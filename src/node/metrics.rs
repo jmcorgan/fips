@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::node::reject::{BloomReject, DiscoveryReject, ForwardingReject, TreeReject};
 use crate::node::stats::{
     BloomStatsSnapshot, CongestionStatsSnapshot, ErrorSignalStatsSnapshot, ForwardingStatsSnapshot,
-    LookupStatsSnapshot, TreeStatsSnapshot,
+    LookupStatsSnapshot, NativeStatsSnapshot, TreeStatsSnapshot,
 };
 
 /// An atomic counter.
@@ -512,11 +512,104 @@ impl ErrorMetrics {
     }
 }
 
+/// Native datagram API metric counters.
+///
+/// Every one of these is bumped on the rx_loop, in the native request handler,
+/// the outbound handler and the inbound dispatch arm. No client task touches a
+/// counter, so there is one path per counter rather than two.
+///
+/// `flows_accepted` counts flows promoted out of a listener's backlog, which
+/// happens before the daemon writes the arrival that carries one to its client.
+/// A hand-off that then fails is counted under `drop_listener_not_reading` or
+/// `drop_listener_gone` and is not taken back off `flows_accepted`, so what a
+/// client actually received is the first less the other two.
+#[derive(Default)]
+pub struct NativeMetrics {
+    pub flows_opened: Counter,
+    pub flows_accepted: Counter,
+    pub flows_closed: Counter,
+    pub flows_expired: Counter,
+    pub sent_datagrams: Counter,
+    pub sent_bytes: Counter,
+    pub received_datagrams: Counter,
+    pub received_bytes: Counter,
+    pub drop_no_port: Counter,
+    pub drop_backlog_full: Counter,
+    pub drop_too_many_flows: Counter,
+    pub drop_pending_queue_full: Counter,
+    pub drop_flow_queue_full: Counter,
+    pub drop_arrival_queue_full: Counter,
+    pub drop_listener_not_reading: Counter,
+    pub drop_listener_gone: Counter,
+    pub drop_oversize: Counter,
+}
+
+impl NativeMetrics {
+    /// Route a typed drop to its counter.
+    ///
+    /// Exhaustive over [`DropReason`](crate::native::link::DropReason) with no
+    /// wildcard arm, which is what makes a variant added later a compile error
+    /// here rather than a datagram that vanishes uncounted. `DropReason` rather
+    /// than `DropCause` because delivery can also fail after the registry has
+    /// agreed, and those cases are the ones a slow client causes.
+    #[inline]
+    pub fn record_drop(&self, reason: crate::native::link::DropReason) {
+        use crate::native::link::DropReason;
+        match reason {
+            DropReason::NoPort => self.drop_no_port.inc(),
+            DropReason::BacklogFull => self.drop_backlog_full.inc(),
+            DropReason::TooManyFlows => self.drop_too_many_flows.inc(),
+            DropReason::PendingQueueFull => self.drop_pending_queue_full.inc(),
+            DropReason::FlowQueueFull => self.drop_flow_queue_full.inc(),
+            DropReason::ArrivalQueueFull => self.drop_arrival_queue_full.inc(),
+            DropReason::ListenerNotReading => self.drop_listener_not_reading.inc(),
+            DropReason::ListenerGone => self.drop_listener_gone.inc(),
+        }
+    }
+
+    /// Count one datagram leaving a client for the mesh.
+    #[inline]
+    pub fn record_sent(&self, bytes: usize) {
+        self.sent_datagrams.inc();
+        self.sent_bytes.add(bytes as u64);
+    }
+
+    /// Count one datagram reaching a client from the mesh.
+    #[inline]
+    pub fn record_received(&self, bytes: usize) {
+        self.received_datagrams.inc();
+        self.received_bytes.add(bytes as u64);
+    }
+
+    /// Sample every counter into a serializable snapshot.
+    pub fn snapshot(&self) -> NativeStatsSnapshot {
+        NativeStatsSnapshot {
+            flows_opened: self.flows_opened.get(),
+            flows_accepted: self.flows_accepted.get(),
+            flows_closed: self.flows_closed.get(),
+            flows_expired: self.flows_expired.get(),
+            sent_datagrams: self.sent_datagrams.get(),
+            sent_bytes: self.sent_bytes.get(),
+            received_datagrams: self.received_datagrams.get(),
+            received_bytes: self.received_bytes.get(),
+            drop_no_port: self.drop_no_port.get(),
+            drop_backlog_full: self.drop_backlog_full.get(),
+            drop_too_many_flows: self.drop_too_many_flows.get(),
+            drop_pending_queue_full: self.drop_pending_queue_full.get(),
+            drop_flow_queue_full: self.drop_flow_queue_full.get(),
+            drop_arrival_queue_full: self.drop_arrival_queue_full.get(),
+            drop_listener_not_reading: self.drop_listener_not_reading.get(),
+            drop_listener_gone: self.drop_listener_gone.get(),
+            drop_oversize: self.drop_oversize.get(),
+        }
+    }
+}
+
 /// Atomic counter registry shared across the node via `Arc`.
 ///
 /// Sole storage for the forwarding, discovery, tree, bloom, congestion,
-/// and error counter families; these were migrated off `NodeStats`, which
-/// now holds only the session, handshake, mmp, and transport families.
+/// error, and native counter families; these were migrated off `NodeStats`,
+/// which now holds only the session, handshake, mmp, and transport families.
 #[derive(Default)]
 pub struct MetricsRegistry {
     pub forwarding: ForwardingMetrics,
@@ -525,6 +618,7 @@ pub struct MetricsRegistry {
     pub bloom: BloomMetrics,
     pub congestion: CongestionMetrics,
     pub errors: ErrorMetrics,
+    pub native: NativeMetrics,
 }
 
 impl MetricsRegistry {
@@ -536,6 +630,54 @@ impl MetricsRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_record_drop_routes_every_reason_to_its_own_counter() {
+        use crate::native::link::DropReason;
+        let m = NativeMetrics::default();
+        for reason in [
+            DropReason::NoPort,
+            DropReason::BacklogFull,
+            DropReason::TooManyFlows,
+            DropReason::PendingQueueFull,
+            DropReason::FlowQueueFull,
+            DropReason::ArrivalQueueFull,
+            DropReason::ListenerNotReading,
+            DropReason::ListenerGone,
+        ] {
+            m.record_drop(reason);
+        }
+        let snap = m.snapshot();
+        // Each reason lands in one counter and no reason lands in two, which is
+        // what a shared counter would hide.
+        assert_eq!(snap.drop_no_port, 1);
+        assert_eq!(snap.drop_backlog_full, 1);
+        assert_eq!(snap.drop_too_many_flows, 1);
+        assert_eq!(snap.drop_pending_queue_full, 1);
+        assert_eq!(snap.drop_flow_queue_full, 1);
+        assert_eq!(snap.drop_arrival_queue_full, 1);
+        assert_eq!(snap.drop_listener_not_reading, 1);
+        assert_eq!(snap.drop_listener_gone, 1);
+        // Nothing bumped the send-side refusal, which no DropReason reaches.
+        assert_eq!(snap.drop_oversize, 0);
+    }
+
+    #[test]
+    fn native_pending_and_flow_queue_drops_read_alike_to_a_client_and_apart_to_a_counter() {
+        use crate::native::link::DropReason;
+        // The two render identically on purpose, so the debug arrival command
+        // answers the same strings it always has. A counter must still tell
+        // them apart, because only one of them means a slow client.
+        assert_eq!(
+            DropReason::PendingQueueFull.as_str(),
+            DropReason::FlowQueueFull.as_str()
+        );
+        let m = NativeMetrics::default();
+        m.record_drop(DropReason::FlowQueueFull);
+        let snap = m.snapshot();
+        assert_eq!(snap.drop_flow_queue_full, 1);
+        assert_eq!(snap.drop_pending_queue_full, 0);
+    }
 
     #[test]
     fn forwarding_received_tracks_packets_and_bytes() {

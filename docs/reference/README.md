@@ -19,6 +19,7 @@ guidance on when to use a feature. The "why" lives in design/; the
 | [nostr-events.md](nostr-events.md) | Kind 37195 advert, Kind 21059 traversal signaling, Kind 10050 inbox relays |
 | [transports.md](transports.md) | Per-transport statistics counter inventory |
 | [control-socket.md](control-socket.md) | Line-delimited JSON control protocol for the daemon and gateway |
+| [native-api.md](native-api.md) | Native datagram API: the Rust surface, addressing and ports, errno table, ceilings, line protocol, command reference |
 | [cli-fips.md](cli-fips.md) | `fips` daemon CLI: options, exit codes, environment, files |
 | [cli-fipsctl.md](cli-fipsctl.md) | `fipsctl` control-client: subcommands, options, exit codes |
 | [cli-fipstop.md](cli-fipstop.md) | `fipstop` live-status TUI: tabs, keybindings |

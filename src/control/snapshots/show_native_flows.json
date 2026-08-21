@@ -1,0 +1,26 @@
+{
+  "data": {
+    "flows": [],
+    "listeners": [],
+    "stats": {
+      "drop_arrival_queue_full": 0,
+      "drop_backlog_full": 0,
+      "drop_flow_queue_full": 0,
+      "drop_listener_gone": 0,
+      "drop_listener_not_reading": 0,
+      "drop_no_port": 0,
+      "drop_oversize": 0,
+      "drop_pending_queue_full": 0,
+      "drop_too_many_flows": 0,
+      "flows_accepted": 0,
+      "flows_closed": 0,
+      "flows_expired": 0,
+      "flows_opened": 0,
+      "received_bytes": 0,
+      "received_datagrams": 0,
+      "sent_bytes": 0,
+      "sent_datagrams": 0
+    }
+  },
+  "status": "ok"
+}

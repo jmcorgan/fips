@@ -33,6 +33,7 @@ documents cover specific subsystems in detail.
 | [fips-mesh-layer.md](fips-mesh-layer.md) | FIPS Mesh Protocol (FMP): peer authentication, link encryption, forwarding |
 | [fips-session-layer.md](fips-session-layer.md) | FIPS Session Protocol (FSP): end-to-end encryption, sessions |
 | [fips-ipv6-adapter.md](fips-ipv6-adapter.md) | IPv6 adaptation: TUN interface, DNS, MTU enforcement |
+| [fips-native-api.md](fips-native-api.md) | Native datagram API: pubkey-addressed flows over FSP, and what it is instead of the TUN path |
 
 ### Cross-Cutting
 

@@ -55,6 +55,7 @@ prints the response's `data` object as pretty JSON.
 | `show transports` | `show_transports` | Transport instances: type, state, MTU, local address, per-transport stats. |
 | `show routing` | `show_routing` | Routing summary: pending lookups, retry state, forwarding/discovery/error/congestion counters. |
 | `show identity-cache` | `show_identity_cache` | Cached `(node_addr → npub)` entries with last-seen timestamps. |
+| `show native-flows` | `show_native_flows` | Native datagram API: open and pending flows with their ports, queue depth and age, bound listeners with their backlog, and the `native` counters. |
 
 ### `acl <what>`
 
@@ -69,7 +70,7 @@ Time-series metrics from the in-process history rings.
 | Subcommand | Control-socket command | Description |
 | ---------- | ---------------------- | ----------- |
 | `stats list` | `show_stats_list` | Enumerate available metrics, their units, and the per-ring retention windows. |
-| `stats metrics` | `show_metrics` | Dump current counter values for every protocol metric family (`forwarding`, `discovery`, `tree`, `bloom`, `congestion`, `errors`). |
+| `stats metrics` | `show_metrics` | Dump current counter values for every protocol metric family (`forwarding`, `discovery`, `tree`, `bloom`, `congestion`, `errors`, `native`). |
 | `stats peers` | `show_stats_peers` | List peers tracked in stats history (active or recently active). |
 | `stats history <metric> [options]` | `show_stats_history` | Fetch a time-series window for one metric. |
 

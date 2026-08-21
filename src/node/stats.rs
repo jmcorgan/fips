@@ -436,6 +436,38 @@ pub struct CongestionStatsSnapshot {
     pub kernel_drop_events: u64,
 }
 
+/// Native datagram API counters.
+///
+/// Eight of the `drop_*` fields are one per
+/// [`DropReason`](crate::native::link::DropReason) variant, so a variant added
+/// later has nowhere to hide. `drop_oversize` is the ninth and has no reason
+/// because it is refused on the send side, before the registry sees the
+/// datagram.
+///
+/// Present on every platform even though the API builds only on Linux and
+/// FreeBSD, so `show_metrics` carries one schema everywhere and a consumer does
+/// not branch on the host.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NativeStatsSnapshot {
+    pub flows_opened: u64,
+    pub flows_accepted: u64,
+    pub flows_closed: u64,
+    pub flows_expired: u64,
+    pub sent_datagrams: u64,
+    pub sent_bytes: u64,
+    pub received_datagrams: u64,
+    pub received_bytes: u64,
+    pub drop_no_port: u64,
+    pub drop_backlog_full: u64,
+    pub drop_too_many_flows: u64,
+    pub drop_pending_queue_full: u64,
+    pub drop_flow_queue_full: u64,
+    pub drop_arrival_queue_full: u64,
+    pub drop_listener_not_reading: u64,
+    pub drop_listener_gone: u64,
+    pub drop_oversize: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

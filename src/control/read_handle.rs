@@ -13,8 +13,11 @@
 //! - `entities` — `ArcSwap<EntitySnapshot>`: peers / sessions / links /
 //!   connections / transports, published from the tick with `Vec<Arc<Row>>`
 //!   structural sharing.
+//! - `native` — `ArcSwap<NativeSnapshot>`: native datagram API flows and
+//!   listeners, published from the tick because the registry never leaves the
+//!   rx_loop.
 //!
-//! Publisher placement: all three snapshot cells are published from the
+//! Publisher placement: all four snapshot cells are published from the
 //! periodic tick, which runs as one arm of the rx_loop's `select!`. Publishing
 //! therefore costs the rx_loop; what the handle removes is the read-side round
 //! trip out to the rx_loop and back, not the cost of publishing. The
@@ -38,7 +41,7 @@ use crate::node::context::NodeContext;
 use crate::node::metrics::MetricsRegistry;
 
 use super::protocol::{Request, Response};
-use super::snapshot::{EntitySnapshot, RoutingSnapshot, StatsSnapshot};
+use super::snapshot::{EntitySnapshot, NativeSnapshot, RoutingSnapshot, StatsSnapshot};
 
 /// Cloneable read-only view of node state for off-loop control serving.
 ///
@@ -62,6 +65,9 @@ pub(crate) struct ControlReadHandle {
     /// connections / transports + mmp), published from the tick with
     /// `Vec<Arc<Row>>` structural sharing.
     entities: Arc<ArcSwap<EntitySnapshot>>,
+    /// Native datagram API read view (flows / listeners), published
+    /// from the tick because the registry is the rx_loop's alone.
+    native: Arc<ArcSwap<NativeSnapshot>>,
 }
 
 impl ControlReadHandle {
@@ -75,6 +81,7 @@ impl ControlReadHandle {
         stats: Arc<ArcSwap<StatsSnapshot>>,
         routing: Arc<ArcSwap<RoutingSnapshot>>,
         entities: Arc<ArcSwap<EntitySnapshot>>,
+        native: Arc<ArcSwap<NativeSnapshot>>,
     ) -> Self {
         Self {
             context,
@@ -82,6 +89,7 @@ impl ControlReadHandle {
             stats,
             routing,
             entities,
+            native,
         }
     }
 
@@ -112,6 +120,12 @@ impl ControlReadHandle {
     pub(crate) fn entities(&self) -> arc_swap::Guard<Arc<EntitySnapshot>> {
         self.entities.load()
     }
+
+    /// Load the latest published native-API snapshot (freshest
+    /// available by construction; no staleness gate).
+    pub(crate) fn native(&self) -> arc_swap::Guard<Arc<NativeSnapshot>> {
+        self.native.load()
+    }
 }
 
 /// Attempt to serve a request entirely from the read handle, off the rx_loop.
@@ -120,12 +134,13 @@ impl ControlReadHandle {
 /// snapshot cells, or `None` when it must take the mpsc → rx_loop path.
 ///
 /// The queries served here read any of the cells the handle bundles —
-/// `context`, `metrics`, `stats`, `routing`, `entities` — plus host-OS facts
-/// gathered in [`super::listening`] and [`super::firewall_state`], so they
-/// render in the control task without touching `Node`. Taking a parameter is
-/// not what decides it: `show_stats_history` is parameterized and is served
-/// here. What falls back is a query needing live `Node` state the snapshot does
-/// not carry, and every mutation.
+/// `context`, `metrics`, `stats`, `routing`, `entities`, `native` — plus
+/// host-OS facts gathered in [`super::listening`] and
+/// [`super::firewall_state`], so they render in the control task without
+/// touching `Node`. Taking a parameter is not what decides it:
+/// `show_stats_history` is parameterized and is served here. What falls back is
+/// a query needing live `Node` state the snapshot does not carry, and every
+/// mutation.
 ///
 /// **It now also carries mutating commands**, namely the `profile_tick_*`
 /// family under the `profiling` feature. They are served here rather than on
@@ -219,6 +234,10 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
         "show_connections" => Some(Response::ok(queries::show_connections_from_handle(handle))),
         "show_transports" => Some(Response::ok(queries::show_transports_from_handle(handle))),
         "show_mmp" => Some(Response::ok(queries::show_mmp_from_handle(handle))),
+        // Served from the tick-published `NativeSnapshot`. Peer npubs are
+        // resolved at publish time, and the `native` counter family comes from
+        // the `MetricsRegistry`, so this renders entirely off-loop.
+        "show_native_flows" => Some(Response::ok(queries::show_native_flows_from_handle(handle))),
         _ => None,
     }
 }

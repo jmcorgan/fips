@@ -36,8 +36,15 @@ RUN printf '%s\n' \
     'no-resolv' \
     >> /etc/dnsmasq.conf
 
-COPY fips fipsctl fipstop fips-gateway /usr/local/bin/
-RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop /usr/local/bin/fips-gateway
+# native-echo and native-surface are the native datagram API's example
+# programs, built as cargo examples rather than bins. The native-api harness
+# runs native-echo as one end of a two-node check and native-surface as the
+# assertion walk over the client's whole public surface, so the image carries
+# both beside the daemon they talk to.
+COPY fips fipsctl fipstop fips-gateway native-echo native-surface /usr/local/bin/
+RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop \
+    /usr/local/bin/fips-gateway /usr/local/bin/native-echo \
+    /usr/local/bin/native-surface
 
 # Mirror systemd's RuntimeDirectory=fips so the daemon's resolver picks
 # /run/fips/control.sock — matches production layout and the chaos sim

@@ -437,9 +437,9 @@ pub(crate) fn should_apply_path_mtu(existing: Option<u16>, candidate: u16) -> bo
 /// oldest entry first when the queue is at `per_dest` capacity. Pure transform
 /// over a passed-in queue (the max-destinations cap is a shell-side map-level
 /// check).
-pub(crate) fn push_bounded_pending(
-    queue: &mut alloc::collections::VecDeque<Vec<u8>>,
-    packet: Vec<u8>,
+pub(crate) fn push_bounded_pending<T>(
+    queue: &mut alloc::collections::VecDeque<T>,
+    packet: T,
     per_dest: usize,
 ) {
     if queue.len() >= per_dest {

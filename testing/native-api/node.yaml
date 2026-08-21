@@ -1,0 +1,32 @@
+# Node configuration for the native datagram API checks.
+#
+# One node, no peers, no TUN and no DNS: increment A1 exercises the API socket
+# itself, so the node needs to start and bind the socket and nothing else.
+# Dropping TUN is what lets the container run without NET_ADMIN or
+# /dev/net/tun, which keeps the check cheap and portable.
+
+node:
+  identity:
+    nsec: "2102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+  native_api:
+    enabled: true
+    # Named explicitly rather than left to the default resolver, because the
+    # check bind-mounts this directory from the host in order to read the
+    # socket's mode and to reach it from the client container.
+    socket_path: "/run/fips/api.sock"
+    # inject, stats and arrive. Off in a packaged node, and on here because
+    # nine of the checks below drive the receive and dispatch paths through
+    # them. node-debug-off.yaml is the companion that leaves them off.
+    debug_commands: true
+
+tun:
+  enabled: false
+
+dns:
+  enabled: false
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+    mtu: 1472

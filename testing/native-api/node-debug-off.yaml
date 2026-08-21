@@ -1,0 +1,27 @@
+# Node configuration with the native API on and the debug commands off.
+#
+# The companion to node.yaml, used by the check that inject, stats and arrive
+# are refused where the gate is closed. It differs from node.yaml in one thing:
+# `debug_commands` is not named at all, so what the check observes is the
+# packaged default rather than an explicit false. A change that flipped that
+# default would then red this check, which is the whole point of leaving the
+# key out.
+
+node:
+  identity:
+    nsec: "2102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+  native_api:
+    enabled: true
+    socket_path: "/run/fips/api.sock"
+
+tun:
+  enabled: false
+
+dns:
+  enabled: false
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+    mtu: 1472

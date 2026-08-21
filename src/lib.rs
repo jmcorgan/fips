@@ -21,6 +21,7 @@ pub mod identity;
 #[macro_use]
 pub(crate) mod instr;
 pub mod mdns;
+pub mod native;
 pub mod node;
 pub mod noise;
 pub mod nostr;

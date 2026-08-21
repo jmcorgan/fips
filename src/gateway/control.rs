@@ -7,7 +7,7 @@
 
 use crate::control::protocol::{Request, Response};
 use crate::gateway::pool::{MappingInfo, MappingState, PoolStatus};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -54,35 +54,16 @@ pub struct GatewayControlSocket {
 }
 
 impl GatewayControlSocket {
-    /// Bind the gateway control socket.
+    /// Bind the gateway control socket under the shared FIPS access policy.
     ///
-    /// Creates parent directories if needed, removes stale socket files,
-    /// and sets `root:fips 0770` permissions.
+    /// The policy creates the parent directory, removes a stale socket file,
+    /// and applies mode `0770` plus the `fips` group. It also applies `0750` to
+    /// a parent it manages, which `/run/fips` is; systemd already creates that
+    /// directory at `0750` for the daemon this service requires, so under the
+    /// packaged deployment it is set to the value it already holds.
     pub fn bind() -> Result<Self, std::io::Error> {
         let socket_path = PathBuf::from(GATEWAY_SOCKET_PATH);
-
-        // Create parent directory if it doesn't exist
-        if let Some(parent) = socket_path.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent)?;
-            debug!(path = %parent.display(), "Created gateway control socket directory");
-        }
-
-        // Remove stale socket if it exists
-        if socket_path.exists() {
-            Self::remove_stale_socket(&socket_path)?;
-        }
-
-        let listener = UnixListener::bind(&socket_path)?;
-
-        // Set permissions to 0770 and chown to fips group
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o770))?;
-        Self::chown_to_fips_group(&socket_path);
-        if let Some(parent) = socket_path.parent() {
-            Self::chown_to_fips_group(parent);
-        }
+        let listener = crate::utils::sockbind::bind(&socket_path, "gateway control")?;
 
         info!(path = %socket_path.display(), "Gateway control socket listening");
 
@@ -90,51 +71,6 @@ impl GatewayControlSocket {
             listener,
             socket_path,
         })
-    }
-
-    /// Remove a stale socket file from a previous unclean exit.
-    fn remove_stale_socket(path: &Path) -> Result<(), std::io::Error> {
-        match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                format!("gateway control socket already in use: {}", path.display()),
-            )),
-            Err(_) => {
-                debug!(path = %path.display(), "Removing stale gateway control socket");
-                std::fs::remove_file(path)?;
-                Ok(())
-            }
-        }
-    }
-
-    /// Set group ownership to the `fips` group (best-effort).
-    fn chown_to_fips_group(path: &Path) {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-
-        let group_name = CString::new("fips").unwrap();
-        let grp = unsafe { libc::getgrnam(group_name.as_ptr()) };
-        if grp.is_null() {
-            debug!(
-                "'fips' group not found, skipping chown for {}",
-                path.display()
-            );
-            return;
-        }
-        let gid = unsafe { (*grp).gr_gid };
-
-        let c_path = match CString::new(path.as_os_str().as_bytes()) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let ret = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
-        if ret != 0 {
-            warn!(
-                path = %path.display(),
-                error = %std::io::Error::last_os_error(),
-                "Failed to chown gateway control socket to 'fips' group"
-            );
-        }
     }
 
     /// Run the accept loop, reading the latest snapshot from the watch channel.
@@ -218,17 +154,7 @@ impl GatewayControlSocket {
 
     /// Clean up the socket file.
     fn cleanup(&self) {
-        if self.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.socket_path) {
-                warn!(
-                    path = %self.socket_path.display(),
-                    error = %e,
-                    "Failed to remove gateway control socket"
-                );
-            } else {
-                debug!(path = %self.socket_path.display(), "Gateway control socket removed");
-            }
-        }
+        crate::utils::sockbind::cleanup(&self.socket_path, "gateway control");
     }
 }
 

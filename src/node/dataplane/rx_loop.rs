@@ -134,6 +134,51 @@ impl Node {
         // Drop unused sender to avoid keeping channel open if control is disabled
         drop(control_tx);
 
+        // Native datagram API socket. Experimental, off by default, and built
+        // on Linux, FreeBSD and macOS: Windows has no way to pass a descriptor
+        // between processes at all, which is the mechanism itself. Bound
+        // synchronously so a bad path or a socket already in use is reported
+        // here, before the node starts serving, rather than at whatever later
+        // moment a spawned bind happened to run.
+        // Two channels, as the TUN plane has: registrations go one way and are
+        // rare, datagrams go the other and arrive in bursts. Keeping them apart
+        // lets the data arm drain in batches without a registration waiting
+        // behind a burst of traffic.
+        let (native_out_tx, mut native_outbound_rx) =
+            tokio::sync::mpsc::channel::<crate::native::link::Outbound>(1024);
+        let _native_out_guard = native_out_tx.clone();
+        let (mut native_rx, _native_guard) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<crate::native::link::NativeMessage>(64);
+            // The `cfg` sits on the binding rather than on the arm that drains
+            // the receiver, because `tokio::select!` does not accept one. Where
+            // there is no listener the channel exists and nothing ever sends,
+            // and the guard keeps it open so the arm never sees a closed
+            // receiver.
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
+            let guard = {
+                let mut guard = Some(tx.clone());
+                if self.config().node.native_api.enabled {
+                    match crate::native::NativeApi::bind(&self.config().node.native_api) {
+                        Ok(socket) => {
+                            // The accept loop owns a sender, so the dummy guard
+                            // is dropped: the channel closes when the last
+                            // client task ends, not while one is still serving.
+                            guard = None;
+                            let npub = self.npub();
+                            tokio::spawn(socket.accept_loop(tx, native_out_tx.clone(), npub));
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to bind native API socket");
+                        }
+                    }
+                }
+                guard
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+            let guard = Some(tx.clone());
+            (rx, guard)
+        };
+
         // Decrypt-worker fallback receiver. The worker pushes each
         // authenticated FMP plaintext here so rx_loop can finish the
         // per-peer side-effects (stats, MMP, ECN, link dispatch).
@@ -311,6 +356,30 @@ impl Node {
                     );
                     self.register_identity(identity.node_addr, identity.pubkey);
                 }
+                // Native API datagrams a client wrote to its descriptor. Drained
+                // in a burst like the TUN arm, for the same reason: one wake-up
+                // should clear what a client handed over, not one datagram.
+                Some(out) = native_outbound_rx.recv() => {
+                    self.handle_native_outbound(out.key, out.peer, out.payload).await;
+                    let mut drained = 0;
+                    while drained < 256 {
+                        match native_outbound_rx.try_recv() {
+                            Ok(next) => {
+                                self.handle_native_outbound(next.key, next.peer, next.payload).await;
+                                drained += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                // Native API registry requests. Placed after the hot inbound
+                // path so a burst of client registrations cannot delay packet
+                // processing. No `cfg` here: `tokio::select!` does not accept
+                // one, so the channel exists on every platform and only the
+                // listener that feeds it is gated.
+                Some(message) = native_rx.recv() => {
+                    self.handle_native(message);
+                }
                 Some((request, response_tx)) = control_rx.recv() => {
                     // Only mutating COMMAND requests (`connect` / `disconnect`)
                     // reach the rx_loop now. Every pure-read `show_*` query is
@@ -348,6 +417,10 @@ impl Node {
                     instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::WholeTick, {
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckTimeouts,
                         self.check_timeouts().await);
+                        // Discard flows the rx_loop announced and a listener's
+                        // own task never took. Cheap: it walks only the pending
+                        // map, which the backlog bounds.
+                        self.native_expire();
                         let now_ms = Self::now_ms();
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ReloadPeerAcl,
                         self.reload_peer_acl().await);

@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 722" font-family="monospace" font-size="15">
+  <style>
+    rect.layer   { rx: 5; }
+    rect.app     { fill: #1a3a2a; stroke: #40a060; stroke-width: 2; }
+    rect.fmt     { fill: #1a3a2a; stroke: #40a060; stroke-width: 2; }
+    rect.iface   { fill: #16323a; stroke: #40a0b0; stroke-width: 2; }
+    rect.fsp     { fill: #2a2040; stroke: #8060c0; stroke-width: 2; }
+    rect.fmp     { fill: #2e3a5e; stroke: #5080c0; stroke-width: 2; }
+    rect.xport   { fill: #2a1a1a; stroke: #c06040; stroke-width: 2; }
+    rect.trad    { fill: #1a1d24; stroke: #565f6e; stroke-width: 2; }
+    rect.none    { fill: #16181e; stroke: #3d434f; stroke-width: 2; stroke-dasharray: 7 5; }
+    text         { fill: #e0e0e0; }
+    text.name    { font-size: 18px; font-weight: bold; }
+    text.sub     { font-size: 15px; font-weight: bold; }
+    text.desc    { font-size: 13px; fill: #a0a0b0; }
+    text.dim     { font-size: 13px; fill: #6a7180; }
+    text.tiny    { font-size: 11.5px; fill: #6a7180; }
+    text.api     { font-size: 14px; fill: #c8c8d4; }
+    text.endpt   { font-size: 16px; font-weight: bold; }
+    text.tunnel  { font-size: 12.5px; fill: #40a0b0; font-style: italic; }
+    text.head    { font-size: 13px; fill: #808895; font-style: italic; }
+    text.caption { font-size: 15px; fill: #808090; font-style: italic; }
+    line.drop    { stroke: #565f6e; stroke-width: 2; }
+    path.fork    { stroke: #565f6e; stroke-width: 2; fill: none; }
+    path.tunnel  { stroke: #40a0b0; stroke-width: 2.5; fill: none; }
+  </style>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,1 L7,4.5 L0,8 Z" fill="#565f6e"/>
+    </marker>
+    <marker id="t" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,1 L8,5 L0,9 Z" fill="#40a0b0"/>
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="930" height="702" fill="#0d1117" rx="10"/>
+
+  <!-- One application, two ways down -->
+  <rect x="50" y="36" width="850" height="58" class="layer app"/>
+  <text x="475" y="62" text-anchor="middle" class="name">Application</text>
+  <text x="475" y="82" text-anchor="middle" class="desc">unmodified on the left, written against the key on the right</text>
+
+  <!-- What an endpoint looks like on each side -->
+  <text x="230" y="118" text-anchor="middle" class="api">socket API</text>
+  <text x="230" y="140" text-anchor="middle" class="endpt" fill="#40a0b0">https://&lt;npub&gt;.fips:443</text>
+  <text x="230" y="158" text-anchor="middle" class="tiny">a name, resolved to an address</text>
+
+  <text x="720" y="118" text-anchor="middle" class="api">native datagram API</text>
+  <text x="720" y="140" text-anchor="middle" class="endpt" fill="#c8c8d4">fips://&lt;npub&gt;:443</text>
+  <text x="720" y="158" text-anchor="middle" class="tiny">the key itself, no lookup</text>
+
+  <line x1="230" y1="94" x2="230" y2="104" class="drop"/>
+  <line x1="720" y1="94" x2="720" y2="104" class="drop"/>
+  <line x1="230" y1="164" x2="230" y2="180" class="drop" marker-end="url(#a)"/>
+  <line x1="720" y1="164" x2="720" y2="180" class="drop" marker-end="url(#a)"/>
+
+  <!-- Row 1 — format -->
+  <rect x="50" y="180" width="360" height="72" class="layer trad"/>
+  <text x="68" y="208" class="name">HTTP</text>
+  <text x="68" y="230" class="desc">a format every client already speaks</text>
+
+  <rect x="540" y="180" width="360" height="72" class="layer fmt"/>
+  <text x="558" y="208" class="name">your own format</text>
+  <text x="558" y="230" class="desc">you design it; 1 send = 1 datagram</text>
+
+  <!-- Row 2 — secrecy. FSP is where the tunnel re-enters. -->
+  <rect x="50" y="258" width="360" height="72" class="layer trad"/>
+  <text x="68" y="286" class="name">TLS</text>
+  <text x="68" y="308" class="desc">trust anchored in a CA certificate</text>
+
+  <rect x="540" y="258" width="360" height="72" class="layer fsp"/>
+  <text x="558" y="286" class="name">FSP</text>
+  <text x="558" y="308" class="desc">end-to-end AEAD; trust in the key itself</text>
+
+  <!-- Row 3 — reliability, the row with no counterpart -->
+  <rect x="50" y="336" width="360" height="72" class="layer trad"/>
+  <text x="68" y="364" class="name">TCP</text>
+  <text x="68" y="386" class="desc">reliability, ordering, flow control</text>
+
+  <rect x="540" y="336" width="360" height="72" class="layer none"/>
+  <text x="558" y="362" class="name" fill="#8a919e">ROD</text>
+  <text x="558" y="380" class="dim">Reliable Object Delivery — not in v1</text>
+  <text x="558" y="397" class="dim">a v2 capability, may come forward</text>
+
+  <!-- Row 4 — routing -->
+  <rect x="50" y="414" width="360" height="72" class="layer trad"/>
+  <text x="68" y="442" class="name">IPv6</text>
+  <text x="68" y="464" class="desc">routing by address prefix</text>
+
+  <rect x="540" y="414" width="360" height="72" class="layer fmp"/>
+  <text x="558" y="442" class="name">FMP</text>
+  <text x="558" y="464" class="desc">spanning tree, bloom, per-hop auth</text>
+
+  <!-- Row 5 — where the IP stack lands: a wire, or the adapter -->
+  <path d="M230,486 L230,498 L130,498 L130,508" class="fork" marker-end="url(#a)"/>
+  <path d="M230,486 L230,498 L315,498 L315,508" class="fork" marker-end="url(#a)"/>
+
+  <rect x="50" y="508" width="160" height="66" class="layer none"/>
+  <text x="130" y="534" text-anchor="middle" class="sub" fill="#8a919e">eth0</text>
+  <text x="130" y="556" text-anchor="middle" class="tiny">the ordinary internet</text>
+
+  <rect x="220" y="508" width="190" height="66" class="layer iface"/>
+  <text x="315" y="532" text-anchor="middle" class="sub">fips0</text>
+  <text x="315" y="554" text-anchor="middle" class="tiny" fill="#8fb8c2">IPv6 adapter: TUN + DNS</text>
+
+  <rect x="540" y="508" width="360" height="66" class="layer xport"/>
+  <text x="558" y="534" class="name">Transport</text>
+  <text x="558" y="556" class="desc">UDP, Ethernet, WiFi, BLE, Tor, serial</text>
+
+  <!-- The tunnel: the adapter's output is FSP's input, back up the stack -->
+  <path d="M410,541 L470,541 L470,294 L540,294" class="tunnel" marker-end="url(#t)"/>
+  <text x="462" y="420" text-anchor="middle" class="tunnel" transform="rotate(-90 462 420)">tunnelled into FSP</text>
+
+  <text x="475" y="606" text-anchor="middle" class="head">Both endpoints name the same node and port, but not the same kind of port: on the left it is a TCP port inside the</text>
+  <text x="475" y="624" text-anchor="middle" class="head">tunnel, on the right an FSP port, whose tier rules are expected to change. The adapter is not a bottom layer — an</text>
+  <text x="475" y="642" text-anchor="middle" class="head">IPv6 packet reaching fips0 becomes an FSP payload, so the whole left stack runs inside the right one, TCP included.</text>
+
+  <text x="475" y="678" text-anchor="middle" class="caption">Two ways into one mesh: tunnel the IP stack, or address the key directly</text>
+</svg>

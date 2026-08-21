@@ -221,7 +221,11 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --release
+        # --bins --examples rather than the bare default: the native datagram
+        # API's echo server is a cargo example, and the integration image needs
+        # it. Naming --bins keeps the daemon and its tools in the build, which
+        # --examples alone would drop. Mirrors testing/ci-local.sh.
+        run: cargo build --release --bins --examples
 
       - name: SHA-256 hashes (Linux)
         if: runner.os == 'Linux'
@@ -236,6 +240,15 @@ jobs:
         shell: pwsh
         run: Get-FileHash target\release\fips.exe, target\release\fipsctl.exe, target\release\fipstop.exe -Algorithm SHA256
 
+      # Cargo puts an example under target/release/examples. Staging them
+      # beside the bins keeps the artifact's common root at target/release, so
+      # every existing consumer still finds its file at _bin/<name>.
+      - name: Stage the native API examples beside the release binaries
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cp target/release/examples/native-echo target/release/native-echo
+          cp target/release/examples/native-surface target/release/native-surface
+
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
         if: matrix.os == 'ubuntu-latest'
@@ -247,6 +260,8 @@ jobs:
             target/release/fipsctl
             target/release/fipstop
             target/release/fips-gateway
+            target/release/native-echo
+            target/release/native-surface
           retention-days: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -521,6 +536,14 @@ jobs:
           # loopback-delivered query was once misattributed to the mesh
           # interface and dropped. Single matrix entry runs all 13
           # scenarios sequentially; ~7-12 min warm, ~12-15 min cold.
+          # Native datagram API: a client process opening a pubkey-to-pubkey
+          # flow over the daemon's Unix socket. One single-node leg covering
+          # the socket, its access mode and the command surface, plus a
+          # two-node pair that sends a real datagram end to end. Fast: no
+          # per-distro images and no TUN. ~2-3 min.
+          - suite: native-api
+            type: native-api
+
           - suite: dns-resolver
             type: dns-resolver
 
@@ -544,6 +567,13 @@ jobs:
           cp _bin/fipsctl testing/docker/fipsctl
           [ -f _bin/fipstop ] && cp _bin/fipstop testing/docker/fipstop || true
           [ -f _bin/fips-gateway ] && cp _bin/fips-gateway testing/docker/fips-gateway || true
+          # Not optional: the Dockerfile COPYs both native API examples
+          # unconditionally, and a missing source there fails the shared image
+          # build for every leg, not just native-api. Fail here instead, where
+          # the cause is legible.
+          chmod +x _bin/native-echo _bin/native-surface
+          cp _bin/native-echo testing/docker/native-echo
+          cp _bin/native-surface testing/docker/native-surface
           docker build -t fips-test:latest testing/docker
           docker build -t fips-test-app:latest -f testing/docker/Dockerfile.app testing/docker
 
@@ -731,6 +761,32 @@ jobs:
         if: matrix.type == 'deb-install' && always()
         run: |
           docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done
+
+      # ── Native datagram API ─────────────────────────────────────────────
+      # Reads FIPS_TEST_IMAGE rather than defaulting to a name, so it runs
+      # against the image this workflow built. The two-node check creates and
+      # removes its own docker network.
+      - name: Run native-api test
+        if: matrix.type == 'native-api'
+        timeout-minutes: 15
+        env:
+          FIPS_TEST_IMAGE: fips-test:latest
+        run: bash testing/native-api/test.sh
+
+      - name: Collect logs on failure (native-api)
+        if: matrix.type == 'native-api' && failure()
+        run: |
+          docker ps -a --filter "name=fips-native" --format '{{.Names}}' | while read -r c; do
+            echo "--- ${c} ---"
+            docker logs "$c" 2>&1 | tail -100 || true
+          done
+
+      - name: Stop containers (native-api)
+        if: matrix.type == 'native-api' && always()
+        run: |
+          docker ps -a --filter "name=fips-native" --format '{{.Names}}' | while read -r c; do
             docker rm -f "$c" >/dev/null 2>&1 || true
           done
 

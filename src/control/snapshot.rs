@@ -25,6 +25,7 @@ use crate::node::NodeState;
 use crate::node::acl::PeerAclStatus;
 use crate::node::stats_history::StatsHistory;
 use crate::upper::tun::TunState;
+use secp256k1::XOnlyPublicKey;
 
 /// Read-only snapshot of the stats-history rings plus the scalar gauges and
 /// counts `show_status` reports. Published from the tick.
@@ -393,6 +394,76 @@ pub(crate) struct IdentityRow {
     pub display_name: String,
     pub ipv6_addr: String,
     pub last_seen_ms: u64,
+}
+
+// =====================================================================
+// NativeSnapshot (native datagram API read view)
+// =====================================================================
+
+/// Read-only snapshot of the native datagram API registry that
+/// `show_native_flows` renders. Published via `ArcSwap`.
+///
+/// **Publisher placement.** The registry lives inside `Node` and is touched
+/// only by the rx_loop, which is precisely why the native receive path takes no
+/// lock; a control task cannot read it at all, and putting a lock on it to allow
+/// that would give back the property the design was built for. So the
+/// projection is published from the tick beside the other snapshot cells.
+///
+/// **Cost.** A field read per flow. The peer's key is captured where its
+/// session authenticated it and rides on the registry entry, so publishing a
+/// row resolves nothing and consults no cache.
+///
+/// Time-relative fields (`age_ms`) are derived at render time from the captured
+/// absolute timestamps, so a rendered age stays fresh relative to the read.
+#[derive(Clone, Default)]
+pub(crate) struct NativeSnapshot {
+    /// One row per flow, established and pending, ordered by identifier.
+    pub flows: Vec<NativeFlowRow>,
+    /// One row per listener, ordered by port.
+    pub listeners: Vec<NativeListenerRow>,
+}
+
+impl NativeSnapshot {
+    /// Build an empty snapshot for seeding the `ArcSwap` cell at construction,
+    /// before the first tick has published real state.
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// One native API flow in `show_native_flows`.
+#[derive(Clone)]
+pub(crate) struct NativeFlowRow {
+    /// The identifier the client names the flow by.
+    pub flow: u64,
+    /// The far end, by node address. Kept because this is an operator surface
+    /// and the node address is what `show_sessions` and `show_routing` key on,
+    /// which is what lets a reader correlate the three.
+    pub peer: NodeAddr,
+    /// The far end's address, as the x-only public key. Always present: a
+    /// connected flow decoded it from the npub its client named, and an
+    /// accepted one took it from the session that authenticated the peer.
+    pub peer_key: XOnlyPublicKey,
+    /// This node's port.
+    pub local_port: u16,
+    /// The far end's port.
+    pub remote_port: u16,
+    /// Whether a client has taken the flow, as opposed to still awaiting accept.
+    pub established: bool,
+    /// Datagrams the node is holding for it.
+    pub queued: usize,
+    /// Absolute open / accept / announce time (Unix ms); `age_ms` derived at
+    /// render time.
+    pub since_ms: u64,
+}
+
+/// One native API listener in `show_native_flows`.
+#[derive(Clone)]
+pub(crate) struct NativeListenerRow {
+    /// The local port it holds.
+    pub local_port: u16,
+    /// Flows announced on it and not yet answered.
+    pub backlog: usize,
 }
 
 // =====================================================================

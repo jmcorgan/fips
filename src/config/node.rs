@@ -938,6 +938,142 @@ impl ControlConfig {
     }
 }
 
+/// Native datagram API socket (`node.native_api.*`).
+///
+/// **Experimental, and built on Linux, FreeBSD and macOS only.** The API hands a
+/// client a file descriptor over `SCM_RIGHTS`, which Windows has no equivalent
+/// of, and does it over an `AF_UNIX` `SOCK_SEQPACKET` socket, which macOS does
+/// not implement. No listener is built on either, and this section is ignored
+/// there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeApiConfig {
+    /// Enable the native API socket (`node.native_api.enabled`).
+    ///
+    /// Disabled by default. Any process that can open the socket can send as
+    /// this node's identity, and can receive mesh traffic on a port it chooses,
+    /// so enabling it is an explicit operator decision rather than a default.
+    #[serde(default = "NativeApiConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Unix socket path (`node.native_api.socket_path`).
+    #[serde(default = "NativeApiConfig::default_socket_path")]
+    pub socket_path: String,
+
+    /// Datagrams held for one flow (`node.native_api.pending_per_flow`).
+    ///
+    /// Applies while a flow waits to be accepted and while an established
+    /// flow's client is slow to read. Mirrors
+    /// [`SessionConfig::pending_packets_per_dest`], which bounds the same shape
+    /// of problem on the session layer.
+    ///
+    /// Bounded above by [`NativeApiConfig::MAX_PENDING_PER_FLOW`] at config
+    /// load. The whole batch is written onto a socket pair no process can read
+    /// yet, so a value large enough to exceed the send buffer would leave the
+    /// listener's task with a write it cannot complete.
+    ///
+    /// Bounded below by 1 at the same place. Zero announces an arrival and then
+    /// refuses the datagram that caused it, losing a peer's opening message
+    /// with no refusal a client or an operator can see.
+    #[serde(default = "NativeApiConfig::default_pending_per_flow")]
+    pub pending_per_flow: usize,
+
+    /// Flows awaiting accept on one listener (`node.native_api.backlog`).
+    ///
+    /// A client that announces interest and never answers cannot make the node
+    /// hold more than this, whatever a peer does.
+    ///
+    /// Bounded below by 1 at config load. Zero would admit no flow at all: the
+    /// registry compares a listener's pending depth against this before it
+    /// announces anything, so every arrival would be dropped.
+    #[serde(default = "NativeApiConfig::default_backlog")]
+    pub backlog: usize,
+
+    /// Flows this node holds at once (`node.native_api.max_flows`).
+    #[serde(default = "NativeApiConfig::default_max_flows")]
+    pub max_flows: usize,
+
+    /// Answer the debug commands (`node.native_api.debug_commands`).
+    ///
+    /// **Off by default, and not a supported interface.** The three commands
+    /// it admits (`inject`, `stats`, `arrive`) exist so the test harness can
+    /// drive the receive and dispatch paths without a wire. `inject` makes
+    /// the daemon write bytes the client chose into one of that client's own
+    /// flows, and `arrive` makes it dispatch a datagram as though a peer had
+    /// sent it, which reaches any listener this node holds. None of the three
+    /// belongs in a packaged node, so this key is what the test harness turns
+    /// on and nothing else does.
+    #[serde(default = "NativeApiConfig::default_debug_commands")]
+    pub debug_commands: bool,
+}
+
+impl Default for NativeApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            socket_path: Self::default_socket_path(),
+            pending_per_flow: Self::default_pending_per_flow(),
+            backlog: Self::default_backlog(),
+            max_flows: Self::default_max_flows(),
+            debug_commands: Self::default_debug_commands(),
+        }
+    }
+}
+
+impl NativeApiConfig {
+    /// Largest `pending_per_flow` a node will start with.
+    ///
+    /// The held batch is at most this many datagrams of at most `max_payload`
+    /// bytes each, written without waiting onto a socket pair whose other half
+    /// is still on its way to the client. At 64 and a 1362-byte payload that is
+    /// about 87 KB, which an ordinary `AF_UNIX` send buffer takes. The bound is
+    /// checked at config load so a value that would wedge a listener's task is
+    /// refused at startup rather than at the first arrival.
+    pub const MAX_PENDING_PER_FLOW: usize = 64;
+
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn default_pending_per_flow() -> usize {
+        16
+    }
+
+    fn default_backlog() -> usize {
+        16
+    }
+
+    fn default_max_flows() -> usize {
+        256
+    }
+
+    fn default_debug_commands() -> bool {
+        false
+    }
+
+    /// Default native API socket path, resolved beside the control socket.
+    ///
+    /// On Windows the path is empty: the API is not built there, so no value
+    /// would be meaningful.
+    fn default_socket_path() -> String {
+        #[cfg(unix)]
+        {
+            super::resolve_default_socket("api.sock")
+        }
+        #[cfg(windows)]
+        {
+            String::new()
+        }
+    }
+
+    /// Whether this section carries nothing but its defaults.
+    ///
+    /// Drives `skip_serializing_if` so a config file that never named the
+    /// section does not gain one when the config is serialized back out.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Internal buffers (`node.buffers.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuffersConfig {
@@ -1172,6 +1308,11 @@ pub struct NodeConfig {
     #[serde(default)]
     pub control: ControlConfig,
 
+    /// Native datagram API (`node.native_api.*`). Experimental; the listener
+    /// is built on Linux, FreeBSD and macOS only.
+    #[serde(default, skip_serializing_if = "NativeApiConfig::is_default")]
+    pub native_api: NativeApiConfig,
+
     /// Metrics Measurement Protocol — link layer (`node.mmp.*`).
     #[serde(default)]
     pub mmp: MmpConfig,
@@ -1217,6 +1358,7 @@ impl Default for NodeConfig {
             session: SessionConfig::default(),
             buffers: BuffersConfig::default(),
             control: ControlConfig::default(),
+            native_api: NativeApiConfig::default(),
             mmp: MmpConfig::default(),
             session_mmp: SessionMmpConfig::default(),
             ecn: EcnConfig::default(),
@@ -1418,6 +1560,23 @@ owd_window_size: 48
                 expected
             );
         }
+    }
+
+    #[test]
+    fn test_native_api_is_off_and_undebuggable_by_default() {
+        // Both gates default closed, and neither has any other guard in the
+        // library: the harness case that leaves `debug_commands` out of its
+        // YAML proves the serde path, not the value it lands on.
+        let config = NativeApiConfig::default();
+        assert!(!config.enabled);
+        assert!(!config.debug_commands);
+
+        // Enabling the API must not drag the debug commands in with it, which
+        // is the shape a real operator config takes.
+        let yaml = "enabled: true\n";
+        let parsed: NativeApiConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(parsed.enabled);
+        assert!(!parsed.debug_commands);
     }
 
     #[cfg(windows)]

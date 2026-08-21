@@ -1,0 +1,28 @@
+# Node configuration with the native API explicitly disabled.
+#
+# The companion to node.yaml, used by the check that no socket appears when the
+# feature is off. It names the same socket_path deliberately: if the disable
+# were ignored, the socket would land exactly where the check looks.
+
+node:
+  identity:
+    nsec: "2102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
+  native_api:
+    enabled: false
+    socket_path: "/run/fips/api.sock"
+    # Named for the same reason as socket_path: everything node.yaml turns on
+    # is turned on here too, so `enabled` is the only difference between the
+    # two and the only thing the check can be observing.
+    debug_commands: true
+
+tun:
+  enabled: false
+
+dns:
+  enabled: false
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+    mtu: 1472

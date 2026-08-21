@@ -177,6 +177,8 @@ enum ShowCommands {
     Routing,
     /// Identity cache entries (known node pubkeys)
     IdentityCache,
+    /// Native datagram API flows and listeners
+    NativeFlows,
 }
 
 #[derive(Subcommand, Debug)]
@@ -200,6 +202,7 @@ impl ShowCommands {
             ShowCommands::Transports => "show_transports",
             ShowCommands::Routing => "show_routing",
             ShowCommands::IdentityCache => "show_identity_cache",
+            ShowCommands::NativeFlows => "show_native_flows",
         }
     }
 }
@@ -1479,6 +1482,16 @@ mod tests {
     #[test]
     fn test_acl_show_command_name() {
         assert_eq!(AclCommands::Show.command_name(), "show_acl");
+    }
+
+    #[test]
+    fn test_cli_parses_show_native_flows_to_its_control_command() {
+        let cli = Cli::try_parse_from(["fipsctl", "show", "native-flows"]).unwrap();
+
+        let Commands::Show { what } = cli.command else {
+            panic!("expected a show subcommand");
+        };
+        assert_eq!(what.command_name(), "show_native_flows");
     }
 
     #[test]

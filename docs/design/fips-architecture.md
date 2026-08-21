@@ -83,6 +83,13 @@ addresses with header compression so unmodified IP applications can
 use the network transparently, while the native datagram API
 addresses destinations directly by npub.
 
+The native datagram API is **experimental** and off by default. It is
+not a stable API surface and carries no compatibility promise. See
+[../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md)
+for enabling it and writing against it, and
+[../reference/security.md](../reference/security.md#native-datagram-api)
+for what enabling it grants to the `fips` group.
+
 ![Node Architecture](diagrams/fips-node-architecture.svg)
 
 The mesh routes application traffic across heterogeneous transports

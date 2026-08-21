@@ -38,8 +38,8 @@ use zeroize::{Zeroize, Zeroizing};
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
-    NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy, RateLimitConfig, RekeyConfig,
-    RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
+    NativeApiConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy, RateLimitConfig,
+    RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
@@ -1112,6 +1112,37 @@ impl Config {
                     "NAT UDP advert publishing requires `node.rendezvous.nostr.stun_servers` to be non-empty".to_string(),
                 ));
             }
+        }
+
+        let native = &self.node.native_api;
+        // Both floors refuse a node that would start, answer every setup call
+        // and then drop every datagram a peer sent. A zero `backlog` makes the
+        // registry refuse every arrival; a zero `pending_per_flow` makes it
+        // announce the arrival and then refuse the datagram that caused it, so
+        // a peer's opening message is lost with no refusal anywhere.
+        if native.backlog < 1 {
+            return Err(ConfigError::Validation(
+                "node.native_api.backlog is 0 but must be at least 1: a listener with no \
+                 backlog admits no flow, so every arrival would be dropped"
+                    .to_string(),
+            ));
+        }
+        if native.pending_per_flow < 1 {
+            return Err(ConfigError::Validation(
+                "node.native_api.pending_per_flow is 0 but must be at least 1: a flow that \
+                 can hold nothing loses its peer's opening datagram between the arrival \
+                 being announced and the client taking the flow"
+                    .to_string(),
+            ));
+        }
+        if native.pending_per_flow > NativeApiConfig::MAX_PENDING_PER_FLOW {
+            return Err(ConfigError::Validation(format!(
+                "node.native_api.pending_per_flow is {} but must not exceed {}: the whole batch \
+                 is written onto a socket pair the client cannot read yet, and a larger one \
+                 would not fit the send buffer",
+                native.pending_per_flow,
+                NativeApiConfig::MAX_PENDING_PER_FLOW
+            )));
         }
 
         // Reject loopback UDP bind combined with non-loopback peer addresses.
@@ -2617,6 +2648,68 @@ node:
         config
             .validate()
             .expect("positive established-bucket values must validate");
+    }
+
+    #[test]
+    fn test_validate_pending_per_flow_above_its_ceiling_rejected() {
+        let mut config = Config::default();
+        config.node.native_api.pending_per_flow = NativeApiConfig::MAX_PENDING_PER_FLOW + 1;
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("pending_per_flow"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_pending_per_flow_at_its_ceiling_accepted() {
+        // The boundary is accepted, or the check would be refusing a value the
+        // send buffer takes and the ceiling would be a different number than
+        // the one it is documented as.
+        let mut config = Config::default();
+        config.node.native_api.pending_per_flow = NativeApiConfig::MAX_PENDING_PER_FLOW;
+
+        config
+            .validate()
+            .expect("the documented ceiling itself must validate");
+    }
+
+    #[test]
+    fn test_validate_native_api_backlog_zero_rejected() {
+        // Zero would start a node whose listeners admit no flow at all: the
+        // registry compares the pending depth against this number before it
+        // announces anything, so every arrival is dropped.
+        let mut config = Config::default();
+        config.node.native_api.backlog = 0;
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("node.native_api.backlog"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_native_api_pending_per_flow_zero_rejected() {
+        // Zero is the worse of the two: the arrival is announced and the
+        // datagram that caused it is then refused, so a peer's opening message
+        // is lost with no refusal a client or an operator can see.
+        let mut config = Config::default();
+        config.node.native_api.pending_per_flow = 0;
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("pending_per_flow"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_native_api_floors_accept_one() {
+        // The boundary itself validates, or the floors would be refusing a
+        // working node rather than a broken one.
+        let mut config = Config::default();
+        config.node.native_api.backlog = 1;
+        config.node.native_api.pending_per_flow = 1;
+
+        config
+            .validate()
+            .expect("a depth of one is a working node, not a refused one");
     }
 
     #[test]

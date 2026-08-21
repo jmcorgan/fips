@@ -189,11 +189,74 @@ mutation; rate-limited msg1s never reach the ACL.
 | `/etc/fips/peers.allow` | root:root | `0644` | Optional peer allowlist. |
 | `/etc/fips/peers.deny` | root:root | `0644` | Optional peer denylist. |
 | `/run/fips/control.sock` | root:fips | `0770` | Control socket (members of `fips` group can use `fipsctl`). |
-| `/run/fips/` | root:fips | `0750` | Control socket parent directory. |
+| `/run/fips/api.sock` | root:fips | `0770` | Native datagram API socket, when `node.native_api.enabled` is set (experimental; absent otherwise). |
+| `/run/fips/` | root:fips | `0750` | Socket parent directory. |
 
 Adding a user to the `fips` group grants `fipsctl` access without
 requiring root. The daemon `chown`s the control socket and its parent
-directory at bind time.
+directory at bind time, and does the same for the native API socket when
+that is enabled.
+
+## Native Datagram API
+
+**Experimental. Disabled by default** (`node.native_api.enabled`, default
+`false`), and built on Linux, FreeBSD and macOS only. It is not a stable API
+surface, not a reliability layer, and not the v2 external process API. No
+compatibility promise is made about it.
+
+**Any user in the `fips` group can impersonate the node on the mesh.** The
+API socket is created at mode `0770` owned by group `fips`, and that is the
+entire authorization model. A process that can open it can:
+
+- send datagrams under this node's identity to any peer it names, which
+  peers authenticate as coming from this node;
+- hold any port from 1024 upward and receive mesh traffic addressed to this
+  node on it, including traffic another local program expected;
+- do both without authenticating, without a capability check, and without
+  any record beyond the daemon's own logs.
+
+Group membership is therefore equivalent to possession of the node's
+identity for the purpose of sending on the mesh. **On a node with the native
+API enabled, treat membership of the `fips` group exactly as you would treat
+`/etc/fips/fips.key`.** Grant it to the accounts that are trusted to speak as
+the node and to no others, and review it before enabling the API on a shared
+machine.
+
+**The file descriptor carries the grant, not the connection.** A setup call
+hands the client a socket descriptor and the connection it was made on is then
+closed; the flow or the held port lives until that descriptor is closed. A
+descriptor is an ordinary kernel object, so it survives `fork`, survives
+`exec` unless the client asked for it close-on-exec when it received it, and
+can be handed to another process over `SCM_RIGHTS`. A process holding one can
+send as this node on that flow, or receive on that port, without ever opening
+the API socket and without being in the `fips` group.
+Nothing revokes a descriptor already handed out. Restarting the daemon closes
+its own halves and ends every flow and listener at once, and that is the only
+revocation there is.
+
+Two consequences follow for `fipsctl` access. First, the `fips` group is
+already the control-socket group, so enabling the native API silently
+upgrades every existing `fipsctl` user from "can read node state and manage
+peers" to "can send as the node". Second, an operator who wants the two
+audiences separated must not enable the API on a node whose `fips` group has
+been handed out for monitoring.
+
+`node.native_api.debug_commands` (default `false`) is a second, independent
+gate. It admits three commands (`inject`, `stats`, `arrive`) that exist for
+the test harness: `arrive` makes the daemon dispatch a datagram as though a
+peer had sent it, reaching any listener on this node under any peer identity
+the caller names. Leave it off outside a test harness; a packaged node does
+not enable it.
+
+The socket is local only. It is not reachable over the network, and nothing
+about it changes the mesh's own authentication: a peer still verifies the
+node's signature, which is precisely why a local caller that can send through
+this socket is indistinguishable from the node itself.
+
+See [configuration.md](configuration.md#native-datagram-api-nodenative_api)
+for the key list and
+[../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md)
+for the client.
 
 ## Threat-Resistance Matrix
 
@@ -214,6 +277,7 @@ the FMP design document:
 | Sybil identities | Discretionary peering + handshake rate limiting + optional peer ACL |
 | Eclipse attack | Diverse peering across independent operators and transports |
 | Unauthorized peer admission | Optional `peers.allow` allowlist consulted before handshake |
+| Local impersonation via the native datagram API | API disabled by default; when enabled, `fips` group membership is the only gate and must be treated as key access |
 
 See [../design/fips-mesh-layer.md](../design/fips-mesh-layer.md) for
 the unauthenticated-attack-surface analysis (only handshake msg1 is
@@ -251,3 +315,6 @@ way to restrict inbound traffic on `fips0`. See
   — operator activation and drop-in recipes
 - [configuration.md](configuration.md) — full `node.rekey.*`,
   `node.rate_limit.*` parameter tables
+- [../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md)
+  — enabling the experimental native datagram API, and what group
+  membership grants once it is on

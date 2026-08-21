@@ -24,6 +24,17 @@ a native FIPS datagram service, or through an IPv6 adaptation layer
 that presents each node as an IPv6 endpoint for compatibility with
 existing IP-based applications.
 
+![Two ways into the mesh](diagrams/fips-native-api-stack-comparison.svg)
+
+Both columns are the same mesh. On the left an unmodified program keeps
+the stack it already has, and reaches the mesh through `fips0`, a
+virtual network interface that carries its IPv6 packets. On the right a
+FIPS-aware program names the far node by its key and skips the IP layers
+altogether. The two protocols in the middle are the mesh's own: **FSP**
+encrypts end to end between the two nodes, and **FMP** authenticates
+each hop and decides where a packet goes next.
+[fips-architecture.md](fips-architecture.md) takes them in order.
+
 ## Why FIPS?
 
 **Self-sovereign identity**: FIPS nodes generate their own addresses,

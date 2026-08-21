@@ -18,6 +18,15 @@ connects to the kernel's IPv6 stack.
 Applications that are FIPS-aware can bypass the adapter entirely and use the
 native FIPS datagram API, addressing destinations directly by npub.
 
+![Where the adapter sits](diagrams/fips-native-api-stack-comparison.svg)
+
+The adapter is the `fips0` box, and the arrow leaving it is the point: an IPv6
+packet arriving there does not go out to a wire. It becomes an FSP payload, so
+the whole IP stack above runs inside the mesh's own stack — TCP included, which
+is what lets an unmodified `ssh` or `curl` work across the mesh. The right-hand
+column is the same mesh reached without the adapter, and
+[fips-native-api.md](fips-native-api.md) covers that path.
+
 ## DNS Integration
 
 ### The Problem

@@ -339,6 +339,40 @@ with v0.4.x or earlier peers.
   terminal leaves behind. `--json` emits exactly one document at the end, so a
   script parsing the report does not have to skip past progress output.
 
+- An **experimental** native datagram API addressed by public key, off by
+  default and not a stable interface. A client process opens a flow to a
+  peer's public key on a chosen port and sends and receives datagrams on a
+  file descriptor the daemon hands it: no IPv6 emulation, no TUN device and no
+  DNS, a datagram travelling from key to key. **The wire needs no change and
+  gets none.** Every FSP data packet has carried a port pair inside its AEAD
+  envelope since v0.2.0 and port 256 is simply the IPv6 shim, so what was
+  missing was a way for a program to ask for a port of its own and be handed
+  the traffic. The x-only public key is the address and an npub is that key
+  written in bech32, so converting between them is a local encoding rather
+  than a lookup or a name service; the 16-byte node address that travels on
+  the wire is a truncated hash of the key, does not invert, and appears
+  nowhere a client can see. A listener is a descriptor: the daemon writes one
+  message per arrival to it, carrying the new flow's descriptor and the peer's
+  address, so poll, select and epoll work on a listener and accepting is a
+  `recvmsg`. There is no accept command and no reject command, and refusing a
+  flow is closing the descriptor you were handed. The Rust surface mirrors
+  `std::net`, with `FipsStream::connect`, `FipsListener::bind`, `incoming`,
+  `accept`, `io::Result` and an errno mapping rather than a bespoke error
+  type, plus `set_nonblocking`, `AsFd` and four deadline methods under the
+  names and signatures `std::net` uses for the same jobs. One rule has no
+  counterpart in Berkeley sockets and a client author must know it: the v1
+  wire carries no half-close, so nothing peer-driven ever closes a flow, and a
+  server written to read until the flow ends waits for a signal that cannot
+  arrive. The listener uses `SOCK_SEQPACKET` on Linux and FreeBSD and
+  `SOCK_DGRAM` on macOS, which does not implement `SOCK_SEQPACKET` for
+  `AF_UNIX`; both keep the message boundaries the API's contract with its
+  clients rests on. The two kernels signal a closed peer differently and were
+  measured rather than reasoned about, so the receive path treats a Darwin
+  `ECONNRESET` as end of file alongside the `POLLHUP` and zero-byte read that
+  Linux gives. `EAGAIN` is deliberately not in that company: it means the
+  socket is empty and the peer alive, so it stays an error and the caller
+  waits again.
+
 ### Changed
 
 - `node.rekey.enabled` now means "initiate rekeys" and nothing else. The

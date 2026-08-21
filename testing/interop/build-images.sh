@@ -183,6 +183,20 @@ build_one() {
         chmod +x "$ctx/$bin"
     done
 
+    # The shared Dockerfile COPYs the native datagram API's example programs,
+    # which are cargo examples that older refs do not carry and no interop
+    # check runs: these images exercise the wire between daemon versions. The
+    # cargo invocation above names only the four bins for that reason. Stage a
+    # stub for each so the image still builds, and so anything that does reach
+    # for one says why it is not there.
+    for example in native-echo native-surface; do
+        printf '%s\n' \
+            '#!/bin/sh' \
+            "echo \"$example is not built into interop images\" >&2" \
+            'exit 1' > "$ctx/$example"
+        chmod +x "$ctx/$example"
+    done
+
     docker build \
         --label "fips.interop.slot=$slot" \
         --label "fips.interop.ref=$ref" \

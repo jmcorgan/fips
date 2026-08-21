@@ -57,25 +57,34 @@ if [ "$UNAME_S" = "Darwin" ]; then
     fi
 
     echo "Building FIPS for Linux (release) using cargo-zigbuild..."
-    cargo zigbuild --release --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
+    cargo zigbuild --release --bins --examples --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
     TARGET_DIR="$TARGET_ROOT/$CARGO_TARGET/release"
 else
     echo "Building FIPS (release)..."
-    cargo build --release --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
+    cargo build --release --bins --examples --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
     TARGET_DIR="$TARGET_ROOT/release"
 fi
 
+# --bins --examples above rather than the bare default: the native datagram
+# API's example programs are cargo examples, and the shared image carries them.
+# Naming --bins keeps the daemon and its tools, which --examples alone would drop.
 echo "Copying binaries to $DOCKER_DIR/"
 cp "$TARGET_DIR/fips" "$DOCKER_DIR/fips"
 cp "$TARGET_DIR/fipsctl" "$DOCKER_DIR/fipsctl"
 cp "$TARGET_DIR/fips-gateway" "$DOCKER_DIR/fips-gateway"
 [ -f "$TARGET_DIR/fipstop" ] && cp "$TARGET_DIR/fipstop" "$DOCKER_DIR/fipstop" || true
-chmod +x "$DOCKER_DIR/fips" "$DOCKER_DIR/fipsctl" "$DOCKER_DIR/fips-gateway"
+# Not optional: the Dockerfile COPYs both native API examples unconditionally,
+# so a missing one must fail here, where the cause is legible, rather than
+# inside docker build.
+cp "$TARGET_DIR/examples/native-echo" "$DOCKER_DIR/native-echo"
+cp "$TARGET_DIR/examples/native-surface" "$DOCKER_DIR/native-surface"
+chmod +x "$DOCKER_DIR/fips" "$DOCKER_DIR/fipsctl" "$DOCKER_DIR/fips-gateway" \
+    "$DOCKER_DIR/native-echo" "$DOCKER_DIR/native-surface"
 [ -f "$DOCKER_DIR/fipstop" ] && chmod +x "$DOCKER_DIR/fipstop" || true
 
-echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl,fipstop,fips-gateway}"
+echo "Done. Binaries at $DOCKER_DIR/{fips,fipsctl,fipstop,fips-gateway,native-echo,native-surface}"
 
 if [ "$BUILD_DOCKER" = true ]; then
     echo ""

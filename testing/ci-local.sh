@@ -212,6 +212,7 @@ NAT_SUITES=(cone symmetric lan)
 NOSTR_RELAY_SUITES=(nostr-publish-consume)
 STUN_FAULTS_SUITES=(stun-faults)
 DNS_RESOLVER_SUITES=(dns-resolver)
+NATIVE_API_SUITES=(native-api)
 DEB_INSTALL_SUITES=(deb-install)
 TOR_SUITES=(tor-socks5 tor-directory)
 
@@ -262,6 +263,9 @@ list_suites() {
     echo ""
     echo "  Sidecar:"
     for s in "${SIDECAR_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Native API:"
+    for s in "${NATIVE_API_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  DNS resolver:"
     for s in "${DNS_RESOLVER_SUITES[@]}"; do echo "    $s"; done
@@ -511,8 +515,12 @@ run_build() {
         return 1
     fi
 
-    info "cargo build --release"
-    if cargo build --release 2>&1; then
+    info "cargo build --release --bins --examples"
+    # --bins --examples rather than the bare default: the native datagram API's
+    # echo server is a cargo example, and the native-api harness's image needs
+    # it built here rather than separately. Naming --bins keeps the daemon and
+    # its tools in the build, which --examples alone would drop.
+    if cargo build --release --bins --examples 2>&1; then
         record "build" 0
     else
         record "build" 1
@@ -620,7 +628,13 @@ install_binaries() {
     cp target/release/fipsctl "$dest/fipsctl"
     [[ -f target/release/fipstop ]] && cp target/release/fipstop "$dest/fipstop" || true
     [[ -f target/release/fips-gateway ]] && cp target/release/fips-gateway "$dest/fips-gateway" || true
-    chmod +x "$dest/fips" "$dest/fipsctl"
+    # Not optional: the native-api harness runs native-echo as one end of its
+    # echo check and native-surface as its surface walk, so a missing one must
+    # fail the image build rather than fail a check later with the container
+    # exiting on a missing entrypoint.
+    cp target/release/examples/native-echo "$dest/native-echo"
+    cp target/release/examples/native-surface "$dest/native-surface"
+    chmod +x "$dest/fips" "$dest/fipsctl" "$dest/native-echo" "$dest/native-surface"
     [[ -f "$dest/fipstop" ]] && chmod +x "$dest/fipstop" || true
     [[ -f "$dest/fips-gateway" ]] && chmod +x "$dest/fips-gateway" || true
 }
@@ -974,6 +988,20 @@ run_stun_faults() {
     record "stun-faults" $rc
 }
 
+# Run the native datagram API harness.
+#
+# Reads FIPS_TEST_IMAGE, so it exercises this run's binaries rather than a
+# separately built one. Its two-node check creates and removes its own docker
+# network, so nothing here has to.
+run_native_api() {
+    info "[native-api] Running native datagram API test"
+    if FIPS_TEST_IMAGE="$CI_IMAGE_TEST" bash testing/native-api/test.sh 2>&1; then
+        record "native-api" 0
+    else
+        record "native-api" 1
+    fi
+}
+
 # Run dns-resolver harness (multi-distro + e2e scenarios)
 run_dns_resolver() {
     info "[dns-resolver] Running multi-distro test (slow — builds per-distro images)"
@@ -1031,7 +1059,7 @@ run_integration() {
     local _f
     for _f in "$SCRIPT_DIR"/docker/*; do
         case "$(basename "$_f")" in
-            fips|fipsctl|fipstop|fips-gateway) continue ;;
+            fips|fipsctl|fipstop|fips-gateway|native-echo|native-surface) continue ;;
         esac
         cp -a "$_f" "$CI_BUILD_CONTEXT/" || { record "docker-build" 1; return; }
     done
@@ -1154,6 +1182,9 @@ run_integration() {
     # Sidecar
     run_sidecar
 
+    # Native datagram API (light — one single-node run plus a two-node pair)
+    run_native_api
+
     # DNS resolver multi-distro suite (heavy — per-distro systemd images)
     run_dns_resolver
 
@@ -1208,6 +1239,8 @@ run_suite() {
             run_sidecar ;;
         dns-resolver)
             run_dns_resolver ;;
+        native-api)
+            run_native_api ;;
         deb-install)
             run_deb_install ;;
         tor-socks5)

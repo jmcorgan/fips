@@ -380,6 +380,7 @@ impl Node {
                     debug!(len = rest.len(), "DataPacket too short for port header");
                     return;
                 }
+                let src_port = u16::from_le_bytes([rest[0], rest[1]]);
                 let dst_port = u16::from_le_bytes([rest[2], rest[3]]);
                 let service_payload = &rest[FSP_PORT_HEADER_SIZE..];
 
@@ -422,11 +423,43 @@ impl Node {
                         }
                     }
                     _ => {
-                        debug!(
-                            src = %self.peer_display_name(src_addr),
-                            dst_port,
-                            "Unknown FSP service port, dropping DataPacket"
-                        );
+                        // Every other port belongs to the native datagram API,
+                        // which decides between an established flow, a listener
+                        // and a drop. The same decision serves the debug
+                        // arrival command, so the rule was exercised before
+                        // this call site existed.
+                        // The peer's key comes from the session entry rather
+                        // than from the wire: the handler above refuses
+                        // anything but an Established session, and an
+                        // Established entry holds the key its handshake
+                        // attested. Nothing has to invert the node address.
+                        let payload = service_payload.to_vec();
+                        // The entry was removed for the trial-decrypt cascade
+                        // and re-inserted above, and this arm is reached only
+                        // for an Established session, so the lookup finds one.
+                        // It is written as a lookup rather than an unwrap
+                        // because a future path that skipped the re-insert
+                        // would otherwise panic on a peer's datagram. Skipping
+                        // is scoped to the native dispatch alone: the idle
+                        // timer and the pending-outbound flush at the end of
+                        // this function are this message's bookkeeping and are
+                        // owed whether or not it had anywhere to go.
+                        if let Some(peer_key) = self
+                            .sessions
+                            .get(src_addr)
+                            .map(|session| session.remote_pubkey().x_only_public_key().0)
+                        {
+                            let outcome = self
+                                .native_deliver(*src_addr, peer_key, src_port, dst_port, payload);
+                            if let crate::native::link::Outcome::Dropped(why) = outcome {
+                                debug!(
+                                    src = %self.peer_display_name(src_addr),
+                                    dst_port,
+                                    why = why.as_str(),
+                                    "Unknown FSP service port, dropping DataPacket"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -461,6 +494,7 @@ impl Node {
         // Flush any pending outbound packets (e.g., simultaneous initiation
         // where responder also had queued outbound packets)
         self.flush_pending_packets(src_addr).await;
+        self.flush_pending_native(src_addr).await;
     }
 
     /// Handle an incoming SessionSetup (Noise XX msg1).
@@ -1083,6 +1117,7 @@ impl Node {
 
         // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;
+        self.flush_pending_native(src_addr).await;
 
         info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XX)");
     }
@@ -1360,6 +1395,7 @@ impl Node {
 
         // Flush any pending packets
         self.flush_pending_packets(src_addr).await;
+        self.flush_pending_native(src_addr).await;
 
         info!(src = %self.peer_display_name(src_addr), "Session established (responder, XX)");
     }

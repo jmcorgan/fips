@@ -410,6 +410,67 @@ tuning under high load or on memory-constrained devices.
 | `node.buffers.tun_channel` | usize | `1024` | TUN to Node outbound channel capacity |
 | `node.buffers.dns_channel` | usize | `64` | DNS to Node identity channel capacity |
 
+### Native Datagram API (`node.native_api.*`)
+
+**Experimental, off by default, and built on Linux, FreeBSD and macOS only.** A
+client process connects to a Unix socket and asks either to open a flow to a
+remote pubkey or to hold a local port. Both answers carry a file descriptor:
+a flow's, which the client sends and receives datagrams on, or a listener's,
+which arriving flows are delivered on. There is no IPv6 emulation and no TUN
+device on this path.
+
+The surface is not stable, is not a reliability layer, and is not the v2
+external process API. No compatibility promise is made about it: the keys
+below, the line protocol behind them, and the Rust client that hides it may
+change or be withdrawn in any release.
+
+The listener is not built on macOS or Windows, and this section is ignored
+there. Two separate things bound that: Windows has no `SCM_RIGHTS` and so no
+way to hand a file descriptor to another process at all, while macOS has
+`SCM_RIGHTS` but does not implement `SOCK_SEQPACKET` for `AF_UNIX`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.native_api.enabled` | bool | `false` | Enable the native API socket |
+| `node.native_api.socket_path` | string | *(auto)* | Socket file path. Resolved the same way as the control socket, with the filename `api.sock`: `/run/fips/api.sock` when `/run/fips` exists; then `/var/run/fips/api.sock` on FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/api.sock`; finally `/tmp/fips-api.sock` |
+| `node.native_api.pending_per_flow` | usize | `16` | Datagrams held for one flow while it waits to be accepted, or while an established flow's client is slow to read. Refused above 64 at startup: the whole batch is written onto a socket pair the client cannot read yet. Refused below 1: a flow that can hold nothing loses its peer's opening datagram between the arrival being announced and the client taking the flow |
+| `node.native_api.backlog` | usize | `16` | Flows announced on one listener and not yet taken by its task. Refused below 1 at startup: a listener with no backlog admits no flow, so every arrival would be dropped |
+| `node.native_api.max_flows` | usize | `256` | Flows this node holds at once |
+| `node.native_api.debug_commands` | bool | `false` | Answer the `inject`, `stats` and `arrive` debug commands. Not a supported interface |
+
+> **Security note:** the socket is mode `0770`, owned by group `fips`, and
+> that is the whole of the authorization model. **Any user in the `fips` group
+> can impersonate this node on the mesh.** A process that can open the socket
+> can send datagrams under this node's identity to any peer it names, and can
+> hold a port and receive mesh traffic addressed to this node on it. There is
+> no per-client authentication, no capability check and no audit trail beyond
+> the daemon's own logs. On a node with the native API enabled, treat `fips`
+> group membership exactly as you would treat the node's private key. This is
+> why the API is disabled by default, and why enabling it is an explicit
+> operator decision rather than something a package turns on. See
+> [security.md](security.md#native-datagram-api).
+
+A client may hold ports 1024 through 65535. Ports 0 through 255 are reserved
+for protocol use and 256 through 1023 for FIPS standard services (the IPv6
+shim among them), and the daemon refuses both ranges by name. A client that
+names no local port is given one from 49152 upward.
+
+`debug_commands` is a separate gate on three commands that exist only so the
+test harness can drive the receive and dispatch paths without a wire.
+`inject` makes the daemon write bytes the client chose into one of that
+client's own flows, and `arrive` makes it dispatch a datagram as though a peer
+had sent it, reaching any listener this node holds. A node with the key off
+refuses each by name, so a client can tell "this node will not do that" from
+"this build has no such command". Leave it off outside the test harness.
+
+`fipsctl show native-flows` reports the open and pending flows, the bound
+listeners and the `native` counters; see the [`fipsctl`
+reference](cli-fipsctl.md) and
+[control-socket.md](control-socket.md#read-only-queries). A Rust program links
+the crate and speaks the API through the `fips::native::client` module, which
+hides the line protocol; see
+[../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md).
+
 ## TUN Interface (`tun.*`)
 
 | Parameter | Type | Default | Description |
@@ -1019,6 +1080,13 @@ node:
   control:
     enabled: true
     socket_path: null                # null = auto (platform runtime dir → XDG → /tmp)
+  # native_api:                      # uncomment to enable the experimental native datagram API
+  #   enabled: true                  # opt-in, default false; not on Windows
+  #   socket_path: /run/fips/api.sock  # omit the key for the resolution above
+  #   pending_per_flow: 16           # datagrams held for one flow; 1..=64
+  #   backlog: 16                    # flows announced on one listener, awaiting its task; at least 1
+  #   max_flows: 256                 # flows this node holds at once
+  #   debug_commands: false          # inject/stats/arrive; test harness only
   buffers:
     packet_channel: 1024
     tun_channel: 1024

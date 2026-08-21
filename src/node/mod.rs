@@ -476,6 +476,18 @@ pub struct Node {
     /// Keyed by destination NodeAddr, bounded per-dest and total.
     pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
 
+    /// Native API registry: which local ports are held, and where an inbound
+    /// datagram goes. Reached only from the `rx_loop`, so it takes no lock.
+    native: crate::native::registry::Registry,
+
+    /// Native datagrams held per destination while its session establishes.
+    ///
+    /// Deliberately **not** `pending_tun_packets`: that queue is drained
+    /// through `send_ipv6_packet`, which compresses its bytes as an IPv6
+    /// header, and it records neither a port nor a kind, so nothing could tell
+    /// a native datagram from an IPv6 packet once it was in there.
+    pending_native: HashMap<NodeAddr, VecDeque<crate::node::handlers::PendingNative>>,
+
     // === Discovery ===
     /// Discovery-subsystem state: recent-request dedup cache, in-flight
     /// lookups, originator-side backoff, and transit-side forward limiter.
@@ -523,6 +535,12 @@ pub struct Node {
     /// `Vec<Arc<Row>>` structural sharing (unchanged rows reused by pointer);
     /// see [`Self::publish_entities_snapshot`] for the rationale.
     entities_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::EntitySnapshot>>,
+
+    /// Read-side snapshot of the native datagram API registry (flows
+    /// / listeners) that the `show_native_flows` query renders off the rx_loop.
+    /// Published from the tick; see [`Self::publish_native_snapshot`] for why
+    /// the registry itself cannot be shared instead.
+    native_snapshot: std::sync::Arc<arc_swap::ArcSwap<crate::control::snapshot::NativeSnapshot>>,
 
     // === TUN Interface ===
     /// TUN device state.
@@ -786,6 +804,12 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
+            pending_native: HashMap::new(),
+            native: crate::native::registry::Registry::new(crate::native::registry::Limits {
+                per_flow: config.node.native_api.pending_per_flow,
+                backlog: config.node.native_api.backlog,
+                max_flows: config.node.native_api.max_flows,
+            }),
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
@@ -799,6 +823,9 @@ impl Node {
             )),
             entities_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::control::snapshot::EntitySnapshot::empty(),
+            )),
+            native_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::NativeSnapshot::empty(),
             )),
             tun_state,
             tun_name: None,
@@ -941,6 +968,12 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
+            pending_native: HashMap::new(),
+            native: crate::native::registry::Registry::new(crate::native::registry::Limits {
+                per_flow: config.node.native_api.pending_per_flow,
+                backlog: config.node.native_api.backlog,
+                max_flows: config.node.native_api.max_flows,
+            }),
             next_link_id: 1,
             next_transport_id: 1,
             stats: stats::NodeStats::new(),
@@ -954,6 +987,9 @@ impl Node {
             )),
             entities_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::control::snapshot::EntitySnapshot::empty(),
+            )),
+            native_snapshot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::control::snapshot::NativeSnapshot::empty(),
             )),
             tun_state,
             tun_name: None,
@@ -1563,6 +1599,7 @@ impl Node {
             self.stats_snapshot.clone(),
             self.routing_snapshot.clone(),
             self.entities_snapshot.clone(),
+            self.native_snapshot.clone(),
         )
     }
 
@@ -1711,6 +1748,72 @@ impl Node {
         // Publish the per-entity read view from the same tick, with
         // `Vec<Arc<Row>>` structural sharing against the previous snapshot.
         self.publish_entities_snapshot();
+
+        // Publish the native datagram API read view from the same tick.
+        self.publish_native_snapshot();
+    }
+
+    /// Project the native datagram API registry into a
+    /// [`NativeSnapshot`](crate::control::snapshot::NativeSnapshot) and publish
+    /// it via `ArcSwap`, so `show_native_flows` renders off the rx_loop.
+    ///
+    /// **Publisher placement.** The registry is reached only from the rx_loop,
+    /// which is what lets the native receive path take no lock; sharing it with
+    /// the control task would mean locking it and giving that property back.
+    /// The tick is therefore the publisher, as it is for the other three cells.
+    /// The peer's npub needs nothing from `&Node`: the key rides on the
+    /// registry entry, captured where the session authenticated it.
+    fn publish_native_snapshot(&self) {
+        use crate::control::snapshot as snap;
+
+        let flows: Vec<snap::NativeFlowRow> = self
+            .native
+            .flows()
+            .into_iter()
+            .map(|view| snap::NativeFlowRow {
+                flow: view.flow,
+                peer: view.key.peer,
+                peer_key: view.pubkey,
+                local_port: view.key.local,
+                remote_port: view.key.remote,
+                established: view.established,
+                queued: view.queued,
+                since_ms: view.at,
+            })
+            .collect();
+
+        let listeners: Vec<snap::NativeListenerRow> = self
+            .native
+            .listeners()
+            .into_iter()
+            .map(|view| snap::NativeListenerRow {
+                local_port: view.port,
+                backlog: view.backlog,
+            })
+            .collect();
+
+        self.native_snapshot
+            .store(std::sync::Arc::new(snap::NativeSnapshot {
+                flows,
+                listeners,
+            }));
+    }
+
+    /// Borrow the native datagram API registry, read-only.
+    ///
+    /// For the on-loop `show_native_flows` oracle. Every mutation still goes
+    /// through the rx_loop's own handler.
+    pub(crate) fn native(&self) -> &crate::native::registry::Registry {
+        &self.native
+    }
+
+    /// Test-only: reach the native registry mutably, so a test can populate it
+    /// the way the rx_loop's handler does without standing up a client task and
+    /// a socket pair. A parity test over an empty registry proves nothing about
+    /// a publisher that drops fields, which is why this exists.
+    #[cfg(test)]
+    pub(crate) fn native_registry_for_test(&mut self) -> &mut crate::native::registry::Registry {
+        &mut self.native
     }
 
     /// Resolve the npub of the spanning-tree root for `show_tree`'s `root_npub`.

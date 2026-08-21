@@ -132,61 +132,6 @@ mod unix_impl {
     use std::path::{Path, PathBuf};
     use tokio::net::UnixListener;
 
-    /// Ensure the socket's parent exists and report whether this call created
-    /// the leaf directory.
-    ///
-    /// `create_dir` gives us an atomic ownership decision: an `AlreadyExists`
-    /// result means another actor owns the existing directory, while success
-    /// means it is safe for this bind to apply FIPS ownership and mode. Missing
-    /// ancestors are created recursively, but only the requested leaf is later
-    /// treated as the socket's private directory.
-    fn ensure_socket_parent(parent: &Path) -> Result<bool, std::io::Error> {
-        if parent.as_os_str().is_empty() {
-            return Ok(false);
-        }
-
-        match std::fs::create_dir(parent) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if parent.is_dir() {
-                    Ok(false)
-                } else {
-                    Err(error)
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let ancestor = parent.parent().ok_or(error)?;
-                ensure_socket_parent(ancestor)?;
-                ensure_socket_parent(parent)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Apply access policy to a newly bound control socket.
-    ///
-    /// The socket is always group-owned. `managed_parent` is either a private
-    /// directory this bind created or a canonical FIPS runtime directory. A
-    /// shared or operator-owned existing parent is omitted so it retains its
-    /// ownership and mode.
-    fn set_control_socket_access(
-        socket_path: &Path,
-        managed_parent: Option<&Path>,
-        mut chown_to_fips_group: impl FnMut(&Path),
-    ) -> Result<(), std::io::Error> {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o770))?;
-        chown_to_fips_group(socket_path);
-
-        if let Some(parent) = managed_parent {
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
-            chown_to_fips_group(parent);
-        }
-
-        Ok(())
-    }
-
     /// Control socket listener (Unix domain socket).
     ///
     /// Manages the Unix domain socket lifecycle: bind, accept, cleanup.
@@ -202,36 +147,7 @@ mod unix_impl {
         /// and binds the Unix listener.
         pub fn bind(config: &ControlConfig) -> Result<Self, std::io::Error> {
             let socket_path = PathBuf::from(&config.socket_path);
-
-            // Creation is useful for diagnostics, but ownership is keyed to
-            // directory identity as well: systemd pre-creates /run/fips on
-            // every Linux service start and initially owns it as root:root.
-            let managed_parent = match socket_path.parent() {
-                Some(parent) => {
-                    let created = ensure_socket_parent(parent)?;
-                    if created {
-                        debug!(path = %parent.display(), "Created private control socket directory");
-                    }
-                    (created || crate::config::is_managed_socket_parent(parent))
-                        .then(|| parent.to_owned())
-                }
-                None => None,
-            };
-
-            // Remove stale socket if it exists
-            if socket_path.exists() {
-                Self::remove_stale_socket(&socket_path)?;
-            }
-
-            let listener = UnixListener::bind(&socket_path)?;
-
-            // Make the socket and its managed private directory group-accessible
-            // so fips group members can use fipsctl/fipstop.
-            set_control_socket_access(
-                &socket_path,
-                managed_parent.as_deref(),
-                Self::chown_to_fips_group,
-            )?;
+            let listener = crate::utils::sockbind::bind(&socket_path, "control")?;
 
             info!(path = %socket_path.display(), "Control socket listening");
 
@@ -239,60 +155,6 @@ mod unix_impl {
                 listener,
                 socket_path,
             })
-        }
-
-        /// Remove a stale socket file.
-        ///
-        /// If the file exists but no one is listening, remove it so we can
-        /// bind. This handles unclean daemon exits.
-        fn remove_stale_socket(path: &Path) -> Result<(), std::io::Error> {
-            // Try connecting to see if someone is listening
-            match std::os::unix::net::UnixStream::connect(path) {
-                Ok(_) => {
-                    // Someone is listening — don't remove it
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::AddrInUse,
-                        format!("control socket already in use: {}", path.display()),
-                    ))
-                }
-                Err(_) => {
-                    // No one listening — remove the stale socket
-                    debug!(path = %path.display(), "Removing stale control socket");
-                    std::fs::remove_file(path)?;
-                    Ok(())
-                }
-            }
-        }
-
-        /// Set group ownership of a path to the 'fips' group (best-effort).
-        fn chown_to_fips_group(path: &Path) {
-            use std::ffi::CString;
-            use std::os::unix::ffi::OsStrExt;
-
-            // Look up the 'fips' group
-            let group_name = CString::new("fips").unwrap();
-            let grp = unsafe { libc::getgrnam(group_name.as_ptr()) };
-            if grp.is_null() {
-                debug!(
-                    "'fips' group not found, skipping chown for {}",
-                    path.display()
-                );
-                return;
-            }
-            let gid = unsafe { (*grp).gr_gid };
-
-            let c_path = match CString::new(path.as_os_str().as_bytes()) {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            let ret = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
-            if ret != 0 {
-                warn!(
-                    path = %path.display(),
-                    error = %std::io::Error::last_os_error(),
-                    "Failed to chown control socket to 'fips' group"
-                );
-            }
         }
 
         /// Run the accept loop, forwarding requests to the main event loop via mpsc.
@@ -334,109 +196,13 @@ mod unix_impl {
 
         /// Clean up the socket file.
         fn cleanup(&self) {
-            if self.socket_path.exists() {
-                if let Err(e) = std::fs::remove_file(&self.socket_path) {
-                    warn!(
-                        path = %self.socket_path.display(),
-                        error = %e,
-                        "Failed to remove control socket"
-                    );
-                } else {
-                    debug!(path = %self.socket_path.display(), "Control socket removed");
-                }
-            }
+            crate::utils::sockbind::cleanup(&self.socket_path, "control");
         }
     }
 
     impl Drop for ControlSocket {
         fn drop(&mut self) {
             self.cleanup();
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{ensure_socket_parent, set_control_socket_access};
-        use std::os::unix::fs::PermissionsExt;
-
-        #[test]
-        fn parent_setup_distinguishes_existing_and_created_directories() {
-            let temp = tempfile::tempdir().unwrap();
-            let existing = temp.path().join("existing");
-            std::fs::create_dir(&existing).unwrap();
-            assert!(!ensure_socket_parent(&existing).unwrap());
-
-            let nested = temp.path().join("missing").join("fips");
-            assert!(ensure_socket_parent(&nested).unwrap());
-            assert!(nested.is_dir());
-            assert!(!ensure_socket_parent(&nested).unwrap());
-        }
-
-        #[test]
-        fn access_setup_leaves_an_existing_shared_parent_unchanged() {
-            let temp = tempfile::tempdir().unwrap();
-            let parent = temp.path().join("shared");
-            std::fs::create_dir(&parent).unwrap();
-            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o711)).unwrap();
-            let socket = parent.join("control.sock");
-            std::fs::File::create(&socket).unwrap();
-
-            let mut chowned = Vec::new();
-            set_control_socket_access(&socket, None, |path| chowned.push(path.to_path_buf()))
-                .unwrap();
-
-            assert_eq!(chowned, vec![socket.clone()]);
-            assert_eq!(
-                std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
-                0o711
-            );
-            assert_eq!(
-                std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
-                0o770
-            );
-        }
-
-        #[test]
-        fn access_setup_secures_a_new_private_parent() {
-            let temp = tempfile::tempdir().unwrap();
-            let parent = temp.path().join("fips");
-            std::fs::create_dir(&parent).unwrap();
-            let socket = parent.join("control.sock");
-            std::fs::File::create(&socket).unwrap();
-
-            let mut chowned = Vec::new();
-            set_control_socket_access(&socket, Some(&parent), |path| {
-                chowned.push(path.to_path_buf())
-            })
-            .unwrap();
-
-            assert_eq!(chowned, vec![socket, parent.clone()]);
-            assert_eq!(
-                std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
-                0o750
-            );
-        }
-
-        #[test]
-        fn access_setup_secures_an_existing_managed_parent() {
-            let temp = tempfile::tempdir().unwrap();
-            let parent = temp.path().join("managed");
-            std::fs::create_dir(&parent).unwrap();
-            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let socket = parent.join("control.sock");
-            std::fs::File::create(&socket).unwrap();
-
-            let mut chowned = Vec::new();
-            set_control_socket_access(&socket, Some(&parent), |path| {
-                chowned.push(path.to_path_buf())
-            })
-            .unwrap();
-
-            assert_eq!(chowned, vec![socket, parent.clone()]);
-            assert_eq!(
-                std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
-                0o750
-            );
         }
     }
 }

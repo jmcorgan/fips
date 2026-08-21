@@ -38,13 +38,19 @@ policy, and an understanding of both deployment modes — overlay
 on top of existing IP, and ground-up where the mesh is the
 network.
 
-There is also a side trip you can take any time after tutorial 1:
+There are also two side trips you can take:
 
 - [ipv6-adapter-walkthrough.md](ipv6-adapter-walkthrough.md) —
   trace one `ssh` from DNS query through session setup to the
   far-side TUN, using `fipstop` and `fipsctl` to watch each step.
   Optional, but if you like seeing how the pieces fit together,
-  this is the doc that shows you.
+  this is the doc that shows you. Take it any time after tutorial 1.
+
+- [native-api-walkthrough.md](native-api-walkthrough.md) — write a
+  program against the experimental native datagram API, addressing a
+  peer by public key and port with no IPv6 emulation and no TUN. Runs
+  two throwaway nodes on one machine, so it needs no mesh and no root,
+  and you can take it without doing the tutorials first.
 
 ## Advanced
 
