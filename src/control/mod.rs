@@ -11,6 +11,7 @@
 pub mod commands;
 pub mod firewall_state;
 pub mod listening;
+pub mod probe;
 pub mod protocol;
 pub mod queries;
 pub mod read_handle;

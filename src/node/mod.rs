@@ -22,6 +22,8 @@ mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
 pub(crate) mod session;
+pub(crate) use handlers::probe::ProbeJob;
+
 pub(crate) mod stats;
 pub(crate) mod stats_history;
 #[cfg(test)]
@@ -479,6 +481,11 @@ pub struct Node {
     /// lookups, originator-side backoff, and transit-side forward limiter.
     lookup: Lookup,
 
+    // === Diagnostics ===
+    /// In-flight `probe` jobs plus their per-target ownership claims. Driven
+    /// once per tick by `poll_probes`; see `node::handlers::probe`.
+    probes: handlers::probe::ProbeRegistry,
+
     // === Counters ===
     /// Next link ID to allocate.
     next_link_id: u64,
@@ -809,6 +816,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
+            probes: handlers::probe::ProbeRegistry::new(),
             lookup: Lookup::new(
                 LookupBackoff::with_params(backoff_base_secs, backoff_max_secs),
                 LookupForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
@@ -963,6 +971,7 @@ impl Node {
             coords_response_rate_limiter: RoutingErrorRateLimiter::with_interval_ms(
                 coords_response_interval_ms,
             ),
+            probes: handlers::probe::ProbeRegistry::new(),
             lookup: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
             peering: peering::reconcile::Peering::new(),
             last_parent_reeval: None,
@@ -2990,6 +2999,16 @@ impl Node {
     /// Count of destinations with queued TUN packets awaiting session setup.
     pub fn pending_tun_destinations(&self) -> usize {
         self.pending_tun_packets.len()
+    }
+
+    /// Queue a TUN packet for a destination directly (for tests that need a
+    /// pending queue without driving the whole outbound path).
+    #[cfg(test)]
+    pub(crate) fn queue_pending_tun_packet_for_test(&mut self, dest: NodeAddr, packet: Vec<u8>) {
+        self.pending_tun_packets
+            .entry(dest)
+            .or_default()
+            .push_back(packet);
     }
 
     /// Total TUN packets queued across all destinations.

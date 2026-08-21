@@ -15,6 +15,7 @@ pub(crate) mod link;
 pub(crate) mod lookup;
 pub(crate) mod math;
 pub(crate) mod mmp;
+pub(crate) mod probe;
 pub(crate) mod rate_limit;
 pub(crate) mod routing;
 pub(crate) mod stp;

@@ -405,6 +405,11 @@ impl Node {
                         self.check_session_rekey().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckPendingLookups,
                         self.check_pending_lookups(now_ms).await);
+                        // After CheckPendingLookups so a probe's resolve stage
+                        // observes this tick's lookup progress rather than the
+                        // previous tick's.
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollProbes,
+                        self.poll_probes().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollTransportDiscovery,
                         self.poll_transport_discovery().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::SampleTransportCongestion,

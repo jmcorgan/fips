@@ -87,6 +87,24 @@ pub struct MmpMetrics {
     prev_reverse_highest: u64,
     /// Whether we have a previous reverse-side snapshot for delta computation.
     has_prev_reverse: bool,
+
+    // --- Report-processing counters (in-memory process state only) ---
+    /// ReceiverReports that arrived at all, counted before the stale/duplicate
+    /// early return. A diagnostic that reads only the accepted-sample count
+    /// cannot tell "nothing came back" from "nothing usable came back", and
+    /// those mean opposite things about reverse-path reachability.
+    reports_seen: u64,
+    /// Reports that produced an accepted RTT sample (`rtt_ms > 0`).
+    rtt_samples: u64,
+    /// Echoes whose derived RTT truncated to 0 ms — the expected outcome on
+    /// loopback and same-host meshes, not a fault.
+    rtt_zero: u64,
+    /// Echoes whose arithmetic failed: the session-relative timestamp wrapped,
+    /// or the peer echoed a bogus or stale value. A real anomaly.
+    rtt_arith_fail: u64,
+    /// The most recent accepted per-exchange RTT in ms, which the SRTT
+    /// estimator otherwise smooths away.
+    last_rtt_ms: Option<u32>,
 }
 
 impl MmpMetrics {
@@ -132,6 +150,11 @@ impl MmpMetrics {
             prev_reverse_packets: 0,
             prev_reverse_highest: 0,
             has_prev_reverse: false,
+            reports_seen: 0,
+            rtt_samples: 0,
+            rtt_zero: 0,
+            rtt_arith_fail: 0,
+            last_rtt_ms: None,
         }
     }
 
@@ -151,6 +174,9 @@ impl MmpMetrics {
         now_ms: u64,
     ) -> (bool, RrLog) {
         let had_srtt = self.srtt.initialized();
+        // Counted before the stale/duplicate return below: this counter means
+        // "a report arrived at all", not "a report was useful".
+        self.reports_seen += 1;
 
         if self.has_prev_rr {
             let counters_regressed = rr.highest_counter < self.prev_rr_highest_counter
@@ -195,10 +221,19 @@ impl MmpMetrics {
                     // trace read `srtt` before `update`).
                     let srtt_ms = self.srtt.srtt_us() as f64 / 1000.0;
                     log = RrLog::RttSample { rtt_ms, srtt_ms };
+                    self.rtt_samples += 1;
+                    self.last_rtt_ms = Some(rtt_ms);
                     self.srtt.update(rtt_us);
                     self.rtt_trend.update(rtt_us as f64);
                 }
-                _ => {
+                Some(_) => {
+                    // A sample that truncated to 0 ms: sub-millisecond path.
+                    self.rtt_zero += 1;
+                    log = RrLog::InvalidRtt;
+                }
+                None => {
+                    // `checked_add` / `checked_sub` failed: wrapped or bogus.
+                    self.rtt_arith_fail += 1;
                     log = RrLog::InvalidRtt;
                 }
             }
@@ -323,6 +358,31 @@ impl MmpMetrics {
     /// Cumulative ECN CE count from the most recent ReceiverReport.
     pub fn last_ecn_ce_count(&self) -> u32 {
         self.prev_rr_ecn_ce
+    }
+
+    /// ReceiverReports processed, including stale and duplicate ones.
+    pub fn reports_seen(&self) -> u64 {
+        self.reports_seen
+    }
+
+    /// Reports that yielded an accepted RTT sample.
+    pub fn rtt_samples(&self) -> u64 {
+        self.rtt_samples
+    }
+
+    /// Echoes whose derived RTT truncated to 0 ms.
+    pub fn rtt_zero(&self) -> u64 {
+        self.rtt_zero
+    }
+
+    /// Echoes whose RTT arithmetic failed.
+    pub fn rtt_arith_fail(&self) -> u64 {
+        self.rtt_arith_fail
+    }
+
+    /// The most recent accepted per-exchange RTT in ms.
+    pub fn last_rtt_ms(&self) -> Option<u32> {
+        self.last_rtt_ms
     }
 }
 

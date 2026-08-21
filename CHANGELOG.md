@@ -308,6 +308,37 @@ with v0.4.x or earlier peers.
   invisible for a peer that has a second address that works: the lane would
   never carry traffic and nothing above debug logging would say so.
 
+- `fipsctl probe <npub|hostname>` answers, for one target, where it sits in the
+  spanning tree relative to this node and whether this node can actually reach
+  it. The work runs as five stages that report separately, `bloom`,
+  `discovery`, `path`, `session` and `rtt`, because one verdict covering
+  several findings is what sends an operator to the source: "no peer's filter
+  claims this address" says the mesh has never heard of the target, while "a
+  filter claimed it and nothing answered" says the opposite. The probe opens an
+  FSP session, waits for one MMP receiver report to yield a round-trip time,
+  and tears down only what it opened. A session that existed before the probe
+  started is never torn down, ownership is decided at the moment of action
+  rather than once at the start, and it is re-checked before teardown, so a
+  session adopted by traffic underneath the probe is left alone. **The path is
+  computed from coordinates rather than observed**, and the output says so in
+  those words: nothing traverses the mesh to confirm the hops, and a display
+  that read like traceroute output would be believed as one. A real per-hop
+  trace needs a wire message that does not exist. **Nothing here changes the
+  wire format**; the probe is built from messages that already exist. The
+  control socket carries three new commands, `probe_start`, `probe_poll` and
+  `probe_cancel`, each returning in well under a millisecond with the stages
+  advanced on the daemon's tick, because a probe needs a mesh lookup, a Noise
+  XK handshake and at least one remote MMP tick, which no single control
+  round-trip could survive inside the socket's five-second timeout. A probe
+  that runs and finds a problem is not an error response: the status is `ok`
+  and the failure sits in the per-stage verdicts, and error responses stay
+  reserved for malformed or inadmissible requests. On a terminal the stage
+  block is redrawn in place with a running elapsed on whichever stage is
+  working; piped or redirected there is no cursor to move, so each row prints
+  once, at the moment it settles, and the transcript ends up the same block a
+  terminal leaves behind. `--json` emits exactly one document at the end, so a
+  script parsing the report does not have to skip past progress output.
+
 ### Changed
 
 - `node.rekey.enabled` now means "initiate rekeys" and nothing else. The

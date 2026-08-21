@@ -1,0 +1,96 @@
+{
+  "bloom": {
+    "detail": null,
+    "elapsed_ms": 0,
+    "fanout": 3,
+    "reason": null,
+    "verdict": "ok"
+  },
+  "cleanup": {
+    "coords_were_cached": false,
+    "identity_was_cached": false,
+    "left_intact_reason": null,
+    "lookup_issued": true,
+    "session_created_and_torn_down": true,
+    "session_left_intact": false,
+    "warmups_sent": 1
+  },
+  "discovery": {
+    "attempt_timeouts_secs": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "attempts": 2,
+    "detail": null,
+    "elapsed_ms": 2000,
+    "reason": null,
+    "source": "lookup",
+    "verdict": "ok"
+  },
+  "elapsed_ms": 4000,
+  "overall": "ok",
+  "path": {
+    "computed_locally": true,
+    "coords_known": true,
+    "detail": null,
+    "elapsed_ms": 0,
+    "lca": "91b40c6e",
+    "lca_depth": 0,
+    "next_hop": {
+      "class": "tree_up",
+      "direct_peer": false,
+      "display_name": "relay-a",
+      "leaves_tree_walk": false,
+      "node_addr": "91b40c6e"
+    },
+    "no_hop_reason": null,
+    "observed": false,
+    "our_coords": [
+      "4d2201ff",
+      "91b40c6e"
+    ],
+    "our_depth": 1,
+    "reason": null,
+    "same_root": true,
+    "their_coords": [
+      "4a1f9c22",
+      "91b40c6e"
+    ],
+    "their_depth": 1,
+    "tree_distance": 2,
+    "tree_hops_down": 1,
+    "tree_hops_up": 1,
+    "verdict": "ok"
+  },
+  "probe_id": 7,
+  "rtt": {
+    "arith_failures": 0,
+    "detail": null,
+    "elapsed_ms": 1000,
+    "reason": null,
+    "reports_seen": 1,
+    "rtt_ms": 18,
+    "samples": 1,
+    "srtt_ms": 18.0,
+    "verdict": "ok",
+    "zero_samples": 0
+  },
+  "session": {
+    "detail": null,
+    "elapsed_ms": 1000,
+    "established": true,
+    "path_mtu": 1420,
+    "preexisting": false,
+    "reason": null,
+    "verdict": "ok"
+  },
+  "target": {
+    "display_name": "hydra",
+    "ipv6_addr": "fd00:4a1f:9c22:e08b:5d37:14aa:06fb:92c1",
+    "node_addr": "4a1f9c22e08b5d3714aa06fb92c1de55",
+    "npub": "npub1qq8s4f7x"
+  },
+  "tick_ms": 1000
+}

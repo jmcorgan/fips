@@ -978,6 +978,39 @@ async fn converge_nodes(mut nodes: Vec<TestNode>, edges: &[(usize, usize)]) -> V
     nodes
 }
 
+/// Populate every node's coordinate cache with every other node's coords.
+///
+/// Routing between non-adjacent nodes needs cached destination coordinates on
+/// both the bloom-filter and greedy-tree paths, so tests that skip discovery
+/// seed them here.
+pub(super) fn populate_all_coord_caches(nodes: &mut [TestNode]) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    // Collect all coords first to avoid borrow conflicts
+    let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes
+        .iter()
+        .map(|tn| {
+            (
+                *tn.node.node_addr(),
+                tn.node.tree_state().my_coords().clone(),
+            )
+        })
+        .collect();
+
+    for tn in nodes.iter_mut() {
+        for (addr, coords) in &all_coords {
+            if addr != tn.node.node_addr() {
+                tn.node
+                    .coord_cache_mut()
+                    .insert(*addr, coords.clone(), now_ms);
+            }
+        }
+    }
+}
+
 /// Clean up transports for all test nodes.
 pub(super) async fn cleanup_nodes(nodes: &mut [TestNode]) {
     for tn in nodes.iter_mut() {

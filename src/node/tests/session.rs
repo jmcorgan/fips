@@ -4,9 +4,10 @@ use super::*;
 use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
-    lock_large_network_test, make_test_node_with_config, process_available_packets, run_tree_test,
-    run_tree_test_with_configs, run_tree_test_with_mtus, run_tree_test_with_profiles,
-    run_tree_test_with_profiles_leaf_smallest, verify_tree_convergence,
+    lock_large_network_test, make_test_node_with_config, populate_all_coord_caches,
+    process_available_packets, run_tree_test, run_tree_test_with_configs, run_tree_test_with_mtus,
+    run_tree_test_with_profiles, run_tree_test_with_profiles_leaf_smallest,
+    verify_tree_convergence,
 };
 use crate::proto::fsp::{SessionAck, SessionMsg3};
 use crate::proto::link::SessionDatagram;
@@ -18,37 +19,6 @@ use crate::proto::link::SessionDatagram;
 /// bucket has to drive `handle_session_datagram` instead.
 fn stub_link_peer() -> NodeAddr {
     make_node_addr(0xFE)
-}
-
-/// Populate all nodes' coordinate caches with each other's coords.
-///
-/// This enables routing between non-adjacent nodes (bloom filter + tree
-/// routing both require cached destination coordinates).
-fn populate_all_coord_caches(nodes: &mut [TestNode]) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    let all_coords: Vec<(NodeAddr, crate::proto::stp::TreeCoordinate)> = nodes
-        .iter()
-        .map(|tn| {
-            (
-                *tn.node.node_addr(),
-                tn.node.tree_state().my_coords().clone(),
-            )
-        })
-        .collect();
-
-    for tn in nodes.iter_mut() {
-        for (addr, coords) in &all_coords {
-            if addr != tn.node.node_addr() {
-                tn.node
-                    .coord_cache_mut()
-                    .insert(*addr, coords.clone(), now_ms);
-            }
-        }
-    }
 }
 
 /// Render each node's address and elected tree root.

@@ -10,6 +10,7 @@ use crate::node::reject::DiscoveryReject;
 use crate::proto::lookup::{
     LookupAction, LookupRequest, LookupResponse, MAX_RECENT_LOOKUP_REQUESTS,
 };
+use crate::proto::probe::LookupOutcomeKind;
 use crate::transport::{TransportAddr, TransportId};
 use crate::{NodeAddr, PeerIdentity};
 use tracing::{debug, info, trace, warn};
@@ -24,6 +25,41 @@ use tracing::{debug, info, trace, warn};
 /// to borrow only `peers` + `tree_state` instead of the whole node.
 struct NodeRoutingView<'a> {
     node: &'a Node,
+}
+
+/// What [`Node::maybe_initiate_lookup`] did, for callers that report on the
+/// lookup rather than merely triggering it. The three existing data-path call
+/// sites are statement-position and discard it unchanged.
+pub(in crate::node) struct LookupInitiateOutcome {
+    kind: LookupOutcomeKind,
+    /// Peers the LookupRequest actually reached; `None` when the gate declined
+    /// and no request was built.
+    sent: Option<usize>,
+}
+
+impl LookupInitiateOutcome {
+    fn gated(kind: LookupOutcomeKind) -> Self {
+        Self { kind, sent: None }
+    }
+
+    fn sent(sent: usize) -> Self {
+        Self {
+            kind: if sent == 0 {
+                LookupOutcomeKind::ZeroFanout
+            } else {
+                LookupOutcomeKind::Sent
+            },
+            sent: Some(sent),
+        }
+    }
+
+    pub(in crate::node) fn kind(&self) -> LookupOutcomeKind {
+        self.kind
+    }
+
+    pub(in crate::node) fn fanout(&self) -> Option<usize> {
+        self.sent
+    }
 }
 
 impl crate::proto::lookup::RoutingView for NodeRoutingView<'_> {
@@ -610,7 +646,10 @@ impl Node {
     /// Subsequent attempts (with fresh request_ids) are scheduled by
     /// [`Self::check_pending_lookups`] when each attempt's per-attempt timeout
     /// expires, using the sequence in `node.lookup.attempt_timeouts_secs`.
-    pub(in crate::node) async fn maybe_initiate_lookup(&mut self, dest: &NodeAddr) {
+    pub(in crate::node) async fn maybe_initiate_lookup(
+        &mut self,
+        dest: &NodeAddr,
+    ) -> LookupInitiateOutcome {
         let now_ms = Self::now_ms();
 
         // Bloom filter pre-check (view read) BEFORE the core call: if no peer's
@@ -627,6 +666,7 @@ impl Node {
                     target_node = %self.peer_display_name(dest),
                     "Discovery lookup deduplicated, already pending"
                 );
+                LookupInitiateOutcome::gated(LookupOutcomeKind::Deduplicated)
             }
             InitiateDecision::Suppressed { failures } => {
                 self.metrics().lookup.req_backoff_suppressed.inc();
@@ -635,6 +675,7 @@ impl Node {
                     failures = failures,
                     "Discovery lookup suppressed by backoff"
                 );
+                LookupInitiateOutcome::gated(LookupOutcomeKind::Suppressed)
             }
             InitiateDecision::BloomMiss => {
                 self.metrics().lookup.req_bloom_miss.inc();
@@ -642,6 +683,7 @@ impl Node {
                     target_node = %self.peer_display_name(dest),
                     "Discovery skipped, target not in any peer bloom filter"
                 );
+                LookupInitiateOutcome::gated(LookupOutcomeKind::BloomMiss)
             }
             InitiateDecision::Proceed => {
                 let ttl = self.config().node.lookup.ttl;
@@ -655,6 +697,7 @@ impl Node {
                         "Discovery failed, no tree peers with bloom match"
                     );
                 }
+                LookupInitiateOutcome::sent(sent)
             }
         }
     }

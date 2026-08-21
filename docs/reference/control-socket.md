@@ -94,6 +94,10 @@ daemon closes it with no response.
 | `unknown command: <name>` | Command not registered with this daemon. |
 | `missing params for <name>` | Command requires `params` but none were provided. |
 | `missing '<field>' parameter` | Required parameter missing. |
+| `invalid peer npub: <e>` | `probe_start` could not decode the bech32 npub. |
+| `cannot probe this node` | `probe_start` was given this daemon's own npub. |
+| `unknown probe id: <n>` | `probe_poll` / `probe_cancel` named a job that does not exist, or one already collected by a previous poll. |
+| `too many probes in flight` | The probe registry is at its concurrency cap. |
 | `query timeout` | Internal handler did not respond within 5 seconds. |
 | `node shutting down` | Daemon is exiting. |
 | `gateway not yet initialized` | (Gateway socket only) snapshot has not been published yet. |
@@ -163,6 +167,9 @@ not reproduced here to avoid duplicating the source.
 | ------- | --------------- | --------- |
 | `connect` | `npub` (bech32), `address` (transport endpoint), `transport` (`udp`, `tcp`, `tor`, `nym`, `ethernet`) | Asks the node to dial the peer over the named transport. The named transport must be configured and running. Returns the API result on success or an error string on failure. |
 | `disconnect` | `npub` (bech32) | Asks the node to drop the link to the named peer. |
+| `probe_start` | `npub` (bech32) | Admits a diagnostic probe job and returns immediately. `data`: `probe_id`, `npub`, `node_addr`, `display_name`, `budget_ms`. |
+| `probe_poll` | `probe_id` (integer) | Reports a probe's progress. `data`: `state` (`running` / `done`) and `report`. A terminal job is removed on the poll that observes it, so the report is delivered once. |
+| `probe_cancel` | `probe_id` (integer) | Runs the probe's terminal actions immediately, without the teardown grace tick. |
 
 `connect` on a peer the node is **already connected to** neither tears the
 live link down nor ignores the address: the address is tried as an alternate
@@ -175,8 +182,27 @@ dial to a peer the node does not yet hold also reports `refreshed: false`.
 `connect` is ephemeral either way: the peer is not written to the config file
 and gets no auto-reconnect, so an attempt that fails leaves no residue.
 
-Both commands run on the daemon's main task and may block briefly
-while the node mutates its state.
+`connect` and `disconnect` run on the daemon's main task and may block
+briefly while the node mutates its state. The probe triplet does not:
+each call returns in well under a millisecond, and the stages run on
+the daemon's tick. That split exists because a probe needs a mesh
+lookup, a Noise XK handshake and at least one remote MMP tick, which no
+single control round-trip could survive inside the 5-second I/O
+timeout.
+
+A probe that runs and finds a problem is **not** an error response: the
+status is `ok` and the failure is in the report's per-stage verdicts.
+Error responses are reserved for malformed or inadmissible requests.
+
+The report carries one block per stage — `bloom`, `discovery`, `path`,
+`session`, `rtt` — plus `target`, `cleanup` and the overall verdict.
+The two lookup stages are separate because they fail for unrelated
+reasons: `bloom` says whether any peer's filter claimed the address and
+a request therefore went out, and `discovery` says whether anything
+answered. `discovery.attempts` is the request in flight, or the last
+one tried, and `discovery.attempt_timeouts_secs` is this node's
+configured ladder, published so a client can say how long each attempt
+was given rather than guessing.
 
 #### Profiler toggle (`--features profiling` builds only)
 

@@ -550,6 +550,60 @@ fn test_ignores_future_rtt_sample() {
     assert!(m.srtt_ms().is_none());
 }
 
+/// The four report counters must land in the arms they name. `rtt_zero` means
+/// "expected on loopback" and `rtt_arith_fail` means "a real anomaly": swapping
+/// them steers an operator away from a genuine fault, and nothing else in the
+/// suite observes either of them incrementing from a real report.
+#[test]
+fn test_report_counters_discriminate_the_rtt_outcomes() {
+    // A positive sample: echo 1000 + dwell 5, our clock at 1050 => 45 ms.
+    let mut m = MmpMetrics::new();
+    m.process_receiver_report(&make_rr(10, 10, 5_000, 1_000, 5, 0), 1_050, 0);
+    assert_eq!(m.reports_seen(), 1);
+    assert_eq!(m.rtt_samples(), 1);
+    assert_eq!(m.last_rtt_ms(), Some(45));
+    assert_eq!(m.rtt_zero(), 0);
+    assert_eq!(m.rtt_arith_fail(), 0);
+
+    // A sample that truncates to exactly 0 ms: echo 1000 + dwell 5 == our 1005.
+    let mut m = MmpMetrics::new();
+    m.process_receiver_report(&make_rr(10, 10, 5_000, 1_000, 5, 0), 1_005, 0);
+    assert_eq!(m.reports_seen(), 1);
+    assert_eq!(m.rtt_zero(), 1);
+    assert_eq!(m.rtt_samples(), 0);
+    assert_eq!(m.rtt_arith_fail(), 0);
+    assert_eq!(m.last_rtt_ms(), None);
+
+    // Arithmetic failure: echo + dwell overflows u32.
+    let mut m = MmpMetrics::new();
+    m.process_receiver_report(&make_rr(10, 10, 5_000, u32::MAX - 10, 20, 0), 15, 0);
+    assert_eq!(m.reports_seen(), 1);
+    assert_eq!(m.rtt_arith_fail(), 1);
+    assert_eq!(m.rtt_zero(), 0);
+    assert_eq!(m.rtt_samples(), 0);
+}
+
+/// `reports_seen` is counted before the stale/duplicate early return, which is
+/// what lets the probe's `no_report` be a reachability claim rather than a
+/// measurement claim. Moving it below the return would make the probe assert
+/// one-way reachability against a peer that is in fact answering.
+#[test]
+fn test_reports_seen_counts_a_stale_report_the_rtt_arms_reject() {
+    let mut m = MmpMetrics::new();
+    let rr = make_rr(10, 10, 5_000, 1_000, 5, 0);
+    m.process_receiver_report(&rr, 1_050, 0);
+    let after_first = (m.rtt_samples(), m.rtt_zero(), m.rtt_arith_fail());
+
+    // The identical report again is stale and returns before the RTT arms.
+    m.process_receiver_report(&rr, 6_000, 5_000);
+    assert_eq!(m.reports_seen(), 2, "a report arrived, usable or not");
+    assert_eq!(
+        (m.rtt_samples(), m.rtt_zero(), m.rtt_arith_fail()),
+        after_first,
+        "a stale report must move no RTT counter"
+    );
+}
+
 #[test]
 fn test_loss_rate_computation() {
     let mut m = MmpMetrics::new();

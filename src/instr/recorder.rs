@@ -72,6 +72,7 @@ pub(crate) enum Step {
     CheckRekey,
     CheckSessionRekey,
     CheckPendingLookups,
+    PollProbes,
     PollTransportDiscovery,
     SampleTransportCongestion,
     ActivateConnectedUdpSessions,
@@ -111,6 +112,7 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::CheckRekey,
     Step::CheckSessionRekey,
     Step::CheckPendingLookups,
+    Step::PollProbes,
     Step::PollTransportDiscovery,
     Step::SampleTransportCongestion,
     Step::ActivateConnectedUdpSessions,
@@ -145,6 +147,7 @@ impl Step {
             Step::CheckRekey => "check_rekey",
             Step::CheckSessionRekey => "check_session_rekey",
             Step::CheckPendingLookups => "check_pending_lookups",
+            Step::PollProbes => "poll_probes",
             Step::PollTransportDiscovery => "poll_transport_discovery",
             Step::SampleTransportCongestion => "sample_transport_congestion",
             Step::ActivateConnectedUdpSessions => "activate_connected_udp_sessions",
@@ -383,15 +386,19 @@ mod tests {
     #[test]
     fn emitted_row_count_matches_build() {
         let emitted = STEPS.iter().filter(|s| s.emitted()).count();
-        // 26 unconditional subsystem steps on this line (25 shared with the
+        // 27 unconditional subsystem steps on this line (26 shared with the
         // master line, plus `resend_pending_fmp_rekey_msg3`, which exists only
         // here) + the whole-tick span, plus the two conditionally-compiled
         // steps where this build has them. The count is pinned deliberately: it
         // is what caught the extra step when the master-line instrumentation
         // was merged up, rather than letting the tables silently disagree — and
         // it did so again when `purge_expired_path_mtu` arrived with the
-        // path-MTU expiry work, taking the shared count from 24 to 25.
-        let mut expected = 27;
+        // path-MTU expiry work, taking the shared count from 24 to 25, and
+        // again when `poll_probes` arrived with the probe diagnostic, taking it
+        // from 25 to 26. That merge is the sharpest case so far: both lines
+        // held 27 for different reasons, so the literal merged without a
+        // conflict and only the comment above it collided.
+        let mut expected = 28;
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             expected += 1;
         }

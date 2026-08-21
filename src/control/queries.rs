@@ -2780,8 +2780,17 @@ mod tests {
             assert_eq!(resp.status, "ok", "{cmd} off-loop response not ok");
         }
 
-        // Mutations are NOT served off-loop; they take the rx_loop COMMAND path.
-        for cmd in ["connect", "disconnect"] {
+        // Mutations are NOT served off-loop; they take the rx_loop COMMAND
+        // path. A probe served from the one-tick-stale off-loop snapshot would
+        // silently never run, so the three probe commands are asserted here
+        // alongside connect/disconnect.
+        for cmd in [
+            "connect",
+            "disconnect",
+            "probe_start",
+            "probe_poll",
+            "probe_cancel",
+        ] {
             let req = Request {
                 command: cmd.to_string(),
                 params: None,
@@ -2791,6 +2800,100 @@ mod tests {
                 "{cmd} must fall through to the rx_loop command path"
             );
         }
+    }
+
+    /// Schema guard for the probe report. Built by hand from a terminal
+    /// outcome so the fixture pins field names, nesting and the flattened
+    /// stage status.
+    #[test]
+    fn probe_report_json_shape() {
+        use crate::control::probe::{
+            BloomStage, CleanupInfo, DiscoveryStage, NextHopInfo, PathStage, ProbeReport, RttStage,
+            SessionStage, StageStatus, TargetInfo,
+        };
+
+        let status = |verdict, elapsed| StageStatus {
+            verdict,
+            reason: None,
+            detail: None,
+            elapsed_ms: Some(elapsed),
+        };
+        let report = ProbeReport {
+            probe_id: 7,
+            target: TargetInfo {
+                npub: "npub1qq8s4f7x".to_string(),
+                node_addr: "4a1f9c22e08b5d3714aa06fb92c1de55".to_string(),
+                display_name: "hydra".to_string(),
+                ipv6_addr: "fd00:4a1f:9c22:e08b:5d37:14aa:06fb:92c1".to_string(),
+            },
+            overall: "ok",
+            elapsed_ms: 4000,
+            tick_ms: 1000,
+            bloom: BloomStage {
+                status: status("ok", 0),
+                fanout: Some(3),
+            },
+            discovery: DiscoveryStage {
+                status: status("ok", 2000),
+                source: Some("lookup"),
+                attempts: Some(2),
+                attempt_timeouts_secs: vec![1, 2, 4, 8],
+            },
+            path: PathStage {
+                status: status("ok", 0),
+                computed_locally: true,
+                observed: false,
+                coords_known: true,
+                our_coords: vec!["4d2201ff".to_string(), "91b40c6e".to_string()],
+                their_coords: vec!["4a1f9c22".to_string(), "91b40c6e".to_string()],
+                our_depth: Some(1),
+                their_depth: Some(1),
+                same_root: Some(true),
+                lca: Some("91b40c6e".to_string()),
+                lca_depth: Some(0),
+                tree_hops_up: Some(1),
+                tree_hops_down: Some(1),
+                tree_distance: Some(2),
+                next_hop: Some(NextHopInfo {
+                    node_addr: "91b40c6e".to_string(),
+                    display_name: "relay-a".to_string(),
+                    class: "tree_up",
+                    direct_peer: false,
+                    leaves_tree_walk: false,
+                }),
+                no_hop_reason: None,
+            },
+            session: SessionStage {
+                status: status("ok", 1000),
+                preexisting: false,
+                established: true,
+                path_mtu: Some(1420),
+            },
+            rtt: RttStage {
+                status: status("ok", 1000),
+                rtt_ms: Some(18),
+                srtt_ms: Some(18.0),
+                reports_seen: 1,
+                samples: 1,
+                zero_samples: 0,
+                arith_failures: 0,
+            },
+            cleanup: CleanupInfo {
+                session_created_and_torn_down: true,
+                session_left_intact: false,
+                left_intact_reason: None,
+                lookup_issued: true,
+                coords_were_cached: false,
+                identity_was_cached: false,
+                warmups_sent: 1,
+            },
+        };
+
+        let mut value = serde_json::to_value(&report).expect("report serializes");
+        normalize_value(&mut value);
+        let sorted = sort_object_keys(&value);
+        let actual = serde_json::to_string_pretty(&sorted).expect("pretty");
+        assert_snapshot("probe_report", &actual);
     }
 
     /// Structural confirmation that the rx_loop no longer dispatches `show_*`:

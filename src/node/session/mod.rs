@@ -284,8 +284,8 @@ impl SessionEntry {
         self.state.as_ref().is_some_and(|s| s.is_awaiting_msg3())
     }
 
-    /// Get creation time.
-    #[cfg(test)]
+    /// Get creation time. Used as the probe's session-identity check: an
+    /// entry with a different creation stamp is a replacement, not ours.
     pub(crate) fn created_at(&self) -> u64 {
         self.created_at
     }

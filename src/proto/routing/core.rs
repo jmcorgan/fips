@@ -277,6 +277,20 @@ pub(crate) enum RouteClass {
     DirectPeer,
 }
 
+impl RouteClass {
+    /// The stable string form, for diagnostics that publish the class.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            RouteClass::TreeUp => "tree_up",
+            RouteClass::TreeDown => "tree_down",
+            RouteClass::TreeDownCross => "tree_down_cross",
+            RouteClass::CrosslinkDescend => "crosslink_descend",
+            RouteClass::CrosslinkAscend => "crosslink_ascend",
+            RouteClass::DirectPeer => "direct_peer",
+        }
+    }
+}
+
 /// Select the best next hop from the active peers that may reach `dest`.
 ///
 /// Enumerates borrowed peers through [`RoutingView`], applies the bloom and

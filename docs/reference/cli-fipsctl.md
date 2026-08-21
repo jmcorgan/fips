@@ -115,6 +115,104 @@ Tell the daemon to drop a peer link.
 | -------- | ----------- |
 | `peer` | npub (bech32) or hostname from `/etc/fips/hosts`. |
 
+### `probe <target>`
+
+Diagnose whether a mesh endpoint is reachable, in five stages, and
+report a per-stage verdict so a partial failure localizes itself.
+
+| Argument | Description |
+| -------- | ----------- |
+| `target` | npub (bech32) or hostname from `/etc/fips/hosts`. |
+| `--json` | Emit the report as JSON instead of human-readable text. |
+| `--timeout <secs>` | Client-side ceiling. Defaults to the budget the daemon computed, which scales with its tick interval. |
+
+The stages are:
+
+1. **bloom** — does any peer's announced filter claim the target, and
+   did a LookupRequest therefore go out? A miss ends the probe here and
+   is a statement about the mesh's own knowledge: nobody has heard of
+   this address. Skipped when the coordinates are already cached, and
+   when the target is a directly connected peer.
+2. **discovery** — waiting for a LookupResponse to answer with
+   coordinates. Each request the node sends gets its own line under the
+   stage, with the timeout that attempt was given and whether it drew a
+   reply. Failing here is the opposite finding to a bloom miss: a peer's
+   filter did claim the address, and nothing answered for it.
+3. **path** — the least-common-ancestor walk between the two
+   coordinates, plus the next hop this node would select. This is a
+   **local computation, not a traceroute**: no hop beyond the first is
+   contacted, and the tree distance is an upper bound on the real hop
+   count because a crosslink cut-through can deliver in fewer hops.
+   When no coordinates were available the walk is not computed at all:
+   `path.coords_known` is false and every tree field is null, rather
+   than a default that would read as a finding about the spanning tree.
+4. **session** — a full Noise XK handshake over FSP. Completing it is
+   genuine end-to-end evidence: our route reached them, their route
+   reached us, and the remote holds the expected static key.
+5. **rtt** — one MMP sender/receiver report exchange, for a real
+   round-trip time.
+
+Exit status is 0 only for an overall verdict of `ok`; `partial`,
+`failed` and `cancelled` all exit 1.
+
+**The stage block fills in as the probe runs.** Each stage reports its
+verdict at the moment it reaches one, rather than the whole report
+arriving at the end, so a slow stage is visible as the stage that is
+slow. On a terminal the block is redrawn in place, with a spinner and a
+running elapsed on whichever stage is working; piped or redirected, each
+row is printed once, when it settles, and the transcript ends up the
+same block. A running stage reports only what the daemon has observed —
+which requests have gone unanswered so far, whether the handshake is in
+flight, how many receiver reports have arrived — and never previews an
+outcome it does not have yet. The per-request lines under the discovery
+stage carry the configured timeout of each attempt in parentheses, which
+is the node's own ladder rather than a measurement.
+
+The elapsed column comes from the daemon's clock throughout: a finished
+stage carries its own tick-quantized figure, and the stage still running
+carries the report's elapsed less the stages already accounted for.
+Nothing in that column is measured client-side.
+
+**Stages that were never attempted get no row.** A failure marks
+everything behind it as not reached, and the report says that once, in
+the failed row, rather than three more times. Two cases deliberately keep
+their rows: a *skipped* stage, because a skip is a result naming why that
+stage was unnecessary, and everything after a *failed path* stage,
+because the path preview touches nothing and the session can still
+succeed where the preview named no next hop.
+
+Below the stage block, the `path:` line renders the whole tree walk on
+one line, from this node to the target, through the least common
+ancestor, which is emphasised on a terminal. It is the same computed
+walk the `ours`, `theirs` and `tree walk` lines describe, read in one
+piece.
+
+`--json` is unaffected and still emits exactly one document, when the
+probe ends, so a script parsing the report does not have to skip past
+progress output.
+
+**What the probe leaves behind.** It tears down a session it opened
+itself and never touches one that already existed. Three residues are
+deliberate and worth knowing about:
+
+- The coordinate-cache and identity-cache entries a lookup produced are
+  not evicted. They are TTL-bounded shared read caches, and evicting
+  them could strand an unrelated flow mid-route.
+- The remote's half of a probe-created session persists until its own
+  idle timeout (default 90s). There is no teardown wire message. In the
+  window between our removal and its idle purge, any session frame the
+  remote sends lands here as one unknown-session reject.
+- To obtain a round-trip time the probe sends a `CoordsWarmup`, which
+  starts MMP reporting on the session. On a session the probe does not
+  own, that reporting continues until the idle purge — the same traffic
+  any single data packet would cause, and bounded, but a real change to
+  a session the probe did not create. The report names it under
+  `cleanup.warmups_sent`.
+
+Running a probe against a production node is safe: the job carries its
+own deadline daemon-side, so it cleans up whether or not the client is
+still there.
+
 ### `profile tick <on|off|status>`
 
 > **Reading the output.** Step durations are wall clock measured across `await`

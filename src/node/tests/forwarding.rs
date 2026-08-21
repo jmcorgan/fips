@@ -11,7 +11,8 @@ use crate::proto::link::SessionDatagram;
 use crate::proto::stp::TreeCoordinate;
 use crate::proto::stp::encode_coords;
 use spanning_tree::{
-    TestNode, cleanup_nodes, process_available_packets, run_tree_test, verify_tree_convergence,
+    TestNode, cleanup_nodes, populate_all_coord_caches, process_available_packets, run_tree_test,
+    verify_tree_convergence,
 };
 
 // ============================================================================
@@ -474,35 +475,6 @@ async fn test_coord_cache_warming_ttl_zero_transit_drop() {
 // ============================================================================
 // Integration Tests
 // ============================================================================
-
-/// Helper: populate all coordinate caches across a set of test nodes.
-fn populate_all_coord_caches(nodes: &mut [TestNode]) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    // Collect all coords first to avoid borrow conflicts
-    let all_coords: Vec<(NodeAddr, TreeCoordinate)> = nodes
-        .iter()
-        .map(|tn| {
-            (
-                *tn.node.node_addr(),
-                tn.node.tree_state().my_coords().clone(),
-            )
-        })
-        .collect();
-
-    for tn in nodes.iter_mut() {
-        for (addr, coords) in &all_coords {
-            if addr != tn.node.node_addr() {
-                tn.node
-                    .coord_cache_mut()
-                    .insert(*addr, coords.clone(), now_ms);
-            }
-        }
-    }
-}
 
 #[tokio::test]
 async fn test_forwarding_single_hop() {

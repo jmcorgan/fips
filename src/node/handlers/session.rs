@@ -2801,7 +2801,10 @@ impl Node {
     /// coordinates via `try_warm_coord_cache()` (same as CP-flagged data
     /// packets). The encrypted inner payload is the 6-byte inner header
     /// with no application data.
-    async fn send_coords_warmup(&mut self, dest_addr: &NodeAddr) -> Result<(), NodeError> {
+    pub(in crate::node) async fn send_coords_warmup(
+        &mut self,
+        dest_addr: &NodeAddr,
+    ) -> Result<(), NodeError> {
         let now_ms = Self::now_ms();
 
         let my_coords = self.tree_state.my_coords().clone();
