@@ -721,7 +721,7 @@ impl Node {
                                         let _ = self.index_allocator.free(idx);
                                     }
                                     self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::BadState,
+                                        HandshakeReject::RekeyStaticMismatch,
                                     ));
                                 }
                             }

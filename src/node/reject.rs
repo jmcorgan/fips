@@ -154,7 +154,9 @@ pub enum DiscoveryReject {
 /// `UnknownConnection` covers lookup-miss sites where an inbound message
 /// arrived for a connection identifier we don't recognise (no pending
 /// outbound for the receiver_idx in msg2; duplicate msg1 with no stored
-/// msg2 to resend).
+/// msg2 to resend). `RekeyStaticMismatch` is carved out of the
+/// `BadState` bulk so the one attacker-driven arm in the cluster has a
+/// counter of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum HandshakeReject {
@@ -162,7 +164,10 @@ pub enum HandshakeReject {
     /// failed, identity could not be learned, index allocator returned an
     /// error, msg2/msg3 send failed, promote_connection returned an error,
     /// ACL gate rejected the peer, or the admission gate fired
-    /// (max_peers / accept_connections). Tracked via
+    /// (max_peers / accept_connections). The rekey static-key continuity
+    /// gate also lived here until it was given its own
+    /// [`RekeyStaticMismatch`](HandshakeReject::RekeyStaticMismatch)
+    /// variant. Tracked via
     /// [`HandshakeStats::bad_state`](crate::node::stats::HandshakeStats).
     BadState,
     /// Inbound handshake message arrived but the connection identifier
@@ -172,6 +177,16 @@ pub enum HandshakeReject {
     /// no rekey-responder state). Tracked via
     /// [`HandshakeStats::unknown_connection`](crate::node::stats::HandshakeStats).
     UnknownConnection,
+    /// Initiator-side rekey msg2 completed the Noise read, but the static
+    /// key it revealed is not the key the established session is bound to
+    /// — the msg2 did not come from the peer we are rekeying with. The
+    /// rekey cycle is abandoned and the working session is left untouched.
+    /// Unlike the rest of the cluster this arm cannot be reached by
+    /// routine handshake noise: the rekey msg1 header travels in the
+    /// clear, so a sustained rate here means an on-path attacker is
+    /// forging rekey msg2 and suppressing key rotation. Tracked via
+    /// [`HandshakeStats::rekey_static_mismatch`](crate::node::stats::HandshakeStats).
+    RekeyStaticMismatch,
 }
 
 /// FSP session rejection reasons.

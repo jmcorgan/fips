@@ -143,6 +143,12 @@ pub struct HandshakeStats {
     /// resend, msg3 for an unknown pending-inbound index without a
     /// matching rekey-responder slot.
     pub unknown_connection: u64,
+    /// Initiator-side rekey msg2 read cleanly but revealed a static key
+    /// other than the one the established session is bound to, so the
+    /// rekey cycle was abandoned and the working session kept. A
+    /// sustained rate here is an on-path attacker forging rekey msg2 and
+    /// suppressing key rotation, not routine handshake noise.
+    pub rekey_static_mismatch: u64,
 }
 
 impl HandshakeStats {
@@ -150,6 +156,7 @@ impl HandshakeStats {
         HandshakeStatsSnapshot {
             bad_state: self.bad_state,
             unknown_connection: self.unknown_connection,
+            rekey_static_mismatch: self.rekey_static_mismatch,
         }
     }
 
@@ -157,6 +164,7 @@ impl HandshakeStats {
         match reason {
             HandshakeReject::BadState => self.bad_state += 1,
             HandshakeReject::UnknownConnection => self.unknown_connection += 1,
+            HandshakeReject::RekeyStaticMismatch => self.rekey_static_mismatch += 1,
         }
     }
 }
@@ -401,6 +409,7 @@ pub struct SessionStatsSnapshot {
 pub struct HandshakeStatsSnapshot {
     pub bad_state: u64,
     pub unknown_connection: u64,
+    pub rekey_static_mismatch: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -572,6 +581,16 @@ mod tests {
         stats.record_reject(HandshakeReject::UnknownConnection);
         assert_eq!(stats.unknown_connection, 2);
         assert_eq!(stats.bad_state, 0);
+    }
+
+    #[test]
+    fn handshake_stats_record_reject_rekey_static_mismatch() {
+        let mut stats = HandshakeStats::default();
+        stats.record_reject(HandshakeReject::RekeyStaticMismatch);
+        stats.record_reject(HandshakeReject::RekeyStaticMismatch);
+        assert_eq!(stats.rekey_static_mismatch, 2);
+        assert_eq!(stats.bad_state, 0);
+        assert_eq!(stats.snapshot().rekey_static_mismatch, 2);
     }
 
     #[test]

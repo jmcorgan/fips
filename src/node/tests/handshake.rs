@@ -3044,6 +3044,96 @@ async fn test_rekey_msg2_foreign_static_rejected() {
     stop_hs(&mut attacker).await;
 }
 
+/// The forged rekey msg2 is charged to `rekey_static_mismatch`, not to the
+/// undifferentiated `bad_state` bucket.
+///
+/// This counter is the only machine-readable indicator that the continuity
+/// gate is firing. `bad_state` is shared with header parse failures, ACL
+/// denials, allocator pressure and admission drops, so an operator alerting on
+/// it cannot tell an on-path attacker forging rekey msg2 from routine
+/// handshake noise. The `bad_state == 0` limb is what makes this test
+/// discriminating: recording the old catch-all variant from the reject arm
+/// fails both assertions, not neither.
+#[tokio::test]
+async fn test_forged_rekey_msg2_is_counted_as_rekey_static_mismatch_not_bad_state() {
+    let mut rekey_config = Config::new();
+    rekey_config.node.rekey.enabled = true;
+    rekey_config.node.rekey.after_secs = 30;
+
+    let mut initiator = make_hs_node(rekey_config).await;
+    let mut responder = make_hs_node(Config::new()).await;
+    let mut attacker = make_hs_node(Config::new()).await;
+
+    let responder_addr =
+        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    assert_eq!(initiator.node.peer_count(), 1);
+
+    // Counter identity: the established handshake must not itself have
+    // charged either counter, or the post-attack readings prove nothing.
+    assert_eq!(
+        initiator.node.stats().handshake.rekey_static_mismatch,
+        0,
+        "the clean handshake charges no mismatch"
+    );
+    assert_eq!(
+        initiator.node.stats().handshake.bad_state,
+        0,
+        "the clean handshake charges no catch-all reject"
+    );
+
+    initiator
+        .node
+        .get_peer_mut(&responder_addr)
+        .unwrap()
+        .test_backdate_session_established(std::time::Duration::from_secs(120));
+    initiator.node.check_rekey().await;
+    assert!(
+        initiator
+            .node
+            .get_peer(&responder_addr)
+            .unwrap()
+            .rekey_our_index()
+            .is_some(),
+        "the cadence started a rekey, so the reject arm is reachable"
+    );
+
+    // The attacker answers the cleartext rekey msg1 under its own static.
+    let rekey_msg1 = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
+    attacker.node.handle_msg1(rekey_msg1).await;
+    let forged_msg2 = recv_phase(&mut initiator.packet_rx, 2, "forged rekey msg2").await;
+    initiator.node.handle_msg2(forged_msg2).await;
+
+    // Arm identity: the reject really happened, rather than the msg2 being
+    // dropped earlier for some unrelated reason.
+    assert_eq!(initiator.node.peer_count(), 1, "peer set unchanged");
+    assert!(
+        !initiator
+            .node
+            .get_peer(&responder_addr)
+            .unwrap()
+            .rekey_in_progress(),
+        "the rejected rekey cycle is abandoned"
+    );
+
+    assert_eq!(
+        initiator.node.stats().handshake.rekey_static_mismatch,
+        1,
+        "the forged rekey msg2 is charged to its own counter"
+    );
+    assert_eq!(
+        initiator.node.stats().handshake.bad_state,
+        0,
+        "and is no longer hidden in the undifferentiated bucket"
+    );
+
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+    stop_hs(&mut attacker).await;
+}
+
 /// The same cadence-driven rekey, answered by the REAL peer, still installs the
 /// pending session — the gate must be invisible on the legitimate path.
 #[tokio::test]
