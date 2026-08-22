@@ -550,8 +550,20 @@ mod unix_impl {
             // The buffer is the only bound on arrivals a client has stopped
             // reading, so a failure to size it is worth a warning rather than a
             // refusal: the listener still works, with the system default.
-            if let Err(error) = set_sndbuf(&ours, queue * ARRIVAL_ALLOWANCE) {
+            //
+            // **Both halves, because the two kernels charge different ones.**
+            // Linux accounts an `AF_UNIX` message against the sender's
+            // `SO_SNDBUF`; BSD queues it in the receiver's `so_rcv`, whose
+            // `SOCK_DGRAM` default is small. Sizing only the sender leaves the
+            // declared backlog inert on FreeBSD and Darwin, where arrivals are
+            // then dropped well below it. This is the same correction
+            // `wire_flow` already makes for a flow's pair.
+            let budget = queue * ARRIVAL_ALLOWANCE;
+            if let Err(error) = set_sndbuf(&ours, budget) {
                 warn!(error = %error, "Could not size a native API listener's send buffer");
+            }
+            if let Err(error) = set_rcvbuf(&theirs, budget) {
+                warn!(error = %error, "Could not size a native API listener's receive buffer");
             }
 
             let sock = match Seqpacket::new(ours) {
@@ -1333,12 +1345,31 @@ mod tests {
         serde_json::to_value(response).unwrap()
     }
 
+    /// How long a test waits for something that should already be on a
+    /// descriptor.
+    ///
+    /// Every read below is of a message this test already caused to be written,
+    /// so anything that is coming has arrived and a longer wait is one that will
+    /// not end. These tests run inside a current-thread runtime and read with
+    /// blocking syscalls, so an unbounded read here does not merely fail to
+    /// return: it stops the runtime that would have produced what it is waiting
+    /// for. Without a bound that is a wedged suite with no named failure, which
+    /// is how a FreeBSD portability bug turned into six cancelled CI runs.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Put [`DEADLINE`] on a descriptor a test reads with blocking calls.
+    fn bounded(sock: StdUnixStream) -> StdUnixStream {
+        sock.set_read_timeout(Some(DEADLINE))
+            .expect("the descriptor is open");
+        sock
+    }
+
     /// Send one command that opens a flow, returning the reply and descriptor.
     async fn open(connection: &mut Connection, line: &str) -> (serde_json::Value, StdUnixStream) {
         let (response, fd) = connection.answer(line.as_bytes()).await;
         let value = serde_json::to_value(response).unwrap();
         let fd = fd.expect("this command should carry a descriptor");
-        (value, StdUnixStream::from(fd))
+        (value, bounded(StdUnixStream::from(fd)))
     }
 
     /// Bind a listener and keep its descriptor, the way a client does.
@@ -1355,13 +1386,16 @@ mod tests {
     /// Goes through the same `recvmsg` a client process runs, so what these
     /// tests assert about the ancillary framing is what a client would see.
     fn accept(listener: &StdUnixStream) -> (serde_json::Value, StdUnixStream) {
+        // The listener descriptor comes back from `listen` already bounded, so
+        // this recvmsg cannot park: an arrival the test wrote is there, or the
+        // read fails and names the listener.
         let mut buf = [0u8; 4096];
         let chunk = super::fdpass::recv(listener.as_raw_fd(), &mut buf)
             .expect("an arrival should be readable on the listener");
         let fd: OwnedFd = chunk.fd.expect("an arrival carries the flow's descriptor");
         let value: serde_json::Value =
             serde_json::from_slice(&buf[..chunk.len]).expect("the arrival is one JSON object");
-        (value, StdUnixStream::from(fd))
+        (value, bounded(StdUnixStream::from(fd)))
     }
 
     /// Deliver a datagram as though a peer had sent it.

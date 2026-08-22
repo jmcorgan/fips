@@ -102,7 +102,28 @@ jobs:
             # CI — the main CI matrix is Linux-only, and a release build
             # compiles no #[cfg(test)] code (AF-prefix strip round-trips,
             # platform module, config path gates).
-            cargo test
+            #
+            # Bounded, because libtest has no per-test deadline and this job
+            # runs plain `cargo test` rather than nextest, so one test that
+            # blocks on a syscall holds the whole binary open with nothing to
+            # end it. Six runs in August 2026 did exactly that. The bound is on
+            # the suite rather than on the job so the failure is a named step
+            # failure at fifteen minutes instead of the job ceiling at thirty,
+            # and `timeout` leaves the test binary's stdout untouched up to the
+            # kill: that stdout is what carries libtest's "has been running for
+            # over N seconds" lines, which are what name the blocked test.
+            #
+            # This bounds the damage; it does not fix anything. A test that can
+            # block for ever is a defect at the test, and the ones this suite
+            # has are bounded where they are written.
+            if ! timeout -s KILL 900 cargo test; then
+              echo "FAIL: cargo test failed, or did not finish within its 900s bound." >&2
+              echo "      If the output above stops mid-run, look for libtest's" >&2
+              echo "      'has been running for over' lines: they name the test" >&2
+              echo "      that blocked, and the tests that never reported at all" >&2
+              echo "      are the rest of the answer." >&2
+              exit 1
+            fi
 
             packaging/freebsd/build-pkg.sh \
               --version "$FREEBSD_PACKAGE_VERSION" \

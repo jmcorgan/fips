@@ -10,11 +10,23 @@
 //! [`AsyncFd`], which is tokio's supported way to put an arbitrary file
 //! descriptor under the reactor.
 //!
-//! **macOS uses `SOCK_DGRAM` instead**, because it does not implement
-//! `SOCK_SEQPACKET` for `AF_UNIX`. Everything else this module needs works
-//! there: `SCM_RIGHTS` is supported, `AsyncFd` is backed by kqueue, and a
-//! connected `SOCK_DGRAM` pair keeps message boundaries just as `SOCK_SEQPACKET`
-//! does.
+//! **macOS and FreeBSD use `SOCK_DGRAM` instead**, for two different reasons
+//! that come to the same thing. macOS does not implement `SOCK_SEQPACKET` for
+//! `AF_UNIX` at all. FreeBSD accepts the constant and gives back a socket that
+//! is not an atomic-record socket: `seqpacketproto` carries no `PR_ATOMIC` and
+//! shares its send and receive handlers with `SOCK_STREAM`, so consecutive
+//! messages coalesce and a zero-length message is queued nowhere and delivered
+//! never. **Measured on the FreeBSD 15.1 CI image on 2026-08-22**, by the two
+//! probes in [`super::dgram_probe`] named for it: a `SOCK_SEQPACKET` pair there
+//! does not keep message boundaries, and it drops a zero-length message instead
+//! of delivering it. The reading of the kernel source came first and the
+//! measurement agreed with it; before that run the mechanism was inferred from
+//! a CI log in which the zero-length-message test hung until the job was killed
+//! and five boundary tests failed within 360 ms.
+//! Everything else this module needs works on both: `SCM_RIGHTS` is supported,
+//! `AsyncFd` is backed by kqueue, and a connected `SOCK_DGRAM` pair keeps
+//! message boundaries and delivers an empty datagram, which `SOCK_SEQPACKET`
+//! does on Linux and does not here.
 //!
 //! The two types are **not** interchangeable at end of file, and that is the
 //! whole difficulty of the port. Measured 2026-08-20 and recorded in
@@ -42,13 +54,21 @@ pub enum Received {
 
 /// The socket type a flow's descriptor uses on this platform.
 ///
-/// `SOCK_SEQPACKET` everywhere it exists for `AF_UNIX`. macOS does not
-/// implement it there, and `SOCK_DGRAM` is the replacement: it keeps message
-/// boundaries, which is the property the API's contract with its clients rests
-/// on. See the module header for what changes with it and what does not.
-#[cfg(not(target_os = "macos"))]
+/// `SOCK_SEQPACKET` where `AF_UNIX` genuinely implements it as an atomic-record
+/// socket, `SOCK_DGRAM` where it does not. macOS has no `AF_UNIX`
+/// `SOCK_SEQPACKET`; FreeBSD has the name without the record semantics. On both
+/// the replacement is `SOCK_DGRAM`, which keeps message boundaries and delivers
+/// a zero-length message, and those two are the properties the API's contract
+/// with its clients rests on. See the module header for what changes with it and
+/// what does not, and [`super::dgram_probe`] for the measurements.
+///
+/// The list is by exclusion rather than by inclusion so that a new unix target
+/// gets Linux's arm, which is the one that fails loudly: a kernel without
+/// `AF_UNIX` `SOCK_SEQPACKET` refuses the `socketpair` outright rather than
+/// returning something that silently loses messages.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const SOCK_TYPE: libc::c_int = libc::SOCK_SEQPACKET;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 const SOCK_TYPE: libc::c_int = libc::SOCK_DGRAM;
 
 /// Create a connected socket pair of this platform's [`SOCK_TYPE`].
@@ -142,7 +162,7 @@ pub fn set_sndbuf(fd: &OwnedFd, bytes: usize) -> io::Result<()> {
     Ok(())
 }
 
-/// How long a receive waits on the reactor before retrying the syscall, on the
+/// How long a receive waits on the reactor before retrying the syscall, on a
 /// platform whose reactor cannot see a closed `SOCK_DGRAM` peer.
 ///
 /// This is a detection latency, not a poll interval for data: an arriving
@@ -153,7 +173,7 @@ pub fn set_sndbuf(fd: &OwnedFd, bytes: usize) -> io::Result<()> {
 /// A quarter second is chosen against the cost, which is one timer per idle
 /// flow and listener. Shortening it buys a faster reclaim of something nothing
 /// is waiting on; lengthening it holds a dead flow's port longer.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 const CLOSE_RETRY: Duration = Duration::from_millis(250);
 
 /// The daemon's half of a flow's or a listener's socket pair, registered with
@@ -215,14 +235,14 @@ impl Seqpacket {
             // consumes it, so the bound sets detection latency and cannot lose
             // the event. Everywhere else the readiness is authoritative and the
             // wait stays unbounded.
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             let mut guard = match tokio::time::timeout(CLOSE_RETRY, self.inner.readable()).await {
                 Ok(ready) => ready?,
                 // The bound expired. The loop retries the syscall, which is the
                 // only thing that can see this platform's close.
                 Err(_elapsed) => continue,
             };
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
             let mut guard = self.inner.readable().await?;
             let attempt = guard.try_io(|inner| recv_once(inner.get_ref().as_raw_fd(), buf));
             match attempt {

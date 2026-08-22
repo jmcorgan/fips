@@ -319,3 +319,148 @@ fn an_empty_datagram_queued_before_the_close_is_not_read_as_the_close() {
          datagram would be swallowed and reported as a close"
     );
 }
+
+/// Whether FreeBSD signals a closed `SOCK_DGRAM` peer, and how.
+///
+/// The open question this platform's arm of [`super::seqpacket`] rests on, and
+/// the counterpart of [`darwin_reports_a_closed_dgram_peer_somehow`]. The three
+/// kernels do three different things: Linux reports nothing at all, Darwin
+/// reports `ECONNRESET`, and FreeBSD does signal it — this probe passed on the
+/// 15.1 CI image on 2026-08-22, so the flow's end of file can come from the
+/// descriptor there and no line-protocol fallback is needed. `recv_once` accepts
+/// either `ECONNRESET` or a zero-byte read plus `POLLHUP`, so either signal is
+/// enough and the assertion does not care which.
+///
+/// **A failure here is the measurement coming back negative, not a
+/// regression.** It says FreeBSD behaves as Linux does, that a `SOCK_DGRAM`
+/// descriptor carries no close signal, and that the flow's end of file has to
+/// come from the client's line-protocol connection instead of from the flow
+/// descriptor. That would be a real gap in the port, and it should red here,
+/// with the errno in the message, rather than present as a flow that never
+/// reports `EPIPE`.
+///
+/// The message carries what was actually read either way, because a negative
+/// result is the useful one and it has to name what the kernel did.
+#[cfg(target_os = "freebsd")]
+#[test]
+fn freebsd_reports_a_closed_dgram_peer_somehow() {
+    let (a, b) = dgram_pair().expect("AF_UNIX SOCK_DGRAM socketpair");
+    drop(a);
+
+    let mut buf = [0u8; 64];
+    let read = recv(b.as_raw_fd(), &mut buf);
+    let hup = hung_up(b.as_raw_fd());
+    let signalled = hup
+        || matches!(&read, Ok(0))
+        || read.as_ref().err().is_some_and(|e| {
+            e.raw_os_error() != Some(libc::EAGAIN) && e.raw_os_error() != Some(libc::EWOULDBLOCK)
+        });
+    assert!(
+        signalled,
+        "FreeBSD reports nothing when a connected SOCK_DGRAM peer closes: \
+         POLLHUP unset and recv gave {read:?}, which is what an idle socket \
+         with a live peer gives. The flow descriptor cannot carry the close on \
+         this platform, and seqpacket's end-of-file rule needs another source."
+    );
+}
+
+/// Create a connected `AF_UNIX` `SOCK_SEQPACKET` pair, for the one platform
+/// that accepts the constant without implementing its semantics.
+///
+/// Deliberately separate from [`dgram_pair`] and used only by the two tests
+/// below: nothing in the daemon opens one of these on FreeBSD any more, and
+/// these tests exist to record why.
+#[cfg(target_os = "freebsd")]
+fn seqpacket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a two-element array of the type socketpair writes, and
+    // the call either fills both entries or reports failure.
+    let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: socketpair reported success, so both entries are open descriptors
+    // this frame now owns.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// FreeBSD's `AF_UNIX` `SOCK_SEQPACKET` does not keep message boundaries.
+///
+/// This is why the socket type is chosen per platform rather than taken from
+/// the constant's name. `seqpacketproto` in `uipc_usrreq.c` carries
+/// `PR_CONNREQUIRED | PR_CAPATTACH | PR_SOCKBUF` and no `PR_ATOMIC`, and its
+/// `pr_sosend` and `pr_soreceive` are the `SOCK_STREAM` handlers, which split a
+/// read only at a control mbuf, at `M_EOR`, or when the buffer fills. Nothing
+/// in this daemon ever sends `MSG_EOR`, so consecutive sends coalesce.
+///
+/// **A failure here is the measurement coming back positive, not a
+/// regression.** It says this kernel now gives `AF_UNIX` `SOCK_SEQPACKET` the
+/// record semantics Linux gives it, and that FreeBSD could move back onto the
+/// `SOCK_SEQPACKET` arm and regain the close signal that comes with it.
+#[cfg(target_os = "freebsd")]
+#[test]
+fn freebsd_seqpacket_does_not_keep_message_boundaries() {
+    let (a, b) = seqpacket_pair().expect("AF_UNIX SOCK_SEQPACKET socketpair");
+    assert_eq!(send(a.as_raw_fd(), &[1, 2, 3]).unwrap(), 3);
+    assert_eq!(send(a.as_raw_fd(), &[4, 5]).unwrap(), 2);
+
+    let mut buf = [0u8; 64];
+    let first = recv(b.as_raw_fd(), &mut buf);
+    assert_eq!(
+        first.as_ref().ok().copied(),
+        Some(5),
+        "expected the two sends to coalesce into one five-byte read, which is \
+         what a SOCK_STREAM-backed seqpacket does; got {first:?}. If this is \
+         now 3, FreeBSD has gained record semantics and seqpacket::SOCK_TYPE \
+         should be reconsidered."
+    );
+}
+
+/// FreeBSD's `AF_UNIX` `SOCK_SEQPACKET` accepts a zero-length send and queues
+/// nothing, which is the mechanism behind six stalled FreeBSD CI runs.
+///
+/// The send handler's whole body is inside `while (mc.mc_len + cmc.mc_len > 0)`,
+/// so a zero-length send with no control data enters no iteration: nothing is
+/// appended to the receive buffer, `sorwakeup_locked` is never reached, and
+/// `send` returns 0 as success. A client that then does a blocking `recv`
+/// waiting for that message waits for ever, and libtest has no per-test
+/// deadline to end it.
+///
+/// The measurement is what makes that a fact rather than a reading of someone
+/// else's source tree. The recv is non-blocking, so this test cannot itself
+/// become the hang it describes.
+///
+/// **A failure here is the measurement coming back positive, not a
+/// regression**, and it would mean the diagnosis behind the socket-type change
+/// is wrong and should be reopened.
+#[cfg(target_os = "freebsd")]
+#[test]
+fn freebsd_seqpacket_drops_a_zero_length_message_instead_of_delivering_it() {
+    let (a, b) = seqpacket_pair().expect("AF_UNIX SOCK_SEQPACKET socketpair");
+
+    // SAFETY: the descriptor is open and owned by `a`; a null pointer with a
+    // zero length is what a zero-length send is.
+    let sent = unsafe { libc::send(a.as_raw_fd(), std::ptr::null(), 0, 0) };
+    assert_eq!(
+        sent,
+        0,
+        "a zero-length send was refused outright: {}",
+        io::Error::last_os_error()
+    );
+
+    // A second, non-empty send follows so the test can tell "the empty message
+    // was dropped" from "the empty message has not arrived yet". If the empty
+    // one were queued it would be read first, before these five bytes.
+    assert_eq!(send(a.as_raw_fd(), b"after").unwrap(), 5);
+
+    let mut buf = [0u8; 64];
+    let first = recv(b.as_raw_fd(), &mut buf);
+    assert_eq!(
+        first.as_ref().ok().copied(),
+        Some(5),
+        "expected the zero-length message to have been dropped and the next \
+         message to be first in the queue; got {first:?}. A 0 here means \
+         FreeBSD does deliver an empty seqpacket message after all, and the \
+         diagnosis of the stalled FreeBSD runs is wrong."
+    );
+}

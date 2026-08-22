@@ -811,8 +811,70 @@ mod tests {
         }
     }
 
+    /// How long a test waits for something that should already be there.
+    ///
+    /// Every assertion in this module about a datagram or an arrival has the
+    /// same failure mode: the thing never comes. A blocking `recv` against that
+    /// defect parks for ever, so the suite wedges with no named failure and no
+    /// diagnostic instead of reporting one, and **a hang is not a red**. That is
+    /// not hypothetical: it is what a kernel whose `AF_UNIX SOCK_SEQPACKET`
+    /// drops a zero-length message did to this suite on a FreeBSD runner, six
+    /// runs in a row, until the job's own ceiling killed it.
+    ///
+    /// The bound is not a workaround for a slow machine. It is what makes the
+    /// assertion decidable: the descriptors here are socket pairs this thread
+    /// already wrote to, so anything that is coming has arrived, and a wait past
+    /// this is a wait that will not end. Loose enough that a loaded runner does
+    /// not trip it, short enough that a real block reds within one test.
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    /// One receive on a flow, bounded by [`DEADLINE`].
+    ///
+    /// The deadline is set for the call and put back afterwards, so a test can
+    /// still assert what the flow's own deadline is. A blocked receive panics
+    /// naming the flow rather than returning `WouldBlock`, because no caller
+    /// here asked for a deadline and a `WouldBlock` they did not ask for would
+    /// be read as the defect it is hiding.
+    fn recv_bounded(flow: &FipsStream, buf: &mut [u8]) -> io::Result<usize> {
+        let previous = flow.read_timeout().expect("the descriptor is open");
+        flow.set_read_timeout(Some(DEADLINE))
+            .expect("the descriptor is open");
+        let outcome = flow.recv(buf);
+        flow.set_read_timeout(previous)
+            .expect("the descriptor is open");
+        if let Err(error) = &outcome {
+            assert!(
+                error.kind() != io::ErrorKind::WouldBlock,
+                "nothing arrived on the flow within {DEADLINE:?} and the recv \
+                 was still waiting: the datagram this asserts on was never \
+                 delivered, or the peer closed without this platform saying so"
+            );
+        }
+        outcome
+    }
+
+    /// A listener over `fd`, with [`DEADLINE`] on its accepts.
+    ///
+    /// Every test here writes the arrival onto the far half before accepting,
+    /// so a blocked accept means the message was not delivered. Bounded for the
+    /// same reason [`recv_bounded`] is: without it that is a hang rather than a
+    /// failure.
+    fn listener(fd: OwnedFd) -> FipsListener {
+        seqpacket::set_timeout(fd.as_raw_fd(), libc::SO_RCVTIMEO, Some(DEADLINE))
+            .expect("the descriptor is open");
+        FipsListener {
+            fd,
+            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
+        }
+    }
+
     /// A stream whose far end is a socket the test drives, standing in for the
     /// daemon's half of a real flow.
+    ///
+    /// The far half carries [`DEADLINE`] from the start, because the tests read
+    /// it directly rather than through [`recv_bounded`]. The flow half does not:
+    /// two tests assert that a fresh flow has no deadline, which is the API's
+    /// documented default, so the flow's bound is applied per call instead.
     fn stream(max: usize) -> (FipsStream, UnixStream) {
         let (ours, theirs) = seqpacket::pair().expect("a socket pair should be available");
         let stream = FipsStream::wired(
@@ -825,7 +887,10 @@ mod tests {
                 max,
             },
         );
-        (stream, UnixStream::from(theirs))
+        let far = UnixStream::from(theirs);
+        far.set_read_timeout(Some(DEADLINE))
+            .expect("the descriptor is open");
+        (stream, far)
     }
 
     #[test]
@@ -972,10 +1037,7 @@ mod tests {
     #[test]
     fn a_nonblocking_listener_reports_would_block_rather_than_waiting_for_a_flow() {
         let (ours, _theirs) = seqpacket::pair().expect("a socket pair should be available");
-        let listener = FipsListener {
-            fd: ours,
-            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
-        };
+        let listener = listener(ours);
 
         listener
             .set_nonblocking(true)
@@ -991,10 +1053,7 @@ mod tests {
         assert_eq!(flow.as_fd().as_raw_fd(), flow.as_raw_fd());
 
         let (ours, _theirs) = seqpacket::pair().unwrap();
-        let listener = FipsListener {
-            fd: ours,
-            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
-        };
+        let listener = listener(ours);
         assert_eq!(listener.as_fd().as_raw_fd(), listener.as_raw_fd());
     }
 
@@ -1216,10 +1275,7 @@ mod tests {
         let (passed, held) = seqpacket::pair().unwrap();
         let held = UnixStream::from(held);
 
-        let listener = FipsListener {
-            fd: ours,
-            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
-        };
+        let listener = listener(ours);
 
         // The daemon writes the peer's opening datagram onto the flow's own
         // half first, and the arrival that carries that flow's descriptor
@@ -1238,7 +1294,7 @@ mod tests {
         assert_eq!(flow.max_payload(), 1362);
 
         let mut buf = [0u8; 64];
-        assert_eq!(flow.recv(&mut buf).unwrap(), 7);
+        assert_eq!(recv_bounded(&flow, &mut buf).unwrap(), 7);
         assert_eq!(&buf[..7], b"opening");
 
         // The descriptor is the flow's own half and nothing else's.
@@ -1253,10 +1309,7 @@ mod tests {
         // could only be discovered by blocking in it.
         let (ours, theirs) = seqpacket::pair().unwrap();
         let (passed, _held) = seqpacket::pair().unwrap();
-        let listener = FipsListener {
-            fd: ours,
-            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
-        };
+        let listener = listener(ours);
 
         let mut poll = libc::pollfd {
             fd: listener.as_raw_fd(),
@@ -1278,10 +1331,7 @@ mod tests {
     #[test]
     fn an_arrival_with_no_descriptor_is_reported_rather_than_taken_as_a_flow() {
         let (ours, theirs) = seqpacket::pair().unwrap();
-        let listener = FipsListener {
-            fd: ours,
-            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
-        };
+        let listener = listener(ours);
         fdpass::send_once(theirs.as_raw_fd(), ARRIVAL, None).unwrap();
 
         assert_eq!(
@@ -1294,10 +1344,7 @@ mod tests {
     fn incoming_yields_the_same_flows_accept_would() {
         let (ours, theirs) = seqpacket::pair().unwrap();
         let (passed, _held) = seqpacket::pair().unwrap();
-        let listener = FipsListener {
-            fd: ours,
-            local: FipsAddr::new(codec::pton(NODE).unwrap(), 4242),
-        };
+        let listener = listener(ours);
         fdpass::send_once(theirs.as_raw_fd(), ARRIVAL, Some(passed.as_fd())).unwrap();
 
         let flow = listener.incoming().next().unwrap().unwrap();
@@ -1318,7 +1365,7 @@ mod tests {
 
         (&far).write_all(b"back").unwrap();
         let mut buf = [0u8; 64];
-        assert_eq!(flow.recv(&mut buf).unwrap(), 4);
+        assert_eq!(recv_bounded(&flow, &mut buf).unwrap(), 4);
         assert_eq!(&buf[..4], b"back");
     }
 
@@ -1338,10 +1385,10 @@ mod tests {
         assert_eq!(sent, 0, "{}", io::Error::last_os_error());
 
         let mut buf = [0u8; 64];
-        assert_eq!(flow.recv(&mut buf).unwrap(), 0);
+        assert_eq!(recv_bounded(&flow, &mut buf).unwrap(), 0);
 
         drop(far);
-        let error = flow.recv(&mut buf).unwrap_err();
+        let error = recv_bounded(&flow, &mut buf).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
     }
 

@@ -365,15 +365,18 @@ with v0.4.x or earlier peers.
   counterpart in Berkeley sockets and a client author must know it: the v1
   wire carries no half-close, so nothing peer-driven ever closes a flow, and a
   server written to read until the flow ends waits for a signal that cannot
-  arrive. The listener uses `SOCK_SEQPACKET` on Linux and FreeBSD and
-  `SOCK_DGRAM` on macOS, which does not implement `SOCK_SEQPACKET` for
-  `AF_UNIX`; both keep the message boundaries the API's contract with its
-  clients rests on. The two kernels signal a closed peer differently and were
-  measured rather than reasoned about, so the receive path treats a Darwin
-  `ECONNRESET` as end of file alongside the `POLLHUP` and zero-byte read that
-  Linux gives. `EAGAIN` is deliberately not in that company: it means the
-  socket is empty and the peer alive, so it stays an error and the caller
-  waits again.
+  arrive. The listener uses `SOCK_SEQPACKET` on Linux and `SOCK_DGRAM` on macOS
+  and FreeBSD; both keep the message boundaries the API's contract with its
+  clients rests on. macOS does not implement `SOCK_SEQPACKET` for `AF_UNIX` at
+  all. FreeBSD accepts the constant and returns a socket that is not an
+  atomic-record socket, so consecutive messages coalesce and a zero-length
+  message is dropped rather than delivered; both were measured on the FreeBSD
+  15.1 image rather than reasoned about. The three kernels signal a closed
+  peer differently and were measured too, so the receive path treats a Darwin
+  or FreeBSD `ECONNRESET` as end of file alongside the `POLLHUP` and
+  zero-byte read that Linux gives. `EAGAIN` is deliberately not in that
+  company: it means the socket is empty and the peer alive, so it stays an
+  error and the caller waits again.
 
 #### OpenWrt mesh
 
