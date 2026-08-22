@@ -594,6 +594,44 @@ with v0.4.x or earlier peers.
   coordinates are still cached, the sub-floor path MTU is still discarded, and
   the same counter is still charged.
 
+- A dial that names a peer now requires that peer to answer. Under Noise XX
+  the responder's static key arrives during the handshake instead of being
+  pinned before it, so a cryptographically valid msg2 proves only that
+  somebody answered, not that the peer we asked for did. The initiator holds
+  the dial-time identity in its own field and compares it against the
+  identity msg2 carried, dropping the leg on a mismatch. Two situations that
+  used to end in a connection no longer do, both of them intended.
+
+  A LAN peer advertised under the wrong npub is refused rather than peered
+  under its real identity. mDNS adverts are unauthenticated and the npub in
+  the TXT record is taken as the identity to dial, so anyone on the LAN can
+  point a node at a real host under someone else's name; that dial now ends
+  in a rejection instead of promoting whoever answered. It is a repeating
+  refusal and not a permanent stop: the candidate comes back each time the
+  advert is resolved again, and each return costs one handshake.
+
+  A peer whose key has rotated stops connecting for as long as configuration
+  or a discovery record still names its old npub. This is what pinning means
+  and there is no form of it that keeps the previous behaviour, but it is a
+  change in a situation with no attacker in it: a rotated peer used to come
+  back quietly under its new identity, and the stale npub went unnoticed.
+
+  What an operator sees in both cases is a peer that never comes up, and one
+  warning per attempt reading `msg2 answered by a different static than the
+  one dialed, dropping the leg`, carrying the link, the identity dialed and
+  the identity learned. The rejection is charged to the undifferentiated
+  `BadState` handshake reject counter and has none of its own, so the log
+  line is the only thing that names the cause. A configured peer is put back
+  on the retry schedule under the identity that was dialed, never under the
+  one that answered, so the warning repeats on backoff until the mismatch is
+  resolved.
+
+  For a legitimate key rotation the fix is to update the peer's npub in
+  configuration, or to let discovery republish it under the new key; the next
+  dial then matches and the peer comes up. Dials that name nobody, meaning
+  shared-media legs and every inbound leg, are unaffected and still promote
+  whoever answers.
+
 ### Deprecated
 
 - The `discovery` metric-family key (control-socket JSON). It is dual-emitted
