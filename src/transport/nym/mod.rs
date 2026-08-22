@@ -642,6 +642,15 @@ fn parse_target_addr(addr: &TransportAddr) -> Result<SocksTarget, TransportError
 /// counters, so its teardown hook is a no-op. Emits the terminal
 /// "receive loop stopped" debug (without a `direction` field) that the
 /// shared loop deliberately leaves to each transport.
+///
+/// The first-frame deadline is `None` on every nym connection. Nym is
+/// outbound-only (`accept_connections()` is `false` and no listener is ever
+/// bound), so no nym connection is admitted before a byte is read and none
+/// occupies a capped slot: the pool carries `()` metadata and the teardown
+/// hook decrements nothing. There is no resource for a silent remote to
+/// exhaust, and the mixnet's Sphinx routing makes a first frame legitimately
+/// slow, so a TCP-scale deadline here would drop good connections to defend
+/// a cap that does not exist.
 async fn nym_receive_loop(
     reader: tokio::net::tcp::OwnedReadHalf,
     transport_id: TransportId,
@@ -660,6 +669,7 @@ async fn nym_receive_loop(
         mtu,
         stats,
         "Nym",
+        None,
         |_stats, _meta| {},
     )
     .await;

@@ -133,3 +133,54 @@ def is_container_running(container: str) -> bool:
         return result.returncode == 0 and result.stdout.strip() == "true"
     except subprocess.TimeoutExpired:
         return False
+
+
+def existing_containers(names: list[str], timeout: int = 30) -> list[str] | None:
+    """Return which of `names` docker still knows about, running or not.
+
+    Deliberately scoped to the names the caller passes in. Enumerating by
+    compose project label would also sweep up whatever a concurrent run or
+    a different project owns, and under the parallel CI matrix that turns a
+    leak check into a flake generator.
+
+    Returns `None` when docker could not be asked -- a query that failed has
+    observed nothing, and reporting "no survivors" for it would recreate the
+    silence this check exists to break.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("docker ps timed out after %ds", timeout)
+        return None
+    if result.returncode != 0:
+        log.error("docker ps exited %d\nstderr: %s", result.returncode, _tail(result.stderr))
+        return None
+    present = set(result.stdout.split())
+    return [name for name in names if name in present]
+
+
+def force_remove(names: list[str], timeout: int = 60) -> None:
+    """Remove the named containers outright, whatever state they are in.
+
+    Best effort and never raises: this runs on a teardown path that has
+    already reported a leak, and the report is the part that must survive.
+    """
+    if not names:
+        return
+    try:
+        result = subprocess.run(
+            ["docker", "rm", "-f"] + names,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("docker rm -f timed out after %ds", timeout)
+        return
+    if result.returncode != 0:
+        log.error("docker rm -f exited %d\nstderr: %s", result.returncode, _tail(result.stderr))

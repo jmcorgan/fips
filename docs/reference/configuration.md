@@ -20,8 +20,10 @@ locations, lowest to highest priority:
 
 All found files are loaded and merged in priority order. Values from higher
 priority files override those from lower priority files. This allows a system
-administrator to set site-wide defaults in `/etc/fips/fips.yaml` while
-individual deployments override specific values in `./fips.yaml`.
+administrator to set site-wide defaults in the priority 1 path above,
+`/usr/local/etc/fips/fips.yaml` on macOS and `/etc/fips/fips.yaml` on other
+Unix systems, while individual deployments override specific values in
+`./fips.yaml`.
 
 ### CLI Option
 

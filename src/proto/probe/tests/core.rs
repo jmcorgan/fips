@@ -4,8 +4,8 @@
 use crate::NodeAddr;
 use crate::proto::probe::core::{Budgets, Observation, Probe, ProbeAction};
 use crate::proto::probe::state::{
-    FailKind, LeftIntact, LookupOutcomeKind, NextHopFacts, PathFacts, Preflight, ResolveSource,
-    RttCounters, StageVerdict,
+    FailKind, LeftIntact, LookupOutcomeKind, NextHopFacts, Overall, PathFacts, Preflight,
+    ResolveSource, RttCounters, StageVerdict,
 };
 use crate::proto::routing::RouteClass;
 
@@ -166,7 +166,7 @@ fn discovery_times_out_at_its_own_budget_measured_from_the_request() {
     assert_eq!(probe.step(&o), vec![ProbeAction::Finish]);
     let snap = probe.snapshot();
     assert_eq!(snap.discovery.verdict, StageVerdict::Failed);
-    assert_eq!(snap.discovery.reason, Some(FailKind::NoResponse));
+    assert_eq!(snap.discovery.reason, Some(FailKind::BloomUnconfirmed));
     assert_eq!(
         snap.bloom.verdict,
         StageVerdict::Ok,
@@ -198,7 +198,7 @@ fn discovery_fails_early_when_the_pending_entry_clears() {
     assert_eq!(probe.step(&o), vec![ProbeAction::Finish]);
     assert_eq!(
         probe.snapshot().discovery.reason,
-        Some(FailKind::NoResponse)
+        Some(FailKind::BloomUnconfirmed)
     );
     assert!(T0 + 2_000 < T0 + b.discovery_ms);
 }
@@ -248,6 +248,111 @@ fn each_gate_decision_lands_on_the_stage_that_owns_it() {
             "outcome {kind:?} must not collapse into one reason"
         );
     }
+}
+
+/// Drive a probe for a key that is **not** on the mesh under a given gate
+/// decision, and return the finished snapshot.
+///
+/// `BloomMiss` is the run where no peer's filter claimed the key. `Sent` is
+/// the run where at least one did — which, for a genuinely absent key, can
+/// only be a false positive, since a bloom filter has no false negatives.
+/// The mesh then answers nothing and the ladder runs out.
+fn absent_key_probe(gate: LookupOutcomeKind) -> crate::proto::probe::ProbeSnapshot {
+    let mut pre = preflight();
+    pre.coords_cached = false;
+    let mut probe = Probe::new(T0, budgets(), pre);
+    let claimed = gate == LookupOutcomeKind::Sent;
+
+    for tick in 0..40u64 {
+        let mut o = obs(T0 + tick * 1_000);
+        o.coords_cached = false;
+        if tick > 0 {
+            o.lookup_outcome = Some(gate);
+        }
+        // The claimed run holds a pending entry while the ladder retries, then
+        // clears it with no coordinates: nobody answered for the address.
+        o.lookup_pending = claimed && tick < 16;
+        if probe.step(&o).contains(&ProbeAction::Finish) {
+            break;
+        }
+    }
+    probe.snapshot()
+}
+
+#[test]
+fn absent_key_names_the_filter_claim_instead_of_collapsing_into_no_response() {
+    let clean = absent_key_probe(LookupOutcomeKind::BloomMiss);
+    let claimed = absent_key_probe(LookupOutcomeKind::Sent);
+
+    assert_eq!(
+        clean.bloom.verdict,
+        StageVerdict::Failed,
+        "no filter claimed it, so the bloom stage is where it ended"
+    );
+    assert_eq!(
+        claimed.bloom.verdict,
+        StageVerdict::Ok,
+        "a filter claimed it, so a request did go out"
+    );
+
+    assert_eq!(clean.bloom.reason, Some(FailKind::BloomMiss));
+    assert_eq!(
+        claimed.discovery.reason,
+        Some(FailKind::BloomUnconfirmed),
+        "a lookup issued on a filter claim and left unanswered is its own finding"
+    );
+
+    // The defect this guards: the claimed run must not land on any reason a
+    // run that never issued a request can also produce. `no_response` was
+    // exactly such a reason — the bloom stage reaches it too — so reporting
+    // it here told the operator nothing about which case they were in.
+    for shared in [
+        FailKind::BloomMiss,
+        FailKind::NoResponse,
+        FailKind::BackoffSuppressed,
+        FailKind::NoTreePeers,
+    ] {
+        assert_ne!(
+            claimed.discovery.reason,
+            Some(shared),
+            "{} cannot distinguish a claimed lookup from one never issued",
+            shared.name()
+        );
+    }
+
+    // The verdict is the answer and the answer was already right: absent
+    // either way. Only the reason changes.
+    assert_eq!(clean.overall, Overall::Failed);
+    assert_eq!(
+        clean.overall, claimed.overall,
+        "the key is absent on both paths; the verdict must not move"
+    );
+}
+
+#[test]
+fn cancelling_mid_discovery_still_names_the_filter_claim() {
+    // `expire_running_stage` writes the reason for a stage that never got to
+    // settle. It must give the same finding the budget path would.
+    let mut pre = preflight();
+    pre.coords_cached = false;
+    let mut probe = Probe::new(T0, budgets(), pre);
+
+    let mut o = obs(T0);
+    o.coords_cached = false;
+    probe.step(&o);
+
+    let mut o = obs(T0 + 1_000);
+    o.coords_cached = false;
+    o.lookup_pending = true;
+    o.lookup_outcome = Some(LookupOutcomeKind::Sent);
+    probe.step(&o);
+    assert_eq!(probe.snapshot().discovery.verdict, StageVerdict::Running);
+
+    probe.cancel(T0 + 2_000);
+    assert_eq!(
+        probe.snapshot().discovery.reason,
+        Some(FailKind::BloomUnconfirmed)
+    );
 }
 
 // ---- ownership ----------------------------------------------------------

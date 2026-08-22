@@ -483,7 +483,7 @@ impl Node {
                          handler and must never reach the executor"
                     );
                 }
-                PeerAction::SwapSendState { .. } => {
+                PeerAction::SwapSendState => {
                     // Initiator cutover: the live authoritative rekey-cadence
                     // path, routed here from `check_rekey` via
                     // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the

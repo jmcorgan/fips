@@ -25,7 +25,7 @@ from .assertions import (
 from .compose import generate_compose
 from .config_gen import write_configs
 from .control import snapshot_all_congestion, snapshot_all_mmp, snapshot_all_trees
-from .docker_exec import docker_compose
+from .docker_exec import docker_compose, existing_containers, force_remove
 from .link_swap import LinkSwapManager
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
@@ -569,6 +569,85 @@ class SimRunner:
         except Exception:
             log.exception("Could not write status file")
 
+    def _own_containers(self) -> list[str]:
+        """Name every container this run asked compose to create.
+
+        Empty before the topology exists, which is the only window in which
+        a teardown can run with nothing of its own on the host.
+        """
+        if not self.topology:
+            return []
+        return [self.topology.container_name(nid) for nid in self.topology.nodes]
+
+    def _stop_mesh(self) -> None:
+        """Take the containers down, then check that they actually went.
+
+        `docker compose down` exits 0 while leaving containers behind when it
+        races an `up -d` that failed part way through: compose enumerates the
+        project before the stragglers have registered, finds nothing to
+        remove, and says so successfully. Nothing downstream looks at what
+        survived, so the leak is invisible at the one moment it is cheap to
+        see.
+        """
+        log.info("Stopping containers...")
+        docker_compose(self.compose_file, ["down"], check=False)
+        self._check_teardown()
+
+    def _check_teardown(self) -> None:
+        """Report, then clear, any of this run's containers that outlived `down`.
+
+        Scoped to names this run generated. A check that reasoned about the
+        compose project label, or about container names in general, would
+        answer for whatever a concurrent scenario happens to own, and the CI
+        matrix runs plenty of those at once.
+        """
+        wanted = self._own_containers()
+        if not wanted:
+            return
+
+        survivors = existing_containers(wanted)
+        if survivors is None:
+            # Detection failed, which is not the same as detecting nothing.
+            log.error("Could not ask docker what survived `down`; leak undetectable")
+            return
+        if not survivors:
+            return
+        log.warning(
+            "`compose down` exited 0 but left %d of this run's %d containers: %s",
+            len(survivors), len(wanted), ", ".join(survivors),
+        )
+
+        # Remedy, kept apart from the detection above on purpose: deleting
+        # everything from here down leaves the report intact.
+        force_remove(survivors)
+        leaked = existing_containers(survivors)
+        if not leaked:
+            return
+        # Either docker could not be asked a second time, or the containers
+        # are still there after a forced removal. Neither is the transient
+        # race, and neither clears itself, so this is the run's verdict.
+        detail = "unknown" if leaked is None else ", ".join(leaked)
+        log.error("Containers survived forced removal, leaked to the host: %s", detail)
+        self._write_leak(leaked if leaked is not None else wanted)
+        self.aborted = True
+
+    def _write_leak(self, names: list[str]) -> None:
+        """Record the leaked names beside the run's other artifacts.
+
+        Never raises, for the same reason `_write_status` does not: this runs
+        on a teardown path that has already gone wrong. Written alongside
+        status.txt rather than into it: the status is the simulation's own
+        outcome, and a leak on the way out does not retract it.
+        """
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            path = os.path.join(self.output_dir, "leaked-containers.txt")
+            with open(path, "w") as f:
+                for name in names:
+                    f.write(name + "\n")
+        except Exception:
+            log.exception("Could not write leaked-containers file")
+
     def _release_network(self) -> None:
         """Give this run's claimed /24 back.
 
@@ -593,8 +672,7 @@ class SimRunner:
             if self.compose_file:
                 # `up -d` can fail part way through, so this run may own
                 # containers or a network even with no mesh to speak of.
-                log.info("Stopping containers...")
-                docker_compose(self.compose_file, ["down"], check=False)
+                self._stop_mesh()
             self._release_network()
             return None
 
@@ -755,12 +833,7 @@ class SimRunner:
             # Status first: it is the one artifact that must exist whatever
             # else happens, and stopping containers can still time out.
             self._write_status(status)
-            log.info("Stopping containers...")
-            docker_compose(
-                self.compose_file,
-                ["down"],
-                check=False,
-            )
+            self._stop_mesh()
             self._release_network()
 
         return result

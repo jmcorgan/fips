@@ -111,8 +111,31 @@ ping_backcompat_hold() {
     fi
 }
 
+# Case 6 trace: converges quickly, so the verdict case that needs a
+# converged run does not spend the near-converged hold's twelve seconds.
+ping_quick_converge() {
+    set_pt; local t=$PT
+    if (( t < 2 )); then
+        PASSED=18; FAILED=2
+    else
+        PASSED=20; FAILED=0
+    fi
+}
+
 HOLD_MSG="holding for full budget"
 STUCK_MSG="STUCK"
+NOCONV_MSG="tree did not converge"
+
+# Run the gate in THIS shell (not a subshell) so the CONVERGE_* verdict
+# globals survive, capturing its output to a file instead. `$(...)` runs the
+# gate in a fork, which discards those assignments — that is why cases 1-4
+# can only assert on text.
+VERDICT_OUT=$(mktemp)
+run_gate() {
+    reset_ping
+    CONVERGE_OUTCOME=""; CONVERGE_REACHED=-1; CONVERGE_PENDING=-1
+    wait_until_connected "$@" >"$VERDICT_OUT" 2>&1
+}
 
 # --- Case 1: near-converged hold --------------------------------------
 echo
@@ -220,6 +243,56 @@ c5_polled_ok=1; [ "$elapsed" -ge 2 ] && c5_polled_ok=0
 check "case5: floor of 1 polled its full budget" "$c5_polled_ok" "elapsed=${elapsed}s >= 2s"
 
 unset -f docker
+
+# --- Case 6: the verdict discriminates non-convergence from connectivity --
+#
+# This is the break-what-it-guards check for the verdict itself. The recorded
+# failure exited 1 while reporting "20 passed, 0 failed": every connectivity
+# pair passed and only the tree fell short, and nothing in the summary told
+# the two apart. The gate now names its verdict, so drive it into each
+# outcome and assert the verdict is the one that outcome deserves.
+echo
+echo "== Case 6: verdict names which condition failed =="
+
+echo "-- Case 6a: genuinely unconverged tree, hard cap --"
+run_gate ping_never_converges 6 3 1 2; rc=$?
+cat "$VERDICT_OUT"
+c6a_rc_ok=1; [ "$rc" -ne 0 ] && c6a_rc_ok=0
+check "case6a: unconverged tree still reds" "$c6a_rc_ok" "rc=$rc"
+c6a_out_ok=1; [ "$CONVERGE_OUTCOME" = "timeout" ] && c6a_out_ok=0
+check "case6a: verdict is timeout" "$c6a_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
+c6a_cnt_ok=1
+[ "$CONVERGE_REACHED" -eq 19 ] && [ "$CONVERGE_PENDING" -eq 1 ] && c6a_cnt_ok=0
+check "case6a: verdict carries the shortfall" "$c6a_cnt_ok" \
+    "reached=$CONVERGE_REACHED pending=$CONVERGE_PENDING"
+c6a_msg_ok=1; grep -q "$NOCONV_MSG" "$VERDICT_OUT" && c6a_msg_ok=0
+check "case6a: message says the tree did not converge" "$c6a_msg_ok"
+
+echo "-- Case 6b: wedged far from convergence, stall bail --"
+run_gate ping_far_stall 30 4 1 2; rc=$?
+cat "$VERDICT_OUT"
+c6b_rc_ok=1; [ "$rc" -ne 0 ] && c6b_rc_ok=0
+check "case6b: wedged tree still reds" "$c6b_rc_ok" "rc=$rc"
+c6b_out_ok=1; [ "$CONVERGE_OUTCOME" = "stalled" ] && c6b_out_ok=0
+check "case6b: verdict is stalled" "$c6b_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
+c6b_msg_ok=1; grep -q "$NOCONV_MSG" "$VERDICT_OUT" && c6b_msg_ok=0
+check "case6b: message says the tree did not converge" "$c6b_msg_ok"
+
+echo "-- Case 6c: converged tree, and the verdict does not cry non-convergence --"
+run_gate ping_quick_converge 20 4 1 2; rc=$?
+cat "$VERDICT_OUT"
+c6c_rc_ok=1; [ "$rc" -eq 0 ] && c6c_rc_ok=0
+check "case6c: converged tree still passes" "$c6c_rc_ok" "rc=$rc"
+c6c_out_ok=1; [ "$CONVERGE_OUTCOME" = "converged" ] && c6c_out_ok=0
+check "case6c: verdict is converged" "$c6c_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
+c6c_cnt_ok=1
+[ "$CONVERGE_REACHED" -eq 20 ] && [ "$CONVERGE_PENDING" -eq 0 ] && c6c_cnt_ok=0
+check "case6c: verdict carries a clean tree" "$c6c_cnt_ok" \
+    "reached=$CONVERGE_REACHED pending=$CONVERGE_PENDING"
+c6c_quiet_ok=0; grep -q "$NOCONV_MSG" "$VERDICT_OUT" && c6c_quiet_ok=1
+check "case6c: no non-convergence message on a clean run" "$c6c_quiet_ok"
+
+rm -f "$VERDICT_OUT"
 
 # --- Summary ----------------------------------------------------------
 echo

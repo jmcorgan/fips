@@ -104,17 +104,34 @@ class NodeManager:
                 self._start_node(nid)
 
     def _stop_node(self, node_id: str, duration: float):
-        """Stop a container."""
+        """Stop a container, and record it as down only if it stopped.
+
+        A `docker stop` that exits non-zero -- the container already gone,
+        the daemon refusing -- once left the node marked down anyway. Every
+        figure the scenario reasons with is derived from that mark:
+        `down_count` and so the `max_down_nodes` cap, `_would_disconnect`
+        and so the `protect_connectivity` guard, and the shared
+        `down_nodes` set that netem, links and traffic all skip. Returning
+        before the mutation keeps the model equal to the mesh and lets the
+        next churn tick retry the node.
+        """
         container = self.topology.container_name(node_id)
         docker_exec_quiet(container, "kill 1", timeout=5)  # SIGTERM to PID 1
         # Use docker stop with a short grace period
         import subprocess
 
-        subprocess.run(
+        result = subprocess.run(
             ["docker", "stop", "-t", "2", container],
             capture_output=True,
+            text=True,
             timeout=15,
         )
+        if result.returncode != 0:
+            log.warning(
+                "Failed to stop %s: %s; leaving %s marked up",
+                container, result.stderr.strip(), node_id,
+            )
+            return
 
         now = time.time()
         state = self.node_states[node_id]

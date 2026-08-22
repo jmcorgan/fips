@@ -448,8 +448,9 @@ pub(crate) enum PeerAction {
     /// resolution; it must never reach the action executor.
     ResolveCrossConnection { swap: bool },
     /// Initiator-side rekey cutover: swap the published send-state to the pending
-    /// epoch.
-    SwapSendState { epoch: [u8; 8] },
+    /// epoch. The remote epoch is not carried here: `conn` is its sole carrier
+    /// and promotion reads it from there via `conn_remote_epoch`.
+    SwapSendState,
     /// Complete an initiator-side rekey drain: retire the previous session slot
     /// (drop its `peers_by_index`/decrypt-worker entry, free its index). The
     /// executor reads the REAL previous index from `ActivePeer::complete_drain`
@@ -576,8 +577,6 @@ pub(crate) struct PeerMachine {
     /// Pure handshake-phase bookkeeping (link/direction/indices/transport/
     /// stored handshake bytes/epoch). Reused verbatim from the FMP state core.
     conn: ConnectionState,
-    /// Remote startup epoch (establish-path-only; NOT in send-state).
-    remote_epoch: Option<[u8; 8]>,
     /// A stored-handshake send failure was observed on this leg. The failure is
     /// carried as a flag (not a `PeerState::Failed` transition) so retransmit
     /// eligibility (`is_handshaking_sent_msg1`) survives until the
@@ -635,7 +634,6 @@ impl PeerMachine {
                 Some(id) => ConnectionState::outbound(link, id, now),
                 None => ConnectionState::outbound_anonymous(link, now),
             },
-            remote_epoch: None,
             send_failed: false,
             rekey_in_progress: false,
             rekey_our_index: None,
@@ -663,7 +661,6 @@ impl PeerMachine {
             node_addr: None,
             leg: None,
             conn: ConnectionState::inbound(link, now),
-            remote_epoch: None,
             send_failed: false,
             rekey_in_progress: false,
             rekey_our_index: None,
@@ -739,7 +736,6 @@ impl PeerMachine {
             node_addr: Some(addr),
             leg: None,
             conn,
-            remote_epoch,
             send_failed: false,
             rekey_in_progress: false,
             rekey_our_index: None,
@@ -1578,7 +1574,6 @@ impl PeerMachine {
         // Identity crystallizes at msg3 on XX (WireOutcome carries only the node
         // address + epoch; the full static key stays shell-side).
         self.node_addr = Some(wire.peer_node_addr);
-        self.remote_epoch = wire.remote_epoch;
         // Seed the leg's index from the event. On a fresh classification machine
         // the index was allocated at msg1 shell-side and is not otherwise known
         // here; the cross-connection and rekey-responder decisions read it back to
@@ -1887,9 +1882,7 @@ impl PeerMachine {
                     addr: peer,
                     kind: MaintainKind::Rekey(RekeyPhase::Draining),
                 };
-                let mut actions = vec![PeerAction::SwapSendState {
-                    epoch: self.remote_epoch.unwrap_or_default(),
-                }];
+                let mut actions = vec![PeerAction::SwapSendState];
                 if let Some(idx) = self.conn.our_index() {
                     actions.push(PeerAction::RegisterDecryptSession { index: idx });
                 }
@@ -2527,7 +2520,7 @@ mod tests {
                 link: LinkId::new(7),
             },
             PeerAction::ResolveCrossConnection { swap: true },
-            PeerAction::SwapSendState { epoch: [1u8; 8] },
+            PeerAction::SwapSendState,
             PeerAction::CompleteDrain { peer },
             PeerAction::InvalidateSendState,
             PeerAction::RegisterDecryptSession {
@@ -2573,7 +2566,7 @@ mod tests {
                 | PeerAction::SendLinkMessage { .. }
                 | PeerAction::PromoteToActive { .. }
                 | PeerAction::ResolveCrossConnection { .. }
-                | PeerAction::SwapSendState { .. }
+                | PeerAction::SwapSendState
                 | PeerAction::CompleteDrain { .. }
                 | PeerAction::InvalidateSendState
                 | PeerAction::RegisterDecryptSession { .. }
@@ -2627,7 +2620,12 @@ mod tests {
         };
         m.rekey_our_index = Some(SessionIndex::new(0x2222));
         m.conn.set_our_index(SessionIndex::new(0x1111));
-        m.remote_epoch = Some([9u8; 8]);
+        // The remote startup epoch lives on the surviving carrier, written
+        // there by BOTH handshake legs (`complete_handshake` from msg2 on the
+        // outbound leg, `complete_handshake_msg3` from msg3 on the inbound one)
+        // through this same setter. Seed it the way production does, so the
+        // value asserted below is one an outbound machine can actually hold.
+        m.conn.set_remote_epoch(Some([9u8; 8]));
         m.session_established_at_ms = 0;
 
         let actions = m.step(
@@ -2641,7 +2639,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![
-                PeerAction::SwapSendState { epoch: [9u8; 8] },
+                PeerAction::SwapSendState,
                 PeerAction::RegisterDecryptSession {
                     index: SessionIndex::new(0x2222)
                 },
@@ -2673,6 +2671,9 @@ mod tests {
             vec![PeerAction::CompleteDrain { peer: addr }]
         );
         assert_eq!(m.state(), PeerState::Active { addr });
+        // The cutover carries no epoch of its own; `conn` is the sole carrier
+        // and the cutover must leave it exactly as the handshake wrote it.
+        assert_eq!(m.conn_remote_epoch(), Some([9u8; 8]));
     }
 
     // ---- Test 2: responder cutover (data-plane owned) ---------------------
@@ -2701,7 +2702,7 @@ mod tests {
         assert!(
             !actions
                 .iter()
-                .any(|a| matches!(a, PeerAction::SwapSendState { .. }))
+                .any(|a| matches!(a, PeerAction::SwapSendState))
         );
         assert_eq!(m.state(), PeerState::Active { addr });
     }
@@ -3672,7 +3673,8 @@ mod tests {
         };
         m.rekey_our_index = Some(SessionIndex::new(0x2222));
         m.conn.set_our_index(SessionIndex::new(0x1111));
-        m.remote_epoch = Some([9u8; 8]);
+        // Seeded through the setter both handshake legs use; see Test 1.
+        m.conn.set_remote_epoch(Some([9u8; 8]));
 
         // Consume the shell-decided Cutover.
         let cut = m.step(
@@ -3685,7 +3687,7 @@ mod tests {
         assert_eq!(
             cut,
             vec![
-                PeerAction::SwapSendState { epoch: [9u8; 8] },
+                PeerAction::SwapSendState,
                 PeerAction::RegisterDecryptSession {
                     index: SessionIndex::new(0x2222)
                 },
@@ -4045,7 +4047,6 @@ mod tests {
         };
         m.rekey_our_index = Some(SessionIndex::new(0x2222));
         m.conn.set_our_index(SessionIndex::new(0x1111));
-        m.remote_epoch = Some([9u8; 8]);
         m.session_established_at_ms = 0;
 
         let actions = m.step(

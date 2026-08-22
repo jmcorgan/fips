@@ -58,6 +58,13 @@ jobs:
     # major (FreeBSD:15:amd64) — pkg on other majors refuses the package.
     runs-on: ubuntu-latest
     needs: determine-versioning
+    # Successful runs of this job take 8 to 11 minutes. Five consecutive runs
+    # in August 2026 instead sat in the VM step for 70, 190, 360, 360 and 360
+    # minutes and ended cancelled, the last three at GitHub's own six-hour job
+    # ceiling. Nothing here bounded them. This bound is deliberately loose
+    # enough that a slow-but-working run still passes, and tight enough that a
+    # stall fails in half an hour instead of burning a runner for six.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

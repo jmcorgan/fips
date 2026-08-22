@@ -45,8 +45,8 @@ and a local STUN responder.
 Automated network testing with configurable node counts, topology
 algorithms (random geometric, Erdos-Renyi, chain, explicit), and fault
 injection (netem mutation, link flaps, traffic generation, node
-churn). 20 scenarios covering general stress testing, cost-based parent
-selection, mixed link technologies (fiber/Bluetooth/WiFi),
+churn). 10 scenarios covering general stress and node churn, discovery
+over sparse topologies, spanning-tree and bloom-propagation regression,
 transport-specific validation (UDP, TCP, Ethernet), and ECN/congestion
 testing. Scenarios are
 defined in YAML and executed via a Python harness that manages the full

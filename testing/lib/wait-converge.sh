@@ -9,6 +9,9 @@
 #   wait_until_connected <ping_fn> <max_secs> <stall_secs> [poll_secs] \
 #       [near_converged_slack]
 #
+# wait_until_connected also sets CONVERGE_OUTCOME / CONVERGE_REACHED /
+# CONVERGE_PENDING; see the block above it.
+#
 # There was a wait_for_links() here. It was removed rather than kept for
 # symmetry: it had no caller anywhere in the tree on any branch, and its
 # reader carried the same failure-to-zero fallback wait_for_peers does. An
@@ -54,6 +57,30 @@ wait_for_peers() {
     done
     echo "  $container: TIMEOUT waiting for $min_peers peer(s) after ${timeout}s"
     return 1
+}
+
+# Verdict of the most recent wait_until_connected() call, so a caller can
+# report WHICH condition failed rather than only that one did:
+#   CONVERGE_OUTCOME  converged | stalled | timeout
+#   CONVERGE_REACHED  reachable pairs at the moment of the verdict
+#   CONVERGE_PENDING  unreachable pairs at that moment
+#
+# These exist because the gate's own probe is strictly harsher than the
+# assertion it guards, so a run can fail the gate at 18/20 and then pass
+# the strict all-pairs assertion 20/20. Without them the caller's summary
+# line reads "20 passed, 0 failed" on a non-convergence exit, which a
+# reader cannot tell from a connectivity failure.
+CONVERGE_OUTCOME=""
+CONVERGE_REACHED=0
+CONVERGE_PENDING=0
+
+# Record the verdict of a wait_until_connected() return.
+#
+# shellcheck disable=SC2034  # read by sourcing suites, not within this file
+_converge_verdict() {
+    CONVERGE_OUTCOME="$1"
+    CONVERGE_REACHED="$PASSED"
+    CONVERGE_PENDING="$FAILED"
 }
 
 # Wait until a connectivity check reports every pair reachable, using a
@@ -102,6 +129,7 @@ wait_until_connected() {
     while (( SECONDS - start_secs < max_secs )); do
         "$ping_fn"
         if (( FAILED == 0 )); then
+            _converge_verdict converged
             echo "  converge: all $PASSED pair(s) reachable after $((SECONDS - start_secs))s"
             return 0
         fi
@@ -111,7 +139,8 @@ wait_until_connected() {
             echo "  converge: $PASSED reachable, $FAILED pending (progressing) after $((SECONDS - start_secs))s"
         elif (( SECONDS - last_progress >= stall_secs )); then
             if (( FAILED > near_converged_slack )); then
-                echo "  converge: STUCK at $PASSED reachable / $FAILED pending — no progress for ${stall_secs}s (after $((SECONDS - start_secs))s)"
+                _converge_verdict stalled
+                echo "  converge: STUCK — tree did not converge: $PASSED reachable / $FAILED pending, no progress for ${stall_secs}s (after $((SECONDS - start_secs))s)"
                 return 1
             fi
             if (( held_for_budget == 0 )); then
@@ -122,6 +151,7 @@ wait_until_connected() {
         sleep "$poll_secs"
     done
 
-    echo "  converge: TIMEOUT at $PASSED reachable / $FAILED pending after ${max_secs}s"
+    _converge_verdict timeout
+    echo "  converge: TIMEOUT — tree did not converge: $PASSED reachable / $FAILED pending after ${max_secs}s"
     return 1
 }

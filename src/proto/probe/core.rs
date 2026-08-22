@@ -408,12 +408,23 @@ impl Probe {
         let gave_up = self.lookup_was_pending && !obs.lookup_pending;
         if gave_up || obs.now_ms.saturating_sub(self.stage_started_ms) >= self.budgets.discovery_ms
         {
-            let reason = if self.lookup_outcome == Some(LookupOutcomeKind::Deduplicated) {
-                FailKind::AlreadyPending
-            } else {
-                FailKind::NoResponse
-            };
-            self.fail_stage(reason, obs);
+            self.fail_stage(self.discovery_fail_kind(), obs);
+        }
+    }
+
+    /// Which "the lookup did not answer" finding this probe has earned.
+    ///
+    /// The gate proceeds only when some peer's filter claimed the target, so
+    /// a `Sent` lookup that goes unanswered is a claim nobody could confirm.
+    /// Reporting that as a bare `NoResponse` reads as a network fault and
+    /// hides the one fact the resolver does know: a filter put the key on the
+    /// mesh and the mesh disagreed. A joined lookup is its own finding again,
+    /// because this probe never chose to issue it.
+    fn discovery_fail_kind(&self) -> FailKind {
+        match self.lookup_outcome {
+            Some(LookupOutcomeKind::Deduplicated) => FailKind::AlreadyPending,
+            Some(LookupOutcomeKind::Sent) => FailKind::BloomUnconfirmed,
+            _ => FailKind::NoResponse,
         }
     }
 
@@ -644,7 +655,8 @@ impl Probe {
     /// the reason its own budget would have given.
     fn expire_running_stage(&mut self) {
         let kind = match self.stage {
-            Stage::Bloom | Stage::Discovery => FailKind::NoResponse,
+            Stage::Bloom => FailKind::NoResponse,
+            Stage::Discovery => self.discovery_fail_kind(),
             Stage::Path => FailKind::NoNextHop,
             Stage::Session => {
                 if self.owns_session {

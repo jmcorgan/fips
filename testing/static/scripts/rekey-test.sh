@@ -196,6 +196,11 @@ PASSED=0
 FAILED=0
 TOTAL_PASSED=0
 TOTAL_FAILED=0
+# Counted separately from TOTAL_FAILED on purpose: a convergence-gate
+# failure and a connectivity failure are different outcomes, and folding
+# the first into the second is what made the recorded transcript report
+# "20 passed, 0 failed" on an exit-1 run.
+TOTAL_UNCONVERGED=0
 
 # Node identities
 ENV_FILE="$SCRIPT_DIR/../generated-configs${FIPS_CI_NAME_SUFFIX:-}/npubs.env"
@@ -272,6 +277,24 @@ ping_all() {
 # wait_until_connected).
 _baseline_ping() {
     ping_all quiet "$CONVERGENCE_PING_TIMEOUT"
+}
+
+# Emit the one-line run summary.
+#
+# When the convergence gate is what failed, the line says so and names the
+# shortfall. The gate's probe is strictly harsher than the strict all-pairs
+# assertion it guards, so a run can fail the gate at 18/20 relationships and
+# still pass the assertion 20/20 — which is exactly the recorded failure this
+# discriminator exists for. Without it both outcomes print the same counts.
+results_line() {
+    local line="=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed"
+    if [ "$TOTAL_UNCONVERGED" -ne 0 ]; then
+        line+=", tree did not converge"
+        line+=" ($CONVERGE_REACHED/$((CONVERGE_REACHED + CONVERGE_PENDING))"
+        line+=" relationships, $CONVERGE_OUTCOME)"
+    fi
+    echo "$line ==="
+    return 0
 }
 
 phase_result() {
@@ -404,16 +427,19 @@ if wait_until_connected _baseline_ping "$BASELINE_CONVERGENCE_TIMEOUT" 20; then
     if [ "$FAILED" -ne 0 ]; then
         echo ""
         dump_peer_connectivity
-        echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
+        results_line
         exit 1
     fi
 else
-    echo "  Mesh did not reach a converged tree before timeout"
+    TOTAL_UNCONVERGED=$((TOTAL_UNCONVERGED + 1))
+    echo "  Mesh did not reach a converged tree before timeout" \
+        "($CONVERGE_OUTCOME at $CONVERGE_REACHED reachable /" \
+        "$CONVERGE_PENDING pending)"
     ping_all quiet "$CONVERGENCE_PING_TIMEOUT"
     phase_result "Pre-rekey baseline (all 20 pairs)"
     echo ""
     dump_peer_connectivity
-    echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
+    results_line
     exit 1
 fi
 echo ""
@@ -570,9 +596,9 @@ phase_result "Log analysis"
 echo ""
 
 # ── Summary ────────────────────────────────────────────────────────────
-echo "=== Results: $TOTAL_PASSED passed, $TOTAL_FAILED failed ==="
+results_line
 
-if [ "$TOTAL_FAILED" -eq 0 ]; then
+if [ "$TOTAL_FAILED" -eq 0 ] && [ "$TOTAL_UNCONVERGED" -eq 0 ]; then
     exit 0
 else
     # Dump logs on failure for diagnostics.

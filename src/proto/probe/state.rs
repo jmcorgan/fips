@@ -64,6 +64,12 @@ pub(crate) enum FailKind {
     NoTreePeers,
     /// discovery: the attempt ladder was exhausted, or the budget expired.
     NoResponse,
+    /// discovery: the gate proceeded on a peer filter's claim and the lookup
+    /// was never answered, so the claim was never confirmed. Distinct from
+    /// `NoResponse` because the reason a request went out at all is part of
+    /// the finding: a filter cannot miss a key that is present, so on an
+    /// absent key this is that filter false-positiving.
+    BloomUnconfirmed,
     /// path: the two coordinates have different spanning-tree roots.
     DisjointTrees,
     /// path: no send-ready peer is strictly closer to the target.
@@ -96,6 +102,7 @@ impl FailKind {
             FailKind::AlreadyPending => "already_pending",
             FailKind::NoTreePeers => "no_tree_peers",
             FailKind::NoResponse => "no_response",
+            FailKind::BloomUnconfirmed => "bloom_unconfirmed",
             FailKind::DisjointTrees => "disjoint_trees",
             FailKind::NoNextHop => "no_next_hop",
             FailKind::Preexisting => "preexisting",

@@ -28,6 +28,11 @@ The whole exercise should take about ten minutes.
               your stable nsec / npub
 ```
 
+The diagram shows the Linux layout. On macOS the same three files
+live under `/usr/local/etc/fips/`; read
+[Where these files live](#where-these-files-live) before running any
+command below.
+
 After this tutorial your node will have:
 
 - A keypair on disk that the daemon reuses across restarts.
@@ -35,6 +40,28 @@ After this tutorial your node will have:
   their `peers:` list once and have the entry keep working.
 - A clear understanding of which file holds the secret and how
   to keep it that way.
+
+## Where these files live
+
+Every path in this tutorial is written in its Linux form. The macOS
+package (`.pkg`) installs config and keys under
+`/usr/local/etc/fips/` instead of `/etc/fips/`, so on macOS
+substitute as you go:
+
+| Linux / other Unix | macOS |
+| --- | --- |
+| `/etc/fips/fips.yaml` | `/usr/local/etc/fips/fips.yaml` |
+| `/etc/fips/fips.key` | `/usr/local/etc/fips/fips.key` |
+| `/etc/fips/fips.pub` | `/usr/local/etc/fips/fips.pub` |
+
+`fipsctl keygen` writes to `/usr/local/etc/fips/` by default on
+macOS. The daemon still probes `/etc/fips/fips.yaml` as a fallback,
+so an existing install is not broken by an upgrade, but the macOS
+packaging only installs files under `/usr/local/etc/fips/`. If a
+macOS host already carries key files at the old `/etc/fips/` path,
+the daemon uses the old key and warns rather than minting a new
+identity; the migration recipe is in the
+[how-to guide](../how-to/persistent-identity.md).
 
 ## Why a stable identity matters
 
@@ -68,7 +95,8 @@ The daemon supports two ways of holding that keypair:
 >   identity unless you explicitly ask for one.
 > - *Persistent*: the daemon reads (or, on first start,
 >   generates and writes) a keypair stored at
->   `/etc/fips/fips.key`. The npub stays the same across
+>   `/etc/fips/fips.key` (`/usr/local/etc/fips/fips.key` on
+>   macOS). The npub stays the same across
 >   restarts, reboots, and reinstalls as long as that file is
 >   preserved. You take on the cost of protecting an on-disk
 >   secret in exchange for being addressable by a stable name.
@@ -117,9 +145,9 @@ Make a note of it. We expect this to change.
 
 ## Step 2: Enable persistent identity in the config
 
-Open `/etc/fips/fips.yaml` and find the `node:` block. The
-shipped default has the relevant fragment commented out; make it
-look like this:
+Open `/etc/fips/fips.yaml` (`/usr/local/etc/fips/fips.yaml` on
+macOS) and find the `node:` block. The shipped default has the
+relevant fragment commented out; make it look like this:
 
 ```yaml
 node:
@@ -136,6 +164,9 @@ The daemon's behavior on the next restart:
 - If it does not exist, generate a fresh keypair, write it to
   `/etc/fips/fips.{key,pub}` with the correct file modes, and
   use that.
+
+The daemon derives the key directory from whichever config file it
+loaded, so on macOS both files land in `/usr/local/etc/fips/`.
 
 ## Step 3: Restart the daemon
 
@@ -163,6 +194,9 @@ The daemon wrote two files:
 ```sh
 sudo ls -l /etc/fips/fips.key /etc/fips/fips.pub
 ```
+
+On macOS, list `/usr/local/etc/fips/fips.key` and
+`/usr/local/etc/fips/fips.pub` instead.
 
 Expect:
 
@@ -239,7 +273,7 @@ old one will be stale.
   persistent identity.
 - **Where it lives.** `/etc/fips/fips.key` and
   `/etc/fips/fips.pub`, mode `0600` and `0644`, owned
-  `root:root`.
+  `root:root`; under `/usr/local/etc/fips/` on macOS.
 - **What to share.** `fips.pub` is public; `fips.key` is not.
 - **What it buys you.** A npub other operators can add to their
   `peers:` list once, and that addresses the services your node
@@ -250,11 +284,13 @@ old one will be stale.
 If the post-restart npub does not match `fips.pub`:
 
 - **Check file permissions.**
-  `sudo ls -l /etc/fips/fips.key`. If the mode is not `0600` or
-  the owner is not `root:root`, the daemon may have refused to
-  read it. Restore with
+  `sudo ls -l /etc/fips/fips.key`, or
+  `sudo ls -l /usr/local/etc/fips/fips.key` on macOS. If the mode
+  is not `0600` or the owner is not `root:root`, the daemon may
+  have refused to read it. Restore with
   `sudo chmod 0600 /etc/fips/fips.key && sudo chown root:root
-  /etc/fips/fips.key`.
+  /etc/fips/fips.key`, substituting the macOS path where it
+  applies.
 - **Check the journal.** `sudo journalctl -u fips -n 100` after
   the restart will show one of:
   - `Loaded persistent identity from key file path=...` — good.

@@ -55,50 +55,115 @@ cleanup_container() {
     docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
+# Emit a captured output file to stderr, delimited and labelled with the
+# command it came from. Callers use this only on failure: a command that
+# succeeds leaves no trace, so the suite stays quiet when it is green.
+dump_output() {
+    local label="$1" file="$2"
+    {
+        echo "  --- $label failed; captured output follows ---"
+        if [ -s "$file" ]; then
+            cat "$file"
+        else
+            echo "  (no output)"
+        fi
+        echo "  --- end captured output ---"
+    } >&2
+}
+
+# Run a command with both streams captured. Discard the capture on success;
+# on failure emit it, so the reason a build or a container start died is not
+# thrown away. Stdin is inherited, so a caller may pipe into it.
+run_quiet() {
+    local label="$1"
+    shift
+    local out rc=0
+    out=$(mktemp)
+    "$@" >"$out" 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || dump_output "$label" "$out"
+    rm -f "$out"
+    return "$rc"
+}
+
 # Build an image from an inline Dockerfile.
 build_image() {
     local tag="$1"
     shift
-    echo "$@" | docker build -t "$tag" -f - "$REPO_ROOT" >/dev/null 2>&1
+    echo "$@" | run_quiet "docker build -t $tag" \
+        docker build -t "$tag" -f - "$REPO_ROOT"
 }
 
 # Start a systemd container in the background.
 start_systemd_container() {
     local name="$1" image="$2"
     cleanup_container "$name"
-    docker run -d --name "$name" \
+    run_quiet "docker run $name" \
+        docker run -d --name "$name" \
         --label com.corganlabs.fips-ci=1 \
         --privileged \
         --cgroupns=host \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         --tmpfs /run --tmpfs /run/lock \
-        "$image" >/dev/null 2>&1
+        "$image"
 }
 
 # Same, but with TUN device for the e2e scenario.
 start_systemd_container_with_tun() {
     local name="$1" image="$2"
     cleanup_container "$name"
-    docker run -d --name "$name" \
+    run_quiet "docker run $name (with tun)" \
+        docker run -d --name "$name" \
         --label com.corganlabs.fips-ci=1 \
         --privileged \
         --cgroupns=host \
         --device /dev/net/tun \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         --tmpfs /run --tmpfs /run/lock \
-        "$image" >/dev/null 2>&1
+        "$image"
+}
+
+# Report why systemd never reached a running state. Every probe is
+# best-effort and captured with its own stderr: the container may have
+# exited, or never have been created at all, and the docker error text
+# saying so is itself the diagnosis.
+dump_systemd_state() {
+    local name="$1" out
+    out=$(mktemp)
+    {
+        echo "== docker ps -a"
+        docker ps -a --filter "name=^${name}$" 2>&1
+        echo "== systemctl is-system-running"
+        docker exec "$name" systemctl is-system-running 2>&1
+        echo "== systemctl list-units --failed"
+        docker exec "$name" systemctl list-units --failed --no-pager 2>&1
+        echo "== journalctl -b (last 100 lines)"
+        docker exec "$name" journalctl -b --no-pager -n 100 2>&1
+        echo "== docker logs (last 100 lines)"
+        docker logs --tail 100 "$name" 2>&1
+    } >"$out" 2>&1
+    dump_output "systemd boot of $name" "$out"
+    rm -f "$out"
 }
 
 # Wait for systemd to reach a bootable state inside the container.
 wait_for_systemd() {
     local name="$1"
+    local state
     for _i in $(seq 1 "$BOOT_TIMEOUT"); do
-        if docker exec "$name" systemctl is-system-running --wait 2>/dev/null | grep -qE 'running|degraded'; then
-            return 0
-        fi
+        # Read the state rather than piping it into grep. systemctl exits
+        # non-zero for "degraded", and pipefail turns that into a failed
+        # pipeline even when grep matched, so the piped form could never
+        # accept a degraded boot: in a container systemd-modules-load
+        # always fails, so every scenario burned the full timeout and
+        # warned about a container that had in fact booted.
+        state=$(docker exec "$name" systemctl is-system-running --wait 2>/dev/null)
+        case "$state" in
+            *running*|*degraded*) return 0 ;;
+        esac
         sleep 1
     done
     echo "  WARNING: systemd did not reach running state in ${BOOT_TIMEOUT}s (may still work)"
+    dump_systemd_state "$name"
     return 0
 }
 

@@ -1088,6 +1088,15 @@ fn settled_text(name: &str, stage: &serde_json::Value) -> String {
                 Some(n) => format!("no reply to {n} requests"),
                 None => "no reply".to_string(),
             },
+            "bloom_unconfirmed" => match stage.get("attempts").and_then(|v| v.as_u64()) {
+                Some(1) => {
+                    "a peer filter claimed this address; 1 request went unanswered".to_string()
+                }
+                Some(n) => {
+                    format!("a peer filter claimed this address; {n} requests went unanswered")
+                }
+                None => "a peer filter claimed this address; nothing answered for it".to_string(),
+            },
             "already_pending" => "joined a lookup already in flight, which failed".to_string(),
             other => other.replace('_', " "),
         },
@@ -1287,9 +1296,34 @@ fn rtt_text(rtt: &serde_json::Value) -> String {
 
 /// The closing paragraph, which must not claim reachability it did not observe.
 fn overall_note(report: &serde_json::Value) -> Option<&'static str> {
-    if field(report, "overall") != "partial" {
-        return None;
+    match field(report, "overall") {
+        "partial" => partial_note(report),
+        "failed" => failed_note(report),
+        _ => None,
     }
+}
+
+/// A failed probe's closing paragraph. Only the unconfirmed-claim case earns
+/// one: it is the reading the operator cannot make from the reason alone, and
+/// it is the one that otherwise reads as a network fault.
+fn failed_note(report: &serde_json::Value) -> Option<&'static str> {
+    match field(report.get("discovery")?, "reason") {
+        "bloom_unconfirmed" => Some(
+            "          A peer's bloom filter claimed this address and then no lookup\n\
+             \x20         answered for it. A filter cannot miss a key that IS on the\n\
+             \x20         mesh, so an absent address produces exactly this whenever some\n\
+             \x20         peer's filter false-positives on it -- the same finding the\n\
+             \x20         fast bloom_miss reports, reached the slow way. An address that\n\
+             \x20         is present but whose lookups are being lost produces it too.\n\
+             \x20         The wait says nothing about which; it is the ladder running to\n\
+             \x20         the end.",
+        ),
+        _ => None,
+    }
+}
+
+/// The partial-verdict paragraph, keyed on what the rtt stage settled on.
+fn partial_note(report: &serde_json::Value) -> Option<&'static str> {
     match field(report.get("rtt")?, "reason") {
         "no_report" => Some(
             "          The handshake completed, so our packets reached them. Nothing has\n\
@@ -1596,6 +1630,97 @@ mod tests {
         );
         assert_eq!(rows[0].name, "bloom");
         assert_eq!(rows[0].text, "no peer filter holds this address");
+    }
+
+    /// A finished probe of an address that is not on the mesh, under a given
+    /// gate outcome. `bloom_miss` is the run where no filter claimed it;
+    /// `bloom_unconfirmed` is the run where one did and no lookup answered.
+    fn absent_key_report(claimed: bool) -> serde_json::Value {
+        if claimed {
+            serde_json::json!({
+                "overall": "failed",
+                "elapsed_ms": 17000,
+                "bloom": {"verdict": "ok", "reason": null, "elapsed_ms": 1000, "fanout": 1},
+                "discovery": {"verdict": "failed", "reason": "bloom_unconfirmed",
+                              "elapsed_ms": 16000, "attempts": 4,
+                              "attempt_timeouts_secs": [1, 2, 4, 8]},
+                "path": {"verdict": "skipped", "reason": "not_reached"},
+                "session": {"verdict": "skipped", "reason": "not_reached"},
+                "rtt": {"verdict": "skipped", "reason": "not_reached"},
+            })
+        } else {
+            serde_json::json!({
+                "overall": "failed",
+                "elapsed_ms": 1900,
+                "bloom": {"verdict": "failed", "reason": "bloom_miss", "elapsed_ms": 1900,
+                          "fanout": null},
+                "discovery": {"verdict": "skipped", "reason": "not_reached"},
+                "path": {"verdict": "skipped", "reason": "not_reached"},
+                "session": {"verdict": "skipped", "reason": "not_reached"},
+                "rtt": {"verdict": "skipped", "reason": "not_reached"},
+            })
+        }
+    }
+
+    #[test]
+    fn the_two_absent_key_paths_read_differently_to_the_operator() {
+        let clean = absent_key_report(false);
+        let claimed = absent_key_report(true);
+
+        let clean_rows = stage_rows(&clean);
+        let clean_text = clean_rows[row_at(&clean_rows, "bloom")].text.clone();
+        let claimed_rows = stage_rows(&claimed);
+        let claimed_text = claimed_rows[row_at(&claimed_rows, "discovery")]
+            .text
+            .clone();
+
+        assert_eq!(clean_text, "no peer filter holds this address");
+        assert_ne!(
+            clean_text, claimed_text,
+            "the two paths must not print the same line"
+        );
+        assert!(
+            claimed_text.contains("claimed this address"),
+            "the slow line must say a filter claimed it: {claimed_text}"
+        );
+        assert!(
+            claimed_text.contains('4'),
+            "and how many requests went unanswered: {claimed_text}"
+        );
+
+        // The line `no_response` used to print. It says nothing about why a
+        // request went out, which is the whole finding here.
+        assert_ne!(
+            claimed_text, "no reply to 4 requests",
+            "the claimed path must not fall back to the bare no-reply wording"
+        );
+
+        // The closing paragraph is where the operator is told what the wait
+        // meant. Only the claimed path earns one.
+        let note = overall_note(&claimed).unwrap_or_default();
+        assert!(
+            note.contains("false-positive"),
+            "the note must name the mechanism: {note}"
+        );
+        assert!(
+            note.contains("bloom_miss"),
+            "and tie it to the fast answer: {note}"
+        );
+        assert!(overall_note(&clean).is_none());
+    }
+
+    #[test]
+    fn a_bare_no_response_still_reads_as_a_missing_reply() {
+        // The reason survives for the case it still describes: the gate's
+        // answer never arrived, so no claim was ever made.
+        let mut report = absent_key_report(true);
+        report["discovery"]["reason"] = serde_json::json!("no_response");
+        let rows = stage_rows(&report);
+        assert_eq!(
+            rows[row_at(&rows, "discovery")].text,
+            "no reply to 4 requests"
+        );
+        assert!(overall_note(&report).is_none());
     }
 
     #[test]

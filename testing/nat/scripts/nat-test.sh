@@ -306,41 +306,97 @@ require_docker_daemon() {
     fi
 }
 
+# The two path assertions below decide whether a converged mesh took the path
+# the scenario expects. Every failure branch names the container, what was
+# expected and what was read instead, and callers wrap them in the same
+# `|| { dump_*_diagnostics; return 1; }` shape the convergence waits use, so the
+# container state behind a mismatch is captured with it. Both stay silent on
+# success: this suite passes most of the time.
 assert_peer_path() {
     local container="$1"
     local expected_transport="$2"
     local expected_prefix="$3"
-    docker exec "$container" fipsctl show peers \
-        | python3 -c "
+    local peers errfile rc=0
+    # stdout and stderr are kept apart deliberately: any warning fipsctl writes
+    # to stderr would otherwise be spliced into the JSON and turn a healthy read
+    # into a parse failure.
+    errfile="$(mktemp)"
+    peers="$(docker exec "$container" fipsctl show peers 2>"$errfile")" || rc=$?
+    if [ "$rc" != 0 ]; then
+        echo "ASSERT FAIL: peer path $container: expected transport ${expected_transport} to a peer at ${expected_prefix}*, but 'fipsctl show peers' exited ${rc}:" >&2
+        cat "$errfile" >&2
+        rm -f "$errfile"
+        return 1
+    fi
+    rm -f "$errfile"
+    if ! python3 -c "
 import json, sys
-data = json.load(sys.stdin)
-peers = [p for p in data.get('peers', []) if p.get('connectivity') == 'connected']
+container, want_transport, want_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+raw = sys.stdin.read()
+want = f'transport {want_transport!r} to a peer at {want_prefix}*'
+head = f'ASSERT FAIL: peer path {container}: expected {want}, '
+try:
+    data = json.loads(raw)
+except ValueError as exc:
+    raise SystemExit(head + f'but the peer JSON did not parse: {exc}; read: {raw!r}')
+reported = data.get('peers', [])
+seen = [
+    {k: p.get(k) for k in
+     ('npub', 'connectivity', 'transport_type', 'transport_addr', 'direction', 'last_seen_ms')}
+    for p in reported
+]
+peers = [p for p in reported if p.get('connectivity') == 'connected']
 if not peers:
-    raise SystemExit(1)
+    raise SystemExit(head + f'observed no connected peer; {len(reported)} peer(s) reported: {seen}')
 peer = peers[0]
 transport = peer.get('transport_type', '')
 addr = peer.get('transport_addr', '')
-if transport != sys.argv[1]:
-    raise SystemExit(f'transport mismatch: expected {sys.argv[1]!r}, got {transport!r}')
-if not addr.startswith(sys.argv[2]):
-    raise SystemExit(f'addr mismatch: expected prefix {sys.argv[2]!r}, got {addr!r}')
-" "$expected_transport" "$expected_prefix"
+if transport != want_transport:
+    raise SystemExit(head + f'observed transport {transport!r} at {addr!r}; peers: {seen}')
+if not addr.startswith(want_prefix):
+    raise SystemExit(head + f'observed addr {addr!r} on transport {transport!r}; peers: {seen}')
+" "$container" "$expected_transport" "$expected_prefix" <<<"$peers"; then
+        return 1
+    fi
 }
 
 assert_link_path() {
     local container="$1"
     local expected_prefix="$2"
-    docker exec "$container" fipsctl show links \
-        | python3 -c "
+    local links errfile rc=0
+    # See assert_peer_path: stderr is kept out of the JSON on purpose.
+    errfile="$(mktemp)"
+    links="$(docker exec "$container" fipsctl show links 2>"$errfile")" || rc=$?
+    if [ "$rc" != 0 ]; then
+        echo "ASSERT FAIL: link path $container: expected a link to ${expected_prefix}*, but 'fipsctl show links' exited ${rc}:" >&2
+        cat "$errfile" >&2
+        rm -f "$errfile"
+        return 1
+    fi
+    rm -f "$errfile"
+    if ! python3 -c "
 import json, sys
-data = json.load(sys.stdin)
+container, want_prefix = sys.argv[1], sys.argv[2]
+raw = sys.stdin.read()
+want = f'a link to {want_prefix}*'
+head = f'ASSERT FAIL: link path {container}: expected {want}, '
+try:
+    data = json.loads(raw)
+except ValueError as exc:
+    raise SystemExit(head + f'but the link JSON did not parse: {exc}; read: {raw!r}')
 links = data.get('links', [])
+seen = [
+    {k: link.get(k) for k in ('link_id', 'remote_addr', 'direction', 'state')}
+    for link in links
+]
 if not links:
-    raise SystemExit(1)
+    raise SystemExit(head + 'observed no links at all')
 addr = links[0].get('remote_addr', '')
-if not addr.startswith(sys.argv[1]):
-    raise SystemExit(f'link addr mismatch: expected prefix {sys.argv[1]!r}, got {addr!r}')
-" "$expected_prefix"
+if not addr.startswith(want_prefix):
+    raise SystemExit(head + f'observed {addr!r}; links: {seen}')
+" "$container" "$expected_prefix" <<<"$links"; then
+        return 1
+    fi
 }
 
 require_bootstrap_activity() {
@@ -373,10 +429,22 @@ run_cone() {
         dump_cone_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_WAN}.
-    assert_peer_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_WAN}.
-    assert_link_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.
-    assert_link_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.
+    assert_peer_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_WAN}. || {
+        dump_cone_diagnostics
+        return 1
+    }
+    assert_peer_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_WAN}. || {
+        dump_cone_diagnostics
+        return 1
+    }
+    assert_link_path fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}. || {
+        dump_cone_diagnostics
+        return 1
+    }
+    assert_link_path fips-nat-cone-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}. || {
+        dump_cone_diagnostics
+        return 1
+    }
     # shellcheck disable=SC1090
     source "$CONFIG_DIR/cone/npubs.env"
     ping_peer fips-nat-cone-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"
@@ -398,10 +466,22 @@ run_symmetric() {
         dump_symmetric_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} tcp ${NAT_WAN}.11:
-    assert_peer_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} tcp ${NAT_WAN}.10:
-    assert_link_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.11:
-    assert_link_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.10:
+    assert_peer_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} tcp ${NAT_WAN}.11: || {
+        dump_symmetric_diagnostics
+        return 1
+    }
+    assert_peer_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} tcp ${NAT_WAN}.10: || {
+        dump_symmetric_diagnostics
+        return 1
+    }
+    assert_link_path fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.11: || {
+        dump_symmetric_diagnostics
+        return 1
+    }
+    assert_link_path fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_WAN}.10: || {
+        dump_symmetric_diagnostics
+        return 1
+    }
     require_bootstrap_activity fips-nat-symmetric-a${FIPS_CI_NAME_SUFFIX:-}
     require_bootstrap_activity fips-nat-symmetric-b${FIPS_CI_NAME_SUFFIX:-}
     # shellcheck disable=SC1090
@@ -424,10 +504,22 @@ run_lan() {
         dump_lan_diagnostics
         return 1
     }
-    assert_peer_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_LAN}.
-    assert_peer_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_LAN}.
-    assert_link_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}.
-    assert_link_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}.
+    assert_peer_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_LAN}. || {
+        dump_lan_diagnostics
+        return 1
+    }
+    assert_peer_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} udp ${NAT_LAN}. || {
+        dump_lan_diagnostics
+        return 1
+    }
+    assert_link_path fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}. || {
+        dump_lan_diagnostics
+        return 1
+    }
+    assert_link_path fips-nat-lan-b${FIPS_CI_NAME_SUFFIX:-} ${NAT_LAN}. || {
+        dump_lan_diagnostics
+        return 1
+    }
     # shellcheck disable=SC1090
     source "$CONFIG_DIR/lan/npubs.env"
     ping_peer fips-nat-lan-a${FIPS_CI_NAME_SUFFIX:-} "$NPUB_B"

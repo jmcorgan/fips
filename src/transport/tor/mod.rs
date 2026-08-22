@@ -33,6 +33,7 @@ use crate::transport::socks5::{
     ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, Socks5Auth,
     Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
 };
+use crate::transport::tcp::INBOUND_FIRST_FRAME_TIMEOUT;
 use control::{ControlAuth, TorControlClient, TorMonitoringInfo};
 use stats::TorStats;
 
@@ -367,6 +368,7 @@ impl TorTransport {
                 pool,
                 mtu,
                 max_inbound,
+                INBOUND_FIRST_FRAME_TIMEOUT,
                 stats,
             )
             .await;
@@ -769,6 +771,7 @@ impl TorTransport {
                 mtu,
                 recv_stats,
                 Direction::Outbound,
+                None,
             )
             .await;
         });
@@ -934,6 +937,7 @@ impl TorTransport {
                 mtu,
                 recv_stats,
                 Direction::Outbound,
+                None,
             )
             .await;
         });
@@ -1046,6 +1050,10 @@ impl Transport for TorTransport {
 /// actually removing it (so a concurrent close/stop never drives the counter
 /// below zero). `direction` is retained for the terminal "receive loop
 /// stopped" debug field the shared loop deliberately leaves to each transport.
+///
+/// `first_frame_timeout` is `Some` for an inbound connection, which holds a
+/// capped pool slot from the moment it is accepted, and `None` for an
+/// outbound one, which holds no such slot.
 #[allow(clippy::too_many_arguments)]
 async fn tor_receive_loop(
     reader: tokio::net::tcp::OwnedReadHalf,
@@ -1056,6 +1064,7 @@ async fn tor_receive_loop(
     mtu: u16,
     stats: Arc<TorStats>,
     direction: Direction,
+    first_frame_timeout: Option<Duration>,
 ) {
     proxied_receive_loop(
         reader,
@@ -1066,6 +1075,7 @@ async fn tor_receive_loop(
         mtu,
         stats,
         "Tor",
+        first_frame_timeout,
         |stats, meta| match meta {
             Direction::Inbound => stats.record_pool_inbound_removed(),
             Direction::Outbound => stats.record_pool_outbound_removed(),
@@ -1091,6 +1101,13 @@ async fn tor_receive_loop(
 /// connections to a local TCP listener; we accept them, configure
 /// socket options, split the stream, and spawn a per-connection
 /// receive task.
+///
+/// `first_frame_timeout` is the deadline from accept to the first complete
+/// inbound frame, handed to each spawned receive loop. An accepted socket
+/// takes an inbound slot against `max_inbound` before any byte is read, so
+/// without it a remote that connects and stays silent holds that slot for as
+/// long as it keeps the socket open.
+#[allow(clippy::too_many_arguments)]
 async fn tor_accept_loop(
     listener: TcpListener,
     transport_id: TransportId,
@@ -1098,6 +1115,7 @@ async fn tor_accept_loop(
     pool: ProxiedPool<Direction>,
     mtu: u16,
     max_inbound: usize,
+    first_frame_timeout: Duration,
     stats: Arc<TorStats>,
 ) {
     debug!(
@@ -1185,6 +1203,7 @@ async fn tor_accept_loop(
                 mtu,
                 recv_stats,
                 Direction::Inbound,
+                Some(first_frame_timeout),
             )
             .await;
         });
@@ -1892,5 +1911,144 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("directory"));
+    }
+
+    // ========================================================================
+    // Inbound first-frame deadline (onion listener)
+    // ========================================================================
+
+    /// Poll `f` every 10ms until it holds or `limit` elapses.
+    async fn wait_until<F: FnMut() -> bool>(mut f: F, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if f() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Drives `tor_accept_loop` directly: the only production path to it is
+    /// `start_directory_mode`, which needs a Tor-managed hostname file and a
+    /// running daemon, so it is not reachable from a unit test.
+    fn spawn_onion_accept_loop(
+        listener: TcpListener,
+        packet_tx: PacketTx,
+        first_frame_timeout: Duration,
+    ) -> (ProxiedPool<Direction>, Arc<TorStats>, JoinHandle<()>) {
+        let pool: ProxiedPool<Direction> = Arc::new(Mutex::new(HashMap::new()));
+        let stats = Arc::new(TorStats::new());
+        let handle = tokio::spawn(tor_accept_loop(
+            listener,
+            TransportId::new(1),
+            packet_tx,
+            pool.clone(),
+            1400,
+            64,
+            first_frame_timeout,
+            stats.clone(),
+        ));
+        (pool, stats, handle)
+    }
+
+    /// Mirror of the TCP case: a silent onion-side socket must lose its
+    /// inbound slot at the deadline. Break-check: with the timeout wrapper
+    /// removed from the shared loop the count stays at 1 and the second
+    /// assertion fails.
+    #[tokio::test]
+    async fn idle_inbound_onion_socket_releases_its_slot() {
+        let (tx, _rx) = packet_channel(32);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let (pool, stats, accept) =
+            spawn_onion_accept_loop(listener, tx, Duration::from_millis(200));
+
+        // Held open for the whole test: any release is the deadline's doing.
+        let squatter = TcpStream::connect(listen).await.unwrap();
+
+        assert!(
+            wait_until(|| stats.pool_inbound_count() == 1, Duration::from_secs(2)).await,
+            "an accepted onion socket should take an inbound slot"
+        );
+        assert!(
+            wait_until(|| stats.pool_inbound_count() == 0, Duration::from_secs(2)).await,
+            "a silent onion socket should lose its slot at the first-frame deadline"
+        );
+        assert!(pool.lock().await.is_empty());
+
+        drop(squatter);
+        accept.abort();
+    }
+
+    /// The deadline covers a *complete* first frame, not merely the first
+    /// byte: a remote that dribbles a prefix inside the deadline and the
+    /// remainder after it must still lose its slot, and the late frame must
+    /// not be delivered.
+    #[tokio::test]
+    async fn byte_dripped_first_onion_frame_past_deadline_is_dropped() {
+        let (tx, mut rx) = packet_channel(32);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let (_pool, stats, accept) =
+            spawn_onion_accept_loop(listener, tx, Duration::from_millis(300));
+
+        let frame = build_msg1_frame();
+        let mut peer = TcpStream::connect(listen).await.unwrap();
+        // Prefix inside the deadline, remainder well past it.
+        peer.write_all(&frame[..4]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let _ = peer.write_all(&frame[4..]).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .is_err(),
+            "a first onion frame completing after the deadline must not be delivered"
+        );
+        assert!(
+            wait_until(|| stats.pool_inbound_count() == 0, Duration::from_secs(2)).await,
+            "the dripped onion connection should have released its slot"
+        );
+
+        drop(peer);
+        accept.abort();
+    }
+
+    /// The healthy path, and a regression guard as for TCP: the deadline is
+    /// scoped to the first iteration, so an established onion connection that
+    /// then goes quiet keeps its slot. It exists so a future general idle
+    /// deadline cannot start reaping quiet onion links without a test going
+    /// red.
+    #[tokio::test]
+    async fn established_onion_connection_survives_long_idle() {
+        let (tx, mut rx) = packet_channel(32);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let (pool, stats, accept) =
+            spawn_onion_accept_loop(listener, tx, Duration::from_millis(200));
+
+        let mut peer = TcpStream::connect(listen).await.unwrap();
+        peer.write_all(&build_msg1_frame()).await.unwrap();
+        let packet = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("packet channel closed");
+        assert_eq!(packet.data, build_msg1_frame());
+
+        // Four deadlines' worth of silence after the first frame.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        assert_eq!(
+            stats.pool_inbound_count(),
+            1,
+            "an established onion connection must not be dropped by the first-frame deadline"
+        );
+        assert!(!pool.lock().await.is_empty());
+
+        drop(peer);
+        accept.abort();
     }
 }
