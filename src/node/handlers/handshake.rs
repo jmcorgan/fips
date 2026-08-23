@@ -19,13 +19,14 @@ use crate::peer::machine::{
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
     DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
-    EstablishSnapshot, InboundDecision, InboundReject, NegotiationPayload, OutboundSnapshot,
-    PromotionResult, RekeyClaim, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot,
-    WireOutcome, cross_connection_winner, decide_fmp_negotiation,
+    EPOCH_RESTART_MIN_INTERVAL_SECS, EstablishSnapshot, InboundDecision, InboundReject,
+    NegotiationPayload, OutboundSnapshot, PromotionResult, RekeyClaim, RekeyMsg2Decision,
+    RekeyMsg2Reject, RekeyMsg2Snapshot, WireOutcome, cross_connection_winner,
+    decide_fmp_negotiation,
 };
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket};
 use crate::utils::index::SessionIndex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 impl Node {
@@ -1633,6 +1634,11 @@ impl Node {
                 different_link: existing_peer.link_id() != link_id,
                 rekey_claim,
                 our_node_addr,
+                peering_idle_ms: existing_peer.idle_time(Self::now_ms()),
+                epoch_restart_dampened: self
+                    .restart_dampener
+                    .get(&peer_node_addr)
+                    .is_some_and(|t| t.elapsed().as_secs() < EPOCH_RESTART_MIN_INTERVAL_SECS),
             },
             None => EstablishSnapshot {
                 has_existing_peer: false,
@@ -1645,6 +1651,9 @@ impl Node {
                 different_link: false,
                 rekey_claim,
                 our_node_addr,
+                // No existing peering, so neither gate applies.
+                peering_idle_ms: u64::MAX,
+                epoch_restart_dampened: false,
             },
         };
 
@@ -1702,6 +1711,24 @@ impl Node {
         };
 
         match decision {
+            InboundDecision::Reject {
+                reason: InboundReject::EpochRestartDampened,
+            } => {
+                // The msg1 is authentic but would destroy a peering that is
+                // still carrying authenticated traffic, or it is a second epoch
+                // change inside the dampening interval. No msg2 goes back: the
+                // stored msg2 is bound to the original msg1's ephemeral, and
+                // answering an address the sender chose is free amplification.
+                debug!(
+                    peer = %self.peer_display_name(&peer_node_addr),
+                    "Epoch mismatch dampened, dropping msg1"
+                );
+                self.execute_peer_actions(link_id, &ambient, actions).await;
+                self.links.remove(&link_id);
+                self.remove_peer_machine(link_id);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            }
             InboundDecision::Reject {
                 reason: InboundReject::DualRekeyWon,
             } => {
@@ -1771,6 +1798,12 @@ impl Node {
                         peer = %self.peer_display_name(peer),
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
+                    // Stamped on acceptance only. A refusal that slid the window
+                    // would let a sustained replay starve a genuinely restarting
+                    // peer for as long as it kept sending.
+                    let cutoff = Duration::from_secs(EPOCH_RESTART_MIN_INTERVAL_SECS);
+                    self.restart_dampener.retain(|_, t| t.elapsed() < cutoff);
+                    self.restart_dampener.insert(*peer, Instant::now());
                 }
                 // Machine-driven inbound establish/rekey resolution. The leg's
                 // PERSISTENT machine emitted the action stream alongside the

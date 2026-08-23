@@ -61,7 +61,7 @@ impl GapTracker {
     pub(crate) fn observe(&mut self, counter: u64) -> u64 {
         let Some(expected) = self.expected_next else {
             // First frame: initialize
-            self.expected_next = Some(counter + 1);
+            self.expected_next = Some(counter.saturating_add(1));
             return 0;
         };
 
@@ -90,7 +90,7 @@ impl GapTracker {
         // Update expected (always advance to counter+1 or keep expected if
         // this was a late/reordered frame)
         if counter >= expected {
-            self.expected_next = Some(counter + 1);
+            self.expected_next = Some(counter.saturating_add(1));
         }
 
         lost

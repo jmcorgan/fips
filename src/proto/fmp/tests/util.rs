@@ -87,6 +87,10 @@ pub(super) fn establish_snapshot(our_byte: u8) -> EstablishSnapshot {
         existing_msg2: None,
         different_link: false,
         rekey_claim: RekeyClaim::None,
+        // Idle by default, so the epoch-restart gate does not fire unless a
+        // test sets it: the pre-0161 behaviour every other branch expects.
+        peering_idle_ms: u64::MAX,
+        epoch_restart_dampened: false,
         our_node_addr: make_node_addr(our_byte),
     }
 }

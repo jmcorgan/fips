@@ -1585,6 +1585,19 @@ impl PeerMachine {
         let decision = Fmp::new().establish_inbound(&est, &wire);
         let actions = match &decision {
             InboundDecision::Reject {
+                reason: InboundReject::EpochRestartDampened,
+            } => {
+                // The epoch-mismatch teardown was refused: the peering this msg1
+                // would destroy is still carrying authenticated traffic, or this
+                // identity already changed epoch inside the dampening interval.
+                // The established peer is untouched; this temporary leg is
+                // discarded, returning the msg1-allocated index rather than
+                // orphaning it, exactly as the other reject arm does.
+                let actions = vec![PeerAction::FreeIndex { index: our_index }];
+                let _ = self.fail(FailReason::Rejected);
+                actions
+            }
+            InboundDecision::Reject {
                 reason: InboundReject::DualRekeyWon,
             } => {
                 // Dual-init rekey tie-break: we win (smaller NodeAddr), drop the
@@ -2296,6 +2309,8 @@ mod tests {
             existing_msg2: None,
             different_link: false,
             rekey_claim: RekeyClaim::None,
+            peering_idle_ms: u64::MAX,
+            epoch_restart_dampened: false,
             our_node_addr: our,
         }
     }

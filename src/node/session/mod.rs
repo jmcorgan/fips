@@ -100,6 +100,15 @@ pub(crate) struct SessionEntry {
     /// Whether this node initiated the Noise handshake.
     /// Surfaced through the `is_initiator()` accessor.
     is_initiator: bool,
+    /// Largest on-the-wire frame this node has sent toward the remote since
+    /// the last accepted path-MTU decrease or release, in bytes.
+    ///
+    /// Corroborates a reactive `MtuExceeded`, which is unauthenticated: an
+    /// honest report exists only because a frame this node emitted did not
+    /// fit some hop, so an honest report always names a value below this.
+    /// Reset on each accepted decrease and on release so one historical
+    /// large send cannot vouch for a session's whole lifetime.
+    max_sent_wire_len: u16,
     /// Session-layer MMP state. Initialized on Established transition.
     mmp: Option<MmpSessionState>,
 
@@ -203,6 +212,7 @@ impl SessionEntry {
             session_start_ms: 0,
             coords_warmup_remaining: 0,
             is_initiator,
+            max_sent_wire_len: 0,
             mmp: None,
             packets_sent: 0,
             packets_recv: 0,
@@ -304,6 +314,27 @@ impl SessionEntry {
     /// and CoordsRequired reset).
     pub(crate) fn set_coords_warmup_remaining(&mut self, value: u8) {
         self.coords_warmup_remaining = value;
+    }
+
+    /// Largest wire frame sent toward the remote since the last accepted
+    /// path-MTU decrease or release.
+    pub(crate) fn max_sent_wire_len(&self) -> u16 {
+        self.max_sent_wire_len
+    }
+
+    /// Note a frame of `wire_len` bytes sent toward the remote, keeping the
+    /// largest. Frames beyond `u16::MAX` saturate, which only ever makes the
+    /// corroboration more permissive and cannot exceed what a path MTU can
+    /// name.
+    pub(crate) fn record_sent_wire_len(&mut self, wire_len: usize) {
+        let wire_len = u16::try_from(wire_len).unwrap_or(u16::MAX);
+        self.max_sent_wire_len = self.max_sent_wire_len.max(wire_len);
+    }
+
+    /// Forget what has been sent, so the next reactive report needs fresh
+    /// evidence of its own.
+    pub(crate) fn clear_sent_wire_len(&mut self) {
+        self.max_sent_wire_len = 0;
     }
 
     /// Mark the session as started (transition to Established).
@@ -728,9 +759,23 @@ impl SessionEntry {
     /// permanent silent decrypt failure. A peer that never catches up
     /// is instead handled by the FSP session liveness path (fresh
     /// handshake / teardown of a genuinely dead link).
-    pub(crate) fn drain_expired(&self, now_ms: u64, drain_ms: u64) -> bool {
+    ///
+    /// `max_drain_ms` is an absolute ceiling measured from the cutover
+    /// alone, so the sliding deadline delays erasure by a bounded amount
+    /// rather than preventing it: the only party that can push the
+    /// deadline out is the authenticated peer holding the old key, and
+    /// without a ceiling it holds that key for as long as it keeps using
+    /// it. What the ceiling costs is that a peer which has still not
+    /// recovered by then is cut off deliberately, and its frames are
+    /// undecryptable until its own rekey retry re-converges the epochs.
+    /// It must therefore stay above the worst-case legitimate recovery;
+    /// see `DRAIN_MAX_RETENTION_SECS`.
+    pub(crate) fn drain_expired(&self, now_ms: u64, drain_ms: u64, max_drain_ms: u64) -> bool {
         if self.drain_started_ms == 0 {
             return false;
+        }
+        if now_ms.saturating_sub(self.drain_started_ms) >= max_drain_ms {
+            return true;
         }
         let deadline_anchor = self.drain_started_ms.max(self.previous_last_used_ms);
         now_ms.saturating_sub(deadline_anchor) >= drain_ms
@@ -1228,6 +1273,9 @@ mod overlapping_epoch_tests {
     #[test]
     fn drain_expiry_is_peer_progress_aware() {
         const DRAIN_MS: u64 = 10_000;
+        // Well clear of the shipped ceiling, so this case still exercises
+        // the sliding deadline and nothing else.
+        const MAX_MS: u64 = 120_000;
         let cutover_ms = 1_000;
 
         // Build the post-cutover state via the production cutover path:
@@ -1256,7 +1304,7 @@ mod overlapping_epoch_tests {
             // Even though `now - drain_started_ms` exceeds DRAIN_MS, the
             // window is NOT expired: the peer just used `previous`.
             assert!(
-                !entry.drain_expired(t, DRAIN_MS),
+                !entry.drain_expired(t, DRAIN_MS, MAX_MS),
                 "previous slot must not be retired while peer keeps using it (t={t})"
             );
             assert!(
@@ -1269,11 +1317,11 @@ mod overlapping_epoch_tests {
         // last `previous`-slot use was at t=25_000; the window now
         // elapses DRAIN_MS after that, NOT DRAIN_MS after the cutover.
         assert!(
-            !entry.drain_expired(34_999, DRAIN_MS),
+            !entry.drain_expired(34_999, DRAIN_MS, MAX_MS),
             "window must not expire before DRAIN_MS past the last previous use"
         );
         assert!(
-            entry.drain_expired(35_000, DRAIN_MS),
+            entry.drain_expired(35_000, DRAIN_MS, MAX_MS),
             "window must expire DRAIN_MS after the last previous-slot decrypt"
         );
 
@@ -1291,6 +1339,7 @@ mod overlapping_epoch_tests {
     #[test]
     fn drain_expiry_unaffected_when_peer_off_old_epoch() {
         const DRAIN_MS: u64 = 10_000;
+        const MAX_MS: u64 = 120_000;
         let cutover_ms = 1_000;
 
         let (_old_send, old_recv) = xk_pair(1, 2);
@@ -1302,141 +1351,106 @@ mod overlapping_epoch_tests {
         // No old-epoch frames ever arrive: `previous_last_used_ms` stays
         // 0, the deadline anchor is the cutover time.
         assert!(
-            !entry.drain_expired(cutover_ms + DRAIN_MS - 1, DRAIN_MS),
+            !entry.drain_expired(cutover_ms + DRAIN_MS - 1, DRAIN_MS, MAX_MS),
             "window must not expire early"
         );
         assert!(
-            entry.drain_expired(cutover_ms + DRAIN_MS, DRAIN_MS),
+            entry.drain_expired(cutover_ms + DRAIN_MS, DRAIN_MS, MAX_MS),
             "window must expire on the plain wall-clock timer when peer is off the old epoch"
         );
     }
 
-    // ========================================================================
-    // Rekey-policy characterization (pins `check_session_rekey`'s decision
-    // boundaries before the `Fsp::poll_rekey` hoist — these thresholds have no
-    // other test module).
-    // ========================================================================
+    // The retention ceiling the drain cap added. The five rekey-policy
+    // characterization tests that sat here on `maint` are not carried: they
+    // pinned `check_session_rekey`'s boundaries before the `Fsp::poll_rekey`
+    // hoist, and the hoisted predicate has its own tests in
+    // `src/proto/fsp/tests/core.rs`.
 
-    /// The initiator liveness-cutover delay used by `check_session_rekey`
-    /// (`FSP_CUTOVER_DELAY_MS`). Mirrored here as the characterization anchor.
-    const CUTOVER_DELAY_MS: u64 = 2000;
+    // 12. A peer that keeps exercising the old epoch delays erasure by a
+    //     bounded amount rather than preventing it. The refreshes must
+    //     continue past the ceiling: a case that stops refreshing at the
+    //     boundary passes without the ceiling and proves nothing.
+    #[test]
+    fn drain_retention_is_capped_against_a_peer_pinning_the_old_epoch() {
+        const DRAIN_MS: u64 = 10_000;
+        const MAX_MS: u64 = 120_000;
 
-    /// Build an established entry that has completed a rekey as initiator and
-    /// holds a pending session awaiting the K-bit cutover.
-    fn entry_pending_cutover(rekey_completed_ms: u64) -> SessionEntry {
-        let (_cur_send, cur_recv) = xk_pair(1, 2);
+        let (_old_send, old_recv) = xk_pair(1, 2);
         let (_new_send, new_recv) = xk_pair(3, 4);
-        let mut entry = entry_with_current(cur_recv);
-        // Mark ourselves the rekey initiator, then land the completed session
-        // as pending (clears rekey_state, so has_rekey_in_progress() == false).
-        entry.set_rekey_state(HandshakeState::new_responder(keypair(7)), true);
+        let mut entry = entry_with_current(old_recv);
         entry.set_pending_session(new_recv);
-        entry.set_rekey_completed_ms(rekey_completed_ms);
-        entry
-    }
+        assert!(entry.cutover_to_new_session(1));
 
-    // The initiator-side cutover predicate: pending session present, no rekey
-    // in progress, we are the initiator, and the liveness timer has elapsed.
-    #[test]
-    fn rekey_cutover_predicate_boundary() {
-        let completed = 1_000u64;
-        let entry = entry_pending_cutover(completed);
+        // One old-epoch frame every half window, which is what a peer
+        // pinning the drain deadline actually does.
+        let mut t = 1u64;
+        while t < MAX_MS {
+            entry.refresh_previous_use(t);
+            assert!(
+                !entry.drain_expired(t, DRAIN_MS, MAX_MS),
+                "ceiling fired before the peer's grace ran out (t={t})"
+            );
+            t += DRAIN_MS / 2;
+        }
 
-        assert!(entry.pending_new_session().is_some());
-        assert!(!entry.has_rekey_in_progress());
-        assert!(entry.is_rekey_initiator());
-
-        // Not yet eligible one ms before the delay elapses.
-        let just_before = completed + CUTOVER_DELAY_MS - 1;
+        // Still refreshing, so the sliding deadline is nowhere near due.
+        entry.refresh_previous_use(MAX_MS + 1);
         assert!(
-            just_before.saturating_sub(entry.rekey_completed_ms()) < CUTOVER_DELAY_MS,
-            "cutover must not fire before the liveness delay"
-        );
-        // Eligible exactly at the delay.
-        let at = completed + CUTOVER_DELAY_MS;
-        assert!(
-            at.saturating_sub(entry.rekey_completed_ms()) >= CUTOVER_DELAY_MS,
-            "cutover fires once the liveness delay has elapsed"
+            entry.drain_expired(MAX_MS + 1, DRAIN_MS, MAX_MS),
+            "a peer pinning the old epoch retained the retired key past the ceiling"
         );
     }
 
-    // The rekey trigger's own threshold arithmetic is tested against the real
-    // predicate in src/proto/fmp/tests/core.rs, which drives poll_rekey. A test
-    // here previously reproduced that OR predicate as a local closure and
-    // asserted against its own copy, so it could not fail for the reason it
-    // existed: deleting the counter arm from the trigger left it green. Its one
-    // assertion over real code, that a fresh entry's jitter lies within the
-    // symmetric bound, is covered over 100 samples by
-    // test_session_entry_rekey_jitter_in_range in src/node/tests/session.rs.
-
-    // Dampening boundary: within `dampening_ms` of the peer's rekey msg1, local
-    // initiation is suppressed; at/after the window it is not.
+    // 13. The ceiling must not shorten the grace the sliding deadline
+    //     exists to give a peer that lost msg3 and is still catching up.
     #[test]
-    fn rekey_dampening_boundary() {
-        let (_s, recv) = xk_pair(1, 2);
-        let mut entry = entry_with_current(recv);
-        const DAMP_MS: u64 = 30_000;
+    fn drain_retention_cap_does_not_shorten_the_ordinary_grace() {
+        const DRAIN_MS: u64 = 10_000;
+        const MAX_MS: u64 = 120_000;
+        const CUTOVER_MS: u64 = 1_000;
 
-        // No peer rekey recorded → never dampened.
-        assert!(!entry.is_rekey_dampened(50_000, DAMP_MS));
+        let (_old_send, old_recv) = xk_pair(1, 2);
+        let (_new_send, new_recv) = xk_pair(3, 4);
+        let mut entry = entry_with_current(old_recv);
+        entry.set_pending_session(new_recv);
+        assert!(entry.cutover_to_new_session(CUTOVER_MS));
+        assert!(entry.is_draining());
 
-        entry.record_peer_rekey(10_000);
-        assert!(
-            entry.is_rekey_dampened(10_000 + DAMP_MS - 1, DAMP_MS),
-            "dampened within the window"
-        );
-        assert!(
-            !entry.is_rekey_dampened(10_000 + DAMP_MS, DAMP_MS),
-            "not dampened once the window has elapsed"
-        );
+        // A peer that lost msg3 and is still catching up sends one
+        // old-epoch frame part-way through the window.
+        let last_use = CUTOVER_MS + DRAIN_MS / 2;
+        entry.refresh_previous_use(last_use);
+        assert!(!entry.drain_expired(CUTOVER_MS + DRAIN_MS, DRAIN_MS, MAX_MS));
+        assert!(!entry.drain_expired(last_use + DRAIN_MS - 1, DRAIN_MS, MAX_MS));
+        assert!(entry.drain_expired(last_use + DRAIN_MS, DRAIN_MS, MAX_MS));
     }
 
-    // Epoch-reaction: a frame authenticating against `pending` while a msg3
-    // retransmission is retained confirms the peer on the new epoch (clears the
-    // msg3 payload) and then promotes.
+    // 14. The shipped ceiling has to clear the worst-case legitimate
+    //     recovery of a peer that lost msg3: the msg3 resend ladder, the
+    //     responder's handshake timeout, and the rekey dampening window
+    //     before it may re-initiate. A later tightening of the ceiling
+    //     reds this rather than silently amputating that recovery.
     #[test]
-    fn epoch_reaction_pending_confirms_then_promotes() {
-        let (mut p_send, p_recv) = xk_pair(3, 4);
-        let (_cur_send, cur_recv) = xk_pair(1, 2);
-        let mut entry = entry_with_current(cur_recv);
-        let k_before = entry.current_k_bit();
-        entry.set_pending_session(p_recv);
-        entry.set_rekey_msg3_payload(vec![0xAB; 8], 5_000);
-        assert!(entry.rekey_msg3_payload().is_some());
+    fn drain_retention_cap_clears_the_msg3_recovery_budget() {
+        const DRAIN_MS: u64 = 10_000;
+        // 31 s resend ladder + 30 s handshake timeout + 30 s dampening.
+        const RECOVERY_MS: u64 = 91_000;
+        const CUTOVER_MS: u64 = 1_000;
+        let max_ms = crate::node::handlers::rekey::drain_max_retention_ms(
+            &crate::config::RateLimitConfig::default(),
+        );
 
-        let (ct, counter, hdr) = seal(&mut p_send, b"new-epoch", !k_before);
-        let (_pt, slot) = entry
-            .fsp_trial_decrypt(&ct, counter, &hdr, !k_before, 2_000)
-            .expect("pending frame decrypts");
-        assert_eq!(slot, EpochSlot::Pending);
+        let (_old_send, old_recv) = xk_pair(1, 2);
+        let (_new_send, new_recv) = xk_pair(3, 4);
+        let mut entry = entry_with_current(old_recv);
+        entry.set_pending_session(new_recv);
+        assert!(entry.cutover_to_new_session(CUTOVER_MS));
+        assert!(entry.is_draining());
 
-        // Reaction order: confirm (while pending still held) then promote.
-        entry.confirm_peer_new_epoch();
-        assert!(entry.rekey_msg3_payload().is_none());
-        entry.handle_peer_kbit_flip(2_000);
-        assert!(entry.pending_new_session().is_none());
-        assert_ne!(entry.current_k_bit(), k_before);
-    }
-
-    // Epoch-reaction: as the initiator that already cut over on its own timer
-    // (msg3 retained, no pending), a frame authenticating against `current`
-    // confirms the responder reached the new epoch.
-    #[test]
-    fn epoch_reaction_current_confirms_responder() {
-        let (mut cur_send, cur_recv) = xk_pair(1, 2);
-        let mut entry = entry_with_current(cur_recv);
-        entry.set_rekey_msg3_payload(vec![0xCD; 8], 5_000);
-        assert!(entry.pending_new_session().is_none());
-        assert!(entry.rekey_msg3_payload().is_some());
-
-        let (ct, counter, hdr) = seal(&mut cur_send, b"steady", false);
-        let (_pt, slot) = entry
-            .fsp_trial_decrypt(&ct, counter, &hdr, false, 2_000)
-            .expect("current frame decrypts");
-        assert_eq!(slot, EpochSlot::Current);
-
-        // The Current-with-retained-msg3-and-no-pending arm confirms.
-        entry.confirm_peer_new_epoch();
-        assert!(entry.rekey_msg3_payload().is_none());
+        entry.refresh_previous_use(CUTOVER_MS + RECOVERY_MS);
+        assert!(
+            !entry.drain_expired(CUTOVER_MS + RECOVERY_MS, DRAIN_MS, max_ms),
+            "ceiling fires inside the msg3 recovery budget"
+        );
     }
 }

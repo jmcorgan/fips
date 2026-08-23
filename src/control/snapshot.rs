@@ -134,6 +134,7 @@ fn empty_acl_status() -> PeerAclStatus {
         deny_file_entries: Vec::new(),
         allow_entries: Vec::new(),
         deny_entries: Vec::new(),
+        stale: false,
     }
 }
 

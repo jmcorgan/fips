@@ -120,7 +120,19 @@ pub enum DiscoveryReject {
     /// Request dedup cache (`recent_requests`) is at capacity, so the
     /// `LookupRequest` is dropped without being forwarded. Tracked via
     /// [`DiscoveryStats::req_dedup_cache_full`](crate::node::stats::DiscoveryStats).
+    ///
+    /// Frozen at zero: a full cache now evicts its oldest entry and admits
+    /// the request, counted as
+    /// [`DiscoveryStats::req_dedup_evicted`](crate::node::stats::DiscoveryStats).
+    /// The variant and its counter stay so an operator reading a dashboard
+    /// across versions does not find the series missing.
     ReqDedupCacheFull,
+    /// This node is the lookup target, but the link peer the request
+    /// arrived from has spent its signing budget. Answering costs a fresh
+    /// Schnorr signature per request, so the budget bounds what one
+    /// neighbour can make this node sign. Tracked via
+    /// [`DiscoveryStats::req_sign_rate_limited`](crate::node::stats::DiscoveryStats).
+    ReqSignRateLimited,
     /// Request arrived with TTL=0 — no more forwarding hops allowed.
     /// Tracked via
     /// [`DiscoveryStats::req_ttl_exhausted`](crate::node::stats::DiscoveryStats).
@@ -136,6 +148,14 @@ pub enum DiscoveryReject {
     /// Response proof signature failed verification. Tracked via
     /// [`DiscoveryStats::resp_proof_failed`](crate::node::stats::DiscoveryStats).
     RespProofFailed,
+    /// Response arrived on the originator path but carries no
+    /// `request_id` this node has outstanding for the named target, so
+    /// it answers no lookup of ours. Expected to be nonzero in healthy
+    /// operation: the request is flooded to every qualifying tree peer,
+    /// so duplicate replies land here after the first is accepted.
+    /// Tracked via
+    /// [`DiscoveryStats::resp_unsolicited`](crate::node::stats::DiscoveryStats).
+    RespUnsolicited,
     /// Response could not be routed toward the origin: no reverse-path
     /// entry for the `request_id` and no greedy tree route to the
     /// origin. Tracked via
@@ -264,6 +284,18 @@ pub enum SessionReject {
     /// before any handshake state was created or any ack sent. Tracked via
     /// [`SessionStats::setup_rate_limited`](crate::node::stats::SessionStats).
     SetupRateLimited,
+    /// A session would have been created but the table is at
+    /// `node.limits.max_sessions`. Refused rather than evicted: the
+    /// deciding message is unauthenticated at this point, so evicting
+    /// would hand a stranger a way to tear down established sessions.
+    /// Tracked via
+    /// [`SessionStats::table_full`](crate::node::stats::SessionStats).
+    TableFull,
+    /// A session would have been created but unauthenticated half-open
+    /// entries already hold their share of the table. Bounds what a
+    /// handshake flood can deny an established peer. Tracked via
+    /// [`SessionStats::half_open_full`](crate::node::stats::SessionStats).
+    HalfOpenFull,
 }
 
 /// MMP rejection reasons.
@@ -387,9 +419,11 @@ mod tests {
             DiscoveryReject::ReqDuplicate,
             DiscoveryReject::ReqDedupCacheFull,
             DiscoveryReject::ReqTtlExhausted,
+            DiscoveryReject::ReqSignRateLimited,
             DiscoveryReject::RespDecodeError,
             DiscoveryReject::RespIdentityMiss,
             DiscoveryReject::RespProofFailed,
+            DiscoveryReject::RespUnsolicited,
         ];
         for v in variants {
             let r = RejectReason::Discovery(v);

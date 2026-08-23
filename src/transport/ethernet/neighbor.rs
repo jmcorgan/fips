@@ -5,7 +5,10 @@
 //! - Version (1 byte): beacon protocol version
 
 use crate::transport::{DiscoveredPeer, TransportAddr, TransportId};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Mutex;
+use tracing::warn;
 
 /// Beacon protocol version.
 pub const BEACON_VERSION: u8 = 0x01;
@@ -53,10 +56,33 @@ pub fn parse_beacon(data: &[u8]) -> bool {
     data[4] == BEACON_VERSION
 }
 
+/// How many distinct source MACs the discovery buffer holds between drains.
+///
+/// Beacons are unauthenticated broadcast frames, so anything on the segment
+/// can name as many source MACs as it likes; without a bound the buffer grows
+/// with the flood rate, and it is not drained at all while the transport is
+/// not operational. This caps it at roughly a thousand small structs, tens of
+/// kilobytes. Raising it costs that much more memory per transport; lowering
+/// it risks truncating discovery on a very large segment. A thousand distinct
+/// beaconing FIPS neighbors within one tick is far outside anything a real
+/// deployment produces.
+const MAX_BUFFERED_PEERS: usize = 1024;
+
 /// Buffer for discovered peers, drained by `discover()`.
 pub struct NeighborBuffer {
     transport_id: TransportId,
-    peers: Mutex<Vec<DiscoveredPeer>>,
+    peers: Mutex<Buffered>,
+}
+
+/// Peers keyed by source MAC, plus the sighting order `take()` restores.
+#[derive(Default)]
+struct Buffered {
+    by_mac: HashMap<[u8; 6], (u64, DiscoveredPeer)>,
+    seq: u64,
+    /// Beacons refused for want of room, cumulative and never reset.
+    dropped: u64,
+    /// Cumulative drop count that earns the next log record.
+    warn_at: u64,
 }
 
 impl NeighborBuffer {
@@ -64,24 +90,86 @@ impl NeighborBuffer {
     pub fn new(transport_id: TransportId) -> Self {
         Self {
             transport_id,
-            peers: Mutex::new(Vec::new()),
+            peers: Mutex::new(Buffered::default()),
         }
     }
 
     /// Add a discovered peer from a received beacon.
-    pub fn add_peer(&self, src_mac: [u8; 6]) {
-        let addr = TransportAddr::from_bytes(&src_mac);
-        let peer = DiscoveredPeer::new(self.transport_id, addr);
-        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
-        peers.retain(|p| p.addr.as_bytes() != src_mac);
-        peers.push(peer);
+    ///
+    /// Returns false when the beacon was refused because the buffer is full.
+    /// A MAC already buffered is always refreshed, so a flood of new MACs
+    /// cannot stop a known neighbor from being seen again.
+    pub fn add_peer(&self, src_mac: [u8; 6]) -> bool {
+        let mut buffered = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+        buffered.seq += 1;
+        let seq = buffered.seq;
+        let full = buffered.by_mac.len() >= MAX_BUFFERED_PEERS;
+        let peer = self.peer(src_mac);
+        let stored = match buffered.by_mac.entry(src_mac) {
+            // Refreshing moves the MAC to the end, as retain-then-push did.
+            Entry::Occupied(mut slot) => {
+                slot.insert((seq, peer));
+                true
+            }
+            Entry::Vacant(slot) if !full => {
+                slot.insert((seq, peer));
+                true
+            }
+            Entry::Vacant(_) => false,
+        };
+        if !stored {
+            buffered.dropped += 1;
+        }
+        stored
     }
 
-    /// Drain all discovered peers since the last call.
+    /// Drain all discovered peers since the last call, oldest sighting first.
     pub fn take(&self) -> Vec<DiscoveredPeer> {
-        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut *peers)
+        let mut buffered = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ordered: Vec<(u64, DiscoveredPeer)> =
+            buffered.by_mac.drain().map(|(_, entry)| entry).collect();
+        // The reconcile layer spends a finite connect budget in this order, so
+        // which neighbor gets dialed must not depend on hash iteration order.
+        ordered.sort_unstable_by_key(|(seq, _)| *seq);
+        // Rate-limited: the drop rate is whatever the flooder chooses, and one
+        // record per drain would hand it the log volume too.
+        if buffered.dropped >= buffered.warn_at.max(1) {
+            warn!(
+                transport_id = %self.transport_id,
+                dropped = buffered.dropped,
+                cap = MAX_BUFFERED_PEERS,
+                "discovery buffer full, beacons from unseen neighbors refused"
+            );
+            buffered.warn_at = next_decade(buffered.dropped);
+        }
+        ordered.into_iter().map(|(_, peer)| peer).collect()
     }
+
+    /// Beacons refused for want of room since this buffer was created.
+    pub fn dropped(&self) -> u64 {
+        self.peers.lock().unwrap_or_else(|e| e.into_inner()).dropped
+    }
+
+    /// Build the buffered peer record for one beacon.
+    ///
+    /// This line's beacon carries no key, so there is no pubkey hint to
+    /// attach: the identity is learned from the handshake instead.
+    fn peer(&self, src_mac: [u8; 6]) -> DiscoveredPeer {
+        let addr = TransportAddr::from_bytes(&src_mac);
+        DiscoveredPeer::new(self.transport_id, addr)
+    }
+}
+
+/// Smallest power of ten strictly greater than `n`, saturating at `u64::MAX`.
+fn next_decade(n: u64) -> u64 {
+    let mut threshold = 1u64;
+    while threshold <= n {
+        match threshold.checked_mul(10) {
+            Some(next) => threshold = next,
+            None => return u64::MAX,
+        }
+    }
+    threshold
 }
 
 // ============================================================================
@@ -170,5 +258,85 @@ mod tests {
     #[test]
     fn test_beacon_size() {
         assert_eq!(BEACON_SIZE, 5);
+    }
+
+    /// Distinct MAC number `n`, for filling the buffer.
+    fn nth_mac(n: usize) -> [u8; 6] {
+        let bytes = (n as u64).to_be_bytes();
+        [0x02, bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]
+    }
+
+    #[test]
+    fn discovery_buffer_stops_buffering_past_the_cap() {
+        // The defect: an unauthenticated flood of source MACs grew the buffer
+        // without bound. Fails against the uncapped Vec, which returns all of
+        // them.
+        let buffer = NeighborBuffer::new(TransportId::new(1));
+        for n in 0..MAX_BUFFERED_PEERS + 50 {
+            buffer.add_peer(nth_mac(n));
+        }
+
+        let peers = buffer.take();
+        assert_eq!(peers.len(), MAX_BUFFERED_PEERS);
+        // Drop-new keeps the earliest sightings.
+        assert_eq!(peers[0].addr.as_bytes(), &nth_mac(0));
+    }
+
+    #[test]
+    fn discovery_buffer_counts_dropped_beacons() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
+        for n in 0..MAX_BUFFERED_PEERS {
+            assert!(buffer.add_peer(nth_mac(n)));
+        }
+        for n in MAX_BUFFERED_PEERS..MAX_BUFFERED_PEERS + 7 {
+            assert!(!buffer.add_peer(nth_mac(n)));
+        }
+
+        assert_eq!(buffer.dropped(), 7);
+    }
+
+    #[test]
+    fn discovery_buffer_repeat_beacon_from_a_full_buffer_still_refreshes() {
+        let buffer = NeighborBuffer::new(TransportId::new(1));
+        for n in 0..MAX_BUFFERED_PEERS + 50 {
+            buffer.add_peer(nth_mac(n));
+        }
+        // A neighbor already buffered must not be refused by a full buffer.
+        assert!(buffer.add_peer(nth_mac(0)));
+
+        let peers = buffer.take();
+        assert_eq!(peers.len(), MAX_BUFFERED_PEERS);
+        assert_eq!(peers[peers.len() - 1].addr.as_bytes(), &nth_mac(0));
+    }
+
+    #[test]
+    fn discovery_buffer_drain_preserves_last_seen_order() {
+        // A regression pin on the map rewrite rather than a test of the
+        // defect: retain-then-push already produced this order.
+        let buffer = NeighborBuffer::new(TransportId::new(1));
+        let a = [0xaa; 6];
+        let b = [0xbb; 6];
+        let c = [0xcc; 6];
+
+        buffer.add_peer(a);
+        buffer.add_peer(b);
+        buffer.add_peer(c);
+        buffer.add_peer(a);
+
+        let macs: Vec<_> = buffer
+            .take()
+            .iter()
+            .map(|p| p.addr.as_bytes().to_vec())
+            .collect();
+        assert_eq!(macs, vec![b.to_vec(), c.to_vec(), a.to_vec()]);
+    }
+
+    #[test]
+    fn next_decade_steps_by_powers_of_ten() {
+        assert_eq!(next_decade(0), 1);
+        assert_eq!(next_decade(1), 10);
+        assert_eq!(next_decade(9), 10);
+        assert_eq!(next_decade(10), 100);
+        assert_eq!(next_decade(u64::MAX), u64::MAX);
     }
 }

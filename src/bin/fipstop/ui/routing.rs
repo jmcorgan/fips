@@ -192,6 +192,8 @@ fn draw_routing_stats(
             ("Bloom Miss", lookup("req_bloom_miss")),
             ("Backoff Suppressed", lookup("req_backoff_suppressed")),
             ("Fwd Rate Limited", lookup("req_forward_rate_limited")),
+            ("Sign Rate Limited", lookup("req_sign_rate_limited")),
+            ("Dedup Evicted", lookup("req_dedup_evicted")),
             ("TTL Exhausted", lookup("req_ttl_exhausted")),
             ("Decode Error", lookup("req_decode_error")),
         ],
@@ -206,6 +208,7 @@ fn draw_routing_stats(
             ("Timed Out", lookup("resp_timed_out")),
             ("Identity Miss", lookup("resp_identity_miss")),
             ("Proof Failed", lookup("resp_proof_failed")),
+            ("Unsolicited", lookup("resp_unsolicited")),
             ("Decode Error", lookup("resp_decode_error")),
         ],
     ));
@@ -298,6 +301,13 @@ fn draw_routing_stats(
             ("Path Broken Refused", err("unbound_broken")),
             ("MTU Exceeded Refused", err("unbound_mtu")),
             ("Forged Pairing", err("unbound_forged")),
+            ("Emit Over Peer Budget", err("emit_over_peer_budget")),
+            ("Emit Over Dest Interval", err("emit_over_dest_interval")),
+            ("Emit Limiter At Capacity", err("emit_limiter_at_capacity")),
+            (
+                "MTU Exceeded Uncorroborated",
+                err("mtu_exceeded_uncorroborated"),
+            ),
         ],
     ));
     right.push(Line::from(""));

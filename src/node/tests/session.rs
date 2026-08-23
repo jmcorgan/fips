@@ -2559,6 +2559,17 @@ fn install_halfopen(node: &mut Node, claimed: NodeAddr) {
     node.sessions.insert(claimed, entry);
 }
 
+/// Record that this node put a frame of `wire_len` bytes on the wire toward
+/// `dest`, which is what corroborates a reactive `MtuExceeded` reporting a
+/// smaller bottleneck. Honest path-MTU discovery produces this by sending;
+/// a handler test that installs a session without sending has to state it.
+fn note_sent_wire_len(node: &mut Node, dest: &NodeAddr, wire_len: usize) {
+    node.sessions
+        .get_mut(dest)
+        .expect("session must exist to corroborate a report")
+        .record_sent_wire_len(wire_len);
+}
+
 /// Install the entry `initiate_session` creates: an address this node chose
 /// itself, with the handshake still in flight and MMP not yet initialized.
 fn install_initiating(node: &mut Node, remote: &Identity) {
@@ -2595,6 +2606,7 @@ async fn test_handle_mtu_exceeded_writes_path_mtu_lookup_when_empty() {
         "lookup should start empty for this destination"
     );
 
+    note_sent_wire_len(&mut tn.node, &dest, 1400);
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
     tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
@@ -2621,6 +2633,7 @@ async fn test_handle_mtu_exceeded_tightens_existing_path_mtu_lookup() {
     // response that didn't reflect the forward-path bottleneck).
     tn.node.path_mtu_lookup_insert(dest_fips, 1500);
 
+    note_sent_wire_len(&mut tn.node, &dest, 1400);
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
     tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
@@ -2752,8 +2765,9 @@ async fn test_handle_mtu_exceeded_at_the_floor_still_writes_path_mtu_lookup() {
     let dest = *remote.node_addr();
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let dest_fips = crate::FipsAddress::from_node_addr(&dest);
-    let floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU;
+    let floor = crate::upper::icmp::MIN_REACTIVE_PATH_MTU;
 
+    note_sent_wire_len(&mut tn.node, &dest, 1400);
     let inner = build_mtu_exceeded_inner(&dest, &reporter, floor);
     tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
@@ -3201,6 +3215,7 @@ async fn test_mtu_exceeded_for_a_session_we_initiated_seeds_path_mtu_lookup_befo
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let dest_fips = crate::FipsAddress::from_node_addr(&dest);
 
+    note_sent_wire_len(&mut node, &dest, 1400);
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
     node.handle_mtu_exceeded(&reporter, &inner).await;
 
@@ -3227,6 +3242,7 @@ async fn test_mtu_exceeded_from_a_third_party_forwarder_still_tightens_an_active
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let dest_fips = crate::FipsAddress::from_node_addr(&dest);
 
+    note_sent_wire_len(&mut node, &dest, 1400);
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1280);
     node.handle_mtu_exceeded(&reporter, &inner).await;
 
@@ -4576,6 +4592,258 @@ async fn test_a_drained_stranger_bucket_still_admits_a_setup_naming_an_establish
 }
 
 // ============================================================================
+// Integration tests: the session-table population cap
+// ============================================================================
+
+/// Build a two-node routable mesh with the session table capped for a test
+/// and the setup limiter opened wide, so the cap is the only thing refusing.
+async fn make_session_capped_pair(max_sessions: usize) -> Vec<TestNode> {
+    let configs = (0..2)
+        .map(|_| {
+            let mut config = Config::new();
+            config.node.rekey.enabled = false;
+            config.node.limits.max_sessions = max_sessions;
+            config.node.rate_limit.session_setup_burst = 10_000;
+            config.node.rate_limit.session_setup_rate = 10_000.0;
+            config
+        })
+        .collect();
+    let mut nodes = run_tree_test_with_configs(configs, &[(0, 1)]).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    nodes
+}
+
+#[tokio::test]
+async fn test_forged_setups_stop_growing_the_session_table_once_the_cap_is_reached() {
+    // The table was the one remotely-grown map with no bound: each setup from
+    // an address nobody has seen inserted an entry, and neither existing limit
+    // reached it, the setup limiter governing arrival rate rather than
+    // population and the idle purge only reaching entries a peer stops using.
+    const MAX: usize = 8;
+    let share = MAX / 2;
+    let mut nodes = make_session_capped_pair(MAX).await;
+
+    for _ in 0..share {
+        deliver_forged_setup_over_link(&mut nodes).await;
+    }
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        share,
+        "the admissible entries must be admitted, or this test would pass for \
+         the wrong reason"
+    );
+    assert_eq!(nodes[1].node.stats().session.half_open_full, 0);
+
+    // Every SessionAck goes out through `send_session_datagram`, the only
+    // thing bumping this counter on a node with no transit traffic. A refused
+    // setup must not move it.
+    let originated = nodes[1].node.metrics().forwarding.originated_packets.get();
+
+    for _ in 0..4 {
+        deliver_forged_setup_over_link(&mut nodes).await;
+    }
+
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        share,
+        "a table at its bound must stop growing"
+    );
+    assert_eq!(
+        nodes[1].node.stats().session.half_open_full,
+        4,
+        "each refusal must be counted; the DEBUG line is invisible by default"
+    );
+    assert_eq!(
+        nodes[1].node.metrics().forwarding.originated_packets.get(),
+        originated,
+        "a refused setup must emit nothing at all"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_a_setup_that_would_grow_a_full_table_is_refused_and_counted() {
+    // The table-full arm specifically: one established entry against a cap of
+    // one, so the half-open share is not what refuses.
+    let mut nodes = make_session_capped_pair(1).await;
+    establish_pair_session(&mut nodes).await;
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        1,
+        "precondition: the table is full with the established peer"
+    );
+
+    let originated = nodes[1].node.metrics().forwarding.originated_packets.get();
+    deliver_forged_setup_over_link(&mut nodes).await;
+
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        1,
+        "a full table must not grow for a stranger"
+    );
+    assert_eq!(nodes[1].node.stats().session.table_full, 1);
+    assert_eq!(
+        nodes[1].node.metrics().forwarding.originated_packets.get(),
+        originated,
+        "a refused setup must cost no ack"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_a_full_session_table_still_serves_a_setup_naming_an_existing_entry() {
+    // The guard against writing the cap as "refuse strangers". A setup for an
+    // entry already present cannot grow the table, and refusing it would break
+    // the duplicate-ack resend an initiator depends on.
+    let mut nodes = make_session_capped_pair(1).await;
+    establish_pair_session(&mut nodes).await;
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    let refused_before = nodes[1].node.stats().session.table_full;
+    let originated = nodes[1].node.metrics().forwarding.originated_packets.get();
+
+    // A setup naming the established peer: the shape an inbound rekey has.
+    let setup = forge_setup_from_stranger(&nodes);
+    let datagram = SessionDatagram::new(node0_addr, node1_addr, setup).with_ttl(64);
+    let encoded = datagram.encode();
+    nodes[1]
+        .node
+        .handle_session_datagram(&node0_addr, &encoded[1..], false)
+        .await;
+
+    assert_eq!(
+        nodes[1].node.stats().session.table_full,
+        refused_before,
+        "a setup that cannot grow the table must not be refused by the cap"
+    );
+    assert!(
+        nodes[1].node.metrics().forwarding.originated_packets.get() > originated,
+        "and it must still be answered"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_a_full_session_table_does_not_evict_an_established_session() {
+    // Pins refuse-not-evict. The setup that triggers the decision is
+    // unauthenticated at that point, so evicting would hand a stranger a way
+    // to tear down a session it has nothing to do with.
+    let mut nodes = make_session_capped_pair(1).await;
+    establish_pair_session(&mut nodes).await;
+    let node0_addr = *nodes[0].node.node_addr();
+
+    for _ in 0..4 {
+        deliver_forged_setup_over_link(&mut nodes).await;
+    }
+
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .expect("the established session must survive a flood at the cap")
+            .is_established(),
+        "a stranger's setup must never cost an established peer its session"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_the_session_table_admits_again_after_the_handshake_reaper_drains_it() {
+    // The cap is a ceiling, not a latch: half-open entries are reaped after
+    // `handshake_timeout_secs` and the room they free must be usable.
+    const MAX: usize = 8;
+    let share = MAX / 2;
+    let mut nodes = make_session_capped_pair(MAX).await;
+
+    for _ in 0..(share + 2) {
+        deliver_forged_setup_over_link(&mut nodes).await;
+    }
+    assert!(
+        nodes[1].node.stats().session.half_open_full > 0,
+        "precondition: the table is refusing before the reaper runs"
+    );
+
+    let timeout_ms = nodes[1]
+        .node
+        .config()
+        .node
+        .rate_limit
+        .handshake_timeout_secs
+        * 1000;
+    let now_ms = Node::now_ms();
+    nodes[1]
+        .node
+        .resend_pending_session_handshakes(now_ms + timeout_ms + 1)
+        .await;
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        0,
+        "precondition: the reaper freed the half-open entries"
+    );
+
+    deliver_forged_setup_over_link(&mut nodes).await;
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        1,
+        "room freed by the reaper must be usable, or the cap is a latch"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn test_half_open_setups_cannot_consume_more_than_their_share_of_the_table() {
+    // Half-open entries are unauthenticated and cheap to create, so they are
+    // held to a share of the table rather than being allowed to fill it and
+    // deny it to every peer that would complete a handshake.
+    const MAX: usize = 16;
+    let share = MAX / 2;
+    let mut nodes = make_session_capped_pair(MAX).await;
+
+    for _ in 0..(share + 2) {
+        deliver_forged_setup_over_link(&mut nodes).await;
+    }
+
+    assert_eq!(
+        nodes[1].node.sessions.len(),
+        share,
+        "half-open entries must stop at their share, well below the table cap"
+    );
+    assert_eq!(nodes[1].node.stats().session.half_open_full, 2);
+    assert_eq!(
+        nodes[1].node.stats().session.table_full,
+        0,
+        "the table itself is not full, so the refusals must be attributed to \
+         the share rather than to the cap"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[test]
+fn test_session_entry_size_stays_within_the_budget_the_cap_is_derived_from() {
+    // The default `max_sessions` is derived from what one entry costs.
+    // Measured at 6608 bytes of inline state when the cap was written, plus
+    // heap for the MMP window and handshake payloads, so 1024 sessions is
+    // roughly 7 MB. This is what fires if a large field is added later and
+    // the arithmetic behind that default stops holding.
+    const BUDGET: usize = 8192;
+    assert!(
+        std::mem::size_of::<SessionEntry>() <= BUDGET,
+        "SessionEntry is {} bytes, over the {} the max_sessions default \
+         assumes; re-derive the default or shrink the entry",
+        std::mem::size_of::<SessionEntry>(),
+        BUDGET
+    );
+}
+
+// ============================================================================
 // Integration tests: a forged SessionAck against an in-flight initiation
 // ============================================================================
 
@@ -5612,4 +5880,227 @@ async fn test_peer_restart_reestablishes_through_a_pending_session_that_waited_o
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+// ---------------------------------------------------------------------------
+// Reactive MtuExceeded: corroboration against what this node actually sent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_reactive_mtu_exceeded_at_the_floor_no_longer_pins_a_session_this_node_has_not_overfilled()
+ {
+    // The defect itself. A report of exactly the floor is a legal value, and
+    // the admission gate cannot tell an honest forwarder from anyone else, so
+    // one packet drove a bound session's path MTU to the floor and pinned the
+    // FipsAddress-keyed entry the SYN-time MSS clamp reads. Nothing this node
+    // sent could have overflowed a hop at that size, so no honest report of it
+    // exists.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    let before = node
+        .sessions
+        .get(&dest)
+        .and_then(|e| e.mmp())
+        .map(|m| m.path_mtu.current_mtu());
+
+    let inner =
+        build_mtu_exceeded_inner(&dest, &reporter, crate::upper::icmp::MIN_REACTIVE_PATH_MTU);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(
+        node.sessions
+            .get(&dest)
+            .and_then(|e| e.mmp())
+            .map(|m| m.path_mtu.current_mtu()),
+        before,
+        "an uncorroborated report must leave the session path MTU alone"
+    );
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "an uncorroborated report must leave no clamp entry behind"
+    );
+    assert_eq!(
+        node.metrics().errors.mtu_exceeded_uncorroborated.get(),
+        1,
+        "the refusal must be counted apart from the below-floor refusal"
+    );
+    assert_eq!(
+        node.metrics().errors.mtu_exceeded_below_floor.get(),
+        0,
+        "the floor is not what refused this; the value is exactly at it"
+    );
+}
+
+#[tokio::test]
+async fn an_initiating_session_refuses_an_uncorroborated_report_and_accepts_a_corroborated_one() {
+    // The lookup write is the effect that survives on an initiating session,
+    // which has no MMP state at all, so this branch needs its own coverage:
+    // a guard placed on the apply rather than ahead of it would miss it.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_initiating(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 800);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "nothing this node sent could have overflowed a hop at 800 bytes"
+    );
+
+    // A SessionSetup can itself be the datagram that overflows a hop, so an
+    // initiating session must still be able to act on a real report.
+    note_sent_wire_len(&mut node, &dest, 1400);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        Some(800),
+        "a report corroborated by an oversized send must still be applied"
+    );
+}
+
+#[tokio::test]
+async fn a_second_reactive_decrease_needs_its_own_corroborating_send() {
+    // The evidence is spent on the decrease it vouched for. Otherwise one
+    // large send early in a session would vouch for every forged report for
+    // the rest of that session's life.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+
+    note_sent_wire_len(&mut node, &dest, 1400);
+    let first = build_mtu_exceeded_inner(&dest, &reporter, 1200);
+    node.handle_mtu_exceeded(&reporter, &first).await;
+    assert_eq!(
+        node.sessions
+            .get(&dest)
+            .and_then(|e| e.mmp())
+            .map(|m| m.path_mtu.current_mtu()),
+        Some(1200),
+        "the corroborated first decrease is accepted"
+    );
+
+    let second = build_mtu_exceeded_inner(&dest, &reporter, 600);
+    node.handle_mtu_exceeded(&reporter, &second).await;
+    assert_eq!(
+        node.sessions
+            .get(&dest)
+            .and_then(|e| e.mmp())
+            .map(|m| m.path_mtu.current_mtu()),
+        Some(1200),
+        "a further decrease needs evidence of its own"
+    );
+
+    // A genuine re-route onto a smaller hop is preceded by a send that hop
+    // drops, so the honest sequence still converges.
+    note_sent_wire_len(&mut node, &dest, 900);
+    node.handle_mtu_exceeded(&reporter, &second).await;
+    assert_eq!(
+        node.sessions
+            .get(&dest)
+            .and_then(|e| e.mmp())
+            .map(|m| m.path_mtu.current_mtu()),
+        Some(600),
+        "once this node has again sent something that does not fit, the report applies"
+    );
+}
+
+#[tokio::test]
+async fn a_corroborated_report_below_the_reactive_floor_is_still_refused() {
+    // Corroboration and the floor are independent refusals. A hop that really
+    // is tiny still cannot drive the clamp into the band where the derived
+    // MSS degenerates.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    note_sent_wire_len(&mut node, &dest, 1400);
+    let inner = build_mtu_exceeded_inner(
+        &dest,
+        &reporter,
+        crate::upper::icmp::MIN_REACTIVE_PATH_MTU - 1,
+    );
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    assert_eq!(node.path_mtu_lookup_get(&dest_fips), None);
+    assert_eq!(node.metrics().errors.mtu_exceeded_below_floor.get(), 1);
+    assert_eq!(node.metrics().errors.mtu_exceeded_uncorroborated.get(), 0);
+}
+
+#[tokio::test]
+async fn the_authenticated_path_mtu_notification_still_applies_at_the_actionable_floor() {
+    // The reactive guards must not leak onto the carrier that arrives inside
+    // an established session on the decrypted path, which is authenticated and
+    // needs no corroboration.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+
+    let floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU;
+    let body = build_path_mtu_notification_body(floor);
+    node.handle_session_path_mtu_notification(&dest, &body);
+
+    assert_eq!(
+        node.sessions
+            .get(&dest)
+            .and_then(|e| e.mmp())
+            .map(|m| m.path_mtu.current_mtu()),
+        Some(floor),
+        "the authenticated carrier still applies a value at the actionable floor"
+    );
+}
+
+#[tokio::test]
+async fn a_path_broken_flood_releases_the_stored_path_mtu_only_once_per_interval() {
+    use crate::proto::routing::PathBroken;
+
+    // PathBroken is unauthenticated and its release discards a bottleneck this
+    // node learned the hard way. Unlimited, the claim can be repeated as fast
+    // as it can be sent, so a genuinely learned value never survives.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_initiating(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    let dest_fips = crate::FipsAddress::from_node_addr(&dest);
+
+    let encoded = PathBroken::new(dest, reporter).encode();
+    let inner = &encoded[5..];
+
+    node.path_mtu_lookup_insert(dest_fips, 700);
+    node.handle_path_broken(&reporter, inner).await;
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        None,
+        "the first PathBroken still releases"
+    );
+
+    node.path_mtu_lookup_insert(dest_fips, 700);
+    node.handle_path_broken(&reporter, inner).await;
+    assert_eq!(
+        node.path_mtu_lookup_get(&dest_fips),
+        Some(700),
+        "a second release for the same destination inside the interval is refused"
+    );
 }

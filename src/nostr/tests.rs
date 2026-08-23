@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
+use nostr::nips::nip17;
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
 use super::runtime::{
@@ -13,8 +15,9 @@ use super::signal::{
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
 use super::traversal::{
-    PunchStrategy, build_punch_packet, is_doc_ip, is_never_punchable_ip, is_private_ip, now_ms,
-    parse_punch_packet, plan_punch_targets, planned_remote_endpoints, session_hash,
+    PunchStrategy, SourceRank, build_punch_packet, is_doc_ip, is_never_punchable_ip, is_private_ip,
+    now_ms, parse_punch_packet, plan_punch_targets, planned_remote_endpoints, rank_punch_source,
+    run_punch_attempt, session_hash,
 };
 use super::traversal_machine::suppress_responder_for_own_initiator;
 use super::types::BootstrapError;
@@ -47,14 +50,32 @@ fn can_reach(local_nat: NatType, remote_nat: NatType) -> bool {
 }
 
 fn signed_overlay_advert_event(created_at_secs: u64, expiration_secs: Option<u64>) -> nostr::Event {
-    let keys = nostr::Keys::generate();
+    signed_overlay_advert_event_from(&nostr::Keys::generate(), created_at_secs, expiration_secs)
+}
+
+/// The author-bound variant 0156's tests need: the caller chooses the signing
+/// key, so an event signed by somebody other than the requested peer can be
+/// constructed. The advert content keeps `next`'s own identifier and address.
+fn signed_overlay_advert_event_from(
+    keys: &nostr::Keys,
+    created_at_secs: u64,
+    expiration_secs: Option<u64>,
+) -> nostr::Event {
     let content = r#"{"identifier":"fips-overlay-v1-next","version":1,"endpoints":[{"transport":"tcp","addr":"203.0.113.10:443"}]}"#;
     let mut builder = EventBuilder::new(Kind::Custom(ADVERT_KIND), content)
         .custom_created_at(Timestamp::from(created_at_secs));
     if let Some(expiration_secs) = expiration_secs {
         builder = builder.tags([Tag::expiration(Timestamp::from(expiration_secs))]);
     }
-    builder.sign_with_keys(&keys).unwrap()
+    builder.sign_with_keys(keys).unwrap()
+}
+
+fn signed_inbox_relay_event(keys: &nostr::Keys, created_at_secs: u64, relay: &str) -> nostr::Event {
+    EventBuilder::new(Kind::InboxRelays, "")
+        .tags([Tag::relay(RelayUrl::parse(relay).unwrap())])
+        .custom_created_at(Timestamp::from(created_at_secs))
+        .sign_with_keys(keys)
+        .unwrap()
 }
 
 #[test]
@@ -195,6 +216,102 @@ fn advert_freshness_rejects_stale_created_at_without_expiration() {
     let valid_until =
         NostrRendezvous::compute_advert_valid_until_ms(&event, 600_000, now_secs * 1000);
     assert!(valid_until.is_none());
+}
+
+/// A hostile advert relay may answer an author-filtered request with an event
+/// it signed itself. Selection has to drop those before the newest-`created_at`
+/// contest, or a future-dated foreign advert suppresses the genuine one.
+#[test]
+fn advert_selection_ignores_events_not_signed_by_the_target_peer() {
+    let now_secs = Timestamp::now().as_secs();
+    let peer_keys = nostr::Keys::generate();
+    let hostile_keys = nostr::Keys::generate();
+
+    let hostile = signed_overlay_advert_event_from(&hostile_keys, now_secs + 3_600, None);
+    let genuine = signed_overlay_advert_event_from(&peer_keys, now_secs.saturating_sub(10), None);
+    let events = [hostile, genuine];
+
+    let selected = NostrRendezvous::newest_event_by_author(events.iter(), peer_keys.public_key())
+        .expect("the peer's own advert should be selected");
+    assert_eq!(selected.pubkey, peer_keys.public_key());
+}
+
+/// Nothing signed by the peer means nothing to select, even though the relays
+/// did answer. The caller reads this as "no evidence", not "withdrawn".
+#[test]
+fn advert_selection_returns_nothing_when_every_event_is_foreign() {
+    let now_secs = Timestamp::now().as_secs();
+    let peer_keys = nostr::Keys::generate();
+    let hostile_keys = nostr::Keys::generate();
+
+    let events = [signed_overlay_advert_event_from(
+        &hostile_keys,
+        now_secs + 3_600,
+        None,
+    )];
+
+    assert!(
+        NostrRendezvous::newest_event_by_author(events.iter(), peer_keys.public_key()).is_none()
+    );
+}
+
+/// The same omission on the inbox-relay lookup steers this node's DM and
+/// signal traffic onto relays an attacker chose, so it gets the same filter.
+#[test]
+fn inbox_relay_selection_ignores_relay_lists_not_signed_by_the_target() {
+    let now_secs = Timestamp::now().as_secs();
+    let peer_keys = nostr::Keys::generate();
+    let hostile_keys = nostr::Keys::generate();
+
+    let events = [
+        signed_inbox_relay_event(&hostile_keys, now_secs + 3_600, "wss://hostile.example/"),
+        signed_inbox_relay_event(
+            &peer_keys,
+            now_secs.saturating_sub(10),
+            "wss://genuine.example/",
+        ),
+    ];
+
+    let selected = NostrRendezvous::newest_event_by_author(events.iter(), peer_keys.public_key())
+        .expect("the peer's own relay list should be selected");
+    let relays = nip17::extract_relay_list(selected)
+        .map(|relay| relay.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(relays, vec!["wss://genuine.example/".to_string()]);
+}
+
+/// A far-future `created_at` must not buy a proportionally distant validity
+/// horizon. The window is computed from the clamped timestamp instead, so the
+/// entry expires on our clock rather than the publisher's.
+#[test]
+fn advert_freshness_clamps_created_at_beyond_the_forward_skew_tolerance() {
+    let now_secs = Timestamp::now().as_secs();
+    let event = signed_overlay_advert_event(now_secs + 3_600, None);
+    let valid_until =
+        NostrRendezvous::compute_advert_valid_until_ms(&event, 600_000, now_secs * 1000)
+            .expect("a future-dated advert is still usable, just not for as long");
+    assert_eq!(valid_until, (now_secs + 60) * 1000 + 600_000);
+}
+
+/// Pins the forward bound to `FRESHNESS_SKEW_TOLERANCE_MS` exactly, mirroring
+/// the signal path: 60s ahead is taken as published, 61s ahead is clamped.
+/// This is the healthy-path half; an ordinary clock difference must not cost a
+/// legitimate peer anything.
+#[test]
+fn advert_freshness_at_the_forward_skew_limit_is_untouched_and_one_second_beyond_is_clamped() {
+    let now_secs = Timestamp::now().as_secs();
+
+    let at_limit = signed_overlay_advert_event(now_secs + 60, None);
+    let valid_until =
+        NostrRendezvous::compute_advert_valid_until_ms(&at_limit, 600_000, now_secs * 1000)
+            .expect("an advert exactly at the forward tolerance should be accepted as published");
+    assert_eq!(valid_until, (now_secs + 60) * 1000 + 600_000);
+
+    let past_limit = signed_overlay_advert_event(now_secs + 61, None);
+    let clamped =
+        NostrRendezvous::compute_advert_valid_until_ms(&past_limit, 600_000, now_secs * 1000)
+            .expect("an advert one second past the tolerance is clamped, not refused");
+    assert_eq!(clamped, (now_secs + 60) * 1000 + 600_000);
 }
 
 #[test]
@@ -588,7 +705,11 @@ fn planned_remote_endpoints_bound_an_oversized_list_of_unroutable_candidates() {
         endpoints,
         vec!["198.51.100.20:63000".parse::<SocketAddr>().unwrap()]
     );
-    assert_eq!(tally.unroutable, 300);
+    // Only the first MAX_OFFERED_CANDIDATES are vetted at all now, so the
+    // unroutable count is the bound rather than the whole list; the rest are
+    // recorded as never having been looked at.
+    assert_eq!(tally.unroutable, 32);
+    assert_eq!(tally.over_offered, 268);
     assert_eq!(tally.admitted, 1);
     assert!(tally.suspicious());
 }
@@ -597,6 +718,10 @@ fn planned_remote_endpoints_bound_an_oversized_list_of_unroutable_candidates() {
 /// so the observed reflexive address is itself private. Applying the /24 gate
 /// to a peer's reflexive address would drop it and remove the only branch
 /// that works across arbitrary NATs; this test reds if anyone does that.
+///
+/// The exemption is conditional on exactly the vantage point this test sets
+/// up: our own reflexive address is private here, so it still applies. The
+/// two tests below cover the public and absent cases.
 #[test]
 fn planned_remote_endpoints_keep_private_reflexive_when_stun_is_on_the_lan() {
     let (endpoints, _tally) = planned_remote_endpoints(
@@ -608,6 +733,88 @@ fn planned_remote_endpoints_keep_private_reflexive_when_stun_is_on_the_lan() {
     .expect("endpoint planning should succeed");
 
     assert!(endpoints.contains(&"192.168.1.20:63000".parse().unwrap()));
+}
+
+/// A node whose own STUN result is public shares no LAN with a private
+/// address, so a peer's private reflexive address is only ever an address of
+/// the peer's choosing. Admitting it made the reflexive branch a way to have
+/// this node punch inside its own private network; the /24 gate now applies.
+#[test]
+fn a_peers_private_reflexive_address_is_refused_when_our_own_stun_result_is_public() {
+    let (endpoints, tally) = planned_remote_endpoints(
+        &[],
+        Some(&addr("203.0.113.10", 62000)),
+        &[],
+        Some(&addr("192.168.1.20", 63000)),
+    )
+    .expect("endpoint planning should succeed");
+
+    assert!(endpoints.is_empty());
+    assert_eq!(tally.reflexive, Some("off-subnet"));
+}
+
+/// The conditional gate keys on our own reflexive address being private, and
+/// a node with no reflexive address at all has to keep behaving as it did:
+/// a failed STUN probe must not cost same-LAN peering.
+#[test]
+fn a_peers_private_reflexive_address_is_kept_when_we_have_no_stun_result_at_all() {
+    let (endpoints, tally) = planned_remote_endpoints(
+        &[addr("192.168.1.10", 62000)],
+        None,
+        &[],
+        Some(&addr("192.168.1.20", 63000)),
+    )
+    .expect("endpoint planning should succeed");
+
+    assert!(endpoints.contains(&"192.168.1.20:63000".parse().unwrap()));
+    assert_eq!(tally.reflexive, None);
+}
+
+/// Refusing a peer's private reflexive address is now something an honest
+/// asymmetric-STUN deployment produces, so it must not warn on its own. The
+/// never-routable case above still does.
+#[test]
+fn an_off_subnet_reflexive_refusal_alone_is_not_suspicious() {
+    let (_planned, tally) = plan_punch_targets(
+        &[],
+        Some(&addr("203.0.113.10", 62000)),
+        &[addr("203.0.113.5", 63000)],
+        Some(&addr("192.168.1.20", 63000)),
+    );
+
+    assert_eq!(tally.reflexive, Some("off-subnet"));
+    assert!(
+        tally.admitted > 0,
+        "the host-candidate path should still plan"
+    );
+    assert!(!tally.suspicious());
+}
+
+/// The eight-target cap runs after both planning loops, so it bounds the
+/// output and not the work. The discriminating assertion is `unroutable`:
+/// vetting every candidate would count all thousand, so a count of exactly
+/// `MAX_OFFERED_CANDIDATES` is what proves the excess was never walked.
+#[test]
+fn an_oversized_candidate_list_is_bounded_before_vetting() {
+    let mut remotes = Vec::new();
+    for index in 0..1000u32 {
+        remotes.push(addr(
+            &format!("127.0.0.{}", 1 + (index % 254)),
+            63000 + (index % 1000) as u16,
+        ));
+    }
+
+    let (_planned, tally) = plan_punch_targets(
+        &[],
+        Some(&addr("203.0.113.10", 62000)),
+        &remotes,
+        Some(&addr("198.51.100.20", 63000)),
+    );
+
+    assert_eq!(tally.offered, 1001);
+    assert_eq!(tally.unroutable, 32);
+    assert_eq!(tally.over_offered, 968);
+    assert!(tally.suspicious());
 }
 
 /// The four refusal classes tell four different operational stories, so a
@@ -1170,6 +1377,238 @@ async fn signal_events_use_current_timestamps() {
 
     assert!(created_at >= before);
     assert!(created_at <= after);
+}
+
+/// These punch tests distinguish a spoofer from a planned target by source
+/// **IP**, so each needs its own loopback address. Only Linux treats the whole
+/// of 127/8 as local; macOS and Windows bind 127.0.0.1 alone unless an alias is
+/// added, so the bind panics there. They are gated to Linux rather than
+/// rewritten onto one address, because collapsing them onto 127.0.0.1 would
+/// make every source rank `RemappedPort` and the tests would stop testing what
+/// they are for.
+///
+/// **Coverage gap**: on macOS and Windows nothing exercises `run_punch_attempt`
+/// end to end. The ranking decision itself is covered on every platform by the
+/// `rank_punch_source_*` unit tests above, which take no sockets.
+/// A loopback socket bound on `host`, non-blocking as both production call
+/// sites leave it, since `run_punch_attempt` hands it straight to
+/// `UdpSocket::from_std`.
+#[cfg(target_os = "linux")]
+fn punch_socket(host: &str) -> std::net::UdpSocket {
+    let socket = std::net::UdpSocket::bind(format!("{host}:0")).expect("bind a loopback socket");
+    socket
+        .set_nonblocking(true)
+        .expect("the punch socket must be non-blocking");
+    socket
+}
+
+/// A hint that starts punching immediately. `start_at_ms` is absolute wall
+/// clock, so anything plausible-looking in the future would sleep out the test.
+fn immediate_punch_hint(duration_ms: u64) -> PunchHint {
+    PunchHint {
+        start_at_ms: 0,
+        interval_ms: 20,
+        duration_ms,
+    }
+}
+
+/// Send one well-formed probe carrying `session_id`'s hash from `from` to
+/// `to`, which is what a replay of captured punch bytes looks like.
+#[cfg(target_os = "linux")]
+fn send_probe(from: &std::net::UdpSocket, to: SocketAddr, session_id: &str) {
+    let packet = build_punch_packet(PunchPacketKind::Probe, 1, session_id);
+    from.send_to(&packet, to).expect("probe should send");
+}
+
+/// Whether anything readable on `socket` is a punch ack.
+#[cfg(target_os = "linux")]
+fn received_an_ack(socket: &std::net::UdpSocket) -> bool {
+    let mut buf = [0u8; 2048];
+    while let Ok((len, _)) = socket.recv_from(&mut buf) {
+        if parse_punch_packet(&buf[..len])
+            .map(|packet| packet.kind == PunchPacketKind::Ack)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn rank_punch_source_accepts_a_planned_target() {
+    let target: SocketAddr = "198.51.100.20:63000".parse().unwrap();
+    assert_eq!(rank_punch_source(target, &[target]), SourceRank::Planned);
+}
+
+#[test]
+fn rank_punch_source_reports_a_planned_targets_other_port_as_remapped() {
+    let target: SocketAddr = "198.51.100.20:63000".parse().unwrap();
+    let remapped: SocketAddr = "198.51.100.20:41234".parse().unwrap();
+    assert_eq!(
+        rank_punch_source(remapped, &[target]),
+        SourceRank::RemappedPort
+    );
+}
+
+#[test]
+fn rank_punch_source_rejects_an_address_we_never_planned_to_probe() {
+    let target: SocketAddr = "198.51.100.20:63000".parse().unwrap();
+    let stranger: SocketAddr = "203.0.113.9:63000".parse().unwrap();
+    assert_eq!(
+        rank_punch_source(stranger, &[target]),
+        SourceRank::Unplanned
+    );
+}
+
+/// The regression test for the defect. The punch packet's discriminator is a
+/// digest of a value both peers already know and it travels in the clear in
+/// every probe, so anyone who has seen one can replay it. Acceptance is now
+/// constrained to the targets this node planned; the spoofer is neither
+/// adopted nor acked, and an ack would be a reflection we control.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_matching_punch_packet_from_an_unplanned_source_is_neither_adopted_nor_acked() {
+    let victim = punch_socket("127.0.0.3");
+    let peer = punch_socket("127.0.0.1");
+    let spoofer = punch_socket("127.0.0.2");
+    let victim_addr = victim.local_addr().expect("victim address");
+    let targets = vec![peer.local_addr().expect("peer address")];
+
+    send_probe(&spoofer, victim_addr, "session-unplanned");
+    let result = run_punch_attempt(
+        &victim,
+        "session-unplanned",
+        &targets,
+        immediate_punch_hint(400),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::PunchTimeout(_))),
+        "a spoofed source must not be adopted, got {result:?}"
+    );
+    assert!(
+        !received_an_ack(&spoofer),
+        "an unplanned source must not be acked"
+    );
+}
+
+/// The spoofer wins the race on arrival order and still loses on address.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_planned_source_is_adopted_even_when_a_spoofer_replies_first() {
+    let victim = punch_socket("127.0.0.3");
+    let peer = punch_socket("127.0.0.1");
+    let spoofer = punch_socket("127.0.0.2");
+    let victim_addr = victim.local_addr().expect("victim address");
+    let peer_addr = peer.local_addr().expect("peer address");
+
+    send_probe(&spoofer, victim_addr, "session-race");
+    send_probe(&peer, victim_addr, "session-race");
+    let result = run_punch_attempt(
+        &victim,
+        "session-race",
+        &[peer_addr],
+        immediate_punch_hint(400),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    assert_eq!(
+        result.expect("the planned peer should be adopted"),
+        peer_addr
+    );
+}
+
+/// The healthy path, which is the check that the source constraint does not
+/// red a legitimately clean run: one probe from the single planned target is
+/// adopted immediately and acked.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_ordinary_probe_from_a_planned_target_is_still_adopted_and_acked() {
+    let victim = punch_socket("127.0.0.3");
+    let peer = punch_socket("127.0.0.1");
+    let victim_addr = victim.local_addr().expect("victim address");
+    let peer_addr = peer.local_addr().expect("peer address");
+
+    send_probe(&peer, victim_addr, "session-healthy");
+    let result = run_punch_attempt(
+        &victim,
+        "session-healthy",
+        &[peer_addr],
+        immediate_punch_hint(400),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    assert_eq!(
+        result.expect("the planned peer should be adopted"),
+        peer_addr
+    );
+    assert!(received_an_ack(&peer), "a planned probe should be acked");
+}
+
+/// Peer-reflexive discovery: a symmetric NAT allocates a fresh port toward us,
+/// so the peer's probe arrives from an address that is not in the plan but
+/// shares a planned target's IP. Adopting it is the main class of NAT pairing
+/// punching exists to rescue, and this test reds if the rule is ever tightened
+/// to exact matching without that being reopened deliberately.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_planned_targets_remapped_port_is_adopted_when_that_is_all_that_arrives() {
+    let victim = punch_socket("127.0.0.3");
+    let peer = punch_socket("127.0.0.1");
+    let victim_addr = victim.local_addr().expect("victim address");
+    let peer_addr = peer.local_addr().expect("peer address");
+    // The address the peer's own STUN observation named, before its NAT
+    // remapped the port: same host, a port nothing is bound to.
+    let stale_target = SocketAddr::new(peer_addr.ip(), peer_addr.port().wrapping_add(1).max(1));
+
+    send_probe(&peer, victim_addr, "session-remapped");
+    let result = run_punch_attempt(
+        &victim,
+        "session-remapped",
+        &[stale_target],
+        immediate_punch_hint(400),
+        Duration::from_millis(2000),
+    )
+    .await;
+
+    assert_eq!(
+        result.expect("a remapped port on a planned target should be adopted"),
+        peer_addr
+    );
+}
+
+/// An exact match inside the settle window supersedes a remapped one that
+/// arrived first, which is what the window is for.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_exact_target_supersedes_a_remapped_port_inside_the_settle_window() {
+    let victim = punch_socket("127.0.0.3");
+    let peer = punch_socket("127.0.0.1");
+    let neighbour = punch_socket("127.0.0.1");
+    let victim_addr = victim.local_addr().expect("victim address");
+    let peer_addr = peer.local_addr().expect("peer address");
+
+    send_probe(&neighbour, victim_addr, "session-settle");
+    send_probe(&peer, victim_addr, "session-settle");
+    let result = run_punch_attempt(
+        &victim,
+        "session-settle",
+        &[peer_addr],
+        immediate_punch_hint(400),
+        Duration::from_millis(2000),
+    )
+    .await;
+
+    assert_eq!(
+        result.expect("the exact target should win"),
+        peer_addr,
+        "an exact match must supersede a source that only shares the IP"
+    );
 }
 
 fn node_addr(first_byte: u8) -> NodeAddr {

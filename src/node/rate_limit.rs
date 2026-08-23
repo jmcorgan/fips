@@ -874,3 +874,164 @@ mod tests {
         );
     }
 }
+
+// ============================================================================
+// Target-side: Lookup Signing Budget
+//
+// Homed here rather than in `proto::lookup::limits` because it is an
+// `Instant`-based shell limiter, and the `proto` tree is `alloc`-based and
+// clockless. On `maint` it lived in `src/node/discovery_rate_limit.rs`, which
+// `master` dissolved into `proto/lookup/limits.rs`.
+// ============================================================================
+
+/// Signatures one link peer may buy in a burst before the refill paces it.
+///
+/// Sized for the case that actually produces a burst: a topology change
+/// flushes correspondents' coordinate caches and they all look this node up
+/// at once, through whichever few link peers lead here, each retrying on the
+/// `node.discovery.attempt_timeouts_secs` ladder. Lowering this makes a
+/// genuinely popular node intermittently unresolvable, which is the same
+/// symptom as the flood it defends against; raising it raises the worst-case
+/// signing burst one neighbour can force.
+const DEFAULT_SIGN_BURST: f64 = 256.0;
+
+/// Sustained signatures per second per link peer.
+///
+/// At the default eight or so link peers this caps the node near 256
+/// signatures per second in the sustained case. The real cost of one
+/// `Identity::sign` on this codebase has not been measured, so this number
+/// is a bound rather than a tuned value; it is the one line to change if a
+/// measurement says otherwise.
+const DEFAULT_SIGN_RATE: f64 = 32.0;
+
+/// Maximum age of an idle bucket before cleanup.
+const SIGN_MAX_AGE: Duration = Duration::from_secs(300);
+
+/// Token bucket per link peer for lookups this node answers about itself.
+///
+/// A min-interval limiter is the wrong shape here: a popular node receives
+/// legitimate bursts of lookups for itself through the few link peers that
+/// lead to it, and a min interval refuses all but the first of each burst.
+/// A bucket absorbs the burst and paces the sustained rate.
+pub struct LookupSignRateLimiter {
+    buckets: HashMap<NodeAddr, SignBucket>,
+    burst: f64,
+    rate: f64,
+}
+
+struct SignBucket {
+    /// Tokens remaining, at most `burst`.
+    tokens: f64,
+    /// When `tokens` was last refilled.
+    updated: Instant,
+}
+
+impl LookupSignRateLimiter {
+    /// Create with default burst and refill rate.
+    pub fn new() -> Self {
+        Self::with_params(DEFAULT_SIGN_BURST, DEFAULT_SIGN_RATE)
+    }
+
+    /// Create with a custom burst and refill rate.
+    pub fn with_params(burst: f64, rate: f64) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            burst,
+            rate,
+        }
+    }
+
+    /// Spend one token for `from`, or report that its budget is exhausted.
+    ///
+    /// Returns true when the signature may be produced. A zero burst is
+    /// read as "unlimited" rather than "refuse everything", so a
+    /// misconfiguration cannot make this node unresolvable.
+    pub fn should_sign(&mut self, from: &NodeAddr) -> bool {
+        if self.burst <= 0.0 {
+            return true;
+        }
+        let now = Instant::now();
+        let burst = self.burst;
+        let rate = self.rate;
+        let bucket = self.buckets.entry(*from).or_insert(SignBucket {
+            tokens: burst,
+            updated: now,
+        });
+        let elapsed = now.duration_since(bucket.updated).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
+        bucket.updated = now;
+        if bucket.tokens < 1.0 {
+            return false;
+        }
+        bucket.tokens -= 1.0;
+        self.cleanup(now);
+        true
+    }
+
+    /// Drop buckets untouched for longer than [`SIGN_MAX_AGE`]; a full
+    /// bucket carries no state worth keeping.
+    fn cleanup(&mut self, now: Instant) {
+        self.buckets
+            .retain(|_, b| now.duration_since(b.updated) < SIGN_MAX_AGE);
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
+impl Default for LookupSignRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod sign_limiter_tests {
+    use super::*;
+
+    fn addr(val: u8) -> NodeAddr {
+        let mut bytes = [0u8; 16];
+        bytes[0] = val;
+        NodeAddr::from_bytes(bytes)
+    }
+
+    // The `DiscoveryBackoff` and `DiscoveryForwardRateLimiter` tests that
+    // accompanied this limiter in `src/node/discovery_rate_limit.rs` are not
+    // repeated here: both types moved into `crate::proto::lookup::limits` as
+    // `LookupBackoff` and `LookupForwardRateLimiter`, and all thirteen of those
+    // cases live there, name for name, in `src/proto/lookup/tests/limits.rs`,
+    // ported to the clockless millisecond API. Only the signing budget, which
+    // is `Instant`-based and so stays in the shell, is exercised below.
+
+    #[test]
+    fn test_sign_budget_is_spent_per_peer_and_does_not_touch_another_peer() {
+        let mut limiter = LookupSignRateLimiter::with_params(4.0, 0.0);
+        for _ in 0..4 {
+            assert!(limiter.should_sign(&addr(1)));
+        }
+        assert!(
+            !limiter.should_sign(&addr(1)),
+            "the burst is the whole budget when nothing refills it"
+        );
+        assert!(
+            limiter.should_sign(&addr(2)),
+            "one peer spending its budget must not spend another's"
+        );
+        assert_eq!(limiter.len(), 2);
+    }
+
+    #[test]
+    fn test_sign_budget_of_zero_burst_is_read_as_unlimited() {
+        let mut limiter = LookupSignRateLimiter::with_params(0.0, 0.0);
+        for _ in 0..1000 {
+            assert!(limiter.should_sign(&addr(1)));
+        }
+        assert_eq!(limiter.len(), 0, "unlimited keeps no per-peer state");
+    }
+}

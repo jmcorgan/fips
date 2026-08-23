@@ -20,7 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default path for the peer allow list.
 ///
@@ -106,6 +106,28 @@ pub enum PeerAclContext {
     OutboundHandshake,
 }
 
+/// How many consecutive reloads the empty-snapshot guard may hold back.
+///
+/// A reload whose files all read cleanly but which yields an empty ACL where
+/// an enforcing one was in force is more likely a read that raced an in-place
+/// rewrite than a policy change, so the previous snapshot is held. The guard
+/// releases after this many holds, so an operator who deliberately blanks an
+/// ACL file in place still converges, one tick late. Raising it widens the
+/// window in which a genuine emptying is ignored; setting it to zero disables
+/// the torn-read protection.
+const EMPTY_ACL_HOLD_LIMIT: u32 = 1;
+
+/// A peer ACL input file exists but could not be read.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to read {}: {source}", path.display())]
+pub struct AclLoadError {
+    /// The file whose read failed.
+    pub path: PathBuf,
+    /// The underlying I/O failure.
+    #[source]
+    pub source: std::io::Error,
+}
+
 /// Snapshot of the currently loaded ACL state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PeerAclStatus {
@@ -120,6 +142,9 @@ pub struct PeerAclStatus {
     pub deny_file_entries: Vec<String>,
     pub allow_entries: Vec<String>,
     pub deny_entries: Vec<String>,
+    /// Whether the ACL in force is older than the files on disk because a
+    /// reload input could not be read.
+    pub stale: bool,
 }
 
 impl fmt::Display for PeerAclContext {
@@ -155,26 +180,38 @@ impl PeerAcl {
     #[cfg(test)]
     pub fn load_files(allow_path: &Path, deny_path: &Path) -> Self {
         let hosts = HostMap::new();
-        Self::load_files_with_hosts(allow_path, deny_path, &hosts)
+        Self::try_load_files_with_hosts(allow_path, deny_path, &hosts).unwrap()
     }
 
     /// Load the allow/deny files into a new ACL using alias resolution.
-    pub fn load_files_with_hosts(allow_path: &Path, deny_path: &Path, hosts: &HostMap) -> Self {
+    ///
+    /// An absent file is a policy and contributes an empty set; a file that
+    /// is present and unreadable is a fault and is returned as an error, so
+    /// the caller can keep enforcing whatever it loaded last rather than
+    /// silently becoming an open node.
+    pub fn try_load_files_with_hosts(
+        allow_path: &Path,
+        deny_path: &Path,
+        hosts: &HostMap,
+    ) -> Result<Self, AclLoadError> {
         let mut acl = Self::new();
-        acl.load_file(allow_path, true, hosts);
-        acl.load_file(deny_path, false, hosts);
+        acl.load_file(allow_path, true, hosts)?;
+        acl.load_file(deny_path, false, hosts)?;
+        acl.log_loaded();
+        Ok(acl)
+    }
 
-        if !acl.is_empty() {
+    /// Log the shape of a freshly loaded ACL, unless it has no entries.
+    fn log_loaded(&self) {
+        if !self.is_empty() {
             debug!(
-                allow_entries = acl.allow.len(),
-                deny_entries = acl.deny.len(),
-                allow_all = acl.allow_all,
-                deny_all = acl.deny_all,
+                allow_entries = self.allow.len(),
+                deny_entries = self.deny.len(),
+                allow_all = self.allow_all,
+                deny_all = self.deny_all,
                 "Loaded peer ACL files"
             );
         }
-
-        acl
     }
 
     /// Evaluate whether a peer is allowed.
@@ -245,16 +282,29 @@ impl PeerAcl {
         self.deny_file_entries.iter().cloned().collect()
     }
 
-    fn load_file(&mut self, path: &Path, is_allow: bool, hosts: &HostMap) {
+    /// Merge one ACL file into this ACL.
+    ///
+    /// An absent file is a policy and an unreadable one is a fault, and
+    /// `NotFound` alone does not say which: a stat that still finds the file
+    /// after the read missed it means the file is being rewritten under us,
+    /// which is transient and must not be published as an empty policy.
+    fn load_file(
+        &mut self,
+        path: &Path,
+        is_allow: bool,
+        hosts: &HostMap,
+    ) -> Result<(), AclLoadError> {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && file_mtime(path).is_none() => {
                 debug!(path = %path.display(), "No ACL file found, skipping");
-                return;
+                return Ok(());
             }
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "Failed to read ACL file");
-                return;
+                return Err(AclLoadError {
+                    path: path.to_path_buf(),
+                    source: e,
+                });
             }
         };
 
@@ -310,6 +360,8 @@ impl PeerAcl {
                 self.deny_npubs.insert(resolved_npub);
             }
         }
+
+        Ok(())
     }
 
     fn resolve_entry(entry: &str, hosts: &HostMap) -> Result<(PeerIdentity, String), String> {
@@ -342,6 +394,13 @@ pub struct PeerAclReloader {
     deny_path: PathBuf,
     last_allow_mtime: Option<SystemTime>,
     last_deny_mtime: Option<SystemTime>,
+    /// Set while a reload input is unreadable. Forces the next reload
+    /// attempt regardless of mtimes, because the mtime comparison alone
+    /// cannot see a change the hosts reloader has already consumed, and
+    /// gates the fault log to the transition into the held state.
+    retry_pending: bool,
+    /// Consecutive reloads held back by the empty-snapshot guard.
+    empty_holds: u32,
 }
 
 impl PeerAclReloader {
@@ -377,7 +436,23 @@ impl PeerAclReloader {
         let last_allow_mtime = file_mtime(&allow_path);
         let last_deny_mtime = file_mtime(&deny_path);
         let hosts = HostMapReloader::new(base_hosts, hosts_path);
-        let acl = PeerAcl::load_files_with_hosts(&allow_path, &deny_path, hosts.hosts());
+
+        // There is no last-good snapshot to hold at startup, so an
+        // unreadable file still comes up on an empty ACL, as it always has.
+        // It is logged as the fault it is and armed for retry, so the first
+        // tick after the file becomes readable enforces the real policy.
+        let (acl, retry_pending) =
+            match PeerAcl::try_load_files_with_hosts(&allow_path, &deny_path, hosts.hosts()) {
+                Ok(acl) => (acl, false),
+                Err(e) => {
+                    error!(
+                        path = %e.path.display(),
+                        error = %e.source,
+                        "Peer ACL file is present but unreadable; starting with no ACL entries"
+                    );
+                    (PeerAcl::new(), true)
+                }
+            };
 
         Self {
             acl: arc_swap::ArcSwap::from(Arc::new(acl)),
@@ -386,7 +461,26 @@ impl PeerAclReloader {
             deny_path,
             last_allow_mtime,
             last_deny_mtime,
+            retry_pending,
+            empty_holds: 0,
         }
+    }
+
+    /// Keep the published snapshot after a reload input failed to read.
+    ///
+    /// Leaves the recorded mtimes and the ACL in force untouched, arms the
+    /// retry so the next tick reloads regardless of mtimes, and logs the
+    /// fault once, on the transition into the held state, rather than once
+    /// per tick for as long as the fault lasts.
+    fn hold_snapshot(&mut self, path: &Path, error: &dyn fmt::Display) {
+        if !self.retry_pending {
+            error!(
+                path = %path.display(),
+                error = %error,
+                "Peer ACL input is unreadable; holding the last loaded ACL"
+            );
+        }
+        self.retry_pending = true;
     }
 
     /// Acquire a lock-free guard over the current ACL snapshot.
@@ -409,6 +503,7 @@ impl PeerAclReloader {
             deny_file_entries: acl.deny_file_entries(),
             allow_entries: acl.allow_entries(),
             deny_entries: acl.deny_entries(),
+            stale: self.retry_pending,
         }
     }
 }
@@ -419,19 +514,70 @@ impl Reloadable for PeerAclReloader {
     async fn reload(&mut self) -> bool {
         let allow_mtime = file_mtime(&self.allow_path);
         let deny_mtime = file_mtime(&self.deny_path);
-        let hosts_changed = self.hosts.check_reload();
+        let hosts_changed = match self.hosts.try_check_reload() {
+            Ok(changed) => changed,
+            Err(e) => {
+                let path = self.hosts.path().to_path_buf();
+                self.hold_snapshot(&path, &e);
+                return false;
+            }
+        };
 
         if allow_mtime == self.last_allow_mtime
             && deny_mtime == self.last_deny_mtime
             && !hosts_changed
+            && !self.retry_pending
         {
             return false;
         }
 
+        let new_acl = match PeerAcl::try_load_files_with_hosts(
+            &self.allow_path,
+            &self.deny_path,
+            self.hosts.hosts(),
+        ) {
+            Ok(acl) => acl,
+            Err(e) => {
+                self.hold_snapshot(&e.path.clone(), &e.source);
+                return false;
+            }
+        };
+
+        // Every input read cleanly and the policy still evaporated. With the
+        // ACL files themselves freshly written and still on disk that is more
+        // likely a read that caught one mid-rewrite than an operator emptying
+        // both lists, so hold and look again next tick. Deleting a file, or
+        // dropping the aliases an entry resolved through, remains an
+        // unambiguous way to say "no policy" and is published immediately.
+        let acl_files_changed =
+            allow_mtime != self.last_allow_mtime || deny_mtime != self.last_deny_mtime;
+        if new_acl.is_empty()
+            && !self.acl.load().is_empty()
+            && acl_files_changed
+            && (allow_mtime.is_some() || deny_mtime.is_some())
+            && self.empty_holds < EMPTY_ACL_HOLD_LIMIT
+        {
+            self.empty_holds += 1;
+            self.retry_pending = true;
+            warn!(
+                allow_file = %self.allow_path.display(),
+                deny_file = %self.deny_path.display(),
+                "Peer ACL reload emptied an enforcing ACL; holding the last loaded ACL"
+            );
+            return false;
+        }
+
+        if self.retry_pending {
+            info!(
+                allow_file = %self.allow_path.display(),
+                deny_file = %self.deny_path.display(),
+                "Peer ACL inputs read cleanly again; publishing the files on disk"
+            );
+        }
+        self.retry_pending = false;
+        self.empty_holds = 0;
         self.last_allow_mtime = allow_mtime;
         self.last_deny_mtime = deny_mtime;
-        let new_acl =
-            PeerAcl::load_files_with_hosts(&self.allow_path, &self.deny_path, self.hosts.hosts());
 
         info!(
             allow_file = %self.allow_path.display(),
@@ -786,19 +932,15 @@ mod tests {
     }
 
     #[test]
-    fn test_acl_read_error_is_ignored() {
+    fn test_acl_read_error_is_reported_rather_than_yielding_an_empty_acl() {
         let dir = tempfile::tempdir().unwrap();
         let allow = dir.path().join("peers.allow");
         let deny = dir.path().join("peers.deny");
         std::fs::create_dir(&allow).unwrap();
 
-        let acl = PeerAcl::load_files(&allow, &deny);
+        let err = PeerAcl::try_load_files_with_hosts(&allow, &deny, &HostMap::new()).unwrap_err();
 
-        assert!(acl.is_empty());
-        assert_eq!(
-            acl.check(&test_peer(&test_npub())),
-            PeerAclDecision::DefaultAllow
-        );
+        assert_eq!(err.path, allow);
     }
 
     #[test]
@@ -812,7 +954,7 @@ mod tests {
         hosts.insert("node-a", &npub).unwrap();
         write_file(&allow, "NODE-A\n");
 
-        let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
+        let acl = PeerAcl::try_load_files_with_hosts(&allow, &deny, &hosts).unwrap();
 
         assert_eq!(acl.allow_file_entries(), vec!["NODE-A".to_string()]);
         assert_eq!(acl.allow_entries(), vec![npub.clone()]);
@@ -830,7 +972,7 @@ mod tests {
         hosts.insert("node-a", &npub).unwrap();
         write_file(&allow, &format!("node-a\n{npub}\nnode-a\n"));
 
-        let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
+        let acl = PeerAcl::try_load_files_with_hosts(&allow, &deny, &hosts).unwrap();
 
         assert_eq!(
             acl.allow_file_entries(),
@@ -885,6 +1027,160 @@ mod tests {
             reloader.acl().check(&test_peer(&allowed)),
             PeerAclDecision::DefaultAllow
         );
+    }
+
+    /// The three permission-fault tests below make a file unreadable through
+    /// the unix mode bits, which Windows has no equivalent for: a read-only
+    /// NTFS file is still readable, so the fault they need cannot be produced.
+    /// They are gated to unix rather than made to pass vacuously elsewhere.
+    ///
+    /// **Coverage gap**: on Windows nothing exercises the reloader's
+    /// unreadable-input path, so the fail-open defect this fix closes is
+    /// unverified there.
+    /// Make a file unreadable, returning false if the effective uid can read
+    /// it anyway. Root bypasses the mode bits, so the permission-fault tests
+    /// cannot run there and skip instead of passing vacuously; that leaves
+    /// the EACCES path unexercised in any root CI job.
+    #[cfg(unix)]
+    fn make_unreadable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::read_to_string(path).is_err()
+    }
+
+    #[cfg(unix)]
+    fn make_readable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_acl_reload_holds_last_good_snapshot_when_deny_file_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+        let denied = test_npub();
+
+        write_file(&deny, &format!("{denied}\n"));
+        let mut reloader = PeerAclReloader::with_paths(allow, deny.clone());
+        assert_eq!(
+            reloader.acl().check(&test_peer(&denied)),
+            PeerAclDecision::DenyList
+        );
+
+        // Rewrite before revoking access so the mtime change makes the
+        // reloader actually attempt the read that then fails.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_file(&deny, &format!("{denied}\n"));
+        if !make_unreadable(&deny) {
+            return;
+        }
+
+        assert!(!reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&denied)),
+            PeerAclDecision::DenyList
+        );
+        assert_eq!(reloader.acl().effective_mode(), "denylist");
+        assert!(reloader.status().stale);
+
+        make_readable(&deny);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_acl_reload_retries_after_a_transient_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+        let denied = test_npub();
+
+        write_file(&deny, &format!("{denied}\n"));
+        let mut reloader = PeerAclReloader::with_paths(allow, deny.clone());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_file(&deny, &format!("{denied}\n"));
+        if !make_unreadable(&deny) {
+            return;
+        }
+        assert!(!reloader.reload().await);
+
+        // No further mtime change: only the armed retry can pick this up.
+        make_readable(&deny);
+        assert!(reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&denied)),
+            PeerAclDecision::DenyList
+        );
+        assert!(!reloader.status().stale);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_acl_reload_holds_last_good_when_the_hosts_file_becomes_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+        let hosts = dir.path().join("hosts");
+        let npub = test_npub();
+
+        write_file(&allow, "node-a\n");
+        write_file(&hosts, &format!("node-a {npub}\n"));
+
+        let mut reloader =
+            PeerAclReloader::with_alias_sources(allow, deny, HostMap::new(), hosts.clone());
+        assert_eq!(
+            reloader.acl().check(&test_peer(&npub)),
+            PeerAclDecision::AllowList
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_file(&hosts, &format!("node-a {npub}\n"));
+        if !make_unreadable(&hosts) {
+            return;
+        }
+
+        assert!(!reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&npub)),
+            PeerAclDecision::AllowList
+        );
+        assert_eq!(reloader.acl().default_decision(), "allow");
+        assert_eq!(
+            reloader.acl().allow_file_entries(),
+            vec!["node-a".to_string()]
+        );
+
+        make_readable(&hosts);
+    }
+
+    #[tokio::test]
+    async fn test_acl_reload_does_not_publish_an_empty_acl_over_an_enforcing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow = dir.path().join("peers.allow");
+        let deny = dir.path().join("peers.deny");
+        let allowed = test_npub();
+
+        write_file(&allow, &format!("{allowed}\n"));
+        let mut reloader = PeerAclReloader::with_paths(allow.clone(), deny);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&allowed)),
+            PeerAclDecision::AllowList
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_file(&allow, "");
+
+        assert!(!reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&allowed)),
+            PeerAclDecision::AllowList
+        );
+
+        // The hold is bounded: a file the operator really did blank in place
+        // is published on the following tick.
+        assert!(reloader.reload().await);
+        assert!(reloader.acl().is_empty());
     }
 
     #[test]
@@ -977,7 +1273,7 @@ mod tests {
         hosts.insert("node-a", &npub).unwrap();
         std::fs::write(&allow, "node-a\n").unwrap();
 
-        let acl = PeerAcl::load_files_with_hosts(&allow, &deny, &hosts);
+        let acl = PeerAcl::try_load_files_with_hosts(&allow, &deny, &hosts).unwrap();
         let peer = PeerIdentity::from_npub(&npub).unwrap();
 
         assert_eq!(acl.allow_file_entries(), vec!["node-a".to_string()]);

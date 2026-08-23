@@ -31,6 +31,14 @@ impl ReplayWindow {
     /// Returns true if the counter is acceptable, false if it should be rejected.
     /// Does NOT update the window - call `accept` after successful decryption.
     pub fn check(&self, counter: u64) -> bool {
+        // The send side refuses to emit u64::MAX (`CipherState::advance_nonce`,
+        // `NoiseSession::take_send_counter`), so no conforming peer produces it.
+        // Refusing it here keeps `accept` from pinning `highest` at the ceiling,
+        // which would wedge the window against every later counter.
+        if counter == u64::MAX {
+            return false;
+        }
+
         if counter > self.highest {
             // New highest - always acceptable
             return true;

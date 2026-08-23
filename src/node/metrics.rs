@@ -233,6 +233,8 @@ pub struct LookupMetrics {
     pub req_decode_error: Counter,
     pub req_duplicate: Counter,
     pub req_dedup_cache_full: Counter,
+    pub req_dedup_evicted: Counter,
+    pub req_sign_rate_limited: Counter,
     pub req_target_is_us: Counter,
     pub req_forwarded: Counter,
     pub req_ttl_exhausted: Counter,
@@ -248,6 +250,7 @@ pub struct LookupMetrics {
     pub resp_forwarded: Counter,
     pub resp_identity_miss: Counter,
     pub resp_proof_failed: Counter,
+    pub resp_unsolicited: Counter,
     pub resp_no_route: Counter,
     pub resp_accepted: Counter,
     pub resp_timed_out: Counter,
@@ -262,10 +265,12 @@ impl LookupMetrics {
             DiscoveryReject::ReqDecodeError => self.req_decode_error.inc(),
             DiscoveryReject::ReqDuplicate => self.req_duplicate.inc(),
             DiscoveryReject::ReqDedupCacheFull => self.req_dedup_cache_full.inc(),
+            DiscoveryReject::ReqSignRateLimited => self.req_sign_rate_limited.inc(),
             DiscoveryReject::ReqTtlExhausted => self.req_ttl_exhausted.inc(),
             DiscoveryReject::RespDecodeError => self.resp_decode_error.inc(),
             DiscoveryReject::RespIdentityMiss => self.resp_identity_miss.inc(),
             DiscoveryReject::RespProofFailed => self.resp_proof_failed.inc(),
+            DiscoveryReject::RespUnsolicited => self.resp_unsolicited.inc(),
             DiscoveryReject::RespNoRoute => self.resp_no_route.inc(),
         }
     }
@@ -277,6 +282,8 @@ impl LookupMetrics {
             req_decode_error: self.req_decode_error.get(),
             req_duplicate: self.req_duplicate.get(),
             req_dedup_cache_full: self.req_dedup_cache_full.get(),
+            req_dedup_evicted: self.req_dedup_evicted.get(),
+            req_sign_rate_limited: self.req_sign_rate_limited.get(),
             req_target_is_us: self.req_target_is_us.get(),
             req_forwarded: self.req_forwarded.get(),
             req_ttl_exhausted: self.req_ttl_exhausted.get(),
@@ -292,6 +299,7 @@ impl LookupMetrics {
             resp_forwarded: self.resp_forwarded.get(),
             resp_identity_miss: self.resp_identity_miss.get(),
             resp_proof_failed: self.resp_proof_failed.get(),
+            resp_unsolicited: self.resp_unsolicited.get(),
             resp_no_route: self.resp_no_route.get(),
             resp_accepted: self.resp_accepted.get(),
             resp_timed_out: self.resp_timed_out.get(),
@@ -491,7 +499,25 @@ pub struct ErrorMetrics {
     /// count means a forwarder on the reverse path is mangling the unsigned
     /// annotation.
     pub lookup_resp_mtu_below_floor: Counter,
+    /// `MtuExceeded` signals ignored because this node has not sent a frame
+    /// larger than the bottleneck they report since the last accepted
+    /// decrease. An honest report cannot arise without such a frame, so a
+    /// rising count is a forged or stale reactive signal.
+    pub mtu_exceeded_uncorroborated: Counter,
     pub unbound: UnboundSignals,
+    /// Routing errors this node declined to emit because the authenticated
+    /// link peer that induced them had spent its budget. A rising count is
+    /// either a peer flooding unroutable traffic or a hub relaying more
+    /// simultaneously-broken destinations than the budget allows.
+    pub emit_over_peer_budget: Counter,
+    /// Routing errors this node declined to emit because one for the same
+    /// destination went out within the per-destination interval. This is the
+    /// aggregate suppression a real outage produces.
+    pub emit_over_dest_interval: Counter,
+    /// Routing errors emitted without recording their destination, because
+    /// the per-destination limiter's map was full. The signal was still sent;
+    /// what was lost is interval suppression for that destination.
+    pub emit_limiter_at_capacity: Counter,
 }
 
 impl ErrorMetrics {
@@ -508,6 +534,10 @@ impl ErrorMetrics {
             unbound_broken: self.unbound.broken.get(),
             unbound_mtu: self.unbound.mtu.get(),
             unbound_forged: self.unbound.forged.get(),
+            emit_over_peer_budget: self.emit_over_peer_budget.get(),
+            emit_over_dest_interval: self.emit_over_dest_interval.get(),
+            emit_limiter_at_capacity: self.emit_limiter_at_capacity.get(),
+            mtu_exceeded_uncorroborated: self.mtu_exceeded_uncorroborated.get(),
         }
     }
 }

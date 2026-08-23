@@ -43,6 +43,49 @@ use crate::upper::icmp::FIPS_OVERHEAD;
 use secp256k1::PublicKey;
 use tracing::{debug, info, trace, warn};
 
+/// Minimum interval between path-MTU releases driven by `PathBroken` for one
+/// destination.
+///
+/// `PathBroken` is unauthenticated, so a release is a remote party's claim
+/// that the path a tightened MTU described is gone. Without an interval the
+/// claim can be repeated at line rate, discarding a genuinely learned
+/// bottleneck as fast as it is relearned. Raising it defers a legitimate
+/// release after a second real break, which costs throughput on the new path
+/// but never a blackhole, since the deferred value is the tighter one.
+pub(in crate::node) const PATH_MTU_RELEASE_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(1000);
+
+/// Bytes the link layer adds to an encoded `SessionDatagram` on its way to the
+/// wire: the established FMP header, the 4-byte session-relative timestamp and
+/// the AEAD tag. Mirrors the buffer `send_encrypted_link_message_with_ce`
+/// builds.
+///
+/// Spelled out in full rather than through the `crate::proto::fmp::wire`
+/// import above, which is `#[cfg(unix)]`. This constant feeds `link_wire_len`,
+/// whose caller `send_session_datagram` is compiled on every platform, so
+/// taking the name from that import fails to build on Windows.
+const LINK_FRAME_OVERHEAD: usize =
+    crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE + 4 + crate::noise::TAG_SIZE;
+
+/// Wire size of an encoded `SessionDatagram` of `encoded_len` bytes.
+fn link_wire_len(encoded_len: usize) -> usize {
+    encoded_len + LINK_FRAME_OVERHEAD
+}
+
+/// Divisor giving the share of the session table that unauthenticated
+/// half-open entries may hold, as `max_sessions / DIVISOR`.
+///
+/// Two means a reconnect storm, where every peer that had a session
+/// initiates at once after a restart or a healed partition, still fits in
+/// half the table; a tighter share bites four times sooner and is felt by
+/// a hub before it is felt by an attacker. Half-open entries are reaped
+/// after `handshake_timeout_secs` while established ones survive
+/// `idle_timeout_secs`, so they turn over faster than the share suggests.
+/// Lowering the divisor raises the share, which lets a handshake flood
+/// crowd out peers that complete; raising it refuses legitimate initiators
+/// sooner in a storm.
+const HALF_OPEN_SHARE_DIVISOR: usize = 2;
+
 /// Inputs to `try_send_session_data_pipelined` — the FSP+FMP pipelined
 /// fast path that hands both AEAD operations to the encrypt worker
 /// in a single dispatch.
@@ -538,6 +581,19 @@ impl Node {
         // no limit at all. A setup naming an established peer cannot grow the
         // table and is metered separately, so that a stranger flood over a
         // shared link cannot stop that peer's rekey from arming.
+        // Population cap, ahead of the limiter so a full table costs no
+        // token, no responder handshake and no ack. The predicate is "would
+        // admitting this grow the table", not "is this a stranger": `class`
+        // is Stranger for an existing Initiating or AwaitingMsg3 entry too,
+        // and refusing those would break in-flight legitimate handshakes and
+        // the duplicate-ack resend. Same shape as the pending-destination cap
+        // in `queue_pending_packet`. Refuse rather than evict: msg1 is
+        // unauthenticated here, so evicting would hand a stranger a teardown
+        // primitive it does not have.
+        if !self.admit_new_session(src_addr) {
+            return;
+        }
+
         let class = if self
             .sessions
             .get(src_addr)
@@ -2048,8 +2104,20 @@ impl Node {
             }
         }
         // The path this destination's stored MTU described is gone, so release
-        // it rather than carrying it onto whatever path replaces it.
-        self.path_mtu_lookup_release(&msg.dest_addr);
+        // it rather than carrying it onto whatever path replaces it. Rate
+        // limited per destination on its own budget: PathBroken is
+        // unauthenticated, and an unlimited release discards a genuinely
+        // learned bottleneck as fast as it is relearned. The budget is not
+        // shared with any other signal, so nothing else can spend it.
+        if self
+            .path_mtu_release_limiter
+            .should_send(&msg.dest_addr, Self::now_ms())
+        {
+            self.path_mtu_lookup_release(&msg.dest_addr);
+        } else {
+            trace!(dest = %msg.dest_addr,
+                "PathBroken path MTU release rate-limited, keeping the stored value");
+        }
 
         if !has_cached_identity {
             debug!(dest = %msg.dest_addr,
@@ -2118,6 +2186,55 @@ impl Node {
             "MtuExceeded: transit router reports oversized packet"
         );
 
+        // Both effects below — the session's own path MTU and the
+        // FipsAddress-keyed lookup the TUN MSS clamp reads — are refused from
+        // here, so one return covers both. The guards sit ahead of the apply
+        // rather than between the two effects, which is what makes the floor
+        // govern `current_mtu` and not only the lookup table.
+
+        // Refuse a bottleneck too small to describe a usable path; a stored
+        // value that low drives the SYN-time MSS clamp into single digits or
+        // zero. The reactive carrier is unauthenticated, so it has its own
+        // floor constant, currently equal to the actionable one.
+        if msg.mtu < crate::upper::icmp::MIN_REACTIVE_PATH_MTU {
+            warn!(
+                dest = %peer_name,
+                reporter = %msg.reporter,
+                bottleneck_mtu = msg.mtu,
+                floor = crate::upper::icmp::MIN_REACTIVE_PATH_MTU,
+                "MtuExceeded reports a path MTU below the actionable floor; ignoring"
+            );
+            self.metrics().errors.mtu_exceeded_below_floor.inc();
+            return;
+        }
+
+        // Corroboration. The admission gate narrows which destination may be
+        // named; it cannot authenticate the reporter, so a legal value is a
+        // legal value from anyone and the floor alone only sets the outcome of
+        // a forgery rather than preventing it. An honest report exists only
+        // because a frame this node emitted did not fit some hop, so require
+        // that this node has actually sent something larger than the value
+        // being claimed since the last accepted decrease. Honest path-MTU
+        // discovery satisfies this by construction; a forgery has to wait for
+        // us to emit a frame bigger than the value it wants to claim, which
+        // bounds every accepted claim from below by our own traffic.
+        let sent_wire_len = self
+            .sessions
+            .get(&msg.dest_addr)
+            .map(|e| e.max_sent_wire_len())
+            .unwrap_or(0);
+        if msg.mtu >= sent_wire_len {
+            debug!(
+                dest = %peer_name,
+                reporter = %msg.reporter,
+                bottleneck_mtu = msg.mtu,
+                max_sent_wire_len = sent_wire_len,
+                "MtuExceeded reports a bottleneck no smaller than anything this node has sent; ignoring"
+            );
+            self.metrics().errors.mtu_exceeded_uncorroborated.inc();
+            return;
+        }
+
         // Apply to PathMtuState: immediate decrease via apply_notification()
         if let Some(entry) = self.sessions.get_mut(&msg.dest_addr)
             && let Some(mmp) = entry.mmp_mut()
@@ -2138,21 +2255,12 @@ impl Node {
             }
         }
 
-        // The admission gate above restricts which addresses may be written,
-        // not which values. Any node at any distance may legitimately report a
-        // bottleneck for a destination this node has bound, so refuse to store
-        // one too small to describe a usable path; a stored value that low
-        // drives the SYN-time MSS clamp into single digits or zero.
-        if msg.mtu < crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU {
-            warn!(
-                dest = %peer_name,
-                reporter = %msg.reporter,
-                bottleneck_mtu = msg.mtu,
-                floor = crate::upper::icmp::MIN_ACTIONABLE_PATH_MTU,
-                "MtuExceeded reports a path MTU below the actionable floor; ignoring"
-            );
-            self.metrics().errors.mtu_exceeded_below_floor.inc();
-            return;
+        // Spent: the evidence vouched for this decrease and does not vouch for
+        // the next one. An initiating session has no `mmp` and so reaches this
+        // with the apply above skipped; the reset belongs to the acceptance,
+        // not to the apply.
+        if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
+            entry.clear_sent_wire_len();
         }
 
         // Mirror the bottleneck into the FipsAddress-keyed lookup used by
@@ -2221,6 +2329,59 @@ impl Node {
     /// Creates a Noise XX handshake as initiator, wraps msg1 in a
     /// SessionSetup, encapsulates in a SessionDatagram, and routes
     /// toward the destination.
+    /// Whether a session for `addr` may be created, given the table cap.
+    ///
+    /// Returns true when an entry already exists, since admitting it cannot
+    /// grow the table. Counts its own refusals, so the two reasons are
+    /// distinguishable without turning on debug logging.
+    pub(in crate::node) fn admit_new_session(&mut self, addr: &NodeAddr) -> bool {
+        let max_sessions = self.config().node.limits.max_sessions;
+        if max_sessions == 0 || self.sessions.contains_key(addr) {
+            return true;
+        }
+
+        if self.sessions.len() >= max_sessions {
+            debug!(
+                src = %self.peer_display_name(addr),
+                sessions = self.sessions.len(),
+                max_sessions = max_sessions,
+                "Session table full, refusing to create a session"
+            );
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::TableFull));
+            return false;
+        }
+
+        // Half-open entries are unauthenticated and are reaped after
+        // `handshake_timeout_secs`, so they are the cheap half of the table
+        // to fill. Holding them to a share keeps room for peers that
+        // complete. The outer length test makes the scan unreachable below
+        // the share, and the table is itself bounded by the cap above.
+        // At least one, or a table capped at one would admit no inbound
+        // session at all rather than one.
+        let half_open_share = (max_sessions / HALF_OPEN_SHARE_DIVISOR).max(1);
+        if self.sessions.len() >= half_open_share {
+            let half_open = self
+                .sessions
+                .values()
+                .filter(|e| e.is_awaiting_msg3())
+                .count();
+            if half_open >= half_open_share {
+                debug!(
+                    src = %self.peer_display_name(addr),
+                    half_open = half_open,
+                    half_open_share = half_open_share,
+                    "Half-open session share exhausted, refusing to create a session"
+                );
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::HalfOpenFull));
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub(in crate::node) async fn initiate_session(
         &mut self,
         dest_addr: NodeAddr,
@@ -2686,6 +2847,7 @@ impl Node {
 
         if let Some(entry) = self.sessions.get_mut(dest_addr) {
             entry.record_sent(send.payload.len());
+            entry.record_sent_wire_len(wire_capacity);
             if let Some(mmp) = entry.mmp_mut() {
                 mmp.sender.record_sent(
                     fsp_counter,
@@ -2961,6 +3123,13 @@ impl Node {
         self.send_encrypted_link_message(&next_hop_addr, &encoded)
             .await?;
         self.metrics().forwarding.record_originated(encoded.len());
+
+        // Evidence for the reactive path-MTU carrier. A transit hop
+        // re-encapsulates what it forwards, so the frame that overflows a
+        // downstream link is the size this frame is here.
+        if let Some(entry) = self.sessions.get_mut(&datagram.dest_addr) {
+            entry.record_sent_wire_len(link_wire_len(encoded.len()));
+        }
         Ok(())
     }
 
@@ -3052,6 +3221,17 @@ impl Node {
             }
             // Session exists but not yet established — queue the packet
             self.queue_pending_packet(dest_addr, ipv6_packet);
+            return;
+        }
+
+        // No session, so this one would grow the table. Answer the local
+        // application the way an unroutable destination is answered rather
+        // than returning an error from `initiate_session`: the caller reads
+        // an error as "no route" and responds with a discovery lookup and a
+        // queued packet, which is outbound traffic on a node already at its
+        // limit.
+        if !self.admit_new_session(&dest_addr) {
+            self.send_icmpv6_dest_unreachable(&ipv6_packet);
             return;
         }
 
@@ -3181,6 +3361,10 @@ impl Node {
         if let Some(existing) = self.sessions.get(&dest_addr)
             && (existing.is_established() || existing.is_initiating())
         {
+            return;
+        }
+
+        if !self.admit_new_session(&dest_addr) {
             return;
         }
 

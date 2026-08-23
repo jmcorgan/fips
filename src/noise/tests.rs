@@ -526,6 +526,41 @@ fn test_replay_window_reset() {
 }
 
 #[test]
+fn test_replay_window_max_counter_does_not_wedge_the_window() {
+    let mut window = ReplayWindow::new();
+
+    window.accept(100);
+    // Mirror the real receive path: check, and accept only if the check passed.
+    if window.check(u64::MAX) {
+        window.accept(u64::MAX);
+    }
+
+    // The honest peer's next frame must still be acceptable.
+    assert!(window.check(101), "ceiling frame wedged the window");
+}
+
+#[test]
+fn test_replay_window_rejects_max_counter() {
+    let window = ReplayWindow::new();
+    assert!(!window.check(u64::MAX));
+}
+
+#[test]
+fn test_replay_window_accepts_highest_counter_an_honest_peer_can_send() {
+    // take_send_counter refuses u64::MAX, so u64::MAX - 1 is the highest
+    // counter a conforming peer emits. The ceiling guard must be exactly one
+    // value wide and leave that one alone.
+    let mut window = ReplayWindow::new();
+    assert!(window.check(u64::MAX - 1));
+
+    window.accept(u64::MAX - 1);
+    assert!(
+        !window.check(u64::MAX - 1),
+        "replay should still be rejected"
+    );
+}
+
+#[test]
 fn test_session_replay_protection() {
     let keypair1 = generate_keypair();
     let keypair2 = generate_keypair();

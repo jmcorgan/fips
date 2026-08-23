@@ -12,7 +12,7 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,8 +20,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::recorder;
 use super::writer;
 
-/// Default sink directory. Overridable per capture with `--dir`.
+/// Default sink directory, and the root a privileged daemon confines `--dir`
+/// to. Overridable per capture with `--dir`, within that root.
 pub(crate) const DEFAULT_DIR: &str = "/var/log/fips";
+
+/// How many same-second filename collisions a capture steps around before
+/// giving up. Stop-then-start inside one second is an ordinary operator
+/// sequence and the stamp has one-second granularity, so a bare failure there
+/// would be a regression. Raising this only widens how many restarts one
+/// second can hold; lowering it turns a fast restart back into an error.
+const NAME_COLLISION_RETRIES: u32 = 16;
+
+/// Mode for a created capture file. A capture carries the node npub, build,
+/// platform and a timing series, so it is not world-readable.
+#[cfg(unix)]
+const FILE_MODE: u32 = 0o600;
+
+/// Mode for a created capture directory. `mkdir` can only tighten this with
+/// the umask, never loosen it.
+#[cfg(unix)]
+const DIR_MODE: u32 = 0o750;
 
 /// Writer flush interval.
 pub(crate) const INTERVAL: Duration = Duration::from_secs(10);
@@ -102,12 +120,131 @@ fn reap() {
     }
 }
 
-/// Arm a capture.
+/// True when the process runs with root's privileges.
+///
+/// This is what makes an unconstrained `--dir` a privilege crossing: the
+/// control socket is reachable by the `fips` group, which the security model
+/// writes down as strictly weaker than root, so a group member must not be
+/// able to steer a root `create_dir_all` at an arbitrary path.
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// No control socket and no `fips` group off unix, so there is no weaker
+/// principal to confine and the parameter keeps its original meaning.
+#[cfg(not(unix))]
+fn running_as_root() -> bool {
+    false
+}
+
+/// Resolve a requested capture directory against the root it must stay under.
+///
+/// `privileged` is a parameter rather than a `geteuid()` call so the rules can
+/// be exercised without depending on the uid of whoever ran the tests.
+///
+/// - No `--dir` keeps today's default, `root`.
+/// - An unprivileged daemon crosses no boundary: it can already write wherever
+///   the invoking user can, so the path is taken as given. This is what keeps
+///   the documented non-root `cargo run` capture working.
+/// - Otherwise the path must be absolute, must contain no `..` component, and
+///   must resolve under `root` once every existing ancestor has been followed
+///   through its symlinks.
+///
+/// Accepted: resolution is check-then-act. A symlink planted between the check
+/// here and the `create_dir_all` in `open_sink` would escape the root. Inside
+/// `/var/log/fips` only root can plant one, which is the principal already
+/// being trusted.
+fn resolve_dir_under(dir: Option<&str>, root: &Path, privileged: bool) -> Result<PathBuf, String> {
+    let Some(dir) = dir else {
+        return Ok(root.to_path_buf());
+    };
+    if !privileged {
+        return Ok(PathBuf::from(dir));
+    }
+
+    let requested = Path::new(dir);
+    if !requested.is_absolute() {
+        return Err(format!(
+            "profile directory must be an absolute path under {}: {dir}",
+            root.display()
+        ));
+    }
+    if requested
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!(
+            "profile directory must not contain `..` components: {dir}"
+        ));
+    }
+
+    let resolved = resolve_through_existing(requested)?;
+    let root = resolve_through_existing(root)?;
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "profile directory must be under {}: {dir}",
+            root.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Canonicalize the deepest existing ancestor of `path` and re-append the tail
+/// that does not exist yet.
+///
+/// Plain `canonicalize` returns `NotFound` for the directory a capture is
+/// being asked to create, which is the ordinary case, so it cannot be used on
+/// its own. Following the existing ancestors is what catches a lexically clean
+/// path whose parent is a symlink out of the root.
+fn resolve_through_existing(path: &Path) -> Result<PathBuf, String> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(base) = probe.canonicalize() {
+            let mut out = base;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return Ok(out);
+        }
+        let Some(name) = probe.file_name().map(|n| n.to_os_string()) else {
+            return Err(format!(
+                "cannot resolve profile directory {}",
+                path.display()
+            ));
+        };
+        tail.push(name);
+        if !probe.pop() {
+            return Err(format!(
+                "cannot resolve profile directory {}",
+                path.display()
+            ));
+        }
+    }
+}
+
+/// Arm a capture, confining `--dir` to the capture root.
 ///
 /// Opens the sink first and only then starts the writer, so a bad `--dir` is
-/// reported to the caller rather than logged into the void.
+/// reported to the caller rather than logged into the void. The directory is
+/// resolved before the capture slot is claimed, so a rejected path leaves the
+/// slot free.
 pub(crate) fn start(
     dir: Option<&str>,
+    node_npub: &str,
+    tick_period_secs: u64,
+) -> Result<serde_json::Value, String> {
+    let dir = resolve_dir_under(dir, Path::new(DEFAULT_DIR), running_as_root())?;
+    start_in(&dir, node_npub, tick_period_secs)
+}
+
+/// Arm a capture in an already-resolved directory.
+///
+/// Split out from `start` so the confinement rules live in one place and the
+/// lifecycle can be exercised without them.
+pub(crate) fn start_in(
+    dir: &Path,
     node_npub: &str,
     tick_period_secs: u64,
 ) -> Result<serde_json::Value, String> {
@@ -210,25 +347,80 @@ pub(crate) fn shutdown() {
     }
 }
 
+/// Create the capture directory, giving it a mode rather than inheriting
+/// whatever a permissive umask allows.
+fn create_capture_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(DIR_MODE);
+    }
+    builder.create(dir)
+}
+
+/// Create the capture file, refusing to follow or truncate anything already at
+/// the path.
+///
+/// The basename is a one-second UTC stamp and therefore predictable, so
+/// `File::create` would follow a symlink pre-planted at the next name.
+/// `create_new` refuses any existing entry; a same-second restart, which used
+/// to succeed by silently truncating the previous capture, steps to the next
+/// free suffix instead of failing.
+fn create_capture_file(dir: &Path, stamp: &str) -> Result<(File, PathBuf), String> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(FILE_MODE);
+    }
+
+    let mut last = None;
+    for n in 0..=NAME_COLLISION_RETRIES {
+        let name = if n == 0 {
+            format!("profile-{stamp}.tsv")
+        } else {
+            format!("profile-{stamp}-{n}.tsv")
+        };
+        let path = dir.join(name);
+        match opts.open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last = Some((path, e));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot create profile file {}: {e}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    let (path, e) = last.expect("the loop runs at least once");
+    Err(format!(
+        "cannot create profile file {}: {e}",
+        path.display()
+    ))
+}
+
 /// Create the sink file and write its header block. Returns the open file, its
 /// path, and the number of header bytes written.
 fn open_sink(
-    dir: Option<&str>,
+    dir: &Path,
     node_npub: &str,
     tick_period_secs: u64,
 ) -> Result<(File, PathBuf, u64), String> {
-    let dir = PathBuf::from(dir.unwrap_or(DEFAULT_DIR));
-    std::fs::create_dir_all(&dir)
+    create_capture_dir(dir)
         .map_err(|e| format!("cannot use profile directory {}: {e}", dir.display()))?;
 
     let start_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!("profile-{}.tsv", compact_utc(start_unix)));
-
-    let mut file = File::create(&path)
-        .map_err(|e| format!("cannot create profile file {}: {e}", path.display()))?;
+    let (mut file, path) = create_capture_file(dir, &compact_utc(start_unix))?;
 
     let header = format!(
         "# fips tick profile\n\
@@ -330,15 +522,14 @@ mod tests {
     fn capture_round_trip_writes_header_and_rows() {
         let _guard = crate::instr::test_serial();
         let dir = tempfile::tempdir().expect("tempdir");
-        let dir_str = dir.path().to_str().unwrap().to_string();
 
-        let started = start(Some(&dir_str), "npub1test", 1).expect("start");
+        let started = start_in(dir.path(), "npub1test", 1).expect("start");
         assert_eq!(started["state"], "running");
         assert!(gate(), "gate must be armed while running");
         let path = PathBuf::from(started["path"].as_str().unwrap());
 
         // A second `on` is refused while one is running, and names the file.
-        let refused = start(Some(&dir_str), "npub1test", 1).unwrap_err();
+        let refused = start_in(dir.path(), "npub1test", 1).unwrap_err();
         assert!(refused.contains(&path.display().to_string()), "{refused}");
 
         // Feed one observation so the drained rows are not all zero.
@@ -400,12 +591,160 @@ mod tests {
     #[test]
     fn start_fails_loudly_on_an_unwritable_directory() {
         let _guard = crate::instr::test_serial();
-        let err = start(Some("/proc/fips-profile-should-not-exist"), "npub1test", 1)
-            .expect_err("must fail");
+        let err = start_in(
+            Path::new("/proc/fips-profile-should-not-exist"),
+            "npub1test",
+            1,
+        )
+        .expect_err("must fail");
         assert!(err.contains("profile directory"), "{err}");
         // The failed attempt must leave the slot free for the next try.
         assert_eq!(STATE.load(Ordering::Acquire), IDLE);
         assert!(!gate());
+    }
+
+    // ========================================================================
+    // `--dir` confinement
+    //
+    // All of these force `privileged = true` rather than reading the uid, so
+    // their verdict does not depend on who ran the suite.
+    // ========================================================================
+
+    #[test]
+    fn profile_dir_rejects_a_parent_traversal_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let escape = root.path().join("..").join("..").join("etc");
+        let err = resolve_dir_under(Some(escape.to_str().unwrap()), root.path(), true)
+            .expect_err("a `..` escape must be refused");
+        assert!(err.contains(".."), "{err}");
+    }
+
+    #[test]
+    fn profile_dir_rejects_a_relative_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = resolve_dir_under(Some("sub"), root.path(), true)
+            .expect_err("a relative path must be refused");
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn profile_dir_rejects_an_absolute_path_outside_the_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = resolve_dir_under(Some("/etc/cron.d"), root.path(), true)
+            .expect_err("a path outside the root must be refused");
+        assert!(err.contains("must be under"), "{err}");
+    }
+
+    /// The lexically clean escape: every component is innocent and an existing
+    /// ancestor is a symlink pointing out of the root.
+    #[test]
+    #[cfg(unix)]
+    fn profile_dir_rejects_a_symlinked_ancestor_pointing_out_of_the_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+
+        let asked = link.join("x");
+        let err = resolve_dir_under(Some(asked.to_str().unwrap()), root.path(), true)
+            .expect_err("a symlinked ancestor must not escape the root");
+        assert!(err.contains("must be under"), "{err}");
+    }
+
+    #[test]
+    fn profile_dir_accepts_the_root_and_a_subdirectory_that_does_not_exist_yet() {
+        let root = tempfile::tempdir().expect("tempdir");
+        resolve_dir_under(Some(root.path().to_str().unwrap()), root.path(), true)
+            .expect("the root itself must be allowed");
+
+        // Not yet created: the resolver must not depend on the path existing.
+        let fresh = root.path().join("run-1");
+        let got = resolve_dir_under(Some(fresh.to_str().unwrap()), root.path(), true)
+            .expect("a subdirectory that does not exist yet must be allowed");
+        assert!(got.ends_with("run-1"), "{}", got.display());
+    }
+
+    #[test]
+    fn profile_dir_defaults_to_the_root_when_none_is_given() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let got = resolve_dir_under(None, root.path(), true).expect("the default must be allowed");
+        assert_eq!(got, root.path());
+    }
+
+    #[test]
+    fn profile_dir_takes_the_unprivileged_bypass() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let got = resolve_dir_under(Some("/anywhere/at/all"), root.path(), false)
+            .expect("an unprivileged daemon crosses no boundary");
+        assert_eq!(got, PathBuf::from("/anywhere/at/all"));
+    }
+
+    /// A pre-planted entry at the predicted capture name must not be followed
+    /// or truncated. The stamp is one-second granular, so the name is
+    /// guessable to within a second.
+    #[test]
+    fn profile_sink_does_not_truncate_a_preexisting_path_at_the_capture_name() {
+        let _guard = crate::instr::test_serial();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let start_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let squatted = dir.path().join(format!(
+            "profile-{}.tsv",
+            compact_utc(start_unix.saturating_sub(1))
+        ));
+        std::fs::write(&squatted, b"do not truncate me").expect("plant");
+
+        // Name the same stamp the squatter used, so the sink collides with it.
+        let (_file, path) =
+            create_capture_file(dir.path(), &compact_utc(start_unix.saturating_sub(1)))
+                .expect("the sink must step around the collision");
+
+        assert_ne!(path, squatted, "the sink must not reuse the existing name");
+        assert_eq!(
+            std::fs::read_to_string(&squatted).expect("read"),
+            "do not truncate me",
+            "an existing file at the capture name must survive"
+        );
+    }
+
+    /// Stop-then-start inside one second is an ordinary operator sequence and
+    /// must produce a second capture, not an error.
+    #[test]
+    fn profile_sink_uniquifies_a_same_second_restart() {
+        let _guard = crate::instr::test_serial();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_first, first_path) = create_capture_file(dir.path(), "20260727T191500Z").unwrap();
+        let (_second, second_path) = create_capture_file(dir.path(), "20260727T191500Z")
+            .expect("a same-second restart must not fail");
+        assert_ne!(first_path, second_path);
+        assert!(first_path.exists() && second_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn profile_sink_creates_a_private_file_and_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::instr::test_serial();
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("captures");
+        create_capture_dir(&dir).expect("create dir");
+        let (_file, path) = create_capture_file(&dir, "20260727T191500Z").expect("create file");
+
+        // The umask can only tighten what `mkdir`/`open` were given, so the
+        // assertion is on the bits that must be absent rather than equality.
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o007,
+            0,
+            "the capture directory must not be world-accessible"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o077,
+            0,
+            "the capture file must be private to its owner"
+        );
     }
 
     #[test]

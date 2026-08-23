@@ -16,7 +16,7 @@ use crate::proto::fsp::wire::{
 };
 use crate::proto::fsp::{SessionAck, SessionSetup};
 use crate::proto::link::{SessionDatagram, SessionDatagramRef};
-use crate::proto::routing::{DropReason, NextHop, RouteAction, RouteOutcome};
+use crate::proto::routing::{DropReason, LimitVerdict, NextHop, RouteAction, RouteOutcome};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -125,7 +125,7 @@ impl Node {
                     bytes = payload.len(),
                     "Dropping transit SessionDatagram: no route to destination"
                 );
-                self.send_routing_error(&original).await;
+                self.send_routing_error(from, &original).await;
             }
             RouteOutcome::Forward {
                 next_hop,
@@ -157,7 +157,7 @@ impl Node {
                         self.metrics()
                             .forwarding
                             .record_reject_bytes(ForwardingReject::MtuExceeded, payload.len());
-                        self.send_mtu_exceeded_error(dest, datagram_ref.src_addr, mtu)
+                        self.send_mtu_exceeded_error(from, dest, datagram_ref.src_addr, mtu)
                             .await;
                     }
                     Err(e) => {
@@ -321,6 +321,39 @@ impl Node {
         }
     }
 
+    /// Spend one peer-budget token, after a gate further down has admitted.
+    ///
+    /// The budget is keyed on the authenticated link peer the frame arrived
+    /// over, which is the one value at the emission point a sender cannot
+    /// mint: every field of the datagram itself is chosen by whoever sent it,
+    /// so a per-destination or per-source gate is escaped by varying the field
+    /// it keys on.
+    ///
+    /// Peek and commit are separate because the per-destination interval gate
+    /// lives inside `routing::synth_routing_error` and runs after this.
+    /// Charging a suppressed signal would let a single unroutable destination
+    /// behind a high-fanout peer spend that peer's whole budget on emissions
+    /// nothing sends, silencing every other destination behind it.
+    fn commit_error_emission(&mut self, from: &NodeAddr) {
+        self.peer_error_budget.commit(from, Instant::now());
+    }
+
+    /// Count what the core's per-destination gate decided about one candidate
+    /// error signal.
+    ///
+    /// The three verdicts are counted apart because they mean different
+    /// things to an operator: `Suppress` is the interval doing its job during
+    /// an outage, while `AdmitAtCapacity` says the destination map is full and
+    /// the interval is no longer suppressing anything for this destination, so
+    /// only the per-peer budget is still bounding emission.
+    fn record_error_verdict(&mut self, verdict: LimitVerdict) {
+        match verdict {
+            LimitVerdict::Suppress => self.metrics().errors.emit_over_dest_interval.inc(),
+            LimitVerdict::AdmitAtCapacity => self.metrics().errors.emit_limiter_at_capacity.inc(),
+            LimitVerdict::Admit => {}
+        }
+    }
+
     /// Generate and send a routing error signal back to the datagram's source.
     ///
     /// If we have cached coords for the destination, send PathBroken (we know
@@ -329,7 +362,20 @@ impl Node {
     ///
     /// If we can't route the error back to the source either, drop silently.
     /// No cascading errors.
-    async fn send_routing_error(&mut self, original: &SessionDatagram) {
+    /// `from` is the authenticated link peer the original datagram arrived
+    /// from, and is what the emission is charged against. It is the one value
+    /// at this point a sender cannot mint: every field of the datagram itself
+    /// is chosen by whoever sent it.
+    async fn send_routing_error(&mut self, from: &NodeAddr, original: &SessionDatagram) {
+        // Peeked, not spent. The destination gate inside the core may still
+        // suppress this signal, and charging a suppressed emission would let a
+        // single unroutable destination behind a high-fanout peer burn that
+        // peer's whole budget on signals nothing sends.
+        if !self.peer_error_budget.has_token(from, Instant::now()) {
+            self.metrics().errors.emit_over_peer_budget.inc();
+            return;
+        }
+
         let my_addr = *self.node_addr();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -356,11 +402,21 @@ impl Node {
                 default_ttl,
             )
         };
-        let RouteAction::SendError { toward, bytes } = match action {
+        self.record_error_verdict(action.verdict);
+        let RouteAction::SendError { toward, bytes } = match action.action {
             Some(action) => action,
             // Rate limited: drop silently. No cascading errors.
             None => return,
         };
+
+        // Both gates have admitted, so the token peeked above is now spent.
+        // Charged here rather than at the peek so a destination the core
+        // suppressed costs the link peer nothing; see
+        // `commit_error_emission`. A later failure to resolve the reverse hop
+        // still leaves the token spent, which is deliberate: the work the
+        // budget bounds is the synthesis this node was induced to perform,
+        // not whether a hop happened to exist for it.
+        self.commit_error_emission(from);
 
         // Resolve the reverse link hop only now, after the gate passed, so
         // `find_next_hop`'s coord-cache touch keeps its pre-refactor scope.
@@ -402,12 +458,28 @@ impl Node {
     ///
     /// `dest` is the failed datagram's destination (rate-limit key); `toward`
     /// is its source, where the signal is routed back.
+    ///
+    /// `from` is the authenticated link peer the original datagram arrived
+    /// from, and is what the emission is charged against. MtuExceeded shares
+    /// the link peer's budget with the routing errors rather than holding its
+    /// own: a separate bucket would insulate path-MTU discovery from
+    /// routing-error pressure, at the cost of a second knob and of letting one
+    /// peer induce twice the total emission.
     async fn send_mtu_exceeded_error(
         &mut self,
+        from: &NodeAddr,
         dest: NodeAddr,
         toward: NodeAddr,
         bottleneck_mtu: u16,
     ) {
+        // Peeked, not spent, for the same reason as in `send_routing_error`:
+        // the per-destination gate inside the core runs below and may still
+        // suppress this signal.
+        if !self.peer_error_budget.has_token(from, Instant::now()) {
+            self.metrics().errors.emit_over_peer_budget.inc();
+            return;
+        }
+
         let my_addr = *self.node_addr();
         let now_ms = Self::now_ms();
         let default_ttl = self.config().node.session.default_ttl;
@@ -421,11 +493,15 @@ impl Node {
             now_ms,
             default_ttl,
         );
-        let RouteAction::SendError { toward, bytes } = match action {
+        self.record_error_verdict(action.verdict);
+        let RouteAction::SendError { toward, bytes } = match action.action {
             Some(action) => action,
             // Rate limited: drop silently. No cascading errors.
             None => return,
         };
+
+        // Both gates have admitted; spend the token peeked above.
+        self.commit_error_emission(from);
 
         // Resolve the reverse link hop only now, after the gate passed, so
         // `find_next_hop`'s coord-cache touch keeps its pre-refactor scope.

@@ -14,7 +14,7 @@
 //!   nodes generating fresh request_ids at high rate.
 
 use crate::NodeAddr;
-use crate::proto::rate_limit::PerAddrRateLimiter;
+use crate::proto::rate_limit::{PerAddrRateLimiter, RecordOutcome};
 use alloc::collections::BTreeMap;
 
 // ============================================================================
@@ -180,7 +180,10 @@ impl LookupForwardRateLimiter {
     /// Returns true if enough time has passed since the last forward
     /// for this target. Updates internal state when returning true.
     pub fn should_forward(&mut self, target: &NodeAddr, now_ms: u64) -> bool {
-        self.0.check_and_record(target, now_ms)
+        // A full map admits rather than refuses; for forwarding that is the
+        // same fail-open direction the routing-error limiter takes, and the
+        // per-target interval is the only thing lost.
+        self.0.check_and_record(target, now_ms) != RecordOutcome::Suppress
     }
 
     /// Replace the minimum interval in milliseconds (e.g., set to zero to disable).

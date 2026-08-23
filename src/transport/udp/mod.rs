@@ -25,6 +25,18 @@ use tracing::{debug, info, trace, warn};
 /// DNS cache TTL for hostname resolution (60 seconds).
 const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// Upper bound on the number of hostnames the DNS cache holds at once.
+///
+/// The cache is keyed by the address string a dial was asked for, and under a
+/// rendezvous policy that accepts advertised endpoints those strings come from
+/// remote parties, so without a bound the map grows for the life of the
+/// process. 256 sits about two orders of magnitude above the number of
+/// distinct hostnames a configured peer list produces, so no ordinary
+/// deployment reaches it. Lowering it starts to be reachable by a large peer
+/// list, and the only cost of an eviction is one extra DNS lookup on the next
+/// dial of that name; raising it buys nothing but resident memory.
+const DNS_CACHE_MAX_ENTRIES: usize = 256;
+
 /// UDP transport for FIPS.
 ///
 /// Provides connectionless, unreliable packet delivery over UDP/IP.
@@ -155,10 +167,8 @@ impl UdpTransport {
         // Check cache
         {
             let cache = self.dns_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((resolved, cached_at)) = cache.get(addr)
-                && cached_at.elapsed() < DNS_CACHE_TTL
-            {
-                return Ok(*resolved);
+            if let Some(resolved) = cache_lookup(&cache, addr, Instant::now()) {
+                return Ok(resolved);
             }
         }
 
@@ -168,7 +178,13 @@ impl UdpTransport {
         // Store in cache
         {
             let mut cache = self.dns_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.insert(addr.clone(), (resolved, Instant::now()));
+            cache_store(
+                &mut cache,
+                addr.clone(),
+                resolved,
+                Instant::now(),
+                DNS_CACHE_MAX_ENTRIES,
+            );
         }
 
         Ok(resolved)
@@ -611,6 +627,56 @@ async fn udp_receive_loop(
     }
 }
 
+/// A cached resolution for `key`, if one is present and still inside
+/// `DNS_CACHE_TTL` at `now`.
+fn cache_lookup(
+    cache: &HashMap<TransportAddr, (SocketAddr, Instant)>,
+    key: &TransportAddr,
+    now: Instant,
+) -> Option<SocketAddr> {
+    cache
+        .get(key)
+        .filter(|(_, cached_at)| now.duration_since(*cached_at) < DNS_CACHE_TTL)
+        .map(|(resolved, _)| *resolved)
+}
+
+/// Record a resolution, keeping the cache at or below `cap` entries.
+///
+/// Refreshing a name already present never evicts anything. Otherwise every
+/// entry past its TTL is dropped first, and only if that leaves the map full
+/// is the oldest remaining entry evicted. Eviction is by insertion time rather
+/// than by last use: the timestamp is already there as the TTL clock, and
+/// tracking last use would mean writing to the map on the read path of every
+/// dial. The sweep is linear in `cap` and runs only on a resolution miss, so
+/// at most once per TTL per name.
+fn cache_store(
+    cache: &mut HashMap<TransportAddr, (SocketAddr, Instant)>,
+    key: TransportAddr,
+    resolved: SocketAddr,
+    now: Instant,
+    cap: usize,
+) {
+    if let Some(entry) = cache.get_mut(&key) {
+        *entry = (resolved, now);
+        return;
+    }
+
+    cache.retain(|_, (_, cached_at)| now.duration_since(*cached_at) < DNS_CACHE_TTL);
+
+    while cache.len() >= cap {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (_, cached_at))| *cached_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+
+    cache.insert(key, (resolved, now));
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -620,6 +686,112 @@ mod tests {
     use super::*;
     use crate::transport::packet_channel;
     use tokio::time::{Duration, timeout};
+
+    /// A distinct hostname key, so each store is a fresh entry.
+    fn dns_key(n: usize) -> TransportAddr {
+        TransportAddr::from(format!("host{n}.example:2121"))
+    }
+
+    fn dns_value() -> SocketAddr {
+        "198.51.100.1:2121".parse().unwrap()
+    }
+
+    /// The cache is keyed by strings a remote party can choose, so its size
+    /// has to be bounded no matter how many distinct names are dialed.
+    #[test]
+    fn dns_cache_store_refuses_to_exceed_the_cap() {
+        const CAP: usize = 8;
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+
+        for n in 0..CAP + 5 {
+            cache_store(&mut cache, dns_key(n), dns_value(), now, CAP);
+            assert!(
+                cache.len() <= CAP,
+                "cache grew to {} entries past a cap of {CAP}",
+                cache.len()
+            );
+        }
+    }
+
+    /// A stale entry used to be overwritten on the next dial of the same name
+    /// and otherwise never removed, so a name dialed once sat there forever.
+    #[test]
+    fn dns_cache_store_evicts_entries_past_their_ttl() {
+        let now = Instant::now();
+        let expired_at = now.checked_sub(DNS_CACHE_TTL * 2).expect("monotonic clock");
+        let mut cache = HashMap::new();
+        cache.insert(dns_key(0), (dns_value(), expired_at));
+
+        cache_store(
+            &mut cache,
+            dns_key(1),
+            dns_value(),
+            now,
+            DNS_CACHE_MAX_ENTRIES,
+        );
+
+        assert!(
+            !cache.contains_key(&dns_key(0)),
+            "an entry past its TTL should be swept, not left to accumulate"
+        );
+        assert!(cache_lookup(&cache, &dns_key(0), now).is_none());
+        assert!(cache_lookup(&cache, &dns_key(1), now).is_some());
+    }
+
+    /// With nothing expired, the cap is enforced by dropping the oldest entry.
+    /// The ages here are all well inside the TTL, so the expiry sweep cannot
+    /// be what makes room and the eviction branch is the one under test.
+    #[test]
+    fn dns_cache_store_evicts_the_oldest_entry_when_every_entry_is_fresh() {
+        const CAP: usize = 4;
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        for n in 0..CAP {
+            let age = Duration::from_secs((CAP - n) as u64);
+            assert!(age < DNS_CACHE_TTL, "fixture must stay inside the TTL");
+            let cached_at = now.checked_sub(age).expect("monotonic clock");
+            cache.insert(dns_key(n), (dns_value(), cached_at));
+        }
+        assert_eq!(cache.len(), CAP, "no entry should be expired going in");
+
+        cache_store(&mut cache, dns_key(CAP), dns_value(), now, CAP);
+
+        assert_eq!(cache.len(), CAP);
+        assert!(
+            !cache.contains_key(&dns_key(0)),
+            "the oldest entry should be the one evicted"
+        );
+        for n in 1..=CAP {
+            assert!(
+                cache.contains_key(&dns_key(n)),
+                "entry {n} should have survived"
+            );
+        }
+    }
+
+    /// Re-resolving a name already cached is the common case on a live node.
+    /// It must not cost another entry its place.
+    #[test]
+    fn dns_cache_store_refreshing_an_existing_key_evicts_nothing() {
+        const CAP: usize = 4;
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        for n in 0..CAP {
+            let cached_at = now
+                .checked_sub(Duration::from_secs((CAP - n) as u64))
+                .expect("monotonic clock");
+            cache.insert(dns_key(n), (dns_value(), cached_at));
+        }
+
+        cache_store(&mut cache, dns_key(0), dns_value(), now, CAP);
+
+        assert_eq!(cache.len(), CAP);
+        for n in 0..CAP {
+            assert!(cache.contains_key(&dns_key(n)), "entry {n} should remain");
+        }
+        assert_eq!(cache_lookup(&cache, &dns_key(0), now), Some(dns_value()));
+    }
 
     fn make_config(port: u16) -> UdpConfig {
         UdpConfig {

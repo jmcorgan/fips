@@ -5,11 +5,13 @@
 //! multi-hop forwarding through live node topologies.
 
 use super::*;
+use crate::node::peer_error_budget::PEER_ERROR_BURST;
 use crate::proto::fsp::wire::{FSP_FLAG_CP, build_fsp_header};
 use crate::proto::fsp::{SessionAck, SessionSetup};
 use crate::proto::link::SessionDatagram;
 use crate::proto::stp::TreeCoordinate;
 use crate::proto::stp::encode_coords;
+
 use spanning_tree::{
     TestNode, cleanup_nodes, populate_all_coord_caches, process_available_packets, run_tree_test,
     verify_tree_convergence,
@@ -1194,4 +1196,91 @@ async fn test_coord_cache_warming_short_inner_payload_is_dropped_not_panic() {
         1212,
         "24 frames of 39..=46 and 47..=62 outer bytes sum to 1212"
     );
+}
+
+// --- Emission bounds on induced routing errors ---
+
+/// A distinct destination per index, standing for the fresh `dest_addr` a
+/// flooding sender puts on every datagram to escape the per-destination gate.
+fn minted_dest(val: u32) -> NodeAddr {
+    let mut bytes = [0u8; 16];
+    bytes[..4].copy_from_slice(&val.to_le_bytes());
+    bytes[15] = 0xfe;
+    NodeAddr::from_bytes(bytes)
+}
+
+/// Feed one transit datagram whose destination this node cannot route.
+async fn inject_unroutable(node: &mut Node, from: &NodeAddr, src: NodeAddr, dest: NodeAddr) {
+    let dg = SessionDatagram::new(src, dest, vec![0x10, 0x00, 0x00, 0x00]).with_ttl(8);
+    let encoded = dg.encode();
+    node.handle_session_datagram(from, &encoded[1..], false)
+        .await;
+}
+
+#[tokio::test]
+async fn one_link_peer_cannot_induce_unbounded_errors_by_varying_the_destination() {
+    let mut node = make_node();
+    let attacker = make_node_addr(0xAA);
+    let overshoot = 10u32;
+
+    for i in 0..PEER_ERROR_BURST + overshoot {
+        // Fresh destination and fresh spoofed source per packet: neither
+        // address-keyed gate sees a repeat.
+        inject_unroutable(
+            &mut node,
+            &attacker,
+            minted_dest(i + 1_000_000),
+            minted_dest(i),
+        )
+        .await;
+    }
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.emit_over_dest_interval.get(),
+        0,
+        "the per-destination gate cannot bound a sender that varies the destination"
+    );
+    assert_eq!(
+        errors.emit_over_peer_budget.get(),
+        u64::from(overshoot),
+        "everything past the link peer's burst must be refused"
+    );
+}
+
+#[tokio::test]
+async fn a_destination_suppressed_error_does_not_spend_the_link_peer_budget() {
+    let mut node = make_node();
+    let peer = make_node_addr(0xAA);
+    let src = make_node_addr(0x01);
+    let dest = make_node_addr(0x02);
+    let injected = PEER_ERROR_BURST * 4;
+
+    for _ in 0..injected {
+        inject_unroutable(&mut node, &peer, src, dest).await;
+    }
+
+    let errors = &node.metrics().errors;
+    assert_eq!(
+        errors.emit_over_peer_budget.get(),
+        0,
+        "an outage on one destination must not spend the peer's budget for the others"
+    );
+    assert_eq!(
+        errors.emit_over_dest_interval.get(),
+        u64::from(injected - 1),
+        "only the first error for a destination goes out within the interval"
+    );
+}
+
+#[tokio::test]
+async fn a_single_unroutable_datagram_still_produces_its_error() {
+    let mut node = make_node();
+    let peer = make_node_addr(0xAA);
+
+    inject_unroutable(&mut node, &peer, make_node_addr(0x01), make_node_addr(0x02)).await;
+
+    let errors = &node.metrics().errors;
+    assert_eq!(errors.emit_over_peer_budget.get(), 0);
+    assert_eq!(errors.emit_over_dest_interval.get(), 0);
 }

@@ -771,6 +771,9 @@ impl TorTransport {
                 mtu,
                 recv_stats,
                 Direction::Outbound,
+                // An outbound connection holds no capped inbound slot and is
+                // not gated on an accept-loop insert.
+                None,
                 None,
             )
             .await;
@@ -937,6 +940,9 @@ impl TorTransport {
                 mtu,
                 recv_stats,
                 Direction::Outbound,
+                // An outbound connection holds no capped inbound slot and is
+                // not gated on an accept-loop insert.
+                None,
                 None,
             )
             .await;
@@ -1053,7 +1059,9 @@ impl Transport for TorTransport {
 ///
 /// `first_frame_timeout` is `Some` for an inbound connection, which holds a
 /// capped pool slot from the moment it is accepted, and `None` for an
-/// outbound one, which holds no such slot.
+/// outbound one, which holds no such slot. `ready_rx`, when present, is the
+/// accept loop's readiness barrier: the loop must not run its cleanup before
+/// the accept loop has inserted the pool entry and bumped its counter.
 #[allow(clippy::too_many_arguments)]
 async fn tor_receive_loop(
     reader: tokio::net::tcp::OwnedReadHalf,
@@ -1065,6 +1073,7 @@ async fn tor_receive_loop(
     stats: Arc<TorStats>,
     direction: Direction,
     first_frame_timeout: Option<Duration>,
+    ready_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
     proxied_receive_loop(
         reader,
@@ -1076,6 +1085,7 @@ async fn tor_receive_loop(
         stats,
         "Tor",
         first_frame_timeout,
+        ready_rx,
         |stats, meta| match meta {
             Direction::Inbound => stats.record_pool_inbound_removed(),
             Direction::Outbound => stats.record_pool_outbound_removed(),
@@ -1193,6 +1203,12 @@ async fn tor_accept_loop(
         let recv_addr = remote_addr.clone();
         let recv_tx = packet_tx.clone();
 
+        // Readiness barrier: the receive task must not reach its cleanup path
+        // before the pool insert and counter bump below, or it would remove
+        // nothing and leave an orphaned entry with a permanently incremented
+        // inbound counter.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
         let recv_task = tokio::spawn(async move {
             tor_receive_loop(
                 read_half,
@@ -1204,6 +1220,7 @@ async fn tor_accept_loop(
                 recv_stats,
                 Direction::Inbound,
                 Some(first_frame_timeout),
+                Some(ready_rx),
             )
             .await;
         });
@@ -1216,13 +1233,30 @@ async fn tor_accept_loop(
             meta: Direction::Inbound,
         };
 
-        {
+        let evicted = {
             let mut pool_guard = pool.lock().await;
-            pool_guard.insert(remote_addr.clone(), conn);
+            pool_guard.insert(remote_addr.clone(), conn)
+        };
+
+        if let Some(old) = evicted {
+            // A reused ephemeral forward port can collide with an entry whose
+            // receive task has not finished cleaning up. Abort it and release
+            // its slot here: left alone it would later remove the entry we
+            // just inserted and decrement for it, leaking one slot and
+            // orphaning a live connection.
+            old.recv_task.abort();
+            match old.meta {
+                Direction::Inbound => stats.record_pool_inbound_removed(),
+                Direction::Outbound => stats.record_pool_outbound_removed(),
+            }
         }
 
         stats.record_connection_accepted();
         stats.record_pool_inbound_added();
+
+        // Release the receive task now that both the pool entry and the
+        // inbound counter are in place.
+        let _ = ready_tx.send(());
 
         debug!(
             transport_id = %transport_id,
@@ -2050,5 +2084,231 @@ mod tests {
 
         drop(peer);
         accept.abort();
+    }
+
+    // ========================================================================
+    // Accept-loop readiness barrier
+    // ========================================================================
+
+    /// Build a throwaway `OwnedWriteHalf` for a hand-planted pool entry.
+    async fn spare_write_half() -> OwnedWriteHalf {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        let (_read, write) = client.into_split();
+        write
+    }
+
+    /// The accept loop can be torn down between the pool insert and the
+    /// `ready_tx.send()`: the sender is dropped, so `ready_rx.await` returns
+    /// `Err`. The receive loop must still fall through to its cleanup, or the
+    /// pooled entry and its inbound-counter increment are stranded with no
+    /// task left to undo them. A bare `return` on the error path fails both
+    /// assertions below.
+    #[tokio::test]
+    async fn onion_receive_loop_cleans_up_when_readiness_signal_is_dropped() {
+        let (tx, _rx) = packet_channel(10);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let client = TcpStream::connect(listen).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+        let remote = TransportAddr::from_string(&peer_addr.to_string());
+        let (read_half, write_half) = server.into_split();
+
+        let pool: ProxiedPool<Direction> = Arc::new(Mutex::new(HashMap::new()));
+        let stats = Arc::new(TorStats::new());
+        pool.lock().await.insert(
+            remote.clone(),
+            ProxiedConnection {
+                writer: Arc::new(Mutex::new(write_half)),
+                recv_task: tokio::spawn(async {}),
+                mtu: 1400,
+                established_at: Instant::now(),
+                meta: Direction::Inbound,
+            },
+        );
+        stats.record_pool_inbound_added();
+        assert_eq!(stats.pool_inbound_count(), 1);
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        drop(ready_tx);
+
+        tor_receive_loop(
+            read_half,
+            TransportId::new(1),
+            remote.clone(),
+            tx,
+            pool.clone(),
+            1400,
+            stats.clone(),
+            Direction::Inbound,
+            Some(Duration::from_millis(50)),
+            Some(ready_rx),
+        )
+        .await;
+
+        assert!(
+            pool.lock().await.is_empty(),
+            "an aborted accept must not strand a pool entry"
+        );
+        assert_eq!(
+            stats.pool_inbound_count(),
+            0,
+            "an aborted accept must not strand an inbound-counter increment"
+        );
+        drop(client);
+    }
+
+    /// The losing interleaving, constructed rather than raced for: the peer is
+    /// already gone when the receive task starts, so without the barrier the
+    /// task runs its cleanup against an empty pool, removes nothing, and the
+    /// accept loop's increment lands afterwards and is never undone.
+    ///
+    /// Break-check: pass `None` for `ready_rx`, or delete the `.await` on the
+    /// barrier in the shared loop, and the spawned task completes immediately.
+    /// The first assertion to go red is the "still parked" timeout below;
+    /// the pool-empty and count-zero assertions red after it.
+    #[tokio::test]
+    async fn inbound_slot_is_released_when_the_peer_dies_before_the_pool_insert() {
+        let (tx, _rx) = packet_channel(10);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let client = TcpStream::connect(listen).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+        let remote = TransportAddr::from_string(&peer_addr.to_string());
+        drop(client);
+        let (read_half, write_half) = server.into_split();
+
+        let pool: ProxiedPool<Direction> = Arc::new(Mutex::new(HashMap::new()));
+        let stats = Arc::new(TorStats::new());
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let recv_pool = pool.clone();
+        let recv_stats = stats.clone();
+        let recv_addr = remote.clone();
+        let mut handle = tokio::spawn(async move {
+            tor_receive_loop(
+                read_half,
+                TransportId::new(1),
+                recv_addr,
+                tx,
+                recv_pool,
+                1400,
+                recv_stats,
+                Direction::Inbound,
+                Some(Duration::from_secs(5)),
+                Some(ready_rx),
+            )
+            .await;
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut handle)
+                .await
+                .is_err(),
+            "the receive loop must stay parked on the barrier until the accept tail runs"
+        );
+
+        // The accept loop's tail, in order: insert, count, release.
+        pool.lock().await.insert(
+            remote.clone(),
+            ProxiedConnection {
+                writer: Arc::new(Mutex::new(write_half)),
+                recv_task: tokio::spawn(async {}),
+                mtu: 1400,
+                established_at: Instant::now(),
+                meta: Direction::Inbound,
+            },
+        );
+        stats.record_pool_inbound_added();
+        let _ = ready_tx.send(());
+
+        handle.await.unwrap();
+
+        assert!(
+            pool.lock().await.is_empty(),
+            "the receive loop must remove the entry the accept loop inserted"
+        );
+        assert_eq!(
+            stats.pool_inbound_count(),
+            0,
+            "a peer that dies before the pool insert must not leak its inbound slot"
+        );
+    }
+
+    /// A reused ephemeral forward port can land a second accept on an address
+    /// whose previous entry has not finished cleaning up. The accept loop must
+    /// release the evicted entry's slot: left alone, the old receive task
+    /// later removes the entry the new one just inserted and decrements once,
+    /// leaking a slot and orphaning a live connection.
+    ///
+    /// Break-check: drop the eviction arm in `tor_accept_loop` and the final
+    /// count is 2 rather than 1.
+    #[tokio::test]
+    async fn colliding_pool_key_releases_the_slot_of_the_entry_it_evicts() {
+        use socket2::{Domain, Socket, Type};
+
+        let (tx, _rx) = packet_channel(10);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+
+        // Bind the client socket first so its address is known before the
+        // accept loop ever sees it: that makes the collision deterministic
+        // instead of waiting for the kernel to reuse a port.
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        sock.bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
+        let client_addr = sock.local_addr().unwrap().as_socket().unwrap();
+        let remote = TransportAddr::from_string(&client_addr.to_string());
+
+        let pool: ProxiedPool<Direction> = Arc::new(Mutex::new(HashMap::new()));
+        let stats = Arc::new(TorStats::new());
+
+        // The stale entry: a receive task that never finishes, so nothing
+        // removes it before the colliding accept arrives.
+        pool.lock().await.insert(
+            remote.clone(),
+            ProxiedConnection {
+                writer: Arc::new(Mutex::new(spare_write_half().await)),
+                recv_task: tokio::spawn(std::future::pending::<()>()),
+                mtu: 1400,
+                established_at: Instant::now(),
+                meta: Direction::Inbound,
+            },
+        );
+        stats.record_pool_inbound_added();
+
+        let accept = tokio::spawn(tor_accept_loop(
+            listener,
+            TransportId::new(1),
+            tx,
+            pool.clone(),
+            1400,
+            64,
+            Duration::from_secs(5),
+            stats.clone(),
+        ));
+
+        sock.connect(&listen.into()).unwrap();
+
+        assert!(
+            wait_until(
+                || stats.snapshot().connections_accepted == 1,
+                Duration::from_secs(2)
+            )
+            .await,
+            "the colliding connection should have been accepted"
+        );
+
+        assert_eq!(
+            stats.pool_inbound_count(),
+            1,
+            "evicting a stale entry must release its slot, not stack a second one"
+        );
+        assert_eq!(pool.lock().await.len(), 1);
+
+        accept.abort();
+        drop(sock);
     }
 }

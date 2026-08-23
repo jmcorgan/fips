@@ -234,7 +234,9 @@ fn classify_response_transit_on_fresh_forwarded_request() {
         .recent_requests
         .insert(42, RecentRequest::new(from_peer, 1000));
 
-    match classify_response(&mut lookup, 42) {
+    // Transit is decided by the dedup record alone, so the target the response
+    // names plays no part here — pass one no pending lookup mentions.
+    match classify_response(&mut lookup, 42, &make_node_addr(0xF1)) {
         ResponseRoute::Transit { from_peer: peer } => assert_eq!(peer, from_peer),
         _ => panic!("expected Transit"),
     }
@@ -250,21 +252,70 @@ fn classify_response_already_forwarded_on_second_call() {
         .recent_requests
         .insert(7, RecentRequest::new(from_peer, 1000));
 
+    let target = make_node_addr(0xF2);
     assert!(matches!(
-        classify_response(&mut lookup, 7),
+        classify_response(&mut lookup, 7, &target),
         ResponseRoute::Transit { .. }
     ));
     assert!(matches!(
-        classify_response(&mut lookup, 7),
+        classify_response(&mut lookup, 7, &target),
         ResponseRoute::AlreadyForwarded
     ));
 }
 
 #[test]
-fn classify_response_originator_when_request_absent() {
+fn classify_response_originator_when_a_pending_lookup_issued_the_id() {
+    // No dedup record, so this is not a response we transit. It counts as ours
+    // only because the target has a lookup outstanding and that lookup issued
+    // the very request_id the response carries.
+    let target = make_node_addr(0x51);
     let mut lookup = empty_lookup();
+    let mut pending = PendingLookup::new(1000);
+    pending.record(999);
+    lookup.pending_lookups.insert(target, pending);
+
     assert!(matches!(
-        classify_response(&mut lookup, 999),
+        classify_response(&mut lookup, 999, &target),
+        ResponseRoute::Originator
+    ));
+}
+
+#[test]
+fn classify_response_unsolicited_when_nothing_correlates_the_id() {
+    // The three ways a response can fail to correlate, each of which must be
+    // dropped before the identity resolve and the signature verify rather than
+    // being treated as an answer to something we asked for.
+    let target = make_node_addr(0x52);
+    let other = make_node_addr(0x53);
+    let mut lookup = empty_lookup();
+
+    // 1. Nothing outstanding at all.
+    assert!(matches!(
+        classify_response(&mut lookup, 999, &target),
+        ResponseRoute::Unsolicited
+    ));
+
+    // 2. A lookup is outstanding for the target, but it never issued this id:
+    //    a harvested response cannot be replayed against a live lookup.
+    let mut pending = PendingLookup::new(1000);
+    pending.record(1);
+    lookup.pending_lookups.insert(target, pending);
+    assert!(matches!(
+        classify_response(&mut lookup, 999, &target),
+        ResponseRoute::Unsolicited
+    ));
+
+    // 3. The id was issued, but for a different target: the id is bound to the
+    //    exchange it was drawn for and cannot be redirected onto another name.
+    assert!(matches!(
+        classify_response(&mut lookup, 1, &other),
+        ResponseRoute::Unsolicited
+    ));
+
+    // The matching pair still classifies as ours, so the checks above are
+    // discriminating rather than rejecting everything.
+    assert!(matches!(
+        classify_response(&mut lookup, 1, &target),
         ResponseRoute::Originator
     ));
 }
@@ -447,7 +498,8 @@ fn classify_request_forwards_fresh_and_records_it() {
     let target = make_node_addr(0xAA);
     let request = make_request_id(1, target, 3);
 
-    let outcome = classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096);
+    let outcome =
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome;
     assert!(matches!(outcome, RequestOutcome::Forward));
     // Recorded for reverse-path forwarding.
     assert!(lookup.recent_requests.contains_key(&1));
@@ -463,32 +515,39 @@ fn classify_request_duplicate_on_second_call() {
     let request = make_request_id(1, target, 3);
 
     assert!(matches!(
-        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome,
         RequestOutcome::Forward
     ));
     assert!(matches!(
-        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome,
         RequestOutcome::Duplicate
     ));
 }
 
 #[test]
-fn classify_request_dedup_cache_full() {
+fn classify_request_evicts_rather_than_refusing_a_full_dedup_cache() {
+    // Regression. The cache-full path used to drop the arriving request, so
+    // one peer emitting fresh request_ids
+    // could stop this node forwarding anyone's lookups and answering
+    // lookups for itself. A full cache now evicts instead, charged to the
+    // peer holding the most entries.
     let mut lookup = empty_lookup();
     let from = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
     let target = make_node_addr(0xAA);
-    // Fill the cache to max_recent with distinct request_ids.
+    // Fill the cache to max_recent with distinct request_ids, through
+    // `record_recent` so the per-peer index stays level with the cache. A
+    // direct `recent_requests.insert` would leave the index short and turn
+    // the eviction policy into a no-op, so the test would pass without
+    // exercising it.
     let max_recent = 3usize;
     for id in 100..(100 + max_recent as u64) {
-        lookup
-            .recent_requests
-            .insert(id, RecentRequest::new(from, 1000));
+        lookup.record_recent(id, from, 1000);
     }
     assert_eq!(lookup.recent_requests.len(), max_recent);
 
     let request = make_request_id(1, target, 3);
-    match classify_request(
+    let classification = classify_request(
         &mut lookup,
         &request,
         &from,
@@ -496,12 +555,25 @@ fn classify_request_dedup_cache_full() {
         1000,
         5000,
         max_recent,
-    ) {
-        RequestOutcome::DedupCacheFull { len } => assert_eq!(len, max_recent),
-        _ => panic!("expected DedupCacheFull"),
-    }
-    // The new request must not have been recorded on the drop path.
-    assert!(!lookup.recent_requests.contains_key(&1));
+        1,
+    );
+    assert!(
+        matches!(classification.outcome, RequestOutcome::Forward),
+        "a full cache must not stop the node forwarding"
+    );
+    let evicted = classification
+        .evicted
+        .expect("admitting into a full cache must evict something");
+    assert_eq!(evicted.request_id, 100, "the oldest entry is what pays");
+    assert_eq!(
+        evicted.peer, from,
+        "and the peer that filled the cache is what pays"
+    );
+    // The arriving request is admitted, the evicted one is gone, and the
+    // cache has not grown past its bound.
+    assert!(lookup.recent_requests.contains_key(&1));
+    assert!(!lookup.recent_requests.contains_key(&100));
+    assert_eq!(lookup.recent_requests.len(), max_recent);
 }
 
 #[test]
@@ -513,7 +585,7 @@ fn classify_request_respond_as_target() {
     let request = make_request_id(1, my_addr, 3);
 
     assert!(matches!(
-        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome,
         RequestOutcome::RespondAsTarget
     ));
     // Recorded before the target decision.
@@ -530,7 +602,7 @@ fn classify_request_ttl_exhausted_for_non_target() {
     let request = make_request_id(1, target, 0);
 
     assert!(matches!(
-        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome,
         RequestOutcome::TtlExhausted
     ));
 }
@@ -547,7 +619,7 @@ fn classify_request_forward_rate_limited() {
 
     let request = make_request_id(1, target, 3);
     assert!(matches!(
-        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096),
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome,
         RequestOutcome::ForwardRateLimited
     ));
 }
@@ -560,12 +632,20 @@ fn classify_request_purges_expired_entries() {
     let target = make_node_addr(0xAA);
     // Seed an entry that is expired at now_ms with the given expiry window.
     // is_expired: now - timestamp > expiry_ms → expired.
-    lookup
-        .recent_requests
-        .insert(55, RecentRequest::new(from, 1000));
+    lookup.record_recent(55, from, 1000);
     // now_ms = 10_000, expiry_ms = 5000 → 9000 > 5000 → expired.
     let request = make_request_id(1, target, 3);
-    let outcome = classify_request(&mut lookup, &request, &from, &my_addr, 10_000, 5000, 4096);
+    let outcome = classify_request(
+        &mut lookup,
+        &request,
+        &from,
+        &my_addr,
+        10_000,
+        5000,
+        4096,
+        1,
+    )
+    .outcome;
     assert!(matches!(outcome, RequestOutcome::Forward));
     // The expired entry (55) must have been purged.
     assert!(!lookup.recent_requests.contains_key(&55));

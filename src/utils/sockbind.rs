@@ -48,7 +48,12 @@ pub fn bind(path: &Path, what: &str) -> Result<UnixListener, std::io::Error> {
         remove_stale_socket(path, what)?;
     }
 
-    let listener = UnixListener::bind(path)?;
+    // Bound through `sockperm` rather than `UnixListener::bind` directly:
+    // bind(2) creates the socket inode as `0777 & !umask`, so under a
+    // permissive umask it is world-accessible for the window between the
+    // bind and the `set_socket_access` chmod below. That chmod stays the
+    // authority on the final mode; this only closes the window.
+    let listener = crate::utils::sockperm::bind(path)?;
 
     set_socket_access(path, managed_parent.as_deref(), chown_to_fips_group)?;
 
@@ -65,11 +70,21 @@ pub fn bind(path: &Path, what: &str) -> Result<UnixListener, std::io::Error> {
 /// socket's private directory.
 #[cfg(unix)]
 fn ensure_socket_parent(parent: &Path) -> Result<bool, std::io::Error> {
+    use std::os::unix::fs::DirBuilderExt;
+
     if parent.as_os_str().is_empty() {
         return Ok(false);
     }
 
-    match std::fs::create_dir(parent) {
+    // Mode carried on creation rather than applied afterwards. A directory
+    // made by plain `create_dir` is `0777 & !umask`, and an intermediate
+    // ancestor is never chmodded by anything below, so under a permissive
+    // umask it would stay world-writable for the life of the host — and a
+    // world-writable parent lets an unprivileged account plant an entry at
+    // the socket path. 0750 is what `set_socket_access` applies to a managed
+    // parent anyway, and what the systemd unit and FreeBSD rc script already
+    // use.
+    match std::fs::DirBuilder::new().mode(0o750).create(parent) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if parent.is_dir() {
@@ -120,6 +135,14 @@ fn set_socket_access(
 /// If the file exists but no one is listening, remove it so we can bind. This
 /// handles unclean daemon exits. A live listener yields `AddrInUse` instead, so
 /// two daemons cannot silently take the same path.
+///
+/// The gap between the connect probe and the bind that follows is accepted
+/// rather than closed. Reaching it needs write access to the socket's parent
+/// directory, which the packaged layouts give to root alone (0750 and
+/// root-owned under both systemd and the FreeBSD rc script), and an account
+/// holding it can deny the daemon its socket more simply by squatting the path
+/// before the daemon starts. The removal itself unlinks a symlink rather than
+/// its target, so it is not an arbitrary delete.
 #[cfg(unix)]
 fn remove_stale_socket(path: &Path, what: &str) -> Result<(), std::io::Error> {
     match std::os::unix::net::UnixStream::connect(path) {

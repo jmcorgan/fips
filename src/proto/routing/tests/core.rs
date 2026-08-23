@@ -4,7 +4,7 @@ use super::util::{MockPeer, MockRoutingView, make_coords, make_datagram_ref, mak
 use crate::proto::link::SessionDatagramRef;
 use crate::proto::routing::RoutingSignalType;
 use crate::proto::routing::{
-    DropReason, RouteAction, RouteOutcome, Router, RoutingView, select_best_candidate,
+    DropReason, LimitVerdict, RouteAction, RouteOutcome, Router, RoutingView, select_best_candidate,
 };
 use crate::testutil::make_node_addr;
 use crate::{NodeAddr, TreeCoordinate};
@@ -407,6 +407,7 @@ fn synth_uses_pathbroken_when_coords_cached() {
     };
     let action = router
         .synth_routing_error(&dest, &source, &my_addr, &rv, 0, 64)
+        .action
         .expect("gate passes on first call");
     let RouteAction::SendError { toward, .. } = &action;
     assert_eq!(
@@ -429,6 +430,7 @@ fn synth_uses_coords_required_when_not_cached() {
     let rv = MockRoutingView::new(false); // empty coord table
     let action = router
         .synth_routing_error(&dest, &source, &my_addr, &rv, 0, 64)
+        .action
         .expect("gate passes on first call");
     assert_eq!(
         error_pdu_type(&action),
@@ -445,26 +447,24 @@ fn synth_rate_limit_gate_suppresses_second_call() {
     let my_addr = make_node_addr(0x10);
     let rv = MockRoutingView::new(false);
     // First call for this destination passes the gate.
-    assert!(
-        router
-            .synth_routing_error(&dest, &source, &my_addr, &rv, 0, 64)
-            .is_some()
-    );
+    let first = router.synth_routing_error(&dest, &source, &my_addr, &rv, 0, 64);
+    assert!(first.action.is_some());
+    assert_eq!(first.verdict, LimitVerdict::Admit);
     // An immediate second call for the same destination is within the
     // rate-limit window and is suppressed (no sleeps needed — the two calls
     // are microseconds apart, well under the 100 ms interval).
-    assert!(
-        router
-            .synth_routing_error(&dest, &source, &my_addr, &rv, 0, 64)
-            .is_none()
+    let second = router.synth_routing_error(&dest, &source, &my_addr, &rv, 0, 64);
+    assert!(second.action.is_none());
+    assert_eq!(
+        second.verdict,
+        LimitVerdict::Suppress,
+        "the shell counts emit_over_dest_interval off this verdict"
     );
     // A different destination is independent and still allowed.
     let other = make_node_addr(0x22);
-    assert!(
-        router
-            .synth_routing_error(&other, &source, &my_addr, &rv, 0, 64)
-            .is_some()
-    );
+    let third = router.synth_routing_error(&other, &source, &my_addr, &rv, 0, 64);
+    assert!(third.action.is_some());
+    assert_eq!(third.verdict, LimitVerdict::Admit);
 }
 
 /// Extract the bottleneck MTU (trailing u16 LE) from an MtuExceeded action's
@@ -485,6 +485,7 @@ fn synth_mtu_exceeded_carries_bottleneck_and_targets_source() {
     let my_addr = make_node_addr(0x10);
     let action = router
         .synth_mtu_exceeded(&dest, &source, &my_addr, 1280, 0, 64)
+        .action
         .expect("gate passes on first call");
     let RouteAction::SendError { toward, .. } = &action;
     assert_eq!(
@@ -510,24 +511,22 @@ fn synth_mtu_exceeded_rate_limit_gate_suppresses_second_call() {
     let source = make_node_addr(0x21);
     let my_addr = make_node_addr(0x10);
     // First call for this destination passes the gate.
-    assert!(
-        router
-            .synth_mtu_exceeded(&dest, &source, &my_addr, 1280, 0, 64)
-            .is_some()
-    );
+    let first = router.synth_mtu_exceeded(&dest, &source, &my_addr, 1280, 0, 64);
+    assert!(first.action.is_some());
+    assert_eq!(first.verdict, LimitVerdict::Admit);
     // Immediate second call for the same destination is suppressed.
-    assert!(
-        router
-            .synth_mtu_exceeded(&dest, &source, &my_addr, 1280, 0, 64)
-            .is_none()
+    let second = router.synth_mtu_exceeded(&dest, &source, &my_addr, 1280, 0, 64);
+    assert!(second.action.is_none());
+    assert_eq!(
+        second.verdict,
+        LimitVerdict::Suppress,
+        "the shell counts emit_over_dest_interval off this verdict"
     );
     // A different destination is independent and still allowed.
     let other = make_node_addr(0x22);
-    assert!(
-        router
-            .synth_mtu_exceeded(&other, &source, &my_addr, 1280, 0, 64)
-            .is_some()
-    );
+    let third = router.synth_mtu_exceeded(&other, &source, &my_addr, 1280, 0, 64);
+    assert!(third.action.is_some());
+    assert_eq!(third.verdict, LimitVerdict::Admit);
 }
 
 /// A non-Full peer is excluded even when its bloom filter may reach the

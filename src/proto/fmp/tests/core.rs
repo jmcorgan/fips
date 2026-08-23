@@ -5,9 +5,10 @@ use super::util::{
     wire_outcome,
 };
 use crate::proto::fmp::{
-    ConnAction, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot, Fmp, InboundDecision,
-    InboundReject, NegotiationPayload, NodeProfile, OutboundDecision, OutboundSnapshot, RekeyCfg,
-    RekeyClaim, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot, cross_connection_winner,
+    ConnAction, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot,
+    EPOCH_RESTART_MIN_INTERVAL_SECS, Fmp, InboundDecision, InboundReject, NegotiationPayload,
+    NodeProfile, OutboundDecision, OutboundSnapshot, RekeyCfg, RekeyClaim, RekeyMsg2Decision,
+    RekeyMsg2Reject, RekeyMsg2Snapshot, cross_connection_winner,
 };
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
@@ -407,6 +408,74 @@ fn establish_net_new_promotes() {
         fmp.establish_inbound(&snap, &wire),
         InboundDecision::Promote
     ));
+}
+
+// ===== Epoch-restart dampening (0161) =====
+//
+// An epoch-mismatch msg1 is authentic, because the epoch travels inside the
+// AEAD, but it is replayable: a captured one stays valid forever and accepting
+// it destroys a working peering. Two receiver-local conditions gate the
+// teardown, and each of the first two cases below breaks one of them.
+//
+// The gate lives in the core on this line rather than in the driver as it does
+// on `maint` and `master`, because `next` moved the establish classification
+// into `establish_inbound`. The shell supplies the two observations; the core
+// decides. That is the same fix, re-derived rather than replayed.
+
+/// The liveness half. A peering still taking authenticated inbound traffic is
+/// evidence the old session is not dead, so the msg1 that would destroy it is
+/// refused. `last_seen` moves only on a successful decrypt, so nothing an
+/// unauthenticated sender emits can hold this gate open.
+///
+/// Break-check: set `peering_idle_ms` past the threshold and this returns
+/// `RestartThenPromote`, which is what the test below asserts.
+#[test]
+fn establish_epoch_mismatch_is_refused_while_the_peering_is_still_live() {
+    let fmp = Fmp::new();
+    let mut snap = establish_snapshot(0x05);
+    snap.peering_idle_ms = EPOCH_RESTART_MIN_INTERVAL_SECS * 1000 - 1;
+    let wire = wire_outcome(0x02, [0x02; 8]);
+    match fmp.establish_inbound(&snap, &wire) {
+        InboundDecision::Reject {
+            reason: InboundReject::EpochRestartDampened,
+        } => {}
+        other => panic!("expected EpochRestartDampened, got {other:?}"),
+    }
+}
+
+/// The interval half. A second accepted epoch change for the same identity
+/// inside the interval is refused even though the peering has gone quiet,
+/// which bounds the churn one peer can drive on its own.
+#[test]
+fn establish_epoch_mismatch_is_refused_a_second_time_inside_the_interval() {
+    let fmp = Fmp::new();
+    let mut snap = establish_snapshot(0x05);
+    snap.peering_idle_ms = u64::MAX; // quiet: the liveness half does not fire
+    snap.epoch_restart_dampened = true;
+    let wire = wire_outcome(0x02, [0x02; 8]);
+    match fmp.establish_inbound(&snap, &wire) {
+        InboundDecision::Reject {
+            reason: InboundReject::EpochRestartDampened,
+        } => {}
+        other => panic!("expected EpochRestartDampened, got {other:?}"),
+    }
+}
+
+/// A peering exactly at the threshold is stale enough to replace. Pins the
+/// boundary so a later `<=`/`<` slip is caught: at the threshold the peer has
+/// been silent for the whole interval and a genuine restart must get through.
+#[test]
+fn establish_epoch_mismatch_is_accepted_at_the_liveness_threshold() {
+    let fmp = Fmp::new();
+    let mut snap = establish_snapshot(0x05);
+    snap.peering_idle_ms = EPOCH_RESTART_MIN_INTERVAL_SECS * 1000;
+    let wire = wire_outcome(0x02, [0x02; 8]);
+    match fmp.establish_inbound(&snap, &wire) {
+        InboundDecision::RestartThenPromote { peer } => {
+            assert_eq!(peer, make_node_addr(0x02));
+        }
+        other => panic!("expected RestartThenPromote, got {other:?}"),
+    }
 }
 
 /// An existing peer at a different startup epoch -> restart then promote.

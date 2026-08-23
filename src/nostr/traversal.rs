@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::net::UdpSocket;
+use tracing::debug;
 
 use super::types::{
     BootstrapError, PUNCH_ACK_MAGIC, PUNCH_MAGIC, PunchHint, PunchPacket, PunchPacketKind,
@@ -32,6 +33,61 @@ pub(super) enum PunchStrategy {
 /// 400 packets, about 21 KB on the wire at 52 bytes each for IPv4.
 const MAX_PUNCH_TARGETS: usize = 8;
 
+/// Upper bound on how many candidates one peer's signal may have vetted.
+///
+/// Vetting is linear in this number and the `push_unique` scan that follows
+/// is quadratic in the plan it feeds, so an unbounded candidate list lets one
+/// signal buy an unbounded amount of our planning work regardless of the
+/// eight-target cap, which only applies after both loops have run. Thirty-two
+/// is four times `MAX_PUNCH_TARGETS` and four times what the candidate
+/// generator produces on the widest host we have seen, so an honest peer
+/// never reaches it. Raising it costs planning work per admitted signal;
+/// lowering it costs an honest many-homed peer the tail of its candidate
+/// list, which the tally records either way.
+const MAX_OFFERED_CANDIDATES: usize = 32;
+
+/// How long the punch loop keeps listening for an exact target match once it
+/// has already accepted a planned target's address on a different port.
+///
+/// A source that matches a planned target's IP but not its port is what a
+/// symmetric NAT's fresh mapping toward us looks like, and it is worth
+/// adopting; a source that matches a target exactly is worth more, so the
+/// first remapped source does not end the attempt outright. Raising this
+/// delays adoption on the remapped path only, never past the attempt timeout;
+/// lowering it toward zero makes the first remapped source win.
+const PUNCH_SETTLE_MS: u64 = 250;
+
+/// How much the source address of a punch packet is worth as a peer address.
+///
+/// The packet's own discriminator is a plain digest of a value both peers
+/// already know, so it proves only that the sender has seen a probe. What the
+/// source address is checked against is the target list this node planned,
+/// which is the difference between adopting a peer we chose to probe and
+/// adopting whoever replayed those bytes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum SourceRank {
+    /// Not an address we planned to probe, and so not adoptable.
+    Unplanned,
+    /// A planned target's address on a different port.
+    RemappedPort,
+    /// Exactly a target we planned to probe.
+    Planned,
+}
+
+/// Rank one punch packet's source address against the targets we planned.
+///
+/// `targets` holds at most `MAX_PUNCH_TARGETS` entries, so the scan is
+/// bounded by construction.
+pub(super) fn rank_punch_source(remote: SocketAddr, targets: &[SocketAddr]) -> SourceRank {
+    if targets.contains(&remote) {
+        SourceRank::Planned
+    } else if targets.iter().any(|target| target.ip() == remote.ip()) {
+        SourceRank::RemappedPort
+    } else {
+        SourceRank::Unplanned
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PlannedPunchTarget {
     pub(super) strategy: PunchStrategy,
@@ -42,6 +98,12 @@ pub(super) struct PlannedPunchTarget {
     /// The remote address already parsed and canonicalized by `admit_remote`,
     /// so the endpoint list never has to re-parse peer-supplied text.
     pub(super) remote_ip: IpAddr,
+}
+
+/// Whether a candidate's address text parses as a private or unique-local
+/// address.
+fn is_private_address(candidate: &TraversalAddress) -> bool {
+    candidate.ip.parse::<IpAddr>().is_ok_and(is_private_ip)
 }
 
 fn same_subnet_24(left: &TraversalAddress, right: &TraversalAddress) -> bool {
@@ -151,6 +213,8 @@ pub(super) struct PunchTargetTally {
     pub(super) offsubnet: usize,
     /// Planned targets discarded by the target cap.
     pub(super) capped: usize,
+    /// Candidates past `MAX_OFFERED_CANDIDATES` that were never vetted.
+    pub(super) over_offered: usize,
     /// The class label that refused the peer's reflexive address, if it was
     /// refused. Held apart from the candidate counts because losing the
     /// reflexive branch removes every path that works across arbitrary NATs,
@@ -170,12 +234,21 @@ impl PunchTargetTally {
     /// entirely refused offer is the reflector case itself. An off-subnet-only
     /// refusal is the ordinary dual-homed shape and is not suspicious.
     ///
-    /// A refused reflexive address always counts: the /24 gate does not apply
-    /// to it, so the only ways it can be refused are the attacker-shaped ones.
+    /// A refused reflexive address counts unless the class is `OffSubnet`.
+    /// The /24 gate now applies to a peer's reflexive address whenever our own
+    /// reflexive address is public, so an off-subnet refusal of it is what an
+    /// honest peer behind a LAN STUN server produces against a node with a
+    /// public one. The other three classes still have no honest producer.
+    ///
+    /// A candidate list longer than `MAX_OFFERED_CANDIDATES` counts too: the
+    /// generator tops out near eight, so nothing honest reaches the bound.
     pub(super) fn suspicious(&self) -> bool {
         self.unroutable + self.zeroport + self.unparsable + self.capped > 0
+            || self.over_offered > 0
             || (self.offered > 0 && self.admitted == 0)
-            || self.reflexive.is_some()
+            || self
+                .reflexive
+                .is_some_and(|label| label != RejectClass::OffSubnet.label())
     }
 
     /// Record one refused candidate against its class, keeping the first
@@ -212,10 +285,13 @@ impl PunchTargetTally {
 ///
 /// Returns the parsed address, or the class of the check that refused it.
 /// `lan_refs` are our own addresses that a private candidate must share a /24
-/// with. `apply_private_gate` is false for the peer's reflexive address: a
-/// STUN server inside the private network legitimately reports a private
-/// reflexive address, and dropping it would remove the only branch that works
-/// across arbitrary NATs.
+/// with. `apply_private_gate` is conditionally false for the peer's reflexive
+/// address: a STUN server inside the private network legitimately reports a
+/// private reflexive address, and dropping it would remove the only branch
+/// that works across arbitrary NATs. That exemption applies only when our own
+/// reflexive address is itself private, or absent; a node whose own STUN
+/// result is public has no LAN in common with a private reflexive address and
+/// would only be punching an address of the peer's choosing.
 fn admit_remote(
     candidate: &TraversalAddress,
     lan_refs: &[TraversalAddress],
@@ -261,28 +337,42 @@ pub(super) fn plan_punch_targets(
         ..PunchTargetTally::default()
     };
 
+    // Whether our own vantage point is a LAN one: either STUN reported a
+    // private address for us, or it reported nothing at all. The second case
+    // is deliberately treated as a LAN vantage point rather than a public one,
+    // so a node whose STUN probe failed, or that runs without STUN, keeps
+    // admitting a same-LAN peer's private reflexive address as it always has.
+    let local_reflexive_on_lan = local_reflexive_address.is_none_or(is_private_address);
+
     // Our own addresses a peer's private candidate has to share a /24 with.
     // The local reflexive address joins the set when it is itself private,
     // which is what keeps a LAN-STUN deployment able to match while the
     // shipped `share_local_candidates=false` leaves the local list empty.
     let mut lan_refs = local_addresses.to_vec();
     if let Some(reflexive) = local_reflexive_address
-        && reflexive.ip.parse::<IpAddr>().is_ok_and(is_private_ip)
+        && is_private_address(reflexive)
     {
         lan_refs.push(reflexive.clone());
     }
 
+    // A peer names its own candidate list, so bound it before anything walks
+    // it. The excess is recorded and discarded rather than failing the whole
+    // offer, which would cost an honest many-homed peer its traversal.
+    let considered = &remote_addresses[..remote_addresses.len().min(MAX_OFFERED_CANDIDATES)];
+    tally.over_offered = remote_addresses.len() - considered.len();
+
     // Everything on the remote side is peer-supplied, so it is vetted once
     // here and the branches below only ever see admitted candidates.
-    let remote_reflexive =
-        remote_reflexive_address.and_then(|remote| match admit_remote(remote, &lan_refs, false) {
+    let remote_reflexive = remote_reflexive_address.and_then(|remote| {
+        match admit_remote(remote, &lan_refs, !local_reflexive_on_lan) {
             Ok(ip) => Some((remote, ip)),
             Err(class) => {
                 tally.refuse_reflexive(class, remote);
                 None
             }
-        });
-    let remote_candidates = remote_addresses
+        }
+    });
+    let remote_candidates = considered
         .iter()
         .filter_map(|remote| match admit_remote(remote, &lan_refs, true) {
             Ok(ip) => Some((remote, ip)),
@@ -393,6 +483,27 @@ pub(super) fn planned_remote_endpoints(
     Ok((remotes, tally))
 }
 
+/// Hold a source that matched a planned target's IP on a different port.
+///
+/// That is what a symmetric NAT's fresh mapping toward us looks like, and it
+/// is the main class of pairing punching exists to rescue, so it is adopted
+/// rather than dropped. It is held for `PUNCH_SETTLE_MS` first so an exact
+/// match arriving inside that window supersedes it; the honest path's latency
+/// is unchanged, because an exact match breaks the loop immediately.
+fn hold_remapped(
+    remote: SocketAddr,
+    candidate: &mut Option<SocketAddr>,
+    settle_at: &mut Option<tokio::time::Instant>,
+    superseded: &mut usize,
+) {
+    if candidate.replace(remote).is_some() {
+        *superseded += 1;
+    }
+    settle_at.get_or_insert_with(|| {
+        tokio::time::Instant::now() + Duration::from_millis(PUNCH_SETTLE_MS)
+    });
+}
+
 pub(super) async fn run_punch_attempt(
     socket: &std::net::UdpSocket,
     session_id: &str,
@@ -427,22 +538,59 @@ pub(super) async fn run_punch_attempt(
 
     let expected_hash = session_hash(session_id);
     let mut buf = [0u8; 2048];
+    // Counted rather than logged per packet: an attacker sets how many of
+    // these arrive, so a record each would trade the adoption this closes for
+    // log volume. One record at the end of the attempt instead.
+    let mut unplanned = 0usize;
+    let mut superseded = 0usize;
+    let mut candidate: Option<SocketAddr> = None;
+    let mut settle_at: Option<tokio::time::Instant> = None;
     let result = loop {
-        let recv = tokio::time::timeout_at(finish_at, udp.recv_from(&mut buf)).await;
+        let deadline = settle_at.map_or(finish_at, |settle| settle.min(finish_at));
+        let recv = tokio::time::timeout_at(deadline, udp.recv_from(&mut buf)).await;
         let Ok(Ok((len, remote))) = recv else {
-            break Err(BootstrapError::PunchTimeout(session_id.to_string()));
+            break match candidate {
+                Some(remote) => Ok(remote),
+                None => Err(BootstrapError::PunchTimeout(session_id.to_string())),
+            };
         };
+        // Ranked ahead of the ack, not only ahead of the adoption: acking a
+        // source we never planned to probe is a reflection this node controls,
+        // and there is no reason to emit it. The packet's own discriminator is
+        // a digest of a value both peers already know and travels in the clear
+        // in every probe, so it proves only that the sender saw one.
+        let rank = rank_punch_source(remote, targets);
+        if rank == SourceRank::Unplanned {
+            unplanned += 1;
+            continue;
+        }
         match classify_punch_packet(&buf[..len], expected_hash) {
             PunchAction::Ignore => continue,
             PunchAction::Ack { sequence } => {
                 let ack = build_punch_packet(PunchPacketKind::Ack, sequence, session_id);
                 let _ = udp.send_to(&ack, remote).await;
-                break Ok(remote);
+                if rank == SourceRank::Planned {
+                    break Ok(remote);
+                }
+                hold_remapped(remote, &mut candidate, &mut settle_at, &mut superseded);
             }
-            PunchAction::Matched => break Ok(remote),
+            PunchAction::Matched => {
+                if rank == SourceRank::Planned {
+                    break Ok(remote);
+                }
+                hold_remapped(remote, &mut candidate, &mut settle_at, &mut superseded);
+            }
         }
     };
     send_handle.abort();
+    if unplanned > 0 || superseded > 0 {
+        debug!(
+            session = %super::runtime::short_id(session_id),
+            unplanned,
+            superseded,
+            "traversal: punch packets refused on their source address"
+        );
+    }
     result
 }
 

@@ -427,7 +427,15 @@ async fn ethernet_receive_loop(
                         stats.record_beacon_recv();
 
                         if listen_enabled && parse_beacon(&buf[..len]) {
-                            neighbor_buffer.add_peer(src_mac);
+                            // `add_peer` reports whether the buffer took the
+                            // beacon. It refuses once the distinct-MAC cap is
+                            // reached, which is the bound on an unauthenticated
+                            // broadcast frame naming a fresh MAC every time.
+                            // This line's beacon carries no pubkey, so there is
+                            // no hint to pass through.
+                            if !neighbor_buffer.add_peer(src_mac) {
+                                stats.record_beacon_dropped();
+                            }
                             trace!(
                                 transport_id = %transport_id,
                                 remote_mac = %format_mac(&src_mac),

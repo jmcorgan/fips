@@ -1151,7 +1151,7 @@ fn routing_focused_pane_scrolls() {
     // column is the taller of the two, so scrolling fully to the bottom would
     // over-scroll the right column past Congestion; this offset lands the
     // Congestion region inside the short window instead.
-    app1.scroll_offsets.insert((Tab::Routing, 2), 28);
+    app1.scroll_offsets.insert((Tab::Routing, 2), 32);
     let buf1 = testkit::render(100, 20, |frame, area| {
         super::routing::draw(frame, &app1, area);
     });

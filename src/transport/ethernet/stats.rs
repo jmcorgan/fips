@@ -17,6 +17,7 @@ pub struct EthernetStats {
     pub recv_errors: AtomicU64,
     pub beacons_sent: AtomicU64,
     pub beacons_recv: AtomicU64,
+    pub beacons_dropped: AtomicU64,
     pub frames_too_short: AtomicU64,
     pub frames_too_long: AtomicU64,
 }
@@ -33,6 +34,7 @@ impl EthernetStats {
             recv_errors: AtomicU64::new(0),
             beacons_sent: AtomicU64::new(0),
             beacons_recv: AtomicU64::new(0),
+            beacons_dropped: AtomicU64::new(0),
             frames_too_short: AtomicU64::new(0),
             frames_too_long: AtomicU64::new(0),
         }
@@ -70,6 +72,11 @@ impl EthernetStats {
         self.beacons_recv.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a received beacon the discovery buffer had no room for.
+    pub fn record_beacon_dropped(&self) {
+        self.beacons_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Take a snapshot of all counters.
     pub fn snapshot(&self) -> EthernetStatsSnapshot {
         EthernetStatsSnapshot {
@@ -81,6 +88,7 @@ impl EthernetStats {
             recv_errors: self.recv_errors.load(Ordering::Relaxed),
             beacons_sent: self.beacons_sent.load(Ordering::Relaxed),
             beacons_recv: self.beacons_recv.load(Ordering::Relaxed),
+            beacons_dropped: self.beacons_dropped.load(Ordering::Relaxed),
             frames_too_short: self.frames_too_short.load(Ordering::Relaxed),
             frames_too_long: self.frames_too_long.load(Ordering::Relaxed),
         }
@@ -104,6 +112,7 @@ pub struct EthernetStatsSnapshot {
     pub recv_errors: u64,
     pub beacons_sent: u64,
     pub beacons_recv: u64,
+    pub beacons_dropped: u64,
     pub frames_too_short: u64,
     pub frames_too_long: u64,
 }

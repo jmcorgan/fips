@@ -119,7 +119,8 @@ impl Node {
         let recent_expiry_ms = self.config().node.lookup.recent_expiry_secs * 1000;
         let my_addr = *self.node_addr();
         use crate::proto::lookup::RequestOutcome;
-        match crate::proto::lookup::classify_request(
+        let peer_count = self.peers.len();
+        let classification = crate::proto::lookup::classify_request(
             &mut self.lookup,
             &request,
             from,
@@ -127,7 +128,22 @@ impl Node {
             now_ms,
             recent_expiry_ms,
             MAX_RECENT_LOOKUP_REQUESTS,
-        ) {
+            peer_count,
+        );
+        // A full cache evicts rather than refuses, and the core charges the
+        // eviction to the peer that filled the cache. Count and log it here:
+        // the core does no metrics and no logging of its own.
+        if let Some(evicted) = classification.evicted {
+            self.metrics().lookup.req_dedup_evicted.inc();
+            debug!(
+                request_id = evicted.request_id,
+                evicted_from = %self.peer_display_name(&evicted.peer),
+                admitting = %self.peer_display_name(from),
+                share = evicted.share,
+                "Lookup dedup cache full, evicting the oldest entry to make room"
+            );
+        }
+        match classification.outcome {
             RequestOutcome::Duplicate => {
                 self.metrics()
                     .lookup
@@ -138,19 +154,25 @@ impl Node {
                     "Duplicate LookupRequest, dropping"
                 );
             }
-            RequestOutcome::DedupCacheFull { len } => {
-                self.metrics()
-                    .lookup
-                    .record_reject(DiscoveryReject::ReqDedupCacheFull);
-                debug!(
-                    request_id = request.request_id,
-                    from = %self.peer_display_name(from),
-                    recent_requests = len,
-                    max_recent_requests = MAX_RECENT_LOOKUP_REQUESTS,
-                    "Discovery request dedup cache full, dropping LookupRequest"
-                );
-            }
             RequestOutcome::RespondAsTarget => {
+                // Answering costs a fresh Schnorr signature every time: the
+                // proof is bound to the requester's request_id, so it cannot
+                // be cached or served twice. Meter that per link peer, or a
+                // neighbour generating request_ids sets this node's signing
+                // rate. The dedup entry the core recorded stays regardless,
+                // so a refused request still occupies its id and a retry,
+                // which carries a fresh id, is unaffected.
+                if !self.discovery_sign_limiter.should_sign(from) {
+                    self.metrics()
+                        .lookup
+                        .record_reject(DiscoveryReject::ReqSignRateLimited);
+                    debug!(
+                        request_id = request.request_id,
+                        from = %self.peer_display_name(from),
+                        "Lookup signing budget spent for this peer, not answering"
+                    );
+                    return;
+                }
                 self.metrics().lookup.req_target_is_us.inc();
                 debug!(
                     request_id = request.request_id,
@@ -212,7 +234,11 @@ impl Node {
         let now_ms = Self::now_ms();
 
         // Check if we forwarded this request (transit node) or originated it
-        match crate::proto::lookup::classify_response(&mut self.lookup, response.request_id) {
+        match crate::proto::lookup::classify_response(
+            &mut self.lookup,
+            response.request_id,
+            &response.target,
+        ) {
             crate::proto::lookup::ResponseRoute::AlreadyForwarded => {
                 // Already forwarded a response for this request — drop to
                 // prevent response routing loops.
@@ -245,6 +271,25 @@ impl Node {
                         "Failed to forward LookupResponse"
                     );
                 }
+            }
+            crate::proto::lookup::ResponseRoute::Unsolicited => {
+                // Nothing outstanding matches this, so acting on it would let
+                // one harvested signed response be replayed at will: each
+                // injection cleared the pending lookup, recorded a
+                // reachability success, refreshed the cached coordinates for a
+                // further full TTL, and flushed queued packets onto a route at
+                // a moment the sender chose. Dropped here, before the identity
+                // resolve and before the verify, so an unsolicited response
+                // costs nothing. This counter has a nonzero floor in healthy
+                // operation: a request is flooded to every qualifying tree
+                // peer, so duplicate replies land here once the first has been
+                // accepted.
+                self.metrics().lookup.resp_unsolicited.inc();
+                debug!(
+                    request_id = response.request_id,
+                    target = %self.peer_display_name(&response.target),
+                    "LookupResponse does not match an outstanding request, dropping"
+                );
             }
             crate::proto::lookup::ResponseRoute::Originator => {
                 // We originated this request — verify proof before caching
@@ -604,6 +649,15 @@ impl Node {
         };
         let request = LookupRequest::new(request_id, *target, origin, ttl, min_mtu);
 
+        // Recorded here rather than in the callers, so "if a request went out,
+        // its id is recorded" holds for every caller. The response path
+        // correlates against this set.
+        self.lookup
+            .pending_lookups
+            .entry(*target)
+            .or_insert_with(|| crate::proto::lookup::PendingLookup::new(Self::now_ms()))
+            .record(request_id);
+
         // Tree-peer selection restricted to Full peers meeting min_mtu, plus the
         // single encode, live in the sans-IO core. The core keeps the tree-only
         // (no non-tree fallback) behavior; the shell drives the sends and keeps
@@ -778,6 +832,21 @@ impl Node {
             // No transport info available — don't prune
             true
         }
+    }
+
+    /// Remove expired entries from the recent-request dedup cache.
+    ///
+    /// The ordinary request path purges lazily inside `classify_request`;
+    /// this is the explicit entry point for callers that need the purge
+    /// without an arriving request. Cache and per-peer index are purged
+    /// together, or the eviction policy reads a stale index.
+    ///
+    /// Only the dedup regression tests call it: the production path's purge
+    /// happens inside `classify_request`.
+    #[cfg(test)]
+    pub(in crate::node) fn purge_expired_requests(&mut self, current_time_ms: u64) {
+        let expiry_ms = self.config().node.lookup.recent_expiry_secs * 1000;
+        self.lookup.purge_recent(current_time_ms, expiry_ms);
     }
 
     /// Min-fold our outgoing-link MTU into a LookupResponse's `path_mtu`.

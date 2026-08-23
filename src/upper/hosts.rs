@@ -134,17 +134,34 @@ impl HostMap {
     ///
     /// If the file does not exist, returns an empty map (not an error).
     /// Parse errors on individual lines are logged as warnings and skipped.
+    /// A read failure is logged and also yields an empty map; a caller that
+    /// must not mistake an unreadable file for an empty one uses
+    /// [`Self::try_load_hosts_file`] instead.
     pub fn load_hosts_file(path: &Path) -> Self {
-        let contents = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                debug!(path = %path.display(), "No hosts file found, skipping");
-                return Self::new();
-            }
+        match Self::try_load_hosts_file(path) {
+            Ok(map) => map,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "Failed to read hosts file");
-                return Self::new();
+                Self::new()
             }
+        }
+    }
+
+    /// Load a host map from a hosts file, reporting read failures.
+    ///
+    /// An absent file is a policy, not a fault: it resolves to an empty map
+    /// and `Ok`. Anything else — no read permission, an I/O error, non-UTF-8
+    /// content, or a `NotFound` that contradicts a successful stat and so
+    /// means the file is being rewritten under us — is returned as an error
+    /// so the caller can keep whatever it loaded last.
+    pub fn try_load_hosts_file(path: &Path) -> Result<Self, std::io::Error> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && file_mtime(path).is_none() => {
+                debug!(path = %path.display(), "No hosts file found, skipping");
+                return Ok(Self::new());
+            }
+            Err(e) => return Err(e),
         };
 
         let mut map = Self::new();
@@ -183,7 +200,7 @@ impl HostMap {
         if !map.is_empty() {
             info!(path = %path.display(), count = map.len(), "Loaded hosts file");
         }
-        map
+        Ok(map)
     }
 
     /// Merge another host map into this one. The other map wins on conflicts.
@@ -224,8 +241,16 @@ impl HostMapReloader {
     ///
     /// Performs the initial load of the hosts file and merges with the base map.
     pub fn new(base: HostMap, path: std::path::PathBuf) -> Self {
-        let last_mtime = file_mtime(&path);
-        let hosts_file = HostMap::load_hosts_file(&path);
+        // A failed initial read records no mtime, so the next check sees a
+        // change and retries rather than treating the unread file as empty
+        // for the lifetime of the process.
+        let (last_mtime, hosts_file) = match HostMap::try_load_hosts_file(&path) {
+            Ok(map) => (file_mtime(&path), map),
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Failed to read hosts file");
+                (None, HostMap::new())
+            }
+        };
         let mut effective = base.clone();
         effective.merge(hosts_file);
 
@@ -242,6 +267,11 @@ impl HostMapReloader {
         &self.effective
     }
 
+    /// Path of the hosts file this reloader tracks.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Check if the hosts file has been modified and reload if so.
     ///
     /// Returns `true` if the map was reloaded.
@@ -254,7 +284,32 @@ impl HostMapReloader {
 
         // File appeared, disappeared, or was modified
         self.last_mtime = current_mtime;
-        let hosts_file = HostMap::load_hosts_file(&self.path);
+        self.apply(HostMap::load_hosts_file(&self.path));
+        true
+    }
+
+    /// Check if the hosts file has been modified and reload if so, reporting
+    /// read failures.
+    ///
+    /// On failure neither the recorded mtime nor the effective map is
+    /// touched, so the caller keeps its last-good state and the next call
+    /// retries. Returns `true` if the map was reloaded.
+    pub fn try_check_reload(&mut self) -> Result<bool, std::io::Error> {
+        let current_mtime = file_mtime(&self.path);
+
+        if current_mtime == self.last_mtime {
+            return Ok(false);
+        }
+
+        let hosts_file = HostMap::try_load_hosts_file(&self.path)?;
+        self.last_mtime = current_mtime;
+        self.apply(hosts_file);
+        Ok(true)
+    }
+
+    /// Replace the effective map with the base merged with a freshly read
+    /// hosts file.
+    fn apply(&mut self, hosts_file: HostMap) {
         let mut new_effective = self.base.clone();
         new_effective.merge(hosts_file);
 
@@ -266,7 +321,6 @@ impl HostMapReloader {
             entries = count,
             "Reloaded hosts file"
         );
-        true
     }
 }
 

@@ -670,6 +670,10 @@ async fn nym_receive_loop(
         stats,
         "Nym",
         None,
+        // Nym binds no listener (`accept_connections()` is `false`), its pool
+        // metadata is `()` and its teardown hook decrements nothing, so there
+        // is no admission ordering for a readiness barrier to protect.
+        None,
         |_stats, _meta| {},
     )
     .await;

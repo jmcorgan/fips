@@ -2267,6 +2267,48 @@ fn spawn_blackhole_relay() -> String {
     format!("ws://127.0.0.1:{port}")
 }
 
+/// The author filter on advert selection must not swallow a genuine eviction.
+///
+/// Dropping foreign-authored events narrows what the selection can return, and
+/// the eviction arm is guarded on the relays having answered with nothing at
+/// all. If that guard is written too broadly it also suppresses the real case
+/// this function exists for: the peer withdrew its advert and the cached entry
+/// has to go. Discriminator: a seeded cache entry plus relays that return
+/// nothing must still come back `Evicted` with the entry gone.
+#[tokio::test]
+async fn refetch_still_evicts_a_cached_advert_when_the_relays_return_nothing() {
+    let peer_npub = Identity::generate().npub();
+    let mut bootstrap = crate::nostr::NostrRendezvous::new_for_test();
+    bootstrap
+        .set_advert_relays_for_test(vec![spawn_blackhole_relay()])
+        .await;
+
+    let endpoint = crate::nostr::OverlayEndpointAdvert {
+        transport: crate::nostr::OverlayTransportKind::Udp,
+        addr: "203.0.113.7:2121".to_string(),
+    };
+    let advert =
+        crate::nostr::NostrRendezvous::cached_advert_for_test(peer_npub.clone(), endpoint, 1_000);
+    bootstrap
+        .insert_advert_for_test(peer_npub.clone(), advert)
+        .await;
+
+    let outcome = bootstrap.refetch_advert_for_stale_check(&peer_npub).await;
+
+    assert_eq!(
+        outcome,
+        crate::nostr::NostrRefetchOutcome::Evicted,
+        "an empty relay answer is still evidence the advert is gone"
+    );
+    assert!(
+        bootstrap
+            .cached_created_at_for_test(&peer_npub)
+            .await
+            .is_none(),
+        "the stale entry should have been removed from the cache"
+    );
+}
+
 /// The per-tick retry loop must not await the pre-dial advert refetch.
 ///
 /// `process_pending_retries` runs inline on the node's 1s rx-loop tick. Each
@@ -4089,4 +4131,32 @@ fn node_established_bucket_is_derived_then_overridable() {
         7,
         "an explicit key wins over the derivation"
     );
+}
+
+/// The DNS mesh-interface filter is keyed on the device the node actually
+/// created, not on the configured name. macOS and FreeBSD hand out utunN and
+/// tunN of the kernel's choosing, so a filter keyed on the configured name
+/// resolved to nothing there and was permanently off.
+#[cfg(unix)]
+#[test]
+fn mesh_filter_resolves_the_live_tun_device_rather_than_the_configured_name() {
+    let loopback = if cfg!(target_os = "macos") {
+        "lo0"
+    } else {
+        "lo"
+    };
+    let c_name = std::ffi::CString::new(loopback).unwrap();
+    let expected = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    if expected == 0 {
+        return;
+    }
+
+    let mut config = Config::new();
+    config.tun.name = Some("fips-absent-dev".to_string());
+    let mut node = Node::new(config).unwrap();
+
+    assert_eq!(node.mesh_ifindex(), None);
+
+    node.tun_name = Some(loopback.to_string());
+    assert_eq!(node.mesh_ifindex(), Some(expected));
 }

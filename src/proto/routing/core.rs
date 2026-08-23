@@ -14,6 +14,7 @@
 //! shell hands over only raw per-peer reads; all routing narrowing and decision
 //! logic lives here.
 
+use super::limits::LimitVerdict;
 use super::state::Router;
 use super::wire::{CoordsRequired, MtuExceeded, PathBroken};
 use crate::proto::link::{SessionDatagram, SessionDatagramRef};
@@ -175,8 +176,14 @@ impl Router {
     /// CoordsRequired. The chosen PDU is wrapped in a fresh SessionDatagram
     /// addressed back to `toward` (the failed datagram's source) and encoded.
     ///
-    /// Returns `None` when the rate-limit gate suppresses the signal (the shell
-    /// drops silently). On `Some`, the shell resolves the reverse link hop for
+    /// The returned [`ErrorSynth`] carries the gate's verdict alongside the
+    /// action, rather than collapsing it to a bool. The shell counts the three
+    /// verdicts separately: suppression and a full destination map say
+    /// different things about the node, and an operator cannot tell a genuine
+    /// outage from a limiter that has stopped limiting without the split.
+    ///
+    /// `action` is `None` exactly when the verdict is `Suppress` (the shell
+    /// drops silently). Otherwise the shell resolves the reverse link hop for
     /// `toward` and sends — resolving the hop only after this gate preserves
     /// the pre-refactor ordering (rate-limit before `find_next_hop`'s cache
     /// touch) and lets the shell distinguish suppression from no-reverse-route
@@ -189,21 +196,34 @@ impl Router {
         rv: &impl RoutingView,
         now_ms: u64,
         default_ttl: u8,
-    ) -> Option<RouteAction> {
-        if !self.error_limiter.should_send(dest, now_ms) {
-            return None;
+    ) -> ErrorSynth {
+        let verdict = self.error_limiter.check(dest, now_ms);
+        if verdict == LimitVerdict::Suppress {
+            return ErrorSynth {
+                verdict,
+                action: None,
+            };
         }
-        let error_payload = match rv.cached_coords(dest, now_ms) {
-            Some(coords) => PathBroken::new(*dest, *my_addr)
-                .with_last_coords(coords)
-                .encode(),
-            None => CoordsRequired::new(*dest, *my_addr).encode(),
+        // Which of the two signals is emitted still discloses whether this
+        // node holds coords for the destination, but the coordinates
+        // themselves are not attached: the error is returned to the datagram's
+        // own src_addr, which nothing binds to the peer that sent it, so
+        // attaching them would answer a coordinate-cache read to whoever names
+        // an address, one entry per packet. The field is optional on the wire
+        // and no receiver reads it, so this is an emission change only.
+        let error_payload = if rv.cached_coords(dest, now_ms).is_some() {
+            PathBroken::new(*dest, *my_addr).encode()
+        } else {
+            CoordsRequired::new(*dest, *my_addr).encode()
         };
         let error_dg = SessionDatagram::new(*my_addr, *toward, error_payload).with_ttl(default_ttl);
-        Some(RouteAction::SendError {
-            toward: *toward,
-            bytes: error_dg.encode(),
-        })
+        ErrorSynth {
+            verdict,
+            action: Some(RouteAction::SendError {
+                toward: *toward,
+                bytes: error_dg.encode(),
+            }),
+        }
     }
 
     /// Synthesize an MtuExceeded error signal after a forward send failed with
@@ -212,11 +232,12 @@ impl Router {
     /// carrying `bottleneck_mtu`, wraps it in a fresh SessionDatagram addressed
     /// back to `toward` (the failed datagram's source), and encodes it.
     ///
-    /// Returns `None` when the gate suppresses the signal. On `Some`, the shell
-    /// resolves the reverse link hop for `toward` and sends — resolving the hop
-    /// only after this gate preserves the pre-refactor ordering (rate-limit
-    /// before `find_next_hop`'s cache touch). No coordinate read is involved;
-    /// unlike routing errors, the PDU is unconditional once the gate passes.
+    /// The returned [`ErrorSynth`]'s `action` is `None` exactly when the
+    /// verdict is `Suppress`. Otherwise the shell resolves the reverse link hop
+    /// for `toward` and sends — resolving the hop only after this gate
+    /// preserves the pre-refactor ordering (rate-limit before
+    /// `find_next_hop`'s cache touch). No coordinate read is involved; unlike
+    /// routing errors, the PDU is unconditional once the gate passes.
     pub(crate) fn synth_mtu_exceeded(
         &mut self,
         dest: &NodeAddr,
@@ -225,17 +246,36 @@ impl Router {
         bottleneck_mtu: u16,
         now_ms: u64,
         default_ttl: u8,
-    ) -> Option<RouteAction> {
-        if !self.error_limiter.should_send(dest, now_ms) {
-            return None;
+    ) -> ErrorSynth {
+        let verdict = self.error_limiter.check(dest, now_ms);
+        if verdict == LimitVerdict::Suppress {
+            return ErrorSynth {
+                verdict,
+                action: None,
+            };
         }
         let error_payload = MtuExceeded::new(*dest, *my_addr, bottleneck_mtu).encode();
         let error_dg = SessionDatagram::new(*my_addr, *toward, error_payload).with_ttl(default_ttl);
-        Some(RouteAction::SendError {
-            toward: *toward,
-            bytes: error_dg.encode(),
-        })
+        ErrorSynth {
+            verdict,
+            action: Some(RouteAction::SendError {
+                toward: *toward,
+                bytes: error_dg.encode(),
+            }),
+        }
     }
+}
+
+/// One candidate error signal, as decided by the per-destination gate.
+///
+/// The verdict travels with the action so the shell can count `Suppress` and
+/// `AdmitAtCapacity` separately; a bool return collapsed the two admits
+/// together and left both counters with no writer.
+pub(crate) struct ErrorSynth {
+    /// What the per-destination interval gate decided.
+    pub verdict: LimitVerdict,
+    /// The signal to send. `None` exactly when `verdict` is `Suppress`.
+    pub action: Option<RouteAction>,
 }
 
 /// Route class of a transit-forwarded packet, classified from tree

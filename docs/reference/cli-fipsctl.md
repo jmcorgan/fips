@@ -241,9 +241,22 @@ package does not carry this subcommand and a stock daemon reports
 
 | Flag | Argument | Default | Description |
 | ---- | -------- | ------- | ----------- |
-| `--dir` | directory path | `/var/log/fips` | Where to write the capture. Created if absent. Use it to profile a non-root `cargo run`, or on a platform whose log root differs. |
+| `--dir` | directory path | `/var/log/fips` | Where to write the capture. Created if absent. Use it to profile a non-root `cargo run`. |
 
-One file is written per capture, named `profile-<UTC timestamp>.tsv`.
+Against a daemon running as root, `--dir` must name an absolute path
+under `/var/log/fips`, and a path that resolves outside it through a
+symlinked parent is refused. The control socket is reachable by the
+`fips` group, which the security model treats as strictly weaker than
+root, so a group member cannot steer a root directory creation at an
+arbitrary path. A daemon that is not running as root crosses no such
+boundary and takes `--dir` as given, which is what keeps a non-root
+`cargo run` capture working. Confining a root daemon's captures to a
+different log root is not currently supported.
+
+One file is written per capture, named `profile-<UTC timestamp>.tsv`,
+with `-1`, `-2` and so on appended if a capture in the same second
+already claimed the name. The capture file is created private to its
+owner and is never written over an existing file.
 It opens with a `#`-prefixed header block (node npub, build version,
 platform, configured tick period, flush interval, byte cap, start
 time), then a tab-separated column header, then one row per measured

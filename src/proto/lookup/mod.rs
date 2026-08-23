@@ -30,4 +30,8 @@ pub(crate) use limits::{LookupBackoff, LookupForwardRateLimiter, MAX_RECENT_LOOK
 #[cfg(test)]
 pub(crate) use state::RecentRequest;
 pub(crate) use state::{Lookup, PendingLookup};
+// The eviction policy reads the share floor through `Lookup::peer_share`;
+// only the node-level regression tests name the constant itself.
+#[cfg(test)]
+pub(crate) use state::MIN_RECENT_PER_PEER;
 pub use wire::{LookupRequest, LookupResponse};

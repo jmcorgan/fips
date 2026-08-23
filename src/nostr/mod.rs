@@ -5,6 +5,7 @@ mod handoff;
 mod offer_admission;
 mod runtime;
 mod signal;
+mod signal_gate;
 mod stun;
 mod traversal;
 mod traversal_machine;

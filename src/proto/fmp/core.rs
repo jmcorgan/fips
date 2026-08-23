@@ -233,6 +233,30 @@ pub(crate) struct WireOutcome {
 /// config-derived age floor, both resolved shell-side; the sender's declaration
 /// in [`rekey_claim`](EstablishSnapshot::rekey_claim) replaced them, so there is
 /// no timing left for a clock step to perturb.
+/// Minimum interval between accepted epoch changes for one peer identity,
+/// and the recency threshold at which the peering an epoch change would
+/// destroy still counts as live.
+///
+/// An epoch-mismatch msg1 is authentic but replayable: a captured one stays
+/// valid indefinitely, and accepting it tears down a working peering. Both
+/// conditions are receiver-local. The liveness half is the one that closes
+/// the replay, since a peering under attack is by construction still
+/// heartbeating; the interval half bounds the churn a peer can drive on its
+/// own.
+///
+/// Sized against the peer's own recovery rather than against a round number:
+/// a genuinely restarting peer's msg1 resends fire at roughly t+1, t+3, t+7
+/// and t+15 seconds and its attempt is reaped at `handshake_timeout_secs`
+/// (30), so 15 is the largest value at which a real restart still re-peers
+/// inside its first handshake window with no reconnect backoff. It also sits
+/// below `link_dead_timeout_secs` (30), so the liveness gate can never
+/// outlive the reaper that would have removed the peering anyway.
+///
+/// Raising it lengthens the outage an attacker's accepted replay causes,
+/// because the genuine peer's recovery msg1 hits the same arm. Lowering it
+/// weakens both halves and, below the resend ladder, buys nothing.
+pub(crate) const EPOCH_RESTART_MIN_INTERVAL_SECS: u64 = 15;
+
 pub(crate) struct EstablishSnapshot {
     /// The peer identity is already an active peer in the registry. `false` here
     /// is the net-new path (or the post-restart re-promote) — a plain promote.
@@ -264,6 +288,14 @@ pub(crate) struct EstablishSnapshot {
     pub rekey_claim: RekeyClaim,
     /// This node's own address, for both tie-breaks (the smaller NodeAddr wins).
     pub our_node_addr: NodeAddr,
+    /// How long the existing peering has gone without authenticated inbound
+    /// traffic. Read from `last_seen`, which moves only on a successful
+    /// decrypt, so nothing an unauthenticated sender emits can refresh it.
+    /// Only meaningful when `has_existing_peer`.
+    pub peering_idle_ms: u64,
+    /// This peer identity accepted an epoch change inside the dampening
+    /// interval. Resolved shell-side because the stamp lives in the registry.
+    pub epoch_restart_dampened: bool,
 }
 
 /// What an inbound `msg3` declares about replacing a session we already hold.
@@ -479,6 +511,11 @@ pub(crate) enum InboundReject {
     /// Dual rekey initiation and we are the tie-break *winner* (smaller
     /// NodeAddr): drop the peer's `msg3` and keep driving our own rekey.
     DualRekeyWon,
+    /// An epoch-mismatch msg1 that would tear down a peering still carrying
+    /// authenticated traffic, or a second epoch change for this identity
+    /// inside the dampening interval. Drop it; see
+    /// [`EPOCH_RESTART_MIN_INTERVAL_SECS`].
+    EpochRestartDampened,
 }
 
 /// The classification outcome for one outbound `handle_msg2` completion, decided
@@ -772,7 +809,21 @@ impl Fmp {
         let peer = wire.peer_node_addr;
         match (snap.existing_peer_epoch, wire.remote_epoch) {
             (Some(existing), Some(new)) if existing != new => {
-                // Epoch mismatch → peer restart.
+                // Epoch mismatch → peer restart, but only if two receiver-local
+                // conditions hold first. The epoch is sealed, so this msg1 is
+                // authentic; a captured one stays authentic forever, and
+                // replaying it destroys a working peering. Refuse while the
+                // peering is still carrying authenticated traffic — a peer that
+                // genuinely restarted stopped feeding `last_seen` when it died,
+                // so this self-clears — and refuse a second epoch change inside
+                // the dampening interval, which bounds the churn a peer can
+                // drive on its own.
+                let peering_is_live = snap.peering_idle_ms < EPOCH_RESTART_MIN_INTERVAL_SECS * 1000;
+                if peering_is_live || snap.epoch_restart_dampened {
+                    return InboundDecision::Reject {
+                        reason: InboundReject::EpochRestartDampened,
+                    };
+                }
                 InboundDecision::RestartThenPromote { peer }
             }
             _ => {

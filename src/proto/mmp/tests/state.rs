@@ -735,3 +735,51 @@ fn test_reverse_delivery_rekey_reset() {
         m.delivery_ratio_reverse
     );
 }
+
+// The ceiling-counter behaviour the gap tracker gained with the counter
+// overflow fix. Driven through `ReceiverState` like the burst tests above,
+// because `GapTracker` is private to `receiver.rs`; the discriminator is
+// unchanged either way, since pre-fix the unchecked `counter + 1` aborts the
+// process under the dev profile's overflow checks rather than failing an
+// assertion. The abort is the red, not a harness fault.
+
+#[test]
+fn test_gap_tracker_saturates_on_a_first_frame_at_the_ceiling_counter() {
+    let mut r = ReceiverState::new(32);
+    r.record_recv(u64::MAX, 0, 100, false, 0);
+    // A saturated expectation stops the tracker advancing; a repeat of the
+    // same counter then takes the in-order branch and reports no burst.
+    r.record_recv(u64::MAX, 0, 100, false, 0);
+    let rr = r.build_report(0).unwrap();
+    assert_eq!(rr.burst_loss_count, 0);
+    // `next`'s ReceiverReport carries no `max_burst_loss`; `burst_loss_count`
+    // above is the assertion that survives the field's removal.
+}
+
+#[test]
+fn test_gap_tracker_saturates_when_advancing_onto_the_ceiling_counter() {
+    let mut r = ReceiverState::new(32);
+    // Prime the tracker so the advance branch is taken rather than the
+    // first-frame branch.
+    r.record_recv(1, 0, 100, false, 0);
+    // Reaching this line at all is the discriminator: pre-fix the unchecked
+    // `counter + 1` overflows here and aborts the process under the dev
+    // profile's overflow checks. The jump itself is a legitimate enormous gap
+    // and is correctly reported as one, so this does NOT assert an empty
+    // burst — an earlier version of this test did, and was simply wrong.
+    r.record_recv(u64::MAX, 0, 100, false, 0);
+    let jump = r.build_report(0).unwrap();
+    assert!(
+        jump.burst_loss_count >= 1,
+        "the jump to the ceiling is a real gap and should be reported"
+    );
+
+    // Saturated: the expectation cannot advance past the ceiling, so a repeat
+    // of the same counter takes the in-order branch and opens no new burst.
+    r.record_recv(u64::MAX, 0, 100, false, 0);
+    let after = r.build_report(0).unwrap();
+    assert_eq!(
+        after.burst_loss_count, 0,
+        "a saturated expectation must not keep opening bursts"
+    );
+}

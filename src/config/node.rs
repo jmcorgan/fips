@@ -28,6 +28,20 @@ pub struct LimitsConfig {
     /// Max pending inbound handshakes (`node.limits.max_pending_inbound`).
     #[serde(default = "LimitsConfig::default_max_pending_inbound")]
     pub max_pending_inbound: usize,
+    /// Max end-to-end sessions (`node.limits.max_sessions`), `0` = unlimited.
+    ///
+    /// The session table is the only remotely-grown map with no bound: an
+    /// inbound SessionSetup from an address nobody has seen inserts an
+    /// entry, and the idle purge only reaches entries a peer stops using.
+    /// The default of 1024 is four times the adjacent
+    /// `node.session.pending_max_destinations`. One entry measures 6608
+    /// bytes of inline state plus heap, so the table holds to roughly 7 MB
+    /// and a test pins the per-entry figure the default rests on. Raising it
+    /// raises the memory an attacker can make this node hold; lowering it
+    /// refuses new sessions sooner on a node that legitimately talks
+    /// end-to-end to many others, such as a gateway.
+    #[serde(default = "LimitsConfig::default_max_sessions")]
+    pub max_sessions: usize,
 }
 
 impl Default for LimitsConfig {
@@ -37,6 +51,7 @@ impl Default for LimitsConfig {
             max_peers: 128,
             max_links: 256,
             max_pending_inbound: 1000,
+            max_sessions: 1024,
         }
     }
 }
@@ -53,6 +68,9 @@ impl LimitsConfig {
     }
     fn default_max_pending_inbound() -> usize {
         1000
+    }
+    fn default_max_sessions() -> usize {
+        1024
     }
 }
 

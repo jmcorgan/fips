@@ -778,6 +778,22 @@ with v0.4.x or earlier peers.
 
 #### Data-plane / transports
 
+- An inbound onion connection no longer leaks its inbound slot when the peer
+  goes away before the accept loop has pooled it. The Tor accept loop spawned
+  the per-connection receive task, then inserted the pool entry, then bumped
+  the inbound counter; a remote that reset immediately let the receive task
+  run its cleanup first, find nothing to remove, skip the teardown that
+  decrements, and leave the increment behind for the life of the process. Once
+  enough of those accumulated the `max_inbound` gate rejected every further
+  onion connection, with the pool visibly empty. The accept loop now holds the
+  receive task on a readiness barrier until both the pool entry and the
+  counter are in place, as the TCP accept loop already did, and an aborted
+  accept still falls through to the cleanup rather than stranding the entry.
+  The same accept path also releases the slot of an entry it evicts, which a
+  reused ephemeral forward port could otherwise leave orphaned. Outbound Tor
+  connections and the whole of the Nym transport are unaffected: neither holds
+  a counted inbound slot.
+
 - A path MTU measured on one link no longer clamps a peer that has moved to
   another. Every writer of the per-destination path-MTU cache keeps the
   smaller of the existing and incoming value, which is right while a peer
@@ -811,6 +827,35 @@ with v0.4.x or earlier peers.
   other packaging paths did, so the contact of record in the new `.pkg` artifact
   would have been unreachable at its first release.
 
+### Security
+
+#### Tick profiler
+
+- The `--dir` given to `profile tick on` is now confined to `/var/log/fips`
+  when the daemon runs as root. The control socket is reachable by the `fips`
+  group, which the security model writes down as strictly weaker than root, yet
+  the directory travelled from the socket straight into a root `create_dir_all`
+  with no validation: a group member could create a root-owned directory
+  anywhere on the filesystem, including a path a later privileged component
+  reads. The path must now be absolute, must contain no `..`, and must still
+  resolve under the root once every existing ancestor has been followed through
+  its symlinks, so a symlinked parent does not launder a lexically clean path.
+  A daemon that is not running as root crosses no such boundary and takes
+  `--dir` as given, which keeps the documented non-root `cargo run` capture
+  working; the flag can no longer point a root daemon at a different log root,
+  which was its other documented use. This only ever affected a
+  `--features profiling` build: the subcommand is absent from a stock package.
+
+- A capture file is no longer written over whatever is already at its path. The
+  name is a one-second UTC stamp and therefore predictable, so `File::create`
+  would have followed a symlink pre-planted at the next name, and it truncated
+  any real file it found. The file is created only if it does not exist, and a
+  capture started in the same second as a previous one takes the next free
+  `-N` suffix instead of failing. Capture files are created private to their
+  owner and the capture directory is no longer left world-accessible by a
+  permissive umask; a capture carries the node npub, build, platform and a
+  timing series.
+
 ## [0.4.2] - unreleased
 
 ### Added
@@ -828,6 +873,15 @@ with v0.4.x or earlier peers.
   raising the peer limit sizes it automatically. A zero burst or a
   non-positive rate is rejected at config validation rather than silently
   refusing every session.
+
+- `node.limits.max_sessions`, defaulting to 1024, which bounds the end-to-end
+  session table. Zero means unlimited, which restores the previous behaviour
+  exactly and is the way to back the change out on a running node. The default
+  is four times the adjacent `node.session.pending_max_destinations`. A
+  session entry measures 6608 bytes of inline state plus heap, so the table
+  holds to roughly 7 MB, and a test pins that per-entry figure so the
+  arithmetic behind the default fails loudly if an entry grows. Existing
+  configurations parse unchanged, the key being optional.
 
 - `node.rate_limit.established_handshake_burst` and
   `node.rate_limit.established_handshake_rate`, the parameters of the new
@@ -1261,6 +1315,33 @@ with v0.4.x or earlier peers.
 
 #### Transports & config
 
+- The UDP transport's DNS cache is now bounded and actually evicts. The map
+  held one entry per distinct hostname string ever dialed, and the TTL was
+  applied only on the read, so a stale entry was overwritten on the next dial
+  of the same name and otherwise stayed for the life of the process. Under a
+  rendezvous policy that accepts advertised endpoints the keys are strings a
+  remote party chose, which made the growth theirs to drive. A store now
+  sweeps entries past their TTL and, if the map is still full, drops the
+  oldest, holding it to 256 hostnames. Refreshing a name already cached
+  evicts nothing. Eviction is by insertion time rather than last use, so a
+  rarely dialed name in a very large peer list may re-resolve more often; the
+  cost of a wrong eviction is one DNS lookup, not a failed dial.
+
+- macOS: stopping an Ethernet transport under load no longer hangs the
+  process. The BPF reader thread handed each frame to the async consumer with
+  `blocking_send`, which parks with no way to be woken. Stopping the transport
+  aborts the consumer first, so nothing drains the 1024-frame channel, and the
+  socket's `Drop` then joined a thread that could never return: on a busy
+  interface the daemon had to be killed. The socket now drops the receiver
+  before joining, which releases a parked send at once, and the reader thread
+  sends through a helper that watches the same shutdown pipe its `select()`
+  already honours, so a send waiting for room cannot outlive a shutdown
+  request. The helper yields before it sleeps, so the saturated-path handoff
+  rate is unchanged. **Not covered by CI**: the reader thread is macOS-only
+  and Linux CI compiles none of it. What the tests prove is that the helper
+  the thread now waits in is cancellable; that a real BPF thread exits under
+  load still needs a manual check on a Mac.
+
 - A failed private-key write no longer leaves a node silently running an
   ephemeral identity. Six write results in the identity path were discarded,
   and the sharpest was in `persistent` mode: a failed write to `fips.key` fell
@@ -1356,6 +1437,61 @@ with v0.4.x or earlier peers.
 ### Security
 
 #### FMP/FSP session integrity
+
+- A frame whose counter is `u64::MAX` is now refused by the replay window
+  instead of being accepted as a new high-water mark. Accepting it pinned
+  `highest` at the ceiling, after which every subsequent counter from that peer
+  fell more than a replay window below it and was rejected, wedging that peer's
+  own receive path until a rekey replaced the session. The send side already
+  refuses to emit that counter (`take_send_counter` and `advance_nonce` both
+  return a nonce-overflow error), so no conforming peer can produce it and the
+  refusal is invisible on the wire; the highest counter an honest peer can send,
+  `u64::MAX - 1`, is still accepted. Reaching this required an
+  already-authenticated peer running modified code, and the damage was confined
+  to that peer's own session.
+
+- The MMP gap tracker advances its expected-counter state with a saturating add,
+  so a received counter of `u64::MAX` no longer overflows it. The wrap silently
+  reset the expectation to zero in a release build and aborted the task under a
+  build with overflow checks on, such as the test harness. Behaviour is
+  unchanged for every counter an honest peer can emit.
+
+- An epoch-mismatch msg1 no longer tears down a peering that is still
+  carrying authenticated traffic, and a second epoch change for the same peer
+  identity inside 15 seconds is refused. The epoch travels inside the AEAD, so
+  such a msg1 is authentic, but it stays authentic after capture: replaying
+  one destroyed a working peering, and with it the FSP session state that
+  peering carried, from off the path. The peering's last authenticated inbound
+  frame is the evidence that it is still alive, and nothing an unauthenticated
+  sender emits can refresh it, so a peer that genuinely restarted clears the
+  gate by having stopped sending. The refusal is a silent drop: no msg2 is
+  returned, since the stored msg2 is bound to the original msg1's ephemeral
+  and answering a sender-chosen address is free amplification. The interval is
+  stamped only when an epoch change is accepted, so a sustained replay cannot
+  starve a genuinely restarting peer. Both thresholds come from one constant,
+  sized so a restarting peer's msg1 resends still land inside its own first
+  handshake window and below `link_dead_timeout_secs`, and nothing changes on
+  the wire.
+
+- Retention of a superseded FSP key epoch is now capped at an absolute
+  ceiling measured from the cutover, defaulting to 120 seconds against the
+  10-second drain window. The drain deadline slides forward on every inbound
+  frame that authenticates against the `previous` slot, which is what keeps a
+  peer that lost msg3 from having the old epoch erased out from under it, but
+  it also meant the authenticated peer holding that key could keep the retired
+  key resident for as long as it kept sealing frames in the old epoch. The
+  sliding grace is unchanged; it now delays erasure by a bounded amount rather
+  than preventing it. The ceiling is set to clear the worst-case legitimate
+  recovery of a peer that lost msg3 (the msg3 resend ladder, then
+  `handshake_timeout_secs` before the responder abandons, then the rekey
+  dampening window before it may re-initiate, about 90 seconds at stock
+  settings), and it is raised automatically if the configured handshake timers
+  imply a longer budget, so shortening a timer cannot push the ceiling under
+  the recovery it has to leave room for. Nothing changes on the wire; each side
+  runs its own drain. A peer that has still not recovered when the ceiling
+  fires is left with undecryptable frames until its own rekey retry
+  re-converges the epochs, since nothing tears an established session down on
+  repeated decrypt failure.
 
 - A session setup message naming an already-established peer no longer replaces
   that peer's session. The handler did this whenever `node.rekey.enabled` was
@@ -1463,6 +1599,151 @@ with v0.4.x or earlier peers.
 
 #### NAT traversal / Nostr discovery
 
+- An advert or inbox-relay list returned by a relay is now checked against
+  the peer it claims to describe before anything else looks at it. The relay
+  pool verifies every event's signature but does not check a reply against
+  the request filter, and neither of the two options that would make it do so
+  is enabled, so a relay may answer a request for one author's advert with an
+  event it signed itself. The stale-advert refetch picked the newest
+  `created_at` across everything returned, with no author test, and then wrote
+  the result into the advert cache under the requested peer's npub, so a
+  single hostile or compromised advert relay could pin an endpoint set of its
+  own choosing for that peer. The author test now runs before the timestamp
+  contest rather than after, so a future-dated foreign event cannot even
+  suppress the genuine advert by winning it. The same filter now applies to
+  the inbox-relay lookup, where the omission let an attacker-authored relay
+  list steer this node's direct-message and traversal-signal traffic. A
+  refetch that comes back with events, none of them signed by the peer, now
+  leaves the cached entry alone: that is no evidence the advert was
+  withdrawn, and evicting on it would hand the same relay a way to clear the
+  cache. A refetch that genuinely comes back empty still evicts.
+
+- An advert's `created_at` is now clamped forward to the same 60s of clock
+  skew the traversal-signal path already tolerates. An unbounded future
+  timestamp bought a cache entry a proportionally distant validity horizon
+  and an unbeatable position in every replacement comparison, so a later
+  genuine advert could never displace it and the size-cap eviction collected
+  it last. The clamp applies to the stored timestamp as well as the validity
+  window, at all three points where an advert is cached, so ordering and
+  expiry now agree. Clamping rather than refusing the event is deliberate: a
+  node whose own clock runs slow reads every peer's honest advert as
+  future-dated, and refusing would silently withdraw Nostr-mediated dialing
+  for every peer at once.
+
+- Inbound traversal signals are now rate limited before they are decrypted. A
+  rendezvous-enabled node handed every kind-21059 event straight to the unwrap,
+  which is two NIP-44 decrypts and a signature verify, inline on the single
+  task that also routes traversal answers and maintains the advert cache.
+  Nothing bounded how fast an unauthenticated stranger could schedule that
+  work: the per-npub offer admission cannot, because it keys on the sender's
+  public key, which only exists once the first decrypt has already run, and
+  because it is a concurrency semaphore rather than a limit over time. A token
+  bucket now sits ahead of the unwrap, so a flood costs a node its inbound
+  offers instead of the whole notify loop.
+
+  What the limit can and cannot key on is worth stating, because it decides the
+  shape of the fix. Before decryption there is no sender identity at all: the
+  outer event is signed by a key generated per event, so bucketing on its
+  author would hand an attacker a fresh allowance for free, and the timestamp
+  and recipient tag are equally attacker-chosen. The arrival relay is drawn
+  from our own configured set but is not an isolation boundary either, since an
+  attacker publishes to the same relays an honest peer does. The shared
+  allowance is therefore a single global bucket and is indiscriminate by
+  construction, which on its own would shed our own traversals along with the
+  attacker's, and since the attacker sets the rate every retry would land in
+  the same shed. A second, smaller allowance is held in reserve and drawn only
+  while this node has traversals of its own outstanding, so a flood denies a
+  node its inbound offers, which nothing receiver-side can prevent without a
+  pre-decrypt identity, rather than also denying it the answers to offers it
+  sent. Shed signals are counted and reported at debug level per event with a
+  warning each time the running total doubles, so a bucket sized below a busy
+  node's real need shows up in the log rather than as apparent relay flakiness.
+
+  Two limits on what this buys. It bounds the crypto path only: the advert
+  branch runs earlier in the same loop and is not metered here, so a stranger
+  can still put JSON parsing and a cache insert on the task per event. And the
+  relay SDK verifies each event's outer signature on its own per-relay task
+  before this loop ever sees it, which no receiver-side change short of
+  dropping the subscription can avoid.
+
+- A STUN binding response is now accepted only from the address the binding
+  request was sent to. The client discarded the source address `recv_from`
+  returned and let the parser decide, and the parser checks only the message
+  type, the magic cookie and the 12-byte transaction id. An on-path attacker
+  who could read the outbound request could therefore inject a reply carrying
+  a transaction id copied from it, and its chosen address became the reflexive
+  candidate the node published in a traversal offer or answer, redirecting the
+  peer's hole-punch packets. Datagrams from any other source are counted and
+  discarded, and one debug record per STUN attempt reports the count and the
+  last unexpected source, so a rejection is diagnosable without giving a
+  flooder control of the log rate. A server that answers from an address other
+  than the one dialed, which RFC 5389 forbids, now times out and the next
+  configured server is tried.
+
+- The exemption that lets a peer's reflexive address skip the private-address
+  gate is now conditional on our own vantage point. That exemption exists for
+  the deployment whose STUN server sits inside the private network, so the
+  observed reflexive address is legitimately private; it was applied
+  unconditionally, so a node whose own STUN result was public still punched
+  whatever private address a peer named as its reflexive one. Any sender whose
+  offer or answer was accepted could therefore aim a burst of UDP packets,
+  carrying this node's source address, at a host inside the node's own private
+  network, which is the one place the candidate filter was written to keep it
+  out of. The gate now applies whenever our own reflexive address is public.
+  It stays lifted when our own reflexive address is itself private, which is
+  the LAN-STUN deployment the exemption was for, and also when we have no
+  reflexive address at all, so a failed STUN probe cannot cost a node its
+  same-LAN peering. Two consequences to state rather than discover: a peer
+  behind a private STUN server talking to a node with a public one loses its
+  reflexive candidate, which was never reachable from us in any case, and
+  because the /24 comparison is IPv4-only a unique-local IPv6 reflexive
+  address is refused unless our own reflexive address is unique-local too.
+  An off-subnet refusal of a peer's reflexive address is a shape an honest
+  deployment now produces, so it no longer raises the refusal record to
+  warning level on its own; the never-routable, port-0 and unparsable classes
+  still do.
+
+- A peer's candidate list is now bounded before it is walked rather than only
+  after. The eight-target cap ran after both planning loops had finished, so
+  it bounded what a node punched but not what it spent deciding: a signal
+  naming several thousand candidates had every one of them parsed and vetted,
+  and the deduplicating scan that follows is quadratic in the plan those
+  candidates feed. At most 32 candidates are now vetted, four times the
+  target cap and four times what the candidate generator produces on the
+  widest host, and the excess is discarded rather than failing the offer, so
+  an honest many-homed peer loses the tail of its list instead of its
+  traversal. The refusal record carries the discarded count as a new
+  `over_offered` field and treats a non-zero one as an attack shape, since
+  nothing honest reaches the bound.
+
+- A NAT-punch packet is now accepted only from an address this node planned to
+  probe. The punch packet's discriminator is a plain digest of the session id,
+  a value both peers already know, and it travels in the clear in every probe,
+  so acceptance proved only that the sender had seen one. The receive loop
+  broke on the first packet whose digest matched, whatever its source, and
+  returned that source as the peer address, so anyone who observed a probe, or
+  who could reach the node and guess the session id, could have an arbitrary
+  address adopted as the peer: the legitimate traversal was denied, the Noise
+  handshake and its retransmissions went to an address of the attacker's
+  choosing, and the pair was charged a failure against its backoff state. The
+  npub-pinned handshake still could not authenticate to the wrong host, so this
+  was a denial and a misdirection rather than an impersonation. The source
+  address is now ranked against the planned target list before anything else:
+  an unplanned source is dropped and, deliberately, is not acked either, since
+  acking it is a reflection the node controls. A source matching a planned
+  target exactly is adopted immediately, as before. A source matching a planned
+  target's IP on a different port is what a symmetric NAT's fresh mapping looks
+  like, and it is still adopted, because that is the main class of NAT pairing
+  punching exists to rescue; it is held as a candidate for 250 ms first, so an
+  exact match arriving inside that window supersedes it. The honest path's
+  latency is unchanged. Two consequences to state rather than discover: an
+  attacker that can source packets from a planned target's IP on any port is
+  still accepted, which is the residue only an authenticated probe can close;
+  and an attempt under a flood of spoofed matching packets now runs to its full
+  timeout instead of ending on the first one, so the refused sources are
+  counted and reported once when the attempt ends rather than logged per
+  packet.
+
 - Traversal punch targets taken from a peer's offer or answer are now
   filtered and bounded. A rendezvous-enabled node previously punched every
   address a signed offer named, including loopback, link-local, multicast,
@@ -1515,7 +1796,103 @@ with v0.4.x or earlier peers.
   attributes the acceptance to clock skew, since a peer configured with a longer
   signalling TTL than ours now reaches it too.
 
+#### DNS responder
+
+- The DNS responder's mesh-interface filter now works on macOS and FreeBSD,
+  where it had never run. The filter drops `.fips` queries that arrive over the
+  mesh TUN, which is what keeps a widened `dns.bind_addr` from exposing the
+  hosts file's alias space to every mesh peer. It was keyed on the interface
+  index resolved from the *configured* TUN name, but macOS and FreeBSD assign
+  the device a name of the kernel's choosing (`utunN`, `tunN`), so the lookup
+  found nothing, the index came back `None`, and `None` disables the filter.
+  The index is now resolved from the name of the device the node actually
+  created, which the TUN startup path already records, and a live device whose
+  index will not resolve is logged rather than passed off as "no mesh
+  interface". Linux is unaffected, since the configured name is the device's
+  name there. **Behaviour change on macOS and FreeBSD**: a node with a
+  non-loopback `dns.bind_addr` stops answering `.fips` queries that arrive over
+  the mesh interface. **What this does not close**: with an app-owned TUN the
+  node never learns a device name, so the filter stays off there. **Not
+  measured**: whether macOS and FreeBSD attribute a locally originated query
+  sent to the node's own mesh address to the TUN interface, as Linux does. If
+  they do, such a query is now dropped on those platforms; the shipped resolver
+  drop-in targets `[::1]` rather than the mesh address, so the packaged path is
+  not affected.
+
 #### Data-plane / routing signals
+
+- A transit node's induced routing errors are now bounded by the authenticated
+  link peer that induced them. The 100 ms suppression gate on
+  `CoordsRequired`, `PathBroken` and `MtuExceeded` was keyed on the failed
+  datagram's destination address, which is an envelope field the sender picks,
+  so a fresh random destination on every packet was always a first sighting and
+  every packet was admitted. Each admission also inserted a key and then walked
+  the whole map, so per-packet cost grew with the flood rate while the sender's
+  cost stayed flat, and the error itself is addressed to the datagram's source
+  address, which nothing binds to the sender either. A new per-link-peer token
+  bucket, 20 signals a second sustained with a burst of 50, is now consulted
+  first, keyed on the AEAD-authenticated peer the frame arrived over: the one
+  value at that point a sender cannot mint. The per-destination interval is
+  kept unchanged behind it, because it still does the aggregate suppression a
+  genuine outage needs, and no gate was added on the address the error is
+  returned to, which would have handed a sender a way to silence honest errors
+  toward a victim it names by keeping that victim's key hot.
+
+  Two ordering choices in there rather than left to be discovered. The peer's
+  token is peeked and only spent once the destination gate has also admitted,
+  so a single unroutable destination behind a high-fanout peer cannot burn that
+  peer's whole budget on signals nothing sends and silence every other
+  destination behind it. And the destination map now carries a hard ceiling of
+  4096 entries with its expiry sweep amortized to once per eviction interval
+  rather than run on every admission; when it is full it admits without
+  recording rather than refusing, because refusing would turn a full map into
+  node-wide silence exactly during partition healing, when many destinations
+  are legitimately unroutable at once. Emission stays bounded by the peer
+  budget in that state. Three counters, rendered on the fipstop Routing tab,
+  make each of the three outcomes visible instead of silent.
+
+- A transit-emitted `PathBroken` no longer carries the reporter's cached
+  coordinates for the unreachable destination. The signal is returned to the
+  datagram's source address, so anyone able to reach the node could name any
+  address and have the node's coordinate cache read back to them, one entry per
+  packet. The field is optional on the wire and no receiver reads it, so this
+  is an emission change only: an unmodified peer parses the frame exactly as
+  before. Which of the two signals is emitted still discloses whether the entry
+  exists.
+- A reactive `MtuExceeded` is now believed only when this node has actually
+  sent a frame larger than the bottleneck it reports. The signal is
+  unauthenticated: the admission gate narrows which destination may be named
+  but cannot say who named it, so a value at the floor was a legal value from
+  anyone, and one datagram drove a bound session's path MTU to 256 and pinned
+  the address-keyed entry the SYN-time MSS clamp reads, with recovery costing
+  three consecutive higher notifications across two notification intervals.
+  Each session now carries the largest frame this node has put on the wire
+  toward it since the last accepted decrease, and a report is refused unless it
+  names something smaller. Honest path-MTU discovery satisfies that by
+  construction, because the report exists only because a frame we sent did not
+  fit; a forgery has to wait for us to emit something bigger than the value it
+  wants to claim, which bounds every accepted claim from below by our own
+  traffic. The evidence is cleared on each accepted decrease and on release, so
+  one large send early in a session cannot vouch for the rest of it.
+
+  The guard sits ahead of both effects rather than between them, which is also
+  where the existing floor check moved to: the floor previously ran after the
+  session's own path MTU had already been changed and so governed only the
+  lookup table. The reactive carrier now names its own floor constant, held
+  equal to the actionable floor so no hop legitimately configured with a small
+  transport MTU loses its feedback; corroboration, not the floor's value, is
+  what stops a legal-but-forged claim. A separate counter, rendered on the
+  fipstop Routing tab, distinguishes an uncorroborated refusal from a
+  below-floor one.
+
+- The path-MTU release a `PathBroken` drives is now rate limited per
+  destination on a budget of its own. That signal is unauthenticated too, and
+  the release discards a bottleneck this node learned by having a packet
+  dropped, so repeating the claim discarded a genuine value as fast as it could
+  be relearned. The limiter is a separate instance rather than the one the
+  coordinate warmup send already uses: a budget another signal can spend is not
+  a bound. Deferring a release is the safe direction, since the value kept is
+  the tighter one.
 
 - The influence a remote party has over path MTU is now bounded, and the
   per-destination path MTU cache has a way back. The `path_mtu` field is an
@@ -1591,7 +1968,138 @@ with v0.4.x or earlier peers.
   claimed source and destination pairing no honest forwarder could produce.
   The drop log line now carries the signal type and the refusal class.
 
+- A discovery lookup response is now acted on only when it answers a lookup
+  this node actually has outstanding. The originator path took any response
+  whose `request_id` was not in the transit dedup map, so an admitted peer
+  could harvest one genuine signed response for a target and re-inject it at
+  will: each injection cleared the victim's in-flight lookup, recorded a
+  reachability success for a target that might be unreachable, refreshed the
+  cached coordinates for a further full TTL, and flushed the victim's queued
+  packets onto a route at a moment the sender chose. It also reached the
+  signature verify before any check that the response was wanted, so the
+  verify was the first cost gate on the path. The node now records the
+  `request_id` of every lookup request it sends on that target's pending
+  entry, and a response is dropped unless it names a target with a lookup
+  outstanding and carries one of the ids issued for it. Because the id is
+  fresh 64-bit randomness drawn per attempt and the target signs over it, a
+  harvested response is bound to the request it answered and cannot be
+  redirected or replayed. The check runs before the identity-cache resolve
+  and before the signature verify, so a response nobody asked for costs
+  nothing. Replies to earlier attempts of a still-outstanding lookup are
+  still accepted, which is the common case on a link whose round trip
+  exceeds the first rung of the retry ladder. Drops are counted as
+  `resp_unsolicited`, visible through `show routing`, `show metrics` and the
+  fipstop routing pane; the counter has a nonzero floor in healthy operation,
+  because a request is flooded to every qualifying tree peer and the
+  duplicate replies land there once the first has been accepted.
+
+- A flooded discovery dedup cache no longer makes a node unresolvable. The
+  cache is both the duplicate filter and the reverse-path table for lookup
+  responses, and at its 4096-entry bound it dropped the arriving request.
+  That drop sat ahead of both the check for whether the request names this
+  node and the forwarding path, so one link peer emitting fresh request_ids
+  could stop the node answering lookups for itself and stop it carrying
+  anyone else's, for as long as it kept the cache full. The cache now makes
+  room instead of refusing: over a peer's own share it drops that peer's
+  oldest entry, and at global capacity it drops the oldest entry of whichever
+  peer holds the most, so a light peer's reverse path is never taken to admit
+  a heavy one and extra identities buy a flooder proportionally less. A
+  peer's share is the cache divided by the current link-peer count, with a
+  floor of 64. The loosening this accepts is that an evicted request_id
+  arriving again inside the window is forwarded a second time rather than
+  recognised as a duplicate, which the per-target forward limiter and TTL
+  already bound. Evictions are counted as `req_dedup_evicted`; the old
+  `req_dedup_cache_full` counter stays in place, frozen at zero, so a
+  dashboard carried across versions does not lose the series.
+
+- Answering a lookup for ourselves is now metered per link peer. The response
+  proof is signed over the requester's `request_id`, so every request
+  addressed to this node costs a fresh Schnorr signature that cannot be
+  cached or served twice, and until now the only thing bounding that rate was
+  the dedup cache filling up, which is the defect above. A token bucket per
+  link peer, 256 signatures of burst refilling at 32 per second, absorbs the
+  legitimate burst that follows a topology change, when many correspondents
+  re-look-up at once through the few links that lead here, while capping what
+  one neighbour can make the node sign. Refusals are counted as
+  `req_sign_rate_limited` and visible in `show routing`, `show metrics` and
+  the fipstop routing pane. A refused request keeps its dedup entry, and
+  retries carry fresh request_ids, so a refusal cannot suppress the retry.
+
 #### Admission / peer caps
+
+- The Ethernet transport's discovery buffer is now bounded and no longer costs
+  a linear scan per beacon. Beacons are unauthenticated broadcast frames, and
+  the buffer deduplicated by scanning a `Vec` for the source MAC and had no
+  cap, so anything on the segment could name a fresh MAC per frame and drive
+  both quadratic CPU in the receive loop and unbounded memory. It is drained
+  once per tick only while the transport is operational, so a transport that
+  is receiving but not operational was never drained at all. The buffer is now
+  a map keyed on source MAC, capped at 1024 distinct MACs between drains, with
+  the drain order still oldest sighting first so which neighbour gets dialed
+  under a connect budget does not depend on hash iteration order. A MAC already
+  buffered is always refreshed, so a flood of new MACs cannot crowd out a
+  neighbour already seen. Refused beacons are counted in the transport's stats
+  as `beacons_dropped` and reported in the log on the first drop and then on
+  each power-of-ten thereafter, so the flooder does not set the log rate.
+  **What this does not close**: a flood can still crowd out a neighbour not yet
+  seen in that tick, and anything able to flood raw frames on the segment can
+  already jam the beacon at L2 more cheaply.
+
+- A read failure on `peers.allow`, `peers.deny` or the `hosts` file no longer
+  turns the node into an open one. Every read error other than a steadily
+  absent file was logged and swallowed, leaving that file's entries empty, and
+  the reloader published the result unconditionally: an unreadable `peers.deny`
+  admitted the peers it named, and an unreadable `peers.allow` took a node from
+  admitting a named few to admitting everyone, with one warning line as the
+  only signal. Because the recorded modification times advanced before the
+  load, nothing retried until the file changed again, so a persistent
+  permission or I/O fault left the empty ACL in force indefinitely. The
+  reloader now keeps the last loaded ACL when any input is present but
+  unreadable, leaves the modification times alone, retries on the next tick
+  regardless of them, and logs the fault once on the transition rather than
+  once per tick. An absent file is still a policy and still loads as an empty
+  set; a `NotFound` that a successful stat contradicts is treated as a file
+  being rewritten under us and held. A reload whose inputs all read cleanly but
+  which empties an enforcing ACL while its files are still on disk is held for
+  one tick, which catches a read that caught a non-atomic in-place edit
+  mid-write, and released on the next so a deliberate blanking still takes
+  effect. `fipsctl` ACL status gains a `stale` flag reporting that the policy
+  in force is older than the files on disk. **What this does not close**:
+  there is no last-good snapshot at startup, so a node whose ACL file is
+  unreadable at boot still comes up with no entries, now logged as an error and
+  armed to retry on the first tick. Admission is also checked only at handshake
+  time, so a peer admitted during a window that has already happened keeps its
+  link.
+
+- The end-to-end session table now has a bound. It was the one remotely-grown
+  map with none: an inbound SessionSetup naming an address nobody had seen
+  inserted an entry, and the two existing limits did not reach it, the setup
+  limiter governing the arrival rate rather than the population and the idle
+  purge only reaching entries a peer stops using. One neighbour sending setups
+  at the permitted rate could hold roughly 1440 half-open entries at any
+  moment and grow the table without limit by keeping them warm. Setups that
+  would grow the table past `node.limits.max_sessions` are now refused, ahead
+  of the setup limiter, so a full table costs no token, no responder handshake
+  and no ack; a refused setup emits nothing at all, which is indistinguishable
+  from loss to the sender and is already covered by its own msg1 resend
+  schedule. The test is whether admitting would grow the table, not whether
+  the sender is a stranger, so a resent setup for an entry already present is
+  still served and an in-flight handshake is not broken. Unauthenticated
+  half-open entries are additionally held to half the table, so a handshake
+  flood cannot deny the whole of it to peers that complete; that share is sized
+  to leave a reconnect storm, where every peer initiates at once after a
+  restart or a healed partition, room to land. Locally originated sessions are
+  capped at the same ceiling, answered with ICMPv6 destination unreachable so
+  the application gets an immediate error rather than a silent drop. The cap
+  refuses rather than evicts: the setup that triggers the decision is
+  unauthenticated at that point, so evicting would hand a stranger a way to
+  tear down sessions it has nothing to do with. Refusals are counted as
+  `table_full` and `half_open_full` in the session reject family. What stays
+  open is per-neighbour fairness among established sessions: one hostile
+  neighbour that completes handshakes and keeps each session warm can occupy
+  the table and hold new session establishment closed for as long as it keeps
+  doing so, which is a denial of new sessions rather than the unbounded memory
+  growth it replaces.
 
 - An accepted inbound TCP connection no longer holds a slot indefinitely
   without sending anything. The cap was tested at accept and the pool insert
@@ -1630,6 +2138,30 @@ with v0.4.x or earlier peers.
   than having its rcode relayed. Checking after the rcode would admit a forged
   NXDOMAIN. Connecting the socket also means a dead upstream surfaces
   ECONNREFUSED immediately instead of stalling for five seconds.
+
+#### Control socket
+
+- The control socket and the directory holding it are now created with a
+  restrictive mode rather than created wide and narrowed afterwards. `bind(2)`
+  makes the socket inode `0777 & ~umask`, so under a permissive umask the
+  socket was world-accessible for the window between the bind and the `chmod`
+  to 0770 that followed it; the bind now runs under a umask that masks the
+  "other" bits, so the inode is 0770 from creation and the chmod and chown stay
+  the authority on its final mode. The parent directory was worse than a
+  window: it was created with `create_dir_all`, which is also `0777 & ~umask`,
+  and nothing ever set a mode on it, so under a permissive umask the directory
+  holding the socket stayed world-writable for the life of the host, and a
+  world-writable parent lets an unprivileged account plant an entry at the
+  socket path. Directories this code creates now come out 0750, which is what
+  the systemd unit (`RuntimeDirectoryMode=0750`) and the FreeBSD rc script
+  (`install -d -m 0750`) already apply, so no packaged deployment sees a
+  different mode and no `fipsctl` user loses access. Both the daemon and the
+  gateway control sockets are covered. **What this does not close**: the window
+  between the stale-socket probe and the bind is documented at the site rather
+  than removed. Reaching it needs write access to the socket's parent
+  directory, which the packaged layouts give to root alone, and an account
+  holding it can deny the daemon its socket more simply by squatting the path
+  first.
 
 #### Key material and identity files
 
