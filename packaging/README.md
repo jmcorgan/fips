@@ -48,6 +48,7 @@ packaging/
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
   freebsd/        FreeBSD .pkg packaging via pkg-create(8)
   macos/          macOS .pkg installer via pkgbuild
+  nixos/          NixOS flake module (services.fips.*)
   systemd/        Generic Linux systemd tarball packaging
   openwrt-ipk/    OpenWrt .ipk packaging via cargo-zigbuild (opkg)
   openwrt-apk/    OpenWrt .apk packaging via cargo-zigbuild + apk mkpkg
@@ -244,8 +245,45 @@ nix develop               # dev shell with the pinned toolchain + cargo-edit
 nix flake check           # build + validate the flake
 ```
 
-Add to a NixOS configuration via the flake's `packages.<system>.fips`
-output, e.g. `environment.systemPackages = [ fips.packages.${system}.default ];`.
+The flake also exposes:
+
+- `overlays.default` — adds `pkgs.fips` to nixpkgs
+- `nixosModules.default` — a NixOS module (`packaging/nixos/`) that provides
+  `services.fips.enable` and runs the daemon as a systemd service
+
+**As a package only** (no service management):
+
+```nix
+environment.systemPackages = [ fips.packages.${system}.default ];
+```
+
+**As a managed NixOS service** (recommended — starts on boot, journalctl logs):
+
+```nix
+# flake.nix
+{
+  inputs.fips = {
+    url = "github:jmcorgan/fips";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { self, nixpkgs, fips, ... }@inputs: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      specialArgs = { inherit inputs; };
+      modules = [
+        ./configuration.nix
+        fips.nixosModules.default
+        { services.fips.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+See [`packaging/nixos/README.md`](nixos/README.md) for the full option
+reference (`services.fips.enable`, `.package`, `.configFile`,
+`.openFirewall`).
 
 ## Shared Assets
 

@@ -44,7 +44,7 @@
           rustPlatform.bindgenHook # sets LIBCLANG_PATH + clang for bindgen
         ];
 
-        buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
+        buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.dbus # libdbus-1.so.3, linked via bluer→libdbus-sys
           pkgs.stdenv.cc.cc.lib # libgcc_s.so.1, needed by every Rust binary
         ];
@@ -57,21 +57,29 @@
             src = ./.;
             # Drop the build dir and the usual editor/VCS noise so the source
             # hash is stable and unrelated edits don't trigger rebuilds.
-            filter =
-              path: type:
-              (pkgs.lib.cleanSourceFilter path type) && (baseNameOf path != "target");
+            filter = path: type: (pkgs.lib.cleanSourceFilter path type) && (baseNameOf path != "target");
           };
 
           cargoLock.lockFile = ./Cargo.lock;
 
           inherit buildInputs;
 
+          # Ship the default config, hosts file, and nftables baseline so
+          # the NixOS module can reference them via $out/share/fips/ without
+          # needing the source tree. DNS routing is handled declaratively
+          # via services.resolved on NixOS (no setup/teardown scripts needed).
+          postInstall = ''
+            install -Dm 0644 ${./packaging/common/fips.yaml} $out/share/fips/fips.yaml
+            install -Dm 0644 ${./packaging/common/hosts}     $out/share/fips/hosts
+            install -Dm 0644 ${./packaging/common/fips.nft}  $out/share/fips/fips.nft
+          '';
+
           # autoPatchelfHook rewrites the RPATH of the built binaries so the
           # daemon finds libdbus-1.so.3 (linked via bluer→libdbus-sys) in the
           # Nix store at runtime — without it the `fips` binary fails to load
           # on NixOS where there is no global /usr/lib.
           nativeBuildInputs =
-            nativeBuildInputs ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.autoPatchelfHook ];
+            nativeBuildInputs ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.autoPatchelfHook ];
 
           # The test suite exercises TUN devices, raw sockets and mDNS, none of
           # which exist in the build sandbox. The AUR/Debian packaging likewise
@@ -84,7 +92,7 @@
             homepage = cargoToml.package.homepage;
             license = pkgs.lib.licenses.mit;
             mainProgram = "fips";
-            platforms = pkgs.lib.platforms.linux ++ pkgs.lib.platforms.darwin;
+            platforms = pkgs.lib.platforms.unix;
           };
         };
 
@@ -124,5 +132,15 @@
 
         formatter = pkgs.nixfmt;
       }
-    );
+    )
+    // {
+      # System-independent outputs — outside eachDefaultSystem.
+      # Overlay so consumers get pkgs.fips automatically.
+      overlays.default = final: prev: {
+        fips = self.packages.${final.system}.default;
+      };
+
+      # NixOS module — consumers import this and set services.fips.enable = true.
+      nixosModules.default = import ./packaging/nixos;
+    };
 }
