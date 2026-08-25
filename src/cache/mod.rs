@@ -8,8 +8,10 @@ mod entry;
 
 use thiserror::Error;
 
-pub use coord_cache::{CoordCache, DEFAULT_COORD_CACHE_SIZE, DEFAULT_COORD_CACHE_TTL_MS};
-pub use entry::CacheEntry;
+pub use coord_cache::{
+    CoordCache, DEFAULT_COORD_CACHE_SIZE, DEFAULT_COORD_CACHE_TTL_MS, HintOutcome,
+};
+pub use entry::{CacheEntry, CoordSource, VERIFIED_TTL_MS};
 
 /// Errors related to cache operations.
 #[derive(Debug, Error)]

@@ -3270,7 +3270,7 @@ async fn test_path_broken_naming_a_dest_with_no_session_does_not_flush_cached_co
     let dest = NodeAddr::from_bytes([0xCC; 16]);
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let coords = node.tree_state().my_coords().clone();
-    node.coord_cache_mut().insert(dest, coords, 1000);
+    let _ = node.coord_cache_mut().insert(dest, coords, 1000);
 
     let encoded = PathBroken::new(dest, reporter).encode();
     node.handle_path_broken(&reporter, &encoded[5..]).await;
@@ -3314,7 +3314,7 @@ async fn test_path_broken_naming_a_dest_whose_entry_is_an_unauthenticated_respon
     let dest = NodeAddr::from_bytes([0xCC; 16]);
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let coords = node.tree_state().my_coords().clone();
-    node.coord_cache_mut().insert(dest, coords, 1000);
+    let _ = node.coord_cache_mut().insert(dest, coords, 1000);
 
     // One forged SessionSetup naming `dest` would leave exactly this entry.
     install_halfopen(&mut node, dest);
@@ -3352,7 +3352,7 @@ async fn test_path_broken_for_a_session_we_initiated_still_flushes_cached_coords
     let dest = *remote.node_addr();
     let reporter = NodeAddr::from_bytes([0xBB; 16]);
     let coords = node.tree_state().my_coords().clone();
-    node.coord_cache_mut().insert(dest, coords, 1000);
+    let _ = node.coord_cache_mut().insert(dest, coords, 1000);
 
     let encoded = PathBroken::new(dest, reporter).encode();
     node.handle_path_broken(&reporter, &encoded[5..]).await;

@@ -253,7 +253,7 @@ impl Node {
                             .plan_cache_coords(*src_addr, my_addr, src_coords, dest_coords)
                     {
                         if let FspAction::CacheCoords { addr, coords } = action {
-                            self.coord_cache.insert(addr, coords, now_ms);
+                            self.insert_coord_hint(addr, coords, now_ms);
                         }
                     }
                     ciphertext_offset += bytes_consumed;
@@ -1169,7 +1169,7 @@ impl Node {
         entry.clear_handshake_payload();
         entry.touch(now_ms);
         self.sessions.insert(*src_addr, entry);
-        self.coord_cache.insert(*src_addr, ack.src_coords, now_ms);
+        self.insert_coord_hint(*src_addr, ack.src_coords.clone(), now_ms);
 
         // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;

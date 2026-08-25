@@ -51,6 +51,10 @@
       "unbound_mtu": 0
     },
     "forwarding": {
+      "coord_hint_changed": 0,
+      "coord_hint_rejected": 0,
+      "coord_warm_foreign_root": 0,
+      "coord_warm_key_mismatch": 0,
       "decode_error_bytes": 0,
       "decode_error_packets": 0,
       "delivered_bytes": 0,

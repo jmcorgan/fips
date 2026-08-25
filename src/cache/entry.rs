@@ -2,6 +2,30 @@
 
 use crate::proto::stp::TreeCoordinate;
 
+/// How long a verification outranks a hint, in milliseconds.
+///
+/// Deliberately independent of the entry's own TTL. An entry carrying live
+/// traffic is refreshed on every use and so never expires, and if verification
+/// rode that same clock a once-verified entry would outrank every hint forever
+/// — including the hints that would carry a destination's genuine move. This
+/// clock is never refreshed: verification ages out on its own, and the entry
+/// stays usable afterwards, it just stops winning.
+pub const VERIFIED_TTL_MS: u64 = 300_000;
+
+/// Where a cached coordinate came from, which is what decides whether it may
+/// be overwritten.
+///
+/// The distinction is the whole of the defence: `Verified` values arrive with
+/// a proof this node checked, `Hint` values are copied off a passing packet
+/// and are attacker-supplied in the general case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoordSource {
+    /// Established by a lookup whose response proof this node verified.
+    Verified,
+    /// Copied from a packet in transit. Unauthenticated.
+    Hint,
+}
+
 /// A cached coordinate entry.
 #[derive(Clone, Debug)]
 pub struct CacheEntry {
@@ -19,10 +43,21 @@ pub struct CacheEntry {
     /// response is cached. `None` when populated from SessionSetup or
     /// other sources that don't carry path MTU information.
     path_mtu: Option<u16>,
+    /// Where the current coordinates came from.
+    source: CoordSource,
+    /// Until when a `Verified` source outranks a hint (Unix milliseconds).
+    ///
+    /// Zero for a hint. Never extended by `refresh` or `touch`; see
+    /// [`VERIFIED_TTL_MS`].
+    verified_until: u64,
 }
 
 impl CacheEntry {
-    /// Create a new cache entry.
+    /// Create a new cache entry, carrying a hint.
+    ///
+    /// Hint is the safe default: a caller that means to confer trust has to say
+    /// so with [`CacheEntry::new_verified`], rather than trust being what you
+    /// get by reaching for the obvious constructor.
     pub fn new(coords: TreeCoordinate, current_time_ms: u64, ttl_ms: u64) -> Self {
         Self {
             coords,
@@ -30,7 +65,42 @@ impl CacheEntry {
             last_used: current_time_ms,
             expires_at: current_time_ms.saturating_add(ttl_ms),
             path_mtu: None,
+            source: CoordSource::Hint,
+            verified_until: 0,
         }
+    }
+
+    /// Create a new cache entry from a verified lookup.
+    pub fn new_verified(coords: TreeCoordinate, current_time_ms: u64, ttl_ms: u64) -> Self {
+        let mut entry = Self::new(coords, current_time_ms, ttl_ms);
+        entry.mark_verified(current_time_ms);
+        entry
+    }
+
+    /// Where the current coordinates came from.
+    pub fn source(&self) -> CoordSource {
+        self.source
+    }
+
+    /// Whether this entry's verification still outranks a hint at this time.
+    ///
+    /// A `Verified` entry whose `verified_until` has passed answers `false`:
+    /// the coordinates remain usable, they just no longer refuse an update.
+    pub fn is_verified(&self, current_time_ms: u64) -> bool {
+        self.source == CoordSource::Verified && current_time_ms <= self.verified_until
+    }
+
+    /// Mark the current coordinates as verified, starting the verification
+    /// clock at `current_time_ms`.
+    pub fn mark_verified(&mut self, current_time_ms: u64) {
+        self.source = CoordSource::Verified;
+        self.verified_until = current_time_ms.saturating_add(VERIFIED_TTL_MS);
+    }
+
+    /// Mark the current coordinates as an unauthenticated hint.
+    pub fn mark_hint(&mut self) {
+        self.source = CoordSource::Hint;
+        self.verified_until = 0;
     }
 
     /// Get the cached coordinates.
@@ -79,11 +149,23 @@ impl CacheEntry {
         self.last_used = current_time_ms;
     }
 
-    /// Update the coordinates and refresh timestamps.
+    /// Update the coordinates and refresh timestamps, as a hint.
+    ///
+    /// New coordinates are new provenance: whatever the entry held before, the
+    /// value now present came from this caller, so an update by the hint path
+    /// demotes the entry rather than inheriting the old verification.
     pub fn update(&mut self, coords: TreeCoordinate, current_time_ms: u64, ttl_ms: u64) {
         self.coords = coords;
         self.last_used = current_time_ms;
         self.expires_at = current_time_ms.saturating_add(ttl_ms);
+        self.mark_hint();
+    }
+
+    /// Update the coordinates from a verified lookup and restart the
+    /// verification clock.
+    pub fn update_verified(&mut self, coords: TreeCoordinate, current_time_ms: u64, ttl_ms: u64) {
+        self.update(coords, current_time_ms, ttl_ms);
+        self.mark_verified(current_time_ms);
     }
 
     /// Time since last use (for LRU eviction).

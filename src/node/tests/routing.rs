@@ -89,7 +89,7 @@ fn test_routing_bloom_filter_hit() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
+    let _ = node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // Add dest to peer1's bloom filter only
     let peer1 = node.get_peer_mut(&peer1_addr).unwrap();
@@ -140,7 +140,7 @@ fn test_routing_bloom_filter_multiple_hits_tiebreak() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
+    let _ = node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // Add dest to ALL peers' bloom filters
     for &addr in &peer_addrs {
@@ -192,7 +192,7 @@ fn test_routing_tree_fallback() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
+    let _ = node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // No bloom filter hit — should fall back to tree routing.
     // Our distance to dest: 2 (root → peer → dest)
@@ -268,7 +268,7 @@ fn test_routing_bloom_hit_not_closer_falls_through_to_tree() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
+    let _ = node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // dest is in bloom_peer's filter only (the "bloom hit" candidate),
     // but bloom_peer's tree distance (3) is NOT strictly less than our
@@ -342,7 +342,8 @@ fn test_routing_refreshes_coord_cache_ttl() {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let short_ttl = 10_000; // 10 seconds
-    node.coord_cache_mut()
+    let _ = node
+        .coord_cache_mut()
         .insert_with_ttl(dest, dest_coords, now_ms, short_ttl);
     let original_expiry = node.coord_cache().get_entry(&dest).unwrap().expires_at();
 
@@ -438,7 +439,7 @@ fn test_routing_discovery_coord_cache() {
     assert!(node.find_next_hop(&dest).is_none());
 
     // Now populate coord_cache (as discovery would do)
-    node.coord_cache_mut().insert(dest, dest_coords, now_ms);
+    let _ = node.coord_cache_mut().insert(dest, dest_coords, now_ms);
 
     // find_next_hop should succeed via coord_cache
     let result = node.find_next_hop(&dest);
@@ -484,14 +485,14 @@ async fn test_routing_chain_topology() {
 
     let node3_addr = *nodes[3].node.node_addr();
     let node3_coords = nodes[3].node.tree_state().my_coords().clone();
-    nodes[0]
+    let _ = nodes[0]
         .node
         .coord_cache_mut()
         .insert(node3_addr, node3_coords, now_ms);
 
     let node0_addr = *nodes[0].node.node_addr();
     let node0_coords = nodes[0].node.tree_state().my_coords().clone();
-    nodes[3]
+    let _ = nodes[3]
         .node
         .coord_cache_mut()
         .insert(node0_addr, node0_coords, now_ms);
@@ -551,7 +552,7 @@ async fn test_routing_bloom_preferred_over_tree() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    nodes[0]
+    let _ = nodes[0]
         .node
         .coord_cache_mut()
         .insert(dest, dest_coords, now_ms);
@@ -705,7 +706,8 @@ async fn test_routing_reachability_100_nodes() {
     for node in &mut nodes {
         for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
-                node.node
+                let _ = node
+                    .node
                     .coord_cache_mut()
                     .insert(*addr, coords.clone(), now_ms);
             }
@@ -840,7 +842,8 @@ async fn test_routing_stops_after_peer_removal() {
     for node in &mut nodes {
         for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
-                node.node
+                let _ = node
+                    .node
                     .coord_cache_mut()
                     .insert(*addr, coords.clone(), now_ms);
             }
@@ -945,7 +948,7 @@ async fn test_routing_bloom_only_transit() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    nodes[0]
+    let _ = nodes[0]
         .node
         .coord_cache_mut()
         .insert(node3_addr, node3_coords, now_ms);
@@ -1055,7 +1058,7 @@ async fn test_routing_source_only_coords_100_nodes() {
 
         // Inject dest coords ONLY at the source
         let (dest_addr, dest_coords) = &all_coords[dst];
-        nodes[src]
+        let _ = nodes[src]
             .node
             .coord_cache_mut()
             .insert(*dest_addr, dest_coords.clone(), now_ms);
@@ -1098,7 +1101,8 @@ async fn test_routing_source_only_coords_100_nodes() {
     for node in &mut nodes {
         for (addr, coords) in &all_coords {
             if addr != node.node.node_addr() {
-                node.node
+                let _ = node
+                    .node
                     .coord_cache_mut()
                     .insert(*addr, coords.clone(), now_ms);
             }
@@ -1145,7 +1149,7 @@ fn test_classify_forward_tree_up() {
 
     // Destination somewhere above us; routed via the parent.
     let dest = make_node_addr(50);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         dest,
         TreeCoordinate::from_addrs(vec![dest, root]).unwrap(),
         now_ms(),
@@ -1175,7 +1179,7 @@ fn test_classify_forward_tree_down() {
 
     // Destination below the child; routed down to it.
     let dest = make_node_addr(60);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         dest,
         TreeCoordinate::from_addrs(vec![dest, child, me, root]).unwrap(),
         now_ms(),
@@ -1209,7 +1213,7 @@ fn test_classify_forward_tree_down_cross() {
     // Destination lives elsewhere (directly under root), NOT under the child;
     // reachable from the child only via a cross-link.
     let dest = make_node_addr(60);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         dest,
         TreeCoordinate::from_addrs(vec![dest, root]).unwrap(),
         now_ms(),
@@ -1241,7 +1245,7 @@ fn test_classify_forward_crosslink_descend() {
 
     // Destination is under the cross-link peer.
     let dest = make_node_addr(70);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         dest,
         TreeCoordinate::from_addrs(vec![dest, peer, sibling_parent, root]).unwrap(),
         now_ms(),
@@ -1273,7 +1277,7 @@ fn test_classify_forward_crosslink_ascend() {
 
     // Destination lives elsewhere (under root directly), NOT under the peer.
     let dest = make_node_addr(80);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         dest,
         TreeCoordinate::from_addrs(vec![dest, root]).unwrap(),
         now_ms(),
@@ -1382,14 +1386,14 @@ fn test_parent_loss_reparent_invalidates_coord_cache() {
 
     // via-node class: a downstream destination that routes through us.
     let downstream = make_node_addr(10);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         downstream,
         TreeCoordinate::from_addrs(vec![downstream, my_addr, root]).unwrap(),
         now_ms,
     );
     // survivor: same root, does not route through us.
     let sibling_dest = make_node_addr(11);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         sibling_dest,
         TreeCoordinate::from_addrs(vec![sibling_dest, alt, root]).unwrap(),
         now_ms,
@@ -1436,14 +1440,14 @@ fn test_parent_loss_selfroot_invalidates_coord_cache() {
 
     // via-node class: routes through us.
     let downstream = make_node_addr(10);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         downstream,
         TreeCoordinate::from_addrs(vec![downstream, my_addr, old_root]).unwrap(),
         now_ms,
     );
     // other-roots class: on the old root, does not route through us.
     let foreign = make_node_addr(11);
-    node.coord_cache_mut().insert(
+    let _ = node.coord_cache_mut().insert(
         foreign,
         TreeCoordinate::from_addrs(vec![foreign, parent, old_root]).unwrap(),
         now_ms,
@@ -1549,7 +1553,8 @@ fn seam_two_equidistant_peers(node: &mut Node) -> (NodeAddr, NodeAddr, NodeAddr)
         .update_peer(ParentDeclaration::new(far, dest, 3, 1000), far_coords);
 
     let dest_coords = TreeCoordinate::from_addrs(vec![dest, near, my_addr]).unwrap();
-    node.coord_cache_mut()
+    let _ = node
+        .coord_cache_mut()
         .insert(dest, dest_coords, seam_now_ms());
 
     (near, far, dest)
@@ -1593,7 +1598,8 @@ fn seam_distance_ladder(node: &mut Node) -> (NodeAddr, NodeAddr, NodeAddr, NodeA
         .update_peer(ParentDeclaration::new(rung1, rung2, 3, 1000), rung1_coords);
 
     let dest_coords = TreeCoordinate::from_addrs(vec![dest, rung1, rung2, rung3, my_addr]).unwrap();
-    node.coord_cache_mut()
+    let _ = node
+        .coord_cache_mut()
         .insert(dest, dest_coords, seam_now_ms());
 
     (rung1, rung2, rung3, dest)
@@ -1901,7 +1907,8 @@ fn test_seam_routing_view_reads_match_live_peer_state() {
     // not only the present/absent arms.
     let stale = make_node_addr(201);
     let stale_coords = TreeCoordinate::from_addrs(vec![stale, near, my_addr]).unwrap();
-    node.coord_cache_mut()
+    let _ = node
+        .coord_cache_mut()
         .insert_with_ttl(stale, stale_coords, 1_000_000, 10);
 
     let unknown = make_node_addr(202);

@@ -389,10 +389,10 @@ impl Node {
                              caching coordinates without it"
                         );
                         self.metrics().errors.lookup_resp_mtu_below_floor.inc();
-                        self.coord_cache.insert(target, coords, now_ms);
+                        self.coord_cache.insert_verified(target, coords, now_ms);
                     } else {
                         self.coord_cache
-                            .insert_with_path_mtu(target, coords, now_ms, path_mtu);
+                            .insert_verified_with_path_mtu(target, coords, now_ms, path_mtu);
                     }
                 }
                 LookupAction::WritePathMtu {

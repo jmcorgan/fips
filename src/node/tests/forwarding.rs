@@ -205,12 +205,141 @@ async fn test_forwarding_direct_peer() {
 // ============================================================================
 
 #[tokio::test]
+async fn a_forged_warm_cannot_displace_a_coordinate_established_by_a_verified_lookup() {
+    let mut node = make_node();
+    let attacker_link = make_node_addr(0xAA);
+    let victim_dest = make_node_addr(0x02);
+    let root_addr = *node.tree_state.my_coords().root_id();
+
+    // The state a completed lookup leaves behind.
+    let real_coords = TreeCoordinate::from_addrs(vec![victim_dest, root_addr]).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    node.coord_cache_mut()
+        .insert_verified(victim_dest, real_coords.clone(), now_ms);
+
+    // One packet, claiming to be from the destination, carrying a different
+    // position for it under the same root. This is the whole attack.
+    let forged =
+        TreeCoordinate::from_addrs(vec![victim_dest, make_node_addr(0x77), root_addr]).unwrap();
+    let src_coords = TreeCoordinate::from_addrs(vec![victim_dest, root_addr]).unwrap();
+    let payload = SessionSetup::new(src_coords, forged.clone()).encode();
+    let encoded = SessionDatagram::new(victim_dest, victim_dest, payload).encode();
+
+    let rejected_before = node.metrics().forwarding.coord_hint_rejected.get();
+    node.handle_session_datagram(&attacker_link, &encoded[1..], false)
+        .await;
+
+    assert_eq!(
+        node.coord_cache().get(&victim_dest, now_ms),
+        Some(&real_coords),
+        "a forged warm displaced a verified coordinate"
+    );
+    assert!(
+        node.metrics().forwarding.coord_hint_rejected.get() > rejected_before,
+        "the refusal should be counted"
+    );
+}
+
+#[tokio::test]
+async fn warming_refuses_a_coordinate_rooted_in_a_tree_this_node_is_not_in() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let src_addr = make_node_addr(0x01);
+    let dest_addr = make_node_addr(0x02);
+    // Deliberately NOT this node's root. Such an entry can never route: both
+    // selectors reject a foreign root, so caching it only occupies a slot and
+    // flips the error-PDU choice in `synth_routing_error` from CoordsRequired
+    // to PathBroken, which is the primitive this guard removes.
+    let foreign_root = make_node_addr(0xF0);
+    assert_ne!(
+        &foreign_root,
+        node.tree_state.my_coords().root_id(),
+        "fixture must not accidentally share the node's root"
+    );
+
+    let src_coords = TreeCoordinate::from_addrs(vec![src_addr, foreign_root]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, foreign_root]).unwrap();
+    let setup_payload = SessionSetup::new(src_coords, dest_coords).encode();
+    let encoded = SessionDatagram::new(src_addr, dest_addr, setup_payload).encode();
+
+    let before = node.metrics().forwarding.coord_warm_foreign_root.get();
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(
+        node.coord_cache().get(&src_addr, now_ms).is_none(),
+        "a foreign-root src coordinate was cached"
+    );
+    assert!(
+        node.coord_cache().get(&dest_addr, now_ms).is_none(),
+        "a foreign-root dest coordinate was cached"
+    );
+    assert_eq!(
+        node.metrics().forwarding.coord_warm_foreign_root.get(),
+        before + 2,
+        "both refusals should be counted"
+    );
+}
+
+#[tokio::test]
+async fn warming_counts_but_still_caches_a_coordinate_that_does_not_name_its_own_key() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let src_addr = make_node_addr(0x01);
+    let dest_addr = make_node_addr(0x02);
+    let root_addr = *node.tree_state.my_coords().root_id();
+    let someone_else = make_node_addr(0x09);
+
+    // dest_coords names 0x09, not the 0x02 it will be filed under. This is the
+    // shape an honest sender produces when its own cache missed and
+    // `get_dest_coords` fell back to the sender's own coordinates, so it is
+    // counted and NOT refused.
+    let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
+    let dest_coords = TreeCoordinate::from_addrs(vec![someone_else, root_addr]).unwrap();
+    let setup_payload = SessionSetup::new(src_coords, dest_coords).encode();
+    let encoded = SessionDatagram::new(src_addr, dest_addr, setup_payload).encode();
+
+    let before = node.metrics().forwarding.coord_warm_key_mismatch.get();
+    node.handle_session_datagram(&from, &encoded[1..], false)
+        .await;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(
+        node.coord_cache().get(&dest_addr, now_ms).is_some(),
+        "the mismatching entry should still be cached; this check counts only"
+    );
+    assert_eq!(
+        node.metrics().forwarding.coord_warm_key_mismatch.get(),
+        before + 1,
+        "the mismatch should be counted exactly once"
+    );
+    assert_eq!(
+        node.metrics().forwarding.coord_warm_key_mismatch.get() - before,
+        1,
+        "the well-formed src coordinate must not be counted as a mismatch"
+    );
+}
+
+#[tokio::test]
 async fn test_coord_cache_warming_session_setup() {
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     let src_addr = make_node_addr(0x01);
     let dest_addr = make_node_addr(0x02);
-    let root_addr = make_node_addr(0xF0);
+    // The warming path refuses a coordinate under a root other than this
+    // node's, so a fixture that wants the write to land has to share the
+    // node's root. A fresh node is its own root.
+    let root_addr = *node.tree_state.my_coords().root_id();
 
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
@@ -254,7 +383,10 @@ async fn test_coord_cache_warming_session_ack() {
     let from = make_node_addr(0xAA);
     let src_addr = make_node_addr(0x01);
     let dest_addr = make_node_addr(0x02);
-    let root_addr = make_node_addr(0xF0);
+    // The warming path refuses a coordinate under a root other than this
+    // node's, so a fixture that wants the write to land has to share the
+    // node's root. A fresh node is its own root.
+    let root_addr = *node.tree_state.my_coords().root_id();
 
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
@@ -298,7 +430,10 @@ async fn test_coord_cache_warming_encrypted_msg_with_coords() {
     let from = make_node_addr(0xAA);
     let src_addr = make_node_addr(0x01);
     let dest_addr = make_node_addr(0x02);
-    let root_addr = make_node_addr(0xF0);
+    // The warming path refuses a coordinate under a root other than this
+    // node's, so a fixture that wants the write to land has to share the
+    // node's root. A fresh node is its own root.
+    let root_addr = *node.tree_state.my_coords().root_id();
 
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
@@ -392,7 +527,10 @@ async fn test_coord_cache_warming_ttl_zero_local_delivery() {
     let from = make_node_addr(0xAA);
     let my_addr = *node.node_addr();
     let src_addr = make_node_addr(0x01);
-    let root_addr = make_node_addr(0xF0);
+    // The warming path refuses a coordinate under a root other than this
+    // node's, so a fixture that wants the write to land has to share the
+    // node's root. A fresh node is its own root.
+    let root_addr = *node.tree_state.my_coords().root_id();
 
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![my_addr, root_addr]).unwrap();
@@ -438,7 +576,10 @@ async fn test_coord_cache_warming_ttl_zero_transit_drop() {
     let from = make_node_addr(0xAA);
     let src_addr = make_node_addr(0x01);
     let dest_addr = make_node_addr(0x02);
-    let root_addr = make_node_addr(0xF0);
+    // The warming path refuses a coordinate under a root other than this
+    // node's, so a fixture that wants the write to land has to share the
+    // node's root. A fresh node is its own root.
+    let root_addr = *node.tree_state.my_coords().root_id();
 
     let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
     let dest_coords = TreeCoordinate::from_addrs(vec![dest_addr, root_addr]).unwrap();
@@ -795,7 +936,7 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
     // Node 0 gets full cache
     for (addr, coords) in &all_coords {
         if addr != nodes[0].node.node_addr() {
-            nodes[0]
+            let _ = nodes[0]
                 .node
                 .coord_cache_mut()
                 .insert(*addr, coords.clone(), now_ms);
@@ -824,7 +965,7 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
                         .unwrap()
                         .1
                         .clone();
-                    nodes[i]
+                    let _ = nodes[i]
                         .node
                         .coord_cache_mut()
                         .insert(j_addr, coords, now_ms);

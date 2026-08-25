@@ -856,65 +856,11 @@ with v0.4.x or earlier peers.
   permissive umask; a capture carries the node npub, build, platform and a
   timing series.
 
-## [0.4.2] - unreleased
+## [0.4.2] - 2026-08-25
 
-### Added
+### FMP/FSP sessions and rekey
 
-#### Admission / rate limiting
-
-- `node.rate_limit.session_setup_burst` (64) and
-  `node.rate_limit.session_setup_rate` (16.0), the parameters of the new
-  per-link-peer session-setup limiter. This is the FSP session-setup bucket,
-  and it is distinct from the link-layer msg1 bucket described below; the two
-  meter different messages and are sized independently. Setup messages naming
-  a peer this node is already established with are metered on a second
-  per-link bucket derived from `node.limits.max_peers`,
-  `node.rekey.after_secs` and `node.rate_limit.handshake_max_resends`, so
-  raising the peer limit sizes it automatically. A zero burst or a
-  non-positive rate is rejected at config validation rather than silently
-  refusing every session.
-
-- `node.limits.max_sessions`, defaulting to 1024, which bounds the end-to-end
-  session table. Zero means unlimited, which restores the previous behaviour
-  exactly and is the way to back the change out on a running node. The default
-  is four times the adjacent `node.session.pending_max_destinations`. A
-  session entry measures 6608 bytes of inline state plus heap, so the table
-  holds to roughly 7 MB, and a test pins that per-entry figure so the
-  arithmetic behind the default fails loudly if an entry grows. Existing
-  configurations parse unchanged, the key being optional.
-
-- `node.rate_limit.established_handshake_burst` and
-  `node.rate_limit.established_handshake_rate`, the parameters of the new
-  established-link msg1 token bucket, which meters link-layer msg1 rather
-  than FSP session setup. Both are optional; omitting them (the normal case)
-  derives the bucket from `node.limits.max_peers`, `node.rekey.after_secs`
-  and `node.rate_limit.handshake_max_resends`, so raising the peer limit
-  sizes the bucket automatically. An explicit zero burst or a non-positive
-  rate is rejected at config validation rather than silently refusing all
-  rekey traffic.
-
-#### NAT traversal / Nostr discovery
-
-- `node.discovery.nostr.max_concurrent_offers_per_npub`, defaulting to 4, which
-  bounds how many inbound traversal offers one sender npub may have in flight
-  at once. It sits inside `max_concurrent_incoming_offers`, which remains the
-  outer bound, so a value above that is inert; zero is rejected at config
-  validation, since it refuses every inbound offer rather than disabling the
-  limit, and so is a value above the maximum permit count a semaphore can
-  hold, which would otherwise fail at construction rather than at load.
-  Existing configurations parse unchanged, the key being optional.
-
-#### Docs & contributor tooling
-
-- `SECURITY.md`, stating a private channel for vulnerability reports, what a
-  useful report contains, what a reporter can expect back and on what timing,
-  and which branches receive fixes. The repository previously documented no
-  reporting channel at all, so someone with a finding had to guess at an
-  address or open a public issue.
-
-### Changed
-
-#### FMP/FSP rekey reliability
+#### Changed
 
 - Config validation now rejects two `node.rekey` settings that appear to
   disable the trigger and in fact fire it continuously. `after_messages` of
@@ -929,209 +875,7 @@ with v0.4.x or earlier peers.
   supported way to disable one arm. A config carrying either setting now fails
   to load instead of starting a node that rekeys constantly.
 
-#### NAT traversal / Nostr discovery
-
-- Inbound traversal offers are now admitted against a per-sender allowance as
-  well as the global pool. The intake path previously took a permit from a
-  single semaphore before any identity check, with the sender's npub used only
-  as a log field, so one sender could hold every slot and deny traversal
-  onboarding to every other peer for as long as it kept offering. Admission now
-  takes a per-npub permit and a global permit together. A sender over its own
-  allowance is refused at debug rather than warn, because the party tripping it
-  is by definition sending faster than the node wants and a record per
-  rejection would turn the spam into log volume; the global bound being reached
-  keeps its warn, which is the operator's signal that the node is genuinely
-  saturated. **This does not make the pool inexhaustible.** Nostr identities
-  cost nothing to generate and the signal subscription carries no author
-  restriction, so an attacker running four throwaway npubs still saturates the
-  shipped 16-slot pool at an unchanged total offer rate. What the change buys
-  is that one identity can no longer do it alone, and that the two refusals are
-  distinguishable in the log. The permit is still held across the whole
-  attempt; that duration remains inferred from the attempt timeout rather than
-  measured.
-
-- Config validation now rejects a `node.discovery.nostr.signal_ttl_secs` that
-  is too large for the configured `replay_window_secs`. A traversal signal is
-  acceptable over its TTL plus 60s of clock-skew grace on each side, and that
-  span has to stay strictly inside the replay window, or a session id evicted
-  from the replay cache on expiry is still fresh enough to be accepted a second
-  time. The relation was documented but unenforced, so raising the TTL past
-  180s silently voided it. The bound is derived from the skew constant rather
-  than restated, and is checked whether or not nostr discovery is enabled, for
-  the same reason the rekey rules are. The shipped defaults (120s against 300s)
-  are unaffected, but a configuration that had widened the TTL or narrowed the
-  replay window now fails to load, with an error naming the concrete floor for
-  `replay_window_secs`. The NAT lab's config generator was one such
-  configuration and its generated `replay_window_secs` moves from 60 to 180.
-  Note that this covers eviction on expiry only: `seen_sessions_max_entries`
-  remains a separate capacity-eviction route that no config relation bounds.
-
-- The peer-retry tick no longer awaits the Nostr advert refetch. It ran inline
-  on the 1-second rx-loop tick, awaiting a fetch with a 2-second timeout for
-  each due peer and discarding the result; with up to sixteen due peers the
-  timeouts stacked, and field profiling measured single 2.00 s stalls as the
-  common case and a worst tick of 12.4 s against a 1 s period, delaying every
-  other rx-loop arm by as much as 4.2 s. The refetch is now spawned, so a dial
-  uses the advert cached at that moment and the refreshed one lands for that
-  peer's next retry.
-
-- The `Adopted NAT traversal socket` log line now carries the transport id and
-  the local address alongside the peer npub. Without the local address an
-  operator cannot join a host socket table against adoption events, and without
-  the transport id several peers sharing one adopted transport are
-  indistinguishable from several separate adopted transports.
-
-#### Admission / rate limiting
-
-- Inbound msg1 is classified before it is rate limited, and rekey or restart
-  msg1 arriving on a link belonging to a promoted peer now draws on its own
-  token bucket instead of competing with stranger admission for a single
-  shared one. On a node with many peers the shared bucket refused a large
-  share of ordinary rekey traffic: a field node at roughly 245 peers refused
-  8753 msg1 in 25 minutes, and 159 of the 201 distinct sources were peers it
-  already held sessions with. On the XX handshake path the classifier keys on
-  promotion state rather than on the presence of an address-map entry, because
-  msg1 creates such an entry for a still-pending inbound connection before any
-  identity is known; a still-handshaking stranger therefore stays in the
-  stranger class for its whole lifetime, retransmits included. Nodes upgrade
-  with no config change. The `Msg1 rate limited` log line now reports which
-  limb refused, the pending count or the token bucket, which it previously did
-  not distinguish.
-
-#### Data-plane / metrics / observability
-
-- Peer bloom filters are computed for every recipient in one prefix and suffix
-  union sweep rather than rebuilt per recipient. Announcing to R peers
-  previously did R full map builds and R by T merges; at 240 peers that was
-  20.6 ms per tick, roughly half the tick body, with a median per-interval
-  maximum of 34.5 ms. The result is exactly equal rather than approximately:
-  merging is a bytewise OR, so regrouping the unions cannot change it. The
-  trade-off, measured rather than assumed, is that the sweep does its full work
-  regardless of how many peers are ready, so a tick announcing to one or two
-  peers now costs about twice what it did; break-even is around three ready
-  peers. Cadence, the debounce, the sequence rule and the fill-ratio cap are
-  unchanged.
-
-- Each peer's npub is derived once at construction instead of once per tick.
-  The per-tick stats snapshot ran a bech32 encode for every tracked peer, and a
-  second one for the common peer with no hosts-file entry and no alias, since
-  the display-name fallback bottoms out in the same encode: 14.1 ms per tick at
-  240 peers. The display name itself is deliberately not cached, because the
-  alias map and the host map both mutate at runtime.
-
-#### Transports & config
-
-- `fipsctl keygen` no longer exits non-zero when only the `fips.pub` write
-  fails. The private key is already on disk at that point, so failing the run
-  reported failure for a keygen that did produce the identity; the failure is
-  now a warning and the run succeeds. The pre-existing-key guard also moves
-  from `exists` to `symlink_metadata`, so a dangling symlink at the key path
-  now blocks keygen without `--force` instead of being overwritten silently.
-
-#### Library API
-
-- **Source-breaking for consumers of the library crate**: four public types now
-  implement `Drop`, so their fields can no longer be moved out. `Identity`,
-  `ResolvedIdentity`, `IdentityConfig` and `HandshakeState` each gained one as
-  part of clearing key material at end of scope. `IdentityConfig` is the one
-  most likely to be reached in practice, since it hangs off the public `Config`
-  as `node.identity`, so code that moved the nsec out of a configuration value
-  no longer compiles and needs `Option::take` instead. Nothing about the
-  behaviour of the shipped binaries changes; this affects only callers using
-  `fips` as a library.
-
-#### CI & test-harness reliability
-
-- Two CI runs on one machine can no longer collide. Every suite derives its own
-  docker build context, image tag, container names, network range and host
-  interface names per run, so concurrent runs cannot reap each other's
-  containers or contend for a fixed subnet. This is what a contributor running
-  `testing/ci-local.sh` alongside a GitHub run, or two local runs at once, sees
-  change: the runs stay independent instead of one killing the other.
-
-- A test that does not run, or whose result cannot be read, no longer passes
-  silently. A failed scenario now fails the run rather than being logged and
-  stepped over, a node whose logs cannot be read no longer counts as clean, an
-  unanswered control query no longer reads as zero, an unknown scenario key is
-  rejected instead of matching nothing, and a skipped check appears in the
-  final verdict rather than only in scrollback.
-
-- New guards run in both the local and GitHub runners, so the two gates agree.
-  They check that trailing-log call sites are wired, that the log strings the
-  harness matches on are still emitted by the daemon, that the two runners'
-  integration-suite sets match per leg rather than as a folded token, that
-  every GitHub Action reference is pinned in the required form, and that source
-  comments do not cite references a reader of the published tree cannot
-  resolve.
-
-- Coverage moved from Docker to deterministic in-process tests, and dead
-  scenarios were retired. The six cost-selection chaos scenarios, the
-  admission-cap and acl-allowlist Docker suites, the smoke-10 scenario, the
-  tcp-chain and mesh-public static topologies, and three ignored Ethernet
-  tests are gone, with their behaviour asserted in unit and integration tests
-  instead. A local CI run is correspondingly shorter and less dependent on
-  container timing.
-
-- The `bloom-storm` chaos scenario no longer runs on either the local or the
-  cloud runner. Unlike the retirements above it has no replacement: the
-  scenario files remain in the tree and it stays runnable by hand, but nothing
-  now exercises downstream containment of a mid-chain ancestor swap on a
-  schedule. This is recorded as a coverage gap rather than as a completed
-  migration.
-
-- A failing harness now says why it failed. The dns-resolver suite sent build
-  and container-start output to `/dev/null`, so a failed scenario reported
-  that it had failed and nothing else; output is now captured and emitted on
-  failure, naming the command, and the systemd readiness wait dumps container
-  state, failed units and the journal when it gives up. The NAT-lab path
-  assertions exited bare, printing neither what they expected nor what they
-  saw and triggering none of the scenario diagnostics their siblings already
-  call; all twelve call sites now report the container, the expectation, the
-  observation and a projection of the peer or link table, and distinguish a
-  failed control-socket exec from unparseable output from a genuine mismatch.
-  The convergence gate could not tell a tree that did not converge from
-  connectivity that failed, and could exit non-zero while reporting "20
-  passed, 0 failed"; it now records the outcome, the count reached and the
-  count pending, and its failure messages name the condition. A passing run
-  is as quiet as before, and no timing, threshold or control-flow behaviour
-  changed in any of the three.
-
-- A dns-resolver scenario no longer burns the full 30-second boot timeout and
-  warns about a container that booted correctly. The readiness poll ran under
-  `pipefail` and piped `systemctl is-system-running` into `grep`, and that
-  command exits non-zero when the system is degraded, which is where systemd
-  inside a container always settles; the pipeline therefore failed even when
-  the pattern matched, leaving the degraded branch dead. The poll now matches
-  on the captured state instead of piping into `grep`.
-
-- The chaos harness now checks that teardown and node stops did what they
-  report. `docker compose down` exits 0 while leaving a run's containers
-  alive, so a partly-failed bring-up leaked named containers with nothing to
-  detect it; teardown now asks whether the containers this run owns are gone,
-  treats a survivor that forced removal clears as a warning, and aborts with
-  the names written to an artifact when one survives that or the query cannot
-  run at all. The check is scoped to a run's own names, so concurrent runs
-  cannot trip each other. Node churn separately marked a node down whether or
-  not `docker stop` succeeded, so the simulation's model of the mesh diverged
-  from reality, and `nodes_down`, the `max_down_nodes` cap and the
-  connectivity guard are all computed from that model; a failed stop now
-  warns, carries the daemon's own message, and leaves the node out of the
-  down set for the next churn tick to retry against an honest model.
-
-#### Docs & contributor tooling
-
-- Comments throughout the source tree, the packaging files and the test scripts
-  no longer cite internal identifiers, planning documents or private stage names
-  that a reader of the published tree cannot resolve; each now states the thing
-  the citation stood for. A handful of comments that described behaviour the
-  code does not have (the control-plane read path, its snapshot dispatch, and
-  the MMP report types) have been corrected rather than merely reworded. One of
-  the edited files, the DNS setup helper, installs to `/usr/lib/fips` on every
-  packaging path, so its comment reached users. No code changed.
-
-### Fixed
-
-#### FMP/FSP rekey reliability
+#### Fixed
 
 - Inbound session-setup messages are now rate limited, keyed on the
   authenticated link peer the datagram arrived over. The setup path allocated
@@ -1158,10 +902,10 @@ with v0.4.x or earlier peers.
 
 - A forged SessionAck no longer destroys an in-flight session initiation. The
   handler removed the session entry to take ownership of the handshake state
-  and, when the XX msg2 read failed, returned without putting it back. Nothing
+  and, when the XK msg2 read failed, returned without putting it back. Nothing
   in that message is authenticated (the only thing tying it to the initiation
   is the datagram's source address, which the sender chooses), so any node able
-  to reach the victim could cancel any initiation with 106 bytes of the right
+  to reach the victim could cancel any initiation with 57 bytes of the right
   length, and hold establishment down by repeating it. The entry is now kept.
   Keeping it is not enough on its own, and the second half is the part worth
   naming: the msg2 read mixes the sender's ephemeral into the symmetric state
@@ -1169,274 +913,33 @@ with v0.4.x or earlier peers.
   left it holds a handshake that can never read the genuine msg2, which trades
   a one-round-trip denial for one lasting the full handshake timeout. The read
   is therefore rolled back to its pre-read state before the entry goes back.
-  The entry's activity stamp is deliberately not refreshed on the failure path,
-  so a spray cannot hold a dead initiation past its original sweep deadline,
-  and a new `ack_handshake_failed` counter makes the refusals visible at the
-  default log level.
+  The three later failure paths in the same handler still drop the entry: each
+  is downstream of a msg2 that authenticated, so it is a local failure rather
+  than a possible forgery. The entry's activity stamp is deliberately not
+  refreshed on the failure path, so a spray cannot hold a dead initiation past
+  its original sweep deadline, and a new `ack_handshake_failed` counter makes
+  the refusals visible at the default log level. Only the XK handshake on this
+  branch is covered; the additional drop sites in the XX handshake on the
+  development branch are not.
 
-  Two further exits from the same handler are covered here that the
-  maintenance branch has no equivalent of, because they exist only on the XX
-  handshake: the negotiation payload carried alongside msg2, and the check
-  that the responder's static key is the one this node dialled. Both are still
-  handling an unauthenticated message. A successful XX msg2 read proves the
-  sender holds the static it presented and nothing about *which* static that
-  should be, and identities are free, so any node at all can answer a msg1
-  with a well-formed msg2 of its own and reach either exit. The identity
-  mismatch is the sharper of the two and still not a reason to drop: what it
-  establishes is that the sender of that datagram is not who we dialled, not
-  that the peer is, since the source address it claimed is an envelope field.
-  Both now roll the handshake back and keep the entry, and the identity
-  mismatch — previously a silent return — gets its own `ack_identity_mismatch`
-  counter rather than sharing the first, so a stale npub-to-address mapping
-  and somebody answering initiations under their own identity stay
-  distinguishable. The failure paths downstream of the identity check still
-  drop the entry: each is past a msg2 that both authenticated and matched the
-  dialled peer, so it is a local failure rather than a possible forgery.
+- An unauthenticated session msg3 no longer discards a completed key epoch.
+  Five sites discarded the whole rekey, which nulls a `pending` session sitting
+  beside the handshake, when only the handshake had failed: the four failure
+  paths in the responder-side rekey arm of the msg3 handler, and the
+  dual-initiation yield arm in the setup handler, which is gated on a rekey
+  being in progress rather than on this node having initiated it, so an entry
+  the peer armed reaches it too. That `pending` session is the epoch the real
+  peer may already have cut over to, so discarding it kills the reverse
+  direction until the session idles out. Two unauthenticated messages reached
+  it: a forged setup message arms a handshake beside a completed rekey once
+  that rekey has waited a full idle timeout for a peer that never appeared on
+  the new epoch, and any garbage msg3 of the right length then finishes the
+  job. All five now abandon only the handshake. The four remaining sites in the
+  ack initiator arm are deliberately left alone and the reason is recorded
+  there: an entry with the initiator flag set holds no pending session, so the
+  two calls are the same action at those sites.
 
-- An unauthenticated session msg3 no longer discards a completed key epoch. Six
-  sites discarded the whole rekey, which nulls a `pending` session sitting
-  beside the handshake, when only the handshake had failed: the five failure
-  paths in the responder-side rekey arm of the msg3 handler, and the dual-
-  initiation yield arm in the setup handler, which is gated on a rekey being in
-  progress rather than on this node having initiated it, so an entry the peer
-  armed reaches it too. The fifth msg3 path, the negotiation payload split out
-  of that message, is specific to the XX handshake and has no counterpart on the
-  maintenance branch. That `pending` session is the epoch the real peer may
-  already have cut over to, so discarding it kills the reverse direction until
-  the session idles out. Two unauthenticated messages reached it: a forged setup
-  message arms a handshake beside a completed rekey once that rekey has waited a
-  full idle timeout for a peer that never appeared on the new epoch, and any
-  garbage msg3 of the right length then finishes the job. All six now abandon
-  only the handshake. The four remaining sites in the ack initiator arm are
-  deliberately left alone and the reason is recorded there: an entry with the
-  initiator flag set holds no pending session, so the two calls are the same
-  action at those sites.
-
-#### NAT traversal / Nostr discovery
-
-- Nostr NAT traversal signals are now sent only to relays the client pool
-  actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox
-  relays, the relays its advert nominates for signaling, and our own DM relays,
-  but the pool is built once at startup from the configured relays and the send
-  is rejected outright, before anything is contacted, if any single URL in that
-  list is outside it. One unconfigured relay anywhere in the merge therefore
-  killed the whole attempt, including the sends to relays both sides shared. On
-  a public node in open mode this made discovery non-functional: 309 traversal
-  attempts, 290 explicit failures, zero successes, every failure on `relay not
-  found`. Configured peers were unaffected, since they run a matching relay
-  set. Comparison is on the normalized relay URL rather than the raw string, so
-  a configured relay spelled with a trailing slash or different host case is
-  not discarded. Two smaller fixes ride along: the responder resolves its
-  relays before binding a socket and running STUN, rather than spending a STUN
-  round trip and holding an offer slot only to find it has nowhere to answer,
-  and it gained the empty-relay-list guard the initiator already had.
-
-- Nostr NAT traversal no longer breaks after the host suspends. The traversal
-  clock cached a Unix timestamp once at startup and advanced it with a
-  monotonic `Instant`, which does not tick while a machine is asleep, so after
-  a suspend the daemon's idea of the time trailed real time by the suspend
-  duration for the rest of the process lifetime. Every NIP-40 expiration it
-  computed was therefore published already in the past: relays dropped the
-  offers as expired, the initiator logged a signal timeout waiting for an
-  answer, and traversal stayed broken until the daemon was restarted. The
-  clock now reads the wall clock on every call. This is not macOS-specific,
-  though a laptop that sleeps is where it is easiest to hit; any host that
-  suspends or hibernates was affected. Reported in
-  [#128](https://github.com/jmcorgan/fips/issues/128).
-
-#### Spanning-tree / mesh-size / routing
-
-- Flap dampening can now engage more than once in the lifetime of a node.
-  The arming check tested whether a dampening deadline had ever been set
-  rather than whether one was still in effect, so the first episode
-  disarmed the mechanism permanently: a node in a second flap storm went on
-  switching parents under hold-down alone, and neither the `flap_dampened`
-  counter nor the "Flap dampening engaged" warning fired again, so the
-  storm was invisible to anyone watching that counter. A lapsed episode is
-  now retired explicitly, clearing both the deadline and the switch
-  counter, so a second episode requires a fresh threshold of switches
-  within one window rather than re-engaging on the first switch after
-  lapse. Hold-down was unaffected throughout and continued to limit
-  discretionary switching, which is why the practical effect at shipped
-  settings was lost visibility and a lost escalation tier rather than
-  unrestrained flapping. Every path that can engage an episode now reports
-  it, including a re-engagement during parent-loss recovery, which was
-  previously silent. The warning names which path armed the episode
-  (`trigger`) and how long discretionary parent switching stays suppressed
-  (`dampening_secs`), using the same `trigger` values as the parent-switch
-  logs beside it, so the two can be read together. A
-  `node.tree.flap_dampening_secs` large enough to overflow the monotonic
-  clock is capped at one year, beyond which an episode is
-  indistinguishable from permanent, so an extreme setting no longer panics
-  the node when dampening engages.
-
-#### Data-plane / metrics / observability
-
-- A SessionDatagram carrying a truncated inner FSP payload no longer panics the
-  forwarding path. The coordinate-cache warm path sliced the inner payload at
-  the full 12-byte header offset while guarding only with the 4-byte common
-  prefix parser, so an inner payload of 4 to 11 bytes with phase 0x0 and the
-  Coords Present flag set indexed past the end of the slice. Because the
-  receive loop is the process's main future, the panic terminated the daemon
-  rather than a task, and under the packaged systemd unit the node restarted
-  into the same frame. The warm path now applies the same
-  `FspEncryptedHeader` guard the local-delivery path already used, which
-  additionally means a malformed frame carrying a non-zero protocol version or
-  the Unencrypted flag alongside Coords Present is dropped rather than having
-  its body read as coordinates. Any peer that had completed a link handshake
-  could trigger this, and admission is default-open. Frames rejected by that
-  guard are now counted in the forwarding statistics as
-  `warm_malformed_packets` and `warm_malformed_bytes`, the byte counter
-  charging the whole outer frame, visible over the control socket and on the
-  fipstop Routing State pane, so a node being fed malformed frames is
-  distinguishable from a quiet one at the default log level. The count is not a
-  packet drop: the frame is still delivered or forwarded, and only the
-  coordinate-cache warm attempt is abandoned. The existing debug log now also
-  carries the frame's protocol version and flags, which separate a short frame
-  from a bad-version or Unencrypted-flagged one.
-
-- `SessionDatagram` hop-limit handling now follows IP semantics. Delivery to
-  the addressed node is no longer TTL-gated, and a forwarder decrements before
-  deciding rather than after, so a datagram that would leave with a TTL of zero
-  is dropped instead of transmitted. Previously the TTL check ran ahead of the
-  local-delivery test, so a datagram addressed to this node that arrived with
-  TTL 0 was dropped, and a forwarder receiving a transit datagram at TTL 1
-  transmitted it at TTL 0 for the next hop to discard, wasting one transmission
-  per expiring datagram. `SessionDatagram::decrement_ttl` and
-  `SessionDatagram::can_forward` were aligned to the same semantics:
-  `decrement_ttl` decrements first and reports false when the result is zero,
-  and `can_forward` is true only at a TTL of 2 or more. The reachable radius is
-  unchanged, because the two behaviors compensated exactly: a path of `h` links
-  still delivers for any source TTL of `h` or more. During a rolling upgrade, an
-  unupgraded forwarder feeding an upgraded destination delivers one hop further
-  than either version does on its own; no version mix delivers less far. The
-  `TtlExhausted` reject counter now charges at the node that makes the decision
-  rather than at the hop after it.
-
-#### Transports & config
-
-- The UDP transport's DNS cache is now bounded and actually evicts. The map
-  held one entry per distinct hostname string ever dialed, and the TTL was
-  applied only on the read, so a stale entry was overwritten on the next dial
-  of the same name and otherwise stayed for the life of the process. Under a
-  rendezvous policy that accepts advertised endpoints the keys are strings a
-  remote party chose, which made the growth theirs to drive. A store now
-  sweeps entries past their TTL and, if the map is still full, drops the
-  oldest, holding it to 256 hostnames. Refreshing a name already cached
-  evicts nothing. Eviction is by insertion time rather than last use, so a
-  rarely dialed name in a very large peer list may re-resolve more often; the
-  cost of a wrong eviction is one DNS lookup, not a failed dial.
-
-- macOS: stopping an Ethernet transport under load no longer hangs the
-  process. The BPF reader thread handed each frame to the async consumer with
-  `blocking_send`, which parks with no way to be woken. Stopping the transport
-  aborts the consumer first, so nothing drains the 1024-frame channel, and the
-  socket's `Drop` then joined a thread that could never return: on a busy
-  interface the daemon had to be killed. The socket now drops the receiver
-  before joining, which releases a parked send at once, and the reader thread
-  sends through a helper that watches the same shutdown pipe its `select()`
-  already honours, so a send waiting for room cannot outlive a shutdown
-  request. The helper yields before it sleeps, so the saturated-path handoff
-  rate is unchanged. **Not covered by CI**: the reader thread is macOS-only
-  and Linux CI compiles none of it. What the tests prove is that the helper
-  the thread now waits in is cancellable; that a real BPF thread exits under
-  load still needs a manual check on a Mac.
-
-- A failed private-key write no longer leaves a node silently running an
-  ephemeral identity. Six write results in the identity path were discarded,
-  and the sharpest was in `persistent` mode: a failed write to `fips.key` fell
-  through to an ephemeral identity with no message, so a node that had been
-  asked for a stable identity changed its npub, its routing address and its
-  mesh IPv6 on every start, and nothing said so. All six now report. An
-  ephemeral start that is about to overwrite an existing key file now warns
-  first, naming the path and the setting that would have preserved the
-  identity, which is the warning `fipsctl keygen` has always given and the
-  daemon never did. Existence is tested with `symlink_metadata` rather than
-  `exists`, because a dangling symlink reports absent from the latter while
-  still being a file the write acts on. The persistent read path additionally
-  warns when it finds a key file whose mode is looser than 0600, or one that is
-  a symlink; it does not repair either, since the daemon does not own a file it
-  did not create.
-
-#### Peer lifecycle / gateway
-
-- A failed log write can no longer panic the thread or task that logged. The
-  subscriber was built with the default internal-error reporting, which sends a
-  failed write to `eprintln!`, and that macro panics when stderr has also
-  failed. The shipped supervisor configurations make that a single condition
-  rather than two: the macOS plist points both standard streams at one
-  unrotated file, and the systemd units route both to journald, so one full
-  disk fails both sinks together. In the daemon a crypto worker was the case
-  that mattered: it logs a warning on send backpressure, and a worker that
-  dies takes its share of the peer space with it permanently, while the panic
-  message is discarded along the same broken path. In `fips-gateway`, which
-  built its subscriber the same way, the casualty is a spawned task: the DNS
-  resolver, the control accept loop or the pool tick, none of which is observed
-  until shutdown, so the process would keep running and reporting healthy with
-  mesh name resolution or lease expiry and NAT cleanup silently stopped.
-
-#### macOS install layout
-
-- macOS: `peers.allow`, `peers.deny`, and the `hosts` file are now read
-  from `/usr/local/etc/fips/`, matching the install layout the macOS
-  packaging ships (`packaging/macos/`). That layout is what the three fixes
-  in this group align the daemon and `fipsctl` to. The default-path constants
-  were hardcoded to `/etc/fips/...` with only a `#[cfg(unix)]` /
-  `#[cfg(windows)]` split, so on macOS the daemon looked in a directory that
-  does not exist: `load_file` / `load_hosts_file` hit their `NotFound` no-op
-  arm and silently returned an empty ACL / empty host map. A populated
-  `peers.deny` therefore reported `effective_mode: "default_open"` and
-  `enforcement_active: false` via `fipsctl acl show`, and host-file aliases
-  went unloaded, with no error or warning. The default constants now follow
-  the platform's packaging (`/usr/local/etc/fips/` on macOS, `/etc/fips/` on
-  Linux and other Unix for the ACL files, and `/etc/fips/` on Linux and
-  `%ProgramData%\fips\` on Windows for the hosts file) and are pinned by
-  platform-gated unit tests so the layout cannot silently drift again. At
-  startup the daemon warns once if any of these files exist at the old
-  `/etc/fips/` location but not at the current default. Linux and Windows
-  behavior is unchanged. Contributed by
-  [@sh1ftred](https://github.com/sh1ftred).
-  **macOS users with existing files in `/etc/fips/` should move them to
-  `/usr/local/etc/fips/`.**
-
-- macOS: `fipsctl keygen` now writes `fips.key` / `fips.pub` to
-  `/usr/local/etc/fips/` by default. The default output directory was
-  hardcoded to `/etc/fips` for all Unix, but the daemon derives its identity
-  key paths from the config file's directory, which is
-  `/usr/local/etc/fips/fips.yaml` on macOS, so a generated identity landed
-  where the daemon never reads it and the node silently kept an ephemeral
-  identity. Linux and other Unix keep `/etc/fips`, Windows is unchanged, and
-  the values are pinned by platform-gated unit tests.
-
-- macOS: the system-wide config search path now includes
-  `/usr/local/etc/fips/fips.yaml` in addition to `/etc/fips/fips.yaml`.
-  Previously only `/etc/fips/fips.yaml` was probed, so a bare `fips` run
-  without `--config` skipped the installed config and derived identity key
-  paths from a non-existent directory. `/etc/fips/fips.yaml` is still probed
-  first so existing installs keep working. Both the macOS entry in the search
-  path and the directory `fipsctl keygen` writes to read the shared
-  `SYSTEM_CONFIG_DIR` constant, so the two cannot drift apart. The
-  launchd-installed daemon was unaffected (it always passes `--config`).
-  Linux and Windows behavior is unchanged. Because the daemon derives the
-  identity key directory from whichever config file loaded last, a macOS host
-  carrying `fips.yaml` at both locations would have resolved `fips.key` to the
-  new directory, found none, and under `persistent` generated a fresh
-  identity, silently changing its npub, routing address and mesh IPv6. The
-  daemon now adopts a key stranded at `/etc/fips/fips.key` and warns to move
-  it, instead of generating one. The fallback is confined to keys resolved
-  from the system config directory, so a run using `./fips.yaml` or a user
-  config is never redirected to a system key.
-
-#### Packaging & deployment
-
-- The maintainer address published in package metadata no longer bounces. The
-  crate authors field, the Debian package maintainer and upstream contact, and
-  both AUR PKGBUILD maintainer lines carried an address that no longer accepts
-  mail, so the contact of record in every artifact we ship was unreachable.
-
-### Security
-
-#### FMP/FSP session integrity
+#### Security
 
 - A frame whose counter is `u64::MAX` is now refused by the replay window
   instead of being accepted as a new high-water mark. Accepting it pinned
@@ -1597,7 +1100,104 @@ with v0.4.x or earlier peers.
   phase dispatch and it applies to established data frames as well as to
   handshakes; that counter is not yet readable through the control socket.
 
-#### NAT traversal / Nostr discovery
+### NAT traversal and Nostr discovery
+
+#### Added
+
+- `node.discovery.nostr.max_concurrent_offers_per_npub`, defaulting to 4, which
+  bounds how many inbound traversal offers one sender npub may have in flight
+  at once. It sits inside `max_concurrent_incoming_offers`, which remains the
+  outer bound, so a value above that is inert; zero is rejected at config
+  validation, since it refuses every inbound offer rather than disabling the
+  limit, and so is a value above the maximum permit count a semaphore can
+  hold, which would otherwise fail at construction rather than at load.
+  Existing configurations parse unchanged, the key being optional.
+
+#### Changed
+
+- Inbound traversal offers are now admitted against a per-sender allowance as
+  well as the global pool. The intake path previously took a permit from a
+  single semaphore before any identity check, with the sender's npub used only
+  as a log field, so one sender could hold every slot and deny traversal
+  onboarding to every other peer for as long as it kept offering. Admission now
+  takes a per-npub permit and a global permit together. A sender over its own
+  allowance is refused at debug rather than warn, because the party tripping it
+  is by definition sending faster than the node wants and a record per
+  rejection would turn the spam into log volume; the global bound being reached
+  keeps its warn, which is the operator's signal that the node is genuinely
+  saturated. **This does not make the pool inexhaustible.** Nostr identities
+  cost nothing to generate and the signal subscription carries no author
+  restriction, so an attacker running four throwaway npubs still saturates the
+  shipped 16-slot pool at an unchanged total offer rate. What the change buys
+  is that one identity can no longer do it alone, and that the two refusals are
+  distinguishable in the log. The permit is still held across the whole
+  attempt; that duration remains inferred from the attempt timeout rather than
+  measured.
+
+- Config validation now rejects a `node.discovery.nostr.signal_ttl_secs` that
+  is too large for the configured `replay_window_secs`. A traversal signal is
+  acceptable over its TTL plus 60s of clock-skew grace on each side, and that
+  span has to stay strictly inside the replay window, or a session id evicted
+  from the replay cache on expiry is still fresh enough to be accepted a second
+  time. The relation was documented but unenforced, so raising the TTL past
+  180s silently voided it. The bound is derived from the skew constant rather
+  than restated, and is checked whether or not nostr discovery is enabled, for
+  the same reason the rekey rules are. The shipped defaults (120s against 300s)
+  are unaffected, but a configuration that had widened the TTL or narrowed the
+  replay window now fails to load, with an error naming the concrete floor for
+  `replay_window_secs`. The NAT lab's config generator was one such
+  configuration and its generated `replay_window_secs` moves from 60 to 180.
+  Note that this covers eviction on expiry only: `seen_sessions_max_entries`
+  remains a separate capacity-eviction route that no config relation bounds.
+
+- The peer-retry tick no longer awaits the Nostr advert refetch. It ran inline
+  on the 1-second rx-loop tick, awaiting a fetch with a 2-second timeout for
+  each due peer and discarding the result; with up to sixteen due peers the
+  timeouts stacked, and field profiling measured single 2.00 s stalls as the
+  common case and a worst tick of 12.4 s against a 1 s period, delaying every
+  other rx-loop arm by as much as 4.2 s. The refetch is now spawned, so a dial
+  uses the advert cached at that moment and the refreshed one lands for that
+  peer's next retry.
+
+- The `Adopted NAT traversal socket` log line now carries the transport id and
+  the local address alongside the peer npub. Without the local address an
+  operator cannot join a host socket table against adoption events, and without
+  the transport id several peers sharing one adopted transport are
+  indistinguishable from several separate adopted transports.
+
+#### Fixed
+
+- Nostr NAT traversal signals are now sent only to relays the client pool
+  actually holds. A signal is addressed to the merge of the peer's NIP-17 inbox
+  relays, the relays its advert nominates for signaling, and our own DM relays,
+  but the pool is built once at startup from the configured relays and the send
+  is rejected outright, before anything is contacted, if any single URL in that
+  list is outside it. One unconfigured relay anywhere in the merge therefore
+  killed the whole attempt, including the sends to relays both sides shared. On
+  a public node in open mode this made discovery non-functional: 309 traversal
+  attempts, 290 explicit failures, zero successes, every failure on `relay not
+  found`. Configured peers were unaffected, since they run a matching relay
+  set. Comparison is on the normalized relay URL rather than the raw string, so
+  a configured relay spelled with a trailing slash or different host case is
+  not discarded. Two smaller fixes ride along: the responder resolves its
+  relays before binding a socket and running STUN, rather than spending a STUN
+  round trip and holding an offer slot only to find it has nowhere to answer,
+  and it gained the empty-relay-list guard the initiator already had.
+
+- Nostr NAT traversal no longer breaks after the host suspends. The traversal
+  clock cached a Unix timestamp once at startup and advanced it with a
+  monotonic `Instant`, which does not tick while a machine is asleep, so after
+  a suspend the daemon's idea of the time trailed real time by the suspend
+  duration for the rest of the process lifetime. Every NIP-40 expiration it
+  computed was therefore published already in the past: relays dropped the
+  offers as expired, the initiator logged a signal timeout waiting for an
+  answer, and traversal stayed broken until the daemon was restarted. The
+  clock now reads the wall clock on every call. This is not macOS-specific,
+  though a laptop that sleeps is where it is easiest to hit; any host that
+  suspends or hibernates was affected. Reported in
+  [#128](https://github.com/jmcorgan/fips/issues/128).
+
+#### Security
 
 - An advert or inbox-relay list returned by a relay is now checked against
   the peer it claims to describe before anything else looks at it. The relay
@@ -1796,30 +1396,73 @@ with v0.4.x or earlier peers.
   attributes the acceptance to clock skew, since a peer configured with a longer
   signalling TTL than ours now reaches it too.
 
-#### DNS responder
+### Data plane, routing signals and metrics
 
-- The DNS responder's mesh-interface filter now works on macOS and FreeBSD,
-  where it had never run. The filter drops `.fips` queries that arrive over the
-  mesh TUN, which is what keeps a widened `dns.bind_addr` from exposing the
-  hosts file's alias space to every mesh peer. It was keyed on the interface
-  index resolved from the *configured* TUN name, but macOS and FreeBSD assign
-  the device a name of the kernel's choosing (`utunN`, `tunN`), so the lookup
-  found nothing, the index came back `None`, and `None` disables the filter.
-  The index is now resolved from the name of the device the node actually
-  created, which the TUN startup path already records, and a live device whose
-  index will not resolve is logged rather than passed off as "no mesh
-  interface". Linux is unaffected, since the configured name is the device's
-  name there. **Behaviour change on macOS and FreeBSD**: a node with a
-  non-loopback `dns.bind_addr` stops answering `.fips` queries that arrive over
-  the mesh interface. **What this does not close**: with an app-owned TUN the
-  node never learns a device name, so the filter stays off there. **Not
-  measured**: whether macOS and FreeBSD attribute a locally originated query
-  sent to the node's own mesh address to the TUN interface, as Linux does. If
-  they do, such a query is now dropped on those platforms; the shipped resolver
-  drop-in targets `[::1]` rather than the mesh address, so the packaged path is
-  not affected.
+#### Changed
 
-#### Data-plane / routing signals
+- Peer bloom filters are computed for every recipient in one prefix and suffix
+  union sweep rather than rebuilt per recipient. Announcing to R peers
+  previously did R full map builds and R by T merges; at 240 peers that was
+  20.6 ms per tick, roughly half the tick body, with a median per-interval
+  maximum of 34.5 ms. The result is exactly equal rather than approximately:
+  merging is a bytewise OR, so regrouping the unions cannot change it. The
+  trade-off, measured rather than assumed, is that the sweep does its full work
+  regardless of how many peers are ready, so a tick announcing to one or two
+  peers now costs about twice what it did; break-even is around three ready
+  peers. Cadence, the debounce, the sequence rule and the fill-ratio cap are
+  unchanged.
+
+- Each peer's npub is derived once at construction instead of once per tick.
+  The per-tick stats snapshot ran a bech32 encode for every tracked peer, and a
+  second one for the common peer with no hosts-file entry and no alias, since
+  the display-name fallback bottoms out in the same encode: 14.1 ms per tick at
+  240 peers. The display name itself is deliberately not cached, because the
+  alias map and the host map both mutate at runtime.
+
+#### Fixed
+
+- A SessionDatagram carrying a truncated inner FSP payload no longer panics the
+  forwarding path. The coordinate-cache warm path sliced the inner payload at
+  the full 12-byte header offset while guarding only with the 4-byte common
+  prefix parser, so an inner payload of 4 to 11 bytes with phase 0x0 and the
+  Coords Present flag set indexed past the end of the slice. Because the
+  receive loop is the process's main future, the panic terminated the daemon
+  rather than a task, and under the packaged systemd unit the node restarted
+  into the same frame. The warm path now applies the same
+  `FspEncryptedHeader` guard the local-delivery path already used, which
+  additionally means a malformed frame carrying a non-zero protocol version or
+  the Unencrypted flag alongside Coords Present is dropped rather than having
+  its body read as coordinates. Any peer that had completed a link handshake
+  could trigger this, and admission is default-open. Frames rejected by that
+  guard are now counted in the forwarding statistics as
+  `warm_malformed_packets` and `warm_malformed_bytes`, the byte counter
+  charging the whole outer frame, visible over the control socket and on the
+  fipstop Routing State pane, so a node being fed malformed frames is
+  distinguishable from a quiet one at the default log level. The count is not a
+  packet drop: the frame is still delivered or forwarded, and only the
+  coordinate-cache warm attempt is abandoned. The existing debug log now also
+  carries the frame's protocol version and flags, which separate a short frame
+  from a bad-version or Unencrypted-flagged one.
+
+- `SessionDatagram` hop-limit handling now follows IP semantics. Delivery to
+  the addressed node is no longer TTL-gated, and a forwarder decrements before
+  deciding rather than after, so a datagram that would leave with a TTL of zero
+  is dropped instead of transmitted. Previously the TTL check ran ahead of the
+  local-delivery test, so a datagram addressed to this node that arrived with
+  TTL 0 was dropped, and a forwarder receiving a transit datagram at TTL 1
+  transmitted it at TTL 0 for the next hop to discard, wasting one transmission
+  per expiring datagram. `SessionDatagram::decrement_ttl` and
+  `SessionDatagram::can_forward` were aligned to the same semantics:
+  `decrement_ttl` decrements first and reports false when the result is zero,
+  and `can_forward` is true only at a TTL of 2 or more. The reachable radius is
+  unchanged, because the two behaviors compensated exactly: a path of `h` links
+  still delivers for any source TTL of `h` or more. During a rolling upgrade, an
+  unupgraded forwarder feeding an upgraded destination delivers one hop further
+  than either version does on its own; no version mix delivers less far. The
+  `TtlExhausted` reject counter now charges at the node that makes the decision
+  rather than at the hop after it.
+
+#### Security
 
 - A transit node's induced routing errors are now bounded by the authenticated
   link peer that induced them. The 100 ms suppression gate on
@@ -1859,6 +1502,7 @@ with v0.4.x or earlier peers.
   is an emission change only: an unmodified peer parses the frame exactly as
   before. Which of the two signals is emitted still discloses whether the entry
   exists.
+
 - A reactive `MtuExceeded` is now believed only when this node has actually
   sent a frame larger than the bottleneck it reports. The signal is
   unauthenticated: the admission gate narrows which destination may be named
@@ -2025,7 +1669,54 @@ with v0.4.x or earlier peers.
   the fipstop routing pane. A refused request keeps its dedup entry, and
   retries carry fresh request_ids, so a refusal cannot suppress the retry.
 
-#### Admission / peer caps
+### Admission, rate limiting and peer caps
+
+#### Added
+
+- `node.rate_limit.session_setup_burst` (64) and
+  `node.rate_limit.session_setup_rate` (16.0), the parameters of the new
+  per-link-peer session-setup limiter. This is the FSP session-setup bucket,
+  and it is distinct from the link-layer msg1 bucket described below; the two
+  meter different messages and are sized independently. Setup messages naming
+  a peer this node is already established with are metered on a second
+  per-link bucket derived from `node.limits.max_peers`,
+  `node.rekey.after_secs` and `node.rate_limit.handshake_max_resends`, so
+  raising the peer limit sizes it automatically. A zero burst or a
+  non-positive rate is rejected at config validation rather than silently
+  refusing every session.
+
+- `node.limits.max_sessions`, defaulting to 1024, which bounds the end-to-end
+  session table. Zero means unlimited, which restores the previous behaviour
+  exactly and is the way to back the change out on a running node. The default
+  is four times the adjacent `node.session.pending_max_destinations`. A
+  session entry measures 6608 bytes of inline state plus heap, so the table
+  holds to roughly 7 MB, and a test pins that per-entry figure so the
+  arithmetic behind the default fails loudly if an entry grows. Existing
+  configurations parse unchanged, the key being optional.
+
+- `node.rate_limit.established_handshake_burst` and
+  `node.rate_limit.established_handshake_rate`, the parameters of the new
+  established-link msg1 token bucket, which meters link-layer msg1 rather
+  than FSP session setup. Both are optional; omitting them (the normal case)
+  derives the bucket from `node.limits.max_peers`, `node.rekey.after_secs`
+  and `node.rate_limit.handshake_max_resends`, so raising the peer limit
+  sizes the bucket automatically. An explicit zero burst or a non-positive
+  rate is rejected at config validation rather than silently refusing all
+  rekey traffic.
+
+#### Changed
+
+- Inbound msg1 is classified before it is rate limited, and rekey or restart
+  msg1 arriving on an established link now draws on its own token bucket
+  instead of competing with stranger admission for a single shared one. On a
+  node with many peers the shared bucket refused a large share of ordinary
+  rekey traffic: a field node at roughly 245 peers refused 8753 msg1 in 25
+  minutes, and 159 of the 201 distinct sources were peers it already held
+  sessions with. Nodes upgrade with no config change. The `Msg1 rate limited`
+  log line now reports which limb refused, the pending count or the token
+  bucket, which it previously did not distinguish.
+
+#### Security
 
 - The Ethernet transport's discovery buffer is now bounded and no longer costs
   a linear scan per beacon. Beacons are unauthenticated broadcast frames, and
@@ -2118,7 +1809,135 @@ with v0.4.x or earlier peers.
   well-formed frame and then goes silent still holds its slot. Closing that
   needs a rolling idle deadline.
 
-#### Gateway
+### Transports and configuration
+
+#### Changed
+
+- `fipsctl keygen` no longer exits non-zero when only the `fips.pub` write
+  fails. The private key is already on disk at that point, so failing the run
+  reported failure for a keygen that did produce the identity; the failure is
+  now a warning and the run succeeds. The pre-existing-key guard also moves
+  from `exists` to `symlink_metadata`, so a dangling symlink at the key path
+  now blocks keygen without `--force` instead of being overwritten silently.
+
+#### Fixed
+
+- The UDP transport's DNS cache is now bounded and actually evicts. The map
+  held one entry per distinct hostname string ever dialed, and the TTL was
+  applied only on the read, so a stale entry was overwritten on the next dial
+  of the same name and otherwise stayed for the life of the process. Under a
+  rendezvous policy that accepts advertised endpoints the keys are strings a
+  remote party chose, which made the growth theirs to drive. A store now
+  sweeps entries past their TTL and, if the map is still full, drops the
+  oldest, holding it to 256 hostnames. Refreshing a name already cached
+  evicts nothing. Eviction is by insertion time rather than last use, so a
+  rarely dialed name in a very large peer list may re-resolve more often; the
+  cost of a wrong eviction is one DNS lookup, not a failed dial.
+
+- macOS: stopping an Ethernet transport under load no longer hangs the
+  process. The BPF reader thread handed each frame to the async consumer with
+  `blocking_send`, which parks with no way to be woken. Stopping the transport
+  aborts the consumer first, so nothing drains the 1024-frame channel, and the
+  socket's `Drop` then joined a thread that could never return: on a busy
+  interface the daemon had to be killed. The socket now drops the receiver
+  before joining, which releases a parked send at once, and the reader thread
+  sends through a helper that watches the same shutdown pipe its `select()`
+  already honours, so a send waiting for room cannot outlive a shutdown
+  request. The helper yields before it sleeps, so the saturated-path handoff
+  rate is unchanged. **Not covered by CI**: the reader thread is macOS-only
+  and Linux CI compiles none of it. What the tests prove is that the helper
+  the thread now waits in is cancellable; that a real BPF thread exits under
+  load still needs a manual check on a Mac.
+
+- A failed private-key write no longer leaves a node silently running an
+  ephemeral identity. Six write results in the identity path were discarded,
+  and the sharpest was in `persistent` mode: a failed write to `fips.key` fell
+  through to an ephemeral identity with no message, so a node that had been
+  asked for a stable identity changed its npub, its routing address and its
+  mesh IPv6 on every start, and nothing said so. All six now report. An
+  ephemeral start that is about to overwrite an existing key file now warns
+  first, naming the path and the setting that would have preserved the
+  identity, which is the warning `fipsctl keygen` has always given and the
+  daemon never did. Existence is tested with `symlink_metadata` rather than
+  `exists`, because a dangling symlink reports absent from the latter while
+  still being a file the write acts on. The persistent read path additionally
+  warns when it finds a key file whose mode is looser than 0600, or one that is
+  a symlink; it does not repair either, since the daemon does not own a file it
+  did not create.
+
+### Spanning tree, mesh size and routing
+
+#### Fixed
+
+- Flap dampening can now engage more than once in the lifetime of a node.
+  The arming check tested whether a dampening deadline had ever been set
+  rather than whether one was still in effect, so the first episode
+  disarmed the mechanism permanently: a node in a second flap storm went on
+  switching parents under hold-down alone, and neither the `flap_dampened`
+  counter nor the "Flap dampening engaged" warning fired again, so the
+  storm was invisible to anyone watching that counter. A lapsed episode is
+  now retired explicitly, clearing both the deadline and the switch
+  counter, so a second episode requires a fresh threshold of switches
+  within one window rather than re-engaging on the first switch after
+  lapse. Hold-down was unaffected throughout and continued to limit
+  discretionary switching, which is why the practical effect at shipped
+  settings was lost visibility and a lost escalation tier rather than
+  unrestrained flapping. Every path that can engage an episode now reports
+  it, including a re-engagement during parent-loss recovery, which was
+  previously silent. The warning names which path armed the episode
+  (`trigger`) and how long discretionary parent switching stays suppressed
+  (`dampening_secs`), using the same `trigger` values as the parent-switch
+  logs beside it, so the two can be read together. A
+  `node.tree.flap_dampening_secs` large enough to overflow the monotonic
+  clock is capped at one year, beyond which an episode is
+  indistinguishable from permanent, so an extreme setting no longer panics
+  the node when dampening engages.
+
+### DNS responder
+
+#### Security
+
+- The DNS responder's mesh-interface filter now works on macOS and FreeBSD,
+  where it had never run. The filter drops `.fips` queries that arrive over the
+  mesh TUN, which is what keeps a widened `dns.bind_addr` from exposing the
+  hosts file's alias space to every mesh peer. It was keyed on the interface
+  index resolved from the *configured* TUN name, but macOS and FreeBSD assign
+  the device a name of the kernel's choosing (`utunN`, `tunN`), so the lookup
+  found nothing, the index came back `None`, and `None` disables the filter.
+  The index is now resolved from the name of the device the node actually
+  created, which the TUN startup path already records, and a live device whose
+  index will not resolve is logged rather than passed off as "no mesh
+  interface". Linux is unaffected, since the configured name is the device's
+  name there. **Behaviour change on macOS and FreeBSD**: a node with a
+  non-loopback `dns.bind_addr` stops answering `.fips` queries that arrive over
+  the mesh interface. **What this does not close**: with an app-owned TUN the
+  node never learns a device name, so the filter stays off there. **Not
+  measured**: whether macOS and FreeBSD attribute a locally originated query
+  sent to the node's own mesh address to the TUN interface, as Linux does. If
+  they do, such a query is now dropped on those platforms; the shipped resolver
+  drop-in targets `[::1]` rather than the mesh address, so the packaged path is
+  not affected.
+
+### Gateway and peer lifecycle
+
+#### Fixed
+
+- A failed log write can no longer panic the thread or task that logged. The
+  subscriber was built with the default internal-error reporting, which sends a
+  failed write to `eprintln!`, and that macro panics when stderr has also
+  failed. The shipped supervisor configurations make that a single condition
+  rather than two: the macOS plist points both standard streams at one
+  unrotated file, and the systemd units route both to journald, so one full
+  disk fails both sinks together. In the daemon a crypto worker was the case
+  that mattered: it logs a warning on send backpressure, and a worker that
+  dies takes its share of the peer space with it permanently, while the panic
+  message is discarded along the same broken path. In `fips-gateway`, which
+  built its subscriber the same way, the casualty is a spawned task: the DNS
+  resolver, the control accept loop or the pool tick, none of which is observed
+  until shutdown, so the process would keep running and reporting healthy with
+  mesh name resolution or lease expiry and NAT cleanup silently stopped.
+
+#### Security
 
 - The gateway DNS forwarder now validates an upstream answer before it becomes
   a NAT mapping. It previously accepted whatever datagram arrived: the upstream
@@ -2139,7 +1958,9 @@ with v0.4.x or earlier peers.
   NXDOMAIN. Connecting the socket also means a dead upstream surfaces
   ECONNREFUSED immediately instead of stalling for five seconds.
 
-#### Control socket
+### Control socket
+
+#### Security
 
 - The control socket and the directory holding it are now created with a
   restrictive mode rather than created wide and narrowed afterwards. `bind(2)`
@@ -2163,7 +1984,9 @@ with v0.4.x or earlier peers.
   holding it can deny the daemon its socket more simply by squatting the path
   first.
 
-#### Key material and identity files
+### Key material and identity files
+
+#### Security
 
 - Private key writes no longer follow a symlink, and the key file's mode is
   enforced rather than merely requested. The single write path opened with
@@ -2209,7 +2032,23 @@ with v0.4.x or earlier peers.
   See the `### Changed` note above for the source-breaking effect the four new
   `Drop` implementations have on library consumers.
 
-#### Supply chain
+### Library API
+
+#### Changed
+
+- **Source-breaking for consumers of the library crate**: four public types now
+  implement `Drop`, so their fields can no longer be moved out. `Identity`,
+  `ResolvedIdentity`, `IdentityConfig` and `HandshakeState` each gained one as
+  part of clearing key material at end of scope. `IdentityConfig` is the one
+  most likely to be reached in practice, since it hangs off the public `Config`
+  as `node.identity`, so code that moved the nsec out of a configuration value
+  no longer compiles and needs `Option::take` instead. Nothing about the
+  behaviour of the shipped binaries changes; this affects only callers using
+  `fips` as a library.
+
+### Supply chain
+
+#### Security
 
 - The dependency lockfile is refreshed past a set of advisories against the
   pinned `nostr` 0.44.3 and `nostr-relay-pool` 0.44.1, both of which were also
@@ -2262,7 +2101,163 @@ with v0.4.x or earlier peers.
   that is integrity, not authenticity, because upstream publishes no detached
   sums.
 
-#### Docs & contributor tooling
+### Packaging, install and platform layout
+
+#### Fixed
+
+- macOS: `peers.allow`, `peers.deny`, and the `hosts` file are now read
+  from `/usr/local/etc/fips/`, matching the install layout the macOS
+  packaging ships (`packaging/macos/`). That layout is what the three fixes
+  in this group align the daemon and `fipsctl` to. The default-path constants
+  were hardcoded to `/etc/fips/...` with only a `#[cfg(unix)]` /
+  `#[cfg(windows)]` split, so on macOS the daemon looked in a directory that
+  does not exist: `load_file` / `load_hosts_file` hit their `NotFound` no-op
+  arm and silently returned an empty ACL / empty host map. A populated
+  `peers.deny` therefore reported `effective_mode: "default_open"` and
+  `enforcement_active: false` via `fipsctl acl show`, and host-file aliases
+  went unloaded, with no error or warning. The default constants now follow
+  the platform's packaging (`/usr/local/etc/fips/` on macOS, `/etc/fips/` on
+  Linux and other Unix for the ACL files, and `/etc/fips/` on Linux and
+  `%ProgramData%\fips\` on Windows for the hosts file) and are pinned by
+  platform-gated unit tests so the layout cannot silently drift again. At
+  startup the daemon warns once if any of these files exist at the old
+  `/etc/fips/` location but not at the current default. Linux and Windows
+  behavior is unchanged. Contributed by
+  [@sh1ftred](https://github.com/sh1ftred).
+  **macOS users with existing files in `/etc/fips/` should move them to
+  `/usr/local/etc/fips/`.**
+
+- macOS: `fipsctl keygen` now writes `fips.key` / `fips.pub` to
+  `/usr/local/etc/fips/` by default. The default output directory was
+  hardcoded to `/etc/fips` for all Unix, but the daemon derives its identity
+  key paths from the config file's directory, which is
+  `/usr/local/etc/fips/fips.yaml` on macOS, so a generated identity landed
+  where the daemon never reads it and the node silently kept an ephemeral
+  identity. Linux and other Unix keep `/etc/fips`, Windows is unchanged, and
+  the values are pinned by platform-gated unit tests.
+
+- macOS: the system-wide config search path now includes
+  `/usr/local/etc/fips/fips.yaml` in addition to `/etc/fips/fips.yaml`.
+  Previously only `/etc/fips/fips.yaml` was probed, so a bare `fips` run
+  without `--config` skipped the installed config and derived identity key
+  paths from a non-existent directory. `/etc/fips/fips.yaml` is still probed
+  first so existing installs keep working. Both the macOS entry in the search
+  path and the directory `fipsctl keygen` writes to read the shared
+  `SYSTEM_CONFIG_DIR` constant, so the two cannot drift apart. The
+  launchd-installed daemon was unaffected (it always passes `--config`).
+  Linux and Windows behavior is unchanged. Because the daemon derives the
+  identity key directory from whichever config file loaded last, a macOS host
+  carrying `fips.yaml` at both locations would have resolved `fips.key` to the
+  new directory, found none, and under `persistent` generated a fresh
+  identity, silently changing its npub, routing address and mesh IPv6. The
+  daemon now adopts a key stranded at `/etc/fips/fips.key` and warns to move
+  it, instead of generating one. The fallback is confined to keys resolved
+  from the system config directory, so a run using `./fips.yaml` or a user
+  config is never redirected to a system key.
+
+- The maintainer address published in package metadata no longer bounces. The
+  crate authors field, the Debian package maintainer and upstream contact, and
+  both AUR PKGBUILD maintainer lines carried an address that no longer accepts
+  mail, so the contact of record in every artifact we ship was unreachable.
+
+### Docs, CI and contributor tooling
+
+#### Added
+
+- `SECURITY.md`, stating a private channel for vulnerability reports, what a
+  useful report contains, what a reporter can expect back and on what timing,
+  and which branches receive fixes. The repository previously documented no
+  reporting channel at all, so someone with a finding had to guess at an
+  address or open a public issue.
+
+#### Changed
+
+- Two CI runs on one machine can no longer collide. Every suite derives its own
+  docker build context, image tag, container names, network range and host
+  interface names per run, so concurrent runs cannot reap each other's
+  containers or contend for a fixed subnet. This is what a contributor running
+  `testing/ci-local.sh` alongside a GitHub run, or two local runs at once, sees
+  change: the runs stay independent instead of one killing the other.
+
+- A test that does not run, or whose result cannot be read, no longer passes
+  silently. A failed scenario now fails the run rather than being logged and
+  stepped over, a node whose logs cannot be read no longer counts as clean, an
+  unanswered control query no longer reads as zero, an unknown scenario key is
+  rejected instead of matching nothing, and a skipped check appears in the
+  final verdict rather than only in scrollback.
+
+- New guards run in both the local and GitHub runners, so the two gates agree.
+  They check that trailing-log call sites are wired, that the log strings the
+  harness matches on are still emitted by the daemon, that the two runners'
+  integration-suite sets match per leg rather than as a folded token, that
+  every GitHub Action reference is pinned in the required form, and that source
+  comments do not cite references a reader of the published tree cannot
+  resolve.
+
+- Coverage moved from Docker to deterministic in-process tests, and dead
+  scenarios were retired. The six cost-selection chaos scenarios, the
+  admission-cap and acl-allowlist Docker suites, the smoke-10 scenario, the
+  tcp-chain and mesh-public static topologies, and three ignored Ethernet
+  tests are gone, with their behaviour asserted in unit and integration tests
+  instead. A local CI run is correspondingly shorter and less dependent on
+  container timing.
+
+- The `bloom-storm` chaos scenario no longer runs on either the local or the
+  cloud runner. Unlike the retirements above it has no replacement: the
+  scenario files remain in the tree and it stays runnable by hand, but nothing
+  now exercises downstream containment of a mid-chain ancestor swap on a
+  schedule. This is recorded as a coverage gap rather than as a completed
+  migration.
+
+- A failing harness now says why it failed. The dns-resolver suite sent build
+  and container-start output to `/dev/null`, so a failed scenario reported
+  that it had failed and nothing else; output is now captured and emitted on
+  failure, naming the command, and the systemd readiness wait dumps container
+  state, failed units and the journal when it gives up. The NAT-lab path
+  assertions exited bare, printing neither what they expected nor what they
+  saw and triggering none of the scenario diagnostics their siblings already
+  call; all twelve call sites now report the container, the expectation, the
+  observation and a projection of the peer or link table, and distinguish a
+  failed control-socket exec from unparseable output from a genuine mismatch.
+  The convergence gate could not tell a tree that did not converge from
+  connectivity that failed, and could exit non-zero while reporting "20
+  passed, 0 failed"; it now records the outcome, the count reached and the
+  count pending, and its failure messages name the condition. A passing run
+  is as quiet as before, and no timing, threshold or control-flow behaviour
+  changed in any of the three.
+
+- A dns-resolver scenario no longer burns the full 30-second boot timeout and
+  warns about a container that booted correctly. The readiness poll ran under
+  `pipefail` and piped `systemctl is-system-running` into `grep`, and that
+  command exits non-zero when the system is degraded, which is where systemd
+  inside a container always settles; the pipeline therefore failed even when
+  the pattern matched, leaving the degraded branch dead. The poll now matches
+  on the captured state instead of piping into `grep`.
+
+- The chaos harness now checks that teardown and node stops did what they
+  report. `docker compose down` exits 0 while leaving a run's containers
+  alive, so a partly-failed bring-up leaked named containers with nothing to
+  detect it; teardown now asks whether the containers this run owns are gone,
+  treats a survivor that forced removal clears as a warning, and aborts with
+  the names written to an artifact when one survives that or the query cannot
+  run at all. The check is scoped to a run's own names, so concurrent runs
+  cannot trip each other. Node churn separately marked a node down whether or
+  not `docker stop` succeeded, so the simulation's model of the mesh diverged
+  from reality, and `nodes_down`, the `max_down_nodes` cap and the
+  connectivity guard are all computed from that model; a failed stop now
+  warns, carries the daemon's own message, and leaves the node out of the
+  down set for the next churn tick to retry against an honest model.
+
+- Comments throughout the source tree, the packaging files and the test scripts
+  no longer cite internal identifiers, planning documents or private stage names
+  that a reader of the published tree cannot resolve; each now states the thing
+  the citation stood for. A handful of comments that described behaviour the
+  code does not have (the control-plane read path, its snapshot dispatch, and
+  the MMP report types) have been corrected rather than merely reworded. One of
+  the edited files, the DNS setup helper, installs to `/usr/lib/fips` on every
+  packaging path, so its comment reached users. No code changed.
+
+#### Security
 
 - The security reference now records that both Noise patterns deviate from the
   standard construction in one respect: the handshake AEAD passes an empty

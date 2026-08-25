@@ -13,6 +13,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cache::HintOutcome;
 use crate::node::reject::{BloomReject, DiscoveryReject, ForwardingReject, TreeReject};
 use crate::node::stats::{
     BloomStatsSnapshot, CongestionStatsSnapshot, ErrorSignalStatsSnapshot, ForwardingStatsSnapshot,
@@ -69,6 +70,27 @@ pub struct ForwardingMetrics {
     pub decode_error_bytes: Counter,
     pub warm_malformed_packets: Counter,
     pub warm_malformed_bytes: Counter,
+    /// Coordinate-cache warm writes refused because the coordinate names a
+    /// root other than this node's. Such an entry can never route — both
+    /// selectors reject a foreign root — so a write of one is either tree
+    /// churn or a plant, and the counter is the only place the difference
+    /// shows.
+    pub coord_warm_foreign_root: Counter,
+    /// Coordinate-cache warm writes whose coordinate does not name the address
+    /// it is filed under. Counted, not refused. **This is not a security
+    /// signal**: an attacker forges a passing coordinate by naming the victim
+    /// as its own child. It counts a defect honest nodes make, where a sender
+    /// whose own cache missed sends its own coordinates as the destination's.
+    pub coord_warm_key_mismatch: Counter,
+    /// Hint writes that replaced an existing entry with a different value.
+    /// A destination moving in the tree produces this, and so does a
+    /// poisoning; the two are not distinguishable here, so this is a rate to
+    /// watch rather than an alarm.
+    pub coord_hint_changed: Counter,
+    /// Hint writes refused because the entry they targeted was verified and
+    /// still inside its verification window, or because the cache was full of
+    /// live-verified entries and declined to evict one.
+    pub coord_hint_rejected: Counter,
     pub ttl_exhausted_packets: Counter,
     pub ttl_exhausted_bytes: Counter,
     pub delivered_packets: Counter,
@@ -132,6 +154,25 @@ impl ForwardingMetrics {
     pub fn record_warm_malformed(&self, bytes: usize) {
         self.warm_malformed_packets.inc();
         self.warm_malformed_bytes.add(bytes as u64);
+    }
+
+    /// Record a warm write refused for naming a foreign root.
+    pub fn record_warm_foreign_root(&self) {
+        self.coord_warm_foreign_root.inc();
+    }
+
+    /// Record a warm write whose coordinate does not name its own key.
+    pub fn record_warm_key_mismatch(&self) {
+        self.coord_warm_key_mismatch.inc();
+    }
+
+    /// Record the outcome of a hint write against the coordinate cache.
+    pub fn record_hint_outcome(&self, outcome: HintOutcome) {
+        match outcome {
+            HintOutcome::Changed => self.coord_hint_changed.inc(),
+            HintOutcome::Rejected => self.coord_hint_rejected.inc(),
+            HintOutcome::Inserted | HintOutcome::Unchanged => {}
+        }
     }
 
     /// Record a forwarded (transit) packet of `bytes` payload.
@@ -202,6 +243,10 @@ impl ForwardingMetrics {
             decode_error_bytes: self.decode_error_bytes.get(),
             warm_malformed_packets: self.warm_malformed_packets.get(),
             warm_malformed_bytes: self.warm_malformed_bytes.get(),
+            coord_warm_foreign_root: self.coord_warm_foreign_root.get(),
+            coord_warm_key_mismatch: self.coord_warm_key_mismatch.get(),
+            coord_hint_changed: self.coord_hint_changed.get(),
+            coord_hint_rejected: self.coord_hint_rejected.get(),
             ttl_exhausted_packets: self.ttl_exhausted_packets.get(),
             ttl_exhausted_bytes: self.ttl_exhausted_bytes.get(),
             delivered_packets: self.delivered_packets.get(),

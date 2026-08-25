@@ -997,11 +997,34 @@ jobs:
             | xargs sha256sum \
             > checksums-openwrt.txt
 
-      - name: Create release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: |
-            dist/*.ipk
-            dist/*.apk
-            dist/checksums-openwrt.txt
-          generate_release_notes: true
+      # This job used to create the Release object itself, with
+      # generate_release_notes. The three other packaging workflows wait for
+      # that object instead, so whichever got there first decided what the
+      # release page said: if this one won, the written notes were stranded
+      # behind an auto-generated commit list. Wait like the others, so the
+      # release is created once, deliberately, by whoever pushes the tag.
+      - name: Wait for tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 20); do
+            if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              exit 0
+            fi
+            echo "Release ${GITHUB_REF_NAME} not available yet; waiting..."
+            sleep 15
+          done
+
+          echo "Timed out waiting for release ${GITHUB_REF_NAME}" >&2
+          exit 1
+
+      - name: Upload OpenWrt assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/*.ipk \
+            dist/*.apk \
+            dist/checksums-openwrt.txt \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"

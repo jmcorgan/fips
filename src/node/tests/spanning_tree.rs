@@ -1003,7 +1003,8 @@ pub(super) fn populate_all_coord_caches(nodes: &mut [TestNode]) {
     for tn in nodes.iter_mut() {
         for (addr, coords) in &all_coords {
             if addr != tn.node.node_addr() {
-                tn.node
+                let _ = tn
+                    .node
                     .coord_cache_mut()
                     .insert(*addr, coords.clone(), now_ms);
             }

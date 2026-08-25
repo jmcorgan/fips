@@ -3214,6 +3214,23 @@ impl Node {
     /// cannot make loop-free forwarding decisions. The caller should signal
     /// `CoordsRequired` back to the source when `None` is returned for a
     /// non-local destination.
+    /// Write one unauthenticated coordinate hint, counting the outcome.
+    ///
+    /// Every production hint write goes through here, so the precedence rule
+    /// has exactly one enforcement point and the counters have exactly one
+    /// increment site. The verified path is deliberately not routed through
+    /// this: a caller that has checked a proof calls
+    /// `CoordCache::insert_verified` directly and says so.
+    pub(crate) fn insert_coord_hint(
+        &mut self,
+        addr: NodeAddr,
+        coords: TreeCoordinate,
+        now_ms: u64,
+    ) {
+        let outcome = self.coord_cache.insert(addr, coords, now_ms);
+        self.metrics().forwarding.record_hint_outcome(outcome);
+    }
+
     pub fn find_next_hop(&mut self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
         // 1. Local delivery
         if dest_node_addr == self.node_addr() {

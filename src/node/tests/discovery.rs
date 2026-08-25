@@ -1307,7 +1307,7 @@ async fn test_response_path_mtu_three_node_chain() {
 
 #[tokio::test]
 async fn test_cache_entry_path_mtu_stored() {
-    // Verify that insert_with_path_mtu stores the path_mtu in the cache entry
+    // Verify that insert_verified_with_path_mtu stores the path_mtu in the cache entry
     let mut node = make_node();
     let target = make_node_addr(0xBB);
 
@@ -1315,7 +1315,7 @@ async fn test_cache_entry_path_mtu_stored() {
 
     let now_ms = 1000u64;
     node.coord_cache_mut()
-        .insert_with_path_mtu(target, coords, now_ms, 1280);
+        .insert_verified_with_path_mtu(target, coords, now_ms, 1280);
 
     let entry = node.coord_cache().get_entry(&target).unwrap();
     assert_eq!(entry.path_mtu(), Some(1280));
@@ -1330,7 +1330,7 @@ async fn test_cache_entry_no_path_mtu_from_regular_insert() {
     let coords = TreeCoordinate::from_addrs(vec![target, make_node_addr(0)]).unwrap();
 
     let now_ms = 1000u64;
-    node.coord_cache_mut().insert(target, coords, now_ms);
+    let _ = node.coord_cache_mut().insert(target, coords, now_ms);
 
     let entry = node.coord_cache().get_entry(&target).unwrap();
     assert_eq!(entry.path_mtu(), None);

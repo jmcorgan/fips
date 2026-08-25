@@ -344,7 +344,7 @@ async fn preview_next_hop_reports_why_it_could_name_no_hop() {
     let alien_root = crate::NodeAddr::from_bytes([0x77; 16]);
     let coords = crate::proto::stp::TreeCoordinate::from_addrs(vec![stranger, alien_root])
         .expect("non-empty coordinate");
-    nodes[0]
+    let _ = nodes[0]
         .node
         .coord_cache_mut()
         .insert(stranger, coords, wall_ms);
