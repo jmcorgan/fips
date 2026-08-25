@@ -532,12 +532,12 @@ impl Node {
 
     /// Expire `path_mtu_lookup` entries that nothing else will ever release.
     ///
-    /// The three callers of `path_mtu_lookup_release` all fire on session
+    /// The callers of `path_mtu_lookup_release` all fire on session or peer
     /// state, so an entry written by the discovery `LookupResponse` carrier
-    /// for a destination this node never opens a session with has no release
-    /// path at all. Keep-tighter then makes one such response permanent: a
-    /// `path_mtu` of 256 pins that destination's SYN-time MSS clamp at 119
-    /// bytes until the process restarts. Only those entries carry a
+    /// for a destination this node neither peers with nor opens a session
+    /// with has no release path at all. Keep-tighter then makes one such
+    /// response permanent: a `path_mtu` of 256 pins that destination's
+    /// SYN-time MSS clamp at 119 bytes until the process restarts. Only those entries carry a
     /// `learned_ms`, and only they are expired here.
     ///
     /// The deadline is the coordinate cache's own TTL, because the same

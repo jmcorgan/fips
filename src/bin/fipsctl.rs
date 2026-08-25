@@ -7,10 +7,10 @@
 //! On Windows, uses a TCP connection to localhost.
 
 use clap::{Parser, Subcommand};
-use fips::config::{write_key_file, write_pub_file};
+use fips::config::{read_key_file, write_key_file, write_pub_file};
 use fips::upper::hosts::HostMap;
 use fips::version;
-use fips::{Identity, encode_nsec};
+use fips::{ConfigError, Identity, PeerIdentity, encode_nsec};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::path::{Path, PathBuf};
@@ -57,6 +57,15 @@ enum Commands {
         /// Print nsec and npub to stdout instead of writing files
         #[arg(short = 's', long = "stdout")]
         stdout: bool,
+    },
+    /// Print a node's mesh address, without contacting the daemon
+    Address {
+        /// npub (bech32) or hostname from /etc/fips/hosts. Defaults to this
+        /// node's own identity, read from its key files.
+        identity: Option<String>,
+        /// Derive from this key file (an nsec) or public key file (an npub)
+        #[arg(short = 'k', long = "key", conflicts_with = "identity")]
+        key: Option<PathBuf>,
     },
     /// Connect to a peer
     Connect {
@@ -423,6 +432,63 @@ fn resolve_peer(peer: &str) -> String {
     }
 }
 
+/// Derive the mesh address for whichever identity the arguments name.
+///
+/// Precedence is the order the arguments are documented in: an explicit npub
+/// or hostname, then an explicit key file, then this node's own key files in
+/// the default key directory. Nothing here touches the control socket, so the
+/// address is available to a maintainer script with no daemon running.
+fn mesh_address(identity: Option<&str>, key: Option<&Path>) -> Result<Ipv6Addr, String> {
+    match (identity, key) {
+        (Some(peer), _) => address_from_npub(&resolve_peer(peer)),
+        (None, Some(path)) => address_from_file(path),
+        (None, None) => address_from_key_dir(&default_key_dir()),
+    }
+}
+
+/// Derive a mesh address from a bech32 npub.
+fn address_from_npub(npub: &str) -> Result<Ipv6Addr, String> {
+    let peer = PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub: {e}"))?;
+    Ok(peer.address().to_ipv6())
+}
+
+/// Derive a mesh address from a key file holding an nsec, or from a public
+/// key file holding an npub.
+///
+/// The file contents are the private key in the first case, so they are held
+/// in a guard and cleared on every exit path.
+fn address_from_file(path: &Path) -> Result<Ipv6Addr, String> {
+    let contents = Zeroizing::new(read_key_file(path).map_err(|e| match e {
+        // ReadFile's own text names the file a config file, which this is not.
+        ConfigError::ReadFile { source, .. } => {
+            format!("cannot read {}: {source}", path.display())
+        }
+        other => other.to_string(),
+    })?);
+
+    if contents.starts_with("npub1") {
+        return address_from_npub(contents.as_str());
+    }
+
+    let identity = Identity::from_secret_str(contents.as_str())
+        .map_err(|e| format!("{} does not hold a usable key: {e}", path.display()))?;
+    Ok(identity.address().to_ipv6())
+}
+
+/// Derive this node's mesh address from the key files in `dir`.
+///
+/// Tries `fips.key` first and falls back to `fips.pub`: the private key is
+/// mode 0600, so an unprivileged run can still answer from the world-readable
+/// public key beside it. When neither is readable both attempts are reported,
+/// since either file would have answered.
+fn address_from_key_dir(dir: &Path) -> Result<Ipv6Addr, String> {
+    match address_from_file(&dir.join("fips.key")) {
+        Ok(addr) => Ok(addr),
+        Err(key_err) => address_from_file(&dir.join("fips.pub"))
+            .map_err(|pub_err| format!("{key_err}\n{pub_err}")),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -489,6 +555,17 @@ fn main() {
         eprintln!();
         eprintln!("NOTE: Set 'node.identity.persistent: true' in fips.yaml");
         eprintln!("      or these keys will be overwritten on next daemon start.");
+        return;
+    }
+
+    if let Commands::Address { identity, key } = &cli.command {
+        match mesh_address(identity.as_deref(), key.as_deref()) {
+            Ok(address) => println!("{address}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -566,7 +643,7 @@ fn main() {
                 ProfileTickAction::Status => build_query("profile_tick_status"),
             },
         },
-        Commands::Keygen { .. } => unreachable!(),
+        Commands::Keygen { .. } | Commands::Address { .. } => unreachable!(),
     };
 
     // For plot output we need to post-process the JSON response rather
@@ -1511,6 +1588,85 @@ mod tests {
     #[test]
     fn test_default_key_dir_keeps_etc_fips_layout() {
         assert_eq!(default_key_dir(), PathBuf::from("/etc/fips"));
+    }
+
+    /// Build a key file for `identity` in `dir` and return its path.
+    fn write_identity_key(dir: &Path, identity: &Identity) -> PathBuf {
+        let mut keypair = identity.keypair();
+        let mut secret_key = keypair.secret_key();
+        let nsec = Zeroizing::new(encode_nsec(&secret_key));
+        secret_key.non_secure_erase();
+        keypair.non_secure_erase();
+        let path = dir.join("fips.key");
+        write_key_file(&path, &nsec).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_address_derived_from_an_npub_is_the_one_its_owner_uses() {
+        let identity = Identity::generate();
+        let derived = address_from_npub(&identity.npub()).unwrap();
+        assert_eq!(derived, identity.address().to_ipv6());
+        assert_eq!(derived.octets()[0], 0xfd);
+    }
+
+    #[test]
+    fn a_malformed_npub_is_refused_rather_than_hashed() {
+        assert!(address_from_npub("npub1notarealkey").is_err());
+        assert!(address_from_npub("").is_err());
+    }
+
+    #[test]
+    fn the_address_derived_from_a_key_file_matches_its_npub() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = Identity::generate();
+        let key_path = write_identity_key(dir.path(), &identity);
+
+        let expected = identity.address().to_ipv6();
+        assert_eq!(address_from_file(&key_path).unwrap(), expected);
+        assert_eq!(address_from_key_dir(dir.path()).unwrap(), expected);
+        assert_eq!(
+            mesh_address(None, Some(key_path.as_path())).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_public_key_file_answers_when_the_private_one_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = Identity::generate();
+        write_pub_file(&dir.path().join("fips.pub"), &identity.npub()).unwrap();
+
+        assert_eq!(
+            address_from_key_dir(dir.path()).unwrap(),
+            identity.address().to_ipv6()
+        );
+    }
+
+    #[test]
+    fn a_missing_key_file_reports_every_path_that_was_tried() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = address_from_key_dir(dir.path()).unwrap_err();
+        assert!(err.contains("fips.key"), "{err}");
+        assert!(err.contains("fips.pub"), "{err}");
+        assert!(address_from_file(&dir.path().join("fips.key")).is_err());
+    }
+
+    #[test]
+    fn an_empty_or_unparsable_key_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let empty = dir.path().join("empty.key");
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(address_from_file(&empty).unwrap_err().contains("empty"));
+
+        let junk = dir.path().join("junk.key");
+        std::fs::write(&junk, "not-a-key\n").unwrap();
+        assert!(
+            address_from_file(&junk)
+                .unwrap_err()
+                .contains("does not hold a usable key")
+        );
     }
 
     #[test]

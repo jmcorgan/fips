@@ -85,7 +85,69 @@ require_test_image() {
     "$BUILD_SCRIPT"
 }
 
+# State the relay's own condition, in its own words, before anything else.
+#
+# The relay is a third-party container and it has died mid-run before: strfry
+# took a SIGSEGV twelve milliseconds after both nodes had connected, and every
+# symptom under that was a correct report of a dead relay — subscriptions
+# dropped, no advert consumed, empty peer lists, and a run that failed on the
+# peer-count wait. That verdict is indistinguishable from a product failure
+# unless the relay's state is stated, and the only evidence of the real cause
+# was one container-log line ninety lines above the summary. This does not
+# decide the run; it says whose failure it was, in a line a reader of the
+# output can find.
+#
+# A relay whose state or log cannot be read has not been shown to be healthy,
+# so that case is reported as unestablished rather than as "not the relay".
+relay_verdict() {
+    local state="" status="" exit_code="" restarts="" logs=""
+
+    state="$(docker inspect \
+        -f '{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}' \
+        "$RELAY_CONTAINER" 2>/dev/null)" || state=""
+
+    if [ -z "$state" ]; then
+        echo "RELAY FAILURE: $RELAY_CONTAINER is gone; whatever this run" \
+             "asserted about peering happened without a relay" >&2
+        return 0
+    fi
+
+    read -r status exit_code restarts <<<"$state"
+
+    if [ "$status" != "running" ]; then
+        echo "RELAY FAILURE: $RELAY_CONTAINER is $status (exit $exit_code);" \
+             "the assertions in this run are downstream of that, not of the" \
+             "nodes" >&2
+        return 0
+    fi
+
+    if [ "${restarts:-0}" -gt 0 ]; then
+        echo "RELAY FAILURE: $RELAY_CONTAINER has restarted $restarts time(s)" \
+             "during this run; the nodes lost their subscriptions with it" >&2
+        return 0
+    fi
+
+    if ! logs="$(docker logs "$RELAY_CONTAINER" 2>&1)"; then
+        echo "RELAY HEALTH NOT ESTABLISHED: could not read" \
+             "$RELAY_CONTAINER's logs, so a crash cannot be ruled in or out" >&2
+        return 0
+    fi
+
+    if grep -Eq "caught a signal|SIGSEGV|SIGABRT|terminate called" <<<"$logs"; then
+        echo "RELAY FAILURE: $RELAY_CONTAINER faulted during this run:" >&2
+        grep -E "caught a signal|SIGSEGV|SIGABRT|terminate called" <<<"$logs" >&2
+        return 0
+    fi
+
+    echo "relay: $RELAY_CONTAINER running, no fault in its log — this run's" \
+         "verdict is about the nodes"
+    return 1
+}
+
 dump_diagnostics() {
+    echo ""
+    echo "=== relay verdict ==="
+    relay_verdict || true
     echo ""
     echo "=== nostr publish/consume diagnostics ==="
     for c in "$NODE_A" "$NODE_B" "$RELAY_CONTAINER"; do
@@ -395,6 +457,13 @@ run_test() {
         echo "ping6 A->B failed AFTER malformed-advert injection" >&2
         dump_diagnostics
         return 1
+    fi
+
+    # A relay that faulted while the assertions still passed is a finding
+    # about the relay, not about this run, so it is reported and not made a
+    # failure: the suite proved what it set out to prove.
+    if relay_verdict; then
+        echo "NOTE: the assertions above passed despite that." >&2
     fi
 
     cleanup

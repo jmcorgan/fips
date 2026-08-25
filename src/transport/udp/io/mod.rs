@@ -76,6 +76,29 @@ mod tests {
         assert!(send_buf > 0, "send buffer should be non-zero");
     }
 
+    /// The listen socket's reuse flags go on after its own bind, so they
+    /// never license the kernel to hand this socket a port someone else
+    /// holds. The visible consequence is that a second bind of an occupied
+    /// port fails loudly instead of silently sharing it and splitting the
+    /// inbound datagrams between the two recv loops.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_open_of_an_occupied_port_fails_instead_of_sharing_it() {
+        let holder = UdpRawSocket::open("127.0.0.1:0".parse().unwrap(), 65536, 65536)
+            .expect("failed to bind the holding socket");
+        let addr = holder.local_addr();
+
+        // `UdpRawSocket` is not `Debug`, so this cannot be `expect_err`.
+        let Err(err) = UdpRawSocket::open(addr, 65536, 65536) else {
+            panic!("the port is already held, so the second bind must fail");
+        };
+
+        assert!(
+            err.to_string().contains("bind failed"),
+            "the failure must come from bind, not from a later step: {err}",
+        );
+    }
+
     #[tokio::test]
     async fn test_async_udp_socket_send_recv() {
         let sock1 = UdpRawSocket::open("127.0.0.1:0".parse().unwrap(), 65536, 65536)

@@ -51,9 +51,14 @@
 #   FIPS_INTEROP_STREAMS   data-plane stream pairs (`nid-nid` tokens, both
 #                          directions streamed). Enables Phase 1b/5b. Set
 #                          by --topology; empty = streams off.
-#   STREAM_LOSS_MARGIN_PCT rekey-vs-control loss margin (default 1).
+#   STREAM_LOSS_MARGIN_PCT rekey-vs-control loss margin (default 5).
 #   CONTROL_STREAM_SECS    quiet control-window length (default 12).
-#   MESH_SIZE_TIMEOUT      Phase 7 convergence poll budget (default 180).
+#   MESH_SIZE_WARMUP       Phase 7 bloom warmup, from mesh start, before
+#                          any estimate counts (default 300).
+#   MESH_SIZE_SETTLE       Phase 7 unbroken in-band window a node must
+#                          hold to be credited (default 60).
+#   MESH_SIZE_TIMEOUT      Phase 7 poll budget beyond warmup+settle
+#                          (default 180).
 #   FIPS_INTEROP_KEEP_UP   1 = leave containers running after the test (debug).
 #   REKEY_AFTER_SECS       rekey interval to generate configs with (default
 #                          35; multihop-3v-cycle defaults it to 50).
@@ -174,15 +179,40 @@ LOG_POLL_INTERVAL=2
 # Data-plane continuity stream (control-differential). Streams run a
 # sustained ping6 over the overlay across the rekey window vs a quiet
 # control window; loss is compared to prove rekey is hitless.
-STREAM_RATE_HZ=5                                 # ping6 -i 0.2
+# The control window cannot be lengthened much: it has to fit inside one
+# rekey interval (REKEY_AFTER_SECS, 35s by default) to stand a chance of
+# being cutover-free, and it already gets contaminated sometimes at 12s.
+# So the sample is raised by rate instead. At 20 Hz the control window is
+# 240 packets and the rekey window ~3100, where at 5 Hz they were 60 and
+# ~775 and a 1% margin came to 0.6 of a control packet — below the
+# quantisation of its own measurement, so a one-packet difference decided
+# the verdict and the netem arm failed on same-version pairs as readily
+# as on mixed ones.
+STREAM_RATE_HZ=20
 CONTROL_STREAM_SECS="${CONTROL_STREAM_SECS:-12}" # quiet pre-rekey window
-STREAM_LOSS_MARGIN_PCT="${STREAM_LOSS_MARGIN_PCT:-1}"
+# 5% is 12 packets of the 240-packet control window and ~155 of the
+# ~3100-packet rekey window. On a path losing up to 6% (the range the
+# v0.4.2 netem runs baselined at, under `loss 2%` over several hops) the
+# difference of the two windows has a standard deviation below 1.6%, so
+# 5% is past three sigma and sampling spread can no longer produce a red.
+# It still catches what this check exists for: a rekey that is not
+# hitless blackholes until the session reconverges, which the harness
+# budgets 45s for, against the ~8s of traffic 5% of the rekey window is.
+STREAM_LOSS_MARGIN_PCT="${STREAM_LOSS_MARGIN_PCT:-5}"
 # The rekey-window stream must span Phases 2-5 (both cutovers + reconverge).
 REKEY_STREAM_SECS=$(( FIRST_REKEY_TIMEOUT + SECOND_REKEY_WAIT + POST_REKEY_TIMEOUT + 15 ))
 
-# Mesh-size estimate convergence (strict ±25% of true N). Generous poll
-# budget — the bloom-union estimate converges over minutes.
+# Mesh-size estimate convergence (strict ±25% of true N). The archived
+# design note puts bloom-filter warmup at ~5 minutes from node start and
+# calls the estimate unreliable before that, so nothing sampled inside
+# MESH_SIZE_WARMUP is evidence of convergence, and a node is credited
+# only after holding the band unbroken for MESH_SIZE_SETTLE afterwards.
+# MESH_SIZE_TIMEOUT is the extra budget for reaching that state, on top
+# of the warmup and settle windows rather than covering them.
+MESH_SIZE_WARMUP="${MESH_SIZE_WARMUP:-300}"
+MESH_SIZE_SETTLE="${MESH_SIZE_SETTLE:-60}"
 MESH_SIZE_TIMEOUT="${MESH_SIZE_TIMEOUT:-180}"
+MESH_SIZE_POLL=5
 
 # ── Counters ─────────────────────────────────────────────────────────
 
@@ -512,6 +542,14 @@ wait_for_log_pattern_count() {
     [ "$(count_log_pattern "$pattern")" -ge "$min_count" ]
 }
 
+# One node's bloom-union mesh-size estimate, or "null" when the daemon
+# has no estimate yet or cannot be reached.
+mesh_estimate() {
+    docker exec "${CONTAINER[$1]}" fipsctl show status 2>/dev/null \
+        | python3 -c "import sys,json; v=json.load(sys.stdin).get('estimated_mesh_size'); print(v if v is not None else 'null')" 2>/dev/null \
+        || echo null
+}
+
 # ── Data-plane continuity streams ────────────────────────────────────
 #
 # A sustained ping6 stream over the overlay (<npub>.fips) is data-plane
@@ -530,8 +568,11 @@ _stream_one() {
     local from="$1" to="$2" dur="$3" outfile="$4"
     local from_ctr="${CONTAINER[$from]}" to_npub="${NPUB_OF[$to]}"
     local count=$(( dur * STREAM_RATE_HZ ))
-    local out tx rx
-    out=$(docker exec "$from_ctr" ping6 -i 0.2 -c "$count" -W "$PING_TIMEOUT" \
+    local out tx rx interval
+    # Interval and count both derive from STREAM_RATE_HZ, so the packet
+    # count the margin is reasoned about cannot drift from the rate sent.
+    interval=$(awk -v hz="$STREAM_RATE_HZ" 'BEGIN{ printf "%.3f", 1/hz }')
+    out=$(docker exec "$from_ctr" ping6 -i "$interval" -c "$count" -W "$PING_TIMEOUT" \
         "${to_npub}.fips" 2>&1)
     tx=$(echo "$out" | grep -oE '[0-9]+ packets transmitted' | grep -oE '^[0-9]+')
     rx=$(echo "$out" | grep -oE '[0-9]+ received' | grep -oE '^[0-9]+')
@@ -661,6 +702,9 @@ if ! compose up -d; then
     echo "  FAIL  compose up failed"
     exit 1
 fi
+# Phase 7 measures bloom-filter warmup from node start, not from its own
+# start, so the clock has to be taken here.
+MESH_UP_AT=$SECONDS
 
 # Optional netem: applied via `docker exec ... tc qdisc` on each
 # container's eth0 — host bridge qdisc does NOT shape inter-container
@@ -948,43 +992,80 @@ echo ""
 # .estimated_mesh_size) should converge to the true node count across
 # versions. A mixed-version bloom/tree-encoding divergence shows up as a
 # node that never produces an in-band estimate (or returns null). Strict
-# band = [0.75N, 1.25N]; polled up to MESH_SIZE_TIMEOUT (the estimate
-# converges over minutes and is transiently jittery).
+# band = [0.75N, 1.25N].
+#
+# The verdict is taken on a settled estimate rather than on a node's
+# first tolerable reading. Two windows enforce that. Nothing sampled
+# before MESH_SIZE_WARMUP has elapsed since the mesh came up counts at
+# all, because the estimate is documented as unreliable during warmup;
+# after it, a node is credited only once it has held the band unbroken
+# for MESH_SIZE_SETTLE. Every node is re-polled every round and any
+# out-of-band reading restarts that node's settle clock, so a node
+# cannot be credited for a sample it has since contradicted.
 echo "Phase 7: Mesh-size estimate convergence (strict ±25% of true N=$NUM_NODES)"
 PASSED=0; FAILED=0
 ms_lo="$(awk -v n="$NUM_NODES" 'BEGIN{printf "%.2f", 0.75*n}')"
 ms_hi="$(awk -v n="$NUM_NODES" 'BEGIN{printf "%.2f", 1.25*n}')"
-echo "  band [$ms_lo, $ms_hi], poll up to ${MESH_SIZE_TIMEOUT}s"
-declare -A MS_EST MS_OK
-ms_deadline=$(( SECONDS + MESH_SIZE_TIMEOUT ))
+declare -A MS_EST MS_OK MS_INBAND_SINCE
+ms_accept_after=$(( MESH_UP_AT + MESH_SIZE_WARMUP ))
+echo "  band [$ms_lo, $ms_hi], warmup ends $(( ms_accept_after - SECONDS ))s from now, then ${MESH_SIZE_SETTLE}s settled, poll up to ${MESH_SIZE_TIMEOUT}s beyond that"
+
+# Poll through the warmup as well. Nothing here is asserted on — it is
+# the trajectory the phase has never recorded, and it is what an
+# undercount that never recovers would show up in.
+while [ "$SECONDS" -lt "$ms_accept_after" ]; do
+    ms_line=""
+    for n in "${NODES[@]}"; do
+        MS_EST[$n]="$(mesh_estimate "$n")"
+        ms_line+=" $n=${MS_EST[$n]}"
+    done
+    echo "    warmup, $(( ms_accept_after - SECONDS ))s to go:$ms_line"
+    sleep 30
+done
+
+ms_deadline=$(( SECONDS + MESH_SIZE_SETTLE + MESH_SIZE_TIMEOUT ))
 while :; do
     all_ok=1
     for n in "${NODES[@]}"; do
-        [ "${MS_OK[$n]:-0}" = "1" ] && continue
-        est="$(docker exec "${CONTAINER[$n]}" fipsctl show status 2>/dev/null \
-            | python3 -c "import sys,json; v=json.load(sys.stdin).get('estimated_mesh_size'); print(v if v is not None else 'null')" 2>/dev/null || echo null)"
+        est="$(mesh_estimate "$n")"
         MS_EST[$n]="$est"
         if [ "$est" != "null" ] && awk "BEGIN{exit !($est>=$ms_lo && $est<=$ms_hi)}"; then
+            [ -z "${MS_INBAND_SINCE[$n]:-}" ] && MS_INBAND_SINCE[$n]="$SECONDS"
+        else
+            unset "MS_INBAND_SINCE[$n]"
+        fi
+        if [ -n "${MS_INBAND_SINCE[$n]:-}" ] \
+           && [ $(( SECONDS - ${MS_INBAND_SINCE[$n]} )) -ge "$MESH_SIZE_SETTLE" ]; then
             MS_OK[$n]=1
         else
+            MS_OK[$n]=0
             all_ok=0
         fi
     done
     [ "$all_ok" = "1" ] && break
     [ "$SECONDS" -ge "$ms_deadline" ] && break
-    sleep 3
+    sleep "$MESH_SIZE_POLL"
 done
 for n in "${NODES[@]}"; do
     s="${SLOT_OF[$n]}"; u="$(echo "$s" | tr '[:lower:]' '[:upper:]')"
     if [ "${MS_OK[$n]:-0}" = "1" ]; then
-        echo "    PASS  $n [$u]: estimated_mesh_size=${MS_EST[$n]}"
+        echo "    PASS  $n [$u]: estimated_mesh_size=${MS_EST[$n]} (held band ${MESH_SIZE_SETTLE}s+ after warmup)"
         PASSED=$((PASSED + 1))
     else
-        echo "    FAIL  $n [$u]: estimated_mesh_size=${MS_EST[$n]:-null} (outside [$ms_lo,$ms_hi] after ${MESH_SIZE_TIMEOUT}s)"
+        if [ -n "${MS_INBAND_SINCE[$n]:-}" ]; then
+            ms_why="held band only $(( SECONDS - ${MS_INBAND_SINCE[$n]} ))s of the ${MESH_SIZE_SETTLE}s settle window"
+        else
+            ms_why="outside [$ms_lo,$ms_hi]"
+        fi
+        echo "    FAIL  $n [$u]: estimated_mesh_size=${MS_EST[$n]:-null} ($ms_why)"
         FAILED=$((FAILED + 1))
-        INTEROP_FAILURES+=("[mesh-size] node $n ($u ${SLOT_REF[$s]}@${SLOT_SHA[$s]}): estimate=${MS_EST[$n]:-null} outside [$ms_lo,$ms_hi]")
+        INTEROP_FAILURES+=("[mesh-size] node $n ($u ${SLOT_REF[$s]}@${SLOT_SHA[$s]}): estimate=${MS_EST[$n]:-null} $ms_why")
     fi
 done
+# The band is per-node, so a green says every node was plausible, not
+# that the nodes agreed. Print the spread so nobody has to infer it.
+ms_spread="$(printf '%s\n' "${MS_EST[@]}" | sort -n | awk '/^[0-9]+$/{ if (lo=="") lo=$1; hi=$1 } END{ if (lo=="") print "no numeric estimates"; else if (lo==hi) print "all nodes agree on " lo; else print "nodes disagree: " lo " to " hi }')"
+echo "    NOTE: final estimates — $ms_spread (agreement is reported, not asserted)"
 phase_result "Mesh-size estimate convergence"
 echo ""
 

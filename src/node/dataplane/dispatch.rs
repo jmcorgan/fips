@@ -149,6 +149,16 @@ impl Node {
         }
         self.pending_tun_packets.remove(node_addr);
 
+        // Release the path MTU state this peer's promotion seeded: the link it
+        // measured has just gone. The other callers all fire on session state,
+        // so without this a peer that never opened an FSP session leaves both
+        // its `path_mtu_lookup` entry and its seeding-transport record behind
+        // for the life of the process. The peer is already out of `self.peers`
+        // above, so no reseed follows and the two go together, which is what
+        // keeps a peer returning over a wider link from being clamped to the
+        // one it left.
+        self.path_mtu_lookup_release(node_addr);
+
         let link_id = peer.link_id();
         let transport_id = peer.transport_id();
 

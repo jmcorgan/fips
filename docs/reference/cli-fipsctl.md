@@ -16,8 +16,8 @@ one JSON request, and pretty-prints the response. Exits with a
 non-zero status if the socket cannot be reached, the daemon returns an
 error, or the request times out.
 
-`fipsctl keygen` is a special case: it does not contact the daemon and
-operates purely on local files.
+`fipsctl keygen` and `fipsctl address` are special cases: they do not
+contact the daemon and operate purely on local files.
 
 For the line-delimited JSON wire protocol, see
 [control-socket.md](control-socket.md). For the YAML configuration
@@ -97,6 +97,30 @@ daemon.
 `fips.key` is written with mode `0600` and `fips.pub` with mode `0644`
 on Unix. After running `keygen`, set `node.identity.persistent: true`
 in `fips.yaml` or the daemon will overwrite the keys on next start.
+
+### `address [identity] [options]`
+
+Print a node's mesh address (`fd00::/8`) and nothing else, so it can be
+captured in a shell substitution. Does not contact the daemon, which
+makes it usable from an installer or image build where no node is
+running.
+
+| Argument | Description |
+| -------- | ----------- |
+| `identity` | npub (bech32) or hostname from `/etc/fips/hosts`. Omit to use this node's own identity. |
+
+| Flag | Argument | Default | Description |
+| ---- | -------- | ------- | ----------- |
+| `-k`, `--key` | `PATH` | *(none)* | Derive from this key file (an `nsec`) or public key file (an `npub`). Conflicts with `identity`. |
+
+With neither an `identity` nor `--key`, the address comes from
+`fips.key` in the default key directory (the same directory `keygen`
+writes to), falling back to `fips.pub` beside it, since `fips.key` is
+mode `0600` and an unprivileged run cannot read it.
+
+The address is derived from the public key exactly as the daemon
+derives its own: `fd` followed by the first 15 bytes of
+SHA-256(pubkey).
 
 ### `connect <peer> <address> <transport>`
 

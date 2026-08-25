@@ -304,6 +304,52 @@ fn test_node_link_management() {
 }
 
 #[test]
+fn remove_link_clears_a_reverse_lookup_entry_keyed_on_a_second_address_form() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+
+    let link_id = node.allocate_link_id();
+    node.add_link(Link::connectionless(
+        link_id,
+        transport_id,
+        TransportAddr::from_string("10.128.2.4:2121"),
+        LinkDirection::Inbound,
+        Duration::from_millis(50),
+    ))
+    .unwrap();
+
+    // The cross-connection arms key the surviving link on the *packet's*
+    // source address, which need not be the form the link itself carries.
+    node.addr_to_link.insert(
+        (transport_id, TransportAddr::from_string("node-b:2121")),
+        link_id,
+    );
+
+    // An entry another link has claimed is not this link's to remove.
+    let other_link_id = node.allocate_link_id();
+    node.addr_to_link.insert(
+        (transport_id, TransportAddr::from_string("10.128.2.5:2121")),
+        other_link_id,
+    );
+
+    node.remove_link(&link_id);
+
+    assert!(
+        node.find_link_by_addr(transport_id, &TransportAddr::from_string("10.128.2.4:2121"))
+            .is_none()
+    );
+    assert!(
+        node.find_link_by_addr(transport_id, &TransportAddr::from_string("node-b:2121"))
+            .is_none(),
+        "the second address form outlived the link it named"
+    );
+    assert_eq!(
+        node.find_link_by_addr(transport_id, &TransportAddr::from_string("10.128.2.5:2121")),
+        Some(other_link_id)
+    );
+}
+
+#[test]
 fn test_node_link_limit() {
     let mut node = make_node_with_max_links(2);
 
@@ -2144,6 +2190,113 @@ async fn test_seed_path_mtu_keeps_tighter_value_when_reseeding_same_transport() 
     }
 }
 
+/// The seeding record is bounded by the same lifecycle that writes it.
+///
+/// Promotion seeds; release drops. Without the release the map keeps a row
+/// per peer this node has ever linked with, for the life of the process, and
+/// the two stores drift apart: `path_mtu_lookup` forgets the value while the
+/// record still names the transport that supplied it.
+#[tokio::test]
+async fn test_releasing_a_path_drops_the_seeding_transport_record_with_the_value() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let peer_addr = make_node_addr(0xE4);
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.11:2121");
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    assert_eq!(
+        node.path_mtu_seeded_by
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .copied(),
+        Some(TransportId::new(1)),
+        "the seed records the transport it came from"
+    );
+
+    // No entry in `node.peers`, so nothing reseeds behind the release — the
+    // departed-peer case.
+    node.path_mtu_lookup_release(&peer_addr);
+
+    assert!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .is_none(),
+        "release drops the stored value"
+    );
+    assert!(
+        node.path_mtu_seeded_by
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .is_none(),
+        "release must drop the seeding record with it, or the map grows for \
+         the life of the process"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+/// The live-link case: release is immediately followed by a reseed, so both
+/// stores come back rather than leaving a linked peer on the fallback ceiling.
+#[tokio::test]
+async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let udp = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), udp);
+
+    let identity = make_peer_identity();
+    let peer_addr = *identity.node_addr();
+    let fips_addr = crate::FipsAddress::from_node_addr(&peer_addr);
+    let transport_addr = TransportAddr::from_string("10.0.0.12:2121");
+
+    let mut peer = crate::peer::ActivePeer::new(identity, LinkId::new(1), 0);
+    peer.set_current_addr(TransportId::new(1), transport_addr.clone());
+    node.peers.insert(peer_addr, peer);
+
+    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.path_mtu_lookup_release(&peer_addr);
+
+    assert_eq!(
+        node.path_mtu_lookup
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .map(|e| e.mtu),
+        Some(1452),
+        "a peer whose link is still up is reseeded from that link"
+    );
+    assert_eq!(
+        node.path_mtu_seeded_by
+            .read()
+            .unwrap()
+            .get(&fips_addr)
+            .copied(),
+        Some(TransportId::new(1)),
+        "and the seeding record comes back with it, so a later move is still \
+         detectable"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
 // === Outbound admission gate tests ===
 
 /// Inject `count` synthetic active peers into `node.peers` so peer_count()
@@ -2912,8 +3065,8 @@ async fn app_owned_udp_fd_seam_stays_silent_without_a_udp_transport() {
 }
 
 /// A UDP transport that never bound has no fd to hand out. The bind address is
-/// deliberately unparseable — a busy port would not do it, since
-/// `UdpRawSocket::open` sets `SO_REUSEADDR`/`SO_REUSEPORT` before binding.
+/// deliberately unparseable, so the failure is in parsing and cannot depend on
+/// what else happens to hold a port while the suite runs.
 #[cfg(unix)]
 #[tokio::test]
 async fn app_owned_udp_fd_seam_stays_silent_when_the_udp_transport_fails_to_start() {
@@ -4159,4 +4312,75 @@ fn mesh_filter_resolves_the_live_tun_device_rather_than_the_configured_name() {
 
     node.tun_name = Some(loopback.to_string());
     assert_eq!(node.mesh_ifindex(), Some(expected));
+}
+
+/// The msg1 handler keeps its pending slot for as long as it is running.
+///
+/// The complement of `msg1_reject_arms_do_not_release_another_handshakes_slot`:
+/// that one covers releasing a slot the handler never took, this one covers
+/// releasing its own slot too early. Rebinding `handle_msg1`'s `let _slot` to
+/// a bare `_` drops the guard at acquire time, so the limiter's concurrency
+/// limb stops bounding anything — and every counter this test could read
+/// afterwards is identical either way, because the slot comes back at the end
+/// of the handler in both worlds. The difference exists only while the handler
+/// is on the stack, which is why the observation lives there: the
+/// `#[cfg(test)]` assertion in `handle_msg1` immediately below the acquire
+/// fires under the premature release and under nothing else.
+///
+/// Two packets, so the handler is entered twice on different paths past the
+/// acquire, and each arm asserts the reject counter it must bump. Without
+/// that, a msg1 refused before the acquire (an empty bucket, say) would leave
+/// this test passing while sampling nothing.
+#[tokio::test]
+async fn msg1_handler_holds_its_pending_slot_while_the_handler_runs() {
+    use crate::noise::HANDSHAKE_MSG1_SIZE;
+    use crate::proto::fmp::wire::build_msg1;
+    use crate::utils::index::SessionIndex;
+
+    // No transport is registered: both arms reject before any send, and the
+    // absent transport admits past the `accept_connections` gate.
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let source = TransportAddr::from_string("198.51.100.9:4141");
+    let packet = |data: Vec<u8>| ReceivedPacket {
+        transport_id,
+        remote_addr: source.clone(),
+        data,
+        timestamp_ms: 1000,
+    };
+
+    assert_eq!(
+        node.msg1_rate_limiter.pending_count(),
+        0,
+        "baseline: no handshake in flight"
+    );
+
+    // Arm 1: rejected at the header parse, the shortest path past the acquire.
+    let before = node.stats().handshake.bad_state;
+    node.handle_msg1(packet(vec![0u8; 8])).await;
+    assert_eq!(
+        node.stats().handshake.bad_state,
+        before + 1,
+        "arm 1 must reach the invalid-header reject, not a rate-limit refusal"
+    );
+
+    // Arm 2: well-formed header, unusable Noise payload — rejected further in,
+    // after the duplicate short-circuit and the DH attempt.
+    let before = node.stats().handshake.bad_state;
+    node.handle_msg1(packet(build_msg1(
+        SessionIndex::new(0x4242),
+        &[0u8; HANDSHAKE_MSG1_SIZE],
+    )))
+    .await;
+    assert_eq!(
+        node.stats().handshake.bad_state,
+        before + 1,
+        "arm 2 must reach the receive_handshake_init reject"
+    );
+
+    assert_eq!(
+        node.msg1_rate_limiter.pending_count(),
+        0,
+        "each handler released its own slot exactly once on the way out"
+    );
 }

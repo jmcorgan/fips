@@ -1,0 +1,77 @@
+name: Release Object
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create the Release object for"
+        required: true
+
+# Every packaging workflow's upload job runs a `Wait for tag release` step that
+# polls `gh release view` 20 times at 15s intervals and then fails the job. Five
+# waiters and no creator means a tag push fails all five unless a human runs
+# `gh release create` inside that five-minute budget. This job is the creator.
+#
+# It deliberately does not live in a packaging workflow. The previous creator did
+# (package-openwrt.yml, via an action with generate_release_notes), and it raced
+# the operator's hand-created object for the right to decide the Release body;
+# whichever lost left the written notes stranded. Here there is one creator, it
+# publishes the notes file the release wrote, and it is idempotent, so running it
+# alongside a hand-created object is a no-op rather than a race.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-object-${{ github.ref }}
+
+jobs:
+  create-release:
+    name: Create the Release object
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Create the Release object if it does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; leaving it untouched."
+            exit 0
+          fi
+
+          args=(--repo "${GITHUB_REPOSITORY}" --title "FIPS ${TAG}")
+
+          # A tag carrying a pre-release suffix (v0.5.0-rc1) is an RC: it is
+          # marked as a pre-release and has no written notes of its own, since
+          # the notes are finalized for the stable tag.
+          notes="docs/releases/release-notes-${TAG}.md"
+          if [[ "${TAG}" == *-* ]]; then
+            args+=(--prerelease --notes "Release candidate - packaging validation only.")
+          elif [[ -f "${notes}" ]]; then
+            args+=(--notes-file "${notes}")
+          else
+            # Never --generate-notes: an auto-generated commit list published
+            # under a stable tag is exactly what stranded the written notes
+            # before. An empty body is visibly wrong and trivially editable.
+            echo "::warning::${notes} is missing; publishing ${TAG} with an empty body."
+            args+=(--notes "")
+          fi
+
+          if ! gh release create "${TAG}" "${args[@]}"; then
+            # A concurrent creator - the operator by hand, or a re-run - may have
+            # won between the check above and here. An object that now exists is
+            # the outcome this job wanted.
+            gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1
+            echo "Release ${TAG} was created concurrently; nothing to do."
+          fi

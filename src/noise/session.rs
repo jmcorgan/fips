@@ -14,7 +14,17 @@ pub struct NoiseSession {
     send_cipher: CipherState,
     /// Cipher for receiving.
     recv_cipher: CipherState,
-    /// Handshake hash.
+    /// Handshake hash, copied out of the handshake's `SymmetricState`.
+    ///
+    /// Deliberately not cleared on drop, unlike the copy it came from. That
+    /// copy is cleared because it sits beside the chaining key in a type whose
+    /// contract is that it erases what it holds; this one is a transcript hash
+    /// that nothing derives a key from, and `handshake_hash()` hands it out to
+    /// any caller. A type cannot both publish a value and treat it as secret.
+    ///
+    /// Revisit if the hash ever becomes key-adjacent: feeding it to the AEAD as
+    /// associated data, or building channel binding or an exporter on it, would
+    /// make this session's copy the long-lived home of something worth erasing.
     handshake_hash: [u8; 32],
     /// Remote peer's static public key.
     remote_static: PublicKey,

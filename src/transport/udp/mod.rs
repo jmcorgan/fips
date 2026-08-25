@@ -100,11 +100,41 @@ impl UdpTransport {
     /// Raw file descriptor of the bound listen socket, or `None` before
     /// `start_async` has bound one.
     ///
+    /// The socket stays owned by the transport, so the descriptor is a borrow
+    /// and not a handover. It is the wildcard listen socket only: the per-peer
+    /// `connect()`-ed sockets the fast path opens on Linux and macOS are not
+    /// reachable through here.
+    ///
+    /// What a holder may do with it: read it (`getsockname`, `getsockopt`),
+    /// query it (`SIOCGIFINDEX` and friends), and set the host-network options
+    /// the seam exists for — binding it to a device (`SO_BINDTODEVICE`),
+    /// marking it (`SO_MARK`), or attaching it to a routing table. `dup()` is
+    /// fine as long as the duplicate is closed by whoever made it.
+    ///
+    /// What a holder may not do: `close()` it, adopt it into an owning wrapper
+    /// (`OwnedFd::from_raw_fd`, `UdpSocket::from_raw_fd`) whose `Drop` will
+    /// close it, `shutdown()` it, re-`bind()` or `connect()` it, or clear
+    /// `O_NONBLOCK` on it. The transport registered this descriptor with the
+    /// tokio reactor through `AsyncFd`, and reads packets from it on its own
+    /// task; any of those actions either stalls the receive loop or, in the
+    /// case of a close, frees a number the kernel is free to hand to the next
+    /// socket or file this process opens, at which point every later use of it
+    /// silently addresses something else.
+    ///
+    /// The descriptor is invalidated by anything that drops the transport's
+    /// socket: `stop_async`, the node stop that calls it, a transport that
+    /// fails and is torn down, or dropping the transport itself. **Nothing
+    /// notifies the holder when that happens.** A holder that outlives a stop
+    /// has to treat the value it kept as stale on its own account — after a
+    /// restart the transport binds a fresh socket, and the descriptor names a
+    /// different socket even when the kernel hands back the same number.
+    /// Fetch it again after each `start_async` rather than caching it
+    /// across one; embedders that receive it through
+    /// [`Node::enable_app_owned_udp_fd`](crate::Node::enable_app_owned_udp_fd)
+    /// get exactly that, one message per successful bind.
+    ///
     /// Unix-only: `RawFd` is a unix concept and the Windows backend is built
-    /// on `tokio::net::UdpSocket` with no descriptor to hand out. The socket
-    /// stays owned by the transport, so the descriptor is a borrow with no
-    /// lifetime promise beyond "this is the transport's socket, and it is
-    /// open right now".
+    /// on `tokio::net::UdpSocket` with no descriptor to hand out.
     #[cfg(unix)]
     pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
         use std::os::unix::io::AsRawFd;

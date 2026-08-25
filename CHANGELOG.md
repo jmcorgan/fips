@@ -521,6 +521,26 @@ with v0.4.x or earlier peers.
 
 #### Packaging & deployment
 
+- A NixOS module and an overlay are exposed from the flake, so a flake consumer
+  enables the daemon with one line rather than hand-rolling a systemd unit.
+  `overlays.default` adds `pkgs.fips`, and `nixosModules.default` provides
+  `services.fips.*`: `enable`, `package`, `configFile`, `openFirewall` (UDP 2121
+  and TCP 8443) and `dns.enable`, which routes `.fips` to `[::1]:5354` through
+  systemd-resolved declaratively rather than with setup and teardown scripts.
+  `packaging/nixos/README.md` documents it with a full consumer `flake.nix`.
+  Contributed by Arjen. **Unexercised here**: no CI job builds the flake and no
+  Nix toolchain is present on the machine this release was assembled on, so the
+  module is untested outside its author's environment.
+
+- `fipsctl address [npub|hostname]` prints a node's `fd00::/8` mesh address and
+  nothing else, without contacting the daemon. With no argument it derives the
+  local node's address from `fips.key` in the default key directory, falling
+  back to the world-readable `fips.pub` beside it; `--key PATH` names a key or
+  public key file elsewhere. This lets an installer or image build write a mesh
+  address into a config file at a point where no node is running and none can
+  be, and keeps the derivation in one place rather than reimplemented by
+  whatever needs it.
+
 - `packaging/debian/build-deb.sh --features <list>` builds the `.deb` with a
   Cargo feature list, which is how an instrumented package is produced for a
   measurement run. The auto-derived dev Version gains a matching `+<features>`
@@ -728,6 +748,36 @@ with v0.4.x or earlier peers.
   nothing on the wire changes: encoded bytes and decode decisions are identical.
 
 ### Fixed
+
+#### Peer and link state
+
+- A peer that goes away no longer leaves its path-MTU state behind. The record
+  of which transport link-seeded a destination's path MTU had no removal site
+  on any lifecycle, so the map grew one entry per peer this node had ever
+  linked with and held them for the life of the process. Both the stored value
+  and its seeding record are now released when the path they describe goes,
+  together rather than separately: releasing the record alone would leave the
+  value with nothing recording where it came from, and a peer returning over a
+  wider transport would then be refused by the never-loosen rule indefinitely.
+  A peer whose link is still up has both written straight back by the reseed
+  that already follows.
+
+- Removing a link now clears every reverse-lookup key it was inserted under.
+  The removal rebuilt one key from the link's own remote address, so an entry
+  inserted under a different address form — which the cross-connection
+  promotion arms do, keying on the packet's source address — outlived the link
+  it named. An entry a newer link has since claimed is still left alone.
+
+- A rejected handshake no longer strands a session index or a retry schedule.
+  Two reject arms freed neither, which the `next`-line versions already do;
+  master now carries the same shape, so an ACL-rejected outbound dial is
+  rescheduled and an abandoned rekey index is returned rather than held.
+
+#### Transport
+
+- The UDP listen socket's address-reuse flags are now set before its bind
+  rather than after, where they had no effect on the socket they were meant to
+  configure.
 
 #### Control socket
 

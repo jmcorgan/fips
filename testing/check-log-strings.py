@@ -37,6 +37,14 @@ ALLOWED = {
     "ERROR": "tracing's own level token, produced by the subscriber's formatter",
     " ERROR ": "tracing's own level token, produced by the subscriber's formatter",
     " WARN ": "tracing's own level token, produced by the subscriber's formatter",
+    "caught a signal": (
+        "read from the strfry relay container's log, not the fips daemon's — "
+        "strfry's own crash handler writes it"
+    ),
+    "terminate called": (
+        "read from the strfry relay container's log, not the fips daemon's — "
+        "the C++ runtime writes it on an uncaught exception"
+    ),
     "Bootstrapped 100%": (
         "read from the tor-daemon container's log, not the fips daemon's — "
         "Tor's own bootstrap progress line"

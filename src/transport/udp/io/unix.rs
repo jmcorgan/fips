@@ -57,18 +57,26 @@ impl UdpRawSocket {
         sock.set_nonblocking(true)
             .map_err(|e| TransportError::StartFailed(format!("set nonblocking failed: {}", e)))?;
 
-        // SO_REUSEPORT lets per-peer `ConnectedPeerSocket`s bind
-        // to the same wildcard port the listen socket holds. Must
-        // be set BEFORE bind. Without this, the connected-UDP
-        // activation handler fails with EADDRINUSE on Linux and
-        // every outbound packet falls back to the wildcard listen
-        // socket — losing the kernel 5-tuple cache benefit and
-        // most of the multihop forwarding throughput gain.
-        let _ = sock.set_reuse_port(true);
-        let _ = sock.set_reuse_address(true);
-
         sock.bind(&bind_addr.into())
             .map_err(|e| TransportError::StartFailed(format!("bind failed: {}", e)))?;
+
+        // SO_REUSEPORT lets per-peer `ConnectedPeerSocket`s bind to the same
+        // port this listen socket holds; without it the connected-UDP
+        // activation handler fails with EADDRINUSE on Linux and every
+        // outbound packet falls back to the wildcard listen socket, losing
+        // the kernel 5-tuple cache benefit and most of the multihop
+        // forwarding throughput gain.
+        //
+        // Set AFTER bind, deliberately. The flags mean different things
+        // either side of it: before bind, "the kernel may give me a port
+        // another socket already holds", which for the `outbound_only`
+        // `0.0.0.0:0` bind means duplicate ephemeral ports, and for a
+        // configured port means a second daemon silently shares it instead
+        // of failing to start; after bind, "another socket may later join my
+        // port", which is the only half the fast path needs. A joiner still
+        // binds successfully against a holder flagged after its own bind.
+        let _ = sock.set_reuse_port(true);
+        let _ = sock.set_reuse_address(true);
 
         // Set socket buffer sizes
         sock.set_recv_buffer_size(recv_buf_size)

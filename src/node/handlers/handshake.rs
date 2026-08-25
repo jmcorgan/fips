@@ -236,6 +236,12 @@ impl Node {
         } else {
             Msg1Class::Stranger
         };
+        // The binding name matters. `_slot` holds the guard until this
+        // function returns, and that is what releases the pending slot on
+        // every exit path. Renaming it to a bare `_` drops the guard right
+        // here instead, releasing the slot at acquire time — silently, with
+        // no clippy lint catching the difference. Do not "tidy" this
+        // binding; the assertion below is what reds if it is tidied.
         let _slot = match self.msg1_rate_limiter.start_handshake(class) {
             Ok(slot) => slot,
             Err(reason) => {
@@ -248,6 +254,19 @@ impl Node {
                 return;
             }
         };
+
+        // Test-build witness for the paragraph above, and the only thing that
+        // observes it. A guard released at acquire time leaves this msg1
+        // in flight with its slot already back in the pool, which no counter,
+        // log line or lint reports: by the time any test can look, the count
+        // has returned to its baseline either way. Sampling it here, on the
+        // handler's own stack, is what tells the two apart — see
+        // `msg1_handler_holds_its_pending_slot_while_the_handler_runs`.
+        #[cfg(test)]
+        assert!(
+            self.msg1_rate_limiter.pending_count() > 0,
+            "the msg1 pending slot was released before the handler ran"
+        );
 
         // accept_connections gate. Rekey/restart msg1 on an existing link
         // is always admitted; the gate only filters truly-fresh connections
@@ -1000,6 +1019,19 @@ impl Node {
             if let Some(idx) = our_index {
                 let _ = self.index_allocator.free(idx);
             }
+            // Put the dial back on the retry schedule. The disposal above takes
+            // this leg out of the stuck-leg sweep — `has_pending_leg` reads false
+            // for it from here on, so the reap that normally reaches
+            // `note_handshake_timeout` never runs — and that reflex is the only
+            // thing that seeds `retry_pending` for a configured peer.
+            // `close_connection` only drops the transport's pool entry; it
+            // schedules nothing.
+            //
+            // `peer_identity` is safe to reschedule against here because this is
+            // an IK dial: the initiator's expected identity is fixed at
+            // `start_handshake` and `complete_handshake` never overwrites it, so
+            // it is still the peer we meant to dial and not whoever answered.
+            self.note_handshake_timeout(*peer_identity.node_addr(), packet.timestamp_ms);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;

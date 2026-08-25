@@ -4530,19 +4530,38 @@ async fn test_forged_setups_from_one_link_peer_stop_creating_session_entries_onc
 
 #[tokio::test]
 async fn test_a_drained_setup_bucket_refills_and_admits_the_next_legitimate_setup() {
-    // Fast refill: the point is that the denial is transient, and that the
-    // initiator's own msg1 resend schedule covers a window this short.
-    let mut nodes = make_setup_limited_pair(2, 50.0).await;
+    // The refill has to be slow enough that the draining loop below cannot be
+    // outrun by the refill it is draining against. At the 50/s this test used
+    // to run at, a token returned every 20 ms, so on a loaded runner the loop
+    // outlived its own window, the third setup was admitted, and the
+    // precondition failed on arrangement rather than on behaviour. At 2/s a
+    // delivery would have to take 500 ms to lose that race.
+    let mut nodes = make_setup_limited_pair(2, 2.0).await;
 
-    for _ in 0..3 {
+    // Deliver until one is actually refused, rather than assuming three is
+    // enough: a delivery the refill absorbs costs one more iteration and
+    // nothing else. The cap is what a runner slow enough to lose even this
+    // race trips, and it says so rather than reporting a drained bucket that
+    // was never drained.
+    let before = nodes[1].node.stats().session.setup_rate_limited;
+    let mut delivered = 0;
+    while nodes[1].node.stats().session.setup_rate_limited == before {
+        assert!(
+            delivered < 50,
+            "the bucket must actually be drained before the refill is tested; \
+             50 forged setups drew no refusal, so each delivery is outlasting \
+             the 500 ms refill interval"
+        );
         deliver_forged_setup_over_link(&mut nodes).await;
+        delivered += 1;
     }
-    assert!(
-        nodes[1].node.stats().session.setup_rate_limited > 0,
-        "the bucket must actually be drained before the refill is tested"
-    );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A full burst back from empty at 2/s, so the legitimate setup below meets
+    // the same bucket however many tokens the drain left behind. The point
+    // being made is that the denial is transient and clears on its own; the
+    // length of the window is a function of the configured rate, not of the
+    // claim.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     establish_pair_session(&mut nodes).await;
 
     cleanup_nodes(&mut nodes).await;
