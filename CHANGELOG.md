@@ -1842,6 +1842,29 @@ with v0.4.x or earlier peers.
   doing so, which is a denial of new sessions rather than the unbounded memory
   growth it replaces.
 
+- One inbound BLE connector can no longer stall every other inbound
+  connection. The accept loop ran the pre-handshake pubkey exchange inline, so
+  a peer that connected an L2CAP channel and then said nothing held the loop
+  for the full 5-second exchange deadline and no other inbound connection was
+  accepted in that window; the maximum-connections argument the loop was given
+  was never used, so the effective concurrency was one. Each inbound connection
+  now runs its handshake in its own task, up to eight in flight, and at that
+  bound the oldest pending handshake is aborted to make room rather than the
+  loop waiting for a slot: a healthy exchange is one round trip, so anything
+  still pending under a flood is overwhelmingly the flooder's, and a genuinely
+  slow peer that is aborted reconnects, which is better than never being
+  accepted at all. Aborted handshakes are counted in the transport's stats as
+  `handshakes_aborted`. The tasks live in a set owned by the accept loop, so
+  stopping the transport stops them too and none can insert into a pool that
+  stop has just drained. Separately, the send half of the pubkey exchange had
+  no deadline at all while the receive half had one, so a peer that stopped
+  draining its channel could park the write forever; it now shares the same
+  5-second deadline, which also covers the outbound connect and scan-probe
+  paths. **What this does not close**: eight simultaneous silent connectors
+  still occupy the whole in-flight budget, and no BlueZ hardware was exercised,
+  so the controller's own concurrent-link limit and accept backlog depth stay
+  unmeasured.
+
 - An accepted inbound TCP connection no longer holds a slot indefinitely
   without sending anything. The cap was tested at accept and the pool insert
   and counter bump followed with no read in between, while the frame reader's

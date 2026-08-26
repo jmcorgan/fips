@@ -560,6 +560,17 @@ pub struct Node {
     /// TUN interface name (for cleanup).
     tun_name: Option<String>,
 
+    /// Slot the embedder installs its BLE radio into, armed by
+    /// [`Self::enable_app_owned_ble_radio`]. `None` unless armed.
+    ///
+    /// Gated on the BLE transport existing *and* on its backend being the
+    /// embedder-supplied one — the same condition
+    /// `transport::ble::io_android` itself is compiled under, so the seam is
+    /// absent on platforms whose radio is opened in process, and present in a
+    /// test build so its contract is covered on an ordinary runner.
+    #[cfg(all(ble_available, any(target_os = "android", test)))]
+    ble_radio: Option<Arc<crate::transport::ble::io_android::BleRadioSlot>>,
+
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
@@ -859,6 +870,8 @@ impl Node {
             )),
             tun_state,
             tun_name: None,
+            #[cfg(all(ble_available, any(target_os = "android", test)))]
+            ble_radio: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -1029,6 +1042,8 @@ impl Node {
             )),
             tun_state,
             tun_name: None,
+            #[cfg(all(ble_available, any(target_os = "android", test)))]
+            ble_radio: None,
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             pending_outbound: HashMap::new(),
@@ -1199,7 +1214,7 @@ impl Node {
                 let transport_id = self.allocate_transport_id();
                 let adapter = ble_config.adapter().to_string();
                 let mtu = ble_config.mtu();
-                match crate::transport::ble::io::BluerIo::new(&adapter, mtu).await {
+                match crate::transport::ble::io_linux::BluerIo::new(&adapter, mtu).await {
                     Ok(io) => {
                         let ble = crate::transport::ble::BleTransport::new(
                             transport_id,
@@ -1220,6 +1235,32 @@ impl Node {
             if !ble_instances.is_empty() {
                 #[cfg(not(test))]
                 tracing::warn!("BLE transport configured but this build lacks BlueZ support");
+            }
+        }
+
+        // Create BLE transport instances over an embedder-supplied radio.
+        // Built whether or not a radio is installed yet: the backend resolves
+        // the slot per operation, so one that arrives later is adopted in
+        // place rather than needing the node rebuilt around it.
+        #[cfg(all(target_os = "android", not(bluer_available), not(test)))]
+        if let Some(slot) = self.ble_radio.clone() {
+            let ble_instances: Vec<_> = self
+                .config()
+                .transports
+                .ble
+                .iter()
+                .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+                .collect();
+            for (name, ble_config) in ble_instances {
+                let transport_id = self.allocate_transport_id();
+                let ble = crate::transport::ble::BleTransport::new(
+                    transport_id,
+                    name,
+                    ble_config,
+                    crate::transport::ble::io_android::AndroidIo::new(Arc::clone(&slot)),
+                    packet_tx.clone(),
+                );
+                transports.push(TransportHandle::Ble(ble));
             }
         }
 
@@ -1289,7 +1330,7 @@ impl Node {
     /// Resolve a BLE address string (`"adapter/AA:BB:CC:DD:EE:FF"`) to a
     /// (TransportId, TransportAddr) pair by finding the BLE transport
     /// instance matching the adapter name.
-    #[cfg(bluer_available)]
+    #[cfg(ble_available)]
     fn resolve_ble_addr(&self, addr_str: &str) -> Result<(TransportId, TransportAddr), NodeError> {
         let ta = TransportAddr::from_string(addr_str);
         let adapter = crate::transport::ble::addr::adapter_from_addr(&ta).ok_or_else(|| {
@@ -3442,6 +3483,56 @@ impl Node {
         let (udp_fd_tx, udp_fd_rx) = std::sync::mpsc::channel();
         self.supervisor.udp_fd_tx = Some(udp_fd_tx);
         udp_fd_rx
+    }
+
+    /// Set up an **app-owned BLE radio**: the embedder supplies the radio the
+    /// BLE transport drives, because on this platform there is no
+    /// Rust-reachable one to open. Call this after [`Node::new`] and
+    /// **before** [`Self::start`] — the transport is built during `start`, and
+    /// only a node armed by then has a slot to build it over.
+    ///
+    /// Returns the slot. Installing, replacing and clearing a radio through it
+    /// is safe at any time, from any thread, including long after the node is
+    /// running:
+    ///
+    /// ```no_run
+    /// # async fn f(node: &mut fips::Node, radio: std::sync::Arc<dyn fips::transport::ble::io_android::AndroidRadio>)
+    /// # -> Result<(), Box<dyn std::error::Error>> {
+    /// let slot = node.enable_app_owned_ble_radio();   // after new(), before start()
+    /// node.start().await?;
+    /// // ...whenever the embedder's radio service comes up, and again each
+    /// // time it restarts:
+    /// slot.install(fips::transport::ble::io_android::AndroidBleBridge::new(radio));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The lateness is the point rather than a convenience. The radio belongs
+    /// to a service whose lifetime is not the node's: the user can turn it on
+    /// after the mesh is already running, and off and on again, and each start
+    /// typically produces a fresh radio. A node that had to be built around an
+    /// existing radio would make that mean "tear the node down and rebuild
+    /// it", dropping every peer, session and route for as long as
+    /// re-handshaking takes. So the transport is built and started whether or
+    /// not a radio is installed, and resolves the slot per operation: it
+    /// listens and scans against whichever radio is there, dials fail while
+    /// there is none, and everything recovers on its own when one appears.
+    /// Streams already open keep the radio they were opened on rather than
+    /// migrating.
+    ///
+    /// Deliberately narrow, and shaped like the [`Self::enable_app_owned_tun`]
+    /// seam it sits beside: one call, no callbacks, and no lifecycle contract
+    /// beyond the slot outliving the node. Arming twice returns the same slot,
+    /// so a second call cannot orphan a radio installed through the first. The
+    /// seam does not exist on platforms whose BLE backend is opened in
+    /// process, since there is nothing there for an embedder to supply.
+    #[cfg(all(ble_available, any(target_os = "android", test)))]
+    pub fn enable_app_owned_ble_radio(
+        &mut self,
+    ) -> Arc<crate::transport::ble::io_android::BleRadioSlot> {
+        Arc::clone(self.ble_radio.get_or_insert_with(|| {
+            Arc::new(crate::transport::ble::io_android::BleRadioSlot::new())
+        }))
     }
 
     /// Address the built-in `.fips` DNS responder is listening on, or `None`

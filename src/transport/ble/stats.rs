@@ -1,4 +1,12 @@
 //! BLE transport statistics.
+//!
+//! Counters reach an operator through `show_transports`, which serves them
+//! off the control socket. Each connect outcome also emits a `debug!` at the
+//! moment it happens, carrying a uniform field set — `addr`, `role`
+//! (`central` for a dial, `peripheral` for an accept), `outcome` (a stable
+//! kebab-case string matching the counter name), and `discovery_ms` where a
+//! probe stamp exists. The counters give the aggregate; the trace stream
+//! gives the same taxonomy per event and per peer.
 
 use portable_atomic::{AtomicU64, Ordering};
 
@@ -20,6 +28,8 @@ pub struct BleStats {
     pub connections_accepted: AtomicU64,
     pub connections_rejected: AtomicU64,
     pub connect_timeouts: AtomicU64,
+    /// Outbound connects that failed with an error rather than timing out.
+    pub connect_errors: AtomicU64,
     pub pool_evictions: AtomicU64,
     pub advertisements_sent: AtomicU64,
     pub scan_results: AtomicU64,
@@ -40,6 +50,7 @@ impl BleStats {
             connections_accepted: AtomicU64::new(0),
             connections_rejected: AtomicU64::new(0),
             connect_timeouts: AtomicU64::new(0),
+            connect_errors: AtomicU64::new(0),
             pool_evictions: AtomicU64::new(0),
             advertisements_sent: AtomicU64::new(0),
             scan_results: AtomicU64::new(0),
@@ -93,6 +104,15 @@ impl BleStats {
         self.connect_timeouts.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record an outbound connect that failed with an error.
+    ///
+    /// Kept separate from [`Self::record_connect_timeout`]: a refusal and a
+    /// silence are different faults and blur into one useless number if
+    /// merged.
+    pub fn record_connect_error(&self) {
+        self.connect_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record a pool eviction (non-static peer displaced).
     pub fn record_pool_eviction(&self) {
         self.pool_evictions.fetch_add(1, Ordering::Relaxed);
@@ -122,6 +142,7 @@ impl BleStats {
             connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
             connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
             connect_timeouts: self.connect_timeouts.load(Ordering::Relaxed),
+            connect_errors: self.connect_errors.load(Ordering::Relaxed),
             pool_evictions: self.pool_evictions.load(Ordering::Relaxed),
             advertisements_sent: self.advertisements_sent.load(Ordering::Relaxed),
             scan_results: self.scan_results.load(Ordering::Relaxed),
@@ -149,6 +170,7 @@ pub struct BleStatsSnapshot {
     pub connections_accepted: u64,
     pub connections_rejected: u64,
     pub connect_timeouts: u64,
+    pub connect_errors: u64,
     pub pool_evictions: u64,
     pub advertisements_sent: u64,
     pub scan_results: u64,

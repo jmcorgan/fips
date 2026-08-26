@@ -1,16 +1,28 @@
 //! BLE L2CAP Transport Implementation
 //!
-//! Provides BLE-based transport for FIPS peer communication using L2CAP
-//! Connection-Oriented Channels (CoC) in SeqPacket mode. L2CAP CoC
-//! preserves message boundaries (unlike TCP byte streams), so no FMP
-//! framing is needed — each send/recv is one FIPS packet.
+//! Provides BLE-based transport for FIPS peer communication over L2CAP
+//! Connection-Oriented Channels.
+//!
+//! ## Packet boundaries
+//!
+//! Message-boundary preservation is a property of the *socket type* a
+//! backend uses, not of L2CAP. BlueZ's `SOCK_SEQPACKET` preserves SDU
+//! boundaries; other backends expose an L2CAP channel as a byte stream and
+//! may return a fragment of a packet or several packets coalesced from one
+//! read. The receive path therefore recovers boundaries from the FMP length
+//! prefix via [`stream_read::BleStreamRead`] and
+//! `crate::transport::framing::read_fmp_packet`, which is a transparent
+//! pass-through on a boundary-preserving backend.
 //!
 //! ## Architecture
 //!
-//! Transport logic (pool, neighbor, lifecycle) is separated from the
-//! BlueZ/bluer stack via the `BleIo` trait. `BluerIo` provides the real
-//! implementation (behind `cfg(bluer_available)`); `MockBleIo` provides
-//! an in-memory test double for CI without hardware.
+//! Transport logic (pool, neighbor, lifecycle) is separated from any one
+//! Bluetooth stack via the `BleIo` trait. `BluerIo` drives BlueZ (behind
+//! `cfg(bluer_available)`), [`io_android::AndroidIo`] drives a radio the
+//! embedder supplies, and `MockBleIo` is an in-memory double for tests
+//! without hardware. Which one `DefaultBleTransport` resolves to is decided
+//! by the cascade below, and the whole module is compiled only on platforms
+//! that have one of them — see `ble_available` in `build.rs`.
 //!
 //! ## Connection Pool
 //!
@@ -20,10 +32,25 @@
 
 pub mod addr;
 pub mod io;
+/// A backend whose radio is supplied by the embedder rather than opened in
+/// process.
+///
+/// Compiled under `cfg(test)` on every host as well as on the platform that
+/// will select it, so its channel machinery, slot semantics and connect
+/// routing are exercised by an ordinary test run on an ordinary runner. The
+/// platform build of it is linted but executed nowhere, which is exactly why
+/// the logic must not be behind a platform-only gate.
+#[cfg(any(target_os = "android", test))]
+pub mod io_android;
+#[cfg(bluer_available)]
+pub mod io_linux;
 pub mod neighbor;
 pub mod pool;
+pub mod psm;
 pub mod stats;
+pub mod stream_read;
 
+use super::framing::{StreamError, read_fmp_packet};
 use super::{
     ConnectionState, DiscoveredPeer, PacketTx, ReceivedPacket, Transport, TransportAddr,
     TransportError, TransportId, TransportState, TransportType,
@@ -34,6 +61,7 @@ use io::{BleIo, BleScanner, BleStream};
 use neighbor::NeighborBuffer;
 use pool::{BleConnection, ConnectionPool};
 use stats::BleStats;
+use stream_read::BleStreamRead;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,17 +72,48 @@ use tracing::{debug, info, trace, warn};
 /// Default FIPS L2CAP PSM (Protocol Service Multiplexer).
 ///
 /// 0x0085 (133) is in the dynamic range (0x0080-0x00FF).
+///
+/// This is a request and a fallback, not a guarantee. A backend whose
+/// platform assigns the PSM reports back what it actually bound (see
+/// [`io::BleIo::listen`]), and a peer that advertises its own PSM (see
+/// [`psm`]) is dialled there instead. The configured value is what a peer is
+/// dialled at when it advertises nothing.
 pub const DEFAULT_PSM: u16 = 0x0085;
 
-/// Concrete BLE transport type for use in TransportHandle.
+/// Concrete BLE transport type for use in `TransportHandle`.
 ///
-/// Production builds on glibc-linux use `BluerIo` (real BlueZ stack).
-/// Test builds, musl-linux, and non-Linux platforms use `MockBleIo`.
+/// Three arms, in priority order: an in-process BlueZ stack where one exists,
+/// otherwise a radio the embedder supplies, otherwise — and *only* in a test
+/// build — the in-memory double.
+///
+/// The mock arm is deliberately not written as "anything that is not BlueZ".
+/// That phrasing is what makes widening the module gate dangerous: a platform
+/// added to `ble_available` without a backend would silently land on an
+/// in-memory transport that compiles, starts, reports [`TransportState::Up`]
+/// and never peers, with nothing anywhere to say so. The tripwire below makes
+/// that state unrepresentable instead.
 #[cfg(all(bluer_available, not(test)))]
-pub type DefaultBleTransport = BleTransport<io::BluerIo>;
+pub type DefaultBleTransport = BleTransport<io_linux::BluerIo>;
 
-#[cfg(any(not(bluer_available), test))]
+#[cfg(all(target_os = "android", not(bluer_available), not(test)))]
+pub type DefaultBleTransport = BleTransport<io_android::AndroidIo>;
+
+#[cfg(test)]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
+
+// The tripwire. This module is only compiled when `ble_available`, so
+// reaching here means a platform declared it has BLE while having no concrete
+// backend to provide it. It cannot fire today; it exists for whoever next
+// widens `ble_available`, and it fails the build rather than shipping a
+// transport that quietly never connects.
+#[cfg(all(not(test), not(bluer_available), not(target_os = "android")))]
+compile_error!(
+    "this target is `ble_available` but has no concrete `BleIo` backend. \
+     Add its backend and an arm to the `DefaultBleTransport` cascade in \
+     src/transport/ble/mod.rs, or drop the target from `ble_available` in \
+     build.rs. Falling back to the in-memory mock in a non-test build would \
+     produce a BLE transport that starts, reports itself up, and never peers."
+);
 
 // ============================================================================
 // BLE Transport
@@ -145,13 +204,19 @@ impl<I: BleIo> BleTransport<I> {
         }
         self.state = TransportState::Starting;
 
-        let psm = self.config.psm();
+        let configured_psm = self.config.psm();
         let adapter = self.io.adapter_name().to_string();
+
+        // The PSM peers should dial us on. Only the listener knows it: a
+        // backend whose platform assigns PSMs reports back something other
+        // than what was requested, and that is what has to be advertised.
+        let mut listener_psm = configured_psm;
 
         // Start L2CAP listener for inbound connections
         if self.config.accept_connections() {
-            match self.io.listen(psm).await {
-                Ok(acceptor) => {
+            match self.io.listen(configured_psm).await {
+                Ok((acceptor, bound_psm)) => {
+                    listener_psm = bound_psm;
                     let pool = Arc::clone(&self.pool);
                     let packet_tx = self.packet_tx.clone();
                     let transport_id = self.transport_id;
@@ -167,7 +232,12 @@ impl<I: BleIo> BleTransport<I> {
                         max_conns,
                         Arc::clone(&self.neighbor_buffer),
                     )));
-                    debug!(adapter = %adapter, psm = psm, "BLE accept loop started");
+                    debug!(
+                        adapter = %adapter,
+                        psm = listener_psm,
+                        requested_psm = configured_psm,
+                        "BLE accept loop started"
+                    );
                 }
                 Err(e) => {
                     warn!(adapter = %adapter, error = %e, "failed to start BLE listener");
@@ -179,11 +249,15 @@ impl<I: BleIo> BleTransport<I> {
 
         // Start continuous advertising
         if self.config.advertise() {
-            if let Err(e) = self.io.start_advertising().await {
+            if let Err(e) = self.io.start_advertising(listener_psm).await {
                 warn!(adapter = %adapter, error = %e, "failed to start BLE advertising");
             } else {
                 self.stats.record_advertisement();
-                debug!(adapter = %adapter, "BLE advertising started (continuous)");
+                debug!(
+                    adapter = %adapter,
+                    psm = listener_psm,
+                    "BLE advertising started (continuous)"
+                );
             }
         }
 
@@ -212,7 +286,7 @@ impl<I: BleIo> BleTransport<I> {
         }
 
         self.state = TransportState::Up;
-        info!(adapter = %adapter, psm = psm, "BLE transport started");
+        info!(adapter = %adapter, psm = listener_psm, "BLE transport started");
         Ok(())
     }
 
@@ -220,6 +294,11 @@ impl<I: BleIo> BleTransport<I> {
     pub async fn stop_async(&mut self) -> Result<(), TransportError> {
         // Stop advertising
         let _ = self.io.stop_advertising().await;
+
+        // Stop scanning. Aborting the scan task below stops us reading
+        // adverts; on a backend whose radio the embedder owns, only this
+        // stops the radio.
+        let _ = self.io.stop_scanning().await;
 
         // Abort accept loop
         if let Some(task) = self.accept_task.take() {
@@ -324,17 +403,33 @@ impl<I: BleIo> BleTransport<I> {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                debug!(addr = %addr, error = %e, "BLE connect-on-send failed");
+                self.stats.record_connect_error();
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-error", error = %e,
+                    "BLE connect-on-send failed"
+                );
                 return Err(TransportError::ConnectionRefused);
             }
             Err(_) => {
                 self.stats.record_connect_timeout();
-                debug!(addr = %addr, "BLE connect-on-send timeout");
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-timeout",
+                    "BLE connect-on-send timeout"
+                );
                 return Err(TransportError::Timeout);
             }
         };
 
-        self.promote_connection(addr, &ble_addr, stream).await
+        // One reader for the life of the connection: it buffers what one
+        // `recv` left over, so packet boundaries come from the FMP length
+        // prefix rather than from the L2CAP SDU boundary.
+        let stream = Arc::new(stream);
+        let recv_mtu = stream.recv_mtu();
+        let reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+
+        self.neighbor_buffer.add_peer(&ble_addr);
+        self.promote_connection(addr, &ble_addr, stream, reader)
+            .await
     }
 
     /// Promote a newly established stream into the connection pool.
@@ -344,14 +439,14 @@ impl<I: BleIo> BleTransport<I> {
         &self,
         addr: &TransportAddr,
         ble_addr: &BleAddr,
-        stream: I::Stream,
+        stream: Arc<I::Stream>,
+        reader: BleStreamRead<I::Stream>,
     ) -> Result<(), TransportError> {
         let send_mtu = stream.send_mtu();
         let recv_mtu = stream.recv_mtu();
-        let stream = Arc::new(stream);
 
         let recv_task = tokio::spawn(receive_loop(
-            Arc::clone(&stream),
+            reader,
             addr.clone(),
             Arc::clone(&self.pool),
             self.packet_tx.clone(),
@@ -424,6 +519,7 @@ impl<I: BleIo> BleTransport<I> {
         let psm = self.config.psm();
         let timeout_ms = self.config.connect_timeout_ms();
         let addr_clone = addr.clone();
+        let neighbor_buffer = Arc::clone(&self.neighbor_buffer);
 
         let task = tokio::spawn(async move {
             let result = tokio::time::timeout(
@@ -440,9 +536,13 @@ impl<I: BleIo> BleTransport<I> {
                     let send_mtu = stream.send_mtu();
                     let recv_mtu = stream.recv_mtu();
                     let stream = Arc::new(stream);
+                    // Boundaries come from the FMP length prefix, not from
+                    // the L2CAP SDU boundary.
+                    let reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
+                    neighbor_buffer.add_peer(&ble_addr);
 
                     let recv_task = tokio::spawn(receive_loop(
-                        Arc::clone(&stream),
+                        reader,
                         addr_clone.clone(),
                         Arc::clone(&pool),
                         packet_tx,
@@ -479,11 +579,18 @@ impl<I: BleIo> BleTransport<I> {
                     stats.record_connection_established();
                 }
                 Ok(Err(e)) => {
-                    debug!(addr = %addr_clone, error = %e, "BLE connect failed");
+                    stats.record_connect_error();
+                    debug!(
+                        addr = %addr_clone, role = "central", outcome = "connect-error",
+                        error = %e, "BLE connect failed"
+                    );
                 }
                 Err(_) => {
                     stats.record_connect_timeout();
-                    debug!(addr = %addr_clone, "BLE connect timeout");
+                    debug!(
+                        addr = %addr_clone, role = "central", outcome = "connect-timeout",
+                        "BLE connect timeout"
+                    );
                 }
             }
         });
@@ -595,7 +702,15 @@ impl<I: BleIo> Transport for BleTransport<I> {
 // Background Tasks
 // ============================================================================
 
-/// Accept loop: accepts inbound L2CAP connections and adds to pool.
+// Beacon loop removed — advertising is now continuous (started once
+// in start_async, stopped in stop_async). BLE advertising overhead
+// is negligible (~0.15% duty cycle on advertising channels).
+
+/// Accept loop: accepts inbound L2CAP connections and adds them to the pool.
+///
+/// One reader is built per connection and handed to the receive loop, so
+/// packet boundaries come from the FMP length prefix rather than from the
+/// L2CAP SDU boundary.
 #[allow(clippy::too_many_arguments)]
 async fn accept_loop<A>(
     mut acceptor: A,
@@ -630,10 +745,11 @@ async fn accept_loop<A>(
                 neighbor_buffer.add_peer(&addr);
 
                 let stream = Arc::new(stream);
+                let reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
                 // Spawn receive loop
                 let recv_task = tokio::spawn(receive_loop(
-                    Arc::clone(&stream),
+                    reader,
                     ta.clone(),
                     Arc::clone(&pool),
                     packet_tx.clone(),
@@ -662,8 +778,11 @@ async fn accept_loop<A>(
                         info!(addr = %ta, send_mtu, recv_mtu, "BLE inbound connection accepted");
                     }
                     Err(e) => {
-                        warn!(addr = %ta, error = %e, "BLE pool full, inbound connection rejected");
                         stats.record_connection_rejected();
+                        warn!(
+                            addr = %ta, role = "peripheral", outcome = "pool-rejected",
+                            error = %e, "BLE pool full, inbound connection rejected"
+                        );
                         continue;
                     }
                 }
@@ -678,8 +797,14 @@ async fn accept_loop<A>(
 }
 
 /// Receive loop: reads packets from a BLE stream and delivers to node.
-async fn receive_loop<S: BleStream>(
-    stream: Arc<S>,
+///
+/// Takes the connection's `BleStreamRead` — already positioned past the
+/// pubkey exchange, and still holding anything the peer coalesced behind it
+/// — and pulls whole FIPS packets out of it using the FMP length prefix.
+/// Boundaries come from the bytes, not from the backend's socket type, so a
+/// fragment is reassembled and a coalesced tail is not lost.
+async fn receive_loop<S: BleStream + 'static>(
+    mut reader: BleStreamRead<S>,
     addr: TransportAddr,
     pool: Arc<Mutex<ConnectionPool<Arc<S>>>>,
     packet_tx: PacketTx,
@@ -687,20 +812,19 @@ async fn receive_loop<S: BleStream>(
     stats: Arc<BleStats>,
     recv_mtu: u16,
 ) {
-    let mut buf = vec![0u8; recv_mtu as usize];
     loop {
-        match stream.recv(&mut buf).await {
-            Ok(0) => {
-                debug!(addr = %addr, "BLE connection closed by peer");
-                break;
-            }
-            Ok(n) => {
-                stats.record_recv(n);
-                let packet = ReceivedPacket::new(transport_id, addr.clone(), buf[..n].to_vec());
+        match read_fmp_packet(&mut reader, recv_mtu).await {
+            Ok(data) => {
+                stats.record_recv(data.len());
+                let packet = ReceivedPacket::new(transport_id, addr.clone(), data);
                 if packet_tx.send(packet).await.is_err() {
                     trace!("BLE packet_tx closed, stopping receive loop");
                     break;
                 }
+            }
+            Err(StreamError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                debug!(addr = %addr, "BLE connection closed by peer");
+                break;
             }
             Err(e) => {
                 debug!(addr = %addr, error = %e, "BLE receive error");
@@ -713,6 +837,145 @@ async fn receive_loop<S: BleStream>(
     // Remove from pool
     let mut pool = pool.lock().await;
     pool.remove(&addr);
+}
+
+/// Consecutive-failure backoff ceiling for a pending address, as a power of
+/// two multiple of the base cooldown. At the 30 s default this caps a failing
+/// address at one dial attempt every 16 minutes.
+const MAX_PROBE_BACKOFF_SHIFT: u32 = 5;
+
+/// Ceiling on how many discovered-but-unconnected addresses are kept for
+/// retry. Resolvable private addresses rotate, so without a bound the book
+/// grows for the life of the process; with one, the total retry dial rate is
+/// bounded too (at most one dial per retry tick, spread over the book).
+const MAX_PENDING_PROBES: usize = 32;
+
+/// One discovered address awaiting a successful probe.
+#[derive(Debug, Clone)]
+struct PendingProbe {
+    addr: BleAddr,
+    /// Consecutive failed probes. Reset only by removal from the book, which
+    /// every conclusive outcome (connected, duplicate declined, already
+    /// pooled) performs.
+    failures: u32,
+    /// Earliest instant at which this address may be dialled again.
+    next_attempt: tokio::time::Instant,
+}
+
+/// The retry book for addresses the scanner has offered but which are not yet
+/// connected.
+///
+/// Exists because a scanner is not a reliable repeat source: BlueZ emits
+/// `DeviceAdded` once per address per discovery session, so an address the
+/// probe loop forgets is never offered again. Everything here therefore
+/// throttles rather than discards — an entry leaves the book on a *conclusive*
+/// outcome, or when [`MAX_PENDING_PROBES`] other addresses compete for its
+/// slot, never because it failed.
+///
+/// Two properties matter:
+///
+/// - **Consecutive failures back an address off exponentially.** A dead
+///   address is retried on a doubling interval up to
+///   [`MAX_PROBE_BACKOFF_SHIFT`], instead of being re-dialled every cooldown
+///   forever. Addresses rotate and links are lossy, so a handful of failures
+///   is normal and must not retire a peer that is still there.
+/// - **The retry tick rotates.** Probing only the head of the book let one
+///   slow or dead address starve every other pending address behind it, which
+///   on a busy radio is most of them.
+#[derive(Debug)]
+struct PendingProbes {
+    entries: Vec<PendingProbe>,
+    cooldown: std::time::Duration,
+}
+
+impl PendingProbes {
+    fn new(cooldown: std::time::Duration) -> Self {
+        Self {
+            entries: Vec::new(),
+            cooldown,
+        }
+    }
+
+    fn position(&self, addr: &BleAddr) -> Option<usize> {
+        self.entries.iter().position(|e| &e.addr == addr)
+    }
+
+    /// Record a sighting. A previously unseen address becomes immediately
+    /// eligible; a known one keeps whatever backoff it has earned, so a
+    /// scanner that re-reports the same address many times a second cannot
+    /// wash out the backoff.
+    ///
+    /// When the book is full the *most-failed* entry is evicted to make room,
+    /// which is the entry least likely to still have a peer behind it.
+    fn observe(&mut self, addr: &BleAddr, now: tokio::time::Instant) {
+        if self.position(addr).is_some() {
+            return;
+        }
+        if self.entries.len() >= MAX_PENDING_PROBES
+            && let Some(worst) = self
+                .entries
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, e)| (e.failures, e.next_attempt))
+                .map(|(i, _)| i)
+        {
+            self.entries.remove(worst);
+        }
+        self.entries.push(PendingProbe {
+            addr: addr.clone(),
+            failures: 0,
+            next_attempt: now,
+        });
+    }
+
+    /// Whether `addr` may be dialled now. An address that is not in the book
+    /// has no history to hold it back.
+    fn is_due(&self, addr: &BleAddr, now: tokio::time::Instant) -> bool {
+        match self.position(addr) {
+            Some(i) => self.entries[i].next_attempt <= now,
+            None => true,
+        }
+    }
+
+    /// Note that a probe is starting: hold the address for one base cooldown
+    /// so the attempt in flight is not duplicated.
+    fn mark_attempt(&mut self, addr: &BleAddr, now: tokio::time::Instant) {
+        if let Some(i) = self.position(addr) {
+            self.entries[i].next_attempt = now + self.cooldown;
+        }
+    }
+
+    /// Note that a probe failed. Returns the new consecutive-failure count.
+    fn record_failure(&mut self, addr: &BleAddr, now: tokio::time::Instant) -> u32 {
+        let Some(i) = self.position(addr) else {
+            return 0;
+        };
+        let e = &mut self.entries[i];
+        e.failures = e.failures.saturating_add(1);
+        let shift = (e.failures - 1).min(MAX_PROBE_BACKOFF_SHIFT);
+        e.next_attempt = now + self.cooldown * 2u32.pow(shift);
+        e.failures
+    }
+
+    /// Drop an address that reached a conclusive outcome.
+    fn resolve(&mut self, addr: &BleAddr) {
+        self.entries.retain(|e| &e.addr != addr);
+    }
+
+    /// Drop every address for which `connected` reports a live pool entry.
+    fn drop_connected(&mut self, connected: impl Fn(&BleAddr) -> bool) {
+        self.entries.retain(|e| !connected(&e.addr));
+    }
+
+    /// The next address due for a retry, rotated to the back of the book so
+    /// the following tick starts after it rather than on it.
+    fn next_due(&mut self, now: tokio::time::Instant) -> Option<BleAddr> {
+        let i = self.entries.iter().position(|e| e.next_attempt <= now)?;
+        let entry = self.entries.remove(i);
+        let addr = entry.addr.clone();
+        self.entries.push(entry);
+        Some(addr)
+    }
 }
 
 /// Combined scan + probe loop.
@@ -734,18 +997,25 @@ async fn scan_probe_loop<I: io::BleIo>(
     pool: Arc<Mutex<ConnectionPool<Arc<I::Stream>>>>,
     buffer: Arc<NeighborBuffer>,
     stats: Arc<BleStats>,
-    psm: u16,
+    configured_psm: u16,
     connect_timeout_ms: u64,
     cooldown_secs: u64,
     packet_tx: PacketTx,
     transport_id: TransportId,
 ) {
-    // Track last probe time per address for cooldown
-    let mut last_probed: HashMap<BleAddr, tokio::time::Instant> = HashMap::new();
-    // Addresses discovered but not yet connected — retried after cooldown
-    // even if the scanner doesn't fire again (BlueZ deduplicates).
-    let mut pending_addrs: Vec<BleAddr> = Vec::new();
-    let cooldown = std::time::Duration::from_secs(cooldown_secs);
+    // Addresses discovered but not yet connected — retried after cooldown even
+    // if the scanner doesn't fire again (BlueZ deduplicates), on a per-address
+    // backoff that widens with consecutive failures. Also the cooldown record:
+    // an address leaves the book the moment it reaches a conclusive outcome,
+    // after which the pool guard below covers it.
+    let mut pending = PendingProbes::new(std::time::Duration::from_secs(cooldown_secs));
+    // L2CAP listener PSMs read out of peers' advertisements. A peer whose
+    // platform assigns its listener PSM cannot be dialled at a configured
+    // constant, so it publishes the number it actually bound and we dial
+    // that. A peer that advertises nothing is dialled at `configured_psm`,
+    // which is every peer that predates this and every backend that does not
+    // advertise service data.
+    let mut learned_psm: HashMap<BleAddr, u16> = HashMap::new();
     let retry_interval = tokio::time::interval(std::time::Duration::from_secs(cooldown_secs));
     tokio::pin!(retry_interval);
     retry_interval.tick().await; // consume initial tick
@@ -755,7 +1025,13 @@ async fn scan_probe_loop<I: io::BleIo>(
         let addr = tokio::select! {
             result = scanner.next() => {
                 match result {
-                    Some(a) => a,
+                    Some(advert) => {
+                        if let Some(psm) = advert.psm {
+                            trace!(addr = %advert.addr, psm, "BLE scan: learned peer PSM");
+                            learned_psm.insert(advert.addr.clone(), psm);
+                        }
+                        advert.addr
+                    }
                     None => {
                         debug!("BLE scanner ended");
                         break;
@@ -765,12 +1041,13 @@ async fn scan_probe_loop<I: io::BleIo>(
             _ = retry_interval.tick() => {
                 // Re-probe pending addresses that aren't connected
                 let pool_guard = pool.lock().await;
-                pending_addrs.retain(|a| !pool_guard.contains(&a.to_transport_addr()));
+                pending.drop_connected(|a| pool_guard.contains(&a.to_transport_addr()));
                 drop(pool_guard);
-                if let Some(a) = pending_addrs.first().cloned() {
-                    a
-                } else {
-                    continue;
+                // Rotating rather than always taking the head is what stops one
+                // slow or dead address from starving every other pending one.
+                match pending.next_due(tokio::time::Instant::now()) {
+                    Some(a) => a,
+                    None => continue,
                 }
             }
         };
@@ -782,56 +1059,72 @@ async fn scan_probe_loop<I: io::BleIo>(
         {
             let pool_guard = pool.lock().await;
             if pool_guard.contains(&addr.to_transport_addr()) {
-                pending_addrs.retain(|a| a != &addr);
+                pending.resolve(&addr);
                 continue;
             }
         }
 
         // Track for retry in case probe fails and scanner doesn't re-fire
-        if !pending_addrs.contains(&addr) {
-            pending_addrs.push(addr.clone());
-        }
+        let now = tokio::time::Instant::now();
+        pending.observe(&addr, now);
 
-        // Skip if in cooldown
-        if last_probed
-            .get(&addr)
-            .is_some_and(|last| last.elapsed() < cooldown)
-        {
+        // Skip if in cooldown, or backed off after consecutive failures
+        if !pending.is_due(&addr, now) {
             continue;
         }
 
         // Record probe time (before attempt, so cooldown applies on failure too)
-        last_probed.insert(addr.clone(), tokio::time::Instant::now());
+        pending.mark_attempt(&addr, now);
 
-        // L2CAP connect
+        // L2CAP connect, at whatever PSM this peer advertised.
+        let dial_psm = learned_psm.get(&addr).copied().unwrap_or(configured_psm);
+        // Stamped here so every outcome below can report how long the peer
+        // took to go from advertisement to conclusion.
+        let probe_started = tokio::time::Instant::now();
         let stream = match tokio::time::timeout(
             std::time::Duration::from_millis(connect_timeout_ms),
-            io.connect(&addr, psm),
+            io.connect(&addr, dial_psm),
         )
         .await
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                debug!(addr = %addr, error = %e, "BLE probe connect failed");
+                stats.record_connect_error();
+                let failures = pending.record_failure(&addr, tokio::time::Instant::now());
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-error",
+                    psm = dial_psm, discovery_ms = probe_started.elapsed().as_millis() as u64,
+                    failures, error = %e, "BLE probe connect failed"
+                );
+                // A learned PSM that does not answer is stale — forget it, so
+                // the next advert re-learns it and the fallback applies in the
+                // meantime. Costs one retry.
+                learned_psm.remove(&addr);
                 continue;
             }
             Err(_) => {
-                debug!(addr = %addr, "BLE probe connect timeout");
                 stats.record_connect_timeout();
+                let failures = pending.record_failure(&addr, tokio::time::Instant::now());
+                debug!(
+                    addr = %addr, role = "central", outcome = "connect-timeout",
+                    psm = dial_psm, discovery_ms = probe_started.elapsed().as_millis() as u64,
+                    failures, "BLE probe connect timeout"
+                );
+                learned_psm.remove(&addr);
                 continue;
             }
         };
 
-        // Promote connection to pool
+        // Promote the connection to the pool.
         let ta = addr.to_transport_addr();
-        debug!(addr = %addr, "BLE probe complete");
-
         let send_mtu = stream.send_mtu();
         let recv_mtu = stream.recv_mtu();
         let stream = Arc::new(stream);
+        // Boundaries come from the FMP length prefix, not the SDU boundary.
+        let reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
         let recv_task = tokio::spawn(receive_loop(
-            Arc::clone(&stream),
+            reader,
             ta.clone(),
             Arc::clone(&pool),
             packet_tx.clone(),
@@ -857,16 +1150,29 @@ async fn scan_probe_loop<I: io::BleIo>(
                 debug!(addr = %ta, evicted = %evicted, "BLE probe promoted (evicted peer)");
             }
             Ok(None) => {
-                debug!(addr = %ta, "BLE probe promoted to pool");
+                debug!(
+                    addr = %ta, role = "central", outcome = "connected",
+                    discovery_ms = probe_started.elapsed().as_millis() as u64,
+                    "BLE probe promoted to pool"
+                );
             }
             Err(e) => {
-                warn!(addr = %ta, error = %e, "BLE pool full, probe connection dropped");
                 stats.record_connection_rejected();
+                warn!(
+                    addr = %ta, role = "central", outcome = "pool-rejected",
+                    error = %e, "BLE pool full, probe connection dropped"
+                );
+                // The connection is dropped with `conn`, so there is nothing to
+                // report and nothing to resolve. Leaving the address in the
+                // retry book is the point: a slot may free before the peer is
+                // advertised again. The inbound path already continues here
+                // rather than falling through.
+                continue;
             }
         }
         drop(pool_guard);
         stats.record_connection_established();
-        pending_addrs.retain(|a| a != &addr);
+        pending.resolve(&addr);
 
         // Report to node layer for auto-connect / handshake
         buffer.add_peer(&addr);
@@ -880,7 +1186,262 @@ async fn scan_probe_loop<I: io::BleIo>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use io::MockBleIo;
+    use crate::transport::framing::build_established_frame;
+    use io::{MockBleIo, MockBleStream};
+
+    // ------------------------------------------------------------------
+    // PendingProbes — the retry/backoff policy for discovered addresses
+    // ------------------------------------------------------------------
+
+    const TEST_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn probes() -> PendingProbes {
+        PendingProbes::new(TEST_COOLDOWN)
+    }
+
+    fn a(n: u8) -> BleAddr {
+        BleAddr::parse(&format!("ble0/AA:BB:CC:DD:EE:{:02X}", n)).unwrap()
+    }
+
+    /// A fresh sighting is dialled straight away — discovery must not wait a
+    /// cooldown to try a peer it has never met.
+    #[test]
+    fn a_newly_seen_address_is_due_immediately() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(1), t0);
+        assert!(p.is_due(&a(1), t0));
+    }
+
+    /// The regression this policy exists for: an address that keeps failing
+    /// must be dialled exponentially less often, not once per cooldown for as
+    /// long as the process lives.
+    #[test]
+    fn consecutive_failures_back_an_address_off_exponentially() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(1), t0);
+
+        for expected_shift in 0..MAX_PROBE_BACKOFF_SHIFT {
+            let n = p.record_failure(&a(1), t0);
+            assert_eq!(n, expected_shift + 1);
+            let wait = TEST_COOLDOWN * 2u32.pow(expected_shift);
+            assert!(
+                !p.is_due(&a(1), t0 + wait - std::time::Duration::from_millis(1)),
+                "due too early after {n} failures"
+            );
+            assert!(p.is_due(&a(1), t0 + wait), "not due after {n} failures");
+        }
+
+        // And the interval stops growing at the ceiling rather than running
+        // away to hours.
+        let capped = TEST_COOLDOWN * 2u32.pow(MAX_PROBE_BACKOFF_SHIFT);
+        for _ in 0..8 {
+            p.record_failure(&a(1), t0);
+            assert!(p.is_due(&a(1), t0 + capped));
+        }
+    }
+
+    /// Under the old policy an address failing every 30 s for 37 minutes was
+    /// dialled 49 times. Pin the improvement rather than just the formula.
+    #[test]
+    fn a_dead_address_is_dialled_a_handful_of_times_an_hour() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(1), t0);
+
+        let mut dials = 0;
+        let mut now = t0;
+        let deadline = t0 + std::time::Duration::from_secs(37 * 60);
+        // Tick at the retry interval, exactly as the loop does.
+        while now <= deadline {
+            if p.is_due(&a(1), now) {
+                p.mark_attempt(&a(1), now);
+                p.record_failure(&a(1), now);
+                dials += 1;
+            }
+            now += TEST_COOLDOWN;
+        }
+        assert!(
+            (1..=10).contains(&dials),
+            "expected a handful of dials in 37 minutes, got {dials}"
+        );
+    }
+
+    /// A scanner that re-reports the same address many times a second (which
+    /// Android does, at roughly 52/min) must not wash the backoff out.
+    #[test]
+    fn repeated_sightings_do_not_reset_the_backoff() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(1), t0);
+        for _ in 0..4 {
+            p.record_failure(&a(1), t0);
+        }
+        let still_blocked = t0 + TEST_COOLDOWN;
+        for _ in 0..100 {
+            p.observe(&a(1), still_blocked);
+        }
+        assert!(!p.is_due(&a(1), still_blocked));
+        assert_eq!(p.entries.len(), 1);
+    }
+
+    /// Failing never removes an address. This is what keeps a BlueZ node
+    /// recoverable: BlueZ emits `DeviceAdded` once per address per discovery
+    /// session, so an address dropped from the book would never be offered
+    /// again and the peer behind it would be unreachable for the life of the
+    /// process.
+    #[test]
+    fn failures_never_evict_the_address_itself() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(1), t0);
+        for _ in 0..500 {
+            p.record_failure(&a(1), t0);
+        }
+        assert_eq!(p.entries.len(), 1);
+        // Still reachable: once the (capped) backoff elapses it is dialled
+        // again, so a peer that comes back is picked up without a new sighting.
+        let capped = TEST_COOLDOWN * 2u32.pow(MAX_PROBE_BACKOFF_SHIFT);
+        assert_eq!(p.next_due(t0 + capped), Some(a(1)));
+    }
+
+    /// Conclusive outcomes clear the address *and* its failure history, so a
+    /// peer that reconnects later starts from a clean slate.
+    #[test]
+    fn resolving_clears_the_failure_history() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(1), t0);
+        for _ in 0..5 {
+            p.record_failure(&a(1), t0);
+        }
+        p.resolve(&a(1));
+        assert!(p.entries.is_empty());
+        p.observe(&a(1), t0);
+        assert!(p.is_due(&a(1), t0));
+    }
+
+    /// The head-of-line half of the bug: probing only the first entry let one
+    /// address monopolise the retry tick. Rotation gives every due address a
+    /// turn.
+    #[test]
+    fn the_retry_tick_rotates_across_due_addresses() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        for n in 0..3 {
+            p.observe(&a(n), t0);
+        }
+        let order: Vec<_> = (0..6).filter_map(|_| p.next_due(t0)).collect();
+        assert_eq!(order, vec![a(0), a(1), a(2), a(0), a(1), a(2)]);
+    }
+
+    /// A backed-off address is skipped by the tick rather than blocking the
+    /// addresses behind it.
+    #[test]
+    fn a_backed_off_address_does_not_block_the_others() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(0), t0);
+        p.observe(&a(1), t0);
+        p.record_failure(&a(0), t0);
+        assert_eq!(p.next_due(t0), Some(a(1)));
+        assert_eq!(p.next_due(t0), Some(a(1)));
+    }
+
+    /// Nothing is due when everything is backed off — the tick idles rather
+    /// than dialling something it just said it would not.
+    #[test]
+    fn next_due_yields_nothing_when_all_are_backed_off() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        p.observe(&a(0), t0);
+        p.record_failure(&a(0), t0);
+        assert_eq!(p.next_due(t0), None);
+    }
+
+    /// Addresses rotate, so the book is capacity-bounded. Eviction is by
+    /// failure count, so the entry least likely to have a peer behind it goes
+    /// first and a healthy address is never displaced by a dead one.
+    #[test]
+    fn a_full_book_evicts_the_most_failed_address() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        for n in 0..MAX_PENDING_PROBES as u8 {
+            p.observe(&a(n), t0);
+        }
+        // One entry is much worse than the rest.
+        for _ in 0..3 {
+            p.record_failure(&a(7), t0);
+        }
+        p.observe(&a(200), t0);
+        assert_eq!(p.entries.len(), MAX_PENDING_PROBES);
+        assert!(p.position(&a(7)).is_none(), "the worst entry should go");
+        assert!(p.position(&a(200)).is_some(), "the new entry should land");
+        assert!(p.position(&a(0)).is_some(), "healthy entries should stay");
+    }
+
+    /// Pool membership clears entries in bulk on the retry tick.
+    #[test]
+    fn connected_addresses_leave_the_book() {
+        let mut p = probes();
+        let t0 = tokio::time::Instant::now();
+        for n in 0..3 {
+            p.observe(&a(n), t0);
+        }
+        p.drop_connected(|addr| addr == &a(1));
+        assert_eq!(p.entries.len(), 2);
+        assert!(p.position(&a(1)).is_none());
+    }
+
+    /// The mock backend is a *test* backend. Any target that compiles this
+    /// module must have a real one behind it, or a release build of it would
+    /// ship a BLE transport that starts, reports itself up, and never peers.
+    ///
+    /// The `compile_error!` above is what enforces that in a non-test build —
+    /// and by construction it cannot fire in a test build, which is exactly
+    /// the build everybody runs. This closes that gap: the `cfg!` values below
+    /// are evaluated for the *target*, not for the test profile, so this
+    /// asserts the same condition the tripwire does, from the one place a
+    /// developer will actually see it.
+    #[test]
+    fn a_target_that_compiles_this_module_has_a_real_backend() {
+        let has_concrete_backend = cfg!(bluer_available) || cfg!(target_os = "android");
+        assert!(
+            has_concrete_backend,
+            "target {} is `ble_available` but has no concrete `BleIo` backend, \
+             so a non-test build of it would select the in-memory mock. Add \
+             its backend and an arm to the `DefaultBleTransport` cascade, or \
+             drop it from `ble_available` in build.rs.",
+            std::env::consts::OS,
+        );
+    }
+
+    /// Handles a receive-loop test needs to observe: the task, the packets
+    /// it delivers, and the pool it reaps its entry from.
+    type ReceiveLoopHarness = (
+        JoinHandle<()>,
+        tokio::sync::mpsc::Receiver<ReceivedPacket>,
+        Arc<Mutex<ConnectionPool<Arc<MockBleStream>>>>,
+    );
+
+    /// Wire up a receive loop over one end of a mock stream pair.
+    fn spawn_receive_loop(local: MockBleStream) -> ReceiveLoopHarness {
+        let addr = test_addr(2).to_transport_addr();
+        let pool = Arc::new(Mutex::new(ConnectionPool::new(7)));
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let reader = BleStreamRead::new(Arc::new(local), 2048);
+        let task = tokio::spawn(receive_loop(
+            reader,
+            addr,
+            Arc::clone(&pool),
+            tx,
+            TransportId::new(1),
+            Arc::new(BleStats::new()),
+            2048,
+        ));
+        (task, rx, pool)
+    }
 
     fn test_addr(n: u8) -> BleAddr {
         BleAddr {
@@ -935,6 +1496,34 @@ mod tests {
         assert_eq!(transport.state(), TransportState::Down);
     }
 
+    /// `stop_async` has always stopped advertising; it must stop scanning
+    /// too. Aborting the scan task only stops the transport reading adverts —
+    /// on a backend whose radio the embedder owns, the radio keeps scanning
+    /// until it is told, which on a phone costs battery and keeps
+    /// broadcasting after the feature was switched off.
+    #[tokio::test]
+    async fn stop_async_tells_the_backend_to_stop_scanning() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(true),
+            advertise: Some(false),
+            accept_connections: Some(false),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.start_async().await.unwrap();
+        assert_eq!(transport.io.stop_scan_calls(), 0);
+
+        transport.stop_async().await.unwrap();
+        assert_eq!(
+            transport.io.stop_scan_calls(),
+            1,
+            "stopping the transport must reach the backend's scan"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_scan_discovers_peers() {
         let io = MockBleIo::new("hci0", test_addr(1));
@@ -958,7 +1547,7 @@ mod tests {
         // Let the expired entries get processed
         tokio::task::yield_now().await;
 
-        // Scan results go to neighbor buffer as bare addresses after probe
+        // Scan results reach the neighbor buffer as bare addresses after probe
         let peers = transport.neighbor_buffer.take();
         assert_eq!(peers.len(), 2);
     }
@@ -1003,5 +1592,427 @@ mod tests {
             transport.connection_state_sync(&addr),
             ConnectionState::None
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Packet boundary recovery
+    // ------------------------------------------------------------------
+
+    /// Two whole FMP packets delivered in one `recv` must both arrive.
+    /// Before reframing the tail was silently truncated and lost.
+    #[tokio::test]
+    async fn test_receive_loop_splits_coalesced_packets() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let (task, mut rx, _pool) = spawn_receive_loop(local);
+
+        let first = build_established_frame(16);
+        let second = build_established_frame(48);
+        let mut both = first.clone();
+        both.extend_from_slice(&second);
+        peer.send(&both).await.unwrap();
+
+        assert_eq!(rx.recv().await.unwrap().data, first);
+        assert_eq!(rx.recv().await.unwrap().data, second);
+        task.abort();
+    }
+
+    /// One FMP packet split across three `recv`s arrives once, whole —
+    /// not as three runts that FMP and Noise would reject.
+    #[tokio::test]
+    async fn test_receive_loop_reassembles_fragmented_packet() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let (task, mut rx, _pool) = spawn_receive_loop(local);
+
+        let frame = build_established_frame(64);
+        let third = frame.len() / 3;
+        peer.send(&frame[..third]).await.unwrap();
+        peer.send(&frame[third..2 * third]).await.unwrap();
+        peer.send(&frame[2 * third..]).await.unwrap();
+
+        assert_eq!(rx.recv().await.unwrap().data, frame);
+        assert!(rx.try_recv().is_err(), "no runt packets");
+        task.abort();
+    }
+
+    /// One `send` per packet still yields one packet per `send`, byte for
+    /// byte — the boundary-preserving backend regression.
+    #[tokio::test]
+    async fn test_receive_loop_passes_through_whole_packets() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let (task, mut rx, _pool) = spawn_receive_loop(local);
+
+        let frames: Vec<Vec<u8>> = [8u16, 0, 512]
+            .iter()
+            .map(|n| build_established_frame(*n))
+            .collect();
+        for f in &frames {
+            peer.send(f).await.unwrap();
+        }
+        for f in &frames {
+            assert_eq!(&rx.recv().await.unwrap().data, f);
+        }
+        task.abort();
+    }
+
+    /// A malformed frame closes the connection and drops it from the pool
+    /// rather than spinning the loop.
+    #[tokio::test]
+    async fn test_receive_loop_drops_connection_on_bad_frame() {
+        let (peer, local) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let ta = test_addr(2).to_transport_addr();
+        let (task, _rx, pool) = spawn_receive_loop(local);
+
+        // Put a pool entry in place so its removal is observable.
+        let (parked, _other) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        pool.lock()
+            .await
+            .insert(
+                ta.clone(),
+                BleConnection {
+                    stream: Arc::new(parked),
+                    recv_task: None,
+                    send_mtu: 2048,
+                    recv_mtu: 2048,
+                    established_at: tokio::time::Instant::now(),
+                    is_static: false,
+                    addr: test_addr(2),
+                },
+            )
+            .unwrap();
+        assert!(pool.lock().await.contains(&ta));
+
+        // 0x16 is a TLS ClientHello record type; it parses as FMP version 1.
+        peer.send(&[0x16, 0x03, 0x01, 0x00]).await.unwrap();
+
+        // The loop exits and clears the pool entry.
+        for _ in 0..50 {
+            if !pool.lock().await.contains(&ta) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!pool.lock().await.contains(&ta));
+        assert!(task.await.is_ok(), "loop exited cleanly");
+    }
+
+    // ------------------------------------------------------------------
+    // Node identity vs. rotating link address
+    // ------------------------------------------------------------------
+
+    fn identity_test_config() -> BleConfig {
+        BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(false),
+            advertise: Some(false),
+            accept_connections: Some(true),
+            probe_cooldown_secs: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// Let spawned loops make progress.
+    ///
+    /// Cooperative only: this hands the scheduler control, it does not move
+    /// the clock. Anything gated on a `tokio::time` timer needs
+    /// [`wait_for`] instead.
+    async fn settle() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// A probe the pool refuses is not a connection, and must not be recorded
+    /// as one. The inbound path already continues on rejection; this pins the
+    /// outbound probe path to the same shape.
+    ///
+    /// Reaching the refusal needs `max_connections: 0`. `ConnectionPool::insert`
+    /// only fails when the pool is full *and* every slot is static, and every
+    /// BLE connection is built with `is_static: false`, so a non-empty pool
+    /// always has an evictable slot. That makes this arm unreachable in a
+    /// default deployment today and reachable the moment anything marks a
+    /// connection static, which the pool is already written for.
+    #[tokio::test(start_paused = true)]
+    async fn a_pool_rejected_probe_is_neither_established_nor_reported() {
+        use std::sync::Mutex as StdMutex;
+
+        let io = MockBleIo::new("hci0", test_addr(1));
+
+        let connects: Arc<StdMutex<Vec<BleAddr>>> = Arc::new(StdMutex::new(Vec::new()));
+        {
+            let connects = Arc::clone(&connects);
+            io.set_connect_handler(move |addr, _psm| {
+                let (mine, _theirs) = MockBleStream::pair(test_addr(1), addr.clone(), 2048);
+                connects.lock().unwrap().push(addr.clone());
+                Ok(mine)
+            });
+        }
+
+        let config = BleConfig {
+            scan: Some(true),
+            accept_connections: Some(false),
+            max_connections: Some(0),
+            ..identity_test_config()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        settle().await;
+
+        // The dial happened; only the pool refused.
+        assert_eq!(connects.lock().unwrap().len(), 1, "the peer was dialled");
+        let snap = transport.stats.snapshot();
+        assert_eq!(snap.connections_rejected, 1, "the refusal is recorded");
+        assert_eq!(
+            snap.connections_established, 0,
+            "a refused probe is not an established connection"
+        );
+        assert_eq!(transport.pool.lock().await.len(), 0);
+        assert!(
+            transport.neighbor_buffer.take().is_empty(),
+            "the node layer must not be handed a peer with no connection behind it"
+        );
+
+        // It stayed in the retry book, so a freed slot can still admit it.
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        settle().await;
+        assert!(
+            connects.lock().unwrap().len() >= 2,
+            "a refused address is retried, not resolved away"
+        );
+
+        transport.stop_async().await.unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Per-peer listener PSM
+    // ------------------------------------------------------------------
+
+    /// Every `(address, psm)` the transport tried to dial.
+    type DialLog = Arc<std::sync::Mutex<Vec<(BleAddr, u16)>>>;
+
+    /// A scanning transport whose dials all fail, recording the PSM each was
+    /// attempted at.
+    fn psm_probe_transport(
+        dials: DialLog,
+    ) -> (
+        BleTransport<MockBleIo>,
+        tokio::sync::mpsc::Receiver<ReceivedPacket>,
+    ) {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        io.set_connect_handler(move |addr, psm| {
+            dials.lock().unwrap().push((addr.clone(), psm));
+            Err(TransportError::ConnectionRefused)
+        });
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(true),
+            advertise: Some(false),
+            accept_connections: Some(false),
+            probe_cooldown_secs: Some(1),
+            ..Default::default()
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        (transport, rx)
+    }
+
+    /// A peer that advertises its listener PSM is dialled there, not at the
+    /// configured one — the whole point of learning it.
+    #[tokio::test(start_paused = true)]
+    async fn test_advertised_psm_is_dialled() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport
+            .io
+            .inject_scan_advert(io::ScanAdvert::with_psm(test_addr(2), 0x00C1))
+            .await;
+        settle().await;
+
+        assert_eq!(dials.lock().unwrap().as_slice(), &[(test_addr(2), 0x00C1)]);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A legacy UUID-only advertiser carries no PSM, so the configured one is
+    /// used. This is the path every existing peer takes and it must not
+    /// regress.
+    #[tokio::test(start_paused = true)]
+    async fn test_advert_without_a_psm_falls_back_to_the_configured_one() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        settle().await;
+
+        assert_eq!(
+            dials.lock().unwrap().as_slice(),
+            &[(test_addr(2), DEFAULT_PSM)]
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A learned PSM that does not answer is forgotten, so a stale value
+    /// costs one retry rather than making the peer permanently unreachable.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_failed_dial_forgets_the_learned_psm() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport
+            .io
+            .inject_scan_advert(io::ScanAdvert::with_psm(test_addr(2), 0x00C1))
+            .await;
+        settle().await;
+        assert_eq!(dials.lock().unwrap().len(), 1);
+
+        // The retry after the cooldown must not repeat the PSM that failed.
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        settle().await;
+
+        let log = dials.lock().unwrap().clone();
+        assert!(log.len() >= 2, "the address is retried after the cooldown");
+        assert_eq!(log[0], (test_addr(2), 0x00C1));
+        assert!(
+            log[1..].iter().all(|(_, psm)| *psm == DEFAULT_PSM),
+            "retries fall back to the configured PSM: {log:?}"
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The advertisement carries the PSM the listener actually bound, not the
+    /// one that was requested. This is the whole OS-assigned-PSM case, with
+    /// no platform in the assertion.
+    #[tokio::test]
+    async fn test_the_advertised_psm_is_the_one_actually_bound() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        io.set_bound_psm(0x00C1);
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(false),
+            advertise: Some(true),
+            accept_connections: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.start_async().await.unwrap();
+
+        assert_ne!(DEFAULT_PSM, 0x00C1, "test setup: the bound PSM differs");
+        assert_eq!(transport.io.advertised_psm(), Some(0x00C1));
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A backend that binds what it was asked for advertises that — the BlueZ
+    /// path, unchanged.
+    #[tokio::test]
+    async fn test_a_backend_that_honours_the_request_advertises_it() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let config = BleConfig {
+            adapter: Some("hci0".to_string()),
+            scan: Some(false),
+            advertise: Some(true),
+            accept_connections: Some(true),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.start_async().await.unwrap();
+
+        assert_eq!(transport.io.advertised_psm(), Some(DEFAULT_PSM));
+        transport.stop_async().await.unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Connect outcome counters
+    // ------------------------------------------------------------------
+
+    /// A dial that errors is counted as an error, not as a timeout. The two
+    /// are different faults and blur into one useless number if merged.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_refused_dial_counts_as_an_error_not_a_timeout() {
+        let dials: DialLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut transport, _rx) = psm_probe_transport(Arc::clone(&dials));
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        settle().await;
+
+        let snap = transport.stats.snapshot();
+        assert_eq!(snap.connect_errors, 1);
+        assert_eq!(snap.connect_timeouts, 0);
+        assert_eq!(snap.connections_established, 0);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// An oversized packet is a caller bug, not a property of the peer's
+    /// link. Folding it into `send_errors` would make that number useless as
+    /// evidence.
+    #[tokio::test]
+    async fn test_mtu_rejection_does_not_count_as_a_send_error() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let transport =
+            BleTransport::new(TransportId::new(1), None, identity_test_config(), io, tx);
+
+        let ta = test_addr(2).to_transport_addr();
+        let (parked, _peer) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        transport
+            .pool
+            .lock()
+            .await
+            .insert(
+                ta.clone(),
+                BleConnection {
+                    stream: Arc::new(parked),
+                    recv_task: None,
+                    send_mtu: 64,
+                    recv_mtu: 64,
+                    established_at: tokio::time::Instant::now(),
+                    is_static: false,
+                    addr: test_addr(2),
+                },
+            )
+            .unwrap();
+
+        let err = transport.send_async(&ta, &[0u8; 128]).await.unwrap_err();
+        assert!(matches!(err, TransportError::MtuExceeded { .. }));
+
+        let snap = transport.stats.snapshot();
+        assert_eq!(snap.mtu_exceeded, 1);
+        assert_eq!(snap.send_errors, 0);
+    }
+
+    /// The snapshot is the control-socket contract. Pin every key so a field
+    /// cannot be dropped or renamed without a test saying so.
+    #[test]
+    fn test_snapshot_carries_every_counter() {
+        let value = serde_json::to_value(BleStats::new().snapshot()).unwrap();
+        let object = value.as_object().unwrap();
+        let expected = [
+            "packets_sent",
+            "bytes_sent",
+            "packets_recv",
+            "bytes_recv",
+            "send_errors",
+            "recv_errors",
+            "mtu_exceeded",
+            "connections_established",
+            "connections_accepted",
+            "connections_rejected",
+            "connect_timeouts",
+            "connect_errors",
+            "pool_evictions",
+            "advertisements_sent",
+            "scan_results",
+        ];
+        for key in expected {
+            assert!(object.contains_key(key), "snapshot lost `{key}`");
+        }
+        assert_eq!(object.len(), expected.len(), "snapshot gained a key");
     }
 }
