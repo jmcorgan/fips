@@ -212,7 +212,7 @@ Single-path forwarding is more fragile than flooding — if any transit node
 on the path has a stale bloom filter or loses a link, the request fails.
 To compensate, each discovery is a sequence of attempts with growing
 per-attempt timeouts. The default sequence is `[1s, 2s, 4s, 8s]`
-(configurable via `node.discovery.attempt_timeouts_secs`); the destination
+(configurable via `node.lookup.attempt_timeouts_secs`); the destination
 is declared unreachable only after the full sequence is exhausted (15s
 total at default).
 
@@ -228,8 +228,8 @@ After the per-attempt sequence is exhausted, the originator can additionally
 suppress further fresh lookups for the same target with exponential
 post-failure backoff. This is **disabled by default** (`backoff_base_secs:
 0`); the per-attempt sequence is the only retry pacing in the standard
-configuration. Operators may opt in via `node.discovery.backoff_base_secs`
-and `node.discovery.backoff_max_secs` if their deployment has chatty apps
+configuration. Operators may opt in via `node.lookup.backoff_base_secs`
+and `node.lookup.backoff_max_secs` if their deployment has chatty apps
 generating repeated lookups for genuinely unreachable destinations. When
 enabled, backoff is **reset on topology changes** that might make
 previously unreachable targets reachable: parent switch, new peer

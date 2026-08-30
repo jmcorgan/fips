@@ -15,8 +15,8 @@ oversize), see the relevant how-to under `docs/how-to/`.
 
 A FIPS path can traverse heterogeneous link types — UDP/IP (1280
 default, IPv6 minimum), Ethernet (interface MTU − 3, typically 1497),
-BLE (negotiated ATT_MTU per link), Tor stream (1400 default), radio
-(51–222) — within a single end-to-end session.
+BLE (per-connection L2CAP CoC MTU, 2048 default), Tor stream (1400
+default), radio (51–222) — within a single end-to-end session.
 The minimum MTU along the path determines the largest datagram a
 session can deliver. Several properties make this harder than in
 classic IP networks:
@@ -89,7 +89,7 @@ SessionDatagram and LookupResponse. Per-transport defaults:
 | Ethernet | interface MTU − 3 (typically 1497) | uniform |
 | TCP | 1400 | derived from `TCP_MAXSEG` per connection |
 | Tor | 1400 | uniform |
-| BLE | 2048 default; negotiated ATT_MTU per link | per-link (overrides `mtu()`) |
+| BLE | 2048 default; per-connection L2CAP CoC MTU | per-link (overrides `mtu()`) |
 
 For TCP, the per-connection `TCP_MAXSEG` query lets FMP discover the
 actual MSS the kernel negotiated for each connection, rather than

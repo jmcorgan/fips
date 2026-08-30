@@ -54,14 +54,14 @@ layer doesn't amplify it.
 assertions:
   bloom_send_rate:
     window_secs: 30
-    max_per_node: 30
+    max_per_node: 40
   min_parent_switches:
     min_total: 10
 ```
 
 `bloom_send_rate` is the load-bearing assertion: per-node delta of
 `stats.bloom.sent` over the trailing 30s of the run must be at most
-30. Per-node deltas and the offending node IDs are written to
+40. Per-node deltas and the offending node IDs are written to
 `assertions.txt` and the runner exits 3 on failure.
 
 `min_parent_switches` is a sanity guard. It fails if the run did not
@@ -146,7 +146,7 @@ plausible jitter band).
   (or the `backup-broadcast-gate-bloom-storm` branch if still
   retained), build, copy binaries into `testing/docker/`, and rerun
   this scenario; the bloom-rate assertion is expected to fail loud
-  with n05/n06 deltas well above 30.
+  with n05/n06 deltas well above 40.
 
 - Root-election outcome is sensitive to the seed (smallest
   `NodeAddr` wins, where `NodeAddr = SHA-256(pubkey)[..16]`). The

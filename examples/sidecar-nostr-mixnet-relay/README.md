@@ -45,7 +45,8 @@ How the pieces interlock:
 
 ```bash
 # 1. Generate a node identity (any machine with fipsctl, or reuse one):
-fipsctl keygen
+#    --stdout prints the nsec and npub instead of writing key files.
+fipsctl keygen --stdout
 
 # 2. Put the nsec into the environment:
 export FIPS_NSEC=<your-nsec>
@@ -132,7 +133,7 @@ docker compose exec fips curl -s -H "Accept: application/nostr+json" http://127.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `FIPS_NSEC` | *(required)* | Node identity, `fipsctl keygen` |
+| `FIPS_NSEC` | *(required)* | Node identity, `fipsctl keygen --stdout` |
 | `FIPS_PEER_NPUB` | test-us03's npub | Peer to dial; empty = standalone |
 | `FIPS_PEER_ADDR` | `54.183.70.180:443` | **TCP** endpoint in nym/tcp mode (use `:2121` for udp) |
 | `FIPS_PEER_TRANSPORT` | `nym` | `nym` \| `tcp` \| `udp` — see "Switching transport" above |

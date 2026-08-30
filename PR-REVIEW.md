@@ -42,10 +42,10 @@ Read these *before* analyzing the diff so the review is grounded:
 
 3. Base-branch freshness. How many commits have landed on the PR's
    base since the PR forked from it.
-4. Project guidance. Read [CLAUDE.md](CLAUDE.md) at the repo root and
-   any nested `CLAUDE.md` in directories the diff touches. These
-   describe project-specific conventions and constraints not visible
-   from the diff alone.
+4. Project guidance. Read [CONTRIBUTING.md](CONTRIBUTING.md) and
+   [docs/branching.md](docs/branching.md). These describe
+   project-specific conventions and constraints not visible from the
+   diff alone.
 5. Related work on GitHub. Skim the [open issues](https://github.com/jmcorgan/fips/issues)
    and other [open PRs](https://github.com/jmcorgan/fips/pulls) for
    work that overlaps, duplicates, partially addresses, or is unblocked
@@ -157,7 +157,7 @@ Quality over quantity. Do not flag:
 - Pedantic style nitpicks a senior engineer would not call out
 - Likely intentional changes related to the broader goal
 - Things explicitly silenced by an `#[allow]` with justification
-- Stylistic preferences not anchored in `CLAUDE.md` or the
+- Stylistic preferences not anchored in `CONTRIBUTING.md` or the
   surrounding codebase's idioms
 
 When in doubt about whether something is worth surfacing: would a

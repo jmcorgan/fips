@@ -71,6 +71,56 @@ mechanism-match summary across the run. Used for statistical reliability
 characterization of known flake classes under calibrated stress, not as
 a per-commit gate; not part of `ci-local.sh`.
 
+### [sidecar/](sidecar/) -- Network Sidecar Isolation
+
+FIPS running as a sidecar container that owns the network namespace of
+a companion application container, with iptables/ip6tables rules
+confining the app to the mesh. `scripts/test-sidecar.sh` boots a
+three-node chain of such pairs and asserts both connectivity and
+isolation.
+
+### [firewall/](firewall/) -- nftables Baseline
+
+End-to-end exercise of the production `fips0` nftables baseline at
+`packaging/common/fips.nft`, covering the default-deny, conntrack and
+drop-in semantics.
+
+### [acl-allowlist/](acl-allowlist/) -- Peer ACL Enforcement
+
+Six nodes with per-node allowlist files mounted at the runtime ACL
+paths, exercising insiders, outsiders and allowed remotes at once to
+check which peer pairs are admitted and which are rejected.
+
+### [native-api/](native-api/) -- Native Datagram API
+
+Checks the experimental native datagram API: a client process opens a
+flow to a remote pubkey over a Unix socket, receives a file descriptor,
+and exchanges datagrams on it with no TUN device and no IPv6 emulation.
+
+### [dns-resolver/](dns-resolver/) -- `fips-dns-setup` Backends
+
+Runs `fips-dns-setup` against each supported Linux resolver backend in
+systemd containers, verifying backend detection, generated config and
+teardown, plus an end-to-end scenario that resolves a `.fips` name
+through the configured backend.
+
+### [deb-install/](deb-install/) -- Debian Package Install
+
+Installs the built `.deb` in privileged systemd containers for each
+target distro and verifies unit enablement, conffile placement and
+end-to-end `.fips` resolution as a user would meet it.
+
+### [boringtun/](boringtun/) -- WireGuard Throughput Baseline
+
+Two userspace WireGuard peers running Cloudflare BoringTun, measured
+with `iperf3`, as a comparison baseline for FIPS tunnel throughput.
+
+### [ble/](ble/) -- BLE L2CAP Spike
+
+Standalone cargo project (`ble_spike`) that validates the `bluer` API
+assumptions behind the `BleIo` trait against real adapters on two
+machines. Not a Docker harness.
+
 ## Running CI locally (`ci-local.sh`)
 
 [`ci-local.sh`](ci-local.sh) runs the full local CI pipeline — build,

@@ -10,13 +10,14 @@ academic citations, see [fips-prior-work.md](fips-prior-work.md).
 
 FIPS is a self-organizing mesh network that can operate natively over a
 variety of physical and logical media, such as local area networks,
-Bluetooth, serial links, or the existing internet as an overlay. The
-long-term goal is infrastructure that can function alongside or
-ultimately replace dependence on the Internet itself. Systems running
-FIPS establish peer connections, authenticate each other, and route
-traffic for each other without any central authority or global topology
-knowledge, and allow end-to-end encrypted sessions between any two
-nodes regardless of how many hops separate them.
+Bluetooth, or the existing internet as an overlay; radio and serial
+links are in the planned set. The long-term goal is infrastructure that
+can function alongside or ultimately replace dependence on the Internet
+itself. Systems running FIPS establish peer connections, authenticate
+each other, and route traffic for each other without any central
+authority or global topology knowledge, and allow end-to-end encrypted
+sessions between any two nodes regardless of how many hops separate
+them.
 
 Nodes in the mesh route traffic for each other using Nostr identities
 (npubs) as network addresses. Applications can access the mesh through

@@ -11,6 +11,14 @@ This example lets macOS reach the FIPS mesh through a local Docker container.
 - `identity/fips.key` and `identity/fips.pub`: generated persistent sidecar identity
 - `fips.yaml`: FIPS node config used inside the container
 
+## Prerequisites
+
+`fips-on.sh` generates the sidecar identity with `fipsctl` from the `fips-test:latest` image, which this example's `docker-compose.yml` does not build. Build it once from the repo root before the first run:
+
+```bash
+./testing/scripts/build.sh
+```
+
 ## Configure Peers
 
 Before first use, replace the placeholder bootstrap peer in `fips.yaml` with a real peer for the mesh you want to join.

@@ -40,7 +40,7 @@ The whole exercise should take about ten minutes.
 
 You'll change two things in `/etc/fips/fips.yaml`:
 
-- Add a `node.discovery.nostr` block that turns the consume-
+- Add a `node.rendezvous.nostr` block that turns the consume-
   side of Nostr discovery on.
 - Edit the existing `test-us01` peer entry to drop its hard-
   coded `addresses:` block and add `via_nostr: true`.
@@ -51,7 +51,7 @@ peer normally.
 
 ## How Nostr discovery resolves an address
 
-Every FIPS daemon with `node.discovery.nostr.advertise: true`
+Every FIPS daemon with `node.rendezvous.nostr.advertise: true`
 publishes a signed Nostr event (Kind 37195) listing the
 transport endpoints it is willing to accept connections on.
 The event is signed by the daemon's secret key, so anyone
@@ -95,8 +95,9 @@ You should currently have:
   sudo fipsctl show peers
   ```
 
-  Expect `test-us01` listed with `connectivity` active and a
-  `transport_addr` of roughly `test-us01.fips.network:2121`.
+  Expect `test-us01` listed with `connectivity` `connected`
+  and a `transport_addr` of roughly
+  `test-us01.fips.network:2121`.
 
 If either of those isn't true, finish the previous two
 tutorials first; the Nostr discovery layer is built on top of
@@ -104,14 +105,14 @@ that working state.
 
 ## Step 2: Enable the consume side of Nostr discovery
 
-Open `/etc/fips/fips.yaml` and add a `discovery` block under
+Open `/etc/fips/fips.yaml` and add a `rendezvous` block under
 `node:`:
 
 ```yaml
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: false
@@ -129,6 +130,11 @@ Two knobs, one job each:
   default is `true`, so we are setting it explicitly to
   disable advertising for this consume-only tutorial. The next
   tutorial flips it back on.
+
+If you already have a `node.discovery` block from an older release it
+still parses and logs one deprecation warning naming the new table, so
+nothing is broken (see
+[../reference/configuration.md](../reference/configuration.md)).
 
 ## Step 3: Switch the peer entry to `via_nostr`
 
@@ -187,11 +193,12 @@ necessary for this tutorial.)
 sudo fipsctl show peers
 ```
 
-`test-us01` should appear with `connectivity` active and a
-`transport_addr` reflecting the address that was resolved from
-the advert — `test-us01.fips.network:2121` at time of writing. That field
-is the strong signal: nothing in your config gave the daemon
-that IP, yet there it is.
+`test-us01` should appear with `connectivity` `connected` and
+a `transport_addr` reflecting the endpoint that was resolved
+from the advert — `test-us01.fips.network:2121` at time of
+writing. That is the same endpoint you just removed from the
+config, so the field on its own does not show where the daemon
+got it; the `nak` query below is what settles that.
 
 You can confirm independently that the address came from the
 advert. The advert is a public Nostr event — anyone can fetch
@@ -250,11 +257,11 @@ If the link does not come up:
   query returns nothing, that is the problem and it is on the
   peer's side. Re-add the static `addresses:` entry as a
   fallback while you wait for the peer to come back up.
-- **Relay reachability.** `Connected to relay` lines should
-  appear for at least one of the three default relays. If
-  none do, your network may be filtering outbound WebSocket
-  traffic or DNS for those hostnames. Check the journal for
-  TLS/DNS errors.
+- **Relay reachability.** A `Connected to 'wss://...'` line
+  should appear for at least one of the three default
+  relays, naming the relay URL. If none do, your network may
+  be filtering outbound WebSocket traffic or DNS for those
+  hostnames. Check the journal for TLS/DNS errors.
 - **Stale cache.** The daemon caches resolved endpoints
   briefly. If a peer's advert changes mid-session and you
   hit a stale entry, restart the daemon to force a fresh

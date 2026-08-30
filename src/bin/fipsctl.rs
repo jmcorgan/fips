@@ -910,6 +910,20 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 /// The four stages, in the order the probe runs them.
 const STAGES: [&str; 5] = ["bloom", "discovery", "path", "session", "rtt"];
 
+/// Column widths of the stage block, and the column its text starts in. The
+/// detail lines under a row are padded to the same column, so a row and its
+/// detail read as one entry rather than two.
+const IND: usize = 2;
+const NAME_W: usize = 9;
+const VERDICT_W: usize = 7;
+const ELAPSED_W: usize = 6;
+const TEXT_COL: usize = IND + NAME_W + 1 + 1 + 1 + VERDICT_W + 1 + ELAPSED_W + 2;
+
+/// Rows that open a group, and so carry a blank line above them. The five
+/// stages answer three questions -- where is it, how do we get there, can we
+/// reach it -- and the separator is what makes those groups visible.
+const GROUP_STARTS: [&str; 2] = ["path", "session"];
+
 /// The whole up-then-down tree walk on one line, this node to the target,
 /// with the least common ancestor emphasised.
 ///
@@ -990,6 +1004,11 @@ struct StageRow {
     /// Detail lines rendered under the row. Only discovery has any: one per
     /// request it sent.
     subs: Vec<String>,
+    /// The row is bookkeeping rather than a finding, so the block leaves it
+    /// out. Only the path stage earns this, and only when it succeeded: it
+    /// then restates the heading of the path section printed below it. A
+    /// failure or a skip is a finding and stays.
+    hidden: bool,
 }
 
 impl StageRow {
@@ -1005,8 +1024,16 @@ impl StageRow {
             None => String::new(),
         };
         let line = format!(
-            "{:<9} {mark} {:<8} {:>6}  {}",
-            self.name, self.verdict, elapsed, self.text
+            "{:ind$}{:<nw$} {mark} {:<vw$} {:>ew$}  {}",
+            "",
+            self.name,
+            self.verdict,
+            elapsed,
+            self.text,
+            ind = IND,
+            nw = NAME_W,
+            vw = VERDICT_W,
+            ew = ELAPSED_W
         );
         line.trim_end().to_string()
     }
@@ -1060,6 +1087,11 @@ fn stage_rows(report: &serde_json::Value) -> Vec<StageRow> {
             elapsed_ms,
             settled,
             subs,
+            // Hidden while pending too, not only once it succeeds: the stage
+            // needs no I/O and settles in the tick it is reached, so a row
+            // shown and then withdrawn would be the only thing the viewer saw
+            // of it.
+            hidden: name == "path" && !matches!(verdict, "failed" | "skipped"),
         });
     }
 
@@ -1113,7 +1145,7 @@ fn attempt_lines(stage: &serde_json::Value, verdict: &str) -> Vec<String> {
             } else {
                 " "
             };
-            format!("  attempt {n:<3}{mark} {status:<9} {timeout}")
+            format!("attempt {n:<3}{mark} {status:<9} {timeout}")
                 .trim_end()
                 .to_string()
         })
@@ -1133,9 +1165,21 @@ const SPIN_HERE: &str = "\u{1}";
 fn block_lines(rows: &[StageRow], spin: Option<char>) -> Vec<String> {
     let mark = spin.unwrap_or(' ').to_string();
     let mut lines = Vec::new();
-    for row in rows {
+    for row in rows.iter().filter(|row| !row.hidden) {
+        // Above the row, never below it, so a group that is still being built
+        // does not end on a blank line the next row has to justify.
+        if !lines.is_empty() && GROUP_STARTS.contains(&row.name) {
+            lines.push(String::new());
+        }
         lines.push(row.line(spin));
-        lines.extend(row.subs.iter().map(|sub| sub.replace(SPIN_HERE, &mark)));
+        lines.extend(row.subs.iter().map(|sub| {
+            format!(
+                "{:col$}{}",
+                "",
+                sub.replace(SPIN_HERE, &mark),
+                col = TEXT_COL
+            )
+        }));
     }
     lines
 }
@@ -1146,9 +1190,8 @@ fn settled_text(name: &str, stage: &serde_json::Value) -> String {
     match name {
         "bloom" => match field(stage, "reason") {
             "" => match stage.get("fanout").and_then(|v| v.as_u64()) {
-                Some(1) => "claimed by a peer filter, request sent".to_string(),
-                Some(n) => format!("claimed by a peer filter, request sent to {n} peers"),
-                None => "claimed by a peer filter".to_string(),
+                Some(n) if n > 1 => format!("claimed by a peer filter, {n} peers asked"),
+                _ => "claimed by a peer filter".to_string(),
             },
             "cached" => "coordinates already cached".to_string(),
             "direct_peer" => "target is a directly connected peer".to_string(),
@@ -1177,9 +1220,19 @@ fn settled_text(name: &str, stage: &serde_json::Value) -> String {
             "already_pending" => "joined a lookup already in flight, which failed".to_string(),
             other => other.replace('_', " "),
         },
-        "path" => "computed locally from coordinates, not an observed path".to_string(),
+        // The row keys on the reason like every other stage. It did not
+        // before, so a failed preview printed the success text; the block only
+        // ever shows this row when it failed or was skipped, which made that
+        // the one text it could print.
+        "path" => match field(stage, "reason") {
+            "" => "computed locally".to_string(),
+            "disjoint_trees" => "different spanning-tree roots".to_string(),
+            "no_next_hop" => "no next hop toward this target".to_string(),
+            "direct_peer" => "target is a directly connected peer".to_string(),
+            other => other.replace('_', " "),
+        },
         "session" => match field(stage, "reason") {
-            "" => "FSP session established (XK handshake)".to_string(),
+            "" => "established (XK handshake)".to_string(),
             "preexisting" => "a session to this endpoint already existed".to_string(),
             "send_error" => format!("could not send: {}", field(stage, "detail")),
             "handshake_timeout" => "gave up waiting for the handshake to complete".to_string(),
@@ -1231,8 +1284,8 @@ struct ProbeProgress {
     tty: bool,
     /// Rows the last frame left on screen, and so the distance to move up.
     drawn: usize,
-    /// Rows already printed, off a terminal.
-    emitted: usize,
+    /// Lines already printed, off a terminal.
+    printed: usize,
     frame: usize,
     header: bool,
 }
@@ -1242,7 +1295,7 @@ impl ProbeProgress {
         Self {
             tty: std::io::stdout().is_terminal(),
             drawn: 0,
-            emitted: 0,
+            printed: 0,
             frame: 0,
             header: false,
         }
@@ -1308,23 +1361,27 @@ impl ProbeProgress {
         self.frame += 1;
     }
 
-    /// Print rows that have settled since the last call, in stage order.
+    /// Print the lines the settled rows have added since the last call.
     fn emit(&mut self, rows: &[StageRow]) {
         for line in self.settled_since(rows) {
             println!("{line}");
         }
     }
 
-    /// Lines for the rows that have settled since the last call. Stages settle
-    /// in order, so this stops at the first one that has not, and a row is
-    /// never returned twice.
+    /// Lines the block has gained since the last call. Stages settle in order,
+    /// so the block is rebuilt from the settled prefix and the lines already
+    /// printed are dropped.
+    ///
+    /// Rebuilt rather than appended row by row, because a group separator
+    /// belongs to the row below it and a single-row render cannot know whether
+    /// that row exists yet. The prefix only grows, so the lines already
+    /// printed never change.
     fn settled_since(&mut self, rows: &[StageRow]) -> Vec<String> {
-        let mut lines = Vec::new();
-        while let Some(row) = rows.get(self.emitted).filter(|r| r.settled) {
-            lines.extend(block_lines(std::slice::from_ref(row), None));
-            self.emitted += 1;
-        }
-        lines
+        let settled = rows.iter().take_while(|row| row.settled).count();
+        let lines = block_lines(&rows[..settled], None);
+        let fresh = lines.get(self.printed..).unwrap_or_default().to_vec();
+        self.printed = lines.len();
+        fresh
     }
 
     /// Take the live block back off the screen. Its rows are clipped to fit one
@@ -1352,7 +1409,8 @@ fn rtt_text(rtt: &serde_json::Value) -> String {
         .unwrap_or(0);
     match field(rtt, "reason") {
         "" => match rtt.get("rtt_ms").and_then(|v| v.as_u64()) {
-            Some(ms) => format!("{ms} ms round trip ({reports} report exchange)"),
+            Some(ms) if reports == 1 => format!("{ms} ms round trip"),
+            Some(ms) => format!("{ms} ms round trip ({reports} report exchanges)"),
             None => "measured".to_string(),
         },
         "no_report" => "no receiver report of any kind within the budget".to_string(),
@@ -1386,14 +1444,14 @@ fn overall_note(report: &serde_json::Value) -> Option<&'static str> {
 fn failed_note(report: &serde_json::Value) -> Option<&'static str> {
     match field(report.get("discovery")?, "reason") {
         "bloom_unconfirmed" => Some(
-            "          A peer's bloom filter claimed this address and then no lookup\n\
-             \x20         answered for it. A filter cannot miss a key that IS on the\n\
-             \x20         mesh, so an absent address produces exactly this whenever some\n\
-             \x20         peer's filter false-positives on it -- the same finding the\n\
-             \x20         fast bloom_miss reports, reached the slow way. An address that\n\
-             \x20         is present but whose lookups are being lost produces it too.\n\
-             \x20         The wait says nothing about which; it is the ladder running to\n\
-             \x20         the end.",
+            "             A peer's bloom filter claimed this address and then no lookup\n\
+             \x20            answered for it. A filter cannot miss a key that IS on the\n\
+             \x20            mesh, so an absent address produces exactly this whenever some\n\
+             \x20            peer's filter false-positives on it -- the same finding the\n\
+             \x20            fast bloom_miss reports, reached the slow way. An address that\n\
+             \x20            is present but whose lookups are being lost produces it too.\n\
+             \x20            The wait says nothing about which; it is the ladder running to\n\
+             \x20            the end.",
         ),
         _ => None,
     }
@@ -1403,14 +1461,14 @@ fn failed_note(report: &serde_json::Value) -> Option<&'static str> {
 fn partial_note(report: &serde_json::Value) -> Option<&'static str> {
     match field(report.get("rtt")?, "reason") {
         "no_report" => Some(
-            "          The handshake completed, so our packets reached them. Nothing has\n\
-             \x20         come back since, so the reverse path may be broken and this\n\
-             \x20         endpoint may be reachable in one direction only.",
+            "             The handshake completed, so our packets reached them. Nothing has\n\
+             \x20            come back since, so the reverse path may be broken and this\n\
+             \x20            endpoint may be reachable in one direction only.",
         ),
         "no_echo" | "sub_millisecond" | "bad_timestamp_echo" => Some(
-            "          The endpoint IS reachable: the session handshake completed end to\n\
-             \x20         end and receiver reports came back. Only the round-trip\n\
-             \x20         measurement did not land inside the budget.",
+            "             The endpoint IS reachable: the session handshake completed end to\n\
+             \x20            end and receiver reports came back. Only the round-trip\n\
+             \x20            measurement did not land inside the budget.",
         ),
         _ => None,
     }
@@ -1430,11 +1488,8 @@ fn probe_header(report: &serde_json::Value) {
         .get("target")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    println!(
-        "probe {} ({})",
-        field(&target, "display_name"),
-        field(&target, "npub")
-    );
+    println!("probe {}", field(&target, "display_name"));
+    println!("  npub       {}", field(&target, "npub"));
     println!("  node_addr  {}", field(&target, "node_addr"));
     println!("  ipv6       {}", field(&target, "ipv6_addr"));
     println!();
@@ -1463,8 +1518,7 @@ fn probe_detail(report: &serde_json::Value, tty: bool) {
     }
 
     println!();
-    println!("path (locally computed; this is the route this node WOULD select, not a");
-    println!("traceroute -- no hop beyond the first was contacted)");
+    println!("path:");
     // Absent coordinates are not a topology finding. A resolve failure and a
     // freshly peered neighbour both leave them absent, and neither says
     // anything about the spanning tree, so the tree lines are omitted rather
@@ -1475,30 +1529,35 @@ fn probe_detail(report: &serde_json::Value, tty: bool) {
         .unwrap_or(false)
     {
         println!(
-            "  ours       {}   depth {}",
-            render_coords(path.get("our_coords").unwrap_or(&empty), "self"),
-            path.get("our_depth").and_then(|v| v.as_u64()).unwrap_or(0)
+            "  ours       depth {:<3}  {}",
+            path.get("our_depth").and_then(|v| v.as_u64()).unwrap_or(0),
+            render_coords(path.get("our_coords").unwrap_or(&empty), "self")
         );
         println!(
-            "  theirs     {}   depth {}",
-            render_coords(path.get("their_coords").unwrap_or(&empty), "target"),
+            "  theirs     depth {:<3}  {}",
             path.get("their_depth")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            render_coords(path.get("their_coords").unwrap_or(&empty), "target")
         );
+        // The route is what the section is for, so it sits directly under the
+        // two coordinate lists it is derived from, set off by a blank line on
+        // each side. Named `route` rather than `path`, which is the section's
+        // own name and reads as a repeat of the heading above it.
         println!();
         match path.get("lca").and_then(|v| v.as_str()) {
-            Some(lca) => println!("  path:      {}", walk_line(path, lca, tty)),
-            None => println!("  path:      none (different spanning-tree roots)"),
+            Some(lca) => println!("  route      {}", walk_line(path, lca, tty)),
+            None => println!("  route      none (different spanning-tree roots)"),
         }
+        println!();
         if let (Some(up), Some(down), Some(dist)) = (
             path.get("tree_hops_up").and_then(|v| v.as_u64()),
             path.get("tree_hops_down").and_then(|v| v.as_u64()),
             path.get("tree_distance").and_then(|v| v.as_u64()),
         ) {
             println!(
-                "  tree walk  {up} up, {down} down  (tree distance {dist}; upper bound, \
-                 crosslinks may shorten it)"
+                "  walk       {up} up, {down} down   tree distance {dist} \
+                 (upper bound; crosslinks may shorten it)"
             );
         }
     } else {
@@ -1507,10 +1566,10 @@ fn probe_detail(report: &serde_json::Value, tty: bool) {
     match path.get("next_hop") {
         Some(hop) if !hop.is_null() => {
             println!(
-                "  next hop   {} ({})  class {}",
+                "  next hop   {} ({})   class {}",
                 short_addr(field(hop, "node_addr")),
                 field(hop, "display_name"),
-                field(hop, "class")
+                field(hop, "class").replace('_', " ")
             );
             if hop
                 .get("leaves_tree_walk")
@@ -1521,7 +1580,10 @@ fn probe_detail(report: &serde_json::Value, tty: bool) {
                 println!("              than the tree distance)");
             }
         }
-        _ => println!("  next hop   none ({})", field(path, "no_hop_reason")),
+        _ => println!(
+            "  next hop   none ({})",
+            field(path, "no_hop_reason").replace('_', " ")
+        ),
     }
     if let Some(mtu) = session.get("path_mtu").and_then(|v| v.as_u64()) {
         println!("  path mtu   {mtu} bytes (observed)");
@@ -1547,20 +1609,20 @@ fn probe_close(report: &serde_json::Value) {
     } else {
         "nothing to clean up".to_string()
     };
-    println!("cleanup   {cleanup_text}");
+    println!("  cleanup    {cleanup_text}");
     let warmups = cleanup
         .get("warmups_sent")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     if warmups > 0 && !torn {
         println!(
-            "          {warmups} coords-warmup message(s) were sent on a session this \
+            "             {warmups} coords-warmup message(s) were sent on a session this \
              probe does not own"
         );
     }
     let tick = report.get("tick_ms").and_then(|v| v.as_u64()).unwrap_or(0);
     println!(
-        "overall   {}  ({} ms; stage timings are quantized to the {tick} ms tick)",
+        "  overall    {}, {} ms   (stage timings quantized to the {tick} ms tick)",
         field(report, "overall"),
         report
             .get("elapsed_ms")
@@ -1994,19 +2056,19 @@ mod tests {
         let mut progress = ProbeProgress {
             tty: false,
             drawn: 0,
-            emitted: 0,
+            printed: 0,
             frame: 0,
             header: true,
         };
         let running = stage_rows(&running_report());
         let first = progress.settled_since(&running);
-        // bloom, discovery with its two attempt lines, then path.
-        assert_eq!(first.len(), 5, "settled block: {first:?}");
-        assert!(first[0].starts_with("bloom"));
-        assert!(first[1].starts_with("discovery"));
+        // bloom and discovery with its two attempt lines. Path settled too and
+        // prints nothing, because it computed a route.
+        assert_eq!(first.len(), 4, "settled block: {first:?}");
+        assert!(first[0].trim_start().starts_with("bloom"));
+        assert!(first[1].trim_start().starts_with("discovery"));
         assert!(first[2].trim_start().starts_with("attempt 1"));
         assert!(first[3].trim_start().starts_with("attempt 2"));
-        assert!(first[4].starts_with("path"));
 
         // A second poll with nothing new settled emits nothing.
         assert!(progress.settled_since(&running).is_empty());
@@ -2017,10 +2079,88 @@ mod tests {
         done["rtt"] = serde_json::json!({"verdict": "ok", "reason": null, "elapsed_ms": 1000,
                                          "rtt_ms": 18, "reports_seen": 1});
         let rest = progress.settled_since(&stage_rows(&done));
-        assert_eq!(rest.len(), 2, "session and rtt settled: {rest:?}");
-        assert!(rest[0].starts_with("session"));
-        assert!(rest[1].starts_with("rtt"));
-        assert_eq!(progress.emitted, 5);
+        // The separator belongs to the session row and is printed with it, not
+        // left behind on the earlier poll that could not know it was coming.
+        assert_eq!(rest.len(), 3, "separator, session and rtt: {rest:?}");
+        assert_eq!(rest[0], "");
+        assert!(rest[1].trim_start().starts_with("session"));
+        assert!(rest[2].trim_start().starts_with("rtt"));
+        assert_eq!(progress.printed, 7);
+    }
+
+    /// Every stage succeeded and the probe is over.
+    fn finished_report() -> serde_json::Value {
+        serde_json::json!({
+            "overall": "ok",
+            "elapsed_ms": 4000,
+            "bloom": {"verdict": "ok", "reason": null, "elapsed_ms": 1000, "fanout": 1},
+            "discovery": {"verdict": "ok", "reason": null, "elapsed_ms": 0, "attempts": 1,
+                          "attempt_timeouts_secs": [1, 2, 4, 8]},
+            "path": {"verdict": "ok", "reason": null, "elapsed_ms": 0},
+            "session": {"verdict": "ok", "reason": null, "elapsed_ms": 1000},
+            "rtt": {"verdict": "ok", "reason": null, "elapsed_ms": 2000, "rtt_ms": 83,
+                    "reports_seen": 1},
+        })
+    }
+
+    #[test]
+    fn a_path_stage_that_computed_a_route_prints_no_row_and_one_that_failed_does() {
+        // The successful row restates the heading of the path section printed
+        // below the block, so it says nothing the report does not already say
+        // twice over. A failure is the opposite: disjoint trees and a missing
+        // next hop appear nowhere else in the block.
+        let ok = block_lines(&stage_rows(&finished_report()), None);
+        assert!(
+            !ok.iter().any(|line| line.trim_start().starts_with("path")),
+            "a successful path stage took a row: {ok:?}"
+        );
+
+        let mut broken = finished_report();
+        broken["path"] = serde_json::json!({"verdict": "failed", "reason": "disjoint_trees",
+                                            "elapsed_ms": 0});
+        let lines = block_lines(&stage_rows(&broken), None);
+        let row = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("path"))
+            .expect("a failed path stage must keep its row");
+        assert!(row.contains("different spanning-tree roots"), "{row}");
+    }
+
+    #[test]
+    fn a_group_separator_sits_above_a_row_and_never_closes_the_block() {
+        // A trailing blank line would be a group the block never opened, and
+        // off a terminal it is printed rather than redrawn, so it stays.
+        let lines = block_lines(&stage_rows(&finished_report()), None);
+        let blanks: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(blanks.len(), 1, "one separator only: {lines:?}");
+        assert!(
+            lines[blanks[0] + 1].trim_start().starts_with("session"),
+            "the separator must sit above the row it opens: {lines:?}"
+        );
+        assert!(!lines.last().unwrap().is_empty(), "{lines:?}");
+
+        // A block of one row has no group boundary to draw.
+        let single = block_lines(&stage_rows(&absent_key_report(false)), None);
+        assert_eq!(single.len(), 1, "{single:?}");
+    }
+
+    #[test]
+    fn the_round_trip_row_names_the_exchange_count_only_when_it_is_not_one() {
+        let mut report = finished_report();
+        let rows = stage_rows(&report);
+        assert_eq!(rows[row_at(&rows, "rtt")].text, "83 ms round trip");
+
+        report["rtt"]["reports_seen"] = serde_json::json!(3);
+        let rows = stage_rows(&report);
+        assert_eq!(
+            rows[row_at(&rows, "rtt")].text,
+            "83 ms round trip (3 report exchanges)"
+        );
     }
 
     /// A four-hop shape: two up to the root, two back down.

@@ -3,9 +3,6 @@
 This directory is an OpenWrt feed package that builds and installs FIPS on any
 OpenWrt 22.03+ router via the standard `opkg` package system.
 
-For ad-hoc deployment without the build system, see
-[`deploy/native/`](../../deploy/native/README.md) instead.
-
 ## Package contents
 
 | Installed path | Purpose |
@@ -15,6 +12,7 @@ For ad-hoc deployment without the build system, see
 | `/usr/bin/fipstop` | Live TUI dashboard |
 | `/usr/bin/fips-gateway` | Outbound LAN gateway service (not started by default) |
 | `/usr/bin/fips-mesh-setup` | Opt-in helper — creates an open 802.11s mesh interface for router↔router backhaul |
+| `/usr/bin/fips-ap-setup` | Opt-in helper — creates the open `!FIPS` access SSID for client devices |
 | `/etc/init.d/fips` | procd service for the daemon (auto-start, crash respawn) |
 | `/etc/init.d/fips-gateway` | procd service for the gateway (disabled by default) |
 | `/etc/fips/fips.yaml` | Node configuration (edit before first start) |
@@ -74,7 +72,7 @@ Copy or symlink this directory into the SDK's `package/` tree:
 
 ```bash
 # From inside the SDK root:
-ln -s /path/to/fips/packaging/openwrt package/fips
+ln -s /path/to/fips/packaging/openwrt-ipk package/fips
 ```
 
 Or add the FIPS repository as a feed in `feeds.conf`:
@@ -136,8 +134,7 @@ physical interface names for your router. **Always use physical port names
 (`eth0`, `eth1`, or DSA port names like `wan`/`lan1`), never bridge names
 (`br-lan`).** The shipped default WAN port is `eth0` (OpenWrt 24); on OpenWrt
 25 (DSA) boards the WAN port is named `wan` — the `.apk` package ships that
-default. Run `ip link show` to confirm the names on your board. See
-[`deploy/native/README.md`](../../deploy/native/README.md) for details.
+default. Run `ip link show` to confirm the names on your board.
 
 ## Service management
 

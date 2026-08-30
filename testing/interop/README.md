@@ -40,7 +40,7 @@ more than once. The slots resolve to the three images built by
 | ---- | ------------------- | -------------------------------- |
 | `a`  | version under test  | the branch tip / commit to vet   |
 | `b`  | parent / comparison | parent commit on the same branch |
-| `c`  | release baseline    | latest release tag (`v0.3.0`)    |
+| `c`  | release baseline    | latest release tag               |
 
 `build-images.sh` is **unchanged** — it always builds exactly three images
 from three refs. A node-spec like `a a b c` resolves to the *same* three
@@ -237,7 +237,7 @@ working copy at all.
 
 ## How to read the output
 
-The driver runs six phases:
+The driver runs seven phases:
 
 | Phase | Check                                                            |
 | ----- | ---------------------------------------------------------------- |

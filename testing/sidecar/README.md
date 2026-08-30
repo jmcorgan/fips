@@ -13,15 +13,17 @@ non-mesh peers.
 ## Quick Start
 
 ```bash
+# From the repo root:
+./testing/scripts/build.sh
+
 cd testing/sidecar
-./scripts/build.sh
 docker compose up -d
 
 # Verify the sidecar is running:
-docker exec fips-sidecar fipsctl show status
+docker compose exec fips fipsctl show status
 
 # Verify the app container can see the FIPS interface:
-docker exec fips-app ip addr show fips0
+docker compose exec app ip addr show fips0
 ```
 
 With the default `.env`, FIPS starts with no peers. See
@@ -37,7 +39,7 @@ The sidecar pattern enforces strict network isolation on the app container:
 - **No IPv6 on eth0**: ip6tables blocks all IPv6 traffic on eth0. The app
   container cannot use link-local or any Docker-assigned IPv6 addresses.
 - **FIPS mesh only**: The only routable network path is through `fips0`
-  (`fd::/8`). All application traffic traverses the FIPS mesh with
+  (`fd00::/8`). All application traffic traverses the FIPS mesh with
   end-to-end encryption.
 - **Loopback allowed**: `lo` is unrestricted for inter-process communication
   within the shared namespace.
@@ -63,7 +65,7 @@ with the transport layer directly.
 │ Interfaces:                                       │
 │   lo    — loopback (unrestricted)                 │
 │   eth0  — Docker bridge (iptables: FIPS only)     │
-│   fips0 — FIPS TUN (fd::/8, unrestricted)         │
+│   fips0 — FIPS TUN (fd00::/8, unrestricted)       │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -89,7 +91,7 @@ before launching the FIPS daemon:
 DNS inside the container is handled by dnsmasq (127.0.0.1:53):
 
 - `.fips` queries are forwarded to the FIPS daemon's built-in DNS resolver
-  (127.0.0.1:5354), which resolves npub-based names to `fd::/8` addresses
+  (127.0.0.1:5354), which resolves npub-based names to `fd00::/8` addresses
 - All other queries are forwarded to Docker's embedded DNS (127.0.0.11)
 
 The `resolv.conf` mount points the container's resolver at 127.0.0.1,
@@ -98,13 +100,12 @@ where dnsmasq handles the routing.
 ## Build
 
 ```bash
-cd testing/sidecar
-./scripts/build.sh
+./testing/scripts/build.sh
 ```
 
-This compiles FIPS for Linux, copies the binaries into the Docker context,
-and builds the sidecar and app images. Cross-compilation from macOS is
-supported via `cargo-zigbuild`.
+Run it from the repo root. It compiles FIPS for Linux, copies the binaries
+into the Docker context, and builds the sidecar and app images.
+Cross-compilation from macOS is supported via `cargo-zigbuild`.
 
 ## Run with Peers
 
@@ -121,8 +122,8 @@ docker compose up -d
 Verify the peer link:
 
 ```bash
-docker exec fips-sidecar fipsctl show peers
-docker exec fips-sidecar fipsctl show links
+docker compose exec fips fipsctl show peers
+docker compose exec fips fipsctl show links
 ```
 
 ## Verify Connectivity and Isolation
@@ -131,16 +132,16 @@ From the app container:
 
 ```bash
 # Ping a mesh node by npub (resolves via .fips DNS):
-docker exec fips-app ping6 -c3 npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m.fips
+docker compose exec app ping6 -c3 npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m.fips
 
 # Fetch a web page from a mesh node over FIPS:
-docker exec fips-app curl -6 "http://[fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b]:8000/"
+docker compose exec app curl -6 "http://[fd69:e08d:65cc:3a6b:9c2c:2ac4:bd40:5e4b]:8000/"
 
 # Docker bridge is blocked — this should fail:
-docker exec fips-app ping -c1 -W2 172.20.0.13
+docker compose exec app ping -c1 -W2 172.20.0.13
 
 # Loopback is allowed:
-docker exec fips-app ping -c1 127.0.0.1
+docker compose exec app ping -c1 127.0.0.1
 ```
 
 ## Environment Variables
@@ -175,15 +176,15 @@ devices:
 ```
 
 **No peer connection established** — Verify the peer address is reachable
-from the sidecar container (`docker exec fips-sidecar ping -c1 <peer-ip>`).
+from the sidecar container (`docker compose exec fips ping -c1 <peer-ip>`).
 If joining an external Docker network, ensure `FIPS_NETWORK`, `FIPS_SUBNET`,
 and `FIPS_IPV4` match the target network. Check logs with
-`docker logs fips-sidecar`.
+`docker compose logs fips`.
 
 **DNS not resolving `.fips` names** — Verify dnsmasq is running:
-`docker exec fips-sidecar pgrep dnsmasq`. Check that `resolv.conf` is
+`docker compose exec fips pgrep dnsmasq`. Check that `resolv.conf` is
 mounted (should contain `nameserver 127.0.0.1`). Verify the FIPS DNS
-resolver is listening: `docker exec fips-sidecar dig @127.0.0.1 -p 5354 <npub>.fips AAAA`.
+resolver is listening: `docker compose exec fips dig @127.0.0.1 -p 5354 <npub>.fips AAAA`.
 
 **iptables errors in entrypoint** — The sidecar container requires
 `NET_ADMIN` capability for iptables. Without it, the isolation rules

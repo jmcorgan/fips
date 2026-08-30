@@ -160,7 +160,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install cargo-ndk
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
           tool: cargo-ndk
       - name: Clippy the library for Android
@@ -307,7 +307,7 @@ jobs:
         run: cargo nextest run --all --profile ci
 
       - name: Publish test report (Checks tab)
-        uses: dorny/test-reporter@df6247429542221bc30d46a036ee47af1102c451 # v2
+        uses: dorny/test-reporter@4a2e97665d5fa767581ef38eca97b9694bd4eef4 # v2
         if: always()
         with:
           name: Unit Tests

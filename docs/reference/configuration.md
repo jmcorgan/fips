@@ -13,7 +13,7 @@ locations, lowest to highest priority:
 
 | Priority | Path | Purpose |
 |----------|------|---------|
-| 1 (lowest) | `/usr/local/etc/fips/fips.yaml` (macOS), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
+| 1 (lowest) | `/usr/local/etc/fips/fips.yaml` (macOS, FreeBSD), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
 | 2 | `~/.config/fips/fips.yaml` | User preferences |
 | 3 | `~/.fips.yaml` | Legacy user config |
 | 4 (highest) | `./fips.yaml` | Deployment-specific overrides |
@@ -21,9 +21,13 @@ locations, lowest to highest priority:
 All found files are loaded and merged in priority order. Values from higher
 priority files override those from lower priority files. This allows a system
 administrator to set site-wide defaults in the priority 1 path above,
-`/usr/local/etc/fips/fips.yaml` on macOS and `/etc/fips/fips.yaml` on other
-Unix systems, while individual deployments override specific values in
-`./fips.yaml`.
+`/usr/local/etc/fips/fips.yaml` on macOS and FreeBSD and
+`/etc/fips/fips.yaml` on other Unix systems, while individual
+deployments override specific values in `./fips.yaml`.
+
+On macOS and FreeBSD both directories are probed: `/etc/fips` first,
+then `/usr/local/etc/fips`, so the packaged file wins over a leftover
+`/etc/fips` copy from an earlier install.
 
 ### CLI Option
 
@@ -41,7 +45,8 @@ only the identity and peer list, inheriting all other defaults.
 
 ## YAML Structure
 
-The configuration is organized into five top-level sections:
+The configuration is organized into six top-level sections (`gateway:`
+is Linux only):
 
 ```yaml
 node:        # Node behavior, protocol parameters, and tuning
@@ -49,6 +54,7 @@ tun:         # TUN virtual interface
 dns:         # DNS responder for .fips domain
 transports:  # Network transports (UDP, Ethernet, Bluetooth, Tor, ...)
 peers:       # Static peer list
+gateway:     # LAN gateway service (Linux only)
 ```
 
 ### Control Socket (`node.control.*`)
@@ -112,6 +118,7 @@ to the highest-priority config file for operator visibility, even in ephemeral m
 | `node.base_rtt_ms` | u64 | `100` | Initial RTT estimate for new links before measurements converge |
 | `node.heartbeat_interval_secs` | u64 | `10` | Heartbeat send interval per peer for liveness detection |
 | `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed |
+| `node.drain_timeout_secs` | u64 | `2` | Upper bound in seconds on the `Draining` shutdown phase. On shutdown the node broadcasts Disconnect to its peers and then waits up to this long for the links to clear, exiting as soon as the last peer is gone. `0` skips the wait. The key is absent from a default config file rather than written with its default value, so an unset key and the 2-second default are the same thing |
 | `node.log_level` | string | `"info"` | Tracing filter default. Case-insensitive; one of `trace`, `debug`, `info`, `warn`, `error`. Overridden by the `RUST_LOG` environment variable when set |
 
 ### Resource Limits (`node.limits.*`)
@@ -205,22 +212,38 @@ Controls caching of tree coordinates and identity mappings.
 | `node.cache.coord_ttl_secs` | u64 | `300` | Coordinate cache entry TTL (5 minutes) |
 | `node.cache.identity_size` | usize | `10000` | Max entries in identity cache (LRU, no TTL) |
 
-### Discovery Protocol (`node.discovery.*`)
+### Mesh Lookup (`node.lookup.*`)
 
-Controls bloom-guided node discovery (LookupRequest/LookupResponse).
+Controls bloom-guided mesh lookup (LookupRequest/LookupResponse): finding
+the current coordinates of a mesh address the node already knows.
+
+> **Renamed in v0.5.0.** These six keys were `node.discovery.*`. See
+> [Deprecated keys](#deprecated-keys) for the full mapping. A deployed
+> `node.discovery:` block still loads and still applies, with a one-time
+> deprecation warning at startup.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.discovery.ttl` | u8 | `64` | Hop limit for LookupRequest forwarding |
-| `node.discovery.attempt_timeouts_secs` | array&lt;u64&gt; | `[1, 2, 4, 8]` | Per-attempt timeouts. Each entry is the deadline for one `LookupRequest` before sending the next attempt with a fresh `request_id`. Length determines total attempt count; default gives 4 attempts and a 15s total budget |
-| `node.discovery.recent_expiry_secs` | u64 | `10` | Dedup cache expiry for recent request IDs |
-| `node.discovery.backoff_base_secs` | u64 | `0` | Optional post-failure suppression base in seconds; doubles per consecutive failure. `0` disables (default) — the per-attempt sequence is the only retry pacing |
-| `node.discovery.backoff_max_secs` | u64 | `0` | Cap on optional post-failure backoff |
-| `node.discovery.forward_min_interval_secs` | u64 | `2` | Transit-side rate limiting: minimum interval between forwarded lookups for the same target |
+| `node.lookup.ttl` | u8 | `64` | Hop limit for LookupRequest forwarding |
+| `node.lookup.attempt_timeouts_secs` | array&lt;u64&gt; | `[1, 2, 4, 8]` | Per-attempt timeouts. Each entry is the deadline for one `LookupRequest` before sending the next attempt with a fresh `request_id`. Length determines total attempt count; default gives 4 attempts and a 15s total budget |
+| `node.lookup.recent_expiry_secs` | u64 | `10` | Dedup cache expiry for recent request IDs |
+| `node.lookup.backoff_base_secs` | u64 | `0` | Optional post-failure suppression base in seconds; doubles per consecutive failure. `0` disables (default); the per-attempt sequence is the only retry pacing |
+| `node.lookup.backoff_max_secs` | u64 | `0` | Cap on optional post-failure backoff |
+| `node.lookup.forward_min_interval_secs` | u64 | `2` | Transit-side rate limiting: minimum interval between forwarded lookups for the same target |
 
-#### Nostr Overlay Discovery (`node.discovery.nostr.*`)
+### Peer Rendezvous (`node.rendezvous.*`)
 
-Optional Nostr-mediated overlay discovery. This layer publishes replaceable
+How the node finds peers to connect to at all, over the Nostr overlay and
+on the local link. Distinct from mesh lookup above, which resolves
+coordinates for a mesh address that is already known.
+
+> **Renamed in v0.5.0.** `node.discovery.nostr.*` is now
+> `node.rendezvous.nostr.*`, and `node.discovery.lan.*` is now
+> `node.rendezvous.lan.*`. See [Deprecated keys](#deprecated-keys).
+
+#### Nostr Rendezvous (`node.rendezvous.nostr.*`)
+
+Optional Nostr-mediated overlay rendezvous. This layer publishes replaceable
 endpoint adverts (`fips-overlay-v1`), consumes advert-derived endpoint
 fallbacks for configured peers, and can optionally discover non-configured
 peers (`policy: open`). `udp:nat` remains the trigger for NAT traversal
@@ -229,39 +252,39 @@ into the normal FIPS transport/session stack.
 Inbox-relay discovery falls back to the local DM relay list if remote relay
 metadata cannot be fetched.
 The Nostr discovery runtime is compiled into every build of the crate; it
-is enabled at runtime via `node.discovery.nostr.enabled: true` and stays
+is enabled at runtime via `node.rendezvous.nostr.enabled: true` and stays
 inert otherwise.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.discovery.nostr.enabled` | bool | `false` | Enable Nostr-mediated overlay discovery |
-| `node.discovery.nostr.policy` | string | `"configured_only"` | Advert discovery policy: `disabled`, `configured_only`, `open` |
-| `node.discovery.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
-| `node.discovery.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
-| `node.discovery.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. Zero is rejected, since it refuses every inbound offer rather than disabling the limit |
-| `node.discovery.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic |
-| `node.discovery.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
-| `node.discovery.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
-| `node.discovery.nostr.advert_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for service adverts |
-| `node.discovery.nostr.dm_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for encrypted signaling events |
-| `node.discovery.nostr.stun_servers` | list[string] | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used for local reflexive address discovery |
-| `node.discovery.nostr.share_local_candidates` | bool | `false` | Whether to advertise local (RFC 1918 / ULA) interface addresses as host candidates in the traversal offer. Off by default: in most deployments peers aren't on the same broadcast domain, and sharing private host candidates causes misleading punch successes when an asymmetric L3 path (VPN, Tailscale subnet route, overlapping address space) makes a peer's private IP one-way reachable. Enable only when peers are on the same physical LAN |
-| `node.discovery.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace, published in the advert's `protocol` tag (the `d` tag itself is hardcoded to `fips-overlay-v1`) |
-| `node.discovery.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds |
-| `node.discovery.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds |
-| `node.discovery.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds |
-| `node.discovery.nostr.punch_start_delay_ms` | u64 | `2000` | Delay before punch traffic starts |
-| `node.discovery.nostr.punch_interval_ms` | u64 | `200` | Interval between punch packets |
-| `node.discovery.nostr.punch_duration_ms` | u64 | `10000` | How long to keep punching before failure |
-| `node.discovery.nostr.advert_ttl_secs` | u64 | `3600` | Advert TTL in seconds |
-| `node.discovery.nostr.advert_refresh_secs` | u64 | `1800` | How often adverts are refreshed in seconds |
-| `node.discovery.nostr.startup_sweep_delay_secs` | u64 | `5` | Settle delay after Nostr discovery starts before the one-shot startup advert sweep runs (only used under `policy: open`). Allows the relay subscription backlog to populate the in-memory advert cache before the sweep fires |
-| `node.discovery.nostr.startup_sweep_max_age_secs` | u64 | `3600` | Maximum advert age (`now - created_at`) considered by the one-shot startup sweep (only used under `policy: open`). Adverts older than this are skipped on startup; the per-tick sweep still considers them up to `valid_until_ms` |
-| `node.discovery.nostr.failure_streak_threshold` | u32 | `5` | Consecutive NAT-traversal failures against a peer before an extended cooldown is applied. At this threshold the daemon also actively re-fetches the peer's advert from `advert_relays` to evict cache entries for peers that have gone away |
-| `node.discovery.nostr.extended_cooldown_secs` | u64 | `1800` | Cooldown applied to a peer once `failure_streak_threshold` is hit. Suppresses both open-discovery sweep enqueues and per-attempt retry firings until elapsed (30 minutes default) |
-| `node.discovery.nostr.warn_log_interval_secs` | u64 | `300` | Minimum interval between `NAT traversal failed` WARN log lines for the same peer. Subsequent failures inside the window log at DEBUG to reduce log spam on public-test nodes with many cache-learned peers |
-| `node.discovery.nostr.failure_state_max_entries` | usize | `4096` | Maximum entries retained in the per-npub failure-state map. Bounds memory under high cache turnover; oldest entries (by last failure time) are evicted when the cap is exceeded |
-| `node.discovery.nostr.protocol_mismatch_cooldown_secs` | u64 | `86400` | Cooldown applied after observing a fatal protocol mismatch on a Nostr-adopted bootstrap transport (e.g. `Unknown FMP version` from a peer running a different FMP-protocol version). Independent of `extended_cooldown_secs` and much longer (24 hours default) because the mismatch is structural — re-traversing is wasted effort until one side upgrades |
+| `node.rendezvous.nostr.enabled` | bool | `false` | Enable Nostr-mediated overlay discovery |
+| `node.rendezvous.nostr.policy` | string | `"configured_only"` | Advert discovery policy: `disabled`, `configured_only`, `open` |
+| `node.rendezvous.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
+| `node.rendezvous.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
+| `node.rendezvous.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. Zero is rejected, since it refuses every inbound offer rather than disabling the limit |
+| `node.rendezvous.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic |
+| `node.rendezvous.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
+| `node.rendezvous.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
+| `node.rendezvous.nostr.advert_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for service adverts |
+| `node.rendezvous.nostr.dm_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for encrypted signaling events |
+| `node.rendezvous.nostr.stun_servers` | list[string] | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used for local reflexive address discovery |
+| `node.rendezvous.nostr.share_local_candidates` | bool | `false` | Whether to advertise local (RFC 1918 / ULA) interface addresses as host candidates in the traversal offer. Off by default: in most deployments peers aren't on the same broadcast domain, and sharing private host candidates causes misleading punch successes when an asymmetric L3 path (VPN, Tailscale subnet route, overlapping address space) makes a peer's private IP one-way reachable. Enable only when peers are on the same physical LAN |
+| `node.rendezvous.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace, published in the advert's `protocol` tag (the `d` tag itself is hardcoded to `fips-overlay-v1`) |
+| `node.rendezvous.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds |
+| `node.rendezvous.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds |
+| `node.rendezvous.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds |
+| `node.rendezvous.nostr.punch_start_delay_ms` | u64 | `2000` | Delay before punch traffic starts |
+| `node.rendezvous.nostr.punch_interval_ms` | u64 | `200` | Interval between punch packets |
+| `node.rendezvous.nostr.punch_duration_ms` | u64 | `10000` | How long to keep punching before failure |
+| `node.rendezvous.nostr.advert_ttl_secs` | u64 | `3600` | Advert TTL in seconds |
+| `node.rendezvous.nostr.advert_refresh_secs` | u64 | `1800` | How often adverts are refreshed in seconds |
+| `node.rendezvous.nostr.startup_sweep_delay_secs` | u64 | `5` | Settle delay after Nostr discovery starts before the one-shot startup advert sweep runs (only used under `policy: open`). Allows the relay subscription backlog to populate the in-memory advert cache before the sweep fires |
+| `node.rendezvous.nostr.startup_sweep_max_age_secs` | u64 | `3600` | Maximum advert age (`now - created_at`) considered by the one-shot startup sweep (only used under `policy: open`). Adverts older than this are skipped on startup; the per-tick sweep still considers them up to `valid_until_ms` |
+| `node.rendezvous.nostr.failure_streak_threshold` | u32 | `5` | Consecutive NAT-traversal failures against a peer before an extended cooldown is applied. At this threshold the daemon also actively re-fetches the peer's advert from `advert_relays` to evict cache entries for peers that have gone away |
+| `node.rendezvous.nostr.extended_cooldown_secs` | u64 | `1800` | Cooldown applied to a peer once `failure_streak_threshold` is hit. Suppresses both open-discovery sweep enqueues and per-attempt retry firings until elapsed (30 minutes default) |
+| `node.rendezvous.nostr.warn_log_interval_secs` | u64 | `300` | Minimum interval between `NAT traversal failed` WARN log lines for the same peer. Subsequent failures inside the window log at DEBUG to reduce log spam on public-test nodes with many cache-learned peers |
+| `node.rendezvous.nostr.failure_state_max_entries` | usize | `4096` | Maximum entries retained in the per-npub failure-state map. Bounds memory under high cache turnover; oldest entries (by last failure time) are evicted when the cap is exceeded |
+| `node.rendezvous.nostr.protocol_mismatch_cooldown_secs` | u64 | `86400` | Cooldown applied after observing a fatal protocol mismatch on a Nostr-adopted bootstrap transport (e.g. `Unknown FMP version` from a peer running a different FMP-protocol version). Independent of `extended_cooldown_secs` and much longer (24 hours default) because the mismatch is structural; re-traversing is wasted effort until one side upgrades |
 
 If `stun_servers` is omitted, the built-in default list above is used. If it is
 specified in YAML, the configured list fully overrides the defaults.
@@ -282,9 +305,9 @@ addresses for the punch socket port.
 During punching, compatible private-subnet candidates and reflexive candidates
 are attempted in parallel; the first successful path wins.
 
-#### LAN Discovery (`node.discovery.lan.*`)
+#### LAN Rendezvous (`node.rendezvous.lan.*`)
 
-Peer discovery on the local link via mDNS / DNS-SD (RFC 6762 / RFC
+Peer rendezvous on the local link via mDNS / DNS-SD (RFC 6762 / RFC
 6763). When enabled, the node publishes a `_fips._udp.local.` service
 advert carrying its `npub` (and optional scope) and concurrently
 browses for the same service type to learn same-broadcast-domain peers.
@@ -293,7 +316,7 @@ STUN observation, or NAT traversal: the observed endpoint is by
 construction routable from the consumer's LAN.
 
 mDNS adverts are unauthenticated, so a LAN advert is treated only as a
-routing hint. Identity is still proven end-to-end by the Noise XX
+routing hint. Identity is still proven end-to-end by the Noise IK
 handshake the node initiates against the observed endpoint; a spoofed
 advert carrying another peer's npub fails the handshake and is dropped.
 LAN discovery requires an active UDP transport (peers dial the
@@ -301,9 +324,9 @@ advertised UDP port to begin the handshake).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.discovery.lan.enabled` | bool | `false` | Master switch. Opt-in: enable for sub-second same-LAN pairing. Default-off avoids reintroducing a per-LAN identity broadcast on nodes that have deliberately disabled other discovery channels |
-| `node.discovery.lan.service_type` | string | `"_fips._udp.local."` | DNS-SD service type. Primarily an override for integration tests running multiple isolated services on one loopback interface; leave at the default in production |
-| `node.discovery.lan.scope` | string | *(none)* | Optional application/network scope carried in a `scope=<name>` TXT entry. Browsers with a scope set only surface peers advertising the same scope, so nodes on the same physical LAN configured for different mesh networks do not cross-feed. Intentionally separate from `node.discovery.nostr.app` so relay-visible adverts can stay generic while LAN discovery is isolated per private network |
+| `node.rendezvous.lan.enabled` | bool | `false` | Master switch. Opt-in: enable for sub-second same-LAN pairing. Default-off avoids reintroducing a per-LAN identity broadcast on nodes that have deliberately disabled other discovery channels |
+| `node.rendezvous.lan.service_type` | string | `"_fips._udp.local."` | DNS-SD service type. Primarily an override for integration tests running multiple isolated services on one loopback interface; leave at the default in production |
+| `node.rendezvous.lan.scope` | string | *(none)* | Optional application/network scope carried in a `scope=<name>` TXT entry. Browsers with a scope set only surface peers advertising the same scope, so nodes on the same physical LAN configured for different mesh networks do not cross-feed. Intentionally separate from `node.rendezvous.nostr.app` so relay-visible adverts can stay generic while LAN discovery is isolated per private network |
 
 ### Spanning Tree (`node.tree.*`)
 
@@ -534,8 +557,10 @@ adding entries and the precedence rules:
 
 ### Ethernet (`transports.ethernet.*`)
 
-Ethernet transport sends raw frames via AF_PACKET SOCK_DGRAM sockets.
-Requires `CAP_NET_RAW` or running as root. Linux only.
+Ethernet transport sends raw frames over the platform's raw-frame
+socket: AF_PACKET SOCK_DGRAM on Linux, BPF (`/dev/bpf*`) on macOS.
+Linux and macOS only. On Linux it requires `CAP_NET_RAW` or running as
+root; on macOS it requires read/write access to a `/dev/bpf*` device.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -544,7 +569,7 @@ Requires `CAP_NET_RAW` or running as root. Linux only.
 | `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 3 (for frame type + length prefix) |
 | `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
 | `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
-| `listen` | bool | `true` | Listen for neighbor beacons from other nodes |
+| `listen` | bool | `true` | Listen for neighbor beacons from other nodes. Renamed from `discovery` in v0.5.0; the old key is still accepted as an alias, so a deployed config loads unchanged |
 | `announce` | bool | `false` | Broadcast announcement beacons on the LAN |
 | `auto_connect` | bool | `false` | Auto-connect to discovered peers |
 | `accept_connections` | bool | `false` | Accept incoming connection attempts from discovered peers |
@@ -620,6 +645,7 @@ Requires an external Tor daemon providing a SOCKS5 proxy. Three modes:
 | `transports.tor.max_inbound_connections` | usize | `64` | Maximum inbound connections via onion service. |
 | `transports.tor.directory_service.hostname_file` | string | `"/var/lib/tor/fips_onion_service/hostname"` | Path to Tor-managed hostname file containing the `.onion` address. |
 | `transports.tor.directory_service.bind_addr` | string | `"127.0.0.1:8443"` | Local bind address for the listener that Tor forwards inbound connections to. Must match `HiddenServicePort` target in `torrc`. |
+| `transports.tor.advertise_on_nostr` | bool | `false` | Include this Tor transport in Nostr endpoint adverts. Requires `node.rendezvous.nostr.enabled: true`; setting it while Nostr rendezvous is disabled is a config-load error. `advertised_port` has no effect unless this is `true`. |
 | `transports.tor.advertised_port` | u16 | `443` | Public-facing onion port published in Nostr overlay adverts. Must match the virtual port in torrc's `HiddenServicePort <port> 127.0.0.1:<bind_port>` directive — that is the port other peers will use to reach this onion. |
 
 **Named instances.** Like other transports, multiple Tor instances can
@@ -729,13 +755,15 @@ be configured with named sub-keys for different SOCKS5 proxy endpoints.
 ### BLE (`transports.ble.*`)
 
 Bluetooth Low Energy transport using L2CAP Connection-Oriented Channels.
-Linux + glibc only — at build time, `build.rs` probes for the BlueZ /
-`bluer` crate dependencies and sets the `bluer_available` `cfg`; the BLE
-runtime is gated behind `#[cfg(bluer_available)]`. There is no Cargo
-feature flag to toggle. On non-glibc Linux (musl) or non-Linux platforms,
-BLE config still parses but the transport runtime is absent and config
-entries become no-ops. Communicates with BlueZ via D-Bus through the
-`bluer` crate.
+Compiled on glibc Linux and on Android. At build time, `build.rs` sets
+`bluer_available` from the target triple (Linux and not musl) and sets
+`ble_available` for that or Android; the BLE runtime is gated behind
+`#[cfg(ble_available)]`, with `bluer_available` gating only the BlueZ
+backend inside it. There is no Cargo feature flag to toggle. On musl
+Linux or any other platform, BLE config still parses but the transport
+runtime is absent and config entries become no-ops. On glibc Linux the
+transport communicates with BlueZ via D-Bus through the `bluer` crate;
+on Android the radio is supplied by the embedding application.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -818,12 +846,20 @@ Static peer list. Each entry defines a peer to connect to.
 | `peers[].npub` | string | *(required)* | Peer's Nostr public key (npub-encoded) |
 | `peers[].alias` | string | *(none)* | Human-readable name for logging |
 | `peers[].addresses` | list | `[]` | Transport addresses for the peer. May be left empty (or omitted) when `via_nostr: true`, in which case the daemon resolves endpoints from the peer's Nostr advert at dial time. |
-| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp`, `tcp`, `ethernet`, `tor`, or `ble` |
+| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp`, `tcp`, `ethernet`, `tor`, `nym`, or `ble`. A `udp` entry may be qualified with a named instance as `udp/<instance>` (see below). |
 | `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP/TCP: `"host:port"` (IP or DNS hostname). Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`). BLE: `"adapter/device_address"` (e.g., `"hci0/AA:BB:CC:DD:EE:FF"`). Tor: `".onion:port"` or `"host:port"` |
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual`. Note: `on_demand` and `manual` are reserved for future use; the only policy currently honored at runtime is `auto_connect`. |
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
 | `peers[].via_nostr` | bool | `false` | Append Nostr advert-derived endpoints after static addresses for this peer |
+
+**Named UDP instances.** Where several UDP transports are configured
+under named sub-keys, a peer address can name the one it belongs to by
+writing the transport field as `udp/<instance>`, for example
+`udp/aware`. A bare `udp` matches any instance. The qualifier resolves
+only for `udp`: writing it on any other transport type, or naming a UDP
+instance that is not configured, fails config load with a validation
+error rather than falling back to another instance.
 
 ## Gateway (`gateway.*`)
 
@@ -842,7 +878,7 @@ end-to-end design, see
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `gateway.enabled` | bool | `false` | Enable the gateway. Must be `true` for `fips-gateway` to start. |
-| `gateway.pool` | string | *(required)* | Virtual IPv6 pool CIDR (e.g., `"fd01::/112"`). Must not overlap with the FIPS mesh address space (`fd00::/8`) or any address space already in use on the LAN. The `/112` size yields 65 536 virtual IPs, which is the gateway's hard cap regardless of CIDR width. |
+| `gateway.pool` | string | *(required)* | Virtual IPv6 pool CIDR (e.g., `"fd01::/112"`). Must not overlap with the FIPS mesh address space (`fd00::/8`) or any address space already in use on the LAN. The `/112` size yields 65 535 usable virtual IPs (address 0 in the pool is skipped), which is the gateway's hard cap regardless of CIDR width. |
 | `gateway.lan_interface` | string | *(required)* | LAN-facing network interface name (e.g., `"enp3s0"`). Used for proxy-NDP entry installation so LAN clients can resolve the link-layer address of allocated virtual IPs. |
 | `gateway.pool_grace_period` | u64 | `60` | Seconds a virtual-IP allocation is retained after its last referencing session ends, before the address is returned to the free pool. Larger values reduce churn for short-lived flows; smaller values reclaim addresses faster. |
 
@@ -1005,6 +1041,53 @@ node:
     coord_size: 100000
 ```
 
+## Deprecated Keys
+
+Every key below still loads. Nothing has been removed, so a config file
+written against v0.4.x keeps working after an upgrade. The old spellings
+are scheduled for removal at the next wire-protocol cutover, so migrate
+when convenient rather than urgently.
+
+### `node.discovery.*` split into `node.lookup.*` and `node.rendezvous.*`
+
+The single `node.discovery` table mixed two unrelated jobs: resolving
+coordinates for a mesh address already known (lookup), and finding peers
+to connect to in the first place (rendezvous). It is now two tables.
+
+| Deprecated key | Replacement |
+|----------------|-------------|
+| `node.discovery.ttl` | `node.lookup.ttl` |
+| `node.discovery.attempt_timeouts_secs` | `node.lookup.attempt_timeouts_secs` |
+| `node.discovery.recent_expiry_secs` | `node.lookup.recent_expiry_secs` |
+| `node.discovery.backoff_base_secs` | `node.lookup.backoff_base_secs` |
+| `node.discovery.backoff_max_secs` | `node.lookup.backoff_max_secs` |
+| `node.discovery.forward_min_interval_secs` | `node.lookup.forward_min_interval_secs` |
+| `node.discovery.nostr.*` (whole sub-table) | `node.rendezvous.nostr.*` |
+| `node.discovery.lan.*` (whole sub-table) | `node.rendezvous.lan.*` |
+
+Behaviour of a deployed `node.discovery:` block: each config file is
+folded as it is parsed, before the cross-file merge, and a single warning
+is logged on the `fips::config` target naming the move. Only the keys
+actually present in the old block are applied; the rest keep their
+defaults. The compat block is never written back out, so anything that
+re-serializes the configuration emits the new spelling only.
+
+**Mixing the two spellings inside one file is not a merge.** The fold
+runs after that file is parsed, so a value under `node.discovery`
+overwrites whatever the corresponding `node.lookup` or `node.rendezvous`
+key held in the same file. Use one spelling per file.
+
+### `transports.ethernet.discovery` renamed to `transports.ethernet.listen`
+
+| Deprecated key | Replacement |
+|----------------|-------------|
+| `transports.ethernet.discovery` | `transports.ethernet.listen` |
+
+This one is a plain alias rather than a compat fold, so both spellings
+parse into the same field and no warning is logged. The name changed
+because the key never controlled discovery in the `node.discovery`
+sense: it decides whether the interface listens for neighbour beacons.
+
 ## Complete Reference
 
 The full YAML structure with all defaults:
@@ -1020,6 +1103,7 @@ node:
   base_rtt_ms: 100
   heartbeat_interval_secs: 10
   link_dead_timeout_secs: 30
+  # drain_timeout_secs: 2            # bounded Draining phase; absent = 2s
   limits:
     max_connections: 256
     max_peers: 128
@@ -1042,14 +1126,18 @@ node:
     coord_size: 50000
     coord_ttl_secs: 300
     identity_size: 10000
-  discovery:
+  lookup:
     ttl: 64
     attempt_timeouts_secs: [1, 2, 4, 8]
     recent_expiry_secs: 10
     backoff_base_secs: 0
     backoff_max_secs: 0
     forward_min_interval_secs: 2
-    # lan:                             # uncomment to enable mDNS LAN discovery
+  rendezvous:
+    # nostr:                           # uncomment to enable Nostr rendezvous
+    #   enabled: true                  # opt-in, default false
+    #   policy: configured_only        # disabled | configured_only | open
+    # lan:                             # uncomment to enable mDNS LAN rendezvous
     #   enabled: true                  # opt-in, default false
     #   scope: "my-mesh"               # optional per-network scope filter
   tree:
@@ -1152,6 +1240,8 @@ transports:
   #   #   hostname_file: "/var/lib/tor/fips_onion_service/hostname"
   #   #   bind_addr: "127.0.0.1:8443"
   #   # max_inbound_connections: 64
+  #   # advertise_on_nostr: false      # publish this onion in Nostr adverts
+  #   #                                # (requires node.rendezvous.nostr.enabled)
   #   # advertised_port: 443           # public-facing onion port for Nostr adverts
   # nym:                              # uncomment to enable Nym mixnet transport (outbound-only)
   #   socks5_addr: "127.0.0.1:1080" # nym-socks5-client SOCKS5 proxy address

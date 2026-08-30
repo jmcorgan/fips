@@ -249,13 +249,24 @@ non-blocking. A datagram longer than `buf` is truncated and the remainder
 discarded, which is `SOCK_SEQPACKET` behaviour and is not reported; size `buf`
 at `max_payload()` and it cannot happen. `EINTR` is retried.
 
-**`Ok(0)` is an empty datagram and only that.** An empty datagram and a closed
-peer both produce a zero-byte read, and `MSG_EOR` does not tell them apart. On
-the zero-byte path only, the library polls the descriptor with an events mask
-of zero and reads `POLLHUP` from `revents`, returning `EPIPE` for a genuine
-close and `Ok(0)` otherwise. Without that step a peer could tear down a live
-flow by sending nothing. The `EPIPE` that `recv` returns means the daemon went
-away, never that a peer finished.
+**`Ok(0)` is an empty datagram in every case the socket can distinguish.** An
+empty datagram and a closed peer both produce a zero-byte read, and `MSG_EOR`
+does not tell them apart. On the zero-byte path only, the library polls the
+descriptor with an events mask of `POLLIN` and reads `POLLHUP` from `revents`,
+and where `POLLHUP` is set it asks `FIONREAD` whether the queue still holds
+anything. It returns `EPIPE` only when the peer has hung up and nothing is
+queued behind the read, and `Ok(0)` otherwise. `POLLHUP` alone is not enough,
+because it latches while messages are still queued: a read that trusted it
+would report the close early and discard whatever was waiting. The `EPIPE` that
+`recv` returns means the daemon went away, never that a peer finished.
+
+**One case is reported as `EPIPE` although it is a datagram.** A zero-length
+datagram that is the last message before a close is indistinguishable from the
+close, because reading it drains the queue and `FIONREAD` then reports zero: a
+zero-length message contributes no bytes. Do not give a zero-length payload a
+meaning of its own on this API. Carry a one-byte discriminator instead.
+Separating the two needs a payload that is never zero bytes on the wire, which
+is a protocol change rather than a receive-path one.
 
 **`peer_addr()`** and **`local_addr()`** return `FipsAddr`, not
 `io::Result<FipsAddr>`, unlike their `TcpStream` counterparts. These are field

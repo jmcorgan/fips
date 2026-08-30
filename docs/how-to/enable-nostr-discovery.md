@@ -4,12 +4,17 @@ Nostr-mediated discovery lets FIPS nodes find each other (and punch
 through UDP NAT) using public Nostr relays as the signaling channel.
 The feature ships in every stock packaging artifact but is **off by
 default** — it activates when an operator sets
-`node.discovery.nostr.enabled: true`. Default relay and STUN-server
+`node.rendezvous.nostr.enabled: true`. Default relay and STUN-server
 lists ship in the config; both are optional overrides. See
 [../design/fips-nostr-discovery.md](../design/fips-nostr-discovery.md)
 for the design and rationale; see
 [../reference/configuration.md](../reference/configuration.md) for the
 full knob inventory.
+
+The table was called `node.discovery` before v0.5.0; that spelling still
+parses and logs one deprecation warning naming the move, so an existing
+config keeps working (see
+[../reference/configuration.md](../reference/configuration.md)).
 
 Nostr discovery provides three independent capabilities. They can be
 enabled separately; most deployments end up using two or three of
@@ -57,7 +62,7 @@ resolution without becoming a rendezvous target itself.
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: false
@@ -107,7 +112,7 @@ fits the deployment.
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -166,7 +171,7 @@ side has a NAT type compatible with hole-punching.
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -235,7 +240,7 @@ the advertised port.
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -275,7 +280,7 @@ trade-offs and the `torrc` directives each requires, see
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -309,7 +314,7 @@ for connection attempts subject to `open_discovery_max_pending`.
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -353,7 +358,7 @@ to unrelated overlays that happen to share the default namespace.
 - [../design/fips-nostr-discovery.md](../design/fips-nostr-discovery.md)
   — discovery runtime design, security model
 - [../reference/configuration.md](../reference/configuration.md) —
-  full `node.discovery.nostr.*` and per-transport
+  full `node.rendezvous.nostr.*` and per-transport
   `advertise_on_nostr`/`public` table
 - [../reference/nostr-events.md](../reference/nostr-events.md) — Kind
   37195 advert format, Kind 21059 traversal signaling, Kind 10050

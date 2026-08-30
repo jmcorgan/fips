@@ -179,7 +179,8 @@ providing measurement data up to the teardown moment.
 
 ## Operator Logging
 
-Both layers emit periodic metrics at info level. The interval is
+Both layers emit periodic metrics at debug level, so `node.log_level`
+(or `RUST_LOG`) must be set to `debug` to see them. The interval is
 `node.mmp.log_interval_secs` for link-layer (default 30s) and
 `node.session_mmp.log_interval_secs` for session-layer (default 30s).
 

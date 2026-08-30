@@ -30,13 +30,13 @@ under its identity.
 - `d` — fixed to the literal `fips-overlay-v1` (the application
   identifier baked into the binary). Together with `pubkey`, this
   identifies the unique replaceable event slot.
-- `protocol` — the configured `node.discovery.nostr.app` value
+- `protocol`: the configured `node.rendezvous.nostr.app` value
   (default `fips-overlay-v1`). Distinct from the `d` tag so the
   application string can evolve without breaking the replaceable
   event slot.
 - `version` — protocol version string (currently `"1"`).
 - `expiration` — NIP-40 expiration timestamp set to now +
-  `node.discovery.nostr.advert_ttl_secs` (default 3600 seconds).
+  `node.rendezvous.nostr.advert_ttl_secs` (default 3600 seconds).
   Conforming relays stop serving the event after this time.
 
 ### Content
@@ -143,7 +143,7 @@ The `TraversalAnswer` echoes `sessionId` and carries:
 
 Dialer publishes offers to the recipient's NIP-17 inbox relays (kind
 10050) when available; otherwise to the local
-`node.discovery.nostr.dm_relays` list. The responder publishes the
+`node.rendezvous.nostr.dm_relays` list. The responder publishes the
 answer back through the same relay channel.
 
 ## Kind 10050 — NIP-17 Inbox Relay List

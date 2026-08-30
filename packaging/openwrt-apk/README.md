@@ -23,7 +23,9 @@ calls. The only extra requirement over the `.ipk` build is the `apk` binary.
 The installed-filesystem payload (init scripts, `fips.yaml`, sysctl drop-ins,
 hotplug, uci-defaults, …) is **shared** with the `.ipk` package — there is one
 canonical copy in [`../openwrt-ipk/files/`](../openwrt-ipk/files/). `build-apk.sh`
-stages from there, so the two packages always ship the same files. Keep the
+stages from there, so the two packages ship the same files apart from one
+staged rewrite: `build-apk.sh` changes `ethernet.wan.interface` in the staged
+`fips.yaml` from `eth0` to `wan`, the OpenWrt 25 DSA port name. Keep the
 staging block in `build-apk.sh` in sync with `../openwrt-ipk/build-ipk.sh`.
 
 ## Versioning

@@ -1,0 +1,165 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="monospace" font-size="13">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 26px; font-weight: bold; }
+    text.subtitle { font-size: 16px; fill: #909090; }
+    text.step     { font-size: 14px; fill: #5080c0; font-weight: bold; }
+    text.stage    { font-size: 18px; font-weight: bold; }
+    text.detail   { font-size: 13px; fill: #a0a0b0; }
+    text.fail     { font-size: 15px; fill: #d09070; }
+    text.finding  { font-size: 15px; fill: #d0a040; }
+    text.note     { font-size: 13px; fill: #909090; }
+    text.other    { font-size: 11px; fill: #808090; }
+    text.skip     { font-size: 13px; fill: #7aa0c8; }
+    text.legend   { font-size: 14px; fill: #a0a0b0; }
+    text.caption  { font-size: 14px; fill: #808090; font-style: italic; }
+    rect.stage    { fill: #1a2a3a; stroke: #4080c0; stroke-width: 1.5; rx: 4; }
+    rect.error    { fill: #2a1a1a; stroke: #c06040; stroke-width: 1.5; rx: 4; }
+    rect.finding  { fill: #2a2418; stroke: #d0a040; stroke-width: 1.5; rx: 4; }
+    rect.outcome  { fill: #1a3a2a; stroke: #40a060; stroke-width: 1.5; rx: 4; }
+    rect.panel    { fill: #151520; stroke: #404060; stroke-width: 1; rx: 4; }
+    line.arrow    { stroke: #606080; stroke-width: 1.5; }
+    line.skipline { stroke: #4080c0; stroke-width: 1.5; stroke-dasharray: 6,4; }
+  </style>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#606080"/>
+    </marker>
+    <marker id="skiphead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#4080c0"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="900" fill="#0d1117" rx="8"/>
+
+  <text x="800" y="56" text-anchor="middle" class="title">fipsctl probe — Stage Pipeline</text>
+  <text x="800" y="88" text-anchor="middle" class="subtitle">Five stages in order, each with its own budget, against one target</text>
+
+  <!-- ============================================================ -->
+  <!-- Skip bypass: neither lookup stage is needed                  -->
+  <!-- ============================================================ -->
+  <text x="410" y="192" text-anchor="middle" class="skip">cached coords, or a direct peer:</text>
+  <text x="410" y="212" text-anchor="middle" class="skip">bloom and discovery are skipped</text>
+  <polyline points="150,296 150,228 670,228 670,288" fill="none" class="skipline" marker-end="url(#skiphead)"/>
+
+  <!-- ============================================================ -->
+  <!-- 1  BLOOM                                                     -->
+  <!-- ============================================================ -->
+  <text x="38" y="288" class="step">1</text>
+  <rect x="32" y="296" width="236" height="112" class="stage"/>
+  <text x="150" y="332" text-anchor="middle" class="stage">bloom</text>
+  <text x="150" y="362" text-anchor="middle" class="detail">ask each peer's filter</text>
+  <text x="150" y="384" text-anchor="middle" class="detail">a claim sends a lookup</text>
+  <line x1="268" y1="352" x2="288" y2="352" class="arrow" marker-end="url(#arrowhead)"/>
+  <line x1="150" y1="408" x2="150" y2="448" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <rect x="32" y="452" width="236" height="150" class="error"/>
+  <text x="150" y="482" text-anchor="middle" class="fail">no filter holds it</text>
+  <text x="150" y="508" text-anchor="middle" class="note">bloom_miss</text>
+  <text x="150" y="530" text-anchor="middle" class="other">backoff_suppressed</text>
+  <text x="150" y="550" text-anchor="middle" class="other">no_tree_peers</text>
+  <text x="150" y="578" text-anchor="middle" class="other">later stages: not reached</text>
+
+  <!-- ============================================================ -->
+  <!-- 2  DISCOVERY                                                 -->
+  <!-- ============================================================ -->
+  <text x="298" y="288" class="step">2</text>
+  <rect x="292" y="296" width="236" height="112" class="stage"/>
+  <text x="410" y="332" text-anchor="middle" class="stage">discovery</text>
+  <text x="410" y="362" text-anchor="middle" class="detail">wait for the response</text>
+  <text x="410" y="384" text-anchor="middle" class="detail">four tries: 1s 2s 4s 8s</text>
+  <line x1="528" y1="352" x2="548" y2="352" class="arrow" marker-end="url(#arrowhead)"/>
+  <line x1="410" y1="408" x2="410" y2="448" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <rect x="292" y="452" width="236" height="150" class="error"/>
+  <text x="410" y="482" text-anchor="middle" class="fail">a claim, unconfirmed</text>
+  <text x="410" y="508" text-anchor="middle" class="note">bloom_unconfirmed</text>
+  <text x="410" y="530" text-anchor="middle" class="other">no_response · already_pending</text>
+  <text x="410" y="550" text-anchor="middle" class="other">an absent key looks like this</text>
+  <text x="410" y="578" text-anchor="middle" class="other">later stages: not reached</text>
+
+  <!-- ============================================================ -->
+  <!-- 3  PATH                                                      -->
+  <!-- ============================================================ -->
+  <text x="558" y="288" class="step">3</text>
+  <rect x="552" y="296" width="236" height="112" class="stage"/>
+  <text x="670" y="332" text-anchor="middle" class="stage">path</text>
+  <text x="670" y="362" text-anchor="middle" class="detail">our coords, theirs, the LCA</text>
+  <text x="670" y="384" text-anchor="middle" class="detail">nothing leaves this node</text>
+  <line x1="788" y1="352" x2="808" y2="352" class="arrow" marker-end="url(#arrowhead)"/>
+  <line x1="670" y1="408" x2="670" y2="448" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <rect x="552" y="452" width="236" height="150" class="finding"/>
+  <text x="670" y="482" text-anchor="middle" class="finding">no route to compute</text>
+  <text x="670" y="508" text-anchor="middle" class="note">disjoint_trees</text>
+  <text x="670" y="530" text-anchor="middle" class="other">no_next_hop</text>
+  <text x="670" y="558" text-anchor="middle" class="other">a finding, not a stop:</text>
+  <text x="670" y="578" text-anchor="middle" class="other">the probe carries on past it</text>
+
+  <!-- ============================================================ -->
+  <!-- 4  SESSION                                                   -->
+  <!-- ============================================================ -->
+  <text x="818" y="288" class="step">4</text>
+  <rect x="812" y="296" width="236" height="112" class="stage"/>
+  <text x="930" y="332" text-anchor="middle" class="stage">session</text>
+  <text x="930" y="362" text-anchor="middle" class="detail">an FSP session, Noise XK</text>
+  <text x="930" y="384" text-anchor="middle" class="detail">skipped if one exists</text>
+  <line x1="1048" y1="352" x2="1068" y2="352" class="arrow" marker-end="url(#arrowhead)"/>
+  <line x1="930" y1="408" x2="930" y2="448" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <rect x="812" y="452" width="236" height="150" class="error"/>
+  <text x="930" y="482" text-anchor="middle" class="fail">the handshake failed</text>
+  <text x="930" y="508" text-anchor="middle" class="note">handshake_timeout</text>
+  <text x="930" y="530" text-anchor="middle" class="other">send_error</text>
+  <text x="930" y="558" text-anchor="middle" class="other">skipped if a session exists</text>
+  <text x="930" y="578" text-anchor="middle" class="other">later stages: not reached</text>
+
+  <!-- ============================================================ -->
+  <!-- 5  RTT                                                       -->
+  <!-- ============================================================ -->
+  <text x="1078" y="288" class="step">5</text>
+  <rect x="1072" y="296" width="236" height="112" class="stage"/>
+  <text x="1190" y="332" text-anchor="middle" class="stage">rtt</text>
+  <text x="1190" y="362" text-anchor="middle" class="detail">warmup, receiver report</text>
+  <text x="1190" y="384" text-anchor="middle" class="detail">trip time from the echo</text>
+  <line x1="1308" y1="352" x2="1328" y2="352" class="arrow" marker-end="url(#arrowhead)"/>
+  <line x1="1190" y1="408" x2="1190" y2="448" class="arrow" marker-end="url(#arrowhead)"/>
+
+  <rect x="1072" y="452" width="236" height="150" class="error"/>
+  <text x="1190" y="482" text-anchor="middle" class="fail">no usable echo</text>
+  <text x="1190" y="508" text-anchor="middle" class="note">no_report · no_echo</text>
+  <text x="1190" y="530" text-anchor="middle" class="other">bad_timestamp_echo</text>
+  <text x="1190" y="550" text-anchor="middle" class="other">sub_millisecond (loopback)</text>
+  <text x="1190" y="578" text-anchor="middle" class="other">verdict is partial, not failed</text>
+
+  <!-- ============================================================ -->
+  <!-- VERDICT                                                      -->
+  <!-- ============================================================ -->
+  <rect x="1332" y="296" width="236" height="112" class="outcome"/>
+  <text x="1450" y="332" text-anchor="middle" class="stage">verdict</text>
+  <text x="1450" y="362" text-anchor="middle" class="detail">ok · partial · failed</text>
+  <text x="1450" y="384" text-anchor="middle" class="detail">our session is torn down</text>
+
+  <!-- ============================================================ -->
+  <!-- Legend                                                       -->
+  <!-- ============================================================ -->
+  <rect x="32" y="668" width="1536" height="120" class="panel"/>
+
+  <rect x="60" y="700" width="26" height="16" rx="4" fill="#1a2a3a" stroke="#4080c0" stroke-width="1"/>
+  <text x="100" y="713" class="legend">Stage, run in order with its own budget</text>
+  <rect x="60" y="740" width="26" height="16" rx="4" fill="#2a1a1a" stroke="#c06040" stroke-width="1"/>
+  <text x="100" y="753" class="legend">Terminal failure: later stages not reached</text>
+
+  <rect x="560" y="700" width="26" height="16" rx="4" fill="#2a2418" stroke="#d0a040" stroke-width="1"/>
+  <text x="600" y="713" class="legend">Finding that does not stop the probe</text>
+  <rect x="560" y="740" width="26" height="16" rx="4" fill="#1a3a2a" stroke="#40a060" stroke-width="1"/>
+  <text x="600" y="753" class="legend">Final verdict</text>
+
+  <line x1="1060" y1="708" x2="1086" y2="708" class="skipline"/>
+  <text x="1100" y="713" class="legend">Skip: no lookup was needed</text>
+  <line x1="1060" y1="748" x2="1086" y2="748" class="arrow" marker-end="url(#arrowhead)"/>
+  <text x="1100" y="753" class="legend">Control flow</text>
+
+  <text x="800" y="838" text-anchor="middle" class="caption">A failure marks every later stage not reached; the path preview is the exception, and the probe continues past it</text>
+</svg>

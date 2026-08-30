@@ -145,17 +145,21 @@ transports:
   ethernet:
     mesh0:
       interface: "fips-mesh0"
-      discovery: true
+      listen: true
       announce: true
       auto_connect: true
       accept_connections: true
     mesh1:
       interface: "fips-mesh1"
-      discovery: true
+      listen: true
       announce: true
       auto_connect: true
       accept_connections: true
 ```
+
+`listen:` was called `discovery:` before v0.5.0; the old spelling still
+parses as an alias, so an existing config keeps working (see
+[../reference/configuration.md](../reference/configuration.md)).
 
 ## Step 3 — restart the daemon (order matters)
 

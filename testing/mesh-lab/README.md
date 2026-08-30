@@ -83,8 +83,8 @@ Defined in [pressure-profiles.sh](pressure-profiles.sh):
 
 ## Environment-variable knobs
 
-The harness reads three optional environment variables that shape what
-each rep does, set them in the invoking shell:
+The harness reads optional environment variables that shape what each
+rep does, set them in the invoking shell:
 
 - **`FIPS_MESH_LAB_NETEM`** — netem argument string (e.g.
   `"delay 10ms 5ms 25% loss 1%"`). When set, the harness runs
@@ -101,7 +101,7 @@ each rep does, set them in the invoking shell:
   - rekey / rekey-accept-off / rekey-outbound-only — `rekey`,
     `handshake`, `forwarding`, `session`, `encrypted`, `mmp`
     (via `compose-trace.yml`).
-  - nat-lan — `discovery::nostr`, `transport::udp`,
+  - nat-lan — `fips::nostr`, `transport::udp`,
     `node::lifecycle`, `handlers::handshake`, `dataplane::forwarding`
     (via `compose-trace-nat.yml`, picked up by
     `testing/nat/scripts/nat-test.sh` through the

@@ -43,12 +43,11 @@ After this tutorial your node will have:
 
 ## Where these files live
 
-Every path in this tutorial is written in its Linux form. The macOS
-package (`.pkg`) installs config and keys under
-`/usr/local/etc/fips/` instead of `/etc/fips/`, so on macOS
-substitute as you go:
+Every path in this tutorial is written in its Linux form. macOS and
+FreeBSD install config and keys under `/usr/local/etc/fips/` instead
+of `/etc/fips/`, so on those platforms substitute as you go:
 
-| Linux / other Unix | macOS |
+| Linux / other Unix | macOS / FreeBSD |
 | --- | --- |
 | `/etc/fips/fips.yaml` | `/usr/local/etc/fips/fips.yaml` |
 | `/etc/fips/fips.key` | `/usr/local/etc/fips/fips.key` |

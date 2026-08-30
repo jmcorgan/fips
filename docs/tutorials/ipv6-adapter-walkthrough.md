@@ -87,8 +87,8 @@ prefix, and returns the result. There is no shared registry; the
 address space is self-allocating from the public-key namespace.
 
 If you ask for any non-`.fips` suffix, the responder returns
-`REFUSED` — it is intentionally a stub for this single zone, not a
-recursive resolver. An unknown `.fips` name returns `NXDOMAIN`.
+`NXDOMAIN` — it is intentionally a stub for this single zone, not a
+recursive resolver. An unknown `.fips` name returns `NXDOMAIN` too.
 
 The full DNS integration is documented in
 [../design/fips-ipv6-adapter.md](../design/fips-ipv6-adapter.md).

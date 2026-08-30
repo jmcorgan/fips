@@ -95,10 +95,11 @@ script that only runs when the target file is absent.
 
 ### Why `--config /var/lib/fips/fips.yaml`?
 
-fips has a config search path (`./fips.yaml`, `~/.config/fips/fips.yaml`,
-`/etc/fips/fips.yaml`). Passing `--config` explicitly bypasses that search
-path entirely, so fips loads **only** the user-managed file and never
-accidentally picks up a stale `/etc/fips/fips.yaml`.
+fips has a config search path (`./fips.yaml`, `~/.fips.yaml`,
+`~/.config/fips/fips.yaml`, `/etc/fips/fips.yaml`). Passing `--config`
+explicitly bypasses that search path entirely, so fips loads **only** the
+user-managed file and never accidentally picks up a stale
+`/etc/fips/fips.yaml`.
 
 ## Usage after install
 

@@ -53,7 +53,7 @@ on.
 
 ## Step 1: Enable it on the daemon
 
-Add to `/etc/fips/fips.yaml` (or a drop-in under `/etc/fips/fips.d/`):
+Add to `/etc/fips/fips.yaml`:
 
 ```yaml
 node:

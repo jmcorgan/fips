@@ -132,6 +132,7 @@ gateway:
   pool: "fd01::/112"            # virtual IP range (up to 65535 addresses)
   lan_interface: "br-lan"       # LAN-facing interface for proxy NDP
   dns:
+    listen: "[::1]:5353"        # gateway DNS bind (IPv6 loopback only)
     upstream: "[::1]:5354"      # FIPS daemon DNS resolver (matches daemon default)
     ttl: 60                     # DNS TTL and mapping lifetime (seconds)
   pool_grace_period: 60         # seconds after last session before reclaiming
@@ -146,11 +147,10 @@ Three things to notice:
 - `lan_interface: "br-lan"` — the OpenWrt LAN bridge. The gateway
   installs proxy-NDP entries on this interface so LAN clients can
   ARP-equivalent for pool addresses.
-- No `dns.listen` line — the source default `[::1]:5353` is exactly
-  what OpenWrt wants. The gateway listens on IPv6 loopback only;
-  dnsmasq, which owns LAN port 53, forwards `.fips` queries to it.
-  The init script wires up that forwarding; you don't bind to a LAN
-  address yourself.
+- `dns.listen: "[::1]:5353"` — the gateway's DNS bind, pinned to
+  IPv6 loopback only. dnsmasq, which owns LAN port 53, forwards
+  `.fips` queries to it. The init script wires up that forwarding;
+  you don't bind to a LAN address yourself.
 
 For the full reference, see
 [../reference/configuration.md § Gateway](../reference/configuration.md#gateway-gateway).

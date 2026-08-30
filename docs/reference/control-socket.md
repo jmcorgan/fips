@@ -80,8 +80,10 @@ One JSON object per line.
 ### I/O timeouts
 
 The daemon enforces a 5-second timeout for both the request read and
-the response write. If the connection idles longer than that, the
-daemon closes it with no response.
+the response write. A request that does not arrive within the read
+timeout is answered with a `read timeout` error response and the
+connection is then closed; a response that cannot be written within the
+write timeout is dropped and the connection closed with no response.
 
 ### Common error messages
 
@@ -89,7 +91,7 @@ daemon closes it with no response.
 | ------- | ----- |
 | `empty request` | Connection closed before a newline was received. |
 | `invalid request: <serde error>` | Malformed JSON or missing `command`. |
-| `request too large` | Request exceeded 4096 bytes. |
+| `read error: request too large` | Request exceeded 4096 bytes. |
 | `read timeout` / `read error: ...` | Slow client or transport failure. |
 | `unknown command: <name>` | Command not registered with this daemon. |
 | `missing params for <name>` | Command requires `params` but none were provided. |

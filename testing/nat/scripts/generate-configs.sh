@@ -89,7 +89,7 @@ node:
     max_retries: 3
     base_interval_secs: 2
     max_backoff_secs: 8
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true

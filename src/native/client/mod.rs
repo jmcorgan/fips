@@ -475,10 +475,23 @@ impl FipsStream {
     /// exactly would be wrong: reading a zero-byte datagram as a close would let
     /// a peer tear down a live flow by sending nothing. A closed daemon half is
     /// `EPIPE` on every platform, but the platforms disagree on how the kernel
-    /// says so: Linux discriminates a zero-byte read with `POLLHUP`, and Darwin
-    /// returns `ECONNRESET` outright. Both are measured for this socket pair in
+    /// says so: Linux sets `POLLHUP` on a zero-byte read, and Darwin returns
+    /// `ECONNRESET` outright. Both are measured for this socket pair in
     /// [`seqpacket`](super::seqpacket), and both are translated to `EPIPE` here
     /// so a caller never sees the difference.
+    ///
+    /// **`POLLHUP` alone is not the rule**, because it latches while messages
+    /// are still queued. A daemon half that wrote an empty datagram, then a
+    /// payload, then closed leaves all three facts true at once, and a read that
+    /// stopped at the flag would report the close and discard the payload. So a
+    /// hang-up is end of file only when
+    /// [`bytes_queued`](super::seqpacket::bytes_queued) reports nothing behind
+    /// it. The daemon half applies the identical rule, on the same pair.
+    ///
+    /// One case survives both checks: a zero-length datagram that is the last
+    /// message before the close is indistinguishable from the close, because
+    /// reading it drains the queue and a zero-length message contributes no
+    /// bytes. Do not give a zero-length payload a meaning of its own.
     ///
     /// A datagram longer than `buf` is truncated and the remainder discarded,
     /// which is `SOCK_SEQPACKET` behaviour. Size `buf` at
@@ -496,7 +509,10 @@ impl FipsStream {
                 }
                 return Err(error);
             }
-            if received == 0 && seqpacket::peer_hung_up(self.fd.as_raw_fd()) {
+            if received == 0
+                && seqpacket::peer_hung_up(self.fd.as_raw_fd())
+                && seqpacket::bytes_queued(self.fd.as_raw_fd()) == 0
+            {
                 return Err(io::Error::from_raw_os_error(libc::EPIPE));
             }
             return Ok(received as usize);
@@ -1478,5 +1494,49 @@ mod tests {
         let addr = FipsAddr::new(codec::pton(PEER).unwrap(), 4242);
         assert_eq!(addr.to_string(), format!("{PEER}:4242"));
         assert_eq!(addr.to_string().parse::<FipsAddr>().unwrap(), addr);
+    }
+
+    #[test]
+    fn an_empty_datagram_before_the_daemon_closes_does_not_swallow_what_follows() {
+        // The mirror of the daemon-side test in `super::super::seqpacket`. The
+        // same end-of-file rule lives on both halves of the pair, so the same
+        // defect did: a `POLLHUP` latched while messages are still queued
+        // reported the close early, and the payload behind the empty datagram
+        // was never handed to the caller.
+        let (daemon, ours) = seqpacket::pair().unwrap();
+
+        // SAFETY: the descriptor is open and owned by `daemon`.
+        let sent = unsafe { libc::send(daemon.as_raw_fd(), std::ptr::null(), 0, 0) };
+        assert_eq!(sent, 0, "{}", io::Error::last_os_error());
+        // SAFETY: as above, and the pointer and length describe the literal.
+        let sent = unsafe { libc::send(daemon.as_raw_fd(), b"after".as_ptr().cast(), 5, 0) };
+        assert_eq!(sent, 5, "{}", io::Error::last_os_error());
+        drop(daemon);
+
+        let addr = FipsAddr::new(codec::pton(PEER).unwrap(), 4242);
+        let stream = FipsStream {
+            fd: ours,
+            peer: addr,
+            local: addr,
+            max: 1024,
+        };
+
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            stream.recv(&mut buf).unwrap(),
+            0,
+            "the empty datagram was reported as the close"
+        );
+        assert_eq!(
+            stream.recv(&mut buf).unwrap(),
+            5,
+            "the message queued behind the empty datagram was lost"
+        );
+        assert_eq!(&buf[..5], b"after");
+        assert_eq!(
+            stream.recv(&mut buf).unwrap_err().raw_os_error(),
+            Some(libc::EPIPE),
+            "the close itself must still be reported once the queue is drained"
+        );
     }
 }

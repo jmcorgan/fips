@@ -90,8 +90,9 @@ and one arriving on a held port reaches its flow.
 
 **The interface around it is experimental.** It is not versioned, it has no
 compatibility promise, and three of its five commands exist only to let the
-daemon's own checks drive the receive path without a peer. It is Linux and
-FreeBSD only, and it is off by default.
+daemon's own checks drive the receive path without a peer. It is Linux, FreeBSD
+and macOS only — Windows cannot be supported, as it has no `SCM_RIGHTS` — and it
+is off by default.
 
 ## What this is not
 

@@ -27,8 +27,9 @@ running nodes can mesh.
 
 ## What you'll need
 
-- A Linux, macOS, or Windows host. Linux is the most exercised
-  platform; macOS and Windows installers are available.
+- A Linux, macOS, FreeBSD, or Windows host. Linux is the most
+  exercised platform; macOS, FreeBSD, and Windows installers are
+  available. The FreeBSD package is built for **x86_64 only**.
 - The pre-built installer for your platform (see the project
   README's [Quick start](../README.md#quick-start) section for
   download links), **or** a source checkout if you want to build
@@ -42,10 +43,10 @@ running nodes can mesh.
 
 FIPS is installed by running a binary installer for your
 platform. The installer drops the daemon and CLI tools into
-system locations, installs systemd / launchd / Windows-service
-unit files, places a default `fips.yaml`, and creates the `fips`
-system group. There is no `cargo install` path: the daemon needs
-more than just binaries copied into place.
+system locations, installs systemd / launchd / rc.d /
+Windows-service unit files, places a default `fips.yaml`, and
+creates the `fips` system group. There is no `cargo install`
+path: the daemon needs more than just binaries copied into place.
 
 You can either build the installer yourself from source, or
 download a pre-built one from the release distribution. Both
@@ -57,15 +58,61 @@ post-install state.
 The most direct path. The release distribution carries a
 per-platform installer:
 
-- Debian/Ubuntu — `.deb` package
-- Arch Linux — `fips` AUR package
-- OpenWrt — `.ipk` package
-- macOS — `.pkg` installer
-- Windows — `.zip` with service-install scripts
-- Generic systemd Linux — `.tar.gz` with an `install.sh` script
+- Debian/Ubuntu: `.deb` package
+- Arch Linux: `fips` AUR package
+- OpenWrt: `.ipk` and `.apk` packages
+- macOS: `.pkg` installer
+- FreeBSD: native `.pkg` (x86_64 only)
+- Windows: `.zip` with service-install scripts
+- Generic systemd Linux: `.tar.gz` with an `install.sh` script
 
 See the [project README's Quick start section](../README.md#quick-start)
 for download links and per-platform invocations.
+
+### FreeBSD
+
+FreeBSD gets a native package built from `packaging/freebsd/`. It
+ships `fips`, `fipsctl`, `fipstop`, the `fips` and `fips_dns` rc.d
+services, and `.fips` DNS integration. `fips-gateway` is **not**
+included: its NAT backend is nftables, which is Linux-only. The
+Ethernet and BLE transports are unavailable on FreeBSD; UDP, TCP,
+Tor, and Nym are.
+
+**One architecture.** The published artifact is
+`fips-<version>-freebsd-amd64.pkg`. There is no aarch64 FreeBSD
+build, so on any other architecture use the from-source path below.
+
+```sh
+pkg add ./fips-<version>-freebsd-amd64.pkg
+cp /usr/local/etc/fips/fips.yaml.sample /usr/local/etc/fips/fips.yaml
+sysrc fips_enable=YES fips_dns_enable=YES
+service fips start
+service fips_dns start
+fipsctl show status
+```
+
+FreeBSD differs from the Linux layout in three places worth knowing
+before you go looking for files:
+
+- Config lives at `/usr/local/etc/fips/fips.yaml`, not `/etc/fips/`.
+  It installs with sample semantics and mode `0600`, so an edited
+  file survives `pkg upgrade` and `pkg delete`, and a `nsec:` in it
+  is not world-readable.
+- The daemon runs under `daemon(8)` with pidfile
+  `/var/run/fips/fips.pid` and logs to `/var/log/fips.log`. The
+  rc.conf knobs are `fips_config`, `fips_flags`, and
+  `fips_logfile`.
+- The control socket resolves to `/var/run/fips/control.sock`. As on
+  Linux, a `fips` group is created and its members can run `fipsctl`
+  and `fipstop` without root (`pw groupmod fips -m <user>`, then
+  re-login).
+
+Making the local resolver the *system* resolver is a one-time
+operator step the package deliberately does not take, and there are
+field-tested caveats around unbound upstreams and `/etc/resolv.conf`.
+Both are covered in the FreeBSD section of
+[packaging/README.md](../packaging/README.md) and in
+`packaging/freebsd/README.md`.
 
 ### From source
 
@@ -77,7 +124,7 @@ downloaded one.
 ```sh
 git clone https://github.com/jmcorgan/fips.git
 cd fips/packaging
-make deb         # or: tarball, ipk, aur, pkg, zip, all
+make deb         # or: tarball, ipk, apk, aur, pkg, freebsd, zip, all
 ```
 
 The resulting installer lands in `deploy/` at the project root.
@@ -102,8 +149,10 @@ nix develop               # dev shell with the toolchain + build deps
 This path produces binaries only — it does not run the installer, so
 there are no systemd units, no `fips` group, and no default `fips.yaml`.
 On NixOS, wire the daemon in through your system configuration using the
-flake's `packages.<system>.fips` output instead. See the Nix / NixOS
-section of [packaging/README.md](../packaging/README.md).
+flake's `nixosModules.default` output instead: import it and set
+`services.fips.enable = true`. See
+[packaging/nixos/README.md](../packaging/nixos/README.md) and the Nix /
+NixOS section of [packaging/README.md](../packaging/README.md).
 
 ## What's installed and running
 
@@ -115,18 +164,20 @@ running, and what you'll need to set up yourself.
 - `fips` (daemon)
 - `fipsctl` (control-socket client)
 - `fipstop` (live-status TUI)
-- `fips-gateway`
+- `fips-gateway` (Linux only)
 
 **Files placed on disk:**
 
 - `/etc/fips/fips.yaml` — default daemon config (preserved on
-  upgrade).
+  upgrade). On macOS and FreeBSD this is
+  `/usr/local/etc/fips/fips.yaml`.
 - `/etc/fips/fips.nft` — mesh-interface nftables baseline (used
-  only when the firewall service is enabled).
+  only when the firewall service is enabled). Linux only.
 - `/etc/fips/fips.d/` — empty drop-in directory for operator
-  nftables additions.
-- Systemd, launchd, or Windows-service unit files for the four
-  fips services.
+  nftables additions. Linux only.
+- Systemd, launchd, rc.d, or Windows-service unit files for the
+  fips services. FreeBSD installs `fips` and `fips_dns` only, since
+  `fips-gateway` and the nftables firewall service are Linux-only.
 
 **System changes:**
 
@@ -136,7 +187,7 @@ running, and what you'll need to set up yourself.
 - The runtime directory `/run/fips/` exists with mode
   `0750 root:fips`.
 
-**Services enabled and started on boot:**
+**Services enabled at install, and started on the next boot:**
 
 - `fips.service` — the daemon. Brings up the `fips0` TUN
   adapter, listens on the configured transports, and exposes
@@ -145,13 +196,21 @@ running, and what you'll need to set up yourself.
   the host resolver (a `/etc/systemd/resolved.conf.d/` drop-in
   pointing at `[::1]:5354` on systemd hosts).
 
+The Debian package enables both and starts neither, so a fresh install
+leaves them stopped. Start them yourself rather than waiting for a
+reboot:
+
+```bash
+sudo systemctl start fips fips-dns
+```
+
 **Services installed but not enabled** (operator opt-in):
 
 - `fips-firewall.service` — applies `/etc/fips/fips.nft` to
   the mesh interface. See
   [how-to/enable-mesh-firewall.md](how-to/enable-mesh-firewall.md).
 
-**What's working out of the box:**
+**What's working once both services are running:**
 
 - The daemon is running with a fresh **ephemeral** identity —
   a new Nostr keypair is generated on every start.

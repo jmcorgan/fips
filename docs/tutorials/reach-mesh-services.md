@@ -56,15 +56,15 @@ hostname on the public internet. There is no separate
 the tool takes a hostname, it accepts a `.fips` hostname.
 
 > **Where the address comes from.** Every FIPS node's mesh
-> address is the first 16 bytes of SHA-256 of its public key,
-> with the leading byte replaced by `0xfd` (the `fd00::/8` ULA
-> prefix). The remaining bytes are hash output, so an address
-> like `fd97:...` is per-node — the `97` is part of the hash,
-> not a fixed prefix shared across nodes. Names of the form
-> `<npub>.fips` and any shortname mapped in `/etc/fips/hosts`
-> are aliases for that address. The daemon's local DNS
-> responder hands the answer back to your kernel without ever
-> talking to a remote DNS server.
+> address is `0xfd` (the `fd00::/8` ULA prefix) followed by the
+> first 15 bytes of its node address, which is itself the first
+> 16 bytes of SHA-256 of its public key. The remaining bytes
+> are hash output, so an address like `fd97:...` is per-node —
+> the `97` is part of the hash, not a fixed prefix shared across
+> nodes. Names of the form `<npub>.fips` and any shortname
+> mapped in `/etc/fips/hosts` are aliases for that address. The
+> daemon's local DNS responder hands the answer back to your
+> kernel without ever talking to a remote DNS server.
 
 ## Step 1: Ping a mesh node (recap)
 

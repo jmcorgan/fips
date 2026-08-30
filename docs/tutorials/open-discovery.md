@@ -37,14 +37,14 @@ you'll be a full participant in the ambient
 ```
 
 You will change one thing in `/etc/fips/fips.yaml`: under
-`discovery.nostr`, set `policy: open` (the default is
+`node.rendezvous.nostr`, set `policy: open` (the default is
 `configured_only`). After restart, the daemon subscribes to
 every Kind 37195 advert in the `fips-overlay-v1` namespace and
 queues the publishers for outbound connection attempts.
 
 ## How open discovery works
 
-> **Discovery policy.** `discovery.nostr.policy` decides what
+> **Discovery policy.** `node.rendezvous.nostr.policy` decides what
 > the daemon does with incoming advert data. Two values:
 >
 > - `configured_only` (the default): the daemon only consumes
@@ -71,7 +71,7 @@ working:
 
 The namespace is what scopes who's visible to whom:
 
-> **The namespace is the scope.** `discovery.nostr.app`
+> **The namespace is the scope.** `node.rendezvous.nostr.app`
 > defaults to `fips-overlay-v1` — the namespace the public
 > test mesh uses. Setting a different value (e.g.,
 > `app: "my-experiment.v1"`) carves out a private discovery
@@ -110,7 +110,7 @@ You should be coming out of
 [advertise-your-node](advertise-your-node.md) with:
 
 - Persistent identity, advertising enabled
-  (`discovery.nostr.advertise: true`), and either the
+  (`node.rendezvous.nostr.advertise: true`), and either the
   direct-UDP path
   (`transports.udp.advertise_on_nostr: true`,
   `transports.udp.public: true`) or the `udp:nat` path
@@ -133,14 +133,14 @@ you.
 
 ## Step 2: Switch the discovery policy to `open`
 
-Open `/etc/fips/fips.yaml` and find the `discovery.nostr`
+Open `/etc/fips/fips.yaml` and find the `rendezvous.nostr`
 block. Add (or change) the `policy` line:
 
 ```yaml
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -159,7 +159,12 @@ That's the only change. Notes on what you don't have to touch:
 - **You don't have to set `open_discovery_max_pending`.** The
   default of 64 is plenty for a tutorial; only tune it if you
   see the daemon log
-  `open-discovery: max-pending reached, deferring`.
+  `open-discovery sweep: enqueue budget is 0, skipping`
+  (a debug-level line).
+- **You don't have to rewrite an older `node.discovery` block.**
+  That spelling still parses and logs one deprecation warning
+  naming the new table (see
+  [../reference/configuration.md](../reference/configuration.md)).
 
 Save the file.
 
@@ -192,16 +197,20 @@ You should see considerably more entries than before:
 - Plus any other operator publishing on `fips-overlay-v1`
   (community nodes, other operators' experiments).
 
-Each entry has its own `connectivity` state. Some will be
-`active` (handshake completed). Some will show as
-`connecting` and may transition to `failed` shortly after —
-that's normal; the publisher might be offline, the advert
-might be stale, or NAT traversal failed for that pair.
+Each entry has its own `connectivity` state, and every entry
+that appears here completed a handshake at least once: a peer
+whose advert was stale, or that NAT traversal never reached,
+produces no entry at all rather than a failed one. Healthy links
+read `connected`. A link not heard from recently reads `stale`
+and still carries traffic; one that dropped and is being retried
+reads `reconnecting`, and one explicitly torn down reads
+`disconnected`. Neither of the last two can send.
 
-To get a list of just the active links:
+To get a list of just the connected links:
 
 ```sh
-sudo fipsctl show peers | jq '.peers[] | select(.connectivity == "active") | .npub'
+sudo fipsctl show peers \
+  | jq '.peers[] | select(.connectivity == "connected") | .npub'
 ```
 
 The peer count will continue to drift over time as adverts
@@ -259,12 +268,13 @@ nodes — colleagues, a workshop cohort, a specific deployment
 — set a custom `app` value:
 
 ```yaml
-discovery:
-  nostr:
-    enabled: true
-    advertise: true
-    policy: open
-    app: "my-team.experiment-1"
+node:
+  rendezvous:
+    nostr:
+      enabled: true
+      advertise: true
+      policy: open
+      app: "my-team.experiment-1"
 ```
 
 All nodes participating in the experiment use the same

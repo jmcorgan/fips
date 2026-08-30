@@ -246,8 +246,8 @@ debugging FIPS. The FIPS daemon will log a warning if it cannot
 acquire the adapter.
 
 If the FIPS log contains `bluer` D-Bus errors, the daemon usually
-lacks permission. Run as root or grant `CAP_NET_ADMIN` and add the
-fips user to the `bluetooth` group.
+lacks permission. Run as root, add the fips user to the
+`bluetooth` group, or grant the binary `CAP_NET_RAW`.
 
 ### Peers see each other but never connect
 
@@ -263,11 +263,12 @@ fails.
 
 Practical L2CAP CoC throughput in good conditions reaches
 1-2 Mbps, but interference, range, and controller capability all
-push it lower. If throughput is well below that range, check the
-negotiated ATT_MTU — a small ATT_MTU (default 23 bytes when
-extended ATT MTU is not negotiated) caps per-PDU payload
-regardless of radio conditions. The per-link MTU reported in
-`fipsctl show transports` reveals what was negotiated.
+push it lower. FIPS carries BLE over an L2CAP connection-oriented
+channel rather than GATT, so there is no ATT_MTU to negotiate: the
+per-connection L2CAP CoC MTU applies, defaulting to 2048. The
+measured path MTU is the `path_mtu` field of `fipsctl show mmp`,
+under the session layer; `show peers` omits it and `show
+transports` carries only the transport-wide default.
 
 If MTU is unexpectedly low, both endpoints must support and have
 negotiated the BlueZ L2CAP `cocmode=2` extension. Older Bluetooth

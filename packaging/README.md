@@ -1,7 +1,8 @@
 # FIPS Packaging
 
 This directory contains packaging for all supported target platforms.
-All build outputs go to `deploy/` at the project root.
+Most build outputs go to `deploy/` at the project root; `make ipk`
+and `make apk` write to `dist/` instead.
 
 ## Quick Start
 
@@ -35,9 +36,13 @@ sudo apt install libclang-dev    # Debian / Ubuntu
 This is a build-time prerequisite only — it is not a runtime
 dependency, so hosts installing a pre-built `.deb` do not need it.
 
-BLE support is optional and, when building with it, additionally needs
-`bluez`, `libdbus-1-dev`, and `pkg-config`; the build picks up BLE if
-those are present and skips it cleanly if not.
+BLE is not optional, and it is not universal either. `build.rs` sets
+`ble_available` for glibc Linux or Android, which is the set of
+platforms with a concrete backend: the transport is absent from musl
+Linux, macOS, FreeBSD and Windows builds entirely. On glibc Linux
+`libdbus-1-dev` and `pkg-config` are hard build prerequisites: there is
+no probe that skips BLE when they are missing. The BlueZ daemon is a
+runtime dependency and is not needed to build.
 
 ## Directory Structure
 
@@ -60,8 +65,9 @@ packaging/
 ### Debian/Ubuntu (`.deb`)
 
 Built with [cargo-deb](https://github.com/kornelski/cargo-deb). Installs
-`fips`, `fipsctl`, and `fipstop` to `/usr/bin/`, and enables the systemd
-service.
+`fips`, `fipsctl`, `fipstop`, and `fips-gateway` to `/usr/bin/`, ships
+the `fips`, `fips-dns`, `fips-firewall`, and `fips-gateway` systemd
+units, and enables the `fips` and `fips-dns` services.
 
 The default configuration ships as an example at
 `/usr/share/fips/fips.yaml.example` and is **not** a dpkg conf-file.
@@ -240,7 +246,7 @@ flakes enabled.
 ```sh
 nix build .#fips          # build the package (all four binaries)
 nix run .#fips -- --help  # run a binary directly
-nix run .#fipsctl -- status
+nix run .#fipsctl -- show status
 nix develop               # dev shell with the pinned toolchain + cargo-edit
 nix flake check           # build + validate the flake
 ```

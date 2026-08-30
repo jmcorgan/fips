@@ -183,7 +183,7 @@ shows the new peer with `transport=tor`.
 
 ## Optional: advertise the onion endpoint via Nostr discovery
 
-If `node.discovery.nostr.enabled: true`, set
+If `node.rendezvous.nostr.enabled: true`, set
 `transports.tor.advertise_on_nostr: true` so the onion endpoint
 appears in this node's published advert. See
 [enable-nostr-discovery.md](enable-nostr-discovery.md) Scenario 2.

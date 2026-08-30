@@ -146,15 +146,18 @@ separate `protocol` tag, scoping adverts within a relay set
 without splitting them across multiple `d`-tag streams.
 
 The advert content is a JSON document carrying a list of endpoint
-entries, each shaped as `{transport, addr}`. The transport string
-takes one of:
+entries, each shaped as `{transport, addr}`. The `transport` field
+takes one of `udp`, `tcp` or `tor`, and `addr` carries the rest:
 
-- `udp:host:port` — direct public UDP endpoint.
-- `udp:nat` — NAT-mapped UDP endpoint; reach via Part 2 traversal.
-- `tcp:host:port` — direct public TCP endpoint, for peers whose
-  networks filter outbound UDP. Public-only; there is no
-  `tcp:nat` analogue.
-- `tor:<onion>:<port>` — Tor onion-service endpoint.
+- `{"transport": "udp", "addr": "host:port"}` — direct public UDP
+  endpoint.
+- `{"transport": "udp", "addr": "nat"}` — NAT-mapped UDP endpoint;
+  reach via Part 2 traversal.
+- `{"transport": "tcp", "addr": "host:port"}` — direct public TCP
+  endpoint, for peers whose networks filter outbound UDP. Public-only;
+  there is no NAT analogue.
+- `{"transport": "tor", "addr": "<onion>:<port>"}` — Tor onion-service
+  endpoint.
 
 FIPS publishes the advert with `expiration` set to `now +
 advert_ttl_secs` (default 1 hour) and refreshes it every
@@ -575,7 +578,7 @@ loop:
 
 These knobs are documented in
 [FIPS configuration reference](https://github.com/jmcorgan/fips/blob/master/docs/reference/configuration.md)
-under `node.discovery.nostr`.
+under `node.rendezvous.nostr`.
 
 ---
 

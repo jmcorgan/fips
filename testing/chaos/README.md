@@ -18,7 +18,7 @@ automatically.
 ## Quick Start
 
 ```bash
-./testing/chaos/scripts/build.sh
+./testing/scripts/build.sh
 ./testing/chaos/scripts/chaos.sh churn-mixed
 ```
 
@@ -88,9 +88,9 @@ timing all confound the outcome (a deterministic `link_swap` attempt still
 produced zero periodic switches in a full run).
 
 That logic is now covered by deterministic sans-IO unit tests in
-`src/tree/tests.rs` (`test_evaluate_parent_cost_*`, `..._hysteresis_*`,
-`..._effective_depth_*`), which run in the cargo quartet on every commit and
-can each be shown to fail by breaking the cost or hysteresis logic.
+`src/proto/stp/tests/state.rs` (`test_effective_depth_*`, `test_hysteresis_*`,
+`test_cost_*`), which run in the cargo quartet on every commit and can each be
+shown to fail by breaking the cost or hysteresis logic.
 
 ### Transport-specific
 
@@ -168,6 +168,8 @@ scenario runs.
 | `-v`, `--verbose` | Enable debug logging                 |
 | `--seed N`        | Override the scenario's random seed  |
 | `--duration secs` | Override the scenario's duration     |
+| `--nodes N`       | Override the scenario's node count   |
+| `--subnet CIDR`   | Override the simulation's subnet     |
 | `--list`          | List available scenarios             |
 
 The scenario argument accepts either a name (`churn-mixed`) or a file

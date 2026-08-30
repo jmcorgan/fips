@@ -14,28 +14,40 @@ infrastructure.
 
 ## What FIPS does
 
-A machine running FIPS becomes a node in the mesh with a
-self-generated cryptographic identity (a Nostr keypair). There are
-two equally-supported deployment modes.
+A machine running FIPS becomes a node in the mesh with a self-generated
+cryptographic identity, tunneling existing IPv6 traffic over the mesh
+or bypassing IP altogether and letting natively written applications
+communicate directly with each other. In either case all traffic between
+nodes is end-to-end encrypted and authenticated.
 
-**As an overlay** on top of existing IP networks, FIPS lets your
-node reach any other FIPS node wherever it sits — behind a NAT, on
-a different ISP, on a phone over cellular, on a laptop with only
-Bluetooth in range, or behind a Tor onion. The mesh forwards IPv6
-traffic transparently and end-to-end encrypted, with no central VPN
-concentrator or coordinating server.
+The mesh is self-organizing and permissionless. Any node can join and reach
+any other node without a central address registry, routing configuration, or
+coordination server. Peering between nodes can be manually configured or
+use auto-discovery.
 
-**Ground up** over raw Ethernet, WiFi, or Bluetooth, FIPS provides
-a complete permissionless network without any pre-existing IP
-infrastructure, ISP, or DNS. Any node that joins the link gets
-routable IPv6 addresses, peer discovery, and a path to every other
-node automatically.
+There are two equally-supported deployment modes.
 
-Either way, existing networking software runs over it unchanged —
-SSH, HTTP servers, file transfer, anything IPv6-native works the
-same way it would on a local network.
+**As an overlay** on top of existing IP networks, FIPS lets your node reach
+any other FIPS node wherever it sits: behind a NAT, on a different ISP, on a
+phone over cellular, on a laptop with only Bluetooth in range, or behind a
+Tor onion.
+
+**Ground up** over raw Ethernet, WiFi, or Bluetooth, FIPS provides a
+complete permissionless network without any pre-existing IP infrastructure,
+ISP, or DNS. Any node that joins the link gets routable IPv6 addresses, peer
+discovery, and a path to every other node automatically. Support exists in
+OpenWrt for turning a router radio into a backhaul link and for creating an
+open access SSID so a phone or laptop can join without any configuration.
+
+Either way, existing networking software runs over it unchanged — SSH, HTTP
+servers, file transfer, anything IPv6-native works the same way it would on
+a local network. Applications written to the FIPS native API skip that
+layer entirely and address each other by public key, with no IPv6
+emulation.
 
 ## Features
+
+### The mesh
 
 - **Self-organizing mesh routing.** Spanning-tree coordinates with
   bloom-filter-guided discovery; no global routing tables, no
@@ -52,16 +64,28 @@ same way it would on a local network.
   `fd00::/8` address, so unmodified IPv6 software reaches mesh
   peers as `<npub>.fips`. Built-in `.fips` DNS resolver, with
   optional static name mapping via `/etc/fips/hosts`.
-- **Nostr-mediated discovery and NAT traversal.** Peers publish
-  endpoint adverts on public Nostr relays, exchange candidates via
-  NIP-59 gift-wrapped offers and answers, and establish direct
-  paths through NATs using STUN-assisted hole punching. On the local
-  network, mDNS LAN discovery finds peers directly without relays.
+- **Native datagram API.** A local program moves bytes between two
+  public keys over the mesh, addressing a peer as `npub:port` with no
+  IPv6 emulation and no TUN device in the path. `connect` and `bind`
+  take a key and a port, and from there it is ordinary socket calls.
 - **LAN gateway.** Optional `fips-gateway` service folds an entire
   unmodified LAN into the mesh: outbound (LAN clients reach mesh
   destinations through a DNS-allocated virtual IPv6 pool and
   nftables NAT) and inbound (LAN-side services exposed to the mesh
   through 1:1 port forwards).
+- **OpenWrt support.** FIPS ships as an OpenWrt package. Routers run
+  802.11s between themselves as a bare L2 link, with FIPS supplying the
+  encryption, authentication and routing over it. A second helper brings
+  up an open `!FIPS` SSID, the same on every router, which a FIPS client
+  joins over WiFi without configuration.
+
+### Running a node
+
+- **Operator visibility.** `fipsctl` CLI for control and inspection
+  with time-series stats history queryable for any metric,
+  `fipstop` TUI for live status with inline sparkline dashboards,
+  and a JSON-line control socket on each binary for direct
+  programmatic access.
 - **Per-link metrics.** RTT, loss, jitter, and goodput on every
   hop, plus mesh-size estimation, via the Metrics Measurement
   Protocol.
@@ -73,33 +97,35 @@ same way it would on a local network.
   (`/etc/fips/fips.d/`) and a disabled-by-default
   `fips-firewall.service`. The baseline polices only the mesh
   interface, leaving Docker, Tor, and the host firewall untouched.
-- **Operator visibility.** `fipsctl` CLI for control and inspection
-  with time-series stats history queryable for any metric,
-  `fipstop` TUI for live status with inline sparkline dashboards,
-  and a JSON-line control socket on each binary for direct
-  programmatic access.
 - **Reproducible builds** with toolchain pinning and
   `SOURCE_DATE_EPOCH`.
 
 ## Quick start
 
-The shortest path on Debian / Ubuntu:
+**Start from a released package.** Every packaged platform in the table
+below gets an installer built and published per release, with checksums,
+on the [releases page](https://github.com/jmcorgan/fips/releases/latest).
+Building from source produces the same artifacts and the same
+post-install state, so it is the path to take when you want to modify
+FIPS rather than run it.
+
+On Debian or Ubuntu, download `fips_<version>_amd64.deb` (or
+`_arm64.deb`) and install it:
 
 ```bash
-git clone https://github.com/jmcorgan/fips.git
-cd fips
-cargo install cargo-deb
-cargo deb
-sudo dpkg -i target/debian/fips_*.deb
-sudo systemctl start fips
+sudo dpkg -i fips_<version>_amd64.deb
+sudo systemctl start fips fips-dns
 ```
 
 This installs the daemon, CLI tools (`fipsctl`, `fipstop`), the
-optional `fips-gateway` service, systemd units, and a default
-`/etc/fips/fips.yaml` you can edit before starting.
+`fips-dns` service that wires `.fips` name resolution into the host
+resolver, the optional `fips-gateway` service, systemd units, and a
+default `/etc/fips/fips.yaml` you can edit before starting. The package
+enables `fips` and `fips-dns` but starts neither, which is why the
+second command is there.
 
-For macOS, Windows, OpenWrt, the systemd tarball, a Nix flake, or a
-from-source build, see [docs/getting-started.md](docs/getting-started.md)
+For macOS, Windows, FreeBSD, OpenWrt, the systemd tarball or a Nix
+flake, see [docs/getting-started.md](docs/getting-started.md)
 for the full multi-platform installation guide.
 
 To join a live mesh and reach your first peer, follow the new-user
@@ -108,23 +134,71 @@ tutorial progression starting at
 
 ### Building from source
 
+To build the Debian package yourself rather than downloading it:
+
+```bash
+git clone https://github.com/jmcorgan/fips.git
+cd fips
+cargo install cargo-deb
+cargo deb
+sudo dpkg -i target/debian/fips_*.deb
+```
+
+For the binaries alone, without an installer:
+
 ```bash
 cargo build --release
 ```
 
 Requires Rust 1.94.1+ (edition 2024). Linux, macOS, FreeBSD, and Windows
-run as standalone daemons; Android is supported as an embedded library
-(the host app owns the TUN, e.g. a `VpnService`). Transport availability
-varies by platform.
+run as standalone daemons. FreeBSD is packaged for **x86_64 only**;
+no aarch64 FreeBSD artifact is built or tested. Android is supported as
+an **embedded crate** rather than as a standalone daemon: a
+compile-gated library surface where the host app owns the TUN (a
+`VpnService`, for example) and reaches the built-in resolver through
+`Node::dns_local_addr()`. There is no Android daemon artifact and no
+host-app guide. Transport and feature availability varies by platform.
 
-| Transport | Linux | macOS | FreeBSD | Windows | Android | OpenWrt |
-|-----------|:-----:|:-----:|:-------:|:-------:|:-------:|:-------:|
-| UDP       |   ✅  |   ✅  |    ✅   |    ✅   |    ✅   |   ✅    |
-| TCP       |   ✅  |   ✅  |    ✅   |    ✅   |    ✅   |   ✅    |
-| Ethernet  |   ✅  |   ✅  |    ❌   |    ❌   |    ❌   |   ✅    |
-| Tor       |   ✅  |   ✅  |    ✅   |    ✅   |    ❌   |   ✅    |
-| Nym       |   ✅  |   ✅  |    ✅   |    ✅   |    ❌   |   ❌    |
-| BLE       |   ✅  |   ❌  |    ❌   |    ❌   |    ❌   |   ❌    |
+| Feature        | Debian/Ubuntu | Arch | NixOS | macOS  | OpenWrt         | FreeBSD | Android | Windows |
+|----------------|:-------------:|:----:|:-----:|:------:|:---------------:|:-------:|:-------:|:-------:|
+| UDP            |      ✅       |  ✅  |  ✅   |   ✅   |       ✅        |   ✅    |   ✅    |   ✅    |
+| TCP            |      ✅       |  ✅  |  ✅   |   ✅   |       ✅        |   ✅    |   ✅    |   ✅    |
+| Tor            |      ✅       |  ✅  |  ✅   |   ✅   |       ✅        |   ✅    |   ❌    |   ✅    |
+| Nym            |      ✅       |  ✅  |  ✅   |   ✅   |       ❌        |   ✅    |   ❌    |   ✅    |
+| Ethernet       |      ✅       |  ✅  |  ✅   |   ✅   |       ✅        |   ❌    |   ❌    |   ❌    |
+| BLE            |      ✅       |  ✅  |  ✅   |   ❌   |       ❌        |   ❌    |   ✅    |   ❌    |
+| Native API     |      ✅       |  ✅  |  ✅   |   ✅   |       ✅        |   ✅    |   ❌    |   ❌    |
+| Package format |    `.deb`     | AUR  | flake | `.pkg` | `.ipk` / `.apk` | `.pkg`  |   ❌    |   ZIP   |
+
+A column records what builds and runs in a packaged daemon, FreeBSD on
+x86_64 only. **Native API** is the native datagram API, which is off by
+default; Windows cannot carry it, because it has no `SCM_RIGHTS` with
+which to pass a descriptor. **Package format** names the artifact you install,
+and a ❌ there means the platform ships none. Windows is the odd one:
+its ZIP is an archive you unpack yourself rather than a package an
+installer consumes, and there is no MSI.
+
+Five of these columns are Linux: Debian/Ubuntu, Arch, NixOS, OpenWrt
+and Android. Linux is not one target. Debian, Ubuntu, Arch and NixOS
+are the same glibc build, and what
+differs is the packaging: Debian and Ubuntu take the same `.deb`, Arch
+takes `fips` from the AUR, and NixOS uses the Nix flake described
+below. **Only the `.deb` is exercised per release**, by the
+`deb-install` suite across debian12, debian13, ubuntu22, ubuntu24 and
+ubuntu26; neither the AUR package nor the flake is. OpenWrt is a musl
+target rather than glibc, and it takes an `.ipk` on 24.x and earlier or
+an `.apk` on 25 and later; both carry the `fips-mesh-setup` and
+`fips-ap-setup` helpers.
+
+**Android records what compiles for `aarch64-linux-android` under the
+CI cross-check and nothing more**: no transport in that column is
+exercised on a device or an emulator, so read it as "compiles", not
+"verified here". Being an embedded crate rather than a daemon platform, it
+has nothing to
+install, which is what its ❌ package format records. The BLE cell is
+narrower still: the transport compiles, but the radio behind it is
+supplied by the embedding application rather than by FIPS, and no part
+of that path is device-tested.
 
 On Linux, a source build requires `libclang` — the LAN gateway's
 nftables bindings are generated by `bindgen` at build time, which
@@ -134,11 +208,12 @@ build fails inside the `rustables` crate with an "Unable to find
 libclang" error. This is a build-time prerequisite only — it is not a
 runtime dependency, and the pre-built `.deb` artifacts do not need it.
 
-BLE is optional and, on Linux, requires BlueZ and libdbus
-(`sudo apt install bluez libdbus-1-dev` on Debian / Ubuntu). It is
-gated on a build-script probe — install the dependencies first and
-the `cargo build` line above picks it up. The OpenWrt ipk omits
-BLE because libdbus is not available on the target.
+BLE compiles on every glibc Linux target and on Android, and is
+excluded on musl. On glibc Linux, libdbus is a hard build prerequisite
+(`sudo apt install libdbus-1-dev pkg-config` on Debian / Ubuntu) —
+without it the build fails inside `libdbus-sys` rather than skipping
+BLE. The BlueZ daemon itself is a runtime dependency, not a build one.
+The OpenWrt ipk is a musl target, so it omits BLE.
 
 Nym (mixnet) transport builds on all desktop platforms. The OpenWrt
 ❌ is provisional, pending verification of `nym-socks5-client`
@@ -161,7 +236,8 @@ Nix / NixOS section of [packaging/README.md](packaging/README.md).
   ground-up two-device mesh).
 - **[How-to guides](docs/how-to/)** — operator recipes for
   specific tasks: firewall activation, Nostr discovery, Tor onion
-  service, Bluetooth peering, LAN gateway deployment and
+  service, Bluetooth peering, 802.11s mesh backhaul and the open
+  access SSID on OpenWrt, LAN gateway deployment and
   troubleshooting, MTU diagnostics, host aliases, persistent
   identity, unprivileged-user setup, UDP buffer tuning.
 - **[Reference](docs/reference/)** — `fips.yaml` configuration,
@@ -173,6 +249,8 @@ Nix / NixOS section of [packaging/README.md](packaging/README.md).
   [fips-concepts.md](docs/design/fips-concepts.md) for the framing,
   then [fips-architecture.md](docs/design/fips-architecture.md) for
   the protocol stack.
+- **[Release notes](docs/releases/)** — per-version notes, including
+  [v0.5.0](docs/releases/release-notes-v0.5.0.md).
 
 If you want to contribute, see [CONTRIBUTING.md](CONTRIBUTING.md)
 and [testing/README.md](testing/README.md).
@@ -205,7 +283,8 @@ and [testing/README.md](testing/README.md).
 ```text
 src/          Rust source: library + fips, fipsctl, fipstop, fips-gateway binaries
 docs/         Documentation: tutorials, how-to, reference, design
-packaging/    Debian, macOS .pkg, Windows ZIP, OpenWrt ipk, AUR, systemd tarball
+packaging/    Debian, AUR, systemd tarball, OpenWrt ipk/apk,
+              macOS .pkg, FreeBSD .pkg, Windows ZIP
 examples/     Deployment examples (Nostr relay, K8s sidecar, macOS WireGuard)
 testing/      Docker-based integration test harnesses + chaos simulation
 ```
@@ -236,6 +315,9 @@ full list of v0.6.0 wire-format changes in flight.
 - IPv6 TUN adapter with built-in `.fips` DNS resolver and
   multi-backend auto-configuration (systemd dns-delegate,
   systemd-resolved, dnsmasq, NetworkManager).
+- Native datagram API for FIPS-aware applications (npub:port
+  addressing without the IPv6-shim path): off by default, with a
+  surface that may still change.
 - Static hostname mapping (`/etc/fips/hosts`) with auto-reload.
 - Per-link metrics (RTT, loss, jitter, goodput) and mesh size
   estimation.
@@ -249,23 +331,32 @@ full list of v0.6.0 wire-format changes in flight.
   and inbound (mesh-to-LAN port-forwarding) modes.
 - Peer ACL: per-npub allow / deny admission control at the link
   layer; opt-in mesh-firewall baseline at `fips0` ingress.
-- Runtime inspection and peer management via `fipsctl` and
-  `fipstop`.
+- Runtime inspection and peer management via `fipsctl` (including
+  `fipsctl probe` for reachability diagnosis and `fipsctl address`
+  for mesh-address derivation) and `fipstop`.
 - Reproducible builds with toolchain pinning and
   `SOURCE_DATE_EPOCH`.
-- Linux (Debian, systemd tarball, OpenWrt, AUR), macOS (`.pkg`),
-  FreeBSD (`.pkg`), and Windows (ZIP, service) packaging.
+- Node lifecycle and health reporting (`Starting`, `Running`,
+  `Degraded`, `Failed`, `Draining`) with a fatal start when no
+  transport comes up and a bounded shutdown drain window.
+- OpenWrt setup helpers for an 802.11s mesh between routers
+  (`fips-mesh-setup`) and for the open `!FIPS` client SSID
+  (`fips-ap-setup`).
+- Linux (Debian, systemd tarball, OpenWrt `.ipk` and `.apk`, AUR),
+  macOS (`.pkg`), FreeBSD (`.pkg`, x86_64 only), and Windows (ZIP,
+  service) packaging.
 - Docker-based integration and chaos testing.
 
 ### Near-term priorities
 
-- Native API for FIPS-aware applications (npub:port addressing
-  without the IPv6-shim path).
 - Security audit of the cryptographic protocols.
 
 ### Longer-term
 
-- Mobile platform support.
+- Packaged mobile applications: an Android host app, and iOS. The
+  Android embedding interface ships today (see
+  [Building from source](#building-from-source)); what is absent is a
+  packaged app on either platform.
 - Bandwidth-aware routing and QoS.
 - Protocol stability and a versioned wire format.
 - Published crate.

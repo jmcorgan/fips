@@ -124,9 +124,10 @@ to [Troubleshooting](#troubleshooting) below.
 sudo fipsctl show peers
 ```
 
-Expect one entry whose `alias` is `test-us01`. Useful fields:
+Expect one entry whose `display_name` is `test-us01`. Useful
+fields:
 
-- `connectivity` — should be active / authenticated.
+- `connectivity` — should be `connected`.
 - `transport_addr` — the resolved UDP endpoint your daemon is
   using to reach `test-us01`.
 - `transport_type` — `udp`.

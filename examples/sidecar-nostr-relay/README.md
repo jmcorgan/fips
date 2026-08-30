@@ -12,8 +12,11 @@ iptables — it can only be reached via the node's `.fips` name.
 The relay needs a unique FIPS identity. Generate one with:
 
 ```bash
-fipsctl keygen
+fipsctl keygen --stdout
 ```
+
+`--stdout` prints the nsec and npub instead of writing `fips.key` and
+`fips.pub`.
 
 Then set it in `.env`:
 
@@ -229,9 +232,10 @@ cannot be applied and the entrypoint will fail.
 
 ## Production Considerations
 
-**Secrets management**: The default `.env` contains a hardcoded nsec for
-development. In production, use Docker secrets, a vault, or inject the key
-via a secure CI/CD pipeline. Never commit production keys to version control.
+**Secrets management**: The shipped `.env` leaves `FIPS_NSEC=` empty, so the
+operator supplies the key. In production, use Docker secrets, a vault, or
+inject the key via a secure CI/CD pipeline. Never commit production keys to
+version control.
 
 **Logging**: Set `RUST_LOG` to control log verbosity (`debug`, `info`,
 `warn`, `error`). For production, configure the Docker logging driver with

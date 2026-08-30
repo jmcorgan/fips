@@ -28,8 +28,8 @@ a confirmation prompt — see [Keybindings](#keybindings)). For
 | `-s`, `--socket` | `PATH` | (auto) | Daemon control-socket path / port. Same default as `fipsctl`. |
 | `--gateway-socket` | `PATH` | (auto) | `fips-gateway` control-socket path / port. Default: `/run/fips/gateway.sock` (Unix), TCP port `21211` (Windows). |
 | `-r`, `--refresh` | `SECONDS` | `2` | Poll interval. |
-| `-V`, `--version` | — | — | Print short version. |
-| `--version` | — | — | Print long version. |
+| `-V` | — | — | Print the short version, `<version> (rev <git-hash>)`. |
+| `--version` | — | — | Print the long version: short version plus build target triple. |
 | `-h`, `--help` | — | — | Print usage and exit. |
 
 ## Tabs

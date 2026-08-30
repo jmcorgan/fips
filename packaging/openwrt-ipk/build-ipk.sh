@@ -5,7 +5,7 @@
 # An .ipk is just an ar archive containing two tarballs — no SDK required.
 #
 # Usage:
-#   ./packaging/openwrt/build-ipk.sh [--arch <name>]
+#   ./packaging/openwrt-ipk/build-ipk.sh [--arch <name>]
 #
 # Architectures (--arch):
 #   aarch64   GL.iNet MT3000/MT6000, RPi 3/4/5, most modern routers  [default]

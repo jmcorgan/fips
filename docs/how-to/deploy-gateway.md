@@ -138,8 +138,9 @@ gateway:
 
 Pick a pool CIDR that does **not** overlap with any address space in
 use on the LAN or in the mesh (the FIPS mesh occupies `fd00::/8`;
-pick a different `fdXX::/N`). The `/112` size yields 65 536 virtual
-IPs, which is the gateway's hard cap regardless of CIDR width.
+pick a different `fdXX::/N`). The `/112` size yields 65 535 usable
+virtual IPs, which is the gateway's hard cap regardless of CIDR
+width.
 
 This minimum config is enough to start the gateway. The `dns.*` block
 is optional and defaults to `listen: "[::1]:5353"` and
@@ -186,7 +187,7 @@ Constraints:
 - Must not overlap with `fd00::/8` (the FIPS mesh address space).
 - Must not overlap with any LAN-side IPv6 prefix already in use.
 - `/112` is the practical width — wider just wastes address space
-  because the pool is hard-capped at 65 536 entries. Narrower is
+  because the pool is hard-capped at 65 535 usable entries. Narrower is
   fine if you want a smaller pool, but you'll reject DNS lookups
   faster under churn.
 

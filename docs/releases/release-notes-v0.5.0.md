@@ -137,9 +137,9 @@ read that Linux gives.
 Contributed by [@jmcorgan](https://github.com/jmcorgan) (Johnathan
 Corgan).
 
-Start with [the walkthrough](docs/tutorials/native-api-walkthrough.md), then
-[how to write a client](docs/how-to/write-a-native-api-client.md); [the
-reference](docs/reference/native-api.md) carries the full surface.
+Start with [the walkthrough](../tutorials/native-api-walkthrough.md), then
+[how to write a client](../how-to/write-a-native-api-client.md); [the
+reference](../reference/native-api.md) carries the full surface.
 
 ## OpenWrt
 
@@ -174,7 +174,7 @@ dragging the radio to its upstream access point's channel.
 Contributed by [@Origami74](https://github.com/Origami74)
 ([#123](https://github.com/jmcorgan/fips/pull/123)). The full procedure
 is in
-[the 802.11s backhaul how-to](docs/how-to/set-up-80211s-mesh-backhaul.md).
+[the 802.11s backhaul how-to](../how-to/set-up-80211s-mesh-backhaul.md).
 
 ### The open `!FIPS` access SSID
 
@@ -200,7 +200,7 @@ open raw Ethernet sockets and DNS-SD is how it finds the daemon.
 Contributed by [@Origami74](https://github.com/Origami74)
 ([#126](https://github.com/jmcorgan/fips/pull/126)). The full procedure
 is in
-[the open access SSID how-to](docs/how-to/set-up-open-access-ssid.md).
+[the open access SSID how-to](../how-to/set-up-open-access-ssid.md).
 
 ## Bluetooth LE peering
 
@@ -687,7 +687,7 @@ in files that arrived through the merge on mutable tags because the
 original pinning sweep was authored on a branch that never carried them.
 
 Security reports have a private channel; see
-[`SECURITY.md`](SECURITY.md).
+[`SECURITY.md`](../../SECURITY.md).
 
 ## Known limitations
 
@@ -735,7 +735,7 @@ There is no Android daemon artifact. Android is supported as an
 embedded crate, described above.
 
 The full per-commit changelog lives in
-[`CHANGELOG.md`](CHANGELOG.md). Issues and discussion at
+[`CHANGELOG.md`](../../CHANGELOG.md). Issues and discussion at
 [github.com/jmcorgan/fips](https://github.com/jmcorgan/fips).
 
 ## Contributors

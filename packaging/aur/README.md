@@ -18,6 +18,8 @@ This directory contains Arch Linux packaging files for two AUR packages:
 | `fips.tmpfiles` | tmpfiles.d fragment (creates `/run/fips/`) |
 | `fips.service` | Symlink to `../debian/fips.service` |
 | `fips-dns.service` | Symlink to `../debian/fips-dns.service` |
+| `build-aur.sh` | Local `fips-git` build plus namcap validation (run by `make aur`) |
+| `patch-pkgbuild.sh` | Rewrites `pkgver`, `pkgrel`, `conflicts`, `options`, and `b2sums` in the PKGBUILD at publish time |
 
 Both PKGBUILDs reference files from `packaging/debian/` (service files) and
 `packaging/common/` (config files) at build time. These are pulled from the
@@ -194,10 +196,11 @@ cp packaging/aur/fips.tmpfiles /tmp/aur-fips/
 
 Before pushing, ensure the PKGBUILD is correct for the current release:
 
-1. Verify `pkgver` matches the latest tagged release (currently `0.1.0`)
+1. Verify `pkgver` matches the latest tagged release. The checked-in value is a
+   placeholder; `patch-pkgbuild.sh` rewrites it at publish time
 2. If the tarball b2sum is a placeholder, download the tarball and compute:
    ```sh
-   curl -sL https://github.com/jmcorgan/fips/archive/v0.1.0.tar.gz | b2sum | cut -d' ' -f1
+   curl -sL https://github.com/jmcorgan/fips/archive/v<VERSION>.tar.gz | b2sum | cut -d' ' -f1
    ```
 3. Update the first entry in `b2sums=()` in the PKGBUILD with the real hash
 
@@ -213,7 +216,7 @@ makepkg --printsrcinfo > .SRCINFO
 ```sh
 cd /tmp/aur-fips
 git add PKGBUILD .SRCINFO fips.install fips.sysusers fips.tmpfiles
-git commit -m "Initial import of fips 0.1.0"
+git commit -m "Initial import of fips <VERSION>"
 git push
 ```
 
@@ -261,9 +264,12 @@ yay -S fips
 
 Then run the same verification commands above.
 
-## GitHub Secrets for CI (Phase 4 Preparation)
+## GitHub Secrets for CI
 
-For automated AUR updates via GitHub Actions, a separate SSH key is needed.
+AUR publication is automated: `.github/workflows/aur-publish.yml` pushes the
+release package, and `aur-publish-git.yml` pushes `fips-git`. The manual steps
+above are the fallback for when the workflow cannot be used. The automation
+needs a separate SSH key.
 
 ### Step 1: Generate a CI-Specific Key
 
@@ -326,8 +332,8 @@ Push an update when a new version is tagged. The steps are:
    ```
 6. Commit and push both `PKGBUILD` and `.SRCINFO`
 
-Phase 4 CI automation will handle this workflow automatically on new GitHub
-releases.
+The AUR Publish workflow performs these steps automatically on a new GitHub
+release; run them by hand only as a fallback.
 
 For a packaging-only republish of an existing release tag, run the AUR Publish
 workflow manually with the existing tag and incremented `pkgrel` (for example,

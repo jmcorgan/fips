@@ -29,8 +29,8 @@ that defines the socket location, see
 | Flag | Argument | Description |
 | ---- | -------- | ----------- |
 | `-s`, `--socket` | `PATH` | Override the control-socket path (Linux/macOS) or TCP port (Windows). |
-| `-V`, `--version` | — | Print the short version. |
-| `--version` | — | Print the long version. |
+| `-V` | — | Print the short version, `<version> (rev <git-hash>)`. |
+| `--version` | — | Print the long version: short version plus build target triple. |
 | `-h`, `--help` | — | Print usage and exit. Per-subcommand help via `fipsctl <subcommand> --help`. |
 
 ## Subcommands
@@ -90,7 +90,7 @@ daemon.
 
 | Flag | Argument | Default | Description |
 | ---- | -------- | ------- | ----------- |
-| `-d`, `--dir` | `DIR` | `/usr/local/etc/fips` (macOS), `/etc/fips` (other Unix), `%APPDATA%\fips` (Windows) | Output directory for `fips.key` and `fips.pub`. Matches the directory the platform's packaging installs config into, which is where the daemon derives the key paths from. |
+| `-d`, `--dir` | `DIR` | `/usr/local/etc/fips` (macOS, FreeBSD), `/etc/fips` (other Unix), `%APPDATA%\fips` (Windows) | Output directory for `fips.key` and `fips.pub`. Matches the directory the platform's packaging installs config into, which is where the daemon derives the key paths from. |
 | `-f`, `--force` | — | off | Overwrite an existing `fips.key`. |
 | `-s`, `--stdout` | — | off | Print `nsec` then `npub` to stdout instead of writing files. |
 
@@ -176,6 +176,9 @@ The stages are:
    reached us, and the remote holds the expected static key.
 5. **rtt** — one MMP sender/receiver report exchange, for a real
    round-trip time.
+
+![The probe's five stages, their failure reasons, and the bypass that skips
+both lookup stages](../design/diagrams/fips-probe-stages.svg)
 
 Exit status is 0 only for an overall verdict of `ok`; `partial`,
 `failed` and `cancelled` all exit 1.

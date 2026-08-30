@@ -127,13 +127,13 @@ transports:
     # docs/how-to/set-up-80211s-mesh-backhaul.md.
     # mesh0:
     #   interface: "fips-mesh0"
-    #   discovery: true
+    #   listen: true
     #   announce: true
     #   auto_connect: true
     #   accept_connections: true
     # mesh1:
     #   interface: "fips-mesh1"
-    #   discovery: true
+    #   listen: true
     #   announce: true
     #   auto_connect: true
     #   accept_connections: true
@@ -151,13 +151,13 @@ transports:
     # docs/how-to/set-up-open-access-ssid.md.
     # ap0:
     #   interface: "fips-ap0"
-    #   discovery: true
+    #   listen: true
     #   announce: true
     #   auto_connect: true
     #   accept_connections: true
     # ap1:
     #   interface: "fips-ap1"
-    #   discovery: true
+    #   listen: true
     #   announce: true
     #   auto_connect: true
     #   accept_connections: true

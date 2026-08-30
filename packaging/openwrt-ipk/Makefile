@@ -39,7 +39,7 @@ else ifeq ($(ARCH),arm)
   # Override RUST_TARGET in your build if your target uses softfloat.
   RUST_TARGET:=arm-unknown-linux-musleabihf
 else
-  $(error Unsupported architecture: $(ARCH). Add a RUST_TARGET mapping in packaging/openwrt/Makefile.)
+  $(error Unsupported architecture: $(ARCH). Add a RUST_TARGET mapping in packaging/openwrt-ipk/Makefile.)
 endif
 
 RUST_RELEASE_DIR:=$(PKG_BUILD_DIR)/target/$(RUST_TARGET)/release

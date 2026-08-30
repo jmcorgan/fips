@@ -92,8 +92,10 @@ adapter. Two equivalent ways to get it:
 ip -6 addr show fips0
 ```
 
-Look for the `inet6 fd97:...` line. The address up to the `/`
-is what you want.
+Look for the `inet6 fd...` line: every mesh address begins with
+`fd`, and the rest is derived from your key, so it will not be
+`fd97` unless you are lucky. The address up to the `/` is what
+you want.
 
 Or via the daemon:
 
@@ -109,7 +111,7 @@ when you run the commands. Save it to a shell variable for
 convenience:
 
 ```sh
-FIPS0_ADDR=$(ip -6 addr show fips0 | awk '/inet6 fd97:/ {print $2}' | cut -d/ -f1)
+FIPS0_ADDR=$(ip -6 addr show fips0 | awk '/inet6 fd/ {print $2}' | cut -d/ -f1)
 echo "$FIPS0_ADDR"
 ```
 
@@ -510,7 +512,7 @@ an existing HTTP server on a regular LAN box — and expose it to
 mesh peers through a `fips-gateway`, that's the inbound
 port-forward mode: the gateway runs a mesh-side listener on `fips0`
 and forwards to a LAN target. The operator recipe is at
-[../how-to/deploy-gateway.md#inbound-port-forwarding](../how-to/deploy-gateway.md#inbound-port-forwarding);
+[../how-to/deploy-gateway.md#configure-the-inbound-half](../how-to/deploy-gateway.md#configure-the-inbound-half);
 a hand-held walk-through on an OpenWrt AP is at
 [deploy-fips-gateway.md](deploy-fips-gateway.md) under "Advanced"
 in [README.md](README.md).

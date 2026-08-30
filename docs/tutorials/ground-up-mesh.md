@@ -177,8 +177,8 @@ different interface names — that is normal.
 
 Edit `/etc/fips/fips.yaml` on **both** nodes. Under
 `transports:`, add an `ethernet:` block. The key settings are
-the four neighbor flags — both nodes must opt in to all four,
-and they default to off:
+the four neighbor flags — both nodes must opt in to all four.
+`listen` defaults on; the other three default to off:
 
 ```yaml
 transports:
@@ -302,7 +302,7 @@ sudo fipsctl show peers
 ```
 
 Expect one entry whose `npub` matches the **other** node and
-whose `addresses` line shows `transport: ethernet`. Your
+whose `transport_type` reads `ethernet`. Your
 existing overlay peers (if any from earlier tutorials) appear
 alongside it. Each peer has its own row, and the link status
 columns show whether the Noise session is up.
@@ -313,7 +313,7 @@ sudo fipsctl show transports
 
 Confirms that the Ethernet transport is running and shows the
 beacon counters incrementing. Both `beacons_sent` and
-`beacons_received` should be non-zero if the link is healthy.
+`beacons_recv` should be non-zero if the link is healthy.
 
 ## Step 6: Reach the other node by name
 
@@ -443,7 +443,7 @@ Windows builds skip it.
 ## Troubleshooting
 
 - **No beacons received.** On either node, `sudo fipsctl show
-  transports` should show `beacons_received` incrementing
+  transports` should show `beacons_recv` incrementing
   every `beacon_interval_secs` once the other node is also
   running. If it stays at zero:
   - Confirm the chosen interface is `LOWER_UP` (carrier

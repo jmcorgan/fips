@@ -52,3 +52,8 @@ flags, or counter inventories, go here.
 If you want to understand how the mesh self-organizes, why FIPS
 makes the choices it does, or how the pieces fit together, go
 here.
+
+### [Releases](releases/)
+
+If you want the notes for a particular version — what changed, what
+broke, and what to do about it on upgrade — go here.

@@ -80,6 +80,12 @@ Run one scenario:
   - injects and configures the NAT LAN `veth` pairs in the container namespaces
 - `scripts/nat-test.sh`
   - boots the lab, waits for convergence, and asserts the resulting path
+- `scripts/nostr-relay-test.sh`
+  - exercises the Nostr overlay advert publish/consume round-trip, including
+    rejection of a malformed advert event
+- `scripts/stun-faults-test.sh`
+  - cycles the daemon through STUN drop, delay and outage faults and asserts
+    graceful behavior at each step
 
 ## Assertions
 

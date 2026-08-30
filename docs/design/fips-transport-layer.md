@@ -52,10 +52,10 @@ determine how much payload can fit in a single packet after link-layer
 encryption overhead.
 
 MTU is fundamentally a per-link property. A transport with a fixed MTU
-(Ethernet effective 1499, UDP default 1280) returns the same value for every
+(Ethernet effective 1497, UDP default 1280) returns the same value for every
 link — this is the degenerate case. Transports that negotiate MTU
-per-connection (e.g., BLE ATT_MTU) report the negotiated value for each
-link individually.
+per-connection (e.g., the BLE L2CAP CoC MTU) report the negotiated value
+for each link individually.
 
 The transport trait exposes two MTU methods:
 
@@ -129,7 +129,7 @@ media:
 | --------- | ---------- | --- | ----------- | ----- |
 | Ethernet | MAC | 1500 | Unreliable | Raw AF_PACKET frames |
 | WiFi | MAC | 1500 | Unreliable | Infrastructure mode = Ethernet |
-| BLE | BD_ADDR | 23–517 | Reliable | Negotiated ATT_MTU |
+| BLE | BD_ADDR | 2048 default | Reliable | Per-connection L2CAP CoC MTU |
 | Radio | Device addr | 51–222 | Unreliable | Low bandwidth, long range |
 
 **Point-to-point transports** connect exactly two endpoints:
@@ -192,7 +192,7 @@ proceed.
 | TCP/IP | TCP three-way handshake |
 | Tor | Circuit establishment (typically 10–60s, default timeout 120s) |
 | Nym | SOCKS5 connect through mixnet (minutes possible, default timeout 300s) |
-| BLE | L2CAP CoC or GATT connection |
+| BLE | L2CAP CoC connection |
 | Serial | Physical connection (static) |
 
 ### Implications
@@ -256,8 +256,8 @@ in
 ## Ethernet: The Local Network Transport
 
 For nodes on the same LAN segment, raw Ethernet provides a direct transport
-without IP/UDP overhead — 28 bytes more FIPS payload per frame compared to
-UDP (1500 vs 1472 MTU).
+without IP/UDP overhead — 25 bytes more FIPS payload per frame compared to
+UDP (1497 vs 1472 MTU).
 
 - **No IP dependency**: Operates below the IP layer. Nodes on the same
   Ethernet segment can communicate without IP addresses or routing
@@ -265,16 +265,17 @@ UDP (1500 vs 1472 MTU).
 - **Broadcast neighbor detection**: Nodes discover each other via periodic beacon
   broadcasts on the shared medium, with no static peer configuration required
 - **Higher MTU**: Standard Ethernet frames carry 1500 bytes of payload,
-  yielding an effective FIPS MTU of 1499 after the frame type prefix
+  yielding an effective FIPS MTU of 1497 after the 3-byte frame header
 - **Matches FIPS model**: Like UDP, Ethernet is connectionless and
   unreliable — datagrams flow immediately to any MAC address on the segment
 
 ### Implementation
 
 The Ethernet transport uses Linux AF_PACKET sockets in SOCK_DGRAM mode with
-EtherType 0x2121. SOCK_DGRAM mode
+EtherType 0x2121, and BPF devices (`/dev/bpf*`) on macOS. SOCK_DGRAM mode
 lets the kernel handle Ethernet header construction and parsing — the
-transport deals only with payloads and MAC addresses.
+transport deals only with payloads and MAC addresses; the macOS BPF backend
+presents the same API and handles the 14-byte Ethernet header itself.
 
 All frames use a unified 4-byte header: `[type:1][flags:1][length:2 LE]`.
 The length field allows the receiver to trim Ethernet minimum-frame padding
@@ -288,7 +289,7 @@ that would otherwise corrupt AEAD verification. Frame types: `0x00` (data),
 | Frame header | `[type:1][flags:1][length:2 LE][payload]` |
 | Effective MTU | Interface MTU - 4 (typically 1496) |
 | Addressing | 6-byte MAC address |
-| Platform | Linux only (`CAP_NET_RAW` required) |
+| Platform | Linux (AF_PACKET, `CAP_NET_RAW` required) and macOS (BPF `/dev/bpf*`) |
 
 ### Neighbor Beacons
 
@@ -320,7 +321,7 @@ access points commonly isolate clients from each other's broadcast traffic.
 Startup logging:
 
 ```text
-Ethernet transport started name=eth0 interface=eth0 mac=aa:bb:cc:dd:ee:ff mtu=1499 if_mtu=1500
+Ethernet transport started name=eth0 interface=eth0 mac=aa:bb:cc:dd:ee:ff mtu=1497 if_mtu=1500
 ```
 
 ## TCP/IP: Transport for UDP-Filtered Networks
@@ -713,6 +714,123 @@ The Nym transport exposes per-instance counters covering successful
 send/receive, send/receive errors, connection establishment, SOCKS5-level
 errors, connect timeouts, and MTU rejections.
 
+## BLE: The Local Radio Transport
+
+The BLE transport peers two nodes over Bluetooth Low Energy with no IP
+network between them, using an L2CAP connection-oriented channel as the
+byte pipe. It is the only transport whose reach is a radio horizon
+rather than a route, which makes it the fallback when there is no
+infrastructure at all: two phones in a room, a node and a handset, a
+mesh with its uplink cut.
+
+Like TCP, Tor and Nym it is connection-oriented and reliable, so the
+same TCP-over-TCP considerations apply. Unlike them, its peer set is
+discovered rather than configured, and the addresses it discovers are
+not stable.
+
+### Architecture
+
+Nothing above the radio has a platform dependency. `BleTransport<I>` is
+generic over a `BleIo` seam (`ble/io.rs`) that covers listening,
+connecting, advertising, scanning and the stream I/O itself; the
+connection pool, the PSM wire format, the stream framer and the
+scan/probe loop are shared by every backend.
+
+The backends live one per file and are selected by a three-way cascade
+in `ble/mod.rs`: `BluerIo` (`io_linux.rs`) talks to BlueZ over D-Bus,
+`AndroidIo` (`io_android.rs`) drives a radio the embedding application
+installs, and `MockBleIo` (`io.rs`) is an in-memory double compiled only
+under `cfg(test)`. A build that matches none of the three fails with a
+`compile_error!` rather than silently selecting the mock.
+
+That failure is deliberate. An earlier arrangement wrote the mock arm as
+"anything that is not BlueZ", which meant a new platform got a transport
+that compiled, started, reported itself Up and never peered, with no
+error anywhere to find it.
+
+### Backend Availability
+
+`build.rs` sets `ble_available` for glibc Linux or Android, which is the
+set of platforms with a concrete backend rather than the set that could
+plausibly have Bluetooth. `bluer_available`, the BlueZ sub-condition, is
+glibc Linux alone: musl cannot satisfy `libdbus-sys`'s pkg-config
+cross-compile requirement, and musl router targets do not run BlueZ by
+default. macOS, FreeBSD and Windows have no backend and so have no BLE
+transport at all.
+
+On glibc Linux the build needs `libdbus-1-dev` and `pkg-config`; the
+BlueZ daemon itself is a runtime dependency. On Android the radio is
+supplied by the application: scanning, advertising, L2CAP listen and
+connect all sit behind Java APIs held under a permission and
+foreground-service model that only the app can satisfy, so the embedder
+implements `AndroidRadio` and installs it into a per-node slot which the
+backend resolves per operation.
+
+### Framing
+
+The channel is L2CAP CoC, not GATT, so there is no ATT_MTU to negotiate.
+The per-connection CoC MTU applies, defaulting to 2048, and it overrides
+the transport-wide default per link.
+
+Packet boundaries are recovered from the byte stream rather than assumed
+from the socket. BlueZ's `SOCK_SEQPACKET` preserves SDU boundaries, but
+that is a property of one backend's socket type and not of L2CAP:
+Android's `BluetoothSocket` input stream and macOS's `CBL2CAPChannel`
+may return a fragment of a packet or several packets coalesced in one
+read. FIPS packets are self-delimiting through the 4-byte FMP common
+prefix, so `stream_read.rs` adapts the datagram-shaped stream into the
+`AsyncRead` that `transport::framing::read_fmp_packet` already expects,
+shared with every other stream-oriented transport.
+
+### Discovery and the PSM
+
+Discovery is an LE advertisement, received passively, carrying the
+128-bit FIPS service UUID plus the listener's L2CAP PSM as service data.
+
+The PSM has to ride the advertisement because it is not knowable any
+other way. BlueZ lets an application choose the PSM it binds, and BlueZ
+is the exception: Android's `listenUsingInsecureL2capChannel` and
+macOS's `CBPeripheralManager.publishL2CAPChannel` both return an
+OS-assigned PSM the application cannot request. A dialer cannot guess
+it, and before a connection exists there is no channel on which to be
+told. So `BleIo::listen` reports the PSM it actually bound,
+`start_advertising` takes that PSM, and the scanner yields it alongside
+the address.
+
+The wire layout is fixed by a byte budget and specified in `ble/psm.rs`.
+A legacy advertising PDU carries 31 bytes of AD payload. Flags take 3
+and the 128-bit service UUID list takes 18, so keying the service data
+on the full 128-bit UUID would need 20 more and overrun by 10. Keying it
+on the 16-bit UUID `0x9C90`, which is the leading 16 bits of the FIPS
+service UUID expanded through the Bluetooth base UUID, takes 6 and fits
+at 27. The budget is asserted at compile time. It leaves no room for a
+local name, and it must ride the primary advertisement rather than the
+scan response, because a scan response arrives only after an active-scan
+round trip that drops asymmetrically across chipsets.
+
+### Connection Establishment
+
+A scan/probe loop dials discovered addresses, keeping the learned PSM
+per address beside a probe-cooldown book and falling back to the
+configured `DEFAULT_PSM` for a peer that advertises none.
+
+Peers are identified by node address, not by link address. A device
+using resolvable private addresses rotates continually, and modern
+phones do so by default, so an address-keyed pool sees every rotation as
+a new device and every already-connected guard fails to fire.
+
+Failing addresses back off by powers of two up to
+`MAX_PROBE_BACKOFF_SHIFT`, and the retry book is capped at
+`MAX_PENDING_PROBES` so that rotating addresses cannot grow it without
+bound. Both bounds matter more here than on other transports because BLE
+hardware caps concurrent connections at roughly four to ten, so a
+handful of unreachable addresses can starve discovery of everything
+behind them.
+
+Inbound connections are admitted off the accept loop, with
+`INBOUND_HANDSHAKE_INFLIGHT` handshakes allowed at once and the oldest
+aborted at the bound rather than the loop waiting for a slot.
+
 ## Discovery
 
 Discovery determines that a FIPS-capable endpoint is reachable at a given
@@ -745,7 +863,7 @@ X." FMP does not need to distinguish beacons from query responses.
 | UDP (LAN) | Broadcast/multicast | On local network segment |
 | Ethernet | Broadcast | Custom EtherType, ff:ff:ff:ff:ff:ff |
 | Radio | Beacon | Shared RF channel, natural fit |
-| BLE | Advertising | GATT service UUID |
+| BLE | Advertising | LE advertisement: 128-bit FIPS service UUID plus service-data PSM |
 
 ### Nostr Relay Discovery
 
@@ -776,16 +894,19 @@ Key properties:
 
 ### Current State
 
-> **Implemented**: UDP, TCP, Tor, and Ethernet peers can be configured
+> **Implemented**: UDP, TCP, Tor, Ethernet, and BLE peers can be configured
 > statically via YAML. Ethernet peers can also be discovered via beacon
-> broadcast — the `discover()` trait method returns newly seen endpoints,
-> and per-transport `auto_connect()` / `accept_connections()` policies
-> control whether discovered peers are connected automatically or require
-> explicit configuration. TCP and Tor have no built-in discovery mechanism.
+> broadcast and BLE peers via LE scanning — the `discover()` trait method
+> returns newly seen endpoints, and per-transport `auto_connect()` /
+> `accept_connections()` policies control whether discovered peers are
+> connected automatically or require explicit configuration. TCP and Tor
+> have no built-in discovery mechanism.
 > Nostr relay discovery and STUN-assisted UDP hole punching are
 > implemented and toggled via configuration; see
 > [../reference/configuration.md](../reference/configuration.md) for the
-> `node.discovery.nostr.*` configuration tree.
+> `node.rendezvous.nostr.*` configuration tree. LAN/mDNS peer rendezvous
+> is implemented as a separate subsystem and documented in
+> [fips-nostr-discovery.md](fips-nostr-discovery.md).
 
 ## Transport Interface
 
@@ -893,11 +1014,11 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, AsyncFd/recvmsg, SO_RXQ_OVFL kernel drop detection |
 | TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect, per-connection MSS MTU |
-| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, neighbor beacons, Linux only |
+| Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, neighbor beacons; Linux (AF_PACKET) and macOS (BPF) |
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
 | Nym | **Implemented** | Outbound-only SOCKS5 through nym-socks5-client, mixnet anonymity, IP/hostname addressing |
-| BLE | **Implemented** (Linux/glibc only; experimental) | L2CAP CoC, ATT_MTU negotiation, per-link MTU; musl/macOS/Windows skip |
+| BLE | **Implemented** (glibc Linux and Android; experimental) | L2CAP CoC, per-connection MTU (2048 default), per-link MTU; musl, macOS, FreeBSD and Windows have no backend |
 | Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |
 
@@ -935,8 +1056,9 @@ quality. The spanning tree parent selection factors in link quality through
 cost-based effective depth (`effective_depth = depth + link_cost`), where
 `link_cost` is derived from locally measured MMP metrics (ETX and SRTT).
 This allows the tree to prefer lower-latency, lower-loss links when the
-quality difference is significant. Link cost is not yet used in
-`find_next_hop()` candidate ranking for data forwarding.
+quality difference is significant. Link cost is also the primary key in
+`find_next_hop()` candidate ranking for data forwarding, which orders
+candidates by `(link_cost, distance_to_dest, node_addr)`.
 
 ## References
 

@@ -109,7 +109,7 @@ Compare the live descriptor count against the established peer count:
 
 ```sh
 ls /proc/$(pidof fips)/fd | wc -l
-fipsctl show peers | wc -l
+fipsctl show peers | jq '.peers | length'
 ```
 
 At steady state, expect a stable ratio of about **3 descriptors per

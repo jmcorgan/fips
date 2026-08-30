@@ -76,8 +76,8 @@ transports:
 
 ### 3. Bluetooth Transport
 
-If using BLE for local mesh discovery, the FIPS binary must be built with
-the `ble` feature (enabled by default). BlueZ must be installed and running:
+BLE is compiled automatically on glibc Linux and Android; there is no
+cargo feature to enable. BlueZ must be installed and running:
 
 ```bash
 sudo apt install bluez

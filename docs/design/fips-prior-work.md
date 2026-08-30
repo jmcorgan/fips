@@ -159,8 +159,8 @@ bidirectional delivery ratios, was introduced by
 for wireless mesh routing and is used in protocols including
 [OLSR](https://en.wikipedia.org/wiki/Optimized_Link_State_Routing_Protocol)
 and [Babel](https://www.irif.fr/~jch/software/babel/). FIPS computes
-ETX per-link from MMP loss measurements for future use in candidate
-ranking.
+ETX per-link from MMP loss measurements and uses it for cost-based
+parent selection and as the primary key in next-hop candidate ranking.
 
 The CE (Congestion Experienced) echo flag provides hop-by-hop
 [ECN](https://en.wikipedia.org/wiki/Explicit_Congestion_Notification)

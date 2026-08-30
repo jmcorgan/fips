@@ -294,14 +294,28 @@ impl Seqpacket {
 /// socket returns `msg_flags == 0` for a normal message, for an empty message
 /// and at end of file alike, so the flag carries no information.
 ///
-/// `POLLHUP` does discriminate, measured the same way. After a zero-byte read,
-/// a queued empty datagram leaves the socket with no events pending, while a
-/// closed peer leaves `POLLHUP` set and latched. So a zero-byte read is end of
-/// file only when the peer has hung up.
+/// `POLLHUP` narrows the question and does not answer it, measured the same
+/// way. A live peer never sets it, so a zero-byte read without it is an empty
+/// datagram and nothing else. A closed peer does set it, **and it latches while
+/// messages are still queued**: a socket holding one empty datagram from a peer
+/// that has since closed reports what a drained socket reports, in `revents`,
+/// in `FIONREAD`, under `MSG_PEEK` and in the `recvmsg` return alike.
+///
+/// So the hang-up is one of two conditions rather than the whole rule. The other
+/// is [`bytes_queued`], which catches the case that costs a real payload: an
+/// empty datagram with a further message behind it, read after the peer closed.
+/// Without it that read reports end of file, the caller frees the flow, and the
+/// message behind it is never taken.
 ///
 /// This matters because reading an empty datagram as a close would let a client
 /// tear down its own flow by sending nothing, and the defect would present as a
 /// spurious disconnect.
+///
+/// **One case survives and cannot be fixed here.** A zero-length datagram that
+/// is the last message before a close is indistinguishable from the close:
+/// reading it drains the queue, and every observation then matches a bare end of
+/// file. Separating those needs a payload that is never zero bytes on the wire,
+/// which is a protocol change rather than a receive-path one.
 ///
 /// **`ECONNRESET` is treated as end of file too**, for the platform whose
 /// datagram sockets report a close that way rather than through `POLLHUP`. Both
@@ -320,10 +334,43 @@ fn recv_once(fd: RawFd, buf: &mut [u8]) -> io::Result<Received> {
         }
         return Err(err);
     }
-    if n == 0 && peer_hung_up(fd) {
+    if n == 0 && peer_hung_up(fd) && bytes_queued(fd) == 0 {
         return Ok(Received::Eof);
     }
     Ok(Received::Datagram(n as usize))
+}
+
+/// Bytes the receive queue still holds.
+///
+/// Only one direction of this is sound, and the rule that uses it depends on
+/// that asymmetry. **A non-zero answer proves a further message is waiting**, so
+/// whatever was just read was a datagram and not the close. A zero answer proves
+/// nothing: a zero-length datagram contributes no bytes, so a queue holding one
+/// is indistinguishable from a drained queue by this measure or any other.
+///
+/// The one-directional reading is what makes this safe on every platform the
+/// module compiles for, whatever socket type it chose and however its kernel
+/// signals a close. Bytes queued means the peer's data has not been consumed
+/// yet, and that cannot be end of file anywhere.
+///
+/// A failed `ioctl` reports zero, which leaves the caller with the rule that
+/// applied before this check existed rather than with an error on a path that
+/// has no way to report one.
+///
+/// Visible within [`super`] for the same reason [`peer_hung_up`] is: the
+/// end-of-file rule belongs to the pair, not to the end that reads it, and the
+/// client half at [`super::client::FipsStream::recv`] has to reach the same
+/// verdict on the same socket. One implementation is what stops the two halves
+/// drifting, which they had already done once.
+pub(super) fn bytes_queued(fd: RawFd) -> usize {
+    let mut queued: libc::c_int = 0;
+    // SAFETY: the descriptor is open and `queued` is a live `c_int`, which is
+    // what `FIONREAD` writes through the pointer.
+    let rc = unsafe { libc::ioctl(fd, libc::FIONREAD as _, &mut queued) };
+    if rc < 0 || queued < 0 {
+        return 0;
+    }
+    queued as usize
 }
 
 /// Translate a platform's spelling of "the peer is gone" into this API's.
@@ -589,6 +636,39 @@ mod tests {
         let mut buf = [0u8; 64];
         assert_eq!(recv_bounded(&daemon, &mut buf).await, Received::Datagram(0));
         assert_eq!(recv_bounded(&daemon, &mut buf).await, Received::Datagram(5));
+    }
+
+    #[tokio::test]
+    async fn an_empty_datagram_before_a_close_does_not_swallow_the_message_behind_it() {
+        // The case the test above does not reach. It keeps the client half open,
+        // so `POLLHUP` is never set and the end-of-file rule is never consulted.
+        // Here the client closes, which latches `POLLHUP` while both messages
+        // are still queued. Reading `POLLHUP` alone then reports the empty
+        // datagram as the close, `drain` frees the flow, and `after` is
+        // discarded without ever being read.
+        let (daemon, theirs) = pair().unwrap();
+        let daemon = Seqpacket::new(daemon).unwrap();
+        let mut theirs = client(theirs);
+
+        // SAFETY: the descriptor is open and owned by `theirs`.
+        let sent = unsafe { libc::send(theirs.as_raw_fd(), std::ptr::null(), 0, 0) };
+        assert_eq!(sent, 0, "{}", io::Error::last_os_error());
+        theirs.write_all(b"after").unwrap();
+        drop(theirs);
+
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            recv_bounded(&daemon, &mut buf).await,
+            Received::Datagram(0),
+            "the empty datagram was reported as the close"
+        );
+        assert_eq!(
+            recv_bounded(&daemon, &mut buf).await,
+            Received::Datagram(5),
+            "the message queued behind the empty datagram was lost"
+        );
+        assert_eq!(&buf[..5], b"after");
+        assert_eq!(recv_bounded(&daemon, &mut buf).await, Received::Eof);
     }
 
     #[test]

@@ -9,6 +9,7 @@
 #   --seed <N>             Override scenario seed
 #   --duration <secs>      Override scenario duration
 #   --nodes <N>            Override topology.num_nodes
+#   --subnet <CIDR>        Override the simulation subnet
 #   --list                 List available scenarios
 #
 # Examples:
@@ -35,6 +36,7 @@ usage() {
     echo "  --seed <N>          Override scenario seed"
     echo "  --duration <secs>   Override scenario duration"
     echo "  --nodes <N>         Override topology.num_nodes"
+    echo "  --subnet <CIDR>     Override the simulation subnet"
     echo "  --list              List available scenarios"
     exit 1
 }

@@ -19,14 +19,15 @@ offer/answer exchange, and STUN supplies the reflexive address used for
 a coordinated hole-punch.
 
 Nostr discovery is unconditionally compiled into the `fips` binary on
-every supported platform and ships in every stock packaging artifact
-(`.deb`, AUR, systemd tarball, OpenWrt `.ipk`, macOS `.pkg`, Windows
-`.zip`). It is runtime-opt-in: the YAML configuration defaults to
-disabled (`node.discovery.nostr.enabled: false`), so the discovery
-runtime stays dormant — and opens no relay connections — until an
-operator flips the flag. Default relay and STUN-server lists ship in
-the config; both are optional overrides. When disabled, nodes behave
-exactly as before: only the static `peers[]` addresses are used.
+every supported platform and ships in every published release artifact
+(`.deb`, AUR, systemd tarball, OpenWrt `.ipk` and `.apk`, FreeBSD
+`.pkg`, macOS `.pkg`, Windows `.zip`). It is runtime-opt-in: the YAML
+configuration defaults to disabled (`node.rendezvous.nostr.enabled:
+false`), so the discovery runtime stays dormant — and opens no relay
+connections — until an operator flips the flag. Default relay and
+STUN-server lists ship in the config; both are optional overrides. When
+disabled, nodes behave exactly as before: only the static `peers[]`
+addresses are used.
 
 ## Role
 
@@ -79,7 +80,7 @@ namespace) — see
 The full configuration knob tables, per-transport keys, and startup
 validation rules live in
 [../reference/configuration.md](../reference/configuration.md) under
-`node.discovery.nostr.*`. The Kind 37195 advert event format is in
+`node.rendezvous.nostr.*`. The Kind 37195 advert event format is in
 [../reference/nostr-events.md](../reference/nostr-events.md). The rest
 of this document covers the design of the discovery runtime itself.
 
@@ -371,7 +372,7 @@ semaphore and replay-cache layers downstream.
   for reflexive discovery. Peer-advertised STUN values are
   informational; a malicious peer cannot steer this node to a
   chosen STUN target. See the doc comment on
-  `node.discovery.nostr.stun_servers`.
+  `node.rendezvous.nostr.stun_servers`.
 - **The FIPS identity key signs adverts.** Compromise of
   `fips.key` is compromise of the node's Nostr identity — an attacker
   can publish adverts on behalf of the node. The recovery path is
@@ -410,7 +411,7 @@ The result is sub-second peer pairing on the same LAN.
 It is unrelated to the "LAN candidate" terminology used in the
 NAT-traversal sections above (which refers to a host's own
 locally-bound address offered as a hole-punch candidate). LAN/mDNS
-discovery is a distinct subsystem under `src/discovery/lan/`.
+discovery is a distinct subsystem under `src/mdns/`.
 
 ### Role
 
@@ -426,7 +427,7 @@ LAN discovery adds two capabilities, both confined to the local link:
   initiates a normal FMP link to each newly-seen peer.
 
 The mDNS service type is `_fips._udp.local.`
-(`src/discovery/lan/mod.rs:45`). Per RFC 6763 the `_udp` label denotes
+(`src/mdns/mod.rs:45`). Per RFC 6763 the `_udp` label denotes
 the IP transport used for the advert, not the FIPS upper protocol —
 both UDP and TCP FIPS endpoints announce under the same service type
 because the link-layer handshake travels over UDP either way. (In
@@ -448,16 +449,16 @@ by default**, so doing nothing leaves it off.
 
 ### How it works
 
-The LAN discovery runtime (`src/discovery/lan/mod.rs`) is started
-during node initialization when `node.discovery.lan.enabled` is true.
+The LAN discovery runtime (`src/mdns/mod.rs`) is started
+during node initialization when `node.rendezvous.lan.enabled` is true.
 It is independent of Nostr discovery and runs even when Nostr is
-disabled (`src/node/lifecycle.rs:1159-1162`). Startup requires an
+disabled (`src/node/lifecycle/supervisor.rs:432-437`). Startup requires an
 operational UDP transport: the node advertises the port of its
 lowest-`TransportId` operational, non-bootstrap UDP transport, chosen
 deterministically so the advertised port is stable across restarts
-(`src/node/lifecycle.rs:1169-1180`). If no such port exists, the
+(`src/node/lifecycle/mod.rs:1598-1609`). If no such port exists, the
 runtime returns `NoAdvertisedPort` and LAN discovery does not start
-(`src/discovery/lan/mod.rs:156-158`).
+(`src/mdns/mod.rs:165-167`).
 
 The runtime does two things concurrently:
 
@@ -466,18 +467,18 @@ The runtime does two things concurrently:
    below. `mdns-sd`'s address auto-detection appends every non-loopback
    interface address, with `127.0.0.1` seeded so same-host peers and
    integration tests can still resolve the advert
-   (`src/discovery/lan/mod.rs:182-203`).
+   (`src/mdns/mod.rs:179-212`).
 2. **Browser.** A background pump receives `ServiceResolved` events for
    the same service type. For each resolved advert it extracts the
    `npub` and `scope` TXT values, drops adverts that echo the node's own
    npub, drops cross-scope adverts (see scope filtering), drops records
    without an `npub`, and surfaces one `LanDiscoveredPeer` per routable
-   interface address (`src/discovery/lan/mod.rs:212-299`). IPv6
+   interface address (`src/mdns/mod.rs:230-297`). IPv6
    unicast link-local addresses without an interface scope id are
    skipped, since they cannot be dialed unambiguously
-   (`src/discovery/lan/mod.rs:348-365`).
+   (`src/mdns/mod.rs:357-370`).
 
-The TXT record carries three keys (`src/discovery/lan/mod.rs:47-55`):
+The TXT record carries three keys (`src/mdns/mod.rs:48-55`):
 
 | TXT key | Contents |
 | --- | --- |
@@ -486,8 +487,8 @@ The TXT record carries three keys (`src/discovery/lan/mod.rs:47-55`):
 | `v` | FIPS protocol version (the same `PROTOCOL_VERSION` used by the Nostr advert) |
 
 Once per node tick, the node drains browser events and acts on them in
-`poll_lan_discovery()` (`src/node/lifecycle.rs:907`, called from
-`src/node/dataplane/rx_loop.rs:266`). For each discovered peer it finds
+`poll_lan_rendezvous()` (`src/node/lifecycle/mod.rs:1131`, called from
+`src/node/dataplane/rx_loop.rs:444`). For each discovered peer it finds
 a UDP transport whose family matches the peer address, parses the
 `npub` into a `PeerIdentity`, skips peers it is already connected to or
 currently connecting to, and otherwise initiates a connection.
@@ -495,10 +496,10 @@ currently connecting to, and otherwise initiates a connection.
 ### Handshake: Noise IK
 
 LAN-discovered peers are dialed through the standard FMP outbound link
-path. `poll_lan_discovery()` calls `initiate_connection()`
-(`src/node/lifecycle.rs:380`), which, for connectionless transports
+path. `poll_lan_rendezvous()` calls `initiate_connection()`
+(`src/node/lifecycle/mod.rs:448`), which, for connectionless transports
 such as UDP, allocates a link and **starts the Noise IK handshake**
-(documented at `src/node/lifecycle.rs:373-374`). This is the same
+(documented at `src/node/lifecycle/mod.rs:438-442`). This is the same
 link-layer handshake used by every other FMP connection — IK at the
 link layer per the FIPS architecture — not a different pattern for LAN
 peers.
@@ -512,10 +513,10 @@ The mDNS advert is therefore a routing hint, never an identity
 assertion, exactly as a Nostr advert is treated (a successful contact
 is not trusted until FMP's Noise IK handshake completes).
 
-> Note: a stale source doc-comment at `src/node/lifecycle.rs:904-906`
-> describes this path as a "Noise XX" handshake. That comment is
-> inaccurate — the path uses Noise IK as described above. The comment
-> is flagged for a separate source fix and does not reflect actual
+> Note: stale source doc-comments at `src/mdns/mod.rs:14, 76, 153`
+> describe this path as a "Noise XX" handshake. Those comments are
+> inaccurate — the path uses Noise IK as described above. They are
+> flagged for a separate source fix and do not reflect actual
 > behavior.
 
 ### Scope filtering
@@ -525,9 +526,9 @@ When a discovery scope is configured, the advert carries it in the
 carries a matching scope. Nodes on the same physical LAN but configured
 for different mesh networks therefore do not cross-feed each other.
 
-The scope is resolved by `lan_discovery_scope()`
-(`src/node/lifecycle.rs:880-902`): the explicit
-`node.discovery.lan.scope`, if non-empty, is used directly. Otherwise
+The scope is resolved by `lan_rendezvous_scope()`
+(`src/node/lifecycle/mod.rs:1104`): the explicit
+`node.rendezvous.lan.scope`, if non-empty, is used directly. Otherwise
 the node falls back to deriving a scope from the Nostr discovery `app`
 tag (stripping the `fips-overlay-v1:` prefix when present). This lets
 an application keep its public, relay-visible Nostr `app` tag generic
@@ -537,14 +538,14 @@ adverts it sees on the link.
 
 ### Configuration
 
-LAN discovery is configured under `node.discovery.lan.*`
-(`src/config/node.rs:222-227`, `src/discovery/lan/mod.rs:88-129`):
+LAN discovery is configured under `node.rendezvous.lan.*`
+(`src/config/node.rs:334`, `src/mdns/mod.rs:92-114`):
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `node.discovery.lan.enabled` | bool | `false` | Master switch. LAN discovery is opt-in; default-off avoids an unexpected per-link identity multicast on upgrade. |
-| `node.discovery.lan.service_type` | string | `_fips._udp.local.` | DNS-SD service type. Overridable mainly so integration tests can isolate multiple services on one loopback interface. |
-| `node.discovery.lan.scope` | string (optional) | unset | Application/network scope carried in the LAN-only `scope` TXT record. Kept deliberately separate from the public Nostr `app` tag. When unset, the scope falls back to the derived Nostr `app` value. |
+| `node.rendezvous.lan.enabled` | bool | `false` | Master switch. LAN discovery is opt-in; default-off avoids an unexpected per-link identity multicast on upgrade. |
+| `node.rendezvous.lan.service_type` | string | `_fips._udp.local.` | DNS-SD service type. Overridable mainly so integration tests can isolate multiple services on one loopback interface. |
+| `node.rendezvous.lan.scope` | string (optional) | unset | Application/network scope carried in the LAN-only `scope` TXT record. Kept deliberately separate from the public Nostr `app` tag. When unset, the scope falls back to the derived Nostr `app` value. |
 
 The identity surface published over mDNS (`npub`, version, optional
 scope) is a strict subset of what `nostr.advertise` already publishes

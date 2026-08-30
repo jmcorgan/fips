@@ -78,7 +78,8 @@ ip6 saddr fd97:1234:5678:9abc:def0:1234:5678:9abc tcp dport 22 accept
 
 The source filter is the node's mesh address. To find a node's mesh
 address, look in their `fips.pub` (which contains the npub) and derive
-the `fd97:...` address from it, or query the running daemon:
+the address from it (only the leading `fd` byte is fixed; the other 15
+come from the node's key), or query the running daemon:
 
 ```sh
 fipsctl show identity-cache

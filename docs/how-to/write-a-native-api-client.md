@@ -56,18 +56,42 @@ Neither can happen while the daemon writes exactly one whole line per `sendmsg`
 and treats a short write as an error, which it does. That is an invariant of
 two programs, though, not of the socket type.
 
-## Step 3: Treat a zero-byte read as end of file only when POLLHUP is set
+## Step 3: Decide end of file from POLLHUP and an empty queue
 
 **An empty datagram and a closed peer both produce a zero-byte read, and
 `MSG_EOR` does not tell them apart.** On Linux 6.8, `recvmsg` on an `AF_UNIX`
 `SOCK_SEQPACKET` socket returns `msg_flags == 0` for a normal message, an empty
 message and end of file alike, so the flag carries no information.
 
-`POLLHUP` does discriminate. After a zero-byte read, a queued empty datagram
-leaves the socket with no events pending, while a closed peer leaves `POLLHUP`
-set and latched. Poll with an events mask of **zero**, because `POLLHUP` is
-reported in `revents` whether or not it was requested. The poll costs nothing:
-it runs only on the zero-byte path and does not block.
+`POLLHUP` narrows the question and does not answer it. A live peer never sets
+it, so a zero-byte read without `POLLHUP` is an empty datagram and nothing else.
+A closed peer does set it, **and it latches while messages are still queued**.
+Measured on Linux 6.8: a socket holding one empty datagram from a peer that has
+since closed reports exactly what a drained socket reports, in `revents`, in
+`FIONREAD`, under `MSG_PEEK` and in the `recvmsg` return alike.
+
+Poll with an events mask of **`POLLIN`**. Linux reports `POLLHUP` in `revents`
+whether or not it was requested, but a poll that requests nothing registers no
+filter on Darwin and returns zero events for a peer that has in fact closed.
+`POLLIN` costs nothing on either platform, because you mask the result to
+`POLLHUP` regardless. The poll runs only on the zero-byte path and does not
+block.
+
+**When `POLLHUP` is set, ask whether anything is still queued before you call it
+end of file.** `ioctl(fd, FIONREAD, &n)` reports the bytes the receive queue
+holds. A non-zero `n` proves a further message is waiting, so the zero-byte read
+you just took was an empty datagram: deliver it and read on. This is the case
+that costs a real payload if you get it wrong. A client that sends an empty
+datagram, then a message, then closes, leaves both queued, and a reader that
+trusts `POLLHUP` alone discards the message.
+
+**One case has no answer, and you should design around it rather than solve
+it.** A zero-length datagram that is the last message before a close is
+indistinguishable from the close: reading it drains the queue, and `FIONREAD`
+then reports zero because a zero-length message contributes no bytes. If your
+protocol gives a zero-length payload a meaning, do not send it as a zero-length
+socket message. Carry a one-byte discriminator, and keep the zero-byte read for
+end of file alone.
 
 Both directions of the mistake are real. Reading an empty datagram as a close
 lets a peer tear down a live flow by sending nothing, and presents as a

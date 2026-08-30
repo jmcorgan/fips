@@ -292,7 +292,7 @@ with v0.4.x or earlier peers.
   overwrite it. Anonymous dials still promote whoever answers, which is what
   shared-media discovery means.
 
-## [0.5.0] - unreleased
+## [0.5.0] - 2026-08-30
 
 ### Added
 
@@ -317,8 +317,9 @@ with v0.4.x or earlier peers.
   terminal (all platforms). No aarch64 FreeBSD artifact is produced and
   that combination is not verified here.
 
-- Android-ready core, offered as an embedding seam rather than as a supported
-  platform: there is no Android artifact and none is planned. The daemon's
+- Android-ready core, supported as an embedded crate rather than as a
+  standalone daemon: there is no Android daemon artifact, since the library is
+  the delivery form. The daemon's
   desktop transports and TUN operations are
   gated by `target_os` rather than by Cargo features, so a plain `cargo build`
   compiles for every target with no flags and Android self-excludes the raw
@@ -331,7 +332,8 @@ with v0.4.x or earlier peers.
   `fd00::/8`-destined packets and clamp TCP MSS on outbound SYNs. Desktop
   builds are unchanged and no Cargo features are introduced.
 
-- `Node::dns_local_addr()`, the DNS companion to the app-owned TUN seam above.
+- `Node::dns_local_addr()`, the DNS companion to the app-owned TUN interface
+  above.
   An embedder whose resolver is pointed into the tunnel has no system socket
   aimed at the built-in `.fips` responder, so the accessor reports the address
   read back off the bound socket: `dns.port = 0` therefore yields the
@@ -341,8 +343,8 @@ with v0.4.x or earlier peers.
 
 #### Native datagram API
 
-- An **experimental** native datagram API addressed by public key, off by
-  default and not a stable interface. A client process opens a flow to a
+- A native datagram API addressed by public key, off by default, with a
+  surface that may still change. A client process opens a flow to a
   peer's public key on a chosen port and sends and receives datagrams on a
   file descriptor the daemon hands it: no IPv6 emulation, no TUN device and no
   DNS, a datagram travelling from key to key. **The wire needs no change and
@@ -376,7 +378,16 @@ with v0.4.x or earlier peers.
   or FreeBSD `ECONNRESET` as end of file alongside the `POLLHUP` and
   zero-byte read that Linux gives. `EAGAIN` is deliberately not in that
   company: it means the socket is empty and the peer alive, so it stays an
-  error and the caller waits again.
+  error and the caller waits again. **A zero-length payload has one known
+  limitation.** A closed peer latches `POLLHUP` while its messages are still
+  queued, so that flag alone cannot say whether a zero-byte read is an empty
+  datagram or the close; the receive path also asks `FIONREAD`, and bytes still
+  queued prove a further message is waiting. That leaves one case unresolved:
+  a zero-length datagram that is the last message before a close is reported as
+  the close, because reading it drains the queue and a zero-length message
+  contributes no bytes to `FIONREAD`. A client should not give a zero-length
+  payload a meaning of its own, and should carry a one-byte discriminator
+  instead.
 
 #### OpenWrt mesh
 
@@ -444,13 +455,13 @@ with v0.4.x or earlier peers.
   transports are created by iterating a map, so arrival order is luck, and an
   embedder whose whole purpose is to bind one socket to one network would
   otherwise have to guess which socket it just received. Guessing wrong pins
-  one lane's socket to the other lane's network, which is the failure the seam
-  exists to correct. FIPS keeps owning the socket, and
+  one lane's socket to the other lane's network, which is the failure the
+  interface exists to correct. FIPS keeps owning the socket, and
   the descriptor carries no promise beyond "this is the transport's socket,
   and it is open now". Two limits: the per-peer connected-UDP sockets that
   Linux and macOS open after `start()` returns are not covered, and a
   transport that adopts a socket handed in by the traversal bootstrap does not
-  fire the seam. Unix only, since the Windows UDP backend has no descriptor.
+  deliver one. Unix only, since the Windows UDP backend has no descriptor.
 
 - A peer address may name which *instance* of a transport it belongs to, as
   `transport: "udp/aware"` rather than `"udp"`, where the part after the slash
@@ -474,6 +485,43 @@ with v0.4.x or earlier peers.
   invisible for a peer that has a second address that works: the lane would
   never carry traffic and nothing above debug logging would say so.
 
+#### Bluetooth LE
+
+- The BLE transport is refactored so the code common to Linux and Android is
+  implemented once, with a separate backend for each platform, and gains a
+  reliability pass closing several defects a two-node field capture surfaced.
+  The module gate is now `ble_available`, meaning glibc Linux or Android
+  rather than `target_os = "linux"`, so the transport is no longer conflated
+  with one of its backends; musl is excluded and a platform with no concrete
+  backend fails the build rather than compiling a transport that starts,
+  reports itself up and never peers. The receive path recovers packet
+  boundaries from the 4-byte FMP common prefix instead of assuming one read
+  returns one whole packet, which held only for BlueZ's `SOCK_SEQPACKET` and
+  not for a stream-oriented backend such as Android's `BluetoothSocket`, where
+  fragments shipped up as runts that FMP and Noise rejected and coalesced
+  tails were silently truncated. A peer is recognised by node identity rather
+  than by its link address, so a phone rotating resolvable private addresses
+  no longer presents as a new device on every rotation and defeats the
+  already-connected guards. The L2CAP PSM is decided by the backend: `listen`
+  reports the PSM it actually bound, the advertisement carries it beside the
+  128-bit service UUID, and a dialer learns it from the scan, which is what
+  Android and macOS require since both assign the PSM rather than letting an
+  application request one. Android gains an embedder-supplied radio backend
+  driving a radio the embedder installs into a per-node slot with
+  `Node::enable_app_owned_ble_radio()`, called after `new()` and before
+  `start()`, because its Bluetooth APIs sit behind a permission and
+  foreground-service model only the application can satisfy. Stopping the
+  transport now stops the scan as well as the advertisement, which matters
+  only where the embedder owns the radio: BlueZ ends discovery when the
+  scanner's event stream drops, but an app-owned radio went on scanning for
+  the life of the process. Probe retry backs off by powers of two with a
+  capped retry book, and each connect outcome has its own counter and
+  structured log line carrying the role, outcome, PSM and time to
+  conclusion. Inbound handshakes run off the accept loop, eight in flight
+  and aborting the oldest at the bound, where the exchange previously ran
+  inline and held the loop for its full 5-second deadline, making effective
+  inbound concurrency one.
+
 #### Observability & measurement
 
 - An optional tick-body profiler behind the new `profiling` Cargo feature,
@@ -488,36 +536,38 @@ with v0.4.x or earlier peers.
   `LogsDirectory=fips` was added to the packaged systemd units so the capture
   directory is created and cleaned up declaratively.
 
-- `fipsctl probe <npub|hostname>` answers, for one target, where it sits in the
-  spanning tree relative to this node and whether this node can actually reach
-  it. The work runs as five stages that report separately, `bloom`,
+- `fipsctl probe <npub|hostname>` answers, for one target, where it sits in
+  the spanning tree relative to this node and whether this node can actually
+  reach it. The work runs as five stages that report separately, `bloom`,
   `discovery`, `path`, `session` and `rtt`, because one verdict covering
   several findings is what sends an operator to the source: "no peer's filter
   claims this address" says the mesh has never heard of the target, while "a
-  filter claimed it and nothing answered" says the opposite. The probe opens an
-  FSP session, waits for one MMP receiver report to yield a round-trip time,
-  and tears down only what it opened. A session that existed before the probe
-  started is never torn down, ownership is decided at the moment of action
-  rather than once at the start, and it is re-checked before teardown, so a
-  session adopted by traffic underneath the probe is left alone. **The path is
-  computed from coordinates rather than observed**, and the output says so in
-  those words: nothing traverses the mesh to confirm the hops, and a display
-  that read like traceroute output would be believed as one. A real per-hop
-  trace needs a wire message that does not exist. **Nothing here changes the
-  wire format**; the probe is built from messages that already exist. The
-  control socket carries three new commands, `probe_start`, `probe_poll` and
-  `probe_cancel`, each returning in well under a millisecond with the stages
-  advanced on the daemon's tick, because a probe needs a mesh lookup, a Noise
-  XK handshake and at least one remote MMP tick, which no single control
-  round-trip could survive inside the socket's five-second timeout. A probe
-  that runs and finds a problem is not an error response: the status is `ok`
-  and the failure sits in the per-stage verdicts, and error responses stay
-  reserved for malformed or inadmissible requests. On a terminal the stage
-  block is redrawn in place with a running elapsed on whichever stage is
-  working; piped or redirected there is no cursor to move, so each row prints
-  once, at the moment it settles, and the transcript ends up the same block a
-  terminal leaves behind. `--json` emits exactly one document at the end, so a
-  script parsing the report does not have to skip past progress output.
+  filter claimed it and nothing answered" says the opposite. The probe opens
+  an FSP session, waits for one MMP receiver report to yield a round-trip
+  time, and tears down only what it opened. A session that existed before the
+  probe started is never torn down, ownership is decided at the moment of
+  action rather than once at the start, and it is re-checked before teardown,
+  so a session adopted by traffic underneath the probe is left alone. **The
+  path printed is the least-common-ancestor walk computed from the two sets of
+  coordinates**, which is the worst-case fallback route rather than the route
+  a packet necessarily takes: a cut-through between peers can deliver in fewer
+  hops, so the tree distance is an upper bound. Nothing traverses the mesh to
+  confirm the hops, and a real per-hop trace needs a wire message that does
+  not exist. **Nothing here changes the wire format**; the probe is built from
+  messages that already exist. The control socket carries three new commands,
+  `probe_start`, `probe_poll` and `probe_cancel`, each returning in well under
+  a millisecond with the stages advanced on the daemon's tick, because a probe
+  needs a mesh lookup, a Noise XK handshake and at least one remote MMP tick,
+  which no single control round-trip could survive inside the socket's
+  five-second timeout. A probe that runs and finds a problem is not an error
+  response: the status is `ok` and the failure sits in the per-stage verdicts,
+  and error responses stay reserved for malformed or inadmissible requests. On
+  a terminal the stage block is redrawn in place with a running elapsed on
+  whichever stage is working; piped or redirected there is no cursor to move,
+  so each row prints once, at the moment it settles, and the transcript ends
+  up the same block a terminal leaves behind. `--json` emits exactly one
+  document at the end, so a script parsing the report does not have to skip
+  past progress output.
 
 #### Packaging & deployment
 
@@ -528,9 +578,7 @@ with v0.4.x or earlier peers.
   and TCP 8443) and `dns.enable`, which routes `.fips` to `[::1]:5354` through
   systemd-resolved declaratively rather than with setup and teardown scripts.
   `packaging/nixos/README.md` documents it with a full consumer `flake.nix`.
-  Contributed by Arjen. **Unexercised here**: no CI job builds the flake and no
-  Nix toolchain is present on the machine this release was assembled on, so the
-  module is untested outside its author's environment.
+  Contributed by Arjen.
 
 - `fipsctl address [npub|hostname]` prints a node's `fd00::/8` mesh address and
   nothing else, without contacting the daemon. With no argument it derives the
@@ -775,9 +823,23 @@ with v0.4.x or earlier peers.
 
 #### Transport
 
-- The UDP listen socket's address-reuse flags are now set before its bind
-  rather than after, where they had no effect on the socket they were meant to
-  configure.
+- The UDP listen socket's address-reuse flags are now set after its bind rather
+  than before. Before the bind they mean the kernel may hand back a port another
+  flagged socket already holds, so a second daemon binding the same configured
+  address started silently and shared the port, with the kernel splitting
+  inbound datagrams across the two receive loops on the source 4-tuple, where
+  the second daemon should have failed with `EADDRINUSE`. After the bind they
+  mean what was actually wanted, that the per-peer connected sockets may later
+  join the port. Those connected sockets are the joiners and keep their flags
+  before their own bind, which is where they belong.
+
+- A BLE connection the pool refused is no longer counted as an established
+  link. The scan and probe loop recorded `connections_established`, resolved
+  the address out of the retry book and handed the peer up to the node layer
+  after `ConnectionPool::insert` had already refused the connection and
+  dropped it. Reaching the refusal needs a full pool with no evictable slot,
+  and every BLE connection is built non-static, so only `max_connections: 0`
+  gets there.
 
 #### Control socket
 
@@ -859,6 +921,21 @@ with v0.4.x or earlier peers.
   keeps the tighter value, so repeated promotion does not reset discovery, and
   a destination with no prior seed is unchanged.
 
+- An inbound IPv6 source address no longer loses its scope. Converting a raw
+  `sockaddr` on receive dropped `sin6_scope_id`, and a link-local source
+  (`fe80::/10`) identifies a host only together with its interface scope,
+  because the same address may exist on several interfaces. The failure was
+  silent rather than loud: the address parsed, it looked correct in a log
+  line, and only the reply failed. On a link where every address is
+  link-local, a Wi-Fi Aware data path for instance, that stalled the Noise
+  handshake. msg1 was sent to a scoped address and arrived, the peer replied,
+  and msg2's source was recorded with scope 0 and could not be routed back, so
+  msg1 retried indefinitely with nothing reported. The conversion is shared by
+  all three Unix receive paths, the single-packet `recv_from`, the Linux
+  `recvmmsg` batch and the Darwin `recvmsg_x` batch, so one fix covers each.
+  Sources outside the link-local range carry scope 0, for which the scoped and
+  unscoped forms are identical, so nothing else changes.
+
 #### macOS
 
 - The packaged macOS daemon recreates and binds its control socket at
@@ -878,6 +955,20 @@ with v0.4.x or earlier peers.
   would have been unreachable at its first release.
 
 ### Security
+
+#### Coordinate cache
+
+- The coordinate cache is warmed from plaintext session headers on datagrams a
+  node is merely forwarding, and nothing filtered those writes. Two checks now
+  run at the write site, and an entry carries its provenance, so a coordinate
+  established by a lookup whose proof this node checked is no longer displaced
+  by an unauthenticated hint. Four counters report what the checks refuse:
+  `coord_warm_foreign_root`, `coord_warm_key_mismatch`, `coord_hint_rejected`
+  and `coord_hint_changed`, all in `fipsctl show status` and
+  `fipsctl show routing`. **These are mitigations and not a closure.** The
+  coordinate is still not authenticated, so a same-root forgery is unaffected
+  and hint-over-hint for a destination that was never verified is unchanged.
+  Treat the counters as a rate to watch rather than an alarm.
 
 #### Tick profiler
 
@@ -1841,29 +1932,6 @@ with v0.4.x or earlier peers.
   the table and hold new session establishment closed for as long as it keeps
   doing so, which is a denial of new sessions rather than the unbounded memory
   growth it replaces.
-
-- One inbound BLE connector can no longer stall every other inbound
-  connection. The accept loop ran the pre-handshake pubkey exchange inline, so
-  a peer that connected an L2CAP channel and then said nothing held the loop
-  for the full 5-second exchange deadline and no other inbound connection was
-  accepted in that window; the maximum-connections argument the loop was given
-  was never used, so the effective concurrency was one. Each inbound connection
-  now runs its handshake in its own task, up to eight in flight, and at that
-  bound the oldest pending handshake is aborted to make room rather than the
-  loop waiting for a slot: a healthy exchange is one round trip, so anything
-  still pending under a flood is overwhelmingly the flooder's, and a genuinely
-  slow peer that is aborted reconnects, which is better than never being
-  accepted at all. Aborted handshakes are counted in the transport's stats as
-  `handshakes_aborted`. The tasks live in a set owned by the accept loop, so
-  stopping the transport stops them too and none can insert into a pool that
-  stop has just drained. Separately, the send half of the pubkey exchange had
-  no deadline at all while the receive half had one, so a peer that stopped
-  draining its channel could park the write forever; it now shares the same
-  5-second deadline, which also covers the outbound connect and scan-probe
-  paths. **What this does not close**: eight simultaneous silent connectors
-  still occupy the whole in-flight budget, and no BlueZ hardware was exercised,
-  so the controller's own concurrent-link limit and accept backlog depth stay
-  unmeasured.
 
 - An accepted inbound TCP connection no longer holds a slot indefinitely
   without sending anything. The cap was tested at accept and the pool insert

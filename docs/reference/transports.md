@@ -45,6 +45,7 @@ module.
 | `bytes_sent` / `bytes_recv` | Byte counters |
 | `send_errors` / `recv_errors` | Send/receive failures |
 | `beacons_sent` / `beacons_recv` | Peer-discovery beacon traffic |
+| `beacons_dropped` | Received beacons the discovery buffer had no room for |
 | `frames_too_short` | Frames below minimum length, dropped |
 | `frames_too_long` | Frames above transport MTU, dropped |
 
@@ -92,10 +93,16 @@ Nym is outbound-only (no inbound listener), so there are no
 | `connections_established` | Successful outbound L2CAP connections |
 | `connections_accepted` | Accepted inbound L2CAP connections |
 | `connections_rejected` | Rejected inbound (limit exceeded) |
+| `handshakes_aborted` | Inbound handshakes aborted to free an in-flight slot |
 | `connect_timeouts` | Connection timeout count |
+| `connect_errors` | Outbound connects that failed with an error rather than timing out |
+| `pubkey_exchange_failures` | Connections dropped because the pre-handshake pubkey exchange failed |
+| `tiebreaker_yields` | Outbound connections stood down by the cross-probe tie-breaker |
+| `tiebreaker_drops` | Inbound connections stood down by the cross-probe tie-breaker |
 | `pool_evictions` | Connection-pool entries evicted |
 | `advertisements_sent` | BLE advertisements emitted |
 | `scan_results` | BLE scan results observed |
+| `duplicate_node_declines` | Connections declined because the peer was already linked on another link address |
 
 ## See also
 

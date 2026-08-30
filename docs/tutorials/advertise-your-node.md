@@ -39,7 +39,7 @@ for the cases where direct UDP advertising isn't an option.
 
 You will change two things in `/etc/fips/fips.yaml`:
 
-- Flip `discovery.nostr.advertise` from `false` to `true`.
+- Flip `node.rendezvous.nostr.advertise` from `false` to `true`.
 - Add `advertise_on_nostr: true` and `public: true` under
   `transports.udp`.
 
@@ -109,8 +109,8 @@ You should be coming out of
 
 - A persistent npub (`fipsctl show status | grep '"npub"'`).
 - Nostr discovery in consume-only mode
-  (`discovery.nostr.enabled: true`,
-  `discovery.nostr.advertise: false`).
+  (`node.rendezvous.nostr.enabled: true`,
+  `node.rendezvous.nostr.advertise: false`).
 - A peer entry for `test-us01` with `via_nostr: true` and no
   static address. `fipsctl show peers` shows the link
   established.
@@ -132,13 +132,13 @@ Copy the value.
 Open `/etc/fips/fips.yaml` and change two things.
 
 **Change 1: flip `advertise` to `true`.** Find the
-`discovery.nostr` block under `node:` and set:
+`rendezvous.nostr` block under `node:` and set:
 
 ```yaml
 node:
   identity:
     persistent: true
-  discovery:
+  rendezvous:
     nostr:
       enabled: true
       advertise: true
@@ -146,6 +146,11 @@ node:
 
 (The previous tutorial set `advertise: false`; you're flipping
 that bit now.)
+
+This table was `node.discovery` before v0.5.0; that spelling still parses
+and logs one deprecation warning naming the new table, so an existing
+config keeps working (see
+[../reference/configuration.md](../reference/configuration.md)).
 
 **Change 2: add the UDP advert flags.** Find the `udp:` block
 under `transports:`. The wildcard-bind default
@@ -337,19 +342,20 @@ transports:
     public: false                 # ← was true; change to false
 ```
 
-And add the signaling/STUN block under `discovery.nostr`:
+And add the signaling/STUN block under `node.rendezvous.nostr`:
 
 ```yaml
-discovery:
-  nostr:
-    enabled: true
-    advertise: true
-    dm_relays:
-      - "wss://relay.damus.io"
-      - "wss://nos.lol"
-    stun_servers:
-      - "stun:stun.l.google.com:19302"
-      - "stun:stun.cloudflare.com:3478"
+node:
+  rendezvous:
+    nostr:
+      enabled: true
+      advertise: true
+      dm_relays:
+        - "wss://relay.damus.io"
+        - "wss://nos.lol"
+      stun_servers:
+        - "stun:stun.l.google.com:19302"
+        - "stun:stun.cloudflare.com:3478"
 ```
 
 For the full setup including peer-side config and the punch-
@@ -404,7 +410,7 @@ If your advert doesn't appear on the relays:
   If the daemon is running but `nak` returns no advert, the
   field was accepted but something else is wrong; double-check
   the spelling on the UDP block and that
-  `discovery.nostr.advertise: true` is also set.
+  `node.rendezvous.nostr.advertise: true` is also set.
 
 ## What's next
 

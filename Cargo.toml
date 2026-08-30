@@ -22,15 +22,15 @@ profiling = []
 [dependencies]
 ratatui = "0.30"
 secp256k1 = { version = "0.30", features = ["rand", "global-context"] }
-sha2 = "0.10"
-hkdf = "0.12"
+sha2 = "0.11"
+hkdf = "0.13"
 ring = "0.17"
 libm = "0.2"
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 rand = "0.10.1"
 crossbeam-channel = "0.5"
 thiserror = "2.0"
-bech32 = "0.11"
+bech32 = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

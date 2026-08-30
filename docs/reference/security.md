@@ -294,7 +294,7 @@ for the metadata-privacy model and the rejection of onion routing.
 | Ethernet | Listens on configured interface (raw `AF_PACKET`) | EtherType 0x2121 on selected interface | Per-flag `listen`, `announce`, `auto_connect`, `accept_connections` |
 | Tor | None until `directory_service` configured | `127.0.0.1:8443` (loopback only) | Operator sets `transports.tor.directory_service` and configures `HiddenServiceDir` in `torrc` |
 | BLE | Off by default | n/a | Operator enables `transports.ble.*` |
-| Nostr discovery | Off by default | n/a (relay client, not a listener) | Operator sets `node.discovery.nostr.enabled: true` |
+| Nostr discovery | Off by default | n/a (relay client, not a listener) | Operator sets `node.rendezvous.nostr.enabled: true` |
 
 The mesh-layer `fips0` interface is reachable from any mesh node that
 can route to you, not only direct peers — your direct peers forward

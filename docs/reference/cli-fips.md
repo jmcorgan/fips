@@ -28,7 +28,7 @@ controlled through the standard service control manager.
 | Flag | Argument | Description |
 | ---- | -------- | ----------- |
 | `-c`, `--config` | `FILE` | Use `FILE` as the configuration. Skips the default search paths. |
-| `-V` | — | Print the short version (e.g. `0.5.0-dev (rev abcdef1)`). |
+| `-V` | — | Print the short version, `<version> (rev <git-hash>)`. |
 | `--version` | — | Print the long version: short version plus build target triple. |
 | `-h`, `--help` | — | Print usage and exit. |
 | `--install-service` | — | (Windows only) Install `fips` as a Windows service. Requires Administrator. |
@@ -66,10 +66,14 @@ highest-priority value wins.
 
 | Priority | Path | Purpose |
 | -------- | ---- | ------- |
-| 1 | `/usr/local/etc/fips/fips.yaml` (macOS), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
+| 1 | `/usr/local/etc/fips/fips.yaml` (macOS, FreeBSD), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
 | 2 | `~/.config/fips/fips.yaml` | User preferences |
 | 3 | `~/.fips.yaml` | Legacy user config |
 | 4 | `./fips.yaml` | Deployment-specific overrides |
+
+On macOS and FreeBSD both system directories are probed: `/etc/fips`
+first, then `/usr/local/etc/fips`, so the packaged file wins over a
+leftover `/etc/fips` copy from an earlier install.
 
 Adjacent to the highest-priority config file the daemon reads (or
 writes, on first start) the identity files:

@@ -122,7 +122,7 @@ fips --config ~/napi-lab/b/fips.yaml
 Each should log that it bound its API socket:
 
 ```text
-Native API socket listening on /home/YOU/napi-lab/a/api.sock
+Native API socket listening path=/home/YOU/napi-lab/a/api.sock
 ```
 
 In a third terminal, confirm the two found each other:
@@ -138,7 +138,9 @@ the datagram would simply be held and then dropped.
 
 ## Step 5: Write the listening program
 
-Make a crate next to the lab directory:
+Make a crate inside the lab directory (the shell is still in
+`~/napi-lab` from Step 2, so both crates land there and Step 8's
+`rm -rf ~/napi-lab` removes them along with everything else):
 
 ```sh
 cargo new --bin napi-listen
@@ -334,7 +336,7 @@ relay.
 
 - [../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md)
   — the same ground as a recipe, including enabling the API on a real node and
-  the security posture that grants
+  the security posture that granting a program access to the socket implies
 - [../reference/native-api.md](../reference/native-api.md)
   — every type and method, the errno table, the ceilings, and what happens to
   data that disappears
