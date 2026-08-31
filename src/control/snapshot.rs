@@ -740,6 +740,21 @@ pub(crate) struct TransportRow {
     pub onion_address: Option<String>,
     pub tor_monitoring: Option<serde_json::Value>,
     pub stats: serde_json::Value,
+    /// Interface presence for interface-bound transports; `None` for the rest.
+    pub interface: Option<InterfaceRow>,
+}
+
+/// Interface name, presence and policy for an interface-bound transport, as
+/// `show_transports` renders it.
+#[derive(Clone, PartialEq)]
+pub(crate) struct InterfaceRow {
+    pub name: String,
+    pub presence: &'static str,
+    pub carrier: bool,
+    pub policy: &'static str,
+    pub since_secs: u64,
+    pub binds: u64,
+    pub failed_attempts: u32,
 }
 
 /// MMP trend labels for a peer's link-layer block in `show_mmp` (each present
