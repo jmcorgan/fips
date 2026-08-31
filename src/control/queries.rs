@@ -1361,8 +1361,17 @@ pub(crate) fn show_connections_from_handle(
 
 /// `show_transports` — Transport instances.
 pub fn show_transports(node: &Node) -> Value {
-    let transports: Vec<Value> = node
-        .transport_ids()
+    // Ascending id, which is creation order: UDP, then Ethernet, then TCP,
+    // Tor, Nym, BLE, with each type's instances in config order. The map
+    // behind `transport_ids` is a `HashMap`, so without this the array order
+    // is whatever the hash seed produced — arbitrary, and different on every
+    // daemon restart. Anything scripting against this output, and every view
+    // rendering it, inherits that. Sorting by id groups the list by transport
+    // type for free, because the ids were handed out that way.
+    let mut ids: Vec<_> = node.transport_ids().copied().collect();
+    ids.sort_by_key(|id| id.as_u32());
+    let transports: Vec<Value> = ids
+        .iter()
         .map(|id| {
             let handle = node.get_transport(id).unwrap();
             let mut t_json = json!({
@@ -1388,6 +1397,21 @@ pub fn show_transports(node: &Node) -> Value {
             }
             if let Some(monitoring) = handle.tor_monitoring() {
                 t_json["tor_monitoring"] = serde_json::to_value(&monitoring).unwrap_or_default();
+            }
+
+            // Interface presence, for the transports that have an interface.
+            // Absent from the payload entirely for the ones that do not, rather
+            // than reported as a permanently-`present` interface named "".
+            if let Some(p) = handle.interface_presence() {
+                t_json["interface"] = json!({
+                    "name": handle.interface_name().unwrap_or_default(),
+                    "presence": p.presence,
+                    "carrier": p.carrier,
+                    "policy": p.policy,
+                    "since_secs": p.since_secs,
+                    "binds": p.binds,
+                    "failed_attempts": p.failed_attempts,
+                });
             }
 
             t_json["stats"] = handle.transport_stats();
@@ -1432,6 +1456,18 @@ pub(crate) fn show_transports_from_handle(handle: &super::read_handle::ControlRe
             }
             if let Some(monitoring) = &t.tor_monitoring {
                 t_json["tor_monitoring"] = monitoring.clone();
+            }
+
+            if let Some(iface) = &t.interface {
+                t_json["interface"] = json!({
+                    "name": iface.name,
+                    "presence": iface.presence,
+                    "carrier": iface.carrier,
+                    "policy": iface.policy,
+                    "since_secs": iface.since_secs,
+                    "binds": iface.binds,
+                    "failed_attempts": iface.failed_attempts,
+                });
             }
 
             t_json["stats"] = t.stats.clone();

@@ -59,6 +59,14 @@ impl PacketSocket {
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             unsafe { libc::close(fd) };
+            // The interface can disappear between the index lookup and the
+            // bind. That is absence arriving a few microseconds late, not a
+            // configuration fault, so it reports as absence.
+            if matches!(err.raw_os_error(), Some(libc::ENODEV) | Some(libc::ENXIO)) {
+                return Err(TransportError::InterfaceUnavailable {
+                    interface: interface.to_string(),
+                });
+            }
             return Err(TransportError::StartFailed(format!(
                 "bind(AF_PACKET, {}) failed: {}",
                 interface, err
@@ -231,11 +239,11 @@ fn get_if_index(_fd: RawFd, interface: &str) -> Result<i32, TransportError> {
 
     let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
     if idx == 0 {
-        return Err(TransportError::StartFailed(format!(
-            "interface not found: {} ({})",
-            interface,
-            std::io::Error::last_os_error()
-        )));
+        // Absence, not a fault: the caller's presence watcher rebinds when the
+        // interface shows up. See `TransportError::InterfaceUnavailable`.
+        return Err(TransportError::InterfaceUnavailable {
+            interface: interface.to_string(),
+        });
     }
     Ok(idx as i32)
 }

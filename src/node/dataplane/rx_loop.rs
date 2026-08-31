@@ -109,6 +109,16 @@ impl Node {
             }
         };
 
+        // Interface-presence receiver, or a dummy channel — same pattern and
+        // same reason as the child-liveness receiver above.
+        let (mut presence_rx, _presence_guard) = match self.transport_presence_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
         let tick_period = Duration::from_secs(self.config().node.tick_interval_secs);
         let mut tick = tokio::time::interval(tick_period);
 
@@ -334,6 +344,42 @@ impl Node {
                                 self.supervisor.state = ns;
                             }
                         }
+                        // A transport child exiting leaves the bound set, so
+                        // it can be the one that was holding the node's egress
+                        // MTU down. `is_bound()` is `is_operational()` plus the
+                        // presence refinement, and this moves the first half.
+                        self.refresh_tun_mss_ceiling();
+                    }
+                }
+                // Interface presence. An interface-bound transport's binder
+                // reports attach and detach; the FSM folds it into health.
+                // Unlike `ChildExited` this is reversible in both directions —
+                // the interface coming back republishes `Running` — which is
+                // the whole point of `Degraded` being a level rather than a
+                // latch.
+                maybe_presence = presence_rx.recv() => {
+                    if let Some(edge) = maybe_presence {
+                        let child = crate::node::lifecycle::supervisor::Child::Transport(
+                            edge.transport_id,
+                        );
+                        let event = if edge.present {
+                            crate::node::lifecycle::supervisor::Event::ChildPresent { child }
+                        } else {
+                            crate::node::lifecycle::supervisor::Event::ChildAbsent { child }
+                        };
+                        let actions = self.supervisor.fsm.step(event);
+                        for action in actions {
+                            if let crate::node::lifecycle::supervisor::Action::PublishState(ns) =
+                                action
+                            {
+                                self.supervisor.state = ns;
+                            }
+                        }
+                        // The bound set just changed, so the node's egress MTU
+                        // floor may have. Both directions: an interface that
+                        // binds can be the narrow one, and one that detaches
+                        // can be the reason the clamp was tight.
+                        self.refresh_tun_mss_ceiling();
                     }
                 }
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {

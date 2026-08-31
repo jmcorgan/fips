@@ -1843,6 +1843,114 @@ async fn test_transport_mtu_returns_min_across_operational() {
 }
 
 #[tokio::test]
+async fn the_tun_mss_ceiling_follows_a_transport_arriving_and_leaving() {
+    // The TUN reader and writer used to be handed a `u16` computed once at
+    // spawn. Every other consumer of `transport_mtu()` reads it live, so once
+    // a transport could bind minutes after start the daemon reported one
+    // effective MTU in `show_status` and clamped to another.
+    //
+    // Both directions. A narrow transport arriving has to tighten the ceiling
+    // or traffic egressing over it is clamped too loose; the same transport
+    // leaving has to release it, or unplugging a low-MTU adapter leaves the
+    // node over-clamped until it restarts.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let wide = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), wide);
+    node.refresh_tun_mss_ceiling();
+    let wide_ceiling = node.tun_mss_ceiling();
+    assert_eq!(
+        wide_ceiling,
+        crate::upper::icmp::mss_ceiling(1452),
+        "the seeded ceiling must match the only bound transport"
+    );
+
+    // A narrower transport arrives after the TUN threads would already be
+    // running. The shared ceiling has to tighten.
+    let narrow = make_udp_transport_with_mtu(2, 1280).await;
+    node.transports.insert(TransportId::new(2), narrow);
+    node.refresh_tun_mss_ceiling();
+    let narrow_ceiling = node.tun_mss_ceiling();
+    assert_eq!(narrow_ceiling, crate::upper::icmp::mss_ceiling(1280));
+    assert!(
+        narrow_ceiling < wide_ceiling,
+        "a narrower transport must tighten the clamp, not be ignored"
+    );
+    assert_eq!(
+        narrow_ceiling,
+        crate::upper::icmp::mss_ceiling(node.transport_mtu()),
+        "the clamp and the reported MTU must not disagree"
+    );
+
+    // ...and leaving has to release it again.
+    if let Some(mut gone) = node.transports.remove(&TransportId::new(2)) {
+        gone.stop().await.ok();
+    }
+    node.refresh_tun_mss_ceiling();
+    assert_eq!(
+        node.tun_mss_ceiling(),
+        wide_ceiling,
+        "the ceiling must rise again when the narrow transport goes away"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn a_presence_edge_refreshes_the_tun_mss_ceiling_without_being_asked() {
+    // The one above pins the arithmetic; this pins the wiring. A presence
+    // edge arriving has to refresh the ceiling on its own — if the refresh is
+    // dropped from the edge handlers the value silently stops tracking, which
+    // is the defect in its original form.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let (presence_tx, presence_rx) = tokio::sync::mpsc::channel(4);
+    node.transport_presence_tx = Some(presence_tx.clone());
+    node.transport_presence_rx = Some(presence_rx);
+
+    // Nothing bound: the conservative seed.
+    node.refresh_tun_mss_ceiling();
+    let seeded = node.tun_mss_ceiling();
+    assert_eq!(seeded, crate::upper::icmp::mss_ceiling(1280));
+
+    // A wide transport appears, and an edge announces it. No explicit
+    // refresh call here — draining the edge is the whole trigger.
+    let wide = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), wide);
+    presence_tx
+        .send(crate::transport::TransportPresence {
+            transport_id: TransportId::new(1),
+            present: true,
+        })
+        .await
+        .expect("presence edge queued");
+    node.drain_transport_presence();
+
+    assert_eq!(
+        node.tun_mss_ceiling(),
+        crate::upper::icmp::mss_ceiling(1452),
+        "draining a presence edge must refresh the ceiling on its own"
+    );
+    assert_ne!(
+        node.tun_mss_ceiling(),
+        seeded,
+        "the ceiling stayed at its seed, so the edge did not refresh it"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
 async fn test_transport_mtu_fallback_when_no_operational_transports() {
     // No transports configured at all → falls back to 1280 (IPv6 minimum).
     let node = make_node();

@@ -9,6 +9,97 @@ use crate::transport::TransportError;
 /// Broadcast MAC address.
 pub const ETHERNET_BROADCAST: [u8; 6] = [0xff; 6];
 
+/// Whether the named interface exists and is administratively up.
+///
+/// Presence is `IFF_UP` — the interface exists and the operator has enabled
+/// it — and deliberately **not** `IFF_RUNNING`.
+///
+/// Carrier is a different question from bindability, and only the second one
+/// belongs in a bind gate. An `AF_PACKET` socket on a carrier-less bridge is
+/// perfectly valid and starts carrying traffic the instant a member port comes
+/// up, with no rebind: the socket outlives the carrier. Gating on `IFF_RUNNING`
+/// bought nothing and cost three things —
+///
+/// - `br-lan` on a router with nothing plugged into its LAN ports is `UP` with
+///   `NO-CARRIER`, so a perfectly healthy wifi-only router reported `Degraded`
+///   forever;
+/// - every carrier flap the socket would have survived became an unbind /
+///   rebind cycle, which is churn the presence machine then has to damp;
+/// - an 802.11s mesh interface that reports `RUNNING` only once it has peered
+///   cannot peer, because peering needs beacons, which need a bound socket,
+///   which the gate refuses. A deadlock reachable on shipped hardware.
+///
+/// The signal `IFF_RUNNING` does carry — "is anything plugged in" — is not
+/// lost; it is reported alongside presence by [`interface_carrier`] and
+/// surfaced in `show_transports`, where an operator can read it without it
+/// steering the daemon.
+///
+/// `getifaddrs` rather than an `SIOCGIFFLAGS` ioctl: it needs no socket, so
+/// the presence watcher can poll before any file descriptor exists, and it is
+/// spelled the same on Linux and the BSDs.
+#[cfg(unix)]
+pub fn interface_present(interface: &str) -> bool {
+    interface_has_flags(interface, libc::IFF_UP as u32)
+}
+
+/// The kernel's index for the named interface, or `None` if it does not exist.
+///
+/// A name is not a device, and neither is a name that is still there. Both
+/// backends bind by index — `AF_PACKET` stores `sll_ifindex`, and a BPF
+/// descriptor follows the device it was attached to — so an interface deleted
+/// and recreated under the same name leaves the socket attached to a device
+/// that no longer exists while the *name* resolves perfectly well. Comparing
+/// the live index against the one captured at bind is what tells those apart.
+#[cfg(unix)]
+pub fn interface_index(interface: &str) -> Option<u32> {
+    let c_name = std::ffi::CString::new(interface).ok()?;
+    // Cheaper than `getifaddrs`: one syscall, no allocation, no walk.
+    match unsafe { libc::if_nametoindex(c_name.as_ptr()) } {
+        0 => None,
+        idx => Some(idx),
+    }
+}
+
+/// Whether the named interface currently has carrier (`IFF_RUNNING`).
+///
+/// Reported, never acted on — see [`interface_present`]. `false` for an
+/// interface that does not exist, which keeps "no carrier" and "no interface"
+/// from being told apart here; presence answers that.
+#[cfg(unix)]
+pub fn interface_carrier(interface: &str) -> bool {
+    interface_has_flags(interface, (libc::IFF_UP | libc::IFF_RUNNING) as u32)
+}
+
+/// Whether the named interface exists and has every flag in `wanted` set.
+#[cfg(unix)]
+fn interface_has_flags(interface: &str, wanted: u32) -> bool {
+    let Ok(c_name) = std::ffi::CString::new(interface) else {
+        return false;
+    };
+
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
+        return false;
+    }
+
+    let mut matched = false;
+    let mut cur = addrs;
+    while !cur.is_null() {
+        let entry = unsafe { &*cur };
+        if !entry.ifa_name.is_null()
+            && unsafe { libc::strcmp(entry.ifa_name, c_name.as_ptr()) } == 0
+            && entry.ifa_flags & wanted == wanted
+        {
+            matched = true;
+            break;
+        }
+        cur = entry.ifa_next;
+    }
+
+    unsafe { libc::freeifaddrs(addrs) };
+    matched
+}
+
 // Platform-specific PacketSocket implementation.
 #[cfg(target_os = "linux")]
 #[path = "io_linux.rs"]

@@ -67,6 +67,39 @@
 //! when a task/thread dies at runtime) is **deferred**: start-completion health
 //! resolution is start-framed, and liveness monitoring is a substantial unbuilt
 //! mechanism. This commit is start-time health only.
+//!
+//! ## Scope: interface presence, and `Degraded` as a level (this commit)
+//!
+//! Interface-bound transports are now *sometimes bound*: a transport whose
+//! interface is missing at start comes up [`Absent`] and binds later, and one
+//! whose interface goes away at runtime unbinds and rebinds when it returns.
+//! Two things follow for this machine.
+//!
+//! - **A second reason set.** [`Event::ChildAbsent`] / [`Event::ChildPresent`]
+//!   move a child in and out of `absent`, which feeds `Degraded` exactly like
+//!   `failed` does. It is kept separate because it is *reversible* and `failed`
+//!   is not: a child that failed to start stays failed for the bring-up, while
+//!   an absent interface is expected to come back.
+//! - **`Degraded` is a level, not a latch.** Nothing ever removed from `failed`,
+//!   which was correct while no child could recover — a monotonic set accurately
+//!   described a one-way door. Once recovery exists the assumption inverts: plug
+//!   the WAN back in and the node would stay `Degraded` until the process
+//!   restarted, and `Degraded` would come to mean "something broke at some point
+//!   since boot" rather than "something is broken now".
+//!   [`Self::classify_health`](SupervisorFsm::classify_health) is therefore
+//!   recomputed on every transition **in both directions**.
+//!
+//! An absent transport still counts as *up*. It came up — `start_async` returns
+//! `Ok` with the transport absent — so it does not push a single-transport node
+//! into the fatal [`FailReason::NoTransports`], which would make a node that
+//! merely booted before its wifi exit instead of waiting. Absence degrades; it
+//! never kills.
+//!
+//! There is deliberately **no restart action**. Rebinding is owned by the
+//! transport's own binder task, which is where the file descriptor and the
+//! presence watcher live; the FSM is told what happened and republishes health.
+//!
+//! [`Absent`]: crate::transport::ethernet::Presence::Absent
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -172,6 +205,22 @@ pub(crate) enum Event {
     /// restart (the FSM has no restart action). Inert outside `Running`.
     ChildExited {
         /// The child whose task/thread exited.
+        child: Child,
+    },
+    /// An interface-bound child lost its interface — it was never there at
+    /// start, or it went away at runtime. The child stays *up* (the transport
+    /// object survives detach, only its socket goes) but contributes
+    /// `Degraded`. Valid while `Running`; while `Starting` the edge is recorded
+    /// so start-completion health already reflects it.
+    ChildAbsent {
+        /// The child whose interface is absent.
+        child: Child,
+    },
+    /// An interface-bound child's interface came back and it rebound. Clears
+    /// the absence and republishes health, which is how `Degraded` becomes
+    /// reversible.
+    ChildPresent {
+        /// The child whose interface is present again.
         child: Child,
     },
 }
@@ -320,7 +369,16 @@ pub(crate) struct SupervisorFsm {
     up: HashSet<Child>,
     /// Configured children that failed to start during the current bring-up.
     /// Feeds the `Degraded` health determination when `pending` empties.
+    ///
+    /// One-way within a bring-up: a start failure is not recoverable, so
+    /// nothing removes from this set until the next `Start`.
     failed: HashSet<Child>,
+    /// Children that are up but whose network interface is currently absent.
+    ///
+    /// Reversible, unlike [`Self::failed`] — that is the whole reason it is a
+    /// second set rather than more entries in the first. Feeds `Degraded` the
+    /// same way, and empties as interfaces come back.
+    absent: HashSet<Child>,
 }
 
 impl SupervisorFsm {
@@ -330,6 +388,7 @@ impl SupervisorFsm {
             state: SupState::Created,
             up: HashSet::new(),
             failed: HashSet::new(),
+            absent: HashSet::new(),
         }
     }
 
@@ -348,6 +407,7 @@ impl SupervisorFsm {
             },
             up: up.into_iter().collect(),
             failed: HashSet::new(),
+            absent: HashSet::new(),
         }
     }
 
@@ -357,11 +417,24 @@ impl SupervisorFsm {
         &self.state
     }
 
-    /// The configured children that failed to start during bring-up. The driver
-    /// reads this on the `Degraded` start outcome to enumerate the degraded
-    /// children in an operator-visible `warn!`.
+    /// The configured children that failed to start during bring-up. Kept for
+    /// the tests that pin the failure-vs-absence split; the driver reports
+    /// [`Self::degraded_children`], which is the union of the two.
+    #[cfg(test)]
     pub(in crate::node) fn failed(&self) -> &HashSet<Child> {
         &self.failed
+    }
+
+    /// Children whose interface is currently absent.
+    pub(in crate::node) fn absent(&self) -> &HashSet<Child> {
+        &self.absent
+    }
+
+    /// Every child currently contributing `Degraded` — the ones that failed to
+    /// start plus the ones whose interface is away. This is what an operator
+    /// wants named when the node reports `Degraded`.
+    pub(in crate::node) fn degraded_children(&self) -> HashSet<Child> {
+        self.failed.union(&self.absent).copied().collect()
     }
 
     /// Whether the machine is in the bounded-drain window. The driver uses this
@@ -398,6 +471,8 @@ impl SupervisorFsm {
             Event::DrainDeadlineElapsed => self.on_drain_deadline_elapsed(),
             Event::ChildStopped { child } => self.on_child_stopped(child),
             Event::ChildExited { child } => self.on_child_exited(child),
+            Event::ChildAbsent { child } => self.on_child_absent(child),
+            Event::ChildPresent { child } => self.on_child_present(child),
         }
     }
 
@@ -444,6 +519,7 @@ impl SupervisorFsm {
 
         self.up.clear();
         self.failed.clear();
+        self.absent.clear();
 
         // A node with no children at all resolves health immediately. Zero
         // transports up → `Failed` (this is the behavioral
@@ -497,19 +573,30 @@ impl SupervisorFsm {
         self.classify_health()
     }
 
-    /// Classify health from the current `up` / `failed` sets and set the
-    /// resulting state, returning the [`NodeState`] the driver should publish.
-    /// Shared by start-completion ([`Self::resolve_start_health`]) and runtime
-    /// child-exit ([`Self::on_child_exited`]):
+    /// Classify health from the current `up` / `failed` / `absent` sets and set
+    /// the resulting state, returning the [`NodeState`] the driver should
+    /// publish. Shared by start-completion ([`Self::resolve_start_health`]),
+    /// runtime child-exit ([`Self::on_child_exited`]) and the presence edges
+    /// ([`Self::on_child_absent`] / [`Self::on_child_present`]):
     ///
     /// - zero transports up → [`SupState::Failed`] / [`NodeState::Failed`];
-    /// - ≥1 transport up but some child in `failed` → [`Health::Degraded`] /
-    ///   [`NodeState::Degraded`];
-    /// - everything up and nothing failed → [`Health::Full`] / [`NodeState::Running`].
+    /// - ≥1 transport up but some child in `failed` or `absent` →
+    ///   [`Health::Degraded`] / [`NodeState::Degraded`];
+    /// - everything up, nothing failed, nothing absent → [`Health::Full`] /
+    ///   [`NodeState::Running`].
     ///
     /// Worker-pool failures are captured in `failed` like any other optional
     /// child, so they contribute `Degraded` (never `Failed`) — the inline crypto
     /// fallback keeps the node correct without the pools.
+    ///
+    /// A transport whose interface is absent is still counted among
+    /// `transports_up`: it came up, it is simply not bound. Excluding it would
+    /// make a single-ethernet node that booted before its wifi resolve to the
+    /// fatal [`FailReason::NoTransports`] and exit — which is the failure this
+    /// whole mechanism exists to remove. Absence degrades; it never kills.
+    ///
+    /// Recomputed in **both** directions. This function is the reason
+    /// `Degraded` is a level rather than a latch.
     fn classify_health(&mut self) -> NodeState {
         let transports_up = self
             .up
@@ -521,10 +608,10 @@ impl SupervisorFsm {
                 reason: FailReason::NoTransports,
             };
             NodeState::Failed
-        } else if !self.failed.is_empty() {
+        } else if !self.failed.is_empty() || !self.absent.is_empty() {
             self.state = SupState::Running {
                 health: Health::Degraded {
-                    reasons: self.failed.clone(),
+                    reasons: self.degraded_children(),
                 },
             };
             NodeState::Degraded
@@ -533,6 +620,53 @@ impl SupervisorFsm {
                 health: Health::Full,
             };
             NodeState::Running
+        }
+    }
+
+    /// An interface-bound child lost its interface.
+    ///
+    /// The child stays in the up-set: the transport object survives detach —
+    /// config, id, statistics and neighbor buffer persist, only the descriptor
+    /// and its loops go. Only the reason set changes.
+    ///
+    /// While `Starting` the edge is recorded silently; start-completion health
+    /// picks it up when `pending` empties, so a boot race resolves to
+    /// `Degraded` on the first publish rather than publishing `Full` and
+    /// immediately correcting it. Inert outside `Starting` / `Running`: a
+    /// teardown in flight owns its own bookkeeping.
+    fn on_child_absent(&mut self, child: Child) -> Vec<Action> {
+        match self.state {
+            SupState::Starting { .. } => {
+                self.absent.insert(child);
+                Vec::new()
+            }
+            SupState::Running { .. } => {
+                if !self.absent.insert(child) {
+                    return Vec::new();
+                }
+                vec![Action::PublishState(self.classify_health())]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// An interface-bound child's interface came back.
+    ///
+    /// Clears the absence and republishes. A child that is not currently
+    /// recorded absent produces nothing — a duplicate edge is not an event.
+    fn on_child_present(&mut self, child: Child) -> Vec<Action> {
+        match self.state {
+            SupState::Starting { .. } => {
+                self.absent.remove(&child);
+                Vec::new()
+            }
+            SupState::Running { .. } => {
+                if !self.absent.remove(&child) {
+                    return Vec::new();
+                }
+                vec![Action::PublishState(self.classify_health())]
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -588,6 +722,7 @@ impl SupervisorFsm {
         if let SupState::Stopping { pending } = &mut self.state {
             pending.remove(&child);
             self.up.remove(&child);
+            self.absent.remove(&child);
             if pending.is_empty() {
                 self.state = SupState::Stopped;
             }
@@ -617,6 +752,8 @@ impl SupervisorFsm {
         if !self.up.remove(&child) {
             return Vec::new();
         }
+        // An exit supersedes an absence: the child is gone, not waiting.
+        self.absent.remove(&child);
         self.failed.insert(child);
         vec![Action::PublishState(self.classify_health())]
     }
@@ -1377,5 +1514,290 @@ mod tests {
             }
         );
         assert!(s.failed().is_empty());
+    }
+
+    // ── Interface presence ────────────────────────────────────────────────
+    //
+    // The absence set is separate from `failed` because it is reversible, and
+    // reversibility is what turns `Degraded` from a latch into a level.
+
+    /// Helper: bring a full node up cleanly and leave it `Running{Full}`.
+    fn running_node() -> SupervisorFsm {
+        let mut s = SupervisorFsm::new();
+        s.step(start_full());
+        for child in [
+            Child::Transport(tid(1)),
+            Child::Transport(tid(2)),
+            Child::EncryptWorkers,
+            Child::DecryptWorkers,
+            Child::Nostr,
+            Child::Mdns,
+            Child::Tun,
+            Child::Dns,
+        ] {
+            s.step(Event::SubstrateUp { child });
+        }
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
+        s
+    }
+
+    #[test]
+    fn an_absent_interface_degrades_a_running_node() {
+        let mut s = running_node();
+        assert_eq!(
+            s.step(Event::ChildAbsent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        assert!(s.absent().contains(&Child::Transport(tid(1))));
+        // Absence is not failure: the two sets stay distinct.
+        assert!(s.failed().is_empty());
+    }
+
+    #[test]
+    fn a_returning_interface_clears_degraded() {
+        // The regression this whole design turns on: plug the WAN back in and
+        // the node must leave `Degraded`, not carry it until the process
+        // restarts. `Degraded` is a level, not a latch.
+        let mut s = running_node();
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        assert_eq!(
+            s.step(Event::ChildPresent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Running)]
+        );
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Full
+            }
+        );
+        assert!(s.absent().is_empty());
+    }
+
+    #[test]
+    fn health_reflects_the_last_interface_still_away() {
+        // Two interfaces away, one returns: still Degraded. Only the empty
+        // absence set publishes Full.
+        let mut s = running_node();
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(2)),
+        });
+        assert_eq!(
+            s.step(Event::ChildPresent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        assert_eq!(
+            s.step(Event::ChildPresent {
+                child: Child::Transport(tid(2))
+            }),
+            vec![Action::PublishState(NodeState::Running)]
+        );
+    }
+
+    #[test]
+    fn a_duplicate_presence_edge_is_not_an_event() {
+        let mut s = running_node();
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        assert_eq!(
+            s.step(Event::ChildAbsent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![],
+            "re-reporting the same absence must not republish"
+        );
+        s.step(Event::ChildPresent {
+            child: Child::Transport(tid(1)),
+        });
+        assert_eq!(
+            s.step(Event::ChildPresent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![],
+            "re-reporting the same return must not republish"
+        );
+    }
+
+    #[test]
+    fn absence_during_bringup_resolves_degraded_on_the_first_publish() {
+        // The boot race. The transport reports absence from inside its own
+        // start, then reports up. Start-completion health must already know,
+        // so the node never publishes `Full` and corrects itself.
+        let mut s = SupervisorFsm::new();
+        s.step(start_full());
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        for child in [
+            Child::Transport(tid(1)),
+            Child::Transport(tid(2)),
+            Child::EncryptWorkers,
+            Child::DecryptWorkers,
+            Child::Nostr,
+            Child::Mdns,
+            Child::Tun,
+        ] {
+            assert_eq!(s.step(Event::SubstrateUp { child }), vec![]);
+        }
+        assert_eq!(
+            s.step(Event::SubstrateUp { child: Child::Dns }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        let mut reasons = HashSet::new();
+        reasons.insert(Child::Transport(tid(1)));
+        assert_eq!(
+            s.state(),
+            &SupState::Running {
+                health: Health::Degraded { reasons }
+            }
+        );
+    }
+
+    #[test]
+    fn a_lone_absent_transport_degrades_rather_than_fails() {
+        // A single-ethernet node that boots before its wifi. The transport
+        // came up — absence is a state, not a start failure — so it counts
+        // among the transports up and the node serves. Resolving to `Failed`
+        // here would make the daemon exit on the very race this mechanism
+        // exists to survive.
+        let mut s = SupervisorFsm::new();
+        s.step(Event::Start {
+            transports: vec![tid(1)],
+            encrypt_workers: false,
+            decrypt_workers: false,
+            nostr: false,
+            mdns: false,
+            tun: false,
+            dns: false,
+        });
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        assert_eq!(
+            s.step(Event::SubstrateUp {
+                child: Child::Transport(tid(1))
+            }),
+            vec![Action::PublishState(NodeState::Degraded)]
+        );
+        assert!(
+            !matches!(s.state(), SupState::Failed { .. }),
+            "an absent interface must never be the fatal no-transports case"
+        );
+    }
+
+    #[test]
+    fn an_exit_supersedes_an_absence() {
+        // A transport that is away and then exits is gone, not waiting: it
+        // leaves the up-set and moves from `absent` to `failed`, so a later
+        // spurious `ChildPresent` cannot resurrect it into `Full`.
+        let mut s = running_node();
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        s.step(Event::ChildExited {
+            child: Child::Transport(tid(1)),
+        });
+        assert!(s.absent().is_empty());
+        assert!(s.failed().contains(&Child::Transport(tid(1))));
+        assert_eq!(
+            s.step(Event::ChildPresent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![]
+        );
+        assert!(matches!(
+            s.state(),
+            SupState::Running {
+                health: Health::Degraded { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn presence_edges_are_inert_outside_starting_and_running() {
+        // Teardown and drain own their own bookkeeping; a late edge from a
+        // binder that has not noticed the stop must not author actions.
+        let mut created = SupervisorFsm::new();
+        assert_eq!(
+            created.step(Event::ChildAbsent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![]
+        );
+
+        let mut draining = running_node();
+        draining.step(Event::Drain { deadline_ms: 1 });
+        assert_eq!(
+            draining.step(Event::ChildAbsent {
+                child: Child::Transport(tid(1))
+            }),
+            vec![]
+        );
+        assert!(
+            draining.is_draining(),
+            "a presence edge must not end a drain"
+        );
+    }
+
+    #[test]
+    fn a_new_start_clears_the_previous_absences() {
+        let mut s = running_node();
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        s.step(Event::Stop);
+        for child in [
+            Child::Dns,
+            Child::Nostr,
+            Child::Mdns,
+            Child::Transport(tid(1)),
+            Child::Transport(tid(2)),
+            Child::Tun,
+        ] {
+            s.step(Event::ChildStopped { child });
+        }
+        s.step(start_full());
+        assert!(s.absent().is_empty());
+    }
+
+    #[test]
+    fn degraded_children_is_the_union_of_both_reason_sets() {
+        let mut s = SupervisorFsm::new();
+        s.step(start_full());
+        s.step(Event::ChildAbsent {
+            child: Child::Transport(tid(1)),
+        });
+        s.step(Event::SubstrateFailed { child: Child::Mdns });
+        for child in [
+            Child::Transport(tid(1)),
+            Child::Transport(tid(2)),
+            Child::EncryptWorkers,
+            Child::DecryptWorkers,
+            Child::Nostr,
+            Child::Tun,
+            Child::Dns,
+        ] {
+            s.step(Event::SubstrateUp { child });
+        }
+        let degraded = s.degraded_children();
+        assert!(degraded.contains(&Child::Mdns));
+        assert!(degraded.contains(&Child::Transport(tid(1))));
+        assert_eq!(degraded.len(), 2);
     }
 }

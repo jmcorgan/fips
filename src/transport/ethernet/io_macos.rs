@@ -393,10 +393,18 @@ fn bind_to_interface(fd: RawFd, interface: &str) -> Result<(), TransportError> {
 
     let ret = unsafe { libc::ioctl(fd, BIOCSETIF, ifreq.as_ptr()) };
     if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        // BIOCSETIF answers ENXIO for an interface that is not there. The
+        // interface can also vanish between the index lookup and this ioctl,
+        // so absence is reported as absence rather than as a bind fault.
+        if matches!(err.raw_os_error(), Some(libc::ENXIO) | Some(libc::ENODEV)) {
+            return Err(TransportError::InterfaceUnavailable {
+                interface: interface.to_string(),
+            });
+        }
         return Err(TransportError::StartFailed(format!(
             "BIOCSETIF({}) failed: {}",
-            interface,
-            std::io::Error::last_os_error()
+            interface, err
         )));
     }
     Ok(())
@@ -498,11 +506,11 @@ fn get_if_index(interface: &str) -> Result<i32, TransportError> {
 
     let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
     if idx == 0 {
-        return Err(TransportError::StartFailed(format!(
-            "interface not found: {} ({})",
-            interface,
-            std::io::Error::last_os_error()
-        )));
+        // Absence, not a fault — see the Linux twin and
+        // `TransportError::InterfaceUnavailable`.
+        return Err(TransportError::InterfaceUnavailable {
+            interface: interface.to_string(),
+        });
     }
     Ok(idx as i32)
 }

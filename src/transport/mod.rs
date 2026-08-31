@@ -107,6 +107,54 @@ pub fn packet_channel(buffer: usize) -> (PacketTx, PacketRx) {
     tokio::sync::mpsc::channel(buffer)
 }
 
+/// Operator-visible interface presence, rendered by `show_transports`.
+///
+/// Worth as much as the retry itself. The original boot-race bug was expensive
+/// precisely because the 802.11s peer link formed regardless of the daemon, so
+/// nothing an operator could see said the node was deaf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InterfacePresence {
+    /// `absent`, `binding`, or `present`.
+    pub presence: &'static str,
+    /// Whether the interface currently has carrier (`IFF_RUNNING`).
+    ///
+    /// Reported, never acted on. Presence is `IFF_UP`, because binding does
+    /// not need carrier and a socket outlives a carrier flap — but "is
+    /// anything plugged in" is still what an operator wants to know when a
+    /// bound transport is carrying nothing, so it is reported here instead of
+    /// steering the daemon.
+    pub carrier: bool,
+    /// `required` or `optional`.
+    pub policy: &'static str,
+    /// How long the current phase has been held.
+    pub since_secs: u64,
+    /// Successful binds since the transport was created (`1` after a clean
+    /// start; more means it has rebound).
+    pub binds: u64,
+    /// Failed bind attempts since the last successful bind.
+    pub failed_attempts: u32,
+}
+
+/// A presence edge published by an interface-bound transport.
+///
+/// Absence and return are the same transition seen from two sides, so one
+/// event type carries both: `present: false` on detach (including a start
+/// where the interface was never there), `present: true` on every successful
+/// bind after the first observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportPresence {
+    /// The transport whose interface changed presence.
+    pub transport_id: TransportId,
+    /// Whether the interface is now bound.
+    pub present: bool,
+}
+
+/// Channel sender for transport presence edges.
+pub type PresenceTx = tokio::sync::mpsc::Sender<TransportPresence>;
+
+/// Channel receiver for transport presence edges.
+pub type PresenceRx = tokio::sync::mpsc::Receiver<TransportPresence>;
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -122,6 +170,20 @@ pub enum TransportError {
 
     #[error("transport failed to start: {0}")]
     StartFailed(String),
+
+    /// The named network interface is not usable right now: it does not exist,
+    /// or it exists but is administratively down (no `IFF_UP`).
+    ///
+    /// Distinct from [`TransportError::StartFailed`] because absence is a
+    /// *state*, not a fault. Interface-bound transports treat it as "not bound
+    /// yet" and keep a presence watcher running; a `StartFailed` carrying the
+    /// same text could not be told apart from a typo'd interface name or a
+    /// missing capability.
+    #[error("interface unavailable: {interface}")]
+    InterfaceUnavailable {
+        /// The configured interface name.
+        interface: String,
+    },
 
     #[error("transport shutdown failed: {0}")]
     ShutdownFailed(String),
@@ -866,6 +928,52 @@ impl TransportHandle {
             TransportHandle::Ble(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
+        }
+    }
+
+    /// Interface presence for interface-bound transports: the phase label, the
+    /// absence policy, how long the phase has been held, and the failed-bind
+    /// count since the last successful bind.
+    ///
+    /// `None` for transports that are not bound to a named interface — for
+    /// those, presence is not a concept and an operator should not be shown an
+    /// always-`present` column.
+    pub fn interface_presence(&self) -> Option<InterfacePresence> {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(t) => {
+                let state = t.presence_state();
+                Some(InterfacePresence {
+                    presence: t.presence().as_str(),
+                    carrier: t.has_carrier(),
+                    policy: t.absence_policy().as_str(),
+                    since_secs: state.since().as_secs(),
+                    binds: state.binds(),
+                    failed_attempts: state.attempts(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether this transport can actually put a frame on the wire *now*.
+    ///
+    /// [`Self::is_operational`] answers a different question: it means the
+    /// transport was started, which for an interface-bound transport no longer
+    /// implies a live socket — that is the whole point of presence. Callers
+    /// that are choosing a transport to use, or deriving a value from one,
+    /// want this; callers reasoning about lifecycle want `is_operational`.
+    ///
+    /// `true` for every transport that is not interface-bound, so this is
+    /// `is_operational` with the presence refinement applied where it exists.
+    pub fn is_bound(&self) -> bool {
+        if !self.is_operational() {
+            return false;
+        }
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(t) => t.presence() == ethernet::Presence::Present,
+            _ => true,
         }
     }
 

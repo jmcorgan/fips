@@ -374,6 +374,16 @@ pub struct Node {
     /// SYN/SYN-ACK clamp can use the smaller of the local-egress floor
     /// and the learned per-destination path MTU.
     path_mtu_lookup: crate::upper::tun::PathMtuLookup,
+    /// Node-global TCP MSS ceiling, shared live with the TUN reader and writer
+    /// threads and recomputed whenever the set of *bound* transports changes.
+    ///
+    /// Sits beside `path_mtu_lookup` because it answers the other half of the
+    /// same question at the same moment: that map supplies the per-destination
+    /// ceiling, this supplies the local-egress one, and the clamp takes the
+    /// smaller. Both have to be read live — a transport that binds after start
+    /// can be the narrow one, and one that unbinds can be the reason the node
+    /// was clamped at all.
+    tun_mss_ceiling: crate::upper::tun::MssCeiling,
     /// Which transport last supplied a *link seed* into `path_mtu_lookup`,
     /// per destination.
     ///
@@ -417,6 +427,20 @@ pub struct Node {
     /// Receiver half of the runtime child-liveness channel, `take()`-en by the
     /// rx_loop select arm that feeds `Event::ChildExited` to the supervisor FSM.
     child_exit_rx: Option<tokio::sync::mpsc::Receiver<crate::node::lifecycle::supervisor::Child>>,
+
+    // === Interface Presence Channel ===
+    /// Sender half of the interface-presence channel, cloned into every
+    /// interface-bound transport so its binder task can report attach and
+    /// detach. Held on `self` for the rx_loop's lifetime as the keep-alive
+    /// sender, exactly like [`Self::child_exit_tx`].
+    ///
+    /// Separate from the child-exit channel because presence is *reversible*:
+    /// an exit is one-way, an interface comes back.
+    transport_presence_tx: Option<crate::transport::PresenceTx>,
+    /// Receiver half of the interface-presence channel, `take()`-en by the
+    /// rx_loop select arm that feeds `Event::ChildAbsent` / `Event::ChildPresent`
+    /// to the supervisor FSM.
+    transport_presence_rx: Option<crate::transport::PresenceRx>,
 
     // === Per-Peer Control Machines ===
     /// Per-peer lifecycle control FSMs, keyed by the stable `LinkId` that spans
@@ -813,6 +837,8 @@ impl Node {
             packet_rx: None,
             child_exit_tx: None,
             child_exit_rx: None,
+            transport_presence_tx: None,
+            transport_presence_rx: None,
             peer_machines: HashMap::new(),
             peer_timers: HashMap::new(),
             peers: HashMap::new(),
@@ -880,6 +906,12 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            // Seeded at the IPv6 minimum, which is what `transport_mtu()`
+            // itself falls back to when nothing is bound. Refreshed before
+            // the TUN threads start and on every change to the bound set.
+            tun_mss_ceiling: Arc::new(std::sync::atomic::AtomicU16::new(
+                crate::upper::icmp::mss_ceiling(crate::upper::tun::IPV6_MIN_MTU),
+            )),
             path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
@@ -978,6 +1010,8 @@ impl Node {
             packet_rx: None,
             child_exit_tx: None,
             child_exit_rx: None,
+            transport_presence_tx: None,
+            transport_presence_rx: None,
             peer_machines: HashMap::new(),
             peer_timers: HashMap::new(),
             peers: HashMap::new(),
@@ -1042,6 +1076,12 @@ impl Node {
             peer_acl,
             host_map,
             path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            // Seeded at the IPv6 minimum, which is what `transport_mtu()`
+            // itself falls back to when nothing is bound. Refreshed before
+            // the TUN threads start and on every change to the bound set.
+            tun_mss_ceiling: Arc::new(std::sync::atomic::AtomicU16::new(
+                crate::upper::icmp::mss_ceiling(crate::upper::tun::IPV6_MIN_MTU),
+            )),
             path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
@@ -1098,6 +1138,11 @@ impl Node {
                 let mut eth =
                     EthernetTransport::new(transport_id, name, eth_config, packet_tx.clone());
                 eth.set_local_pubkey(xonly);
+                // The binder task reports attach and detach here, so node
+                // health tracks the interface in both directions.
+                if let Some(tx) = self.transport_presence_tx.clone() {
+                    eth.set_presence_tx(tx);
+                }
                 transports.push(TransportHandle::Ethernet(eth));
             }
         }
@@ -1411,6 +1456,46 @@ impl Node {
         crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
     }
 
+    /// The TCP MSS ceiling the TUN threads are currently clamping to.
+    #[cfg(test)]
+    pub(crate) fn tun_mss_ceiling(&self) -> u16 {
+        self.tun_mss_ceiling
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Recompute the shared TUN MSS ceiling from the currently bound
+    /// transports, and log it if it moved.
+    ///
+    /// Called wherever the bound set can change — the presence edges that
+    /// bind and unbind an interface-bound transport, and a child exiting —
+    /// so the clamp the TUN threads apply keeps agreeing with the
+    /// `effective_ipv6_mtu` this node reports in `show_status`.
+    ///
+    /// Moves in **both** directions, deliberately. A narrow interface
+    /// appearing has to tighten the ceiling or the clamp is wrong for
+    /// traffic that will egress over it; that same interface going away has
+    /// to release it, or unplugging a low-MTU adapter leaves the node
+    /// over-clamped until it restarts. It is the same argument that makes
+    /// `Degraded` a level rather than a latch: nothing here is one-way once
+    /// a transport can come back.
+    ///
+    /// Existing flows are not re-clamped — MSS is negotiated per connection
+    /// at SYN time, so a change applies to connections opened after it.
+    pub(crate) fn refresh_tun_mss_ceiling(&self) {
+        use std::sync::atomic::Ordering;
+
+        let ceiling = crate::upper::icmp::mss_ceiling(self.transport_mtu());
+        let previous = self.tun_mss_ceiling.swap(ceiling, Ordering::Relaxed);
+        if previous != ceiling {
+            tracing::info!(
+                previous_max_mss = previous,
+                max_mss = ceiling,
+                effective_ipv6_mtu = self.effective_ipv6_mtu(),
+                "Node egress MTU changed; TCP MSS ceiling updated for new connections"
+            );
+        }
+    }
+
     /// Get the transport MTU governing the global TUN-boundary MSS clamp.
     ///
     /// Returns the **minimum** MTU across all operational transports, or
@@ -1426,10 +1511,17 @@ impl Node {
     /// to vary across HashMap iteration order + async-startup race) makes
     /// the clamp deterministic across daemon restarts.
     pub fn transport_mtu(&self) -> u16 {
+        // `is_bound`, not `is_operational`. An interface-bound transport is
+        // "operational" from the moment it starts, whether or not its
+        // interface exists — so filtering on that let a transport whose
+        // interface has never appeared clamp the whole node's IPv6 MTU to a
+        // number derived from hardware that is not present. Before dynamic
+        // binding a transport that could not bind was never inserted here at
+        // all, so the distinction did not exist to get wrong.
         let min_operational = self
             .transports
             .values()
-            .filter(|h| h.is_operational())
+            .filter(|h| h.is_bound())
             .map(|h| h.mtu())
             .min();
         if let Some(mtu) = min_operational {
@@ -2318,8 +2410,13 @@ impl Node {
             .collect();
 
         // --- transports (show_transports) ---
-        let transport_rows: Vec<snap::TransportRow> = self
-            .transport_ids()
+        // Ascending id, matching `show_transports`; see the note there. The
+        // off-loop renderer reads this table verbatim, so the two paths would
+        // otherwise disagree about ordering as well as being arbitrary.
+        let mut transport_ids: Vec<_> = self.transport_ids().copied().collect();
+        transport_ids.sort_by_key(|id| id.as_u32());
+        let transport_rows: Vec<snap::TransportRow> = transport_ids
+            .iter()
             .map(|id| {
                 let handle = self.get_transport(id).unwrap();
                 snap::TransportRow {
@@ -2335,6 +2432,15 @@ impl Node {
                         .tor_monitoring()
                         .map(|m| serde_json::to_value(&m).unwrap_or_default()),
                     stats: handle.transport_stats(),
+                    interface: handle.interface_presence().map(|p| snap::InterfaceRow {
+                        name: handle.interface_name().unwrap_or_default().to_string(),
+                        presence: p.presence,
+                        carrier: p.carrier,
+                        policy: p.policy,
+                        since_secs: p.since_secs,
+                        binds: p.binds,
+                        failed_attempts: p.failed_attempts,
+                    }),
                 }
             })
             .collect();
