@@ -7,8 +7,9 @@ use clap::Parser;
 use fips::config::{IdentitySource, resolve_identity};
 use fips::version;
 use fips::{Config, Node};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{EnvFilter, fmt};
 use zeroize::Zeroize;
 
@@ -39,6 +40,110 @@ struct Args {
     #[cfg(windows)]
     #[arg(long)]
     uninstall_service: bool,
+}
+
+/// Where a file-backed log is being written, for the startup log line.
+///
+/// The operator configured one path and the appender writes another (the
+/// rolled name carries the period), so reporting both is what makes the log
+/// findable.
+struct LogTarget {
+    directory: String,
+    live_example: String,
+}
+
+/// Build the rolling-file writer for `node.log_file`.
+///
+/// The appender takes a directory plus a prefix and suffix rather than a
+/// filename, and interposes the rotation period between them, so
+/// `/var/log/fips/fips.log` is written as `fips.2026-08-31.log`. Splitting on
+/// the extension rather than appending the date to the whole name is what
+/// keeps the `.log` extension on the live file.
+///
+/// Fatal on failure, matching how this binary treats an unusable config: a
+/// daemon that silently discarded its logging because a directory was not
+/// writable would present exactly as the disappearing-logs problem the file
+/// exists to solve.
+fn build_file_writer(
+    path: &str,
+    config: &fips::Config,
+) -> (
+    BoxMakeWriter,
+    tracing_appender::non_blocking::WorkerGuard,
+    LogTarget,
+) {
+    use fips::config::LogRotation;
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
+
+    let path = Path::new(path);
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        eprintln!("Invalid node.log_file (no filename): {}", path.display());
+        std::process::exit(1);
+    };
+    let extension = path.extension().and_then(|s| s.to_str());
+
+    // The packaged layouts create this, but a hand-written config naming a
+    // fresh directory should not have to.
+    if let Err(e) = std::fs::create_dir_all(directory) {
+        eprintln!("Cannot create log directory {}: {e}", directory.display());
+        std::process::exit(1);
+    }
+
+    let rotation = match config.node.log_rotation() {
+        LogRotation::Hourly => Rotation::HOURLY,
+        LogRotation::Daily => Rotation::DAILY,
+        LogRotation::Never => Rotation::NEVER,
+    };
+
+    let mut builder = RollingFileAppender::builder()
+        .rotation(rotation.clone())
+        .filename_prefix(stem)
+        .max_log_files(config.node.log_max_files());
+    if let Some(extension) = extension {
+        builder = builder.filename_suffix(extension);
+    }
+
+    let appender = match builder.build(directory) {
+        Ok(appender) => appender,
+        Err(e) => {
+            eprintln!("Cannot open log file {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+
+    // Non-blocking: a slow or full disk must not stall the node's tick loop
+    // behind a write. The guard returned here keeps the writer thread alive.
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+
+    let live_example = match extension {
+        Some(extension) => format!("{stem}.<{}>.{extension}", rotation_label(&rotation)),
+        None => format!("{stem}.<{}>", rotation_label(&rotation)),
+    };
+
+    (
+        BoxMakeWriter::new(writer),
+        guard,
+        LogTarget {
+            directory: directory.display().to_string(),
+            live_example,
+        },
+    )
+}
+
+/// The shape of the date stamp the appender interposes, for the startup line.
+fn rotation_label(rotation: &tracing_appender::rolling::Rotation) -> &'static str {
+    use tracing_appender::rolling::Rotation;
+    if *rotation == Rotation::HOURLY {
+        "YYYY-MM-DD-HH"
+    } else if *rotation == Rotation::DAILY {
+        "YYYY-MM-DD"
+    } else {
+        "no date stamp"
+    }
 }
 
 /// Run the FIPS daemon (shared between foreground and service modes).
@@ -100,20 +205,55 @@ async fn run_daemon(
         _ => filter,
     };
 
+    // Where the log goes. Unset `node.log_file` keeps the stream on stdout
+    // for a supervisor to capture, which is what journald and syslog want and
+    // what every platform but macOS gets. Naming a file moves ownership of it
+    // to us so we can roll it, because launchd holds the descriptor it
+    // redirects and gives the daemon no way to reopen one rotated out from
+    // under it.
+    //
+    // `_log_guard` must outlive the daemon: dropping it flushes and stops the
+    // writer thread, and a log line emitted after that is discarded. It is
+    // held until `main` returns.
+    let (writer, _log_guard, log_target) = match config.node.log_file.as_deref() {
+        Some(path) => {
+            let (writer, guard, target) = build_file_writer(path, &config);
+            (writer, Some(guard), Some(target))
+        }
+        None => (BoxMakeWriter::new(std::io::stdout), None, None),
+    };
+
     // ANSI color only when stdout is a terminal — under a supervisor
-    // (daemon(8), systemd) escape codes would litter the log file.
+    // (daemon(8), systemd) escape codes would litter the log file. A log file
+    // we own is never a terminal.
     //
     // Never let a failed log write panic the thread that logged. The default
     // is to report a write failure with `eprintln!`, which itself panics when
     // stderr fails too — and the shipped supervisor configs point stdout and
     // stderr at the same place, so one full disk satisfies both. A worker
     // thread killed that way takes its share of the peer space with it.
+    let ansi = log_target.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     fmt()
         .with_env_filter(filter)
         .with_target(true)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .with_ansi(ansi)
+        .with_writer(writer)
         .log_internal_errors(false)
         .init();
+
+    // Logged first, and only when we own the file: the operator who goes
+    // looking for output that is no longer on stdout needs the resolved path
+    // and the retention that governs it, and the rolled name is not the one
+    // they configured.
+    if let Some(target) = &log_target {
+        info!(
+            directory = %target.directory,
+            live_file = %target.live_example,
+            rotation = ?config.node.log_rotation(),
+            max_files = config.node.log_max_files(),
+            "Logging to file"
+        );
+    }
 
     info!("FIPS {} starting", version::short_version());
 

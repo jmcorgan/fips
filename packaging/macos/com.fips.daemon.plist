@@ -21,11 +21,15 @@
 		<false/>
 	</dict>
 
+	<!-- The daemon owns and rotates its own log (node.log_file), because
+	     launchd holds this descriptor and never truncates or rotates it,
+	     and gives the daemon no way to reopen one rotated out from under
+	     it. Redirecting here too would reintroduce the unbounded file. -->
 	<key>StandardOutPath</key>
-	<string>/usr/local/var/log/fips/fips.log</string>
+	<string>/dev/null</string>
 
 	<key>StandardErrorPath</key>
-	<string>/usr/local/var/log/fips/fips.log</string>
+	<string>/dev/null</string>
 
 	<key>WorkingDirectory</key>
 	<string>/usr/local/etc/fips</string>

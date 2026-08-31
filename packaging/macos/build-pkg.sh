@@ -116,6 +116,35 @@ done
 
 # Config (marked as conf file via postinstall logic — won't overwrite on upgrade)
 cp "${PACKAGING_DIR}/common/fips.yaml" "${STAGING_DIR}/usr/local/etc/fips/fips.yaml.default"
+
+# Turn on file logging, which is a macOS-only default. Everywhere else the
+# daemon logs to stdout and the platform rotates it (journald, syslog);
+# launchd has no rotation at all, so the daemon has to own the file itself.
+# Set here rather than in packaging/common/fips.yaml, which is shared with
+# the platforms that must keep logging to stdout.
+#
+# Inserted directly after the `node:` line rather than appended: the shared
+# config ends at a top-level `peers:` key, so an appended block would land
+# under the wrong mapping, and a second top-level `node:` would collide with
+# the first.
+LOG_SETTINGS='  # Log rotation. launchd does not rotate what it captures, so the\
+  # daemon owns this file and rolls it. The live file carries the date the\
+  # period opened -- with the settings below, fips.<YYYY-MM-DD>.log -- and\
+  # the oldest is deleted once log_max_files exist. Follow the current one\
+  # with:  tail -f "$(ls -t /usr/local/var/log/fips/fips.*.log | head -1)"\
+  log_file: /usr/local/var/log/fips/fips.log\
+  log_rotation: daily\
+  log_max_files: 7'
+CONF_DEFAULT="${STAGING_DIR}/usr/local/etc/fips/fips.yaml.default"
+if ! grep -q '^node:' "${CONF_DEFAULT}"; then
+    echo "packaging/common/fips.yaml has no top-level 'node:' key to insert log settings under" >&2
+    exit 1
+fi
+awk -v settings="${LOG_SETTINGS}" '
+    { print }
+    !done && /^node:$/ { print settings; done = 1 }
+' "${CONF_DEFAULT}" > "${CONF_DEFAULT}.tmp"
+mv "${CONF_DEFAULT}.tmp" "${CONF_DEFAULT}"
 cp "${PACKAGING_DIR}/common/hosts" "${STAGING_DIR}/usr/local/etc/fips/hosts.default"
 
 # LaunchDaemon plist

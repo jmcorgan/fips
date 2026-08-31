@@ -1336,6 +1336,57 @@ pub struct NodeConfig {
     /// Valid values: trace, debug, info, warn, error. Default: info.
     #[serde(default)]
     pub log_level: Option<String>,
+
+    /// Log file (`node.log_file`). Unset by default, which keeps logging on
+    /// stdout for a supervisor to capture — the right arrangement wherever
+    /// the platform already rotates that stream (journald, syslog).
+    ///
+    /// Set it only where nothing else rotates: launchd redirects stdout to a
+    /// plain file and never truncates it, and the classic rename-and-signal
+    /// rotators cannot help there, because the supervisor holds the
+    /// descriptor and the daemon has no way to reopen it. Naming a file here
+    /// makes the daemon own it instead, so it can roll it itself.
+    ///
+    /// The live file carries a date suffix (`fips.log.2026-08-31`); see
+    /// [`NodeConfig::log_rotation`].
+    #[serde(default)]
+    pub log_file: Option<String>,
+
+    /// Log rotation period (`node.log_rotation`). Case-insensitive.
+    /// Valid values: daily, hourly, never. Default: daily.
+    ///
+    /// Only consulted when [`NodeConfig::log_file`] is set. Rotation is by
+    /// period rather than by size, so a level change is what bounds the
+    /// volume: `debug` costs roughly an order of magnitude more per day than
+    /// `info`. Retention is [`NodeConfig::log_max_files`] periods.
+    ///
+    /// `never` keeps a single file that grows without limit, which is the
+    /// defect this exists to fix — it is here for an operator who has
+    /// arranged rotation some other way, not as a setting to reach for.
+    #[serde(default)]
+    pub log_rotation: Option<String>,
+
+    /// How many rotated log files to keep (`node.log_max_files`). Default: 7.
+    ///
+    /// Counts the live file, so 7 daily files is a week of history. Older
+    /// files are deleted as new ones are opened. Only consulted when
+    /// [`NodeConfig::log_file`] is set.
+    #[serde(default)]
+    pub log_max_files: Option<usize>,
+}
+
+/// How often the daemon rolls its log file over.
+///
+/// Parsed from [`NodeConfig::log_rotation`]; see there for why the choice is
+/// a period rather than a size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogRotation {
+    /// Roll at the top of each hour.
+    Hourly,
+    /// Roll at midnight.
+    Daily,
+    /// Never roll: one file, unbounded.
+    Never,
 }
 
 impl Default for NodeConfig {
@@ -1366,6 +1417,9 @@ impl Default for NodeConfig {
             ecn: EcnConfig::default(),
             rekey: RekeyConfig::default(),
             log_level: None,
+            log_file: None,
+            log_rotation: None,
+            log_max_files: None,
         }
     }
 }
@@ -1385,6 +1439,35 @@ impl NodeConfig {
             Some("error") => tracing::Level::ERROR,
             _ => tracing::Level::INFO,
         }
+    }
+
+    /// Get the log rotation period. Default: daily.
+    ///
+    /// Lenient in the same way as [`NodeConfig::log_level`]: an unrecognised
+    /// value falls back to the default rather than refusing to start. A
+    /// daemon that will not boot over a typo in a log setting is worse than
+    /// one that rolls daily when the operator asked for something else, and
+    /// the resolved value is logged at startup either way.
+    pub fn log_rotation(&self) -> LogRotation {
+        match self
+            .log_rotation
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
+            Some("hourly") => LogRotation::Hourly,
+            Some("never") => LogRotation::Never,
+            _ => LogRotation::Daily,
+        }
+    }
+
+    /// How many log files to keep. Default: 7, and never zero.
+    ///
+    /// Zero is clamped to one: the appender deletes on open, so a retention
+    /// of zero would delete the file it is about to write and lose the log
+    /// entirely.
+    pub fn log_max_files(&self) -> usize {
+        self.log_max_files.unwrap_or(7).max(1)
     }
 
     fn default_tick_interval_secs() -> u64 {
@@ -1516,6 +1599,50 @@ owd_window_size: 48
         let c: NostrRendezvousConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(c.startup_sweep_delay_secs, 30);
         assert_eq!(c.startup_sweep_max_age_secs, 3_600);
+    }
+
+    #[test]
+    fn test_log_rotation_parser() {
+        // Same leniency as log_level: unknown and unset both fall back to the
+        // default rather than refusing to start.
+        let rotation = |input: Option<&str>| {
+            NodeConfig {
+                log_rotation: input.map(|s| s.to_string()),
+                ..NodeConfig::default()
+            }
+            .log_rotation()
+        };
+        assert_eq!(rotation(Some("hourly")), LogRotation::Hourly);
+        assert_eq!(rotation(Some("HOURLY")), LogRotation::Hourly);
+        assert_eq!(rotation(Some("never")), LogRotation::Never);
+        assert_eq!(rotation(Some("daily")), LogRotation::Daily);
+        assert_eq!(rotation(None), LogRotation::Daily);
+        assert_eq!(rotation(Some("weekly")), LogRotation::Daily);
+        assert_eq!(rotation(Some("")), LogRotation::Daily);
+    }
+
+    #[test]
+    fn test_log_max_files_never_zero() {
+        // The appender deletes on open, so a retention of zero would delete
+        // the file it is about to write.
+        let max = |input: Option<usize>| {
+            NodeConfig {
+                log_max_files: input,
+                ..NodeConfig::default()
+            }
+            .log_max_files()
+        };
+        assert_eq!(max(None), 7);
+        assert_eq!(max(Some(0)), 1);
+        assert_eq!(max(Some(3)), 3);
+    }
+
+    #[test]
+    fn test_logging_defaults_to_stdout() {
+        // Unset log_file is what keeps every platform whose supervisor
+        // already rotates (journald, syslog) on stdout. Regressing this to a
+        // file default would double-log there.
+        assert!(NodeConfig::default().log_file.is_none());
     }
 
     #[test]
