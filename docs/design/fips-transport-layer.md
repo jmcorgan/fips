@@ -1010,6 +1010,313 @@ Transports begin in `Configured` state with all parameters set. `start()`
 transitions through `Starting` to `Up` (operational). `stop()` moves to
 `Down`. Transport failures move to `Failed`.
 
+## Interface Presence
+
+`Up` describes the *transport*, not the socket. An interface-bound transport
+(today: Ethernet) carries a second, orthogonal state — whether it is bound
+right now — and the two are independent: a transport is `Up` from the moment
+it starts, whether or not the interface it names exists.
+
+### The Gap This Closes
+
+Three deployment scenarios exercise one missing mechanism:
+
+- **Boot ordering.** On OpenWrt, procd starts `fips` before wifi has created
+  `fips-mesh0` / `fips-ap0`. Both transports were skipped and never retried,
+  while the 802.11s peer link formed anyway — that is mac80211, not the
+  daemon — so the node looked healthy and reached nothing. The failure was
+  expensive precisely because nothing an operator could see said the node was
+  deaf.
+- **Intermittent hardware.** A USB ethernet adapter named in `fips.yaml` is
+  plugged in some days and not others. Its absence is normal and must be
+  silent; its arrival must bind without operator action.
+- **Mid-operation restart.** `wifi reload` for a channel change destroys and
+  recreates the mesh interface within a couple of seconds. The socket dies,
+  the receive loop spun on `Err` with no backoff and no exit, and nothing
+  rebound.
+
+These are not three features. They are one presence machine plus one policy
+field. Before it existed, the first observation was final: an interface
+missing at start was logged once and skipped for the life of the process, and
+one that disappeared at runtime published a health change but was never
+rebound.
+
+### The Presence Machine
+
+```text
+Absent ──attach──> Binding ──ok──> Present
+  ^                   │              │
+  └──── fail/backoff ─┘              │
+  └──────────── detach ──────────────┘
+```
+
+`start_async` binds if it can and otherwise returns `Ok` with the transport
+`Up` and `Absent`; a per-transport binder task then binds when the interface
+appears, tears the socket down when it goes away, and rebinds when it
+returns. Two invariants do the work:
+
+- **The transport object survives detach.** Config, `TransportId`,
+  statistics and the neighbor buffer persist; only the file descriptor and
+  its loops go. A transport is never destroyed because its interface went
+  away.
+- **Start-time absence and runtime detach are the same transition.** A node
+  that boots before its wifi and a node whose wifi reloads at 03:00 take one
+  code path. The old asymmetry — skip forever at start, publish health at
+  runtime — is gone.
+
+`TransportError::InterfaceUnavailable` is what makes absence branchable. A
+missing interface and a typo'd interface name were the same flat
+`StartFailed(String)`, so nothing downstream could tell a state from a fault.
+
+### What Counts as Present
+
+Presence means `IFF_UP` — the interface exists and the operator has enabled
+it — and deliberately **not** `IFF_RUNNING`.
+
+Carrier and bindability are different questions, and only the second belongs
+in a bind gate. An `AF_PACKET` socket on a carrier-less bridge is valid and
+starts carrying traffic the instant a member port comes up, with no rebind:
+the socket outlives the carrier. Gating on `IFF_RUNNING` bought nothing and
+cost three things:
+
+- `br-lan` on a router with nothing in its LAN ports is `UP` with
+  `NO-CARRIER`, so a healthy wifi-only router reported `Degraded` forever and
+  errored for a fault it did not have;
+- every carrier flap the socket would have survived became an unbind/rebind
+  cycle — churn the presence machine then has to damp, a mechanism
+  compensating for a policy error;
+- an 802.11s interface that reports `RUNNING` only once it has peered cannot
+  peer, because peering needs beacons, beacons need a bound socket, and the
+  gate refuses to bind. A deadlock reachable on the hardware this mechanism
+  was written for.
+
+The signal `IFF_RUNNING` carries is not lost: `show_transports` reports
+`interface.carrier` beside presence, so an operator can still tell a bound
+transport carrying nothing from a working one. It is reported rather than
+obeyed.
+
+The probe is `getifaddrs` plus `ifa_flags` rather than an `SIOCGIFFLAGS`
+ioctl: it needs no socket, so the watcher can probe before any file
+descriptor exists, and it is spelled the same on Linux and the BSDs.
+
+### Interface Identity
+
+The configured name is the key, but a name is not a device. Both backends
+bind by *device* — `AF_PACKET` stores `sll_ifindex`, a BPF descriptor follows
+the interface it was attached to — so an interface deleted and recreated
+under the same name leaves the socket attached to something that no longer
+exists while the name resolves perfectly well.
+
+Nothing else notices. A stale `AF_PACKET` socket never becomes readable, so
+the receive loop neither errors nor exits, and send failures go to the caller
+rather than to the binder. A listen-only node (`announce: false`, so no
+beacon sender to fail) therefore sat `present` and deaf indefinitely after a
+`wifi reload` — the original bug wearing a different hat. The bound index is
+captured at bind and compared on every poll; a mismatch is a detach.
+
+Hardware can also change underneath a name. If the name reappears with a MAC
+other than the one last bound, that is a different device, so the cached
+neighbor entries for that transport are dropped rather than resumed onto, and
+the swap is logged at `warn`. Richer selectors (`match: { name | mac |
+id_path }`) are deliberately deferred; the requirement here is only that FIPS
+never silently resumes onto different hardware.
+
+### Detection
+
+| Platform | Source |
+| -------- | ------ |
+| Linux | netlink `RTNLGRP_LINK` (`RTM_NEWLINK` / `RTM_DELLINK`) |
+| macOS, FreeBSD† | `PF_ROUTE` socket, `RTM_IFINFO` |
+| Fallback | poll `getifaddrs` + flags, 1 s |
+
+† Aspirational: the Ethernet transport is
+`cfg(any(target_os = "linux", target_os = "macos"))`, so FreeBSD has no
+interface-bound transport for a watcher to serve. The `PF_ROUTE` branch
+compiles for the BSD family, but only macOS reaches it.
+
+Where an event source exists, detection is sub-second. The poll stays
+underneath as a backstop rather than as the mechanism, and must stay at ~1 s:
+the probe is cheap, and letting the interval drift to tens of seconds
+reintroduces exactly the latency the event source was added to remove.
+Construction is best-effort — a kernel or sandbox that refuses the socket
+yields a watcher that never fires, and the binder degrades to its poll.
+
+Link-event payloads are **not parsed**. An event is a hint to re-run the
+presence probe, which is cheap and authoritative; decoding
+`nlmsghdr`/`ifinfomsg` to reach the same answer would add a parser whose bugs
+would be presence bugs.
+
+Two rate limits protect the binder from its own event source. Probes are
+coalesced to ten a second, because `PF_ROUTE` has no group filter and
+delivers every routing message on the host — route churn, ARP, DHCP renewals,
+a VPN going up and down — each of which would otherwise drive a full
+`getifaddrs` walk. And a persistently failing event source is counted, logged
+once, backed off, and after five consecutive errors abandoned for the poll:
+losing events is survivable because the poll is the backstop, but burning a
+core on a socket that is readable-but-erroring is not.
+
+Bind failures that are *not* absence back off 1 s → 30 s. Absence itself does
+not back off; there is nothing to poll but the probe.
+
+### Policy: `optional`
+
+One field per transport, `transports.ethernet.*.optional`, default `false`:
+
+| | absence | log | retries |
+| --- | --- | --- | --- |
+| `optional: false` (default) | node reports `Degraded` | `info` at boot / `warn` on a runtime detach, then `error` once if it lasts past 10 s | forever |
+| `optional: true` | no health impact | `info`, and nothing after | forever |
+
+Naming an interface in configuration is a statement that you expect it, so
+the default is to complain; silence is opted into.
+
+`optional` describes **the interface's presence, not the transport's
+importance**. An optional interface that is present is used exactly as hard
+as any other. No value of it makes a missing interface fatal at startup: the
+only fatal case remains "no transports at all came up". If a deployment ever
+needs absence to abort startup, that arrives as an explicit `on_absent: exit`
+— never as a second meaning for `optional`.
+
+A bind failure that is not absence — no `CAP_NET_RAW`, no readable
+`/dev/bpf*`, a buffer the kernel refused — is a fault, not a state, and still
+fails the daemon's start. Retrying those forever would convert a hard,
+actionable deployment error into a daemon that retries a socket it can never
+open behind a `Degraded` nobody is watching. Only absence is waited out at
+start; a non-absence failure during a later *rebind* does back off, since by
+then the node is serving and killing it would be the worse answer.
+
+### Health
+
+Node health is recomputed on every presence transition **in both
+directions**, so a returning interface clears `Degraded` without a restart.
+That makes `Degraded` a level rather than a latch: the supervisor's reason set
+was monotonic, which was correct while no child could recover, but with
+recovery it would have come to mean "something broke at some point since boot"
+rather than "something is broken now". Absence lives in its own reversible
+set, separate from the one-way `failed` set a start failure enters.
+
+An absent transport still counts as *up*. It came up — `start_async` returned
+`Ok` — so it does not push a single-transport node into the fatal
+`NoTransports`, which would make a node that merely booted before its wifi
+exit instead of waiting. Absence degrades; it never kills.
+
+There is deliberately **no restart action in the supervisor FSM.** The
+presence watcher and the rebind loop live inside the transport, next to the
+file descriptor they manage, and once that exists a supervisor-authored retry
+has nothing left to do — it would be a second mechanism racing the first for
+the same socket. The supervisor learns about presence
+(`Event::ChildAbsent` / `Event::ChildPresent`) and republishes health; it does
+not drive rebinding.
+
+Peer state needs no separate grace period. A send over an absent interface
+returns `InterfaceUnavailable` and the peer entry survives untouched, so peers
+are already held across a detach and resume when the interface returns; the
+liveness reaper is the effective linger bound. A recreated mesh interface
+comes back with the same MAC (it is derived from the phy) and Noise sessions
+are keyed on the remote peer, so a local rebind is invisible to peers. A
+dedicated linger timer would be a second answer to a question already
+answered.
+
+### Logging
+
+Edges, never attempts. A loop that logs per attempt reproduces the hot log
+spin this mechanism removed, at 1–30 s intervals forever on any router with
+an unplugged WAN — and operators learn to filter it, which is how the next
+real failure gets missed.
+
+The edge itself is not an error. An interface missing when the daemon starts
+and bound a moment later is the ordinary case the mechanism exists to absorb,
+so it is `info`; calling it an error at t=0 and "recovered" at t=0.2 s is the
+cry-wolf failure this rule exists to prevent. A runtime detach is `warn` — a
+link coming and going is ordinary weather for a mesh daemon.
+
+There is exactly one deadline. Ten seconds is the window in which absence
+could still be a race — a radio, a container, a veth arriving late. Past it a
+**required** interface is a fault an operator has to fix, and it is reported
+once at `error`. Start-time absence and a runtime detach share that deadline
+rather than getting one each, for the same reason they share a code path
+everywhere else here. An `optional` interface never reaches `error`; that is
+what `optional` means.
+
+Once, not repeated. This was a 1 m / 10 m / 1 h ladder that re-announced the
+same fact at rising severity and then went permanently quiet after an hour,
+which got both halves wrong: it used the log as a store for something already
+published continuously as state, and it stopped mentioning a fault that was
+still live. Duration belongs in `interface.since_secs` and in how long
+`Degraded` has been held, where a monitor can threshold it per deployment
+instead of the daemon compiling one in.
+
+Node health does not wait for the deadline. `Degraded` publishes on the first
+edge, which is the signal an operator actually watches.
+
+Successful rebinds are damped. Backoff covers failed binds; the opposite and
+nastier case is binds that keep *succeeding* into a socket that dies moments
+later, which a receive loop giving up on a persistent error while the
+interface stays `UP` produces once per second, forever. The binder counts
+consecutive bindings that die inside ten seconds, backs off on the same
+1 s → 30 s curve, and past three of them stops announcing each bind as a
+recovery — holding health where it is until a binding lasts.
+
+### Egress MTU
+
+`transport_mtu()` is the minimum across *bound* transports — `is_bound()`,
+not `is_operational()`, because an interface-bound transport is operational
+from the moment it starts whether or not it holds a socket. Filtering on the
+weaker predicate let a transport whose interface had never appeared set the
+whole node's IPv6 MTU from hardware that was not present.
+
+Since a transport can now bind long after start, that minimum moves at
+runtime, and every consumer has to read it live. `show_status`, the
+control-socket snapshot and the session-layer fragmentation check always did.
+The TUN reader and writer did not: they were handed a `u16` at spawn, so a
+narrow interface binding later never tightened the TCP MSS clamp and the node
+reported one effective MTU while clamping to another. The ceiling is now
+shared with those threads — an atomic beside the per-destination
+`path_mtu_lookup` they already read on the same packet — and recomputed on
+every change to the bound set.
+
+Both directions, for the same reason `Degraded` is a level rather than a
+latch: a narrow interface arriving must tighten the clamp or traffic
+egressing over it is clamped too loose, and that interface leaving must
+release it or unplugging a low-MTU adapter leaves the node over-clamped until
+it restarts. MSS is negotiated per connection at SYN time, so a change binds
+connections opened after it and leaves established ones alone.
+
+### Observability
+
+`show_transports` carries an `interface` block per interface-bound transport:
+netdev name, `presence` (`absent` / `binding` / `present`), `carrier`,
+`policy` (`required` / `optional`), `since_secs`, `binds` and
+`failed_attempts`. The two counters separate an interface that is flapping
+from one that is there and refusing to bind, and `since_secs` measures the
+absence *episode* rather than the phase — a bind that fails walks
+`Absent → Binding → Absent`, and restarting the clock on those edges would
+report a permanently unbindable interface as one second old forever.
+
+`fipstop`'s transports view names the netdev and the absence policy in their
+own columns and shows presence in the State column for these transports,
+because `state` reads `up` from the moment the transport starts and is
+therefore precisely the wrong answer in the one case someone is scanning that
+column for. Both render sites sort by ascending transport id — creation
+order, and so grouped by transport type — rather than by `HashMap` iteration
+order, which was arbitrary and differed on every daemon restart.
+
+### What This Retires
+
+- The `hotplug.d/net` rule that restarted the daemon when the FIPS radio
+  interfaces appeared, and the `wifi down; wifi up; sleep` dance provisioning
+  performed to sequence around the race.
+- The YAML comment-toggling in `fips-mesh-setup` / `fips-ap-setup` — the mesh
+  and AP blocks ship enabled with `optional: true` and simply wait.
+- The ad-hoc ENXIO socket reopen in the beacon sender: beacons now pause while
+  absent because the task does not exist then, and recovery is the presence
+  machine's job. One mechanism for every cause rather than one hack per
+  symptom.
+- The start-time versus runtime asymmetry in the supervisor.
+
+It also covers the case none of those workarounds did: an interface that flaps
+while the daemon is running.
+
 ## Implementation Status
 
 | Transport | Status | Notes |

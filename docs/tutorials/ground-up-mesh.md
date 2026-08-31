@@ -223,6 +223,7 @@ is "all four flags on both ends."
 >       accept_connections: true
 >     dongle:
 >       interface: "enx00aabbccddee"
+>       optional: true
 >       announce: true
 >       # ...
 > ```
@@ -231,6 +232,16 @@ is "all four flags on both ends."
 > A single ground-up link only needs the flat form shown
 > first; named instances become useful when the same node
 > bridges multiple physical segments.
+>
+> `optional: true` on the dongle says its absence is normal —
+> a USB adapter that is plugged in some days and not others.
+> Without it, naming an interface is a statement that you
+> expect it, and while it is missing the node reports
+> `Degraded` and logs at `error`. Either way the interface
+> does not have to exist when the daemon starts: a transport
+> whose interface is missing waits and binds when it appears,
+> and rebinds if it later goes away. Watch that with
+> `fipsctl show transports`.
 
 ## Step 3: Grant the daemon permission to open raw sockets
 

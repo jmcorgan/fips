@@ -52,7 +52,7 @@ prints the response's `data` object as pretty JSON.
 | `show mmp` | `show_mmp` | MMP metrics summary: per-peer link-layer metrics and per-session session-layer metrics. |
 | `show cache` | `show_cache` | Coordinate cache: TTL, fill ratio, per-destination coords and path MTU. |
 | `show connections` | `show_connections` | Pending handshake connections: state, idle time, resend count. |
-| `show transports` | `show_transports` | Transport instances: type, state, MTU, local address, per-transport stats. |
+| `show transports` | `show_transports` | Transport instances: type, state, MTU, local address, per-transport stats, and — for interface-bound transports — interface presence (`absent` / `binding` / `present`), carrier, absence policy (`required` / `optional`), time in the current phase, and bind/failed-attempt counts. |
 | `show routing` | `show_routing` | Routing summary: pending lookups, retry state, forwarding/discovery/error/congestion counters. |
 | `show identity-cache` | `show_identity_cache` | Cached `(node_addr → npub)` entries with last-seen timestamps. |
 | `show native-flows` | `show_native_flows` | Native datagram API: open and pending flows with their ports, queue depth and age, bound listeners with their backlog, and the `native` counters. |
