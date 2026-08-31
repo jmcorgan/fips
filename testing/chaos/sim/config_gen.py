@@ -64,7 +64,22 @@ def generate_peers_block(
 
 
 def _build_ethernet_config(iface: str) -> dict:
-    """Build an Ethernet transport config dict for a single interface."""
+    """Build an Ethernet transport config dict for a single interface.
+
+    ``optional: True`` because in this harness a neighbour's interface
+    disappearing is the scenario, not a fault. ``node_churn`` stops a
+    container, which destroys its netns and with it both ends of every veth
+    pair it held (see ``nodes.py``: the veths are recreated on restart), so a
+    surviving node watches a *required* interface vanish for the 30-90s the
+    neighbour is down -- once per churn event, on every neighbour. The daemon
+    reports a required interface absent past its bring-up window at ERROR,
+    which is correct for a deployment and wrong for a harness that tears the
+    interface down on purpose; the mesh-wide zero-ERROR ceiling would fail on
+    injected chaos rather than on a defect.
+
+    Absence behaviour itself is asserted in ``testing/iface-binding/``, which
+    exists for it and drives both policies deliberately.
+    """
     return {
         "interface": iface,
         "listen": True,
@@ -72,6 +87,7 @@ def _build_ethernet_config(iface: str) -> dict:
         "auto_connect": True,
         "accept_connections": True,
         "beacon_interval_secs": 10,
+        "optional": True,
     }
 
 

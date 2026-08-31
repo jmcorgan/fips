@@ -1,0 +1,57 @@
+networks:
+  # Management bridge only. The FIPS transport under test is raw Ethernet on a
+  # veth pair the harness creates *after* the daemons are already running —
+  # that is the whole point of the suite — so no FIPS traffic crosses this
+  # network. No subnet is requested, so two concurrent runs cannot collide on
+  # one address range.
+  #
+  # The compose project name is still fixed, so two runs that do not set
+  # COMPOSE_PROJECT_NAME share a project and the second `up` recreates the
+  # first's containers. The local CI runner scopes it externally
+  # (run_iface_binding in ci-local.sh); a bare hand run does not.
+  ifb-net:
+    driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
+
+x-fips-common: &fips-common
+  build:
+    # The harness scopes its build context per run and passes it here; the
+    # shared directory is the hand-run default. Compose resolves a relative
+    # value against THIS file's directory, so the harness must export an
+    # absolute path.
+    context: ${FIPS_BUILD_CONTEXT:-../docker}
+  image: ${FIPS_TEST_IMAGE:-fips-test:latest}
+  entrypoint: ["/usr/local/bin/entrypoint.sh"]
+  cap_add:
+    - NET_ADMIN
+    - NET_RAW
+  restart: "no"
+  environment:
+    # `default`, deliberately — NOT `chaos`. The chaos entrypoint waits up to
+    # 30 s for every configured Ethernet interface to appear before it starts
+    # the daemon, which is precisely the workaround this mechanism retires. The
+    # daemon must do its own waiting here or the suite proves nothing.
+    - FIPS_TEST_MODE=default
+    - RUST_LOG=info,fips::transport::ethernet=debug,fips::node=debug
+  networks:
+    - ifb-net
+
+services:
+  node-a:
+    <<: *fips-common
+    container_name: fips-ifb-node-a${FIPS_CI_NAME_SUFFIX:-}
+    hostname: host-a
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a/fips.key:/etc/fips/fips.key:ro
+
+  node-b:
+    <<: *fips-common
+    container_name: fips-ifb-node-b${FIPS_CI_NAME_SUFFIX:-}
+    hostname: host-b
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.key:/etc/fips/fips.key:ro
