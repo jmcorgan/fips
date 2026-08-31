@@ -43,14 +43,17 @@
 # access channels freely.
 #
 # The shipped /etc/fips/fips.yaml carries 'ap0' and 'ap1' entries under
-# 'transports.ethernet' bound to these names, but commented out — a stock
-# install that never creates fips-ap* then logs no bind warning. This
-# helper uncomments the matching entry when it creates an interface and
-# re-comments it on remove, so the daemon binds the transport without a
-# manual config edit. It also uncomments the node.rendezvous.lan block
-# (mDNS/DNS-SD — how phone FIPS apps discover the daemon); that switch is
-# daemon-wide and stays on at remove. After an interface is up, restart
-# fips.
+# 'transports.ethernet' bound to these names, enabled and marked
+# 'optional: true'. The daemon treats a named interface that is not there as
+# ABSENT rather than as a start failure: it waits, binds the moment the
+# interface appears, and unbinds again when it goes away — so creating the
+# interface is all this helper has to do for the transport, with no config
+# rewrite and no daemon restart.
+#
+# It does still edit one thing: the node.rendezvous.lan block (mDNS/DNS-SD —
+# how phone FIPS apps discover the daemon). That is a config value rather than
+# an interface, so it does need a restart to take effect. The switch is
+# daemon-wide and stays on at remove.
 # See docs/how-to/set-up-open-access-ssid.md for the full guide.
 
 DEFAULT_SSID="!FIPS"
@@ -63,19 +66,14 @@ ap_config_write() {
 	chmod 600 "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
 }
 
-# Uncomment the 'ap<idx>' transports.ethernet block in $CONFIG (created by
-# 'fips-ap-setup'). Reversible with ap_config_disable. Returns:
-#   0 enabled (or already active)   1 no config file   2 no such block
-ap_config_enable() {
+# Whether $CONFIG carries an enabled 'ap<idx>' transports.ethernet block.
+# Reports only; the daemon owns the binding. Returns:
+#   0 present   1 no config file   2 no such block
+ap_config_present() {
 	idx="$1"
 	[ -f "$CONFIG" ] || return 1
-	grep -q "^    ap$idx:" "$CONFIG" && return 0
-	grep -q "^    # ap$idx:" "$CONFIG" || return 2
-	awk -v idx="$idx" '
-		$0 ~ ("^    # ap" idx ":[ \t]*$") { blk = 1; sub(/^    # /, "    "); print; next }
-		blk && /^    #   / { sub(/^    # /, "    "); print; next }
-		{ blk = 0; print }
-	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
+	grep -q "^    ap$idx:" "$CONFIG" || return 2
+	return 0
 }
 
 # Uncomment the 'lan' block under node.rendezvous in $CONFIG — the daemon's
@@ -103,19 +101,6 @@ lan_rendezvous_enable() {
 		top == "node:" && /^  [A-Za-z_]/ { sec = $1 }
 		top == "node:" && sec == "rendezvous:" && $0 ~ /^    # lan:[ \t]*$/ { blk = 1; sub(/^    # /, "    "); print; next }
 		blk && /^    #   / { sub(/^    # /, "    "); print; next }
-		{ blk = 0; print }
-	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
-}
-
-# Re-comment the 'ap<idx>' block so the daemon stops binding it (and stops
-# warning about the now-missing interface). Inverse of ap_config_enable.
-ap_config_disable() {
-	idx="$1"
-	[ -f "$CONFIG" ] || return 1
-	grep -q "^    ap$idx:" "$CONFIG" || return 0
-	awk -v idx="$idx" '
-		$0 ~ ("^    ap" idx ":[ \t]*$") { blk = 1; sub(/^    /, "    # "); print; next }
-		blk && /^      / { sub(/^    /, "    # "); print; next }
 		{ blk = 0; print }
 	' "$CONFIG" > "$CONFIG.tmp" && ap_config_write
 }
@@ -154,10 +139,9 @@ if [ "$1" = "remove" ]; then
 		uci -q delete "network.$section"
 		uci -q delete "dhcp.$section"
 		uci -q del_list "firewall.fips_ap.network=$section"
-		# Re-comment the matching ap<N> transport in fips.yaml so the
-		# daemon stops warning about the interface we just removed.
-		idx="$(printf '%s' "$ifname" | sed -n 's/.*[^0-9]\([0-9]\{1,\}\)$/\1/p')"
-		[ -n "$idx" ] && ap_config_disable "$idx"
+		# The fips.yaml block stays as it is. The daemon notices the
+		# interface going away, unbinds, and waits for it — silently,
+		# because the block is marked 'optional: true'.
 		echo "Removed ${ifname:-$section}."
 	done
 	# Drop the shared zone and its rules once the last instance is gone.
@@ -356,12 +340,12 @@ wifi reload
 /etc/init.d/odhcpd reload
 /etc/init.d/firewall reload
 
-# Enable the matching ap<N> transport in the shipped fips.yaml (it ships
-# commented out). Tailor the restart hint to what we could do.
-ap_config_enable "$IDX"
+# Report whether the shipped fips.yaml still carries the matching transport.
+# It ships enabled, so this is a check, not an edit.
+ap_config_present "$IDX"
 case $? in
-	0) TRANSPORT_NOTE="The ap$IDX transport in $CONFIG that binds '$AP_IFNAME' is
-     now uncommented and enabled." ;;
+	0) TRANSPORT_NOTE="The ap$IDX transport in $CONFIG binds '$AP_IFNAME'; the
+     daemon picks the interface up on its own, with no restart." ;;
 	1) TRANSPORT_NOTE="No $CONFIG found — add a transports.ethernet entry binding
      interface '$AP_IFNAME' by hand." ;;
 	*) TRANSPORT_NOTE="No 'ap$IDX' entry in $CONFIG — add a transports.ethernet
@@ -398,9 +382,9 @@ per SSID, so it covers every FIPS router.
 
 Next steps:
   1. $TRANSPORT_NOTE
+     Watch it bind with: fipsctl show transports
   2. $MDNS_NOTE
-     Restart the daemon AFTER the interface is up — a transport whose
-     interface is missing at startup is skipped, not retried:
+     mDNS is a config value, not an interface, so it needs a restart:
        /etc/init.d/fips restart
   3. Associate a phone or laptop running FIPS and verify:
        iw dev $AP_IFNAME station dump

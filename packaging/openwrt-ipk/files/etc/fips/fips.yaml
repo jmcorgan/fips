@@ -101,6 +101,9 @@ transports:
       accept_connections: true
     wwan:
       interface: "phy0-sta0"
+      # Only exists while a radio is in station mode. Absence is normal, so
+      # it must not report the router Degraded.
+      optional: true
       listen: true
       announce: true
       auto_connect: true
@@ -113,54 +116,55 @@ transports:
       accept_connections: true
 
     # 802.11s mesh backhaul between FIPS routers. These entries ship
-    # commented out so a stock install that never creates fips-mesh*
-    # logs no per-boot "interface missing" bind warning. Running
-    # 'fips-mesh-setup <radio>' creates the interface AND uncomments the
-    # matching block here (once per radio; radio0 -> fips-mesh0, radio1 ->
-    # fips-mesh1); 'fips-mesh-setup remove' re-comments it. Restart fips
-    # after — a transport whose interface is missing at startup is skipped,
-    # not retried. Dual-band routers can mesh on both bands at once —
-    # failover, not multipath: FIPS keeps one active link per peer, the
-    # other band stands by. The mesh runs OPEN (no SAE) with 802.11s
-    # forwarding off: FIPS's Noise handshake is the encryption and
-    # authentication, and FIPS is the routing layer. See
-    # docs/how-to/set-up-80211s-mesh-backhaul.md.
-    # mesh0:
-    #   interface: "fips-mesh0"
-    #   listen: true
-    #   announce: true
-    #   auto_connect: true
-    #   accept_connections: true
-    # mesh1:
-    #   interface: "fips-mesh1"
-    #   listen: true
-    #   announce: true
-    #   auto_connect: true
-    #   accept_connections: true
+    # ENABLED and marked 'optional: true'. The daemon treats a named
+    # interface that is not there as absent rather than as a failure: it
+    # waits, binds the moment 'fips-mesh-setup <radio>' creates the
+    # interface, and unbinds again if it goes away — no config edit and no
+    # restart, and 'optional: true' keeps a stock install that never runs
+    # that script quiet and un-Degraded.
+    #
+    # Dual-band routers can mesh on both bands at once — failover, not
+    # multipath: FIPS keeps one active link per peer, the other band stands
+    # by. The mesh runs OPEN (no SAE) with 802.11s forwarding off: FIPS's
+    # Noise handshake is the encryption and authentication, and FIPS is the
+    # routing layer. See docs/how-to/set-up-80211s-mesh-backhaul.md.
+    mesh0:
+      interface: "fips-mesh0"
+      optional: true
+      listen: true
+      announce: true
+      auto_connect: true
+      accept_connections: true
+    mesh1:
+      interface: "fips-mesh1"
+      optional: true
+      listen: true
+      announce: true
+      auto_connect: true
+      accept_connections: true
 
-    # Open "!FIPS" access SSID for phones and laptops running FIPS. These
-    # entries ship commented out so a stock install that never creates
-    # fips-ap* logs no per-boot "interface missing" bind warning. Running
-    # 'fips-ap-setup <radio>' creates the interface AND uncomments the
-    # matching block here (once per radio; radio0 -> fips-ap0, radio1 ->
-    # fips-ap1); 'fips-ap-setup remove' re-comments it. Restart fips after
-    # — a transport whose interface is missing at startup is skipped, not
-    # retried. The SSID is OPEN and isolated on purpose: FIPS's Noise
-    # handshake is the only security layer, and associated clients reach
-    # nothing but the FIPS handshake surface. See
-    # docs/how-to/set-up-open-access-ssid.md.
-    # ap0:
-    #   interface: "fips-ap0"
-    #   listen: true
-    #   announce: true
-    #   auto_connect: true
-    #   accept_connections: true
-    # ap1:
-    #   interface: "fips-ap1"
-    #   listen: true
-    #   announce: true
-    #   auto_connect: true
-    #   accept_connections: true
+    # Open "!FIPS" access SSID for phones and laptops running FIPS. Ships
+    # ENABLED and marked 'optional: true', for the same reason as the mesh
+    # blocks above: 'fips-ap-setup <radio>' creates the interface and the
+    # daemon binds it when it appears, with no config edit and no restart.
+    #
+    # The SSID is OPEN and isolated on purpose: FIPS's Noise handshake is the
+    # only security layer, and associated clients reach nothing but the FIPS
+    # handshake surface. See docs/how-to/set-up-open-access-ssid.md.
+    ap0:
+      interface: "fips-ap0"
+      optional: true
+      listen: true
+      announce: true
+      auto_connect: true
+      accept_connections: true
+    ap1:
+      interface: "fips-ap1"
+      optional: true
+      listen: true
+      announce: true
+      auto_connect: true
+      accept_connections: true
 
   # Bluetooth Low Energy transport — requires BlueZ and the 'ble' feature.
   # ble:
