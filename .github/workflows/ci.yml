@@ -283,6 +283,27 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
 
+      # The same address-less interface the musl leg creates. Pinning the
+      # contract on both libcs is what turns "glibc and musl agree about
+      # `getifaddrs`" from an assumption into a checked fact — and makes this
+      # leg fail first if glibc is the one that changes.
+      - name: Create an address-less interface for the presence probe
+        run: |
+          sudo ip link add fips-probe0 type dummy
+          # `addrgenmode none` before bringing it up: the kernel hands an IPv6
+          # link-local to any interface that comes up, and an interface with a
+          # link-local is not address-less — the fixture would have quietly
+          # tested nothing.
+          sudo ip link set fips-probe0 addrgenmode none
+          sudo ip link set fips-probe0 up
+          ip addr show fips-probe0
+          # Fail rather than test the wrong thing if it acquired one anyway.
+          if ip addr show fips-probe0 | grep -qE "inet6? "; then
+            echo "fips-probe0 has an address; it cannot test the address-less case" >&2
+            exit 1
+          fi
+          echo "FIPS_TEST_ADDRLESS_IFACE=fips-probe0" >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
@@ -364,6 +385,85 @@ jobs:
 
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2bb – Unit tests (musl)
+#
+# OpenWrt — the platform the Ethernet transport's dynamic interface binding
+# exists for — is musl, and musl reimplements the libc calls that binding is
+# built on rather than sharing glibc's. `interface_present` reads `ifa_flags`
+# out of `getifaddrs`, and the interfaces it has to see (`fips-mesh0`,
+# `fips-ap0`) are deliberately unbridged with no IP address at all, which is
+# exactly where getifaddrs implementations differ. Every other leg is glibc, so
+# without this one the presence probe is asserted on a libc no test has ever
+# run it against, on the target it was written for.
+#
+# Built for the musl target on a glibc host rather than inside an Alpine
+# container. The test binary links musl statically and runs natively on the
+# runner, so musl's `getifaddrs` is the one under test — while the build
+# scripts stay host artifacts, which keeps rustables' bindgen on the same
+# libclang the glibc leg already builds with. Building inside Alpine put
+# bindgen on a musl toolchain it does not work on: statically linked build
+# scripts cannot `dlopen` libclang, and turning the static CRT off then left
+# it loading libclang but unable to parse. None of that is anything this leg
+# is trying to test.
+# ─────────────────────────────────────────────────────────────────────────────
+  test-musl:
+    name: Unit tests (musl)
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      # libdbus for the host build scripts; musl-tools for the musl C
+      # toolchain the `cc`-driven dependencies link against. BLE is excluded on
+      # musl by a Cargo.toml cfg, so bluer is not in this build at all.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev musl-tools
+
+      # The address-less interface the presence probe has to be tested
+      # against; see the matching step on the glibc leg for why loopback
+      # cannot stand in for it.
+      - name: Create an address-less interface for the presence probe
+        run: |
+          sudo ip link add fips-probe0 type dummy
+          # `addrgenmode none` before bringing it up: the kernel hands an IPv6
+          # link-local to any interface that comes up, and an interface with a
+          # link-local is not address-less — the fixture would have quietly
+          # tested nothing.
+          sudo ip link set fips-probe0 addrgenmode none
+          sudo ip link set fips-probe0 up
+          ip addr show fips-probe0
+          # Fail rather than test the wrong thing if it acquired one anyway.
+          if ip addr show fips-probe0 | grep -qE "inet6? "; then
+            echo "fips-probe0 has an address; it cannot test the address-less case" >&2
+            exit 1
+          fi
+          echo "FIPS_TEST_ADDRLESS_IFACE=fips-probe0" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+          target: x86_64-unknown-linux-musl
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: musl-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            musl-cargo-
+
+      - name: Run library tests
+        run: cargo test --lib --target x86_64-unknown-linux-musl
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 2c – Unit tests (Windows)
@@ -455,6 +555,9 @@ jobs:
           # ── Firewall baseline (fips0 nftables default-deny) ────────────
           - suite: firewall
             type: firewall
+          # ── Dynamic interface binding (absent → present → absent) ──────
+          - suite: iface-binding
+            type: iface-binding
           # ── Outbound LAN gateway integration test ──────────────────────
           - suite: gateway
             type: gateway
@@ -619,6 +722,22 @@ jobs:
         if: matrix.type == 'firewall' && always()
         run: |
           docker compose -f testing/firewall/docker-compose.yml down --volumes --remove-orphans
+
+      # ── Dynamic interface binding integration test ─────────────────────────
+      - name: Run interface binding integration test
+        if: matrix.type == 'iface-binding'
+        run: bash testing/iface-binding/test.sh --skip-build --keep-up
+
+      - name: Collect logs on failure (iface-binding)
+        if: matrix.type == 'iface-binding' && failure()
+        run: |
+          docker compose -f testing/iface-binding/docker-compose.yml logs --no-color
+          docker exec fips-ifb-node-a fipsctl show transports || true
+
+      - name: Stop containers (iface-binding)
+        if: matrix.type == 'iface-binding' && always()
+        run: |
+          docker compose -f testing/iface-binding/docker-compose.yml down --volumes --remove-orphans
 
       # ── Chaos simulation ───────────────────────────────────────────────────
       - name: Install Python deps (chaos)
