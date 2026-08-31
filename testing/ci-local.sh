@@ -194,6 +194,7 @@ CHAOS_SUITES=(
 GATEWAY_SUITES=(gateway)
 SIDECAR_SUITES=(sidecar)
 FIREWALL_SUITES=(firewall)
+IFACE_BINDING_SUITES=(iface-binding)
 NAT_SUITES=(cone symmetric lan)
 NOSTR_RELAY_SUITES=(nostr-publish-consume)
 STUN_FAULTS_SUITES=(stun-faults)
@@ -231,6 +232,9 @@ list_suites() {
     echo ""
     echo "  Firewall baseline:"
     for s in "${FIREWALL_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Dynamic interface binding:"
+    for s in "${IFACE_BINDING_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  NAT scenarios:"
     for s in "${NAT_SUITES[@]}"; do echo "    nat-$s"; done
@@ -778,6 +782,22 @@ run_sidecar() {
     record "sidecar" $rc
 }
 
+# Run the dynamic interface binding integration test.
+#
+# Creates a veth pair from the host namespace after the daemons are up, so it
+# needs the same privileged ip(8) helper the chaos harness uses. Scoped by
+# COMPOSE_PROJECT_NAME like every other suite; the veth names carry the run
+# suffix themselves (see testing/iface-binding/test.sh).
+run_iface_binding() {
+    export COMPOSE_PROJECT_NAME="$(ci_project iface_binding)"
+    info "[iface-binding] Running integration test"
+    if bash testing/iface-binding/test.sh --skip-build 2>&1; then
+        record "iface-binding" 0
+    else
+        record "iface-binding" 1
+    fi
+}
+
 # Run firewall baseline integration test
 run_firewall() {
     export COMPOSE_PROJECT_NAME="$(ci_project firewall)"
@@ -1086,6 +1106,9 @@ run_integration() {
     # Firewall baseline
     run_firewall
 
+    # Dynamic interface binding
+    run_iface_binding
+
     # NAT scenarios (sequential — each owns its compose project)
     for scenario in "${NAT_SUITES[@]}"; do
         run_nat "$scenario"
@@ -1194,6 +1217,8 @@ run_suite() {
             run_gateway ;;
         firewall)
             run_firewall ;;
+        iface-binding)
+            run_iface_binding ;;
         nat-cone|nat-symmetric|nat-lan)
             run_nat "${suite#nat-}" ;;
         nostr-publish-consume)

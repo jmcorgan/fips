@@ -85,6 +85,15 @@ End-to-end exercise of the production `fips0` nftables baseline at
 `packaging/common/fips.nft`, covering the default-deny, conntrack and
 drop-in semantics.
 
+### [iface-binding/](iface-binding/) -- Dynamic Interface Binding
+
+Two nodes whose only transports are interface-bound, started before the
+interface they name exists. Asserts the boot race (the daemon comes up
+`Degraded` and binds when the interface appears, with no restart), the flap
+(down/up in both directions), destroy-and-recreate, that an `optional`
+interface's absence never moves node health, and that absence is logged once
+on the edge rather than once per retry.
+
 ### [acl-allowlist/](acl-allowlist/) -- Peer ACL Enforcement
 
 Six nodes with per-node allowlist files mounted at the runtime ACL
@@ -132,6 +141,23 @@ local suite set covers the same work as the GitHub matrix, per scenario for
 chaos and per distro for deb-install; a divergence fails the run. GitHub
 runs the same check as its own `ci-parity` job. `--check-parity` runs it
 alone (see [check-ci-parity.sh](check-ci-parity.sh)).
+
+Note that `ci-local.sh` covers the integration suites and the glibc unit
+tests. GitHub additionally runs the library tests on macOS, Windows and
+**musl** (built for the musl target and run natively), and a `--features
+profiling` pass; the musl
+leg exists because interface presence is built on `getifaddrs`/`ifa_flags`,
+which musl reimplements independently, and OpenWrt is a musl target. A local
+green run does not certify those four.
+
+The Linux and musl legs also create an address-less dummy interface
+(`fips-probe0`) and pass its name to the tests as
+`FIPS_TEST_ADDRLESS_IFACE`. That is the one assumption the interface-binding
+mechanism rests on that no ordinary test can reach: loopback has addresses, so
+probing it asks whether `getifaddrs` works rather than whether it reports an
+interface that has none — which is exactly what `fips-mesh0` and `fips-ap0`
+are on OpenWrt. Set the variable by hand to run the assertion locally against
+an interface you have created; leave it unset and the assertion does not run.
 
 ### Per-run isolation and the `FIPS_CI_RUN_ID` override
 
