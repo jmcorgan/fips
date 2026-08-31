@@ -566,6 +566,80 @@ root; on macOS it requires read/write access to a `/dev/bpf*` device.
 | `auto_connect` | bool | `false` | Auto-connect to discovered peers |
 | `accept_connections` | bool | `false` | Accept incoming connection attempts from discovered peers |
 | `beacon_interval_secs` | u64 | `30` | Announcement beacon interval in seconds (minimum 10) |
+| `optional` | bool | `false` | Whether absence of the interface is normal. See below |
+
+**Dynamic binding.** The interface does not have to exist when the daemon
+starts. A transport whose interface is missing comes up *absent*: it is not a
+start failure, it is not skipped, and it binds on its own the moment the
+interface appears — sub-second where the kernel offers link events (netlink on
+Linux, `PF_ROUTE` on the BSDs), within a second otherwise. An interface that
+goes away at runtime unbinds and rebinds by the same path, so a `wifi reload`
+or an unplugged adapter needs no restart. Presence means `IFF_UP` — the
+interface exists and is administratively up — and deliberately not
+`IFF_RUNNING`: binding needs no carrier, and the socket keeps working across a
+carrier flap without rebinding. A bridge with nothing plugged into it, such as
+`br-lan` on a wifi-only router, is therefore bound and healthy rather than
+permanently `Degraded`, and starts carrying traffic the moment a port comes up.
+Whether an interface has carrier is reported separately, as `interface.carrier`
+in `show_transports`.
+
+`optional` selects how that absence is reported:
+
+| | absence | log | retries |
+| --- | --- | --- | --- |
+| `optional: false` (default) | node reports `Degraded` | `info` at boot / `warn` on a runtime detach, then `error` once if it lasts past 10 s | forever |
+| `optional: true` | no health impact | `info`, and nothing after | forever |
+
+Naming an interface in configuration is a statement that you expect it, so the
+default is to complain; silence is opted into. Set `optional: true` for
+hardware that is legitimately not always there — a dock adapter, a radio only
+some boards carry.
+
+`optional` describes **the interface's presence, not the transport's
+importance**. An optional interface that is present is used exactly as hard as
+any other. No value of it makes a missing interface fatal at startup: the only
+fatal case remains "no transports at all came up".
+
+Either way the edge is logged once, on entering absence and on recovery —
+never once per retry.
+
+The edge itself is not an error. An interface missing when the daemon starts
+and bound a moment later is the ordinary boot race this mechanism exists to
+absorb, so it is `info`; a runtime detach is `warn`, because a link coming and
+going is ordinary weather for a mesh daemon and a cable unplugged for two
+seconds does not need a human.
+
+Ten seconds is the whole grace. Past that it is no longer a race against a
+radio or a container coming up, so a **required** interface still missing is
+reported once at `error` and stays `Degraded` until it returns. Start-time
+absence and a runtime detach share the one deadline — they are the same
+transition throughout this mechanism. An `optional` interface never reaches
+`error`; that is what `optional` means.
+
+Said once, not repeated. How long the absence has lasted is a *state*, and it
+is published as one: `interface.since_secs` in `show_transports`, and
+`Degraded` for as long as it holds. Re-announcing it on a timer would put a
+second, lossier copy of that in the log.
+
+Node health does not wait for the ten seconds — `Degraded` is published on the
+first edge, and that is the signal to watch.
+
+If a binding keeps dying moments after it is established (a socket that errors
+persistently while the interface stays up), the binder stops treating each
+bind as a recovery: it backs off on the same 1 s → 30 s curve, holds node
+health at its degraded reading, and stays quiet until a binding survives ten
+seconds. Without that damping a broken socket produces a health flap and a log
+pair every second, which is the same cry-wolf failure the edge-only logging
+rule exists to prevent.
+
+A bind failure that is **not** absence — no `CAP_NET_RAW`, no readable
+`/dev/bpf*`, a buffer the kernel refused — is a fault, not a state, and fails
+the daemon's start as it always has. Only a missing interface is waited out.
+
+`fipsctl show transports` reports the current state per transport under
+`interface`: `presence` (`absent` / `binding` / `present`), `carrier`,
+`policy` (`required` / `optional`), `since_secs`, `binds`, and
+`failed_attempts`.
 
 **Named instances.** Multiple Ethernet interfaces can be configured by
 using named sub-keys instead of flat parameters:

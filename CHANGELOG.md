@@ -7,6 +7,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Dynamic interface binding for the Ethernet transport. An interface-bound
+  transport is now a long-lived object that is *sometimes bound*: the interface
+  it names need not exist when the daemon starts, may appear minutes later, and
+  may vanish and return mid-operation. `start_async` returns `Ok` with the
+  transport **absent** rather than failing, and a per-transport binder task
+  binds when the interface appears, unbinds when it goes away, and rebinds when
+  it returns. Start-time absence and runtime detach are one code path.
+  Detection is event-driven where the kernel offers a source — netlink
+  `RTNLGRP_LINK` on Linux, `PF_ROUTE` on macOS and FreeBSD — with a 1 s
+  `getifaddrs` poll underneath as a backstop. Presence means
+  `IFF_UP` — the interface exists and is administratively up — and
+  deliberately not `IFF_RUNNING`. Binding needs no carrier and a socket
+  outlives a carrier flap, so a bridge with nothing plugged into it (`br-lan`
+  on a wifi-only router) is bound and healthy rather than permanently
+  `Degraded`, and starts carrying traffic the moment a port comes up. Whether
+  an interface has carrier is reported separately as `interface.carrier` in
+  `show_transports`, never acted on.
+
+  This closes the OpenWrt boot race (procd starts `fips` before wifi has
+  created `fips-mesh0` / `fips-ap0`; both transports were skipped for the life
+  of the process while the 802.11s peer link formed anyway, so the node looked
+  healthy and reached nothing), the intermittent-adapter case, and the
+  mid-operation `wifi reload` that destroyed and recreated an interface under a
+  live socket.
+
+- `transports.ethernet.*.optional` (bool, default `false`). Naming an interface
+  in configuration is a statement that you expect it, so the default is to
+  complain: while a required interface is missing the node reports `Degraded`
+  and logs the edge, at a severity that follows how long the absence lasts
+  (see below). `optional: true` makes absence silent (`info` on the edge, no
+  health impact) for hardware that is legitimately not always there. It describes the interface's *presence*, not the transport's
+  importance — an optional interface that is present is used exactly as hard as
+  any other — and no value of it makes a missing interface fatal at startup.
+
+- `fipsctl show transports` reports interface presence per transport under a new
+  `interface` block: `name`, `presence` (`absent` / `binding` / `present`),
+  `policy` (`required` / `optional`), `since_secs`, `binds` and
+  `failed_attempts`. The original boot-race bug was expensive precisely because
+  nothing an operator could see said the node was deaf.
+
+- `testing/iface-binding/` integration suite (`ci-local.sh --only
+  iface-binding`, and a GitHub matrix leg): two daemons whose only transports
+  are interface-bound, run against a veth pair the harness creates, downs,
+  deletes and recreates underneath them. Asserts the boot race, the late
+  attach and peering over it, the flap in both directions,
+  destroy-and-recreate, that an `optional` interface never moves node health,
+  and that absence is logged once on the edge rather than once per retry.
+
+### Changed
+
+- `Degraded` is now a level rather than a latch. The supervisor's reason set
+  was monotonic, which was correct while no child could recover; with recovery
+  it would have meant "something broke at some point since boot" rather than
+  "something is broken now". Interface absence is tracked in its own reversible
+  set and node health is recomputed on every transition **in both directions**,
+  so plugging the WAN back in clears `Degraded` without a restart. A transport
+  whose interface is absent still counts as up, so a single-interface node that
+  boots before its wifi degrades rather than exiting on "no transports".
+
+- The OpenWrt package ships the `mesh0`/`mesh1` and `ap0`/`ap1` Ethernet
+  transports **enabled** with `optional: true`, instead of commented out.
+  `fips-mesh-setup` and `fips-ap-setup` no longer comment-toggle blocks in
+  `fips.yaml`, and no longer tell the operator to restart the daemon after
+  creating an interface — the daemon binds it on its own. `phy0-sta0` (`wwan`)
+  is marked `optional: true` for the same reason: it only exists while a radio
+  is in station mode.
+
+- The Ethernet receive loop backs off and exits on a dead socket instead of
+  spinning on `Err` with a `warn!` per iteration, and the ad-hoc ENXIO
+  socket-reopen in the beacon sender is gone. Both hand recovery to the
+  presence machine: one mechanism for every cause rather than one hack per
+  symptom. Beacons pause while an interface is absent.
+
+- The absence edge is not itself an error, and there is exactly one deadline
+  after it. An interface missing when the daemon starts logs at `info` — that
+  is the boot race the mechanism exists to absorb, not a fault — and a runtime
+  detach at `warn`, because a link coming and going is ordinary weather for a
+  mesh daemon. Ten seconds is the whole grace: past it, absence is no longer a
+  race against a radio or a container, so a **required** interface still
+  missing is reported once at `error`. Start-time absence and a runtime detach
+  share that one deadline rather than getting one each. An `optional`
+  interface never reaches `error`. Node health does not wait for any of it,
+  publishing `Degraded` on the first edge either way.
+
+- The TUN boundary's TCP MSS clamp now tracks the node's egress MTU at
+  runtime instead of freezing it at startup. `transport_mtu()` is the minimum
+  across *bound* transports, so a transport that binds minutes after start can
+  be the narrow one — but the TUN reader and writer were handed a `u16`
+  computed once when they spawned, while every other consumer
+  (`show_status`, the control-socket snapshot, the session-layer fragmentation
+  check) read it live. A node could therefore report one effective IPv6 MTU
+  and clamp to another. The ceiling is now shared with those threads and
+  recomputed whenever the bound set changes, in both directions: a narrow
+  interface appearing tightens it, and its departure releases it. MSS is
+  negotiated per connection, so a change applies to connections opened after
+  it; existing ones are not disturbed.
+
+- Rebinds that keep succeeding into a socket that dies moments later are
+  damped: consecutive bindings shorter than ten seconds back off on the
+  1 s → 30 s curve, and past three of them the binder stops announcing each
+  bind as a recovery until one lasts. Undamped, a persistently broken socket
+  behind a healthy interface produced a log pair and a `Degraded`→`Running`
+  health flap every second.
+
+- A bind failure that is **not** absence — no `CAP_NET_RAW`, no readable
+  `/dev/bpf*`, a buffer the kernel refused — fails the daemon's start as it
+  always has, rather than being waited out. It is a fault, not a state, and
+  will not resolve on its own; only a missing interface is retried at start.
+  A non-absence failure during a later rebind still backs off, since the node
+  is serving by then.
+
+- The binder cannot outlive its transport, and a teardown that races a bind
+  cannot leave a live receive loop on a socket nothing owns. A shared stop flag
+  is raised before teardown and checked by the binder after it stores a
+  binding, so whichever order the two interleave exactly one of them cleans up;
+  `EthernetTransport` gained a `Drop` that raises the flag, aborts the binder
+  and releases the socket, for handles dropped without `stop_async`.
+
+- Presence edges are published with `try_send` and retried on the next tick
+  rather than awaited. A bounded channel could previously park the binder
+  mid-publish — a health channel able to deadlock the machine whose health it
+  carries — freezing the interface in whatever state it held.
+
+- `TransportHandle::is_bound()` joins `is_operational()`: the latter means the
+  transport was *started*, which for an interface-bound transport no longer
+  implies a live socket. `Node::transport_mtu` now filters on the former,
+  because an interface that has never existed was clamping the whole node's
+  IPv6 MTU to a number derived from absent hardware.
+
+- An interface deleted and recreated under the same name is detected as a
+  detach. Both backends bind by device rather than by name, so the old socket
+  is attached to nothing while the name still resolves — and a stale
+  `AF_PACKET` socket never becomes readable, so nothing errors and nothing
+  exits. Detection previously rested entirely on the beacon sender failing,
+  which a node with `announce: false` does not have. The bound interface index
+  is now captured at bind and compared on every poll.
+
+- The link-event watcher distinguishes a genuine receive error from
+  `WouldBlock`. `try_io` clears readiness only on the latter, so a persistent
+  error — `ENOBUFS` after a burst of link events overflows the socket buffer —
+  span a core flat with nothing logged. Errors are now counted, logged once,
+  backed off, and after five the source is abandoned for the presence poll.
+
+- Presence probes are coalesced to at most ten a second. Linux netlink is
+  filtered to `RTNLGRP_LINK`, but `PF_ROUTE` has no group filter, so the macOS
+  source delivers every routing message on the host — route churn, ARP, DHCP
+  renewals, a VPN going up and down — and each would otherwise drive a full
+  `getifaddrs` walk.
+
+- CI runs the library tests on musl (Alpine) as well as glibc. Presence is
+  built on `getifaddrs` and `ifa_flags`, musl reimplements both independently,
+  and the interfaces this feature exists for (`fips-mesh0`, `fips-ap0` on
+  OpenWrt) are unbridged with no IP address at all — the case where
+  implementations most plausibly differ. It was previously asserted on a libc
+  no test had ever run it against, on the target it was written for.
+
+- Interface presence state ignores lock poisoning. Treating a poisoned lock as
+  a failure meant reading "no socket, tasks dead", which is the destructive
+  direction: a transport reporting itself present while every send fails, or a
+  binder tearing down and rebinding every second while teardown silently
+  declined to abort anything.
+
+### Added (internal)
+
+- `TransportError::InterfaceUnavailable { interface }`. A missing interface and
+  a typo'd interface name were previously the same flat
+  `StartFailed(String)`; nothing downstream could branch on absence.
+
 ### Fixed
 
 #### Discovery
