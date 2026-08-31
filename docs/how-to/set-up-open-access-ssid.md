@@ -161,15 +161,17 @@ TCP 8443).
 ## Step 2 — check the FIPS transport binding
 
 The `fips.yaml` shipped in the OpenWrt package carries one transport
-entry per access interface, but **commented out** — so a stock install
-that never runs this helper logs no per-boot "interface missing"
-warning. `fips-ap-setup` uncommented the matching `apN` entry in Step 1,
-and also enabled `node.rendezvous.lan` (the daemon's mDNS/DNS-SD
-rendezvous — phone FIPS apps cannot see raw-Ethernet beacons, so mDNS
-is how they find the daemon; the switch is daemon-wide and stays on if
-you later remove the AP). So there is normally nothing to do here. If
-you maintain your own config (or ran the manual UCI above instead of
-the helper), make sure both are present and uncommented:
+entry per access interface, **enabled** and marked `optional: true` —
+the daemon binds the interface once `fips-ap-setup` creates it, and
+`optional: true` keeps a stock install that never runs the helper quiet
+and un-`Degraded`. `fips-ap-setup` does still edit one thing: it enables
+`node.rendezvous.lan` (the daemon's mDNS/DNS-SD rendezvous — phone FIPS
+apps cannot see raw-Ethernet beacons, so mDNS is how they find the
+daemon; the switch is daemon-wide and stays on if you later remove the
+AP). That one is a config value rather than an interface, so it needs a
+restart to take effect. Otherwise there is normally nothing to do here.
+If you maintain your own config (or ran the manual UCI above instead of
+the helper), make sure both are present:
 
 ```yaml
 node:
@@ -183,6 +185,7 @@ transports:
   ethernet:
     ap0:
       interface: "fips-ap0"
+      optional: true
       listen: true
       announce: true
       auto_connect: true
@@ -199,18 +202,32 @@ transports:
 parses as an alias, so an existing config keeps working (see
 [../reference/configuration.md](../reference/configuration.md)).
 
-## Step 3 — restart the daemon (order matters)
+## Step 3 — no restart needed
+
+The daemon binds an interface when it appears. A transport whose
+interface is missing is *absent*, not skipped: it waits, binds within
+a second of the interface coming up, unbinds if it goes away, and
+rebinds when it returns. Order does not matter, and neither
+`/etc/init.d/fips restart` nor any hotplug rule is part of this
+procedure.
+
+Watch it happen:
+
+```sh
+fipsctl show transports
+```
+
+The transport's `interface` block reports `presence` (`absent` /
+`binding` / `present`), `policy` (`required` / `optional`) and how
+long it has held that state.
+
+If you *changed a config value* above rather than only creating an
+interface, that does need a restart — configuration is read at
+startup, interfaces are not:
 
 ```sh
 /etc/init.d/fips restart
 ```
-
-Restart fips **after** the AP interface is up. A transport whose
-interface is missing at startup is logged and skipped, not retried —
-so if the daemon comes up before the radio, the access transport
-stays dead until the next restart. (An interface that *vanishes and
-returns* after startup is recovered automatically; only the missing-
-at-startup case needs this ordering.)
 
 ## Verify
 
