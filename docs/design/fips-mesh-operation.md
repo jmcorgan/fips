@@ -272,6 +272,17 @@ follows the same path as the request. Greedy tree routing toward the
 greedy tree routing toward the origin's coordinates is used only as a
 fallback if the reverse-path entry has expired.
 
+**Originator check first**: a node tests its own outstanding lookups before
+consulting `recent_requests`. A request is flooded to every bloom-matching
+tree peer, and a bloom false positive can send a copy out into the wider
+network and back to the originator, which would otherwise file its own
+`request_id` as an ordinary transit entry and relay its own answer away. The
+originator arm therefore wins: a response naming a target with a lookup
+outstanding, carrying a `request_id` that lookup issued, is accepted here
+whatever the dedup cache holds. A returning copy of the request is likewise
+dropped as a duplicate rather than recorded, so the originator's id never
+enters the transit cache.
+
 **Response-forwarded flag**: Each `recent_requests` entry tracks whether a
 response has already been forwarded for that `request_id`. If a second
 response arrives (e.g., from convergent request paths that reached the

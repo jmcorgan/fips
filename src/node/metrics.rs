@@ -277,6 +277,7 @@ pub struct LookupMetrics {
     pub req_received: Padded<Counter>,
     pub req_decode_error: Counter,
     pub req_duplicate: Counter,
+    pub req_own_loopback: Counter,
     pub req_dedup_cache_full: Counter,
     pub req_dedup_evicted: Counter,
     pub req_sign_rate_limited: Counter,
@@ -309,6 +310,7 @@ impl LookupMetrics {
         match reason {
             DiscoveryReject::ReqDecodeError => self.req_decode_error.inc(),
             DiscoveryReject::ReqDuplicate => self.req_duplicate.inc(),
+            DiscoveryReject::ReqOwnLoopback => self.req_own_loopback.inc(),
             DiscoveryReject::ReqDedupCacheFull => self.req_dedup_cache_full.inc(),
             DiscoveryReject::ReqSignRateLimited => self.req_sign_rate_limited.inc(),
             DiscoveryReject::ReqTtlExhausted => self.req_ttl_exhausted.inc(),
@@ -326,6 +328,7 @@ impl LookupMetrics {
             req_received: self.req_received.get(),
             req_decode_error: self.req_decode_error.get(),
             req_duplicate: self.req_duplicate.get(),
+            req_own_loopback: self.req_own_loopback.get(),
             req_dedup_cache_full: self.req_dedup_cache_full.get(),
             req_dedup_evicted: self.req_dedup_evicted.get(),
             req_sign_rate_limited: self.req_sign_rate_limited.get(),

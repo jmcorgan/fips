@@ -340,6 +340,7 @@ pub struct LookupStatsSnapshot {
     pub req_received: u64,
     pub req_decode_error: u64,
     pub req_duplicate: u64,
+    pub req_own_loopback: u64,
     pub req_dedup_cache_full: u64,
     pub req_dedup_evicted: u64,
     pub req_sign_rate_limited: u64,

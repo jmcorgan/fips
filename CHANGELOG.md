@@ -273,6 +273,35 @@ with v0.5.x or earlier peers.
   smaller-NodeAddr resolution rule. Mirrored to the FSP rekey msg1
   path for symmetry.
 
+- A node no longer relays away the answer to its own lookup. A request is
+  flooded to every tree peer whose bloom filter claims the target, so a false
+  positive can send a copy out into the wider network and circulate it back to
+  the node that originated it. The only identity test on arrival was whether
+  the request named this node as the target, which a lookup this node
+  originated never satisfies, so the copy was filed in the request dedup cache
+  as ordinary transit under this node's own `request_id`. When the target
+  answered, the reply was reverse-path forwarded to the peer that looped the
+  request, the pending lookup was never satisfied, and discovery reported that
+  its requests went unanswered while the answers were in fact arriving. An
+  inbound response is now matched against this node's outstanding lookups
+  before the transit dedup record, and a returning copy of this node's own
+  request is dropped as the duplicate it is rather than recorded, so that id
+  never enters the transit cache at all. This was a race rather than a hard
+  failure: a reply that beat the looped copy found a clean cache and
+  succeeded, and the failure grew likelier as the bloom fill ratio rose.
+  Contributed by Arjen.
+
+- A lookup request of this node's own, returning to it, is no longer counted as
+  a duplicate from the peer that delivered it. The fix above drops that copy,
+  and it recorded the drop under the existing `req_duplicate` rejection, whose
+  documented meaning is that a peer resent a request. A returning copy has a
+  nonzero floor in healthy operation and rises with the bloom fill ratio, so
+  folding the two together put a permanent number on a counter an operator
+  reads as neighbour misbehaviour, and made the two events indistinguishable.
+  It now has its own rejection reason and counter, `req_own_loopback`, shown in
+  `fipstop` as "Own Loopback". `req_duplicate` returns to meaning only what it
+  says.
+
 ### Security
 
 - The peer static key is verified on both FMP handshake paths, not only at

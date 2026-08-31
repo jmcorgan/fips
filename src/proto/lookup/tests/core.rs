@@ -234,8 +234,8 @@ fn classify_response_transit_on_fresh_forwarded_request() {
         .recent_requests
         .insert(42, RecentRequest::new(from_peer, 1000));
 
-    // Transit is decided by the dedup record alone, so the target the response
-    // names plays no part here — pass one no pending lookup mentions.
+    // With no lookup of ours outstanding for the target, transit is decided by
+    // the dedup record — pass a target no pending lookup mentions.
     match classify_response(&mut lookup, 42, &make_node_addr(0xF1)) {
         ResponseRoute::Transit { from_peer: peer } => assert_eq!(peer, from_peer),
         _ => panic!("expected Transit"),
@@ -261,6 +261,38 @@ fn classify_response_already_forwarded_on_second_call() {
         classify_response(&mut lookup, 7, &target),
         ResponseRoute::AlreadyForwarded
     ));
+}
+
+#[test]
+fn classify_response_originator_wins_over_a_transit_dedup_record() {
+    // Regression. A copy of a request we originated can be flooded back to us
+    // and filed in `recent_requests` as ordinary transit, keyed on our own
+    // request_id. Consulting the dedup record first then classified the answer
+    // as Transit and relayed it to the peer that looped the request, so the
+    // pending lookup was never satisfied and discovery failed with "no reply"
+    // while the responses were in fact arriving. Originator-ness wins.
+    let target = make_node_addr(0x61);
+    let looping_peer = make_node_addr(0x62);
+    let mut lookup = empty_lookup();
+    lookup
+        .recent_requests
+        .insert(4242, RecentRequest::new(looping_peer, 1000));
+    let mut pending = PendingLookup::new(1000);
+    pending.record(4242);
+    lookup.pending_lookups.insert(target, pending);
+
+    assert!(matches!(
+        classify_response(&mut lookup, 4242, &target),
+        ResponseRoute::Originator
+    ));
+    // And nothing was reverse-path forwarded on our behalf.
+    assert!(
+        !lookup
+            .recent_requests
+            .get(&4242)
+            .unwrap()
+            .response_forwarded
+    );
 }
 
 #[test]
@@ -522,6 +554,71 @@ fn classify_request_duplicate_on_second_call() {
         classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome,
         RequestOutcome::Duplicate
     ));
+}
+
+#[test]
+fn classify_request_drops_our_own_request_looped_back_to_us() {
+    // Regression, request side of the same defect. Our flood reaches a peer
+    // that circulates it back; the only identity test is `target == my_addr`,
+    // which a lookup we originated never satisfies. Recording it would file
+    // our own request_id as a transit entry and hand the eventual answer to
+    // the looping peer, so the copy is dropped as the duplicate it is.
+    let mut lookup = empty_lookup();
+    let looping_peer = make_node_addr(0x01);
+    let my_addr = make_node_addr(0x99);
+    let target = make_node_addr(0xAA);
+    let mut pending = PendingLookup::new(1000);
+    pending.record(77);
+    lookup.pending_lookups.insert(target, pending);
+
+    // Built here rather than through `make_request_id`, whose origin is a
+    // third party: the defect is our *own* request returning, so the request
+    // under test has to carry our address as its origin. The guard keys on
+    // the id and ignores the origin, so this asserts the same behaviour the
+    // helper would; it asserts it on the shape the defect actually has.
+    let request = LookupRequest::new(77, target, my_addr, 3, 0);
+    let classification = classify_request(
+        &mut lookup,
+        &request,
+        &looping_peer,
+        &my_addr,
+        1000,
+        5000,
+        4096,
+        1,
+    );
+    assert!(matches!(
+        classification.outcome,
+        RequestOutcome::OwnRequestLooped
+    ));
+    assert!(classification.evicted.is_none());
+    // Crucially, our own id must not enter the transit dedup cache.
+    assert!(!lookup.recent_requests.contains_key(&77));
+    assert!(lookup.recent_by_peer.is_empty());
+    // A response for it is then ours to accept.
+    assert!(matches!(
+        classify_response(&mut lookup, 77, &target),
+        ResponseRoute::Originator
+    ));
+}
+
+#[test]
+fn classify_request_still_transits_a_foreign_id_for_a_target_we_are_looking_up() {
+    // The guard keys on the id, not the target: another node's lookup for the
+    // same target must still be transited normally while ours is outstanding.
+    let mut lookup = empty_lookup();
+    let from = make_node_addr(0x01);
+    let my_addr = make_node_addr(0x99);
+    let target = make_node_addr(0xAA);
+    let mut pending = PendingLookup::new(1000);
+    pending.record(77);
+    lookup.pending_lookups.insert(target, pending);
+
+    let request = make_request_id(88, target, 3);
+    let outcome =
+        classify_request(&mut lookup, &request, &from, &my_addr, 1000, 5000, 4096, 1).outcome;
+    assert!(matches!(outcome, RequestOutcome::Forward));
+    assert_eq!(lookup.recent_requests.get(&88).unwrap().from_peer, from);
 }
 
 #[test]

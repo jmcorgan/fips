@@ -189,6 +189,7 @@ fn draw_routing_stats(
             ("Deduplicated", lookup("req_deduplicated")),
             ("Target Is Us", lookup("req_target_is_us")),
             ("Duplicate", lookup("req_duplicate")),
+            ("Own Loopback", lookup("req_own_loopback")),
             ("Bloom Miss", lookup("req_bloom_miss")),
             ("Backoff Suppressed", lookup("req_backoff_suppressed")),
             ("Fwd Rate Limited", lookup("req_forward_rate_limited")),

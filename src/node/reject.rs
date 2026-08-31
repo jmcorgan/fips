@@ -117,6 +117,16 @@ pub enum DiscoveryReject {
     /// Tracked via
     /// [`DiscoveryStats::req_duplicate`](crate::node::stats::DiscoveryStats).
     ReqDuplicate,
+    /// A request this node originated, flooded to its bloom-matching tree
+    /// peers and circulated back to it by one of them. Dropped without being
+    /// recorded, so the answer is accepted here rather than reverse-path
+    /// forwarded to the peer that looped it. Tracked via
+    /// [`DiscoveryStats::req_own_loopback`](crate::node::stats::DiscoveryStats).
+    ///
+    /// **This has a nonzero floor in healthy operation** and rises with the
+    /// bloom fill ratio. It says nothing about the peer that delivered the
+    /// copy, which is why it is not counted as [`Self::ReqDuplicate`].
+    ReqOwnLoopback,
     /// Request dedup cache (`recent_requests`) is at capacity, so the
     /// `LookupRequest` is dropped without being forwarded. Tracked via
     /// [`DiscoveryStats::req_dedup_cache_full`](crate::node::stats::DiscoveryStats).
@@ -417,6 +427,7 @@ mod tests {
         let variants = [
             DiscoveryReject::ReqDecodeError,
             DiscoveryReject::ReqDuplicate,
+            DiscoveryReject::ReqOwnLoopback,
             DiscoveryReject::ReqDedupCacheFull,
             DiscoveryReject::ReqTtlExhausted,
             DiscoveryReject::ReqSignRateLimited,

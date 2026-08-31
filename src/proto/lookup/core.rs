@@ -172,6 +172,12 @@ pub(crate) fn plan_initiate(request: &LookupRequest, rv: &impl RoutingView) -> V
 pub(crate) enum RequestOutcome {
     /// request_id already in the dedup cache — drop.
     Duplicate,
+    /// A request this node originated, looped back to it — drop without
+    /// recording. Kept separate from `Duplicate`, which means another node
+    /// resent a request, so the two do not share a rejection counter: this
+    /// one has a nonzero floor in healthy operation and says nothing about
+    /// the peer that delivered it.
+    OwnRequestLooped,
     /// We are the lookup target — the shell generates + sends the response.
     RespondAsTarget,
     /// Forward the request onward (the shell calls the forward planner).
@@ -282,6 +288,40 @@ pub(crate) fn classify_request(
         };
     }
 
+    // A request this node originated, flooded to every bloom-matching tree
+    // peer and circulated back to us by one of them. The only identity test
+    // below is `request.target == *my_addr`, and for a lookup we originated
+    // the target is someone else, so without this the copy is filed as an
+    // ordinary transit entry keyed on our own `request_id` — and the answer,
+    // when it comes, is reverse-path forwarded to the peer that looped the
+    // request instead of being accepted here. Dropping it as the duplicate it
+    // is also stops the copy being forwarded a second time: our flood already
+    // reached the peers that could carry it.
+    //
+    // `request.origin` looks like the cheaper identity test and cannot be
+    // used. It is unsigned and set by whoever sends the frame, so a peer
+    // could put this node's address on any request and make it refuse to
+    // transit that request. An id has to have been issued here to match,
+    // which is what makes this test safe to drop on.
+    //
+    // The test reaches only as far as `PendingLookup::ids`, which keeps the
+    // last `MAX_RECORDED_IDS` that a target's ladder issued. A ladder
+    // configured with more rungs than that loses its earliest ids, and a
+    // returning copy of one of those attempts is recorded as transit again.
+    // The bound is inherited from the originator test in `classify_response`
+    // rather than introduced here, and a reply to such an attempt was already
+    // being dropped as unsolicited.
+    if lookup
+        .pending_lookups
+        .get(&request.target)
+        .is_some_and(|pending| pending.matches(request.request_id))
+    {
+        return Classification {
+            outcome: RequestOutcome::OwnRequestLooped,
+            evicted: None,
+        };
+    }
+
     let evicted = make_room(lookup, from, max_recent, peer_count);
     lookup.record_recent(request.request_id, *from, now_ms);
 
@@ -302,8 +342,9 @@ pub(crate) fn classify_request(
     Classification { outcome, evicted }
 }
 
-/// How an inbound LookupResponse should be routed, decided from the
-/// recent-request dedup state.
+/// How an inbound LookupResponse should be routed, decided from the pending
+/// lookups this node has outstanding and, failing that, the recent-request
+/// dedup state.
 pub(crate) enum ResponseRoute {
     /// A response for a request we forwarded, but we already reverse-forwarded
     /// one for this request_id — drop to prevent response routing loops.
@@ -318,7 +359,8 @@ pub(crate) enum ResponseRoute {
     Unsolicited,
 }
 
-/// Classify an inbound LookupResponse against the recent-request dedup cache.
+/// Classify an inbound LookupResponse against the pending lookups and the
+/// recent-request dedup cache, in that order.
 ///
 /// Pure decision over `Lookup` state: sets `response_forwarded` when this is
 /// the first response we transit for the request. No I/O, no view, no metrics.
@@ -327,6 +369,30 @@ pub(crate) fn classify_response(
     request_id: u64,
     target: &NodeAddr,
 ) -> ResponseRoute {
+    // Originator-ness is decided first, ahead of the transit dedup record.
+    // The response names a target this node has a lookup outstanding for and
+    // carries an id that lookup issued, so it answers us whatever else the
+    // dedup cache happens to hold for that id. Testing `recent_requests`
+    // first instead made this arm unreachable whenever a copy of our own
+    // flooded request found its way back to us and was filed as transit: the
+    // reply was relayed away rather than accepted, the pending lookup was
+    // never satisfied, and discovery failed while the answers were arriving.
+    //
+    // The id is fresh 64-bit randomness drawn per attempt and the target
+    // signs over it, so a harvested response is bound to the request it
+    // answered and cannot be redirected or replayed: an id we never issued
+    // still cannot match, and preferring this arm takes nothing away from
+    // what the `Unsolicited` arm protects. Replies to earlier attempts of a
+    // still-outstanding lookup match too, which is the common case on a link
+    // whose round trip exceeds the first rung of the retry ladder.
+    if lookup
+        .pending_lookups
+        .get(target)
+        .is_some_and(|pending| pending.matches(request_id))
+    {
+        return ResponseRoute::Originator;
+    }
+
     match lookup.recent_requests.get_mut(&request_id) {
         Some(recent) => {
             if recent.response_forwarded {
@@ -338,25 +404,9 @@ pub(crate) fn classify_response(
                 }
             }
         }
-        // Not a request we transited, so it claims to answer one of ours.
-        // Require that it names a target with a lookup outstanding and carries
-        // an id issued for it. The id is fresh 64-bit randomness drawn per
-        // attempt and the target signs over it, so a harvested response is
-        // bound to the request it answered and cannot be redirected or
-        // replayed. Replies to earlier attempts of a still-outstanding lookup
-        // still match, which is the common case on a link whose round trip
-        // exceeds the first rung of the retry ladder.
-        None => {
-            let solicited = lookup
-                .pending_lookups
-                .get(target)
-                .is_some_and(|pending| pending.matches(request_id));
-            if solicited {
-                ResponseRoute::Originator
-            } else {
-                ResponseRoute::Unsolicited
-            }
-        }
+        // Neither a request we transited nor an answer to a lookup we have
+        // outstanding for its target. Nobody asked for it.
+        None => ResponseRoute::Unsolicited,
     }
 }
 

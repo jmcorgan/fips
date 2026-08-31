@@ -154,6 +154,23 @@ impl Node {
                     "Duplicate LookupRequest, dropping"
                 );
             }
+            RequestOutcome::OwnRequestLooped => {
+                // Our own flooded request, come back to us through a bloom
+                // false positive. Counted apart from ReqDuplicate: that one
+                // describes a peer resending, and this one describes our own
+                // fan-out returning, so folding them together would put a
+                // permanent healthy floor on a counter an operator reads as
+                // neighbour misbehaviour.
+                self.metrics()
+                    .lookup
+                    .record_reject(DiscoveryReject::ReqOwnLoopback);
+                debug!(
+                    request_id = request.request_id,
+                    from = %self.peer_display_name(from),
+                    target = %self.peer_display_name(&request.target),
+                    "LookupRequest we originated came back to us, dropping"
+                );
+            }
             RequestOutcome::RespondAsTarget => {
                 // Answering costs a fresh Schnorr signature every time: the
                 // proof is bound to the requester's request_id, so it cannot
