@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -123,7 +123,9 @@ fn draw_table(
 ) {
     let header = Row::new(vec![
         Cell::from("Transport / Link"),
-        Cell::from("State"),
+        Cell::from("Instance"),
+        Cell::from("Bound to"),
+        Cell::from(Line::from("State").alignment(Alignment::Right)),
         Cell::from("Peer"),
         Cell::from("Tx"),
         Cell::from("Rx"),
@@ -153,29 +155,72 @@ fn draw_table(
                 let typ = helpers::str_field(t, "type");
                 let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let addr = t.get("local_addr").and_then(|v| v.as_str()).unwrap_or("");
-                let label = if !name.is_empty() {
-                    format!("{indicator}{typ} {name}")
-                } else if typ == "tor" {
+                // An interface-bound transport is identified by the netdev it
+                // names, not by its instance label: "ethernet lan" tells an
+                // operator nothing, "ethernet lan br-lan" tells them where to
+                // look. The presence marker is what makes the row honest —
+                // `state` reads `up` from the moment the transport starts,
+                // whether or not it is bound to anything.
+                let iface = t.get("interface");
+                let iface_name = iface
+                    .and_then(|i| i.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let presence = iface
+                    .and_then(|i| i.get("presence"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let policy = iface
+                    .and_then(|i| i.get("policy"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                // Three cells, not one packed string. The instance name and
+                // the thing the transport is bound to are separate facts about
+                // separate columns of a table, and running them together left
+                // the netdev names ragged down the list — the column an
+                // operator scans to find the interface they are looking for.
+                let label = if typ == "tor" {
                     let mode = t
                         .get("tor_mode")
                         .and_then(|v| v.as_str())
                         .unwrap_or("socks5");
-                    let onion_hint = t
-                        .get("onion_address")
+                    format!("{indicator}tor({mode})")
+                } else {
+                    format!("{indicator}{typ}")
+                };
+
+                // What this transport is attached to: a netdev for the
+                // interface-bound ones, the bound socket address for IP
+                // transports, an onion for tor. Different answers, one
+                // question, so one column.
+                let bound_to = if !iface_name.is_empty() {
+                    iface_name.to_string()
+                } else if typ == "tor" {
+                    t.get("onion_address")
                         .and_then(|v| v.as_str())
                         .map(|a| {
                             let short = if a.len() > 16 { &a[..16] } else { a };
-                            format!(" {short}..")
+                            format!("{short}..")
                         })
-                        .unwrap_or_default();
-                    format!("{indicator}tor({mode}){onion_hint}")
+                        .unwrap_or_default()
                 } else if !addr.is_empty() {
-                    format!("{indicator}{typ} {addr}")
+                    addr.to_string()
                 } else {
-                    format!("{indicator}{typ} #{transport_id}")
+                    format!("#{transport_id}")
                 };
 
-                let state = helpers::str_field(t, "state");
+                // The State column carries presence for an interface-bound
+                // transport, not the lifecycle state. `up` is true from the
+                // moment the transport starts and stays true while its
+                // interface is missing, so it is precisely the wrong answer in
+                // the one case an operator is scanning this column for. There
+                // is no room to show both, and only one of them is news.
+                let state = if presence.is_empty() || presence == "present" {
+                    helpers::str_field(t, "state")
+                } else {
+                    presence
+                };
                 let tx = t
                     .get("stats")
                     .and_then(|s| s.get("packets_sent").or_else(|| s.get("frames_sent")))
@@ -189,14 +234,42 @@ fn draw_table(
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "-".into());
 
+                // Colour follows bindability, not lifecycle: an absent
+                // interface is the case the operator most needs to spot, and
+                // it is precisely the one `state` cannot show. Severity then
+                // follows the absence policy, because that is what the policy
+                // means — a dock adapter that is not plugged in is a warning,
+                // an interface the config says to expect is an error. Same
+                // split the daemon makes between `Degraded` and silence.
+                let row_style = match presence {
+                    "" | "present" => Style::default().fg(Color::White),
+                    "binding" => Style::default().fg(Color::Yellow),
+                    _ if policy == "optional" => Style::default().fg(Color::Yellow),
+                    _ => Style::default().fg(Color::Red),
+                };
+
+                // Policy rides with the instance name rather than owning a
+                // column: `required` is the default and appears on nearly
+                // every row, so a column of it is a column of noise. Only the
+                // exception is worth printing, and its absence then means the
+                // rule.
+                let instance = match (name.is_empty(), policy == "optional") {
+                    (true, true) => "(optional)".to_string(),
+                    (true, false) => String::new(),
+                    (false, true) => format!("{name} (optional)"),
+                    (false, false) => name.to_string(),
+                };
+
                 Row::new(vec![
                     Cell::from(label),
-                    Cell::from(state.to_string()),
+                    Cell::from(instance),
+                    Cell::from(bound_to),
+                    Cell::from(Line::from(state.to_string()).alignment(Alignment::Right)),
                     Cell::from(""),
                     Cell::from(tx),
                     Cell::from(rx),
                 ])
-                .style(Style::default().fg(Color::White))
+                .style(row_style)
             }
             TreeRow::Link { index, is_last } => {
                 let link = &links[*index];
@@ -214,8 +287,14 @@ fn draw_table(
                 // Wide enough to render a full MAC (~17) or `hci0/MAC`
                 // (~22) without chopping mid-octet; the link detail view
                 // shows the untruncated address.
+                // The remote address goes in `Bound to`, not in the label. A
+                // link is bound to a remote endpoint exactly as a transport is
+                // bound to a netdev or a socket — same question, same column —
+                // and keeping a full MAC out of the first column is what lets
+                // the three left columns sit against the left edge instead of
+                // being pushed right by the widest link row.
                 let addr = helpers::truncate_hex(helpers::str_field(link, "remote_addr"), 24);
-                let label = format!("  {tree_char} {dir_short} {addr}");
+                let label = format!("  {tree_char} {dir_short}");
 
                 let state = helpers::str_field(link, "state");
                 let peer_name = lookup_peer_for_link(app, link)
@@ -231,7 +310,12 @@ fn draw_table(
                             Color::Green
                         }),
                     )),
-                    Cell::from(state.to_string()),
+                    // A link has no instance name of its own — it inherits its
+                    // parent transport's, shown one row up — and no absence
+                    // policy, which is a property of an interface.
+                    Cell::from(""),
+                    Cell::from(addr),
+                    Cell::from(Line::from(state.to_string()).alignment(Alignment::Right)),
                     Cell::from(peer_name),
                     Cell::from(""),
                     Cell::from(""),
@@ -251,12 +335,26 @@ fn draw_table(
         format!(" Transports ({transport_count}) ")
     };
 
+    // Every identifying column is fixed-width and packed against the left
+    // edge; `Peer` takes the slack. The first column used to be `Min`, which
+    // meant it absorbed all spare width and shoved Instance and Bound-to into
+    // the middle of the terminal, away from the names an operator is scanning.
+    //
+    // It is sized for the widest label that lives in it — a link's
+    // `  └─ Out` — rather than for a full MAC, because the address moved to
+    // `Bound to` where it belongs. `Bound to` is sized for a MAC (17), which
+    // also covers every netdev name and socket address that shares it.
     let widths = [
-        Constraint::Min(28),
-        Constraint::Length(12),
-        Constraint::Length(14),
-        Constraint::Length(9),
-        Constraint::Length(9),
+        Constraint::Length(18), // Transport / Link
+        Constraint::Length(20), // Instance, plus "(optional)" where it applies
+        Constraint::Length(18), // Bound to: netdev, socket addr, onion, MAC
+        // Wide enough for the longest value that lands here — `connected` (9)
+        // and `binding` — because a right-aligned cell clips from the LEFT,
+        // so an overflow reads as `onnected` rather than as a truncation.
+        Constraint::Length(10), // State, right-aligned
+        Constraint::Min(10),    // Peer — takes the slack
+        Constraint::Length(7),  // Tx
+        Constraint::Length(7),  // Rx
     ];
 
     let table = Table::new(rows, widths)
@@ -339,6 +437,73 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
     }
     if let Some(addr) = t.get("local_addr").and_then(|v| v.as_str()) {
         lines.push(helpers::kv_line("Local Addr", addr));
+    }
+
+    // Interface presence, for the transports that are bound to a netdev.
+    //
+    // `State` above answers a lifecycle question — was this transport started
+    // — and reads `up` for an interface that has never existed. That gap is
+    // the whole reason interface binding is observable at all: the original
+    // OpenWrt bug was expensive because the 802.11s link formed regardless, so
+    // nothing an operator could see said the node was deaf. This is where they
+    // see it.
+    if let Some(iface) = t.get("interface") {
+        lines.push(Line::from(""));
+        lines.push(helpers::section_header("Interface"));
+        lines.push(helpers::kv_line(
+            "Interface",
+            helpers::str_field(iface, "name"),
+        ));
+
+        let presence = helpers::str_field(iface, "presence");
+        let since = iface
+            .get("since_secs")
+            .and_then(|v| v.as_u64())
+            .map(|secs| helpers::format_duration_ms(secs.saturating_mul(1000)))
+            .unwrap_or_else(|| "-".into());
+        lines.push(helpers::kv_line(
+            "Presence",
+            &format!("{presence} for {since}"),
+        ));
+
+        // Carrier is reported, never acted on: presence is IFF_UP, so a bound
+        // interface with no carrier is normal (a bridge with nothing plugged
+        // into it) rather than a fault. Saying so beats an operator inferring
+        // it from silence.
+        let carrier = iface
+            .get("carrier")
+            .and_then(|v| v.as_bool())
+            .map(|c| if c { "yes" } else { "no" })
+            .unwrap_or("-");
+        lines.push(helpers::kv_line("Carrier", carrier));
+
+        // The list marks only the exception, `(optional)`, beside the
+        // instance name. The detail pane has room to spell out both, as the
+        // consequence rather than the config key: `optional` is a statement
+        // about what absence *means*, and someone who has opened this pane
+        // wants the meaning.
+        let policy = helpers::str_field(iface, "policy");
+        let absence = if policy == "optional" {
+            "optional (absence is normal)"
+        } else {
+            "required (absence degrades the node)"
+        };
+        lines.push(helpers::kv_line("On absence", absence));
+
+        // Binds past the first are rebinds, and a climbing failed-attempt
+        // count is an interface that is there and refusing — a different
+        // problem from one that is missing, and invisible without this.
+        let binds = iface.get("binds").and_then(|v| v.as_u64()).unwrap_or(0);
+        if binds > 1 {
+            lines.push(helpers::kv_line("Binds", &format!("{binds} (rebound)")));
+        } else {
+            lines.push(helpers::kv_line("Binds", &binds.to_string()));
+        }
+        if let Some(failed) = iface.get("failed_attempts").and_then(|v| v.as_u64())
+            && failed > 0
+        {
+            lines.push(helpers::kv_line("Failed binds", &failed.to_string()));
+        }
     }
 
     // Tor-specific info

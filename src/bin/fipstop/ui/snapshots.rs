@@ -1313,3 +1313,331 @@ fn help_overlay_lists_keys() {
     assert!(testkit::contains_row(&buf, "quit"));
     assert!(testkit::contains_row(&buf, "Press ? or Esc to close"));
 }
+
+/// An interface-bound transport names its netdev in the table, so an operator
+/// reading the list sees `br-lan` rather than an instance label that means
+/// nothing outside the config file.
+#[test]
+fn transports_row_names_the_interface() {
+    let data = json!({
+        "transports": [{
+            "transport_id": 1,
+            "type": "ethernet",
+            "state": "up",
+            "mtu": 1497,
+            "name": "lan",
+            "interface": {
+                "name": "br-lan",
+                "presence": "present",
+                "carrier": true,
+                "policy": "required",
+                "since_secs": 3600,
+                "binds": 1,
+                "failed_attempts": 0
+            },
+            "stats": {}
+        }]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    let buf = testkit::render(80, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    assert!(testkit::contains_row(&buf, "br-lan"));
+    // A bound interface reads as the transport state; only the exceptional
+    // case displaces it, or the annotation stops being read.
+    assert!(testkit::contains_row(&buf, "up"));
+    assert!(!testkit::contains_row(&buf, "absent"));
+}
+
+/// An absent interface displaces the transport state in the State column, and
+/// its severity follows the absence policy.
+///
+/// `state` reads `up` from the moment the transport starts, whether or not it
+/// is bound to anything, so the row would otherwise look identical to a
+/// working one — the "looks healthy, reaches nothing" failure dynamic binding
+/// exists to make visible.
+///
+/// Optional is a warning: a dock adapter that is not plugged in, or a radio
+/// this board never had, is the case `optional: true` was added to describe,
+/// and the daemon stays `Full` for it. Red there would train the operator to
+/// ignore red.
+#[test]
+fn an_absent_optional_interface_warns() {
+    let data = json!({
+        "transports": [{
+            "transport_id": 2,
+            "type": "ethernet",
+            "state": "up",
+            "mtu": 1499,
+            "name": "mesh0",
+            "interface": {
+                "name": "fips-mesh0",
+                "presence": "absent",
+                "carrier": false,
+                "policy": "optional",
+                "since_secs": 252,
+                "binds": 0,
+                "failed_attempts": 0
+            },
+            "stats": {}
+        }]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    let buf = testkit::render(110, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    assert!(testkit::contains_row(&buf, "fips-mesh0"));
+    // Policy rides with the instance name, and only the exception prints.
+    assert!(testkit::contains_row(&buf, "mesh0 (optional)"));
+    // The State column carries presence, because `up` is what it would
+    // otherwise say about an interface that has never existed.
+    assert!(testkit::contains_row(&buf, "absent"));
+    assert_eq!(
+        testkit::fg_at(&buf, "fips-mesh0"),
+        Some(ratatui::style::Color::Yellow),
+        "an interface whose absence is normal is a warning, not an error"
+    );
+}
+
+/// A required interface being absent is an error.
+///
+/// Naming an interface without `optional: true` is a statement that you expect
+/// it, and the daemon reports `Degraded` while it is missing. The view has to
+/// agree, or the colour stops carrying the same meaning as the health state.
+#[test]
+fn an_absent_required_interface_errors() {
+    let data = json!({
+        "transports": [{
+            "transport_id": 2,
+            "type": "ethernet",
+            "state": "up",
+            "mtu": 1499,
+            "name": "wan",
+            "interface": {
+                "name": "eth0",
+                "presence": "absent",
+                "carrier": false,
+                "policy": "required",
+                "since_secs": 30,
+                "binds": 0,
+                "failed_attempts": 0
+            },
+            "stats": {}
+        }]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    let buf = testkit::render(110, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    // `required` is the default and is spelled by omission — a column of it
+    // on nearly every row would be a column of noise.
+    assert!(!testkit::contains_row(&buf, "required"));
+    assert!(!testkit::contains_row(&buf, "(optional)"));
+    assert!(testkit::contains_row(&buf, "wan"));
+    assert_eq!(
+        testkit::fg_at(&buf, "eth0"),
+        Some(ratatui::style::Color::Red),
+        "an interface the config says to expect is an error while it is gone"
+    );
+}
+
+/// The detail pane reports presence, carrier, policy and bind counts —
+/// everything `state` cannot say.
+#[test]
+fn transport_detail_reports_interface_presence() {
+    let data = json!({
+        "transports": [{
+            "transport_id": 3,
+            "type": "ethernet",
+            "state": "up",
+            "mtu": 1497,
+            "name": "wan",
+            "interface": {
+                "name": "eth0",
+                "presence": "present",
+                "carrier": false,
+                "policy": "required",
+                "since_secs": 90,
+                "binds": 3,
+                "failed_attempts": 2
+            },
+            "stats": {}
+        }]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    app.detail_view = Some(crate::app::DetailView { scroll: 0 });
+    let buf = testkit::render(120, 30, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    assert!(testkit::contains_row(&buf, "Interface"));
+    assert!(testkit::contains_row(&buf, "eth0"));
+    assert!(testkit::contains_row(&buf, "present"));
+    // Carrier is reported rather than acted on, so "bound with no carrier" —
+    // a bridge with nothing plugged into it — has to be legible as its own
+    // state rather than inferred from silence.
+    assert!(testkit::contains_row(&buf, "Carrier"));
+    // A rebind count and a failed-bind count distinguish an interface that is
+    // flapping from one that is there and refusing.
+    assert!(testkit::contains_row(&buf, "rebound"));
+    assert!(testkit::contains_row(&buf, "Failed binds"));
+}
+
+/// Instance names and interfaces line up down the list.
+///
+/// Packed into one label they did not: `ethernet dongle2 en25` over
+/// `ethernet wifi en0` left the netdev names ragged, which is the column an
+/// operator scans to find the interface they are looking for. Separate facts,
+/// separate columns.
+#[test]
+fn transports_columns_align_across_mixed_types() {
+    let data = json!({
+        "transports": [
+            {
+                "transport_id": 1, "type": "udp", "state": "up", "mtu": 1472,
+                "local_addr": "0.0.0.0:2121", "stats": {}
+            },
+            {
+                "transport_id": 2, "type": "tcp", "state": "up", "mtu": 1400,
+                "local_addr": "0.0.0.0:8443", "stats": {}
+            },
+            {
+                "transport_id": 3, "type": "ethernet", "state": "up", "mtu": 1497,
+                "name": "dongle2",
+                "interface": {
+                    "name": "en25", "presence": "absent", "carrier": false,
+                    "policy": "required", "since_secs": 12, "binds": 0,
+                    "failed_attempts": 0
+                },
+                "stats": {}
+            },
+            {
+                "transport_id": 4, "type": "ethernet", "state": "up", "mtu": 1497,
+                "name": "wifi",
+                "interface": {
+                    "name": "en0", "presence": "present", "carrier": true,
+                    "policy": "optional", "since_secs": 900, "binds": 1,
+                    "failed_attempts": 0
+                },
+                "stats": {}
+            }
+        ]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    let buf = testkit::render(100, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    let col_of = |needle: &str| testkit::find(&buf, needle).map(|(x, _)| x);
+
+    // The instance column starts at one x for every row that has one.
+    assert_eq!(col_of("dongle2"), col_of("wifi"));
+    // ... and so does the interface column, across long and short names and
+    // across transports that name a netdev and ones that name a socket.
+    assert_eq!(col_of("en25"), col_of("en0"));
+    assert_eq!(col_of("en25"), col_of("0.0.0.0:2121"));
+    assert_eq!(col_of("0.0.0.0:2121"), col_of("0.0.0.0:8443"));
+
+    // The header sits over the column it names.
+    assert_eq!(col_of("Bound to"), col_of("en25"));
+    assert_eq!(col_of("Instance"), col_of("dongle2"));
+}
+
+/// A link's remote address shares the `Bound to` column with its parent's
+/// interface.
+///
+/// Same question — what is this attached to — so the same column: a netdev for
+/// the transport, a remote endpoint for the link. Keeping a full MAC out of
+/// the first column is also what lets the three identifying columns sit
+/// against the left edge rather than being pushed right by the widest link
+/// row.
+#[test]
+fn a_link_puts_its_remote_address_in_the_bound_to_column() {
+    let transports = json!({
+        "transports": [{
+            "transport_id": 3, "type": "ethernet", "state": "up", "mtu": 1497,
+            "name": "wifi",
+            "interface": {
+                "name": "en0", "presence": "present", "carrier": true,
+                "policy": "optional", "since_secs": 60, "binds": 1,
+                "failed_attempts": 0
+            },
+            "stats": {}
+        }]
+    });
+    let links = json!({
+        "links": [{
+            "link_id": 1, "transport_id": 3, "direction": "Outbound",
+            "remote_addr": "aa:bb:cc:dd:ee:ff", "state": "connected"
+        }]
+    });
+
+    let mut app = app_with(Tab::Transports, transports);
+    app.data.insert(Tab::Links, links);
+    app.expanded_transports.insert(3);
+
+    let buf = testkit::render(110, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    let col_of = |needle: &str| testkit::find(&buf, needle).map(|(x, _)| x);
+
+    // A right-aligned State clips from the left on overflow, so `connected`
+    // reading as `onnected` is a width bug rather than an honest truncation.
+    assert!(testkit::contains_row(&buf, "connected"));
+
+    // The MAC is not truncated and sits under the same header as the netdev.
+    assert!(testkit::contains_row(&buf, "aa:bb:cc:dd:ee:ff"));
+    assert_eq!(col_of("aa:bb:cc:dd:ee:ff"), col_of("en0"));
+    assert_eq!(col_of("Bound to"), col_of("en0"));
+
+    // The link keeps its direction and tree glyph in the first column, which
+    // is therefore narrow enough to leave the identifying columns at the left.
+    assert!(testkit::contains_row(&buf, "Out"));
+    // Packed at the left rather than floating in the middle. With the first
+    // column flexible, as it was, it absorbed every spare column of a wide
+    // terminal and pushed these two past the halfway mark.
+    assert!(col_of("Instance").unwrap() <= 20);
+    assert!(
+        col_of("Bound to").unwrap() < 45,
+        "the identifying columns must stay against the left edge"
+    );
+}
+
+/// `State` is right-aligned, so the values share a right edge and the column
+/// reads as a status strip rather than as ragged text.
+#[test]
+fn the_state_column_is_right_aligned() {
+    let data = json!({
+        "transports": [
+            {
+                "transport_id": 1, "type": "udp", "state": "up", "mtu": 1472,
+                "local_addr": "0.0.0.0:2121", "stats": {}
+            },
+            {
+                "transport_id": 2, "type": "ethernet", "state": "up", "mtu": 1499,
+                "name": "mesh0",
+                "interface": {
+                    "name": "fips-mesh0", "presence": "absent", "carrier": false,
+                    "policy": "optional", "since_secs": 10, "binds": 0,
+                    "failed_attempts": 0
+                },
+                "stats": {}
+            }
+        ]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    let buf = testkit::render(110, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    let end_of = |needle: &str| testkit::find(&buf, needle).map(|(x, _)| x + needle.len() as u16);
+
+    // Same right edge for a two-character value and a six-character one, and
+    // the header shares it.
+    assert_eq!(end_of("up"), end_of("absent"));
+    assert_eq!(end_of("up"), end_of("State"));
+}
