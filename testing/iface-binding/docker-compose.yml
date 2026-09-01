@@ -55,3 +55,26 @@ services:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.yaml:/etc/fips/fips.yaml:ro
       - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.key:/etc/fips/fips.key:ro
+
+  # The clean-start case. Its interface exists before its daemon does, which is
+  # the ordinary state of a booted router and the one ordering node-a and
+  # node-b cannot produce: their interface is created after they are already
+  # running, so they can only ever bind through the binder loop.
+  #
+  # The gate is what buys that ordering. The harness needs a running container
+  # to have a netns to move a veth into, but the daemon must not start until
+  # after the move — so the container comes up, parks on this file, and the
+  # harness releases it once the interface is in place.
+  node-c:
+    <<: *fips-common
+    container_name: fips-ifb-node-c${FIPS_CI_NAME_SUFFIX:-}
+    hostname: host-c
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while [ ! -e /tmp/fips-go ]; do sleep 0.2; done
+        exec /usr/local/bin/entrypoint.sh
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/fips.yaml:/etc/fips/fips.yaml:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/fips.key:/etc/fips/fips.key:ro

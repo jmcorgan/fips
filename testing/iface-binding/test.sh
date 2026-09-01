@@ -33,18 +33,23 @@ COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
 NODE_A="fips-ifb-node-a${FIPS_CI_NAME_SUFFIX:-}"
 NODE_B="fips-ifb-node-b${FIPS_CI_NAME_SUFFIX:-}"
+NODE_C="fips-ifb-node-c${FIPS_CI_NAME_SUFFIX:-}"
 
 # The interface each node binds. Same name on both sides: they are in separate
 # network namespaces, and using one name keeps the fixtures identical.
 LAB_IFACE="ve-lab0"
 # The interface that never exists. `optional: true` in both configs.
 DOCK_IFACE="fips-dock0"
+# node-c's interface, present before its daemon starts. See case (f).
+BOOT_IFACE="ve-boot0"
 
 # Host-side veth names, scoped per run: these live in the host (or Docker VM)
 # namespace for the moment between creation and the move into the containers,
 # where two concurrent runs would otherwise collide on one name.
 HOST_VETH_A="vhifb${FIPS_CI_NAME_SUFFIX:-0}a"
 HOST_VETH_B="vhifb${FIPS_CI_NAME_SUFFIX:-0}b"
+HOST_VETH_C="vhifb${FIPS_CI_NAME_SUFFIX:-0}c"
+HOST_VETH_D="vhifb${FIPS_CI_NAME_SUFFIX:-0}d"
 
 SKIP_BUILD=false
 KEEP_UP=false
@@ -78,6 +83,8 @@ cleanup() {
     # succeeded, on the host if the run died between creation and the move.
     docker exec "$NODE_A" ip link del "$LAB_IFACE" >/dev/null 2>&1 || true
     ip_host "ip link del $HOST_VETH_A" >/dev/null 2>&1 || true
+    docker exec "$NODE_C" ip link del "$BOOT_IFACE" >/dev/null 2>&1 || true
+    ip_host "ip link del $HOST_VETH_C" >/dev/null 2>&1 || true
     if [ "$KEEP_UP" = false ]; then
         docker compose -f "$COMPOSE_FILE" down --volumes --remove-orphans >/dev/null 2>&1 || true
     fi
@@ -95,6 +102,12 @@ cleanup() {
 ip_host() {
     docker run --rm --privileged --network host --pid host \
         --entrypoint /bin/sh "$IMAGE" -c "$1"
+}
+
+# Docker's own view of a container, so the gate case can wait for a netns
+# without implying the daemon inside it has started.
+container_state() {
+    docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true
 }
 
 container_pid() {
@@ -214,7 +227,8 @@ if [ "$SKIP_BUILD" = false ]; then
 fi
 
 log "Generating fixtures"
-LAB_IFACE="$LAB_IFACE" DOCK_IFACE="$DOCK_IFACE" bash "$SCRIPT_DIR/generate-configs.sh"
+LAB_IFACE="$LAB_IFACE" DOCK_IFACE="$DOCK_IFACE" BOOT_IFACE="$BOOT_IFACE" \
+    bash "$SCRIPT_DIR/generate-configs.sh"
 
 log "Starting nodes with $LAB_IFACE absent"
 docker compose -f "$COMPOSE_FILE" up -d
@@ -423,6 +437,64 @@ if ! wait_for_at_least 60 1 peer_count "$NODE_A"; then
     fail "(d) node-a did not re-peer after the interface was recreated"
 fi
 pass "(d) peering re-established over the recreated interface"
+
+# ── (f) an interface present before the daemon starts ────────────────────
+#
+# Everything above binds through the binder loop, because the interface does
+# not exist until the harness makes it. The ordinary case on a booted router is
+# the opposite one: the interface is already there and `start_async` binds it
+# inline, before the loop is running.
+#
+# That path published its presence edge outside the churn guard, so the guard
+# believed it had announced nothing and the *first* detach asked for no
+# retraction. The node kept reporting Running with its only required interface
+# gone, and stayed that way until a second detach happened to repair the guard.
+# Nothing in cases (a)-(e) can reach it.
+log "(f) starting node-c with its interface already present"
+
+docker compose -f "$COMPOSE_FILE" up -d node-c
+
+# The container parks on the gate, so this is the netns and not yet the daemon.
+if ! wait_for 30 "running" container_state "$NODE_C"; then
+    fail "(f) node-c container did not start"
+fi
+
+pid_c="$(container_pid "$NODE_C")"
+ip_host "set -e
+    ip link add $HOST_VETH_C type veth peer name $HOST_VETH_D
+    ip link set $HOST_VETH_C netns $pid_c name $BOOT_IFACE
+    ip link set $HOST_VETH_D netns $pid_c name ${BOOT_IFACE}p" >/dev/null
+docker exec "$NODE_C" ip link set "$BOOT_IFACE" up
+docker exec "$NODE_C" ip link set "${BOOT_IFACE}p" up
+
+# Release the gate. The daemon now starts with the interface already up.
+docker exec "$NODE_C" touch /tmp/fips-go
+
+if ! wait_for 40 "running" node_state "$NODE_C"; then
+    fail "(f) node-c did not come up Running with its interface present at start"
+fi
+[ "$(iface_field "$NODE_C" boot presence)" = "present" ] \
+    || fail "(f) node-c did not bind $BOOT_IFACE inline at start"
+pass "(f) an interface present at start is bound inline and reports Running"
+
+# The assertion. One detach, on a binding this loop did not create.
+docker exec "$NODE_C" ip link set "$BOOT_IFACE" down
+
+if ! wait_for 30 "absent" iface_field "$NODE_C" boot presence; then
+    fail "(f) node-c did not notice $BOOT_IFACE going down"
+fi
+if ! wait_for 30 "degraded" node_state "$NODE_C"; then
+    fail "(f) node-c stayed Running after its only required interface went \
+away — the start-time bind never reached node health"
+fi
+pass "(f) the first detach after a clean start degrades the node"
+
+# And it is still a level, not a latch, on this path too.
+docker exec "$NODE_C" ip link set "$BOOT_IFACE" up
+if ! wait_for 30 "running" node_state "$NODE_C"; then
+    fail "(f) node-c stayed Degraded after its interface returned"
+fi
+pass "(f) health clears again when the interface returns"
 
 # ── final log hygiene ────────────────────────────────────────────────────
 #
