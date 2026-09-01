@@ -22,7 +22,7 @@
 //! yields a watcher that never fires, and the binder degrades to its poll.
 
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::io::unix::AsyncFd;
@@ -123,6 +123,15 @@ pub(crate) struct LinkWatcher {
     inner: Option<AsyncFd<LinkEventSocket>>,
     /// Consecutive receive errors. Reset by any successful read.
     errors: AtomicU32,
+    /// Set once the source has been abandoned for good.
+    ///
+    /// Abandonment has to outlive the future that decided it. `changed()` is
+    /// called fresh on every pass of the caller's `select!` and dropped
+    /// whenever the poll ticker wins, so a `pending()` inside that future
+    /// parks nothing beyond the current pass — without this flag the next pass
+    /// re-reads the dead socket, re-counts the error, and re-logs the
+    /// give-up warning, once per wake-up, forever.
+    given_up: AtomicBool,
 }
 
 impl LinkWatcher {
@@ -144,6 +153,7 @@ impl LinkWatcher {
         Self {
             inner,
             errors: AtomicU32::new(0),
+            given_up: AtomicBool::new(false),
         }
     }
 
@@ -162,6 +172,14 @@ impl LinkWatcher {
             unreachable!("pending never resolves")
         };
 
+        // Already abandoned on an earlier pass. Park without touching the
+        // socket, so giving up costs one syscall in total rather than one per
+        // caller wake-up for the life of the process.
+        if self.given_up.load(Ordering::Relaxed) {
+            std::future::pending::<()>().await;
+            unreachable!("pending never resolves")
+        }
+
         loop {
             let Ok(mut guard) = afd.readable().await else {
                 // The registration died. Stop firing rather than spinning; the
@@ -178,8 +196,19 @@ impl LinkWatcher {
             loop {
                 match guard.try_io(|inner| inner.get_ref().recv(&mut buf)) {
                     Ok(Ok(n)) if n > 0 => saw_event = true,
-                    // A zero-length read: nothing more to take this round.
-                    Ok(Ok(_)) => break,
+                    // A zero-length read. Readiness is *not* cleared by
+                    // `try_io` here — it clears only on `WouldBlock` — so
+                    // breaking out plainly would leave `readable()` instantly
+                    // ready with nothing to read, and this loop would spin
+                    // without ever returning `Pending`. That starves the
+                    // caller's `select!` of its poll ticker entirely, which
+                    // takes presence detection down with it. Clear it by hand
+                    // and treat it as a fault, so the give-up path applies.
+                    Ok(Ok(_)) => {
+                        guard.clear_ready();
+                        failure = Some(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+                        break;
+                    }
                     // A genuine socket error. Distinct from WouldBlock, and
                     // the distinction is the whole point: `try_io` clears
                     // readiness only on WouldBlock, so breaking out of a real
@@ -211,6 +240,7 @@ impl LinkWatcher {
                     warn!(error = %e, "Link event source read failed");
                 }
                 if errors >= ERROR_GIVE_UP {
+                    self.given_up.store(true, Ordering::Relaxed);
                     warn!(
                         errors,
                         "Link event source is not recoverable; falling back to \
@@ -261,6 +291,7 @@ mod tests {
         let watcher = LinkWatcher {
             inner: Some(AsyncFd::new(LinkEventSocket { fd: read_fd }).expect("register")),
             errors: AtomicU32::new(0),
+            given_up: AtomicBool::new(false),
         };
 
         // Keep producing readiness edges. The error arm calls `clear_ready`,
@@ -298,6 +329,7 @@ mod tests {
         let w = LinkWatcher {
             inner: None,
             errors: AtomicU32::new(0),
+            given_up: AtomicBool::new(false),
         };
         let fired = tokio::time::timeout(std::time::Duration::from_millis(50), w.changed()).await;
         assert!(fired.is_err(), "sourceless watcher resolved");

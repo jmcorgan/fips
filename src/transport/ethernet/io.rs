@@ -39,6 +39,17 @@ pub const ETHERNET_BROADCAST: [u8; 6] = [0xff; 6];
 /// spelled the same on Linux and the BSDs.
 #[cfg(unix)]
 pub fn interface_present(interface: &str) -> bool {
+    interface_present_probe(interface).unwrap_or(false)
+}
+
+/// [`interface_present`], keeping "the probe failed" distinct from "absent".
+///
+/// `None` means the kernel would not answer. A caller deciding whether to
+/// *bind* can treat that as absence and retry on the next tick, which is what
+/// [`interface_present`] does. A caller deciding whether to *unbind* must not:
+/// see [`interface_has_flags`].
+#[cfg(unix)]
+pub fn interface_present_probe(interface: &str) -> Option<bool> {
     interface_has_flags(interface, libc::IFF_UP as u32)
 }
 
@@ -67,19 +78,31 @@ pub fn interface_index(interface: &str) -> Option<u32> {
 /// from being told apart here; presence answers that.
 #[cfg(unix)]
 pub fn interface_carrier(interface: &str) -> bool {
-    interface_has_flags(interface, (libc::IFF_UP | libc::IFF_RUNNING) as u32)
+    // Report-only, so a probe failure reads the same as no carrier.
+    interface_has_flags(interface, (libc::IFF_UP | libc::IFF_RUNNING) as u32).unwrap_or(false)
 }
 
-/// Whether the named interface exists and has every flag in `wanted` set.
+/// Whether the named interface exists and has every flag in `wanted` set, or
+/// `None` if the question could not be asked.
+///
+/// The `None` matters. `getifaddrs` is a netlink dump on Linux and it does
+/// fail for reasons that have nothing to do with the interface — `ENOBUFS`
+/// under memory pressure or a busy netlink socket, `EMFILE`/`ENFILE` under fd
+/// exhaustion, since it opens a socket of its own. Answering `false` there
+/// reports a present interface as gone, and a caller holding a live binding
+/// would tear a working socket down over a transient syscall failure. Callers
+/// that can tell the two apart should.
 #[cfg(unix)]
-fn interface_has_flags(interface: &str, wanted: u32) -> bool {
+fn interface_has_flags(interface: &str, wanted: u32) -> Option<bool> {
     let Ok(c_name) = std::ffi::CString::new(interface) else {
-        return false;
+        // An interior NUL is not a probe failure — no such interface can
+        // exist, and no retry will change that.
+        return Some(false);
     };
 
     let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
-        return false;
+        return None;
     }
 
     let mut matched = false;
@@ -97,7 +120,7 @@ fn interface_has_flags(interface: &str, wanted: u32) -> bool {
     }
 
     unsafe { libc::freeifaddrs(addrs) };
-    matched
+    Some(matched)
 }
 
 // Platform-specific PacketSocket implementation.
@@ -284,6 +307,12 @@ mod async_impl {
     /// A received frame: (payload, source_mac).
     type Frame = (Vec<u8>, [u8; 6]);
 
+    /// Consecutive failed BPF reads before the reader thread gives up.
+    ///
+    /// Mirrors the receive loop's own error threshold: the point is not to
+    /// tolerate errors but to end the task so the binder can rebind.
+    const READ_ERROR_EXIT_THRESHOLD: u32 = 5;
+
     pub struct AsyncPacketSocket {
         inner: Arc<PacketSocket>,
         /// `None` once shutdown has taken the receiver, which is what makes
@@ -310,6 +339,9 @@ mod async_impl {
                     let mut parse_buf = vec![0u8; bpf_buflen];
                     let mut parse_offset: usize = 0;
                     let mut parse_len: usize = 0;
+                    // Consecutive failed reads, to bound a socket whose
+                    // interface went away underneath it.
+                    let mut read_errors: u32 = 0;
                     let nfds = bpf_fd.max(shutdown_fd) + 1;
 
                     loop {
@@ -377,11 +409,31 @@ mod async_impl {
                                 if err.raw_os_error() == Some(libc::EBADF) {
                                     break;
                                 }
+                                if err.kind() == std::io::ErrorKind::Interrupted {
+                                    continue;
+                                }
+                            }
+                            // Anything else — `ENXIO` is the one that matters,
+                            // which is what BPF answers once the interface it
+                            // was attached to is torn away — used to loop here
+                            // forever. That mattered beyond the spin: the
+                            // binder's detach check asks whether this thread is
+                            // still running, so a thread that never returns
+                            // reports a dead socket as a live one, and the
+                            // transport sits `present` and deaf until the name
+                            // or index happens to change too. Give up after a
+                            // streak and let the return close the channel,
+                            // which fails `recv_from`, which ends the tokio
+                            // task the binder is actually watching.
+                            read_errors += 1;
+                            if read_errors >= READ_ERROR_EXIT_THRESHOLD {
+                                break;
                             }
                             parse_len = 0;
                             parse_offset = 0;
                             continue;
                         }
+                        read_errors = 0;
                         parse_len = ret as usize;
                         parse_offset = 0;
                     }
