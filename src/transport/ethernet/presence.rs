@@ -198,6 +198,18 @@ impl PresenceState {
         read(&self.since).elapsed()
     }
 
+    /// Restart the episode clock, for a transport that is about to start.
+    ///
+    /// `new()` stamps the clock at construction, but construction and
+    /// `start_async` need not be adjacent — config load and supervisor staging
+    /// sit between them. Left alone, a transport staged for longer than
+    /// [`ABSENCE_ERROR_AFTER`] logs the sustained-absence error on its very
+    /// first binder tick, having given the interface no bring-up window at
+    /// all. The window is supposed to absorb exactly that race.
+    pub fn mark_starting(&self) {
+        *write(&self.since) = Instant::now();
+    }
+
     /// Successful binds since creation (`1` after a clean start).
     pub fn binds(&self) -> u64 {
         self.binds.load(Ordering::Relaxed)
@@ -582,6 +594,48 @@ mod tests {
         assert!(!out.entered_churn);
         assert_eq!(out.backoff, None, "one clean outage must not back off");
         assert_eq!(g.streak(), 0);
+    }
+
+    #[test]
+    fn an_unseeded_guard_retracts_nothing_and_never_repairs_itself() {
+        // Why `binder_loop` seeds the guard when it inherits a binding from
+        // `start_async`, rather than leaving it fresh.
+        //
+        // A guard that was never told about a bind believes it has announced
+        // nothing, so it asks for no retraction — and health, which learned
+        // `present: true` from the inline bind, would keep reading `Full` with
+        // the interface gone. `stabilized` cannot rescue it either: with no
+        // `bound_at` there is nothing for it to judge stable.
+        let mut g = ChurnGuard::new();
+        let t0 = Instant::now();
+
+        assert!(
+            !g.stabilized(t0 + MIN_STABLE_BINDING + Duration::from_secs(60)),
+            "a guard with no recorded bind has nothing to stabilize"
+        );
+
+        let out = g.detached(t0 + Duration::from_secs(60));
+        assert!(
+            !out.retract,
+            "an unseeded guard retracts nothing — which is exactly why the \
+             binder must seed it from the inline bind"
+        );
+    }
+
+    #[test]
+    fn a_seeded_guard_retracts_the_edge_the_inline_bind_published() {
+        // The fix, from the binder's angle: seeding with `bound` is what makes
+        // the first detach after a clean start reach node health.
+        let mut g = ChurnGuard::new();
+        let t0 = Instant::now();
+        g.bound(t0);
+
+        let out = g.detached(t0 + MIN_STABLE_BINDING + Duration::from_secs(60));
+        assert!(
+            out.retract,
+            "the edge `start_async` published must be retracted on detach"
+        );
+        assert!(out.log_edge);
     }
 
     #[test]

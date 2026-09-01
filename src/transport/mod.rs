@@ -147,6 +147,14 @@ pub struct TransportPresence {
     pub transport_id: TransportId,
     /// Whether the interface is now bound.
     pub present: bool,
+    /// Whether this edge should move node health.
+    ///
+    /// `false` for an `optional` interface, whose absence is normal and must
+    /// not take the node off `Full`. The edge is still published, because the
+    /// bound set changed either way and the node's egress MTU floor is derived
+    /// from it — health and MTU are two different questions riding one
+    /// channel, and only the first one is policy-filtered.
+    pub health_relevant: bool,
 }
 
 /// Channel sender for transport presence edges.

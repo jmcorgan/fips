@@ -1929,6 +1929,7 @@ async fn a_presence_edge_refreshes_the_tun_mss_ceiling_without_being_asked() {
         .send(crate::transport::TransportPresence {
             transport_id: TransportId::new(1),
             present: true,
+            health_relevant: true,
         })
         .await
         .expect("presence edge queued");

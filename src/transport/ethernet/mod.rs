@@ -30,7 +30,9 @@ use super::{
     TransportId, TransportPresence, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
-use io::{AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket, interface_present};
+use io::{
+    AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket, interface_present, interface_present_probe,
+};
 use neighbor::{FRAME_TYPE_BEACON, FRAME_TYPE_DATA, NeighborBuffer, build_beacon, parse_beacon};
 use presence::{ABSENCE_ERROR_AFTER, ChurnGuard, PresenceState, bind_backoff};
 use stats::EthernetStats;
@@ -369,6 +371,10 @@ impl EthernetTransport {
         // previous run before the binder can observe it.
         self.shutdown.store(false, Ordering::SeqCst);
 
+        // The bring-up window is measured from here, not from whenever this
+        // object happened to be constructed.
+        self.presence.mark_starting();
+
         let ctx = Arc::new(BinderContext {
             shutdown: self.shutdown.clone(),
             transport_id: self.transport_id,
@@ -388,14 +394,22 @@ impl EthernetTransport {
         // First attempt inline, so the common case (interface already there)
         // keeps its ordering: the transport is bound and logged before
         // `start_async` returns, exactly as before this mechanism existed.
+        // An edge the channel refused here is handed to the binder to retry,
+        // rather than dropped: it is the only edge either consumer will ever
+        // see for this transport until the interface next changes state.
+        let mut initial_unpublished: Option<bool> = None;
         match bind_and_spawn(&ctx).await {
             Ok(()) => {
-                publish_presence(&ctx, true);
+                if !publish_presence(&ctx, true) {
+                    initial_unpublished = Some(true);
+                }
             }
             Err(TransportError::InterfaceUnavailable { .. }) => {
                 // Absence is a state, not a start failure. Come up and wait.
                 log_initial_absence(&ctx);
-                publish_presence(&ctx, false);
+                if !publish_presence(&ctx, false) {
+                    initial_unpublished = Some(false);
+                }
             }
             // Anything else — no CAP_NET_RAW, no free BPF device, a buffer
             // the kernel refused — is a fault, not a state, and it will not
@@ -411,7 +425,7 @@ impl EthernetTransport {
 
         let watcher_ctx = ctx.clone();
         self.binder_task = Some(tokio::spawn(async move {
-            binder_loop(watcher_ctx).await;
+            binder_loop(watcher_ctx, initial_unpublished).await;
         }));
 
         self.state = TransportState::Up;
@@ -441,8 +455,20 @@ impl EthernetTransport {
         // aborted tasks are deliberately not awaited: on a current_thread
         // runtime an aborted task cannot be polled while we are blocked on its
         // `JoinHandle`, which deadlocks.
+        let was_present = self.presence.is_present();
         self.binding.tear_down();
         self.presence.transition(Presence::Absent);
+
+        // Retract the edge the binder left standing. Every other transition
+        // pairs its edges; a transport stopped while `Present` would otherwise
+        // leave health reading `present: true` for a socket that is gone.
+        if was_present && let Some(tx) = &self.presence_tx {
+            let _ = tx.try_send(TransportPresence {
+                transport_id: self.transport_id,
+                present: false,
+                health_relevant: !self.policy.is_optional(),
+            });
+        }
 
         self.state = TransportState::Down;
 
@@ -805,20 +831,25 @@ fn log_initial_absence(ctx: &Arc<BinderContext>) {
 /// it carries. The caller retries a refused edge on its next tick, so a
 /// momentarily full channel costs latency rather than correctness.
 ///
-/// An `optional` interface publishes nothing, and reports success for it.
+/// An `optional` interface publishes its edge with `health_relevant: false`.
 /// That is the entire health half of the policy: absence of an interface
-/// whose absence is normal must not move the node off `Full`, and since
-/// nothing was ever published, its return has nothing to clear.
+/// whose absence is normal must not move the node off `Full`.
+///
+/// It is deliberately *not* silence. The edge still goes out, because the
+/// consumer derives two things from it and only one of them is about health:
+/// the node's egress MTU floor is a function of the bound set, and an
+/// `optional` interface binding or unbinding changes that set exactly as a
+/// `required` one does. Filtering the edge here — which is what this used to
+/// do — left the TUN MSS clamp stale for every `optional` transport, which on
+/// the shipped OpenWrt config is five of seven.
 fn publish_presence(ctx: &Arc<BinderContext>, present: bool) -> bool {
-    if ctx.policy.is_optional() {
-        return true;
-    }
     let Some(tx) = &ctx.presence_tx else {
         return true;
     };
     match tx.try_send(TransportPresence {
         transport_id: ctx.transport_id,
         present,
+        health_relevant: !ctx.policy.is_optional(),
     }) {
         Ok(()) => true,
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -837,7 +868,7 @@ fn publish_presence(ctx: &Arc<BinderContext>, present: bool) -> bool {
 /// fallback; on platforms with a link-event source the same loop is driven by
 /// events instead (see `docs`/the netlink watcher), and the interval below is
 /// what "immediate" degrades to without one.
-async fn binder_loop(ctx: Arc<BinderContext>) {
+async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>) {
     let watcher = LinkWatcher::new();
     let mut ticker = tokio::time::interval(WATCH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -857,10 +888,22 @@ async fn binder_loop(ctx: Arc<BinderContext>) {
     let mut absence_reported = false;
     // Damping for bindings that keep succeeding and then dying young.
     let mut churn = ChurnGuard::new();
+    // `start_async` binds inline and publishes that edge itself, outside this
+    // guard. Seed the guard from that bind, or the guard believes it has
+    // announced nothing: `detached` takes `announced` to decide whether an
+    // edge is owed, so the first detach after a clean start would retract
+    // nothing and health would keep reading `Full` for as long as the
+    // interface stayed away. `stabilized` cannot repair it either — it
+    // early-returns while `bound_at` is `None`, which it is for a bind this
+    // loop did not perform.
+    if ctx.presence.is_present() {
+        churn.bound(Instant::now());
+    }
     // A presence edge the channel refused, to retry on the next tick. Health
     // is a level, so only the most recent value matters — an older pending
-    // edge is superseded rather than queued.
-    let mut unpublished: Option<bool> = None;
+    // edge is superseded rather than queued. Seeded with the start edge if
+    // that one was refused.
+    let mut unpublished: Option<bool> = initial_unpublished;
     // When the presence probe last ran, for the coalescing floor.
     let mut last_probe = Instant::now();
 
@@ -890,7 +933,23 @@ async fn binder_loop(ctx: Arc<BinderContext>) {
         if ctx.presence.is_present() {
             // Detach is either the interface going away or the socket under it
             // dying while the name stays (a recreated veth, a reloaded phy).
-            let gone = !interface_present(&ctx.interface);
+            //
+            // A probe that could not run is not an interface that went away.
+            // Hold the binding and re-ask next tick, rather than tearing a
+            // working socket down because `getifaddrs` hit `ENOBUFS` or the
+            // process ran out of descriptors — the latter being a state the
+            // rebind could not recover from anyway.
+            let gone = match interface_present_probe(&ctx.interface) {
+                Some(present) => !present,
+                None => {
+                    debug!(
+                        transport_id = %ctx.transport_id,
+                        interface = %ctx.interface,
+                        "Interface presence probe failed; holding the binding"
+                    );
+                    false
+                }
+            };
             let replaced = !gone && ctx.binding.device_replaced(&ctx.interface);
             let dead = !ctx.binding.tasks_alive();
             if !gone && !replaced && !dead {
@@ -991,12 +1050,20 @@ async fn binder_loop(ctx: Arc<BinderContext>) {
             }
             Err(e) => {
                 // `bind_and_spawn` has already reverted presence to Absent.
-                let attempts = ctx.presence.record_attempt();
                 if matches!(e, TransportError::InterfaceUnavailable { .. }) {
                     // Raced with a detach between the probe and the bind. No
                     // backoff and no log: the next tick re-probes.
+                    //
+                    // And no `record_attempt` either — the counter below gates
+                    // the only log a genuine bind fault ever gets, on
+                    // `attempts == 1`. Charging absence races to it means a
+                    // flap followed by a real fault (CAP_NET_RAW dropped, no
+                    // free BPF device) is never reported at all, and the
+                    // operator gets `report_sustained_absence`'s "still
+                    // missing" instead — for an interface that is present.
                     continue;
                 }
+                let attempts = ctx.presence.record_attempt();
                 if attempts == 1 {
                     error!(
                         transport_id = %ctx.transport_id,
@@ -1493,20 +1560,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_optional_interface_publishes_no_health_edge() {
+    async fn an_optional_interface_publishes_an_edge_that_does_not_move_health() {
         // `optional: true` is a statement about presence, and its whole health
         // effect is this: a dock adapter that is not plugged in must not make
         // the node report Degraded.
+        //
+        // It is not a statement about the *edge*. The edge still goes out,
+        // carrying `health_relevant: false`, because the consumer derives the
+        // node's egress MTU floor from the same channel and an optional
+        // interface changes the bound set exactly as a required one does.
+        // Suppressing the edge here — which is what this used to do — left the
+        // TUN MSS clamp stale for every optional transport.
         let (mut eth, _rx) = absent_transport(true);
         let (tx, mut presence_rx) = tokio::sync::mpsc::channel(4);
         eth.set_presence_tx(tx);
 
         eth.start_async().await.expect("start");
 
+        let edge = presence_rx
+            .try_recv()
+            .expect("an optional interface still publishes its edge");
+        assert_eq!(edge.transport_id, TransportId::new(1));
+        assert!(!edge.present);
         assert!(
-            presence_rx.try_recv().is_err(),
+            !edge.health_relevant,
             "an optional interface must not report absence to node health"
         );
+
+        eth.stop_async().await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn a_required_interface_publishes_an_edge_that_moves_health() {
+        // The other half of the policy, pinned alongside it so the pair cannot
+        // drift into agreeing.
+        let (mut eth, _rx) = absent_transport(false);
+        let (tx, mut presence_rx) = tokio::sync::mpsc::channel(4);
+        eth.set_presence_tx(tx);
+
+        eth.start_async().await.expect("start");
+
+        let edge = presence_rx
+            .try_recv()
+            .expect("an absence edge is published");
+        assert!(!edge.present);
+        assert!(edge.health_relevant);
 
         eth.stop_async().await.expect("stop");
     }
@@ -1887,6 +1985,7 @@ mod tests {
         tx.try_send(TransportPresence {
             transport_id: TransportId::new(1),
             present: true,
+            health_relevant: true,
         })
         .expect("first slot");
 

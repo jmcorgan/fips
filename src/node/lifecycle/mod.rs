@@ -2290,6 +2290,11 @@ impl Node {
         let mut published = None;
         let saw_edge = !edges.is_empty();
         for edge in edges {
+            // Health is policy-filtered; the MTU refresh below is not. See
+            // `saw_edge`.
+            if !edge.health_relevant {
+                continue;
+            }
             let child = Child::Transport(edge.transport_id);
             let event = if edge.present {
                 Event::ChildPresent { child }

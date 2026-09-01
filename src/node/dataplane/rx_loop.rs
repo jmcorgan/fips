@@ -359,20 +359,27 @@ impl Node {
                 // latch.
                 maybe_presence = presence_rx.recv() => {
                     if let Some(edge) = maybe_presence {
-                        let child = crate::node::lifecycle::supervisor::Child::Transport(
-                            edge.transport_id,
-                        );
-                        let event = if edge.present {
-                            crate::node::lifecycle::supervisor::Event::ChildPresent { child }
-                        } else {
-                            crate::node::lifecycle::supervisor::Event::ChildAbsent { child }
-                        };
-                        let actions = self.supervisor.fsm.step(event);
-                        for action in actions {
-                            if let crate::node::lifecycle::supervisor::Action::PublishState(ns) =
-                                action
-                            {
-                                self.supervisor.state = ns;
+                        // Health is policy-filtered; the MTU floor below is
+                        // not. An `optional` interface's absence is normal and
+                        // must not move the node off `Full`, but it changes
+                        // the bound set all the same.
+                        if edge.health_relevant {
+                            let child = crate::node::lifecycle::supervisor::Child::Transport(
+                                edge.transport_id,
+                            );
+                            let event = if edge.present {
+                                crate::node::lifecycle::supervisor::Event::ChildPresent { child }
+                            } else {
+                                crate::node::lifecycle::supervisor::Event::ChildAbsent { child }
+                            };
+                            let actions = self.supervisor.fsm.step(event);
+                            for action in actions {
+                                if let crate::node::lifecycle::supervisor::Action::PublishState(
+                                    ns,
+                                ) = action
+                                {
+                                    self.supervisor.state = ns;
+                                }
                             }
                         }
                         // The bound set just changed, so the node's egress MTU
