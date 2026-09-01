@@ -1041,6 +1041,68 @@ impl Config {
 
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_ethernet_interfaces()?;
+        self.validate_rendezvous()
+    }
+
+    /// Reject interface names no kernel could ever hand back.
+    ///
+    /// The presence machine deliberately cannot tell a typo from an interface
+    /// that has not been created yet — both are simply absent, and waiting is
+    /// the right answer for the second. That is what makes this check worth
+    /// having: a name that is *impossible* is the one case still separable
+    /// from "not there yet", and without it a typo costs a permanently
+    /// `Degraded` node whose only symptom is an interface that never arrives.
+    ///
+    /// Syntax only. Whether a well-formed name exists is the binder's
+    /// question, asked once a second, forever.
+    fn validate_ethernet_interfaces(&self) -> Result<(), ConfigError> {
+        // Kernel limit: `IFNAMSIZ` is 16 including the terminating NUL, on
+        // both Linux and the BSDs.
+        const MAX_INTERFACE_NAME: usize = 15;
+
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+
+        for (name, cfg) in self.transports.ethernet.iter() {
+            let label = name.unwrap_or("ethernet");
+            let iface = cfg.interface.as_str();
+
+            if iface.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "transport `{label}` has an empty `interface`"
+                )));
+            }
+            if iface.len() > MAX_INTERFACE_NAME {
+                return Err(ConfigError::Validation(format!(
+                    "transport `{label}` interface `{iface}` is {} bytes; \
+                     the kernel limit is {MAX_INTERFACE_NAME}, so no such \
+                     interface can exist",
+                    iface.len()
+                )));
+            }
+            if iface.contains('/') || iface.chars().any(char::is_whitespace) {
+                return Err(ConfigError::Validation(format!(
+                    "transport `{label}` interface `{iface}` contains a \
+                     character no interface name may hold"
+                )));
+            }
+
+            // Two transports on one netdev means two sockets on the same
+            // device at the same ethertype, each receiving every frame the
+            // other does.
+            if let Some(prior) = seen.insert(iface, label) {
+                return Err(ConfigError::Validation(format!(
+                    "transports `{prior}` and `{label}` both bind interface \
+                     `{iface}`"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Cross-checks between transports, peers and the Nostr rendezvous.
+    fn validate_rendezvous(&self) -> Result<(), ConfigError> {
         let nostr = &self.node.rendezvous.nostr;
 
         let any_transport_advertises_on_nostr = self
