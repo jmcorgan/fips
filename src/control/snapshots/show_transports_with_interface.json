@@ -1,0 +1,36 @@
+{
+  "data": {
+    "transports": [
+      {
+        "interface": {
+          "binds": 0,
+          "carrier": false,
+          "failed_attempts": 0,
+          "name": "fips-absent-x0",
+          "policy": "required",
+          "presence": "absent",
+          "since_secs": "<redacted>"
+        },
+        "mtu": 1499,
+        "name": "lab",
+        "state": "up",
+        "stats": {
+          "beacons_dropped": 0,
+          "beacons_recv": 0,
+          "beacons_sent": 0,
+          "bytes_recv": 0,
+          "bytes_sent": 0,
+          "frames_recv": 0,
+          "frames_sent": 0,
+          "frames_too_long": 0,
+          "frames_too_short": 0,
+          "recv_errors": 0,
+          "send_errors": 0
+        },
+        "transport_id": 1,
+        "type": "ethernet"
+      }
+    ]
+  },
+  "status": "ok"
+}
