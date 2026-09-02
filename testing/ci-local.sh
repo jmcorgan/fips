@@ -30,7 +30,8 @@
 #   firewall, nat-cone, nat-symmetric,
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
-#   chaos-ethernet-only, chaos-tcp-mesh, chaos-congestion-stress,
+#   chaos-ethernet-only, chaos-ethernet-churn, chaos-tcp-mesh,
+#   chaos-congestion-stress,
 #   sidecar, dns-resolver, deb-install
 #
 # Opt-in (require --with-tor; depend on live Tor network):
@@ -149,6 +150,7 @@ CHAOS_SUITES=(
     "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
     "ethernet-mesh ethernet-mesh"
     "ethernet-only ethernet-only"
+    "ethernet-churn ethernet-churn"
     "tcp-mesh tcp-mesh"
     "congestion-stress congestion-stress"
 )

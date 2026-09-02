@@ -20,6 +20,7 @@ from .assertions import (
     evaluate_max_errors,
     evaluate_max_parent_switches,
     evaluate_min_parent_switches,
+    evaluate_min_traffic,
     evaluate_tree_parents,
 )
 from .compose import generate_compose
@@ -699,6 +700,7 @@ class SimRunner:
                 self.node_mgr.restore_all()
 
             # Collect iperf3 throughput results before containers stop
+            iperf_results: list[dict] = []
             if self.traffic_mgr:
                 iperf_results = self.traffic_mgr.collect_results()
                 if iperf_results:
@@ -757,6 +759,13 @@ class SimRunner:
             err_cfg = self.scenario.assertions.max_errors
             if err_cfg is not None:
                 outcome = evaluate_max_errors(err_cfg, result.errors)
+                self.assertion_outcomes.append(outcome)
+
+            # Traffic. Evaluated even when no session completed, because
+            # "nothing ran" is the failure this exists to catch.
+            traffic_cfg = self.scenario.assertions.min_traffic
+            if traffic_cfg is not None:
+                outcome = evaluate_min_traffic(traffic_cfg, iperf_results)
                 self.assertion_outcomes.append(outcome)
                 if outcome.passed:
                     log.info("%s", outcome.detail)
