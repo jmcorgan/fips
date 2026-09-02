@@ -23,6 +23,21 @@ enum TreeRow {
     },
 }
 
+/// Below this width the table drops its byte counters and keeps its
+/// identifying columns.
+///
+/// The full layout's fixed columns sum to 90, plus six single-column gaps —
+/// 96 against the ~77 usable inside an 80-column terminal's border and
+/// scrollbar. Ratatui resolves an over-subscribed layout by shrinking every
+/// column, so the overflow does not clip the rightmost column, it clips *all*
+/// of them: `mesh0 (optional)` becomes `mesh0 (optio`, losing the one marker
+/// on the row worth reading.
+const NARROW_TABLE_WIDTH: u16 = 100;
+
+/// Below this width the detail view stacks above/below the table instead of
+/// beside it.
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 110;
+
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let transports = get_transports(app);
     let links = get_links(app);
@@ -33,8 +48,18 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     update_selected_tree_item(app, &tree_rows);
 
     if app.detail_view.is_some() {
-        let chunks = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(area);
+        // Side by side only where the table half can still show its
+        // identifying columns. At 80 columns — the OpenWrt serial console, and
+        // the xterm/tmux default — a 40% split leaves the table 32 columns for
+        // a layout that needs 65 even in its narrow form, and ratatui resolves
+        // that by giving the trailing columns everything and rendering
+        // Transport, Instance, Bound-to and State at width zero. Stacking
+        // keeps both panes readable instead of keeping both unreadable.
+        let chunks = if area.width < SIDE_BY_SIDE_MIN_WIDTH {
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area)
+        } else {
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area)
+        };
 
         draw_table(frame, app, chunks[0], &transports, &links, &tree_rows);
         draw_detail(frame, app, chunks[1], &transports, &links, &tree_rows);
@@ -113,6 +138,19 @@ fn update_selected_tree_item(app: &mut App, tree_rows: &[TreeRow]) {
     };
 }
 
+/// Build a row, dropping the trailing byte counters in the narrow layout.
+///
+/// Both row shapes carry the same seven cells in the same order, so the
+/// narrow variant is the same list with its tail cut — keeping one place
+/// where the column count is decided, rather than two that must agree.
+fn table_row<'a>(cells: Vec<Cell<'a>>, narrow: bool) -> Row<'a> {
+    let mut cells = cells;
+    if narrow {
+        cells.truncate(5);
+    }
+    Row::new(cells)
+}
+
 fn draw_table(
     frame: &mut Frame,
     app: &mut App,
@@ -121,7 +159,12 @@ fn draw_table(
     links: &[serde_json::Value],
     tree_rows: &[TreeRow],
 ) {
-    let header = Row::new(vec![
+    // Tx/Rx are the first thing to go when width is short: they are the only
+    // columns whose absence costs nothing an operator is scanning this table
+    // to find, and the detail pane carries them in full.
+    let narrow = area.width < NARROW_TABLE_WIDTH;
+
+    let mut header_cells = vec![
         Cell::from("Transport / Link"),
         Cell::from("Instance"),
         Cell::from("Bound to"),
@@ -129,8 +172,11 @@ fn draw_table(
         Cell::from("Peer"),
         Cell::from("Tx"),
         Cell::from("Rx"),
-    ])
-    .style(
+    ];
+    if narrow {
+        header_cells.truncate(5);
+    }
+    let header = Row::new(header_cells).style(
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -260,15 +306,18 @@ fn draw_table(
                     (false, false) => name.to_string(),
                 };
 
-                Row::new(vec![
-                    Cell::from(label),
-                    Cell::from(instance),
-                    Cell::from(bound_to),
-                    Cell::from(Line::from(state.to_string()).alignment(Alignment::Right)),
-                    Cell::from(""),
-                    Cell::from(tx),
-                    Cell::from(rx),
-                ])
+                table_row(
+                    vec![
+                        Cell::from(label),
+                        Cell::from(instance),
+                        Cell::from(bound_to),
+                        Cell::from(Line::from(state.to_string()).alignment(Alignment::Right)),
+                        Cell::from(""),
+                        Cell::from(tx),
+                        Cell::from(rx),
+                    ],
+                    narrow,
+                )
                 .style(row_style)
             }
             TreeRow::Link { index, is_last } => {
@@ -301,25 +350,28 @@ fn draw_table(
                     .map(|p| helpers::str_field(&p, "display_name").to_string())
                     .unwrap_or_default();
 
-                Row::new(vec![
-                    Cell::from(Span::styled(
-                        label,
-                        Style::default().fg(if dir == "Outbound" {
-                            Color::Cyan
-                        } else {
-                            Color::Green
-                        }),
-                    )),
-                    // A link has no instance name of its own — it inherits its
-                    // parent transport's, shown one row up — and no absence
-                    // policy, which is a property of an interface.
-                    Cell::from(""),
-                    Cell::from(addr),
-                    Cell::from(Line::from(state.to_string()).alignment(Alignment::Right)),
-                    Cell::from(peer_name),
-                    Cell::from(""),
-                    Cell::from(""),
-                ])
+                table_row(
+                    vec![
+                        Cell::from(Span::styled(
+                            label,
+                            Style::default().fg(if dir == "Outbound" {
+                                Color::Cyan
+                            } else {
+                                Color::Green
+                            }),
+                        )),
+                        // A link has no instance name of its own — it inherits its
+                        // parent transport's, shown one row up — and no absence
+                        // policy, which is a property of an interface.
+                        Cell::from(""),
+                        Cell::from(addr),
+                        Cell::from(Line::from(state.to_string()).alignment(Alignment::Right)),
+                        Cell::from(peer_name),
+                        Cell::from(""),
+                        Cell::from(""),
+                    ],
+                    narrow,
+                )
             }
         })
         .collect();
@@ -344,7 +396,22 @@ fn draw_table(
     // `  └─ Out` — rather than for a full MAC, because the address moved to
     // `Bound to` where it belongs. `Bound to` is sized for a MAC (17), which
     // also covers every netdev name and socket address that shares it.
-    let widths = [
+    // Narrow: the same columns, sized down to what still reads. Instance keeps
+    // 18 because `mesh0 (optional)` is 16 and the marker is the point; `Bound
+    // to` keeps 17 because that is a full MAC.
+    let widths: &[Constraint] = if narrow {
+        &[
+            Constraint::Length(12), // Transport / Link
+            Constraint::Length(18), // Instance, plus "(optional)"
+            Constraint::Length(17), // Bound to: a full MAC
+            Constraint::Length(9),  // State, right-aligned
+            Constraint::Min(6),     // Peer — takes the slack
+        ]
+    } else {
+        &FULL_WIDTHS
+    };
+
+    const FULL_WIDTHS: [Constraint; 7] = [
         Constraint::Length(18), // Transport / Link
         Constraint::Length(20), // Instance, plus "(optional)" where it applies
         Constraint::Length(18), // Bound to: netdev, socket addr, onion, MAC
@@ -357,7 +424,7 @@ fn draw_table(
         Constraint::Length(7),  // Rx
     ];
 
-    let table = Table::new(rows, widths)
+    let table = Table::new(rows, widths.to_vec())
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
         .row_highlight_style(
