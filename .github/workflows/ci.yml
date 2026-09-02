@@ -327,6 +327,31 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # The Darwin half of the address-less presence contract. The Linux legs
+      # pin that `getifaddrs` reports an interface with no addresses as
+      # present, on both glibc and musl; without this the same claim on the
+      # BSD-derived implementation the macOS backend actually calls was
+      # untested, and the test skipped itself silently on this runner.
+      #
+      # `feth` is macOS's fake-Ethernet pseudo-interface. It is created
+      # address-less, and the check below fails the leg rather than testing the
+      # wrong thing if this runner hands it one anyway — the same shape as the
+      # Linux fixture step, which needs `addrgenmode none` for exactly that
+      # reason.
+      - name: Create an address-less interface for the presence probe
+        run: |
+          sudo ifconfig feth0 create
+          sudo ifconfig feth0 up
+          ifconfig feth0
+          if ifconfig feth0 | grep -qE "^[[:space:]]*inet6? "; then
+            echo "feth0 has an address; it cannot test the address-less case" >&2
+            exit 1
+          fi
+          echo "FIPS_TEST_ADDRLESS_IFACE=feth0" >> "$GITHUB_ENV"
+          # Declare that this runner has fixtures, so a test that depends on
+          # one fails when the fixture is missing instead of skipping silently.
+          echo "FIPS_TEST_REQUIRE_FIXTURES=1" >> "$GITHUB_ENV"
+
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 

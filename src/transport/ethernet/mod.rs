@@ -1899,15 +1899,28 @@ mod tests {
              the presence probe; if this fails on musl, every address-less \
              interface on OpenWrt is invisible to interface binding"
         );
-        // It has no carrier either — a dummy device is up but not running —
-        // which pins that presence and carrier really are separate reads.
-        // Asserted rather than discarded: if these two ever collapsed into the
-        // same read, a carrier-less bridge would report absent and the whole
-        // IFF_UP-not-IFF_RUNNING decision would be silently undone.
+        // Carrier is asserted rather than discarded, but the expected answer
+        // is `true`, not `false`: a Linux `dummy` brought up reports
+        // `UP,LOWER_UP`, so `IFF_RUNNING` is set and it has carrier. The
+        // comment this replaces claimed the opposite — "up but not running" —
+        // which is why the result was discarded rather than checked.
+        //
+        // So this fixture pins address-less *presence*, and cannot demonstrate
+        // the presence-vs-carrier split; an interface that is up with no
+        // carrier is a bridge with nothing plugged in, which no fixture here
+        // creates. `carrier_is_reported_separately_from_presence` pins that
+        // split from the other side, on a missing interface having neither.
+        //
+        // Linux only, because the expected answer is a property of the fixture
+        // device rather than of the code: a `dummy` that is up reports
+        // `IFF_RUNNING`, and macOS's `feth` has its own semantics that are not
+        // pinned here. What both platforms do assert is the part that matters
+        // — an interface with no addresses is still *present*.
+        #[cfg(target_os = "linux")]
         assert!(
-            !io::interface_carrier(&iface),
-            "{iface} is up with no carrier, so presence and carrier must \
-             disagree here — if they agree, they are the same read"
+            io::interface_carrier(&iface),
+            "a dummy interface that is up reports IFF_RUNNING; if this fails, \
+             the fixture is no longer a dummy and what it pins has changed"
         );
         // And it resolves to an index, which is what a bind would attach to.
         assert!(io::interface_index(&iface).is_some());
