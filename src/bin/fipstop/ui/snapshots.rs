@@ -1350,6 +1350,52 @@ fn transports_row_names_the_interface() {
     assert!(!testkit::contains_row(&buf, "absent"));
 }
 
+/// The narrow layout keeps the columns an operator is scanning for.
+///
+/// 80x24 is the OpenWrt serial console and the xterm/tmux default. The full
+/// layout's fixed columns sum to 96 against ~77 usable, and ratatui resolves
+/// an over-subscribed layout by shrinking *every* column — so the overflow
+/// does not clip the rightmost one, it clips all of them, and
+/// `mesh0 (optional)` became `mesh0 (optio`. The marker is the one thing on
+/// that row worth reading.
+///
+/// This is the gap that let the regression through: the test asserting the
+/// marker rendered at width 110, and the one rendering at 80 asserted only the
+/// netdev name.
+#[test]
+fn the_optional_marker_survives_an_80_column_terminal() {
+    let data = json!({
+        "transports": [{
+            "transport_id": 2,
+            "type": "ethernet",
+            "state": "up",
+            "mtu": 1499,
+            "name": "mesh0",
+            "interface": {
+                "name": "fips-mesh0",
+                "presence": "absent",
+                "carrier": false,
+                "policy": "optional",
+                "since_secs": 252,
+                "binds": 0,
+                "failed_attempts": 0
+            },
+            "stats": {}
+        }]
+    });
+    let mut app = app_with(Tab::Transports, data);
+    let buf = testkit::render(80, 20, |frame, area| {
+        super::transports::draw(frame, &mut app, area);
+    });
+
+    assert!(
+        testkit::contains_row(&buf, "mesh0 (optional)"),
+        "the policy marker must not be the thing that clips at 80 columns"
+    );
+    assert!(testkit::contains_row(&buf, "fips-mesh0"));
+    assert!(testkit::contains_row(&buf, "absent"));
+}
+
 /// An absent interface displaces the transport state in the State column, and
 /// its severity follows the absence policy.
 ///
