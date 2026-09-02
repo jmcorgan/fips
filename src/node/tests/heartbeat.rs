@@ -123,3 +123,74 @@ async fn heartbeat_unaffected_without_rekey() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+// ---------------------------------------------------------------------------
+// Reaping peers when their interface goes away
+//
+// The detach edge is both earlier and more certain than inactivity, so it is
+// the better trigger for withdrawing what the interface carried. These drive
+// the same real two-node peering the liveness tests use, because a peer only
+// reaches the established context the reap acts on by actually peering.
+// ---------------------------------------------------------------------------
+
+/// A peer reachable only through an interface that has gone is withdrawn on
+/// the detach edge, without waiting out `link_dead_timeout_secs`.
+///
+/// Note what is *not* set here: the link-dead timeout keeps its default, and
+/// no time is advanced. The peer is live by every liveness measure and is
+/// still withdrawn, because the transport under it is gone — which is the
+/// whole distinction this adds.
+#[tokio::test]
+async fn a_detached_transport_withdraws_the_peers_that_needed_it() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+
+    let addr_1 = *nodes[1].node.node_addr();
+    let transport_id = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("peer present")
+        .transport_id()
+        .expect("an established peer names its transport");
+
+    let reaped = nodes[0].node.reap_peers_on_transport(transport_id).await;
+
+    assert_eq!(reaped, 1);
+    assert!(
+        nodes[0].node.get_peer(&addr_1).is_none(),
+        "a peer must not outlive the interface it was reachable through"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The reap is scoped to the transport that detached.
+///
+/// The failure this guards is the one that would make the feature worse than
+/// the defect: an interface going away must not withdraw the peers that were
+/// never reachable through it, which on a mesh router is most of them.
+#[tokio::test]
+async fn a_detached_transport_leaves_other_transports_peers_alone() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+
+    let addr_1 = *nodes[1].node.node_addr();
+    let peer_transport = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("peer present")
+        .transport_id()
+        .expect("an established peer names its transport");
+
+    // A transport this peer was never reachable through.
+    let unrelated = TransportId::new(peer_transport.as_u32() + 100);
+    let reaped = nodes[0].node.reap_peers_on_transport(unrelated).await;
+
+    assert_eq!(reaped, 0, "an unrelated transport withdraws nothing");
+    assert!(
+        nodes[0].node.get_peer(&addr_1).is_some(),
+        "a peer on a healthy transport must survive another one detaching"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}

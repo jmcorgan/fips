@@ -200,6 +200,21 @@ wait_for() {
     return 1
 }
 
+# Poll until the command prints a value no greater than `want`.
+wait_for_at_most() {
+    local timeout="$1" want="$2"; shift 2
+    local i got
+    for i in $(seq 1 "$timeout"); do
+        got="$("$@" || true)"
+        if [ -n "$got" ] && [ "$got" -le "$want" ] 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "  (last value: '${got:-}', wanted <= '$want')" >&2
+    return 1
+}
+
 # Poll until the command prints a value that is at least `want`.
 wait_for_at_least() {
     local timeout="$1" want="$2"; shift 2
@@ -387,6 +402,20 @@ else
     echo "   which is inside the deadline's reach)"
 fi
 
+# The peers that interface carried must go with it, and go *now*.
+#
+# `link_dead_timeout_secs` is at its 30 s default here, so a withdrawal inside
+# 15 s can only have come from the detach edge and not from the liveness
+# reaper. That gap is the whole point: until the edge drove the teardown, this
+# node kept the peer, kept selecting routes through it, and kept advertising
+# reachability it no longer had — dropping transit traffic in silence for the
+# whole timeout, with alternative paths sitting unused.
+if ! wait_for_at_most 15 0 peer_count "$NODE_A"; then
+    fail "(c) node-a kept a peer that was only reachable over the downed \
+interface; the detach edge did not withdraw it"
+fi
+pass "(c) the peers the interface carried were withdrawn on the detach edge"
+
 log "Bringing $LAB_IFACE back up on node-a"
 docker exec "$NODE_A" ip link set "$LAB_IFACE" up
 
@@ -400,6 +429,13 @@ if ! wait_for_at_least 45 2 iface_field "$NODE_A" lab binds; then
     fail "(c) the rebind was not counted"
 fi
 pass "(c) the interface flapped and the daemon followed it both ways"
+
+# And the withdrawal is not a one-way door: the peer comes back over the
+# rebound interface on its own, by beacon, with no operator action.
+if ! wait_for_at_least 60 1 peer_count "$NODE_A"; then
+    fail "(c) node-a did not re-peer after its interface came back"
+fi
+pass "(c) peering re-established over the rebound interface"
 
 # ── (d) destroy and recreate ─────────────────────────────────────────────
 #

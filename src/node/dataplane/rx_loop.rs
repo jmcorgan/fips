@@ -387,6 +387,28 @@ impl Node {
                         // binds can be the narrow one, and one that detaches
                         // can be the reason the clamp was tight.
                         self.refresh_tun_mss_ceiling();
+
+                        // A peer reachable only through an interface that has
+                        // gone is not reachable. Withdraw it now rather than
+                        // leaving the liveness reaper to notice up to
+                        // `link_dead_timeout_secs` later, during which this
+                        // node both drops transit traffic in silence and keeps
+                        // advertising reachability it does not have.
+                        //
+                        // Not policy-filtered: whether an interface's absence
+                        // is normal is a statement about node *health*, not
+                        // about whether the routes over it still work.
+                        if !edge.present {
+                            let reaped =
+                                self.reap_peers_on_transport(edge.transport_id).await;
+                            if reaped > 0 {
+                                info!(
+                                    transport_id = %edge.transport_id,
+                                    peers = reaped,
+                                    "Withdrew peers whose interface went away"
+                                );
+                            }
+                        }
                     }
                 }
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {

@@ -547,6 +547,65 @@ impl Node {
     /// `now_ms` is the sweep's hoisted wall-clock ms (the same value the old reap
     /// fed `note_link_dead`); it flows to the executor `ReportLost` arm via
     /// `ambient.now_ms`.
+    /// Reap every active peer reachable only through `transport_id`.
+    ///
+    /// Called on a transport's detach edge. Until this existed, losing an
+    /// interface withdrew nothing: the peers stayed in the registry, the
+    /// routes through them stayed selectable, and this node kept advertising
+    /// reachability it no longer had — so transit traffic was dropped in
+    /// silence, and other nodes kept routing toward us for those destinations,
+    /// until the liveness reaper noticed up to `link_dead_timeout_secs` later.
+    /// Measured on real hardware that was 27 seconds of routing through a link
+    /// that had already gone, with four alternative peers available the whole
+    /// time.
+    ///
+    /// The detach edge is both earlier and more certain than inactivity, so it
+    /// is the better trigger. This routes through the same
+    /// [`Self::route_link_dead`] the liveness reaper uses rather than
+    /// open-coding a second teardown — every consequence of losing a peer
+    /// (sessions, path MTU, session indices, the link, the control machine,
+    /// tree cleanup and re-announce, bloom withdrawal) already hangs off that
+    /// one path, and a parallel one would drift from it.
+    ///
+    /// Deliberately undamped. A flapping interface cannot drive a reap storm
+    /// through here, because `ChurnGuard` stops publishing presence edges
+    /// after three short-lived bindings and does not resume until one lasts —
+    /// so the edges this reacts to are already rate-limited at the source, and
+    /// a second damper here would only add a way for the two to disagree.
+    ///
+    /// Returns how many peers were reaped.
+    pub(in crate::node) async fn reap_peers_on_transport(
+        &mut self,
+        transport_id: TransportId,
+    ) -> usize {
+        let doomed: Vec<NodeAddr> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.transport_id() == Some(transport_id))
+            .map(|(node_addr, _)| *node_addr)
+            .collect();
+
+        if doomed.is_empty() {
+            return 0;
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let reaped = doomed.len();
+        for node_addr in doomed {
+            debug!(
+                peer = %self.peer_display_name(&node_addr),
+                %transport_id,
+                "Removing peer: its interface went away"
+            );
+            self.route_link_dead(node_addr, now_ms).await;
+        }
+        reaped
+    }
+
     async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
