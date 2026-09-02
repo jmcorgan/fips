@@ -2215,3 +2215,82 @@ async fn a_first_epoch_change_against_a_silent_peering_still_restarts_it() {
         "the replacement must carry the epoch the msg1 announced"
     );
 }
+
+/// A transient send failure during msg2 leaves the half-built link alone.
+///
+/// The interface under the transport is absent or mid-rebind, and the binder
+/// is already working to bring it back. Tearing the link down here meant the
+/// initiator's msg1 resend had nothing to land on, and — worse — recorded
+/// `HandshakeReject::BadState`, a counter whose whole meaning is "the remote
+/// sent something invalid". A local interface flap is not the remote's fault,
+/// and an operator reading that counter would conclude it was.
+///
+/// Nothing leaks by staying: an initiator that never resends leaves a stale
+/// connection, which `check_timeouts` reaps at `handshake_timeout_secs` like
+/// any other abandoned handshake.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
+    use crate::config::EthernetConfig;
+    use crate::proto::fmp::wire::build_msg1;
+    use crate::transport::TransportHandle;
+    use crate::transport::ethernet::EthernetTransport;
+
+    let mut node_b = make_node();
+    let node_a = make_node();
+    let transport_id = TransportId::new(1);
+    node_b.supervisor.state = NodeState::Running;
+
+    // An interface no host has, so every send off this transport reports
+    // `InterfaceUnavailable` — the real error, from the real code path,
+    // rather than a stub that merely returns something transient.
+    let config = EthernetConfig {
+        interface: "fips-absent-x0".to_string(),
+        ethertype: None,
+        mtu: None,
+        recv_buf_size: None,
+        send_buf_size: None,
+        listen: Some(true),
+        announce: Some(false),
+        auto_connect: None,
+        accept_connections: Some(true),
+        beacon_interval_secs: None,
+        optional: Some(true),
+    };
+    let (tx, _rx) = crate::transport::packet_channel(8);
+    let mut eth = EthernetTransport::new(transport_id, Some("lab".into()), config, tx);
+    eth.start_async()
+        .await
+        .expect("an absent interface is not a start failure");
+    node_b
+        .transports
+        .insert(transport_id, TransportHandle::Ethernet(eth));
+
+    let rejects_before = node_b.stats().handshake.snapshot().bad_state;
+
+    let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
+    let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
+    let noise_msg1 = conn_a
+        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+        .unwrap();
+    let wire_msg1 = build_msg1(SessionIndex::new(7), &noise_msg1);
+    let packet = ReceivedPacket::with_timestamp(
+        transport_id,
+        TransportAddr::from_string("aa:bb:cc:dd:ee:ff"),
+        wire_msg1,
+        1000,
+    );
+
+    node_b.handle_msg1(packet).await;
+
+    assert_eq!(
+        node_b.link_count(),
+        1,
+        "the link must survive a transport that is merely between interfaces"
+    );
+    assert_eq!(
+        node_b.stats().handshake.snapshot().bad_state,
+        rejects_before,
+        "a local interface flap must not be recorded as the peer's misbehaviour"
+    );
+}
