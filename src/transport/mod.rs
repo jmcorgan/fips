@@ -224,6 +224,49 @@ pub enum TransportError {
     Io(#[from] std::io::Error),
 }
 
+impl TransportError {
+    /// Whether this failure is expected to clear on its own.
+    ///
+    /// The distinction callers need is not *what* went wrong but whether
+    /// waiting fixes it. A transient failure means the operation was refused
+    /// by a condition the daemon is already working to resolve, so the state
+    /// built up around it — a half-finished handshake, a route, a queued
+    /// packet — is worth keeping. A terminal one means the state is worth
+    /// tearing down.
+    ///
+    /// This lives here, on the error, rather than being re-derived at each
+    /// call site: `InterfaceUnavailable` used to be flattened into a
+    /// formatted string on its way out of the transport layer, so every
+    /// caller downstream saw a generic send failure and could only treat a
+    /// two-second interface flap exactly as it treated a permanent fault.
+    ///
+    /// Deliberately narrow. [`Self::Timeout`] and [`Self::ConnectionRefused`]
+    /// are *not* transient here: they describe a remote that did not answer,
+    /// which is a statement about the peer rather than about this node's
+    /// ability to transmit, and the existing retry paths for them already sit
+    /// at a different layer.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            // The interface is absent or mid-rebind. The binder is polling for
+            // it and will bind it the moment it returns.
+            Self::InterfaceUnavailable { .. } => true,
+            Self::NotStarted
+            | Self::AlreadyStarted
+            | Self::StartFailed(_)
+            | Self::ShutdownFailed(_)
+            | Self::LinkFailed(_)
+            | Self::SendFailed(_)
+            | Self::RecvFailed(_)
+            | Self::InvalidAddress(_)
+            | Self::MtuExceeded { .. }
+            | Self::Timeout
+            | Self::ConnectionRefused
+            | Self::NotSupported(_)
+            | Self::Io(_) => false,
+        }
+    }
+}
+
 // ============================================================================
 // Transport Type Metadata
 // ============================================================================
@@ -1681,5 +1724,40 @@ mod tests {
         // as TransportHandle::mtu() for UDP (no per-link overrides)
         assert_eq!(handle.link_mtu(&addr), expected_mtu);
         assert_eq!(handle.link_mtu(&addr), handle.mtu());
+    }
+
+    #[test]
+    fn only_an_absent_interface_classifies_as_transient() {
+        // The whole point of the classification is that it is narrow. An
+        // interface the binder is already polling for will come back; nothing
+        // else on this list resolves itself by waiting, and treating one of
+        // them as transient would mean holding state open for a fault that is
+        // never going to clear.
+        assert!(
+            TransportError::InterfaceUnavailable {
+                interface: "eth0".into()
+            }
+            .is_transient()
+        );
+
+        for terminal in [
+            TransportError::NotStarted,
+            TransportError::AlreadyStarted,
+            TransportError::StartFailed("no CAP_NET_RAW".into()),
+            TransportError::SendFailed("ENOBUFS".into()),
+            TransportError::MtuExceeded {
+                packet_size: 2000,
+                mtu: 1500,
+            },
+            // Deliberately terminal: both describe a remote that did not
+            // answer, not this node's inability to transmit.
+            TransportError::Timeout,
+            TransportError::ConnectionRefused,
+        ] {
+            assert!(
+                !terminal.is_transient(),
+                "{terminal:?} must not be classified transient"
+            );
+        }
     }
 }

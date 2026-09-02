@@ -137,6 +137,17 @@ pub enum NodeError {
     #[error("send failed to {node_addr}: {reason}")]
     SendFailed { node_addr: NodeAddr, reason: String },
 
+    /// A send refused by a condition that is expected to clear on its own.
+    ///
+    /// Distinct from [`Self::SendFailed`] because the right response differs:
+    /// the state built around the send — a half-finished handshake, a route,
+    /// a queued packet — is worth keeping across a transient refusal and
+    /// worth tearing down after a terminal one. Carries the transport's own
+    /// classification ([`TransportError::is_transient`]) rather than a
+    /// re-derivation of it.
+    #[error("send to {node_addr} unavailable: {reason}")]
+    SendUnavailable { node_addr: NodeAddr, reason: String },
+
     #[error("mtu exceeded forwarding to {node_addr}: packet {packet_size} > mtu {mtu}")]
     MtuExceeded {
         node_addr: NodeAddr,
@@ -167,6 +178,32 @@ pub enum NodeError {
 
     #[error("node start failed: no operational transports")]
     NoOperationalTransports,
+}
+
+impl Node {
+    /// Test-only: place a transport into the node's map directly.
+    ///
+    /// The snapshot tests live in `crate::control` and so cannot reach the
+    /// private `transports` field, but the interface-presence block they need
+    /// to pin only exists on a real interface-bound transport. Mirrors
+    /// `isolate_peer_acl_for_test`: a narrow hook, so the fixture stays honest
+    /// rather than the snapshot being hand-authored JSON that nothing
+    /// produces.
+    #[cfg(test)]
+    pub(crate) fn insert_transport_for_test(&mut self, id: TransportId, handle: TransportHandle) {
+        self.transports.insert(id, handle);
+    }
+}
+
+impl NodeError {
+    /// Whether this failure is expected to clear on its own.
+    ///
+    /// Mirrors [`TransportError::is_transient`] across the node boundary, so
+    /// a caller holding a `NodeError` can ask the same question a caller
+    /// holding a `TransportError` can, and get the same answer.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::SendUnavailable { .. })
+    }
 }
 
 /// Node operational state.
@@ -3802,6 +3839,14 @@ impl Node {
                     node_addr: *node_addr,
                     packet_size,
                     mtu,
+                },
+                // Preserve the transport's own classification instead of
+                // flattening every non-MTU failure into one string. A caller
+                // that wants to keep its half-built state across an interface
+                // flap can only do that if the distinction survives to it.
+                other if other.is_transient() => NodeError::SendUnavailable {
+                    node_addr: *node_addr,
+                    reason: format!("transport send: {}", other),
                 },
                 other => NodeError::SendFailed {
                     node_addr: *node_addr,
