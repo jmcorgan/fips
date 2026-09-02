@@ -1651,10 +1651,13 @@ mod tests {
             io::interface_present(loopback),
             "loopback must be present for this test to mean anything"
         );
-        if PacketSocket::open(loopback, 0x2121).is_ok() {
-            // This host can open the socket, so there is no fault to observe.
-            return;
-        }
+        // Whether the socket opens splits the test into two halves, and both
+        // assert. Returning early on the privileged host — which is what this
+        // used to do — made the test vacuous as root and on any developer
+        // machine with a group-readable /dev/bpf*, so the fail-fast path it is
+        // named for went unchecked exactly where someone was most likely to be
+        // running it.
+        let can_open = PacketSocket::open(loopback, 0x2121).is_ok();
 
         let config = EthernetConfig {
             interface: loopback.to_string(),
@@ -1671,6 +1674,29 @@ mod tests {
         };
         let (tx, _rx) = super::super::packet_channel(8);
         let mut eth = EthernetTransport::new(TransportId::new(9), None, config, tx);
+
+        if can_open {
+            // The privileged half. A present, bindable interface binds inline
+            // and reports itself bound before `start_async` returns — which is
+            // the ordinary case on a booted router, and which no other unit
+            // test reaches: every other one here uses an interface that does
+            // not exist, so the bind-success path has no unit coverage at all
+            // without this branch.
+            eth.start_async()
+                .await
+                .expect("a present, bindable interface must start");
+            assert_eq!(
+                eth.presence(),
+                Presence::Present,
+                "a bind that succeeded must leave the transport present"
+            );
+            assert!(
+                eth.binding.socket().is_some(),
+                "a present transport must hold its socket"
+            );
+            eth.stop_async().await.expect("stop");
+            return;
+        }
 
         let err = eth
             .start_async()
@@ -1853,7 +1879,18 @@ mod tests {
     /// perfectly well-addressed interface without anyone noticing.
     #[test]
     fn an_interface_with_no_addresses_is_still_present() {
+        // A silent skip is how this test spent its life green without ever
+        // running: no fixture, early return, pass. It still has to skip on a
+        // developer machine that has no address-less interface, so the guard
+        // is the runner declaring that it *does* — if the fixture step is
+        // removed or renamed, this fails instead of quietly covering nothing.
         let Ok(iface) = std::env::var("FIPS_TEST_ADDRLESS_IFACE") else {
+            assert!(
+                std::env::var_os("FIPS_TEST_REQUIRE_FIXTURES").is_none(),
+                "this runner sets FIPS_TEST_REQUIRE_FIXTURES but not \
+                 FIPS_TEST_ADDRLESS_IFACE: the fixture step did not run, and \
+                 the musl/glibc getifaddrs contract this pins went unchecked"
+            );
             return;
         };
         assert!(
@@ -1864,7 +1901,14 @@ mod tests {
         );
         // It has no carrier either — a dummy device is up but not running —
         // which pins that presence and carrier really are separate reads.
-        let _ = io::interface_carrier(&iface);
+        // Asserted rather than discarded: if these two ever collapsed into the
+        // same read, a carrier-less bridge would report absent and the whole
+        // IFF_UP-not-IFF_RUNNING decision would be silently undone.
+        assert!(
+            !io::interface_carrier(&iface),
+            "{iface} is up with no carrier, so presence and carrier must \
+             disagree here — if they agree, they are the same read"
+        );
         // And it resolves to an index, which is what a bind would attach to.
         assert!(io::interface_index(&iface).is_some());
     }
@@ -1997,6 +2041,90 @@ mod tests {
              is named for and the comment above is stale"
         );
         assert!(eth.binding.socket().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_restarted_transport_starts_its_binder_again() {
+        // `start_async` clears the stop flag so a restart is not immediately
+        // undone by the previous run's shutdown. Nothing tested the second
+        // start at all: `the_binder_stops_with_the_transport` only asserts a
+        // second *stop* errors, so a transport that could never be restarted
+        // would have passed everything here.
+        let (mut eth, _rx) = absent_transport(false);
+
+        eth.start_async().await.expect("first start");
+        eth.stop_async().await.expect("stop");
+        assert!(eth.shutdown.load(Ordering::SeqCst), "stop raises the flag");
+
+        eth.start_async()
+            .await
+            .expect("a stopped transport restarts");
+        assert!(
+            !eth.shutdown.load(Ordering::SeqCst),
+            "the restart must clear the previous run's stop, or the new binder \
+             tears its own binding down on its first pass"
+        );
+        assert_eq!(eth.state(), TransportState::Up);
+
+        eth.stop_async().await.expect("stop again");
+    }
+
+    #[tokio::test]
+    async fn the_absence_deadline_is_measured_from_the_start() {
+        // `PresenceState::new` stamps the episode clock at construction, but
+        // construction and `start_async` need not be adjacent — config load and
+        // supervisor staging sit between them. Without the restamp a transport
+        // staged for longer than the window reports sustained absence on its
+        // very first binder tick, having given the interface no bring-up window
+        // at all, which is the one thing the window exists to provide.
+        let (mut eth, _rx) = absent_transport(false);
+
+        // Stand in for a slow bring-up by ageing the clock past the deadline.
+        std::thread::sleep(Duration::from_millis(20));
+        let staged_for = eth.presence.since();
+
+        eth.start_async().await.expect("start");
+        assert!(
+            eth.presence.since() < staged_for,
+            "the episode clock must restart at start, not run from whenever \
+             the object happened to be constructed"
+        );
+
+        eth.stop_async().await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn a_refused_presence_edge_is_delivered_once_there_is_room() {
+        // The retry slot, which nothing followed through. The existing test
+        // fills the channel and asserts the binder keeps running, then drops
+        // the receiver — so a slot that captured the edge and never re-sent it
+        // would pass, and health would sit on a stale level forever.
+        let (mut eth, _rx) = absent_transport(false);
+        let (tx, mut presence_rx) = tokio::sync::mpsc::channel(1);
+        eth.set_presence_tx(tx.clone());
+
+        // Occupy the only slot, so the start edge is refused on its way out.
+        tx.try_send(TransportPresence {
+            transport_id: TransportId::new(99),
+            present: true,
+            health_relevant: true,
+        })
+        .expect("the one slot");
+
+        eth.start_async().await.expect("start");
+
+        // Drain the squatter. The binder now has room on its next pass.
+        let squatter = presence_rx.recv().await.expect("squatter");
+        assert_eq!(squatter.transport_id, TransportId::new(99));
+
+        let edge = tokio::time::timeout(Duration::from_secs(5), presence_rx.recv())
+            .await
+            .expect("the refused edge must be retried, not dropped")
+            .expect("channel open");
+        assert_eq!(edge.transport_id, TransportId::new(1));
+        assert!(!edge.present, "the retried edge is the absence it refused");
+
+        eth.stop_async().await.expect("stop");
     }
 
     #[tokio::test]

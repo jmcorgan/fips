@@ -768,5 +768,72 @@ mod tests {
         assert!(AbsencePolicy::Optional.is_optional());
         assert!(!AbsencePolicy::Required.is_optional());
         assert_eq!(AbsencePolicy::Required.as_str(), "required");
+        // Both labels, not just one. `show_transports` renders this string and
+        // fipstop's severity split keys on it, so a swapped pair would paint
+        // every expected interface as the tolerated kind and vice versa —
+        // while a test that checks only `Required` stays green through it.
+        assert_eq!(AbsencePolicy::Optional.as_str(), "optional");
+    }
+
+    #[test]
+    fn a_first_bind_is_not_a_hardware_change() {
+        // The boundary the flush hangs off. `record_bind` returns "different
+        // hardware", and on the very first bind there is no previous MAC to
+        // differ from — so it must answer false, or every clean start would
+        // drop a neighbour cache it had just built and log a hardware swap
+        // that never happened.
+        let state = PresenceState::new();
+        assert!(
+            !state.record_bind([1, 2, 3, 4, 5, 6]),
+            "the first bind has nothing to differ from"
+        );
+        assert_eq!(state.binds(), 1);
+        assert_eq!(state.presence(), Presence::Present);
+    }
+
+    #[test]
+    fn a_rebind_on_new_hardware_reports_the_change_once() {
+        // And it reports the change once, not on every subsequent bind: the
+        // caller drops its cached neighbours on a `true`, so a sticky answer
+        // would flush the cache on every rebind forever.
+        let state = PresenceState::new();
+        state.record_bind([1, 2, 3, 4, 5, 6]);
+
+        assert!(
+            state.record_bind([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            "a name returning on a different MAC is different hardware"
+        );
+        assert!(
+            !state.record_bind([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            "the same hardware rebinding is not a change"
+        );
+        assert_eq!(state.binds(), 3);
+    }
+
+    #[test]
+    fn every_presence_label_is_distinct_and_round_trips() {
+        // The labels are the operator-facing vocabulary — `show_transports`
+        // emits them and the fipstop State column renders them — and
+        // `Presence::as_str` had no test at all, so `binding` in particular was
+        // never observed by anything.
+        use std::collections::HashSet;
+        let all = [Presence::Absent, Presence::Binding, Presence::Present];
+        let labels: HashSet<&str> = all.iter().map(|p| p.as_str()).collect();
+        assert_eq!(labels.len(), 3, "each phase needs its own label");
+        assert!(labels.contains("binding"));
+
+        for phase in all {
+            assert_eq!(
+                Presence::from_u8(phase.as_u8()),
+                phase,
+                "{phase} must survive the atomic round trip the state uses"
+            );
+            assert_eq!(phase.to_string(), phase.as_str(), "Display must agree");
+        }
+
+        // Anything outside the enum reads as absent rather than panicking: the
+        // byte comes out of an AtomicU8 that a torn write could leave at any
+        // value, and the safe answer there is "not bound".
+        assert_eq!(Presence::from_u8(99), Presence::Absent);
     }
 }
