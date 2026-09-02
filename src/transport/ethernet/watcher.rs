@@ -264,9 +264,34 @@ mod tests {
     #[tokio::test]
     async fn watcher_constructs_and_reports_its_backing() {
         let w = LinkWatcher::new();
-        // Both answers are legitimate — a sandbox may refuse the socket — so
-        // this pins that asking is safe, not which answer comes back.
-        let _ = w.is_event_driven();
+
+        // On Linux the source is a plain `AF_NETLINK` socket in the
+        // `RTNLGRP_LINK` group, which needs no capability and no privilege —
+        // so on this platform "a sandbox might refuse it" is not a licence to
+        // accept either answer. Discarding the result, which this test used
+        // to do, meant nothing anywhere asserted that the event path exists:
+        // the 1 s poll is a complete fallback, so the entire suite passed with
+        // the source unavailable and no test could tell.
+        #[cfg(target_os = "linux")]
+        assert!(
+            w.is_event_driven(),
+            "the netlink link-event source must open on Linux; \
+             falling back to the poll here is a silent loss of the fast path"
+        );
+
+        // Elsewhere both answers are legitimate, so pin only that asking is
+        // safe and that a watcher with no source parks rather than fires.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let backed = w.is_event_driven();
+            assert!(
+                backed
+                    || tokio::time::timeout(Duration::from_millis(50), w.changed())
+                        .await
+                        .is_err(),
+                "a watcher with no source must never resolve"
+            );
+        }
     }
 
     /// A descriptor whose `recv` always fails must not become a busy loop.

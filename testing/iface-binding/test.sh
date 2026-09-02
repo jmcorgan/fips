@@ -532,6 +532,72 @@ if ! wait_for 30 "running" node_state "$NODE_C"; then
 fi
 pass "(f) health clears again when the interface returns"
 
+# ── (g) the link-event fast path is actually the one in use ──────────────
+#
+# The whole suite would pass with `open_link_socket()` hardcoded to Err: the
+# 1 s poll is a complete fallback and covers every `wait_for` window here, so
+# nothing else asserts that the netlink path exists, let alone that it is what
+# detected anything. The binder says which backing it got at startup, so ask
+# it directly rather than inferring from timing that the poll would also
+# satisfy.
+# `log_count`, not `grep -q`: under `set -o pipefail` a `grep -q` that exits on
+# its first match closes the pipe, `docker logs` takes SIGPIPE, and the
+# pipeline reports failure even though the line was found. `grep -c` reads the
+# stream to the end.
+if [ "$(log_count "$NODE_A" "event_driven=true")" -eq 0 ]; then
+    docker logs "$NODE_A" 2>&1 | grep -i "binder started" >&2 || true
+    fail "(g) the binder fell back to polling; the netlink link-event source \
+did not open, and every timing assertion in this suite would still pass"
+fi
+pass "(g) detection is driven by netlink events, not by the poll fallback"
+
+# ── (h) churn damping engages on a genuinely flapping interface ──────────
+#
+# This is load-bearing twice over. It is what stops a flapping interface
+# logging a recovery per cycle, and — since the detach edge now withdraws the
+# peers that interface carried — it is also the only thing bounding how often
+# that withdrawal can fire. Nothing exercised it: every flap elsewhere in this
+# suite is a single down/up with long settles either side, which is precisely
+# the shape the damper ignores.
+#
+# Four bindings that each die well inside MIN_STABLE_BINDING (10 s). The
+# streak crosses CHURN_THRESHOLD (3) on the third, which is the edge that
+# announces itself.
+log "(h) flapping $LAB_IFACE to drive the churn guard"
+for _ in 1 2 3 4; do
+    docker exec "$NODE_A" ip link set "$LAB_IFACE" down
+    sleep 1
+    docker exec "$NODE_A" ip link set "$LAB_IFACE" up
+    sleep 2
+done
+
+if ! wait_for_at_least 30 1 log_count "$NODE_A" "keeps dying immediately after binding"; then
+    docker logs "$NODE_A" 2>&1 | grep -i "ethernet" | tail -20 >&2
+    fail "(h) four short-lived bindings did not engage the churn guard"
+fi
+pass "(h) a flapping interface engages churn damping"
+
+# Having engaged, the guard must hold health rather than announcing each bind.
+# The failure this catches is a damper that counts but does not damp.
+recoveries_during_churn="$(log_count "$NODE_A" "Ethernet interface recovered")"
+if [ "$recoveries_during_churn" -gt 6 ]; then
+    fail "(h) node-a announced $recoveries_during_churn recoveries; the guard \
+counted the churn but kept announcing through it"
+fi
+pass "(h) churn suppressed the per-cycle recovery announcements"
+
+# And it is not a latch: once a binding lasts, the interface is announced
+# again and the node returns to Running on its own.
+log "(h) letting $LAB_IFACE settle"
+docker exec "$NODE_A" ip link set "$LAB_IFACE" up >/dev/null 2>&1 || true
+if ! wait_for 60 "present" iface_field "$NODE_A" lab presence; then
+    fail "(h) node-a did not rebind after the flapping stopped"
+fi
+if ! wait_for 60 "running" node_state "$NODE_A"; then
+    fail "(h) node-a stayed Degraded after the flapping stopped"
+fi
+pass "(h) a settled interface is announced again after churn"
+
 # ── final log hygiene ────────────────────────────────────────────────────
 #
 # Four outages happened above (start, down, delete, and node-b's end of the

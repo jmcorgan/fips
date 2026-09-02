@@ -1735,8 +1735,18 @@ mod tests {
         assert!(panicked.is_err(), "the helper thread was supposed to panic");
         assert!(eth.binding.tasks.is_poisoned());
 
-        // Still answerable, and teardown still runs to completion.
-        let _ = eth.binding.tasks_alive();
+        // Still answerable, and — the part that matters — it answers the way
+        // that keeps the transport recoverable. Discarding this, which the
+        // test used to do, left the whole point unasserted: treating a
+        // poisoned lock as "tasks are alive" would make the binder believe a
+        // dead binding is healthy and never rebind it, and treating it as an
+        // error would strand the transport instead. `false` is what routes it
+        // back through detach and rebind.
+        assert!(
+            !eth.binding.tasks_alive(),
+            "a poisoned task lock must read as a dead binding, so the binder \
+             rebinds rather than either believing it healthy or giving up"
+        );
         eth.stop_async().await.expect("stop");
         assert_eq!(eth.state(), TransportState::Down);
     }
@@ -1964,9 +1974,27 @@ mod tests {
             local_pubkey: None,
             presence_tx: None,
         });
+        // Assert the *reason*, not merely that it errored. This transport's
+        // interface does not exist, so `bind_and_spawn` refuses at its
+        // presence probe — before it ever reaches the post-store shutdown
+        // check. Asserting `is_err()` alone therefore proved nothing about
+        // the stop flag: the assertion passed on absence, and would still
+        // pass with the shutdown check deleted outright.
+        //
+        // What is covered here is the observable half of the race — stop
+        // raises the flag before tearing down, and teardown leaves no socket
+        // and no loops. The post-store check itself needs a bind that
+        // *succeeds*, which needs a real bindable interface and the privilege
+        // to open a raw socket on it; that path is exercised only under the
+        // docker suite, and no unit test can reach it unprivileged.
+        let err = bind_and_spawn(&ctx)
+            .await
+            .expect_err("a bind must not complete for a stopped transport");
         assert!(
-            bind_and_spawn(&ctx).await.is_err(),
-            "a bind must not complete for a stopped transport"
+            matches!(err, TransportError::InterfaceUnavailable { .. }),
+            "expected the absence refusal, got {err:?} — if this ever becomes \
+             a shutdown refusal, this test has started covering the race it \
+             is named for and the comment above is stale"
         );
         assert!(eth.binding.socket().is_none());
     }
