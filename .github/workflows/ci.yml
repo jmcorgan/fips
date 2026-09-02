@@ -574,6 +574,9 @@ jobs:
           - suite: ethernet-only
             type: chaos
             scenario: ethernet-only
+          - suite: ethernet-churn
+            type: chaos
+            scenario: ethernet-churn
           - suite: tcp-mesh
             type: chaos
             scenario: tcp-mesh

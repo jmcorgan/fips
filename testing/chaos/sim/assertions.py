@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from .control import snapshot_all_bloom
 from .scenario import (
+    MinTrafficAssertion,
     BaselineAssertion,
     BloomSendRateAssertion,
     CongestionSignalsAssertion,
@@ -440,5 +441,63 @@ def evaluate_min_parent_switches(
             f"parent flapping; bloom-rate assertion would be trivially "
             f"true. Check tree-snapshot-warmup.json: did the expected "
             f"node win the root election?"
+        ),
+    )
+
+
+def _session_bytes(result: dict) -> int:
+    """Bytes actually received in one iperf3 session, or 0 if it failed.
+
+    iperf3 reports a failed run as a top-level ``error`` string with no
+    ``end`` block, and a killed-but-partial run still carries whatever it
+    managed. Both are handled by reading the received total and treating
+    anything missing as zero, so a session only counts when it moved bytes.
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return 0
+    end = result.get("end")
+    if not isinstance(end, dict):
+        return 0
+    summary = end.get("sum_received") or end.get("sum_sent")
+    if not isinstance(summary, dict):
+        return 0
+    value = summary.get("bytes", 0)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def evaluate_min_traffic(
+    cfg: MinTrafficAssertion,
+    results: list[dict],
+) -> AssertionOutcome:
+    """Floor on iperf3 sessions that actually carried data.
+
+    Without this the traffic generator is decoration: the results were
+    written to disk and never read, so a scenario whose every session
+    failed still passed on a healthy control plane. A rebind under load is
+    exactly the case a tree snapshot cannot see.
+    """
+    per_session = [_session_bytes(r) for r in results]
+    ok = [b for b in per_session if b > 0]
+    total = sum(ok)
+
+    if len(ok) >= cfg.min_sessions_ok and total >= cfg.min_bytes_total:
+        return AssertionOutcome(
+            name="min_traffic",
+            passed=True,
+            detail=(
+                f"PASS min_traffic: {len(ok)}/{len(results)} session(s) moved "
+                f"data (need {cfg.min_sessions_ok}); {total} byte(s) total "
+                f"(need {cfg.min_bytes_total})"
+            ),
+        )
+
+    return AssertionOutcome(
+        name="min_traffic",
+        passed=False,
+        detail=(
+            f"FAIL min_traffic: {len(ok)}/{len(results)} session(s) moved data "
+            f"(need {cfg.min_sessions_ok}); {total} byte(s) total (need "
+            f"{cfg.min_bytes_total}). A green control plane with no traffic "
+            f"means the data path did not survive what the scenario did to it."
         ),
     )
