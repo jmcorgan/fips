@@ -373,11 +373,26 @@ impl Node {
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        peer = %self.peer_display_name(node_addr),
-                        error = %e,
-                        "Failed to send rekey msg1"
-                    );
+                    // The teardown here is already benign — this returns before
+                    // `set_rekey_state`, so the cycle simply does not start and
+                    // is retried when rekey next comes due, with nothing torn
+                    // down and nothing charged to the peer. Only the severity
+                    // is wrong for a transport between interfaces, which is a
+                    // local and self-clearing condition the presence machine
+                    // has already reported.
+                    if e.is_transient() {
+                        debug!(
+                            peer = %self.peer_display_name(node_addr),
+                            error = %e,
+                            "Deferred rekey msg1: the transport is between interfaces"
+                        );
+                    } else {
+                        warn!(
+                            peer = %self.peer_display_name(node_addr),
+                            error = %e,
+                            "Failed to send rekey msg1"
+                        );
+                    }
                     let _ = self.index_allocator.free(our_index);
                     return;
                 }

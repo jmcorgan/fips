@@ -187,6 +187,31 @@ impl Node {
                             None => None,
                         };
                         if let Some(e) = send_err {
+                            // A transient refusal is not a failed handshake. The
+                            // interface under this transport is absent or
+                            // mid-rebind, and the binder is already working to
+                            // bring it back — so the half-built link is left
+                            // exactly as it is for the initiator's msg1 resend to
+                            // land on, rather than being torn down and rebuilt.
+                            //
+                            // Tearing down here charged a *local* interface flap
+                            // to the remote: the reject counter it recorded means
+                            // "the peer sent something invalid", which is a
+                            // different thing entirely and one an operator reads
+                            // as the peer's fault.
+                            //
+                            // Nothing leaks by staying. An initiator that never
+                            // resends leaves a stale connection, which
+                            // `check_timeouts` reaps at `handshake_timeout_secs`
+                            // exactly as it reaps every other abandoned handshake.
+                            if e.is_transient() {
+                                debug!(
+                                    link_id = %link,
+                                    error = %e,
+                                    "Deferred msg2: the transport is between interfaces"
+                                );
+                                return;
+                            }
                             // Restored pre-refactor msg2-send-failure warn!
                             // (`handle_msg1` L665): the send error text is surfaced
                             // at the executor point where the failure is now handled.
