@@ -2591,6 +2591,8 @@ mod tests {
         "idle_ms",
         "first_seen_secs_ago",
         "last_contact_secs_ago",
+        // Interface presence: elapsed since the current phase began.
+        "since_secs",
     ];
 
     /// Build a Node with a fixed identity, default config, and empty
@@ -2721,6 +2723,56 @@ mod tests {
     }
 
     // ---- 19 handler snapshot tests --------------------------------------
+
+    /// The `interface` block, which `build_test_node` cannot produce: it
+    /// keeps every transport list empty, so the nineteen snapshots above pin
+    /// `show_transports` only in its empty form. The block is emitted by two
+    /// hand-duplicated sites (the live handler and the read-handle variant)
+    /// that agree today with nothing enforcing it, and the control-socket
+    /// reference states the response schema is pinned by these snapshots.
+    ///
+    /// A separate node rather than a richer `build_test_node`, so the other
+    /// snapshots keep their empty-state determinism.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn snapshot_show_transports_with_interface() {
+        use crate::config::EthernetConfig;
+        use crate::transport::ethernet::EthernetTransport;
+        use crate::transport::{TransportHandle, TransportId};
+
+        let mut node = build_test_node();
+
+        // An interface no host has, so presence is deterministically absent
+        // and carrier deterministically false on every machine this runs on.
+        let config = EthernetConfig {
+            interface: "fips-absent-x0".to_string(),
+            ethertype: None,
+            mtu: None,
+            recv_buf_size: None,
+            send_buf_size: None,
+            listen: Some(true),
+            announce: Some(false),
+            auto_connect: None,
+            accept_connections: None,
+            beacon_interval_secs: None,
+            optional: Some(false),
+        };
+        let (tx, _rx) = crate::transport::packet_channel(8);
+        let mut eth = EthernetTransport::new(TransportId::new(1), Some("lab".into()), config, tx);
+
+        // Started, because "up with its interface absent" is the state an
+        // operator actually meets — and the one whose shape is new here.
+        eth.start_async()
+            .await
+            .expect("absence is not a start failure");
+
+        node.insert_transport_for_test(TransportId::new(1), TransportHandle::Ethernet(eth));
+
+        assert_snapshot(
+            "show_transports_with_interface",
+            &render(show_transports(&node)),
+        );
+    }
 
     #[test]
     fn snapshot_show_status() {
