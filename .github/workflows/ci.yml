@@ -303,6 +303,9 @@ jobs:
             exit 1
           fi
           echo "FIPS_TEST_ADDRLESS_IFACE=fips-probe0" >> "$GITHUB_ENV"
+          # Declare that this runner has fixtures, so a test that depends on
+          # one fails when the fixture is missing instead of skipping silently.
+          echo "FIPS_TEST_REQUIRE_FIXTURES=1" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -443,6 +446,9 @@ jobs:
             exit 1
           fi
           echo "FIPS_TEST_ADDRLESS_IFACE=fips-probe0" >> "$GITHUB_ENV"
+          # Declare that this runner has fixtures, so a test that depends on
+          # one fails when the fixture is missing instead of skipping silently.
+          echo "FIPS_TEST_REQUIRE_FIXTURES=1" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
