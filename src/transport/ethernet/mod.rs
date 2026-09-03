@@ -952,7 +952,8 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
             };
             let replaced = !gone && ctx.binding.device_replaced(&ctx.interface);
             let dead = !ctx.binding.tasks_alive();
-            if !gone && !replaced && !dead {
+            let detach = classify_detach(gone, replaced, dead);
+            if detach.is_none() {
                 // Still bound. A binding held back during a churn streak is
                 // announced here, once it has proved it will last.
                 if churn.stabilized(Instant::now()) {
@@ -974,13 +975,9 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
 
             let outcome = churn.detached(Instant::now());
             if outcome.log_edge {
-                let reason = if gone {
-                    "interface down"
-                } else if replaced {
-                    "interface replaced"
-                } else {
-                    "socket died"
-                };
+                let reason = detach
+                    .expect("classify_detach returned Some above")
+                    .as_str();
                 // `warn`, not `error`. A link coming and going is the weather
                 // in a mesh daemon, and a cable unplugged for two seconds does
                 // not need a human. If it stays away,
@@ -1075,6 +1072,71 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
                 tokio::time::sleep(bind_backoff(attempts)).await;
             }
         }
+    }
+}
+
+/// Why a bound interface stopped being usable.
+///
+/// The three probes the binder runs while `Present` are independent, and the
+/// operator-facing distinction between them is the whole diagnostic value of
+/// the detach line: "the cable is out" and "your netdev was recreated under
+/// you" want different responses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetachReason {
+    /// The name no longer resolves, or resolves to an interface that is down.
+    Gone,
+    /// The name still resolves, but to a *different device* than the one bound
+    /// — a recreated veth, a reloaded phy. The socket is attached to something
+    /// that no longer exists while the name looks fine.
+    Replaced,
+    /// The socket's loops have exited, so the descriptor under them is dead
+    /// even though the interface is present and unchanged.
+    SocketDied,
+}
+
+impl DetachReason {
+    /// The `reason=` field of the detach log line.
+    ///
+    /// These strings are load-bearing: `testing/iface-binding/test.sh` greps
+    /// them, and an operator greps them. Changing one is a change to an
+    /// interface, not a wording tweak.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Gone => "interface down",
+            Self::Replaced => "interface replaced",
+            Self::SocketDied => "socket died",
+        }
+    }
+}
+
+/// Classify a bound transport's liveness from the three probe answers, or
+/// `None` while it is still bound and healthy.
+///
+/// Extracted from the binder loop so the decision is testable without a
+/// privileged bind. Reaching `Replaced` or `SocketDied` in a live daemon
+/// requires a successful bind and then a specific external event — a netdev
+/// recreated under the same name, or five consecutive receive errors — which
+/// no unit test can arrange and which the integration suite cannot arrange
+/// deterministically either (the netlink event from a delete is acted on
+/// within microseconds, so `Gone` wins that race in practice). The inputs are
+/// each tested on their own; this makes the branch between them total and
+/// exhaustively tested, which is the half that was reachable.
+///
+/// Precedence is `Gone` before `Replaced` before `SocketDied`, and it matters:
+/// an interface that has gone away has also, trivially, been "replaced" and
+/// its socket is also dead, so the most specific true statement about *why*
+/// has to win. Callers pass `replaced` already masked by `!gone`, so the
+/// first arm is belt-and-braces rather than load-bearing — but a total
+/// function should not depend on its caller having masked correctly.
+fn classify_detach(gone: bool, replaced: bool, dead: bool) -> Option<DetachReason> {
+    if gone {
+        Some(DetachReason::Gone)
+    } else if replaced {
+        Some(DetachReason::Replaced)
+    } else if dead {
+        Some(DetachReason::SocketDied)
+    } else {
+        None
     }
 }
 
@@ -2054,6 +2116,143 @@ mod tests {
              is named for and the comment above is stale"
         );
         assert!(eth.binding.socket().is_none());
+    }
+
+    /// A stop that lands while a bind is in flight is cleaned up by the bind,
+    /// not left running.
+    ///
+    /// `bind_now` has no await points, so an abort issued while it runs takes
+    /// effect only afterwards — after the socket and tasks are stored. The
+    /// post-store check is what makes "teardown cleared an empty binding, then
+    /// the binder filled it" impossible to end in a live receive loop on a
+    /// socket nothing owns.
+    ///
+    /// This needs a bind that *succeeds*, which needs privilege, so it is the
+    /// one branch `a_stop_racing_a_bind_leaves_nothing_behind` cannot reach:
+    /// that test's interface does not exist, so `bind_and_spawn` refuses at the
+    /// presence probe long before this check.
+    #[tokio::test]
+    async fn a_bind_that_completes_after_a_stop_undoes_itself() {
+        let loopback = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+
+        if PacketSocket::open(loopback, 0x2121).is_err() {
+            // Unprivileged: no bind can succeed, so there is no post-store
+            // state to observe. Loud on a runner that claims otherwise, so
+            // this cannot go quiet the way the fixture tests did.
+            assert!(
+                std::env::var_os("FIPS_TEST_PRIVILEGED").is_none(),
+                "this runner declares FIPS_TEST_PRIVILEGED but cannot open a \
+                 raw socket on {loopback}: the post-store shutdown check went \
+                 unexercised"
+            );
+            return;
+        }
+
+        let (mut eth, _rx) = absent_transport(false);
+        eth.interface = loopback.to_string();
+        eth.shutdown.store(true, Ordering::SeqCst);
+
+        let ctx = Arc::new(BinderContext {
+            shutdown: Arc::clone(&eth.shutdown),
+            transport_id: eth.transport_id,
+            name: None,
+            interface: eth.interface.clone(),
+            config: eth.config.clone(),
+            policy: eth.policy,
+            packet_tx: eth.packet_tx.clone(),
+            neighbor_buffer: eth.neighbor_buffer.clone(),
+            stats: eth.stats.clone(),
+            binding: eth.binding.clone(),
+            presence: eth.presence.clone(),
+            local_pubkey: None,
+            presence_tx: None,
+        });
+
+        let err = bind_and_spawn(&ctx)
+            .await
+            .expect_err("a bind must not stand for a stopped transport");
+        assert!(
+            matches!(err, TransportError::NotStarted),
+            "expected the shutdown refusal, got {err:?}"
+        );
+        assert!(
+            eth.binding.socket().is_none(),
+            "the bind must undo its own socket when it loses the stop race"
+        );
+        assert!(
+            !eth.binding.tasks_alive(),
+            "and its own loops, or a receive task outlives the transport"
+        );
+        assert_eq!(eth.presence.presence(), Presence::Absent);
+    }
+
+    #[test]
+    fn every_detach_classification_is_total_and_ordered() {
+        // All eight probe combinations, because the branch between them was
+        // the untested part. `Replaced` and `SocketDied` are otherwise
+        // unreachable from a test: both need a bind that succeeded and then a
+        // specific external event, and the integration suite cannot arrange
+        // the recreate deterministically either — the netlink event from a
+        // delete is acted on within microseconds, so `Gone` wins that race.
+        use DetachReason::{Gone, Replaced, SocketDied};
+
+        // (gone, replaced, dead) -> expected
+        let cases = [
+            ((false, false, false), None),
+            ((false, false, true), Some(SocketDied)),
+            ((false, true, false), Some(Replaced)),
+            ((false, true, true), Some(Replaced)),
+            ((true, false, false), Some(Gone)),
+            ((true, false, true), Some(Gone)),
+            ((true, true, false), Some(Gone)),
+            ((true, true, true), Some(Gone)),
+        ];
+        for ((gone, replaced, dead), expected) in cases {
+            assert_eq!(
+                classify_detach(gone, replaced, dead),
+                expected,
+                "classify_detach({gone}, {replaced}, {dead})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_healthy_binding_is_the_only_unclassified_state() {
+        // The gate the loop actually uses: anything other than all-three-false
+        // is a detach. Stated separately from the table so a future fourth
+        // probe cannot be added and silently default to "still bound".
+        assert!(classify_detach(false, false, false).is_none());
+        for (gone, replaced, dead) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert!(
+                classify_detach(gone, replaced, dead).is_some(),
+                "a failing probe must detach"
+            );
+        }
+    }
+
+    #[test]
+    fn detach_reason_labels_are_the_ones_greppers_expect() {
+        // These strings are an interface. `testing/iface-binding/test.sh`
+        // greps `reason="interface replaced"`, and operators grep the others.
+        assert_eq!(DetachReason::Gone.as_str(), "interface down");
+        assert_eq!(DetachReason::Replaced.as_str(), "interface replaced");
+        assert_eq!(DetachReason::SocketDied.as_str(), "socket died");
+
+        // And they are distinct, or a grep cannot tell two causes apart.
+        let labels = std::collections::HashSet::from([
+            DetachReason::Gone.as_str(),
+            DetachReason::Replaced.as_str(),
+            DetachReason::SocketDied.as_str(),
+        ]);
+        assert_eq!(labels.len(), 3);
     }
 
     #[tokio::test]
