@@ -13,30 +13,29 @@
 //! for the interface, binds when it appears, tears down when it goes away, and
 //! rebinds when it returns. Start-time absence and runtime detach are the same
 //! transition, so a node that boots before wifi and a node whose wifi reloads
-//! at 03:00 take one code path. See [`presence`] for the state machine.
+//! at 03:00 take one code path. See [`crate::transport::presence`] for the
+//! state machine.
 
 pub mod addr;
 pub mod io;
 pub mod neighbor;
-pub mod presence;
 pub mod stats;
-mod watcher;
 
+pub use crate::transport::presence::{AbsencePolicy, Presence};
 pub use addr::parse_mac_string;
-pub use presence::{AbsencePolicy, Presence};
 
 use super::{
     DiscoveredPeer, PacketTx, PresenceTx, ReceivedPacket, Transport, TransportAddr, TransportError,
     TransportId, TransportPresence, TransportState, TransportType,
 };
 use crate::config::EthernetConfig;
+use crate::transport::presence::{ABSENCE_ERROR_AFTER, ChurnGuard, PresenceState, bind_backoff};
+use crate::transport::watcher::LinkWatcher;
 use io::{
     AsyncPacketSocket, ETHERNET_BROADCAST, PacketSocket, interface_present, interface_present_probe,
 };
 use neighbor::{FRAME_TYPE_BEACON, FRAME_TYPE_DATA, NeighborBuffer, build_beacon, parse_beacon};
-use presence::{ABSENCE_ERROR_AFTER, ChurnGuard, PresenceState, bind_backoff};
 use stats::EthernetStats;
-use watcher::LinkWatcher;
 
 use secp256k1::XOnlyPublicKey;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};

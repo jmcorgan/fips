@@ -20,6 +20,15 @@ pub mod ethernet;
 #[cfg(unix)]
 pub mod watcher;
 
+/// Presence lifecycle for a transport bound to a local resource that can
+/// disappear and come back: the phase machine, the absence policy, and the
+/// damping that keeps a flapping resource from flapping node health with it.
+///
+/// Transport-agnostic on purpose. Only the *probe* — "is my thing there, and
+/// is it still the same one?" — is specific to what is bound, and that stays
+/// with the transport that knows how to ask.
+pub mod presence;
+
 #[cfg(ble_available)]
 pub mod ble;
 
