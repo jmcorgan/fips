@@ -331,6 +331,35 @@ jobs:
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 
+      # The bind-success half. Every other unit-test leg runs unprivileged, so
+      # `PacketSocket::open` cannot succeed on any of them and everything past
+      # a successful bind — the post-store shutdown check, the `Present` arm of
+      # the binder loop, `bind_now` itself — runs nowhere in CI.
+      #
+      # Built as the runner user and only *executed* under sudo: `cargo` run as
+      # root would use root's CARGO_HOME and discard the cache this job just
+      # restored.
+      #
+      # `FIPS_TEST_PRIVILEGED` is what makes this leg honest. A test that needs
+      # a raw socket skips quietly without it; with it set, a test that cannot
+      # open one fails and says so, so a runner that stops granting the
+      # capability shows up as a red leg rather than as silence.
+      - name: Run interface-binding tests with privilege
+        run: |
+          cargo test --lib --no-run
+          BIN=$(cargo test --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact")
+                     | select(.executable != null)
+                     | select(.target.kind[0] == "lib")
+                     | .executable' \
+            | tail -1)
+          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+            echo "could not locate the lib test binary" >&2
+            exit 1
+          fi
+          echo "running $BIN as root"
+          sudo -E env FIPS_TEST_PRIVILEGED=1 "$BIN" transport::ethernet --test-threads=1
+
       - name: Publish test report (Checks tab)
         uses: dorny/test-reporter@4a2e97665d5fa767581ef38eca97b9694bd4eef4 # v2
         if: always()
