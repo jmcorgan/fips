@@ -918,9 +918,8 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
 
         // Coalesce wake-ups that arrive faster than the probe floor. The tick
         // never trips this; a firehose event source does.
-        let since_probe = last_probe.elapsed();
-        if since_probe < MIN_PROBE_INTERVAL {
-            tokio::time::sleep(MIN_PROBE_INTERVAL - since_probe).await;
+        if let Some(wait) = probe_delay(last_probe.elapsed()) {
+            tokio::time::sleep(wait).await;
         }
         last_probe = Instant::now();
 
@@ -1073,6 +1072,24 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
             }
         }
     }
+}
+
+/// How long to wait before the next presence probe, given how long ago the
+/// last one ran.
+///
+/// The floor exists for `PF_ROUTE`, which has no group filter and delivers
+/// every routing message on the host: without it a busy machine wakes the
+/// binder far faster than the interface can actually change, and each wake-up
+/// is a `getifaddrs` walk. It is a coalescing floor, not a delay — an isolated
+/// wake-up after a quiet period waits for nothing, which is what keeps
+/// event-driven detection sub-second.
+fn probe_delay(since_last_probe: Duration) -> Option<Duration> {
+    // `filter` rather than bare `checked_sub`: at exact equality the
+    // subtraction yields `Some(0)`, and the loop this replaced used a strict
+    // `<`, so a zero wait must be "no wait" and not a zero-length sleep.
+    MIN_PROBE_INTERVAL
+        .checked_sub(since_last_probe)
+        .filter(|remaining| !remaining.is_zero())
 }
 
 /// Why a bound interface stopped being usable.
@@ -2188,6 +2205,169 @@ mod tests {
             "and its own loops, or a receive task outlives the transport"
         );
         assert_eq!(eth.presence.presence(), Presence::Absent);
+    }
+
+    #[test]
+    fn the_probe_floor_coalesces_a_burst_but_never_delays_a_lone_wake_up() {
+        // The floor's whole job is `PF_ROUTE`, which has no group filter and
+        // delivers every routing message on the host. Only the *constants*
+        // were asserted before, which says nothing about the behaviour.
+        //
+        // A wake-up that arrives hard on the last probe waits out the
+        // remainder...
+        assert_eq!(
+            probe_delay(Duration::ZERO),
+            Some(MIN_PROBE_INTERVAL),
+            "a wake-up with no gap waits the whole floor"
+        );
+        let half = MIN_PROBE_INTERVAL / 2;
+        assert_eq!(
+            probe_delay(half),
+            Some(MIN_PROBE_INTERVAL - half),
+            "a wake-up mid-floor waits only the remainder"
+        );
+
+        // ...and one after a quiet period waits for nothing, which is what
+        // keeps event-driven detection sub-second rather than floor-limited.
+        assert_eq!(probe_delay(MIN_PROBE_INTERVAL), None);
+        assert_eq!(probe_delay(Duration::from_secs(3600)), None);
+    }
+
+    #[tokio::test]
+    async fn the_absence_deadline_fires_once_and_only_for_required() {
+        // `report_sustained_absence` decides whether an absence has outlasted
+        // the window in which it could still have been an ordinary bring-up
+        // race. Nothing tested it: the integration suite infers it from
+        // counting ERROR lines, and ten seconds of real time is how a deadline
+        // ends up asserted by proxy rather than directly.
+        for (optional, label) in [(false, "required"), (true, "optional")] {
+            let (eth, _rx) = absent_transport(optional);
+            let ctx = Arc::new(BinderContext {
+                shutdown: Arc::clone(&eth.shutdown),
+                transport_id: eth.transport_id,
+                name: None,
+                interface: eth.interface.clone(),
+                config: eth.config.clone(),
+                policy: eth.policy,
+                packet_tx: eth.packet_tx.clone(),
+                neighbor_buffer: eth.neighbor_buffer.clone(),
+                stats: eth.stats.clone(),
+                binding: eth.binding.clone(),
+                presence: eth.presence.clone(),
+                local_pubkey: None,
+                presence_tx: None,
+            });
+
+            // Inside the window: nothing to say yet, either way.
+            assert!(
+                !report_sustained_absence(&ctx),
+                "{label}: a fresh absence is still a bring-up race"
+            );
+
+            // Past it: both policies report handled, so the caller stops
+            // re-checking the clock for the rest of the episode. The
+            // difference is whether anything was said, not whether the
+            // deadline passed.
+            ctx.presence
+                .backdate_for_test(ABSENCE_ERROR_AFTER + Duration::from_secs(1));
+            assert!(
+                report_sustained_absence(&ctx),
+                "{label}: past the window the deadline is handled"
+            );
+        }
+    }
+
+    /// A netdev recreated under the same name produces the exact probe pair
+    /// that classifies as `Replaced` — present, but a different device.
+    ///
+    /// This is the `wifi reload` case from #125, and the one branch the
+    /// integration suite cannot reach: with link events live the kernel's
+    /// `RTM_DELLINK` is acted on within microseconds, so the binder observes
+    /// "gone" before the recreate lands and takes the branch already covered.
+    ///
+    /// Rather than race the binder, this asserts the *inputs* directly. Paired
+    /// with `every_detach_classification_is_total_and_ordered`, which pins that
+    /// `(gone: false, replaced: true)` maps to `Replaced`, the path is covered
+    /// end to end without depending on scheduling.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_netdev_recreated_under_its_name_reads_as_replaced() {
+        use std::process::Command;
+
+        let iface = "fips-swap0";
+        let peer = "fips-swap0p";
+        let ip = |args: &[&str]| {
+            Command::new("ip")
+                .args(args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        let make = || {
+            let _ = ip(&["link", "del", iface]);
+            ip(&["link", "add", iface, "type", "veth", "peer", "name", peer])
+                && ip(&["link", "set", iface, "up"])
+        };
+
+        if !make() {
+            assert!(
+                std::env::var_os("FIPS_TEST_PRIVILEGED").is_none(),
+                "this runner declares FIPS_TEST_PRIVILEGED but cannot create a \
+                 veth: the replaced-device path went unexercised"
+            );
+            return;
+        }
+
+        let config = EthernetConfig {
+            interface: iface.to_string(),
+            ethertype: None,
+            mtu: None,
+            recv_buf_size: None,
+            send_buf_size: None,
+            listen: Some(true),
+            announce: Some(false),
+            auto_connect: None,
+            accept_connections: None,
+            beacon_interval_secs: None,
+            optional: Some(true),
+        };
+        let (tx, _rx) = super::super::packet_channel(8);
+        let mut eth = EthernetTransport::new(TransportId::new(11), None, config, tx);
+
+        if eth.start_async().await.is_err() {
+            let _ = ip(&["link", "del", iface]);
+            assert!(
+                std::env::var_os("FIPS_TEST_PRIVILEGED").is_none(),
+                "this runner declares FIPS_TEST_PRIVILEGED but cannot bind a \
+                 raw socket to {iface}"
+            );
+            return;
+        }
+        assert_eq!(eth.presence(), Presence::Present, "the veth must bind");
+        assert!(!eth.binding.device_replaced(iface), "freshly bound");
+
+        // Swap the device: same name, new kernel index.
+        assert!(make(), "recreate the veth under the same name");
+
+        // The two probes that together mean `Replaced`.
+        assert!(
+            io::interface_present(iface),
+            "the name still resolves after the swap — that is what makes this \
+             different from `gone`"
+        );
+        assert!(
+            eth.binding.device_replaced(iface),
+            "the bound index must no longer match the name, or a recreated \
+             netdev leaves the socket attached to a device that is gone while \
+             the name looks fine"
+        );
+        assert_eq!(
+            classify_detach(false, true, eth.binding.tasks_alive()),
+            Some(DetachReason::Replaced)
+        );
+
+        eth.stop_async().await.expect("stop");
+        let _ = ip(&["link", "del", iface]);
     }
 
     #[test]

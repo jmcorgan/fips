@@ -210,6 +210,18 @@ impl PresenceState {
         *write(&self.since) = Instant::now();
     }
 
+    /// Test-only: age the episode clock, so deadline behaviour can be tested
+    /// without sleeping through it.
+    ///
+    /// `ABSENCE_ERROR_AFTER` is ten seconds. A test that waited it out would
+    /// be ten seconds of nothing, which is how deadline logic ends up
+    /// untested.
+    #[cfg(test)]
+    pub(crate) fn backdate_for_test(&self, by: Duration) {
+        let mut since = write(&self.since);
+        *since = since.checked_sub(by).unwrap_or(*since);
+    }
+
     /// Successful binds since creation (`1` after a clean start).
     pub fn binds(&self) -> u64 {
         self.binds.load(Ordering::Relaxed)
