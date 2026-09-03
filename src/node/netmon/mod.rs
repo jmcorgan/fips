@@ -23,11 +23,19 @@
 //!
 //! | Platform | Backend | Latency |
 //! |---|---|---|
-//! | Linux | `NETLINK_ROUTE` multicast, [`linux`] | kernel event, ~ms |
+//! | Linux | `NETLINK_ROUTE` multicast | kernel event, ~ms |
+//! | macOS, FreeBSD | `PF_ROUTE` socket | kernel event, ~ms |
 //! | everything else | timer, `node.netmon.poll_interval_secs` | up to one period |
 //!
-//! Still to come, each behind the same seam and none of them touching the
-//! handler: the `PF_ROUTE` socket on macOS and FreeBSD,
+//! Both kernel sources are [`crate::transport::watcher::LinkWatcher`], shared
+//! with the interface binder. It is asked for a wider set of netlink groups
+//! here than the binder asks for: presence is a link question, but a default
+//! route moving between two interfaces that both stay up emits nothing in the
+//! link group, so a presence subscription would never fire for the change this
+//! detector exists to catch. `PF_ROUTE` has no group selection and delivers
+//! everything regardless.
+//!
+//! Still to come, behind the same seam and without touching the handler:
 //! `NotifyIpInterfaceChange` on Windows, and an embedder push on Android and
 //! iOS (where netlink is blocked by SELinux policy). Every platform runs the
 //! timer regardless — as the only signal where there is no backend, and as a
@@ -66,6 +74,8 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
+#[cfg(unix)]
+use crate::transport::watcher::LinkWatcher;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
@@ -259,12 +269,8 @@ impl NetChange {
 /// settled-back-unchanged suppression are shared by all of them. No backend
 /// parses kernel messages or decides what a medium change is.
 struct WakeSource {
-    /// Kernel notifications from the event-driven backend. `None` on a platform
-    /// that has no backend, where one failed to start, or after one stopped.
-    ///
-    /// Single-slot upstream, so a burst of kernel notifications coalesces into
-    /// one wake-up rather than queueing a wake-up per message.
-    pings: Option<mpsc::Receiver<()>>,
+    /// What, besides the timer, can wake the detector.
+    source: Wake,
     /// The timer. Without a backend it is the only signal, and its period is
     /// the detection latency. With one it is a backstop, and not a
     /// belt-and-braces backstop: a netlink socket drops messages under memory
@@ -276,19 +282,50 @@ struct WakeSource {
     timer: tokio::time::Interval,
 }
 
+/// Where a wake-up can come from, besides the timer.
+enum Wake {
+    /// Nothing but the timer. The platform has no event source, or one could
+    /// not be opened.
+    Timer,
+    /// Kernel link and route events, via the shared [`LinkWatcher`].
+    ///
+    /// The watcher parks forever when it has no source and after it gives up
+    /// on a broken one, so selecting it against the timer degrades to the
+    /// timer without any bookkeeping here.
+    #[cfg(unix)]
+    Kernel(LinkWatcher),
+    /// An injected channel, so the tests can drive the detector on a paused
+    /// clock without a live network or a real interface to flap.
+    ///
+    /// Single-slot upstream, so a burst coalesces into one wake-up rather
+    /// than queueing a wake-up per message.
+    #[cfg(test)]
+    Injected(mpsc::Receiver<()>),
+}
+
 impl WakeSource {
     /// A wake source with no event-driven backend: the timer alone.
     fn timer_only(period: Duration) -> Self {
         Self {
-            pings: None,
+            source: Wake::Timer,
             timer: Self::make_timer(period),
         }
     }
 
-    /// A wake source driven by `pings`, with the timer as backstop.
+    /// A wake source driven by the kernel, with the timer as backstop.
+    #[cfg(unix)]
+    fn kernel(watcher: LinkWatcher, period: Duration) -> Self {
+        Self {
+            source: Wake::Kernel(watcher),
+            timer: Self::make_timer(period),
+        }
+    }
+
+    /// A wake source driven by an injected channel, with the timer as backstop.
+    #[cfg(test)]
     fn events(pings: mpsc::Receiver<()>, period: Duration) -> Self {
         Self {
-            pings: Some(pings),
+            source: Wake::Injected(pings),
             timer: Self::make_timer(period),
         }
     }
@@ -311,17 +348,29 @@ impl WakeSource {
 
     /// Wait until it is worth sampling again.
     async fn wait(&mut self) {
-        let WakeSource { pings, timer } = self;
+        let WakeSource { source, timer } = self;
+        // Only the injected source can stop: [`LinkWatcher`] parks forever
+        // once it gives up, so a kernel source that dies simply stops firing
+        // and the timer carries on underneath it with nothing to unwind here.
+        #[cfg(test)]
         let mut backend_gone = false;
 
-        match pings.as_mut() {
-            None => {
+        match source {
+            Wake::Timer => {
                 timer.tick().await;
             }
-            Some(pings) => {
+            #[cfg(unix)]
+            Wake::Kernel(watcher) => {
+                tokio::select! {
+                    _ = watcher.changed() => {}
+                    _ = timer.tick() => {}
+                }
+            }
+            #[cfg(test)]
+            Wake::Injected(pings) => {
                 tokio::select! {
                     ping = pings.recv() => {
-                        // A closed channel is the backend giving up. Sampling
+                        // A closed channel is the sender giving up. Sampling
                         // once more on the way past is deliberate: it may have
                         // died part-way through a change.
                         backend_gone = ping.is_none();
@@ -331,9 +380,10 @@ impl WakeSource {
             }
         }
 
+        #[cfg(test)]
         if backend_gone {
             warn!("Network-change backend stopped; falling back to polling");
-            self.pings = None;
+            self.source = Wake::Timer;
         }
     }
 }
@@ -369,21 +419,27 @@ pub(crate) fn spawn_detector(cfg: NetmonConfig) -> (NetChangeRx, JoinHandle<()>)
 fn build_wake_source(cfg: &NetmonConfig) -> WakeSource {
     let period = Duration::from_secs(cfg.poll_interval_secs.max(1));
 
-    #[cfg(target_os = "linux")]
-    match linux::spawn_netlink_backend() {
-        Ok(pings) => {
+    #[cfg(unix)]
+    {
+        // On Linux the mask matters: the default route moving between two
+        // interfaces that stay up emits nothing in the link group, so a
+        // presence watcher would never fire for the change this detector
+        // exists to catch. Elsewhere `PF_ROUTE` delivers every routing
+        // message regardless and the mask is ignored.
+        #[cfg(target_os = "linux")]
+        let watcher = LinkWatcher::with_groups(crate::transport::watcher::groups::EGRESS_PATH);
+        #[cfg(not(target_os = "linux"))]
+        let watcher = LinkWatcher::new();
+
+        if watcher.is_event_driven() {
             debug!(
                 backstop_secs = cfg.poll_interval_secs,
-                "Network-change detection: netlink"
+                "Network-change detection: kernel events"
             );
-            return WakeSource::events(pings, period);
+            return WakeSource::kernel(watcher, period);
         }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "Netlink medium-change detection unavailable; falling back to polling"
-            );
-        }
+
+        warn!("Kernel medium-change events unavailable; falling back to polling");
     }
 
     debug!(
@@ -577,10 +633,6 @@ fn sockaddr_ip(sa: *const libc::sockaddr) -> Option<IpAddr> {
         _ => None,
     }
 }
-
-/// Linux's event-driven backend: a netlink multicast socket.
-#[cfg(target_os = "linux")]
-mod linux;
 
 #[cfg(test)]
 mod tests;

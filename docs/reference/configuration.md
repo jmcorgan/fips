@@ -224,7 +224,8 @@ Detection uses the best backend the platform has:
 | Platform | Backend | Latency |
 |----------|---------|---------|
 | Linux | `NETLINK_ROUTE` multicast (as `ip monitor`) | kernel event, milliseconds |
-| macOS, FreeBSD, Windows, Android, iOS | timer | up to `poll_interval_secs` |
+| macOS, FreeBSD | `PF_ROUTE` socket | kernel event, milliseconds |
+| Windows, Android, iOS | timer | up to `poll_interval_secs` |
 
 Where a backend exists, `poll_interval_secs` is only a backstop: a netlink
 socket drops messages under memory pressure and the subscription can fail to

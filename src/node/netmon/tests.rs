@@ -307,57 +307,57 @@ async fn the_first_wait_is_a_real_wait() {
     );
 }
 
-// === Netlink backend ===
+// === Kernel event source ===
 
-/// The netlink subscription binds and starts on a normal Linux host.
+/// The watcher this detector builds opens on a normal Linux host.
 ///
-/// Everything most likely to be wrong is in that one call — the group
-/// constants, the multicast bind, the connection spawn — and none of it is
-/// exercised by the sampler-driven tests above. A sandbox that refuses the
-/// subscription is a legitimate outcome (it is why the fallback exists), so
-/// that case reports rather than fails.
+/// Distinct from the equivalent check in `transport::watcher`: that one pins
+/// the *link* mask, this one pins the wider mask netmon actually asks for. A
+/// group constant that was wrong only in the added bits would pass there and
+/// fail here. A sandbox that refuses the subscription is a legitimate outcome
+/// — it is why the fallback exists — so that case reports rather than fails.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn the_netlink_backend_starts_or_cleanly_declines() {
-    match super::linux::spawn_netlink_backend() {
-        Ok(pings) => {
-            assert!(
-                !pings.is_closed(),
-                "a started backend holds its sender open"
-            );
-        }
-        Err(e) => {
-            eprintln!("netlink unavailable in this environment ({e}); fallback path applies");
-        }
+async fn the_egress_path_watcher_starts_or_cleanly_declines() {
+    use crate::transport::watcher::{LinkWatcher, groups};
+
+    let watcher = LinkWatcher::with_groups(groups::EGRESS_PATH);
+    if !watcher.is_event_driven() {
+        eprintln!("kernel events unavailable in this environment; fallback path applies");
     }
 }
 
-/// The backend actually delivers: a real kernel link change produces a ping.
+/// A route change — with no link change alongside it — reaches the watcher.
+///
+/// This is the test that justifies the wider group mask, and the only one
+/// that can fail if the mask is narrowed back. `RTMGRP_LINK` alone sees
+/// nothing here: the interface does not appear, disappear or change state,
+/// and yet the host's egress path has moved, which is exactly the event this
+/// detector exists to catch. Every other test in this file drives the shared
+/// decision logic through an injected channel and would pass against a
+/// subscription that never fired for a route at all.
 ///
 /// Ignored because it needs `CAP_NET_ADMIN` in a private network namespace —
-/// it flaps an interface, which must not touch the developer's real network.
-/// Run it with:
+/// it edits a routing table, which must not touch the developer's real
+/// network. Run it with:
 ///
 /// ```text
 /// unshare -rn cargo test --lib netmon -- --ignored --nocapture
 /// ```
-///
-/// This is the only test that proves the group subscription is right. The
-/// sampler-driven tests above exercise the shared decision logic and would pass
-/// against a backend that never fired at all.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "needs CAP_NET_ADMIN in a private netns; run under `unshare -rn`"]
-async fn a_real_link_change_reaches_the_backend() {
+async fn a_route_change_alone_reaches_the_watcher() {
+    use crate::transport::watcher::{LinkWatcher, groups};
     use futures::TryStreamExt;
-
-    let mut pings = super::linux::spawn_netlink_backend().expect("netlink backend starts");
+    use std::net::Ipv4Addr;
 
     let (connection, handle, _) = rtnetlink::new_connection().expect("netlink connection");
     tokio::spawn(connection);
 
-    // `lo` is down in a fresh namespace, so bringing it up is a genuine link
-    // and address change — and it is the one interface that exists there.
+    // `lo` is down in a fresh namespace and a route needs a live interface,
+    // so bring it up first — before the watcher exists, so that this link
+    // change cannot be the thing the assertion below observes.
     let index = handle
         .link()
         .get()
@@ -369,18 +369,37 @@ async fn a_real_link_change_reaches_the_backend() {
         .expect("lo exists")
         .header
         .index;
-
     handle
         .link()
         .change(rtnetlink::LinkUnspec::new_with_index(index).up().build())
         .execute()
         .await
         .expect("bringing lo up needs CAP_NET_ADMIN in this namespace");
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    tokio::time::timeout(Duration::from_secs(5), pings.recv())
+    let watcher = LinkWatcher::with_groups(groups::EGRESS_PATH);
+    assert!(
+        watcher.is_event_driven(),
+        "this test cannot say anything without a live subscription"
+    );
+
+    // A route to TEST-NET-1 out of `lo`: no interface changes state, so the
+    // link group stays silent and only the route group can carry this.
+    handle
+        .route()
+        .add(
+            rtnetlink::RouteMessageBuilder::<Ipv4Addr>::new()
+                .destination_prefix(Ipv4Addr::new(192, 0, 2, 0), 24)
+                .output_interface(index)
+                .build(),
+        )
+        .execute()
         .await
-        .expect("the kernel change must reach the backend well inside 5s")
-        .expect("the backend must still be running");
+        .expect("adding a route needs CAP_NET_ADMIN in this namespace");
+
+    tokio::time::timeout(Duration::from_secs(5), watcher.changed())
+        .await
+        .expect("a route change must reach the watcher well inside 5s");
 }
 
 /// Reactions are paced. Dropping every peer's connected socket and heartbeating

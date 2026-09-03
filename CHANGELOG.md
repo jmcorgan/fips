@@ -81,16 +81,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address goes, briefly nothing has a route, the new one arrives), so a short
   debounce coalesces the burst into one event and a fingerprint that settles
   back where it started reports nothing. Linux subscribes to `NETLINK_ROUTE`
-  multicast (the groups `ip monitor` uses) and reacts to the kernel event in
-  milliseconds; every other platform samples on a timer at
-  `node.netmon.poll_interval_secs`, which also runs underneath netlink as a
-  backstop, since a netlink socket drops messages under memory pressure and the
-  subscription can be refused in a restricted sandbox. A backend only decides
-  *when to look* — the fingerprint comparison, the debounce and the
-  settled-back suppression are shared — so the remaining backends (the
-  `PF_ROUTE` socket on macOS and FreeBSD, `NotifyIpInterfaceChange` on Windows,
-  an embedder push on Android and iOS, where SELinux blocks netlink) land
-  behind the same seam without touching the reaction. What the node does with
+  multicast (the groups `ip monitor` uses) and macOS and FreeBSD to a
+  `PF_ROUTE` socket, both reacting to the kernel event in milliseconds; every
+  other platform samples on a timer at `node.netmon.poll_interval_secs`, which
+  also runs underneath the kernel sources as a backstop, since a netlink socket
+  drops messages under memory pressure and the subscription can be refused in a
+  restricted sandbox. A backend only decides *when to look* — the fingerprint
+  comparison, the debounce and the settled-back suppression are shared — so the
+  remaining backends (`NotifyIpInterfaceChange` on Windows, an embedder push on
+  Android and iOS, where SELinux blocks netlink) land behind the same seam
+  without touching the reaction. What the node does with
   the signal is the connected-socket rebind described under Fixed above.
   Bluetooth is not covered: an adapter's state is not an IP attachment and is
   invisible to this detector.
