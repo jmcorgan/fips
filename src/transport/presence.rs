@@ -27,7 +27,7 @@
 //! enabled it — and deliberately not `IFF_RUNNING`: binding needs no carrier,
 //! and a socket outlives a carrier flap. Carrier is reported alongside it
 //! rather than steering it. See
-//! [`interface_present`](super::io::interface_present) for why.
+//! the ethernet transport's `interface_present` for why.
 
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
