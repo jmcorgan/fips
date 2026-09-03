@@ -544,6 +544,14 @@ jobs:
           - suite: native-api
             type: native-api
 
+          # Moves a multi-homed node's default route between two live paths
+          # while mesh traffic is in flight, and asserts the peering survives
+          # without a re-handshake. Includes a negative control that requires
+          # the outage with detection disabled, so a topology that stops
+          # exercising the bug fails loudly instead of passing green. ~6-8 min.
+          - suite: medium-change
+            type: medium-change
+
           - suite: dns-resolver
             type: dns-resolver
 
@@ -763,6 +771,28 @@ jobs:
           docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
             docker rm -f "$c" >/dev/null 2>&1 || true
           done
+
+      # ── Transport-medium change ─────────────────────────────────────────
+      # Reads FIPS_TEST_IMAGE so it runs against the image this workflow
+      # built. Owns its own compose project and its own three bridges.
+      - name: Run medium-change test
+        if: matrix.type == 'medium-change'
+        timeout-minutes: 20
+        env:
+          FIPS_TEST_IMAGE: fips-test:latest
+        run: bash testing/medium-change/scripts/test.sh
+
+      - name: Collect logs on failure (medium-change)
+        if: matrix.type == 'medium-change' && failure()
+        run: |
+          docker compose -f testing/medium-change/docker-compose.yml \
+            logs --no-color || true
+
+      - name: Stop containers (medium-change)
+        if: matrix.type == 'medium-change' && always()
+        run: |
+          docker compose -f testing/medium-change/docker-compose.yml \
+            down --volumes --remove-orphans || true
 
       # ── Native datagram API ─────────────────────────────────────────────
       # Reads FIPS_TEST_IMAGE rather than defaulting to a name, so it runs
