@@ -15,6 +15,11 @@ pub mod udp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod ethernet;
 
+/// Kernel link-event notifications, shared by any transport or detector that
+/// needs to react to interface state without polling for it.
+#[cfg(unix)]
+pub mod watcher;
+
 #[cfg(ble_available)]
 pub mod ble;
 
