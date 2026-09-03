@@ -1267,10 +1267,9 @@ fn active_peer_same_path_discovery_skips_fresh_peer() {
     node.peers.insert(peer_node_addr, active_peer);
     let candidate = crate::config::PeerAddress::new("udp", "127.0.0.1:9");
 
-    assert!(node.active_peer_candidate_is_fresh_enough_to_skip(
-        &peer_node_addr,
-        std::slice::from_ref(&candidate),
-    ));
+    // Live link: discovery must not dial this peer at all.
+    assert!(node.active_peer_link_is_live(&peer_node_addr));
+    let _ = candidate;
 }
 
 #[test]
@@ -1293,10 +1292,11 @@ fn active_peer_same_path_discovery_refreshes_stale_peer() {
     node.peers.insert(peer_node_addr, active_peer);
     let candidate = crate::config::PeerAddress::new("udp", "127.0.0.1:9");
 
-    assert!(!node.active_peer_candidate_is_fresh_enough_to_skip(
-        &peer_node_addr,
-        std::slice::from_ref(&candidate),
-    ));
+    // Gone quiet past the heartbeat interval: every path is dialable again,
+    // which is what keeps failover working now that a live link is never
+    // displaced.
+    assert!(!node.active_peer_link_is_live(&peer_node_addr));
+    let _ = candidate;
 }
 
 /// An instance-qualified candidate is the peer's *current* path only when it
@@ -1338,12 +1338,11 @@ async fn an_instance_qualified_candidate_matches_only_its_own_instance() {
     active_peer.set_current_addr(main_id, TransportAddr::from_string("127.0.0.1:9"));
     node.peers.insert(peer_node_addr, active_peer);
 
+    // Path matching, which still gates the *configured-peer* refresh even
+    // though beacon discovery now gates on liveness alone.
     let matches = |transport: &str| {
         let candidate = crate::config::PeerAddress::new(transport, "127.0.0.1:9");
-        node.active_peer_candidate_is_fresh_enough_to_skip(
-            &peer_node_addr,
-            std::slice::from_ref(&candidate),
-        )
+        node.active_peer_matches_candidate(&peer_node_addr, &candidate)
     };
 
     assert!(

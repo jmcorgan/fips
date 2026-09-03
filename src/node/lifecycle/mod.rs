@@ -810,15 +810,37 @@ impl Node {
                 let connected = self.peers.contains_key(&node_addr);
 
                 if connected {
-                    // Active peer: skip a candidate whose path is already the
-                    // current, still-fresh one (avoid churning a healthy link).
-                    let transport_name = transport.transport_type().name;
-                    let peer_addr_candidate =
-                        PeerAddress::new(transport_name, remote_addr.to_string());
-                    if self.active_peer_candidate_is_fresh_enough_to_skip(
-                        &node_addr,
-                        std::slice::from_ref(&peer_addr_candidate),
-                    ) {
+                    // Active peer: skip every candidate while the link we
+                    // already hold is live — the current path *and* any
+                    // alternate one.
+                    //
+                    // Only the same-path case used to be skipped, which left
+                    // the stated intent ("avoid churning a healthy link")
+                    // covering exactly the case that could not churn anything.
+                    // A peer reachable twice — the ordinary result of two
+                    // machines sharing a LAN and a cable, since each beacons on
+                    // both — was therefore re-dialled on its alternate path
+                    // every discovery tick, forever. Each dial that completed
+                    // promoted and displaced the incumbent, so the peer's link
+                    // migrated back and forth on a fixed cadence, tearing down
+                    // and re-establishing its session each time. Measured on
+                    // real hardware: seventeen dials to one peer in fifteen
+                    // minutes, alternating wifi and cable, displacing a link
+                    // reporting `etx = 1.0` and `loss = 0.0`.
+                    //
+                    // When that peer is the parent — which the best path
+                    // usually is — every migration also switched parents,
+                    // invalidating the downstream coordinate cache and
+                    // re-announcing to every peer. The cost of the churn was
+                    // therefore mesh-wide while the benefit was nil: the link
+                    // being replaced was already perfect.
+                    //
+                    // Failover is unaffected. Liveness is the gate, so a peer
+                    // that stops answering goes stale within a heartbeat
+                    // interval and every path, alternate included, is dialled
+                    // again. What is given up is switching away from a link
+                    // that is working, which is not a thing worth doing.
+                    if self.active_peer_link_is_live(&node_addr) {
                         continue;
                     }
                     if self.is_connecting_to_peer_on_path(
@@ -3236,14 +3258,13 @@ impl Node {
         candidates
     }
 
-    pub(in crate::node) fn active_peer_candidate_is_fresh_enough_to_skip(
-        &self,
-        peer_node_addr: &NodeAddr,
-        candidates: &[PeerAddress],
-    ) -> bool {
-        if !self.active_peer_matches_any_candidate(peer_node_addr, candidates) {
-            return false;
-        }
+    /// Whether the link we already hold to this peer is answering.
+    ///
+    /// The gate on dialling an active peer at all. Phrased as liveness rather
+    /// than as a property of the candidate, because the candidate's path is
+    /// not the question: a live link should not be replaced by *any* path,
+    /// and a dead one should be replaced by whichever path answers.
+    pub(in crate::node) fn active_peer_link_is_live(&self, peer_node_addr: &NodeAddr) -> bool {
         !self.active_peer_needs_same_path_refresh(peer_node_addr)
     }
 
@@ -3260,17 +3281,7 @@ impl Node {
         peer.idle_time(Self::now_ms()) > stale_after_ms
     }
 
-    fn active_peer_matches_any_candidate(
-        &self,
-        peer_node_addr: &NodeAddr,
-        candidates: &[PeerAddress],
-    ) -> bool {
-        candidates
-            .iter()
-            .any(|candidate| self.active_peer_matches_candidate(peer_node_addr, candidate))
-    }
-
-    fn active_peer_matches_candidate(
+    pub(in crate::node) fn active_peer_matches_candidate(
         &self,
         peer_node_addr: &NodeAddr,
         candidate: &PeerAddress,
