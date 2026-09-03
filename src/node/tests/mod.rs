@@ -20,6 +20,7 @@ mod forwarding;
 mod handshake;
 mod heartbeat;
 mod mmp_chartests;
+mod netmon;
 mod probe;
 mod routing;
 mod session;

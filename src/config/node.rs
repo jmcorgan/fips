@@ -212,6 +212,70 @@ impl RetryConfig {
     }
 }
 
+/// Transport-medium change detection (`node.netmon.*`).
+///
+/// A node that moves between media (WLAN → LAN, WLAN → 5G) otherwise learns
+/// about it only as silence: peers sit in the table until
+/// `node.link_dead_timeout_secs` reaps them, and the reconnect then waits out
+/// whatever backoff the *old* medium accumulated. The detector turns that into
+/// an event; see [`crate::node::netmon`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetmonConfig {
+    /// Whether medium-change detection runs at all (`node.netmon.enabled`).
+    /// On by default: the node is strictly slower to recover without it.
+    #[serde(default = "NetmonConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// How often the host's network attachment is sampled, in seconds
+    /// (`node.netmon.poll_interval_secs`).
+    ///
+    /// On a platform with an event-driven backend (Linux, via netlink) changes
+    /// are acted on the moment the kernel reports them, and this is only the
+    /// backstop period — kept because a kernel event stream can drop messages
+    /// under memory pressure or stop altogether, and the node must not silently
+    /// revert to noticing nothing. Elsewhere it is the only signal, and so the
+    /// detection-latency floor. Not a correctness knob either way:
+    /// `link_dead_timeout_secs` remains the backstop behind it.
+    #[serde(default = "NetmonConfig::default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+
+    /// How long the detector waits for the picture to settle before reporting,
+    /// in milliseconds (`node.netmon.debounce_ms`). A handover is not atomic —
+    /// the old address goes, briefly nothing has a route, the new address
+    /// arrives — and acting mid-burst means acting on a state about to change
+    /// again. Zero disables the wait.
+    #[serde(default = "NetmonConfig::default_debounce_ms")]
+    pub debounce_ms: u64,
+}
+
+impl Default for NetmonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 5,
+            debounce_ms: 250,
+        }
+    }
+}
+
+impl NetmonConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_poll_interval_secs() -> u64 {
+        5
+    }
+    fn default_debounce_ms() -> u64 {
+        250
+    }
+
+    /// Whether this is the untouched default, so an absent `netmon:` block
+    /// stays absent on re-serialize.
+    pub(crate) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Cache parameters (`node.cache.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheConfig {
@@ -1332,6 +1396,15 @@ pub struct NodeConfig {
     #[serde(default)]
     pub rekey: RekeyConfig,
 
+    /// Transport-medium change detection (`node.netmon.*`).
+    ///
+    /// `skip_serializing_if` for the same reason `native_api` has it and
+    /// `drain_timeout_secs` is an `Option`: `NodeConfig` has no
+    /// `deny_unknown_fields`, so a plain `#[serde(default)]` add would write a
+    /// whole `netmon:` block into every deployed config on the next serialize.
+    #[serde(default, skip_serializing_if = "NetmonConfig::is_default")]
+    pub netmon: NetmonConfig,
+
     /// Log level (`node.log_level`). Case-insensitive.
     /// Valid values: trace, debug, info, warn, error. Default: info.
     #[serde(default)]
@@ -1365,6 +1438,7 @@ impl Default for NodeConfig {
             session_mmp: SessionMmpConfig::default(),
             ecn: EcnConfig::default(),
             rekey: RekeyConfig::default(),
+            netmon: NetmonConfig::default(),
             log_level: None,
         }
     }
