@@ -97,6 +97,18 @@ Checks the experimental native datagram API: a client process opens a
 flow to a remote pubkey over a Unix socket, receives a file descriptor,
 and exchanges datagrams on it with no TUN device and no IPv6 emulation.
 
+### [medium-change/](medium-change/) -- Transport-Medium Change
+
+A multi-homed node whose default route moves between two live access paths
+while mesh traffic is in flight, with the far peer reachable only through a
+router so the path to it actually follows that default route. Asserts the
+peering survives without a re-handshake (`link_id` and `authenticated_at_ms`
+unchanged) and that the far side re-pins to the new source address.
+
+Includes a negative control that runs the same move with
+`node.netmon.enabled: false` and requires the outage, so a topology that
+has stopped exercising the bug fails rather than passing quietly.
+
 ### [dns-resolver/](dns-resolver/) -- `fips-dns-setup` Backends
 
 Runs `fips-dns-setup` against each supported Linux resolver backend in

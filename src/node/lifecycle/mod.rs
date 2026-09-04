@@ -1937,6 +1937,20 @@ impl Node {
             });
         }
 
+        // Transport-medium change detection. Spawned after bring-up so its
+        // first sample sees the transports the node actually came up with, and
+        // outside the FSM's child set for the reason documented on
+        // `Supervisor::netmon_rx`: a detector that dies costs recovery latency,
+        // not health.
+        let netmon_cfg = self.config().node.netmon.clone();
+        if netmon_cfg.enabled {
+            let (rx, task) = crate::node::netmon::spawn_detector(netmon_cfg);
+            self.supervisor.netmon_rx = Some(rx);
+            self.supervisor.netmon_task = Some(task);
+        } else {
+            crate::node::handlers::netmon::warn_detection_disabled();
+        }
+
         info!("Node started:");
         info!("       state: {}", self.supervisor.state);
         info!("  transports: {}", self.transports.len());
@@ -2207,6 +2221,16 @@ impl Node {
             self.supervisor.packet_tx.take();
             self.packet_rx.take();
         }
+
+        // The medium-change detector is a bare task with no teardown protocol
+        // of its own: it holds no node state and owns nothing but a timer, so
+        // aborting it is the whole shutdown. Dropping the receiver would also
+        // end it at its next send, but only after one more poll interval, and a
+        // stopped node should not still be sampling the network.
+        if let Some(task) = self.supervisor.netmon_task.take() {
+            task.abort();
+        }
+        self.supervisor.netmon_rx.take();
     }
 
     /// Retract anything a child published about itself, after it exited on its

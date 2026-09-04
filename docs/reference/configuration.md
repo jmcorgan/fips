@@ -194,6 +194,49 @@ Auto-reconnect (triggered by MMP link-dead removal) uses the same backoff
 parameters but bypasses `max_retries`, retrying indefinitely. See
 `peers[].auto_reconnect` below.
 
+### Medium-Change Detection (`node.netmon.*`)
+
+Detects that the host moved between transport media — WLAN to LAN, WLAN to 5G,
+an interface arriving or leaving — and rebinds the send path immediately.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.netmon.enabled` | bool | `true` | Whether medium-change detection runs |
+| `node.netmon.poll_interval_secs` | u64 | `5` | How often the host's network attachment is sampled (backstop period where an event-driven backend exists) |
+| `node.netmon.debounce_ms` | u64 | `250` | How long to wait for the picture to settle before acting (`0` disables) |
+
+Established UDP peers use a per-peer `connect()`-ed socket for the send fast
+path. `connect(2)` makes the kernel resolve the route once and pin the local
+source address to whichever interface carried it then; it never re-evaluates.
+Without detection, a medium change therefore leaves every peer transmitting
+from an abandoned address while the peer answers where it last heard the node —
+the peering reports itself connected and carries nothing until
+`link_dead_timeout_secs` tears it down, typically 60–90s per switch.
+
+On a detected change the node drops those sockets (the wildcard listen socket
+resolves a route per packet, so sends keep working, and a correctly bound
+connected socket is reinstalled on a later tick) and heartbeats every peer at
+once so the far side re-pins to the new source address. No peering is torn
+down: sessions, tree positions and routes survive the switch.
+
+Detection uses the best backend the platform has:
+
+| Platform | Backend | Latency |
+|----------|---------|---------|
+| Linux | `NETLINK_ROUTE` multicast (as `ip monitor`) | kernel event, milliseconds |
+| macOS, FreeBSD | `PF_ROUTE` socket | kernel event, milliseconds |
+| Windows, Android, iOS | timer | up to `poll_interval_secs` |
+
+Where a backend exists, `poll_interval_secs` is only a backstop: a netlink
+socket drops messages under memory pressure and the subscription can fail to
+start in a restricted sandbox, so the timer keeps running underneath. A backend
+that cannot start is logged once at `warn` and the node falls back to the timer.
+
+None of this covers Bluetooth: a BLE adapter's state is not an IP attachment and
+is invisible to this detector. The connected-socket fast path is Linux and macOS
+only; elsewhere there are no pinned sockets to rebind, and the heartbeat alone
+carries the new address.
+
 ### Cache Parameters (`node.cache.*`)
 
 Controls caching of tree coordinates and identity mappings.
@@ -1113,6 +1156,10 @@ node:
     max_retries: 5
     base_interval_secs: 5
     max_backoff_secs: 300
+  netmon:
+    enabled: true
+    poll_interval_secs: 5
+    debounce_ms: 250
   cache:
     coord_size: 50000
     coord_ttl_secs: 300

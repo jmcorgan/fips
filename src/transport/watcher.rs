@@ -67,13 +67,42 @@ impl LinkEventSocket {
     }
 }
 
-/// Open the platform's link-event socket, non-blocking.
+/// Netlink multicast groups a watcher can subscribe to on Linux.
+///
+/// Spelled as literals because the constants' names and availability differ
+/// across libc versions; the values are ABI. These are the `RTMGRP_*` bitmask
+/// form taken by `sockaddr_nl.nl_groups`, not the `RTNLGRP_*` ordinals.
 #[cfg(target_os = "linux")]
-fn open_link_socket() -> std::io::Result<LinkEventSocket> {
-    // RTMGRP_LINK. Spelled as a literal because the constant's name and
-    // availability differ across libc versions; the value is ABI.
-    const RTMGRP_LINK: u32 = 1;
+pub mod groups {
+    /// Interfaces appearing, disappearing, or changing state.
+    pub const LINK: u32 = 0x1;
+    /// IPv4 addresses added to or removed from an interface.
+    pub const IPV4_IFADDR: u32 = 0x10;
+    /// IPv4 route table changes, including the default route moving.
+    pub const IPV4_ROUTE: u32 = 0x40;
+    /// IPv6 addresses added to or removed from an interface.
+    pub const IPV6_IFADDR: u32 = 0x100;
+    /// IPv6 route table changes.
+    pub const IPV6_ROUTE: u32 = 0x400;
 
+    /// Everything that can change which local address the host would use to
+    /// reach a given destination.
+    ///
+    /// [`LINK`] alone does not cover it. A default route moving between two
+    /// interfaces that both stay up emits no link message at all — verified
+    /// with `ip monitor`, which reports zero events in the link group for
+    /// that change and two in the route group. A watcher that wants to hear
+    /// about egress-path changes rather than interface presence needs this.
+    pub const EGRESS_PATH: u32 = LINK | IPV4_IFADDR | IPV4_ROUTE | IPV6_IFADDR | IPV6_ROUTE;
+}
+
+/// Open the platform's link-event socket, non-blocking.
+///
+/// `groups` is ignored off Linux: `PF_ROUTE` has no group selection and
+/// delivers every routing message to every reader, so a caller that wants
+/// more than link events already has them there.
+#[cfg(target_os = "linux")]
+fn open_link_socket(groups: u32) -> std::io::Result<LinkEventSocket> {
     let fd = unsafe {
         libc::socket(
             libc::AF_NETLINK,
@@ -88,7 +117,7 @@ fn open_link_socket() -> std::io::Result<LinkEventSocket> {
 
     let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     sa.nl_family = libc::AF_NETLINK as u16;
-    sa.nl_groups = RTMGRP_LINK;
+    sa.nl_groups = groups;
     let ret = unsafe {
         libc::bind(
             fd,
@@ -104,7 +133,7 @@ fn open_link_socket() -> std::io::Result<LinkEventSocket> {
 
 /// Open the platform's link-event socket, non-blocking.
 #[cfg(not(target_os = "linux"))]
-fn open_link_socket() -> std::io::Result<LinkEventSocket> {
+fn open_link_socket(_groups: u32) -> std::io::Result<LinkEventSocket> {
     // PF_ROUTE delivers RTM_IFINFO (and the rest of the routing messages) to
     // every reader; no bind and no group selection exist for it.
     let fd = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
@@ -148,9 +177,27 @@ impl Default for LinkWatcher {
 }
 
 impl LinkWatcher {
-    /// Open the platform link-event source, falling back to nothing.
+    /// Open a watcher for interface presence.
+    ///
+    /// Subscribes to link events only, which is what a caller asking "is this
+    /// interface here?" needs.
     pub fn new() -> Self {
-        let inner = match open_link_socket() {
+        #[cfg(target_os = "linux")]
+        let groups = groups::LINK;
+        #[cfg(not(target_os = "linux"))]
+        let groups = 0;
+        Self::with_groups(groups)
+    }
+
+    /// Open a watcher over an explicit set of netlink multicast groups.
+    ///
+    /// Only meaningful on Linux, where the group mask decides what the kernel
+    /// sends; elsewhere `PF_ROUTE` delivers everything regardless and the mask
+    /// is ignored. See [`groups`] for the values, and `groups::EGRESS_PATH`
+    /// for the set that covers a change of egress path rather than of
+    /// interface presence.
+    pub fn with_groups(groups: u32) -> Self {
+        let inner = match open_link_socket(groups) {
             Ok(socket) => match AsyncFd::new(socket) {
                 Ok(afd) => Some(afd),
                 Err(e) => {
@@ -305,6 +352,36 @@ mod tests {
                 "a watcher with no source must never resolve"
             );
         }
+    }
+
+    /// The wider egress-path mask must open too.
+    ///
+    /// Same no-privilege argument as the link group above: these are all
+    /// read-only `NETLINK_ROUTE` multicast groups. If this one cannot bind
+    /// while `new()` can, the mask is wrong rather than the environment
+    /// restricted — and the caller that needs it would silently fall back to
+    /// polling.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_egress_path_mask_opens_a_source() {
+        let w = LinkWatcher::with_groups(groups::EGRESS_PATH);
+        assert!(
+            w.is_event_driven(),
+            "the egress-path group mask must bind on Linux"
+        );
+    }
+
+    /// The mask actually reaches the socket.
+    ///
+    /// `EGRESS_PATH` is a superset of `LINK`, so a watcher built on it must
+    /// still be a watcher — this pins that widening the mask does not make
+    /// the bind fail in a way `is_event_driven` would report as a missing
+    /// source, which is how a wrong constant would present.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_egress_path_mask_is_a_superset_of_link() {
+        assert_eq!(groups::EGRESS_PATH & groups::LINK, groups::LINK);
+        assert_ne!(groups::EGRESS_PATH, groups::LINK);
     }
 
     /// A descriptor whose `recv` always fails must not become a busy loop.

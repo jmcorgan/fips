@@ -40,6 +40,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fipstop` as "Own Loopback". `req_duplicate` returns to meaning only what it
   says.
 
+#### Data plane
+
+- A per-peer `connect()`-ed UDP socket is no longer left pinned to an interface
+  the host has moved off. Established UDP peers get their own socket for the
+  send fast path; `open_connected_fd` binds the wildcard and then calls
+  `connect(2)`, which makes the kernel resolve the route once and auto-bind the
+  local source address to whichever interface was carrying it at that moment.
+  It never re-evaluates. So after the host changed transport medium — a laptop
+  moving between WLAN and LAN, a phone between Wi-Fi and cellular — every
+  established peer went on transmitting from an address the routing table had
+  abandoned, while the peer, which re-pins to whatever address it last heard
+  from, answered somewhere the node was no longer sending from. The peering
+  stayed marked connected and carried no traffic until the 30s liveness timeout
+  tore it down, roughly 60-90s of black-holed traffic per medium change,
+  followed by a full re-handshake and tree re-convergence. The mirror-image
+  case — the *peer* rotating its address — was already handled at the point the
+  rotation is observed; this is the local half, which had no signal to hang off
+  because a local move is invisible in the data plane. It now fires from the
+  medium-change detection added below, which is exactly that missing signal.
+  Dropping the sockets is self-healing rather than disruptive: the wildcard
+  listen socket resolves a route per packet, so sends keep working immediately,
+  and a correctly-bound connected socket is reinstalled on a later tick. Every
+  peer is also heartbeated at once, so the far side re-pins to the new source
+  address rather than waiting out its own heartbeat interval. Measured on a live
+  node, a WLAN/LAN switch in either direction now costs no reconnection at all —
+  the Noise session, tree position and routes survive it. Linux and macOS (the
+  platforms with the connected-socket fast path); elsewhere the heartbeat alone
+  carries the new address.
+
+### Added
+
+#### Node lifecycle
+
+- Transport-medium change detection, controlled by the new `node.netmon.*`
+  block (on by default). The node samples a coarse fingerprint of its network
+  attachment — the source addresses the routing table would pick for an off-link
+  destination, plus the set of up, non-loopback interface addresses — and
+  reports a change once the picture settles. A handover is not atomic (the old
+  address goes, briefly nothing has a route, the new one arrives), so a short
+  debounce coalesces the burst into one event and a fingerprint that settles
+  back where it started reports nothing. Linux subscribes to `NETLINK_ROUTE`
+  multicast (the groups `ip monitor` uses) and macOS and FreeBSD to a
+  `PF_ROUTE` socket, both reacting to the kernel event in milliseconds; every
+  other platform samples on a timer at `node.netmon.poll_interval_secs`, which
+  also runs underneath the kernel sources as a backstop, since a netlink socket
+  drops messages under memory pressure and the subscription can be refused in a
+  restricted sandbox. A backend only decides *when to look* — the fingerprint
+  comparison, the debounce and the settled-back suppression are shared — so the
+  remaining backends (`NotifyIpInterfaceChange` on Windows, an embedder push on
+  Android and iOS, where SELinux blocks netlink) land behind the same seam
+  without touching the reaction. What the node does with
+  the signal is the connected-socket rebind described under Fixed above.
+  Bluetooth is not covered: an adapter's state is not an IP attachment and is
+  invisible to this detector.
+
 ## [0.5.0] - 2026-08-30
 
 ### Added

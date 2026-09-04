@@ -17,6 +17,7 @@ pub(crate) mod encrypt_worker;
 mod handlers;
 mod lifecycle;
 pub(crate) mod metrics;
+pub(crate) mod netmon;
 mod peer_error_budget;
 mod peering;
 mod rate_limit;

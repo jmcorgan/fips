@@ -31,7 +31,7 @@
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-congestion-stress,
-#   sidecar, dns-resolver, deb-install
+#   sidecar, dns-resolver, deb-install, medium-change
 #
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
@@ -199,6 +199,7 @@ NOSTR_RELAY_SUITES=(nostr-publish-consume)
 STUN_FAULTS_SUITES=(stun-faults)
 DNS_RESOLVER_SUITES=(dns-resolver)
 NATIVE_API_SUITES=(native-api)
+MEDIUM_CHANGE_SUITES=(medium-change)
 DEB_INSTALL_SUITES=(deb-install)
 TOR_SUITES=(tor-socks5 tor-directory)
 
@@ -252,6 +253,9 @@ list_suites() {
     echo ""
     echo "  Native API:"
     for s in "${NATIVE_API_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Medium change:"
+    for s in "${MEDIUM_CHANGE_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  DNS resolver:"
     for s in "${DNS_RESOLVER_SUITES[@]}"; do echo "    $s"; done
@@ -988,6 +992,19 @@ run_native_api() {
     fi
 }
 
+# Run the transport-medium change suite.
+#
+# Owns its own compose project and its own three bridges, so it neither
+# shares container names with the NAT lab nor has to run after it.
+run_medium_change() {
+    info "[medium-change] Running transport-medium change test"
+    if FIPS_TEST_IMAGE="$CI_IMAGE_TEST" bash testing/medium-change/scripts/test.sh 2>&1; then
+        record "medium-change" 0
+    else
+        record "medium-change" 1
+    fi
+}
+
 # Run dns-resolver harness (multi-distro + e2e scenarios)
 run_dns_resolver() {
     info "[dns-resolver] Running multi-distro test (slow — builds per-distro images)"
@@ -1099,6 +1116,11 @@ run_integration() {
     # STUN fault-injection (sequential — shares the NAT compose project)
     for _suite in "${STUN_FAULTS_SUITES[@]}"; do
         run_stun_faults
+    done
+
+    # Transport-medium change (sequential — owns its own compose project)
+    for _suite in "${MEDIUM_CHANGE_SUITES[@]}"; do
+        run_medium_change
     done
 
     # Chaos scenarios (parallel, throttled)
@@ -1227,6 +1249,8 @@ run_suite() {
             run_dns_resolver ;;
         native-api)
             run_native_api ;;
+        medium-change)
+            run_medium_change ;;
         deb-install)
             run_deb_install ;;
         tor-socks5)
