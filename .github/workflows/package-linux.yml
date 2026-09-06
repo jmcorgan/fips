@@ -49,6 +49,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: determine-versioning
 
+    # Both legs build in the same pinned container. Nothing passes --platform,
+    # so the arm runner resolves the arm64 variant of the base image and builds
+    # natively; the floor check runs on that package too, so an aarch64 build
+    # above the floor fails the leg rather than shipping. What the runner
+    # supplies is Docker and the checkout -- neither leg compiles on the host.
     strategy:
       fail-fast: false
       matrix:
@@ -68,32 +73,76 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev llvm
+      # The host no longer compiles anything: the container carries the
+      # toolchain and the build dependencies. llvm is here only for llvm-strip,
+      # which build-tarball.sh uses on the binaries recovered from the package.
+      - name: Install host packaging tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends llvm
 
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-          rustflags: ''
+      # Build in the pinned container rather than on the runner. The runner's
+      # glibc is what put a GLIBC_2.39 requirement into every Linux artifact
+      # from v0.3.0 onward, so the package installed cleanly and then could not
+      # load on Debian 12 or Ubuntu 22.04. packaging/build-floor.env declares
+      # the base image and the floor; the script builds there and runs
+      # testing/check-glibc-floor.sh on the package it produced, so a build that
+      # would ship an unloadable binary fails here instead of at the user.
+      #
+      # This is the same script ci.yml and a local run call, so the package that
+      # passes the five-distro suite is built the way this one is.
+      - name: Build Debian package in the pinned container
+        id: deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
 
-      - name: Cache Cargo registry + build
-        if: ${{ env.ACT != 'true' }}
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-release-${{ runner.os }}-${{ matrix.artifact_arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            linux-release-${{ runner.os }}-${{ matrix.artifact_arch }}-
+          packaging/debian/build-deb-container.sh \
+            --version "${{ needs.determine-versioning.outputs.linux_package_version }}" \
+            --output-dir deploy \
+            | tee /tmp/build-deb-container.log
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb --version 3.6.3 --locked
+          # The script prints the package path as its last line of stdout.
+          # Only stdout is captured; its diagnostics go to stderr and straight
+          # to the job log, so nothing can land after the path.
+          DEB_FILE=$(tail -n 1 /tmp/build-deb-container.log)
+          if [[ ! -f "$DEB_FILE" ]]; then
+            echo "build-deb-container.sh did not name a package: '$DEB_FILE'" >&2
+            exit 1
+          fi
+          case "$DEB_FILE" in
+            *_${{ matrix.deb_arch }}.deb) ;;
+            *)
+              echo "Package $DEB_FILE is not ${{ matrix.deb_arch }}" >&2
+              exit 1
+              ;;
+          esac
 
-      - name: Build release binaries
-        run: cargo build --release
+          # Record it relative to the checkout: upload-artifact derives the
+          # archive layout from the common ancestor of its paths, and an
+          # absolute path here would nest the package under directories the
+          # release job's dist/*.deb glob does not look in.
+          echo "deb=${DEB_FILE#"$PWD"/}" >> "$GITHUB_OUTPUT"
+
+      # The container writes its target directory to a Docker volume, so the
+      # runner's target/release is empty. Recover the four binaries from the
+      # package instead: they are the container-built ones, so the tarball ships
+      # what the package ships rather than a second, runner-built set that the
+      # floor check never saw and that no package manager would refuse.
+      - name: Stage container-built binaries for the tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNPACK=$(mktemp -d)
+          dpkg-deb -x "${{ steps.deb.outputs.deb }}" "$UNPACK"
+          mkdir -p target/release
+          for bin in fips fipsctl fipstop fips-gateway; do
+            if [[ ! -f "$UNPACK/usr/bin/$bin" ]]; then
+              echo "Package is missing usr/bin/$bin" >&2
+              exit 1
+            fi
+            install -m 0755 "$UNPACK/usr/bin/$bin" "target/release/$bin"
+          done
+          rm -rf "$UNPACK"
 
       - name: Build systemd tarball
         env:
@@ -104,11 +153,23 @@ jobs:
             --arch "${{ matrix.artifact_arch }}" \
             --no-build
 
-      - name: Build Debian package
+      # The tarball has no package manager to refuse it, so nothing at install
+      # time would notice a bad floor. Check the binaries out of the finished
+      # tarball, after the strip, rather than trusting that they are the same
+      # objects the package check already passed.
+      - name: Check the tarball against the declared glibc floor
+        shell: bash
         run: |
-          packaging/debian/build-deb.sh \
-            --version "${{ needs.determine-versioning.outputs.linux_package_version }}" \
-            --no-build
+          set -euo pipefail
+          TARBALL="deploy/fips-${{ needs.determine-versioning.outputs.linux_package_version }}-linux-${{ matrix.artifact_arch }}.tar.gz"
+          UNPACK=$(mktemp -d)
+          tar -xzf "$TARBALL" -C "$UNPACK"
+          testing/check-glibc-floor.sh \
+            "$UNPACK"/*/fips \
+            "$UNPACK"/*/fipsctl \
+            "$UNPACK"/*/fipstop \
+            "$UNPACK"/*/fips-gateway
+          rm -rf "$UNPACK"
 
       - name: Resolve Linux asset paths
         id: linux-assets
@@ -122,14 +183,8 @@ jobs:
             exit 1
           fi
 
-          DEB_FILE=$(find deploy -maxdepth 1 -type f -name "fips_*_${{ matrix.deb_arch }}.deb" | sort | head -n 1)
-          if [[ -z "$DEB_FILE" ]]; then
-            echo "Missing Debian package for ${{ matrix.deb_arch }}" >&2
-            exit 1
-          fi
-
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
-          echo "deb=$DEB_FILE" >> "$GITHUB_OUTPUT"
+          echo "deb=${{ steps.deb.outputs.deb }}" >> "$GITHUB_OUTPUT"
 
       - name: SHA-256 hashes
         run: |

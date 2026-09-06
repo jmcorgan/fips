@@ -4,7 +4,8 @@
 # All outputs are placed in deploy/ at the project root.
 #
 # Usage:
-#   make deb        Build a Debian/Ubuntu .deb package
+#   make deb        Build a Debian/Ubuntu .deb package in the pinned container
+#   make deb-host   Build a .deb with the host toolchain (see below)
 #   make tarball    Build a systemd install tarball
 #   make ipk        Build an OpenWrt .ipk package (opkg, OpenWrt 24.x and earlier)
 #   make apk        Build an OpenWrt .apk package (apk-tools, mandatory on OpenWrt 25+)
@@ -19,11 +20,23 @@ SHELL := /bin/bash
 PACKAGING_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT  := $(abspath $(PACKAGING_DIR)/..)
 
-.PHONY: all deb tarball ipk apk aur pkg freebsd zip clean
+.PHONY: all deb deb-host tarball ipk apk aur pkg freebsd zip clean
 
 all: deb tarball
 
+# `deb` builds in the pinned container so the package carries the declared glibc
+# floor and can install on every supported distribution. It also checks that
+# floor before it hands the package back.
 deb:
+	@bash $(PACKAGING_DIR)/debian/build-deb-container.sh
+
+# `deb-host` builds with whatever toolchain and C library the host has. It is
+# for iterating locally and NOT for anything anyone else installs: on a modern
+# host it produces a package that installs cleanly and then cannot start on
+# Debian 12 or Ubuntu 22.04, which is the defect that made the container build
+# necessary. Nothing checks its floor, deliberately, so the check stays
+# attached to the artifact that ships.
+deb-host:
 	@bash $(PACKAGING_DIR)/debian/build-deb.sh
 
 tarball:

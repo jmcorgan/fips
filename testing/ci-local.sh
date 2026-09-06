@@ -1013,13 +1013,63 @@ run_dns_resolver() {
 }
 
 # Run deb-install harness (multi-distro real-package install)
+#
+# Bounded because this worker is what gates artifact publication: a suite that
+# hangs stops every branch publishing, which is worse than a red. The harness
+# bounds its own service starts now, so this is the backstop for anything else
+# that wedges -- a docker daemon that stops answering, a container that never
+# boots. 40 minutes is well above the observed cold-cache cost of a full
+# five-distro run and is not a performance budget.
+#
+# It bounds the container build and the five installs separately rather than
+# both together: the budget was sized for the installs, and a cold build that
+# ate into it would shrink theirs. Neither phase is left unbounded, which is
+# the property this exists for.
+DEB_INSTALL_TIMEOUT=${DEB_INSTALL_TIMEOUT:-2400}
 run_deb_install() {
-    info "[deb-install] Running multi-distro test (slow — builds .deb + per-distro install)"
-    if bash testing/deb-install/test.sh 2>&1; then
-        record "deb-install" 0
-    else
-        record "deb-install" 1
+    # Build once through the shared container script, then install that one
+    # artifact into every distro. The harness would build its own package if
+    # handed none, and that fallback goes through the same script -- but the
+    # GitHub job builds explicitly and passes `--deb`, so doing it explicitly
+    # here too makes the two systems read as the same work rather than leaving
+    # a reader to discover that a fallback happens to match.
+    info "[deb-install] Building the package in the pinned container"
+    local build_log deb rc=0
+    build_log=$(mktemp "/tmp/ci-deb-install-build.XXXXXX")
+    # stdout carries the package path on its last line, so it is captured;
+    # stderr stays on the console so build progress is still visible live.
+    timeout "$DEB_INSTALL_TIMEOUT" \
+        bash packaging/debian/build-deb-container.sh | tee "$build_log" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if [[ $rc -eq 124 ]]; then
+            echo "  ERROR: the container build exceeded ${DEB_INSTALL_TIMEOUT}s and was killed;" >&2
+            echo "         no package was produced, so this is not an assertion failure." >&2
+        else
+            echo "  ERROR: the container build failed (exit $rc); no package to install." >&2
+        fi
+        rm -f "$build_log"
+        record "deb-install" "$rc"
+        return
     fi
+    deb=$(tail -n 1 "$build_log")
+    rm -f "$build_log"
+    if [[ -z "$deb" || ! -f "$deb" ]]; then
+        echo "  ERROR: the container build reported success but its last line of stdout" >&2
+        echo "         was not a package path: '${deb}'" >&2
+        record "deb-install" 1
+        return
+    fi
+
+    info "[deb-install] Running multi-distro install test against $deb"
+    rc=0
+    timeout "$DEB_INSTALL_TIMEOUT" bash testing/deb-install/test.sh --deb "$deb" 2>&1 || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        # Say so explicitly. A bare red here reads as a failed assertion, and
+        # the difference matters: a timeout means no assertion was reached.
+        echo "  ERROR: deb-install exceeded ${DEB_INSTALL_TIMEOUT}s and was killed;" >&2
+        echo "         no verdict was reached, so this is not an assertion failure." >&2
+    fi
+    record "deb-install" "$rc"
 }
 
 # Run Tor SOCKS5 outbound test (live Tor network)

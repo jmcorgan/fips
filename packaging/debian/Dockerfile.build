@@ -1,0 +1,49 @@
+# Build image for the Linux release artifacts.
+#
+# Pinned to the oldest distribution FIPS supports, because the glibc a binary is
+# linked against decides the glibc it will run on. See packaging/build-floor.env
+# for the floor and the reasoning; BASE is passed from there, not written here,
+# so there is one place to change it.
+#
+# This image carries the toolchain and the build dependencies only. It never
+# carries the source: the source is mounted at run time, so editing a file does
+# not invalidate the image and a warm rebuild costs seconds rather than minutes.
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# dpkg-dev is not in a bare ubuntu:22.04 and is what provides dpkg-shlibdeps,
+# which cargo-deb's "$auto" dependency resolution shells out to. Without it the
+# declared dependencies would silently lose their versions again.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libdbus-1-dev \
+        libclang-dev \
+        clang \
+        binutils \
+        dpkg-dev \
+        curl \
+        ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# The toolchain version is passed in, read from rust-toolchain.toml by the
+# calling script, and the image tag carries it -- so the image cannot drift from
+# the compiler the rest of CI uses, and bumping the pin rebuilds the image. The
+# builder this replaces installed `stable` and never copied rust-toolchain.toml,
+# so it compiled with a different compiler from the release and nothing said so.
+ARG RUST_TOOLCHAIN
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN test -n "${RUST_TOOLCHAIN}" \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && chmod -R a+w "$RUSTUP_HOME" "$CARGO_HOME"
+
+ARG CARGO_DEB_VERSION=3.6.3
+RUN cargo install cargo-deb --version "${CARGO_DEB_VERSION}" --locked \
+    && chmod -R a+w "$CARGO_HOME"
+
+WORKDIR /src

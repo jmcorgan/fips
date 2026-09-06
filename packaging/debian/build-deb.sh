@@ -23,6 +23,9 @@ Options:
   --features <list>   Cargo features to build with (comma-separated). Marks the
                       auto-derived Version so the package is distinguishable
                       from a default build of the same commit.
+  --output-dir <dir>  Where to put the finished .deb. Defaults to deploy/ under
+                      the project root. Exists so the container build can write
+                      to a mount and leave the source tree read-only.
   -h, --help          Show this help
 EOF
 }
@@ -31,6 +34,7 @@ TARGET_TRIPLE=""
 VERSION_OVERRIDE=""
 NO_BUILD=0
 FEATURES=""
+DEST_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,6 +52,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --features)
             FEATURES="${2:?missing value for --features}"
+            shift 2
+            ;;
+        --output-dir)
+            DEST_DIR="${2:?missing value for --output-dir}"
             shift 2
             ;;
         -h|--help)
@@ -124,9 +132,20 @@ if [[ -z "${VERSION_OVERRIDE}" ]]; then
         echo "Auto-derived dev Version: ${VERSION_OVERRIDE}"
     fi
 elif [[ -n "${FEATURES}" ]]; then
-    echo "Warning: --version was given with --features, so the Version carries no" >&2
-    echo "feature marker and this package is indistinguishable from a default" >&2
-    echo "build of the same commit. Mark it yourself if that matters." >&2
+    # An explicit version needs the same marker for the same reason, and it is
+    # the only way a caller that cannot derive the version here can get one.
+    # The container build is that caller: it derives the version on the host
+    # because the image has no git, and the source is mounted read-only from a
+    # worktree whose .git is a file pointing outside the mount.
+    if [[ "${VERSION_OVERRIDE}" == *"+$(printf '%s' "${FEATURES}" | tr -c 'a-zA-Z0-9.' '.')"* ]]; then
+        : # already marked by the caller
+    elif [[ "${VERSION_OVERRIDE}" == *-* ]]; then
+        # Split off the Debian revision so the marker lands on the upstream part.
+        VERSION_OVERRIDE="${VERSION_OVERRIDE%-*}+$(printf '%s' "${FEATURES}" | tr -c 'a-zA-Z0-9.' '.')-${VERSION_OVERRIDE##*-}"
+    else
+        VERSION_OVERRIDE="${VERSION_OVERRIDE}+$(printf '%s' "${FEATURES}" | tr -c 'a-zA-Z0-9.' '.')"
+    fi
+    echo "Feature-marked Version: ${VERSION_OVERRIDE}"
 fi
 
 # Build the .deb package
@@ -149,8 +168,11 @@ if [[ -n "${FEATURES}" ]]; then
 fi
 cargo "${cargo_args[@]}"
 
-# Move output to deploy/
-mkdir -p deploy
+# Move output to the requested directory, or deploy/ by default. Note the
+# distinction from OUTPUT_DIR above, which is cargo-deb's temporary staging
+# directory and is removed by the EXIT trap.
+: "${DEST_DIR:=deploy}"
+mkdir -p "${DEST_DIR}"
 DEB_FILE=$(find "${OUTPUT_DIR}" -maxdepth 1 -name '*.deb' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2)
 
 if [ -z "${DEB_FILE}" ]; then
@@ -158,10 +180,10 @@ if [ -z "${DEB_FILE}" ]; then
     exit 1
 fi
 
-cp "${DEB_FILE}" deploy/
+cp "${DEB_FILE}" "${DEST_DIR}/"
 BASENAME=$(basename "${DEB_FILE}")
-echo "Package built: deploy/${BASENAME}"
+echo "Package built: ${DEST_DIR}/${BASENAME}"
 echo ""
-echo "Install with: sudo dpkg -i deploy/${BASENAME}"
+echo "Install with: sudo dpkg -i ${DEST_DIR}/${BASENAME}"
 echo "Remove with:  sudo dpkg -r fips"
 echo "Purge with:   sudo dpkg -P fips  (removes config and identity keys)"

@@ -1,10 +1,10 @@
 #!/bin/bash
 # ── CI parity invariant guard ───────────────────────────────────────────────
-# The GitHub integration matrix (.github/workflows/ci.yml) and the local
-# default suite set (ci-local.sh) MUST run the same integration suites,
-# EXCEPT for the deliberate local-only entries listed below. Adding a suite
-# to one runner without the other means "local green" and "GitHub green" stop
-# being equivalent claims.
+# The GitHub integration matrices (.github/workflows/ci.yml, swept across every
+# job) and the local default suite set (ci-local.sh) MUST run the same
+# integration suites, EXCEPT for the deliberate local-only entries listed below.
+# Adding a suite to one runner without the other means "local green" and
+# "GitHub green" stop being equivalent claims.
 #
 # Deliberate local-only (NOT on the GitHub gate), with reason:
 #   tor-socks5     — requires live Tor network; opt-in via --with-tor,
@@ -19,8 +19,9 @@
 #                    names differ cosmetically between runners and are ignored
 #                    — `scenario:` is the identity.
 #   deb-install    — per distro. GitHub splits into per-distro legs carrying
-#                    `scenario:`; local runs the same distro set in one suite,
-#                    enumerated by ALL_SCENARIOS in deb-install/test.sh.
+#                    `scenario:`, in a job of their own; local runs the same
+#                    distro set in one suite, enumerated by ALL_SCENARIOS in
+#                    deb-install/test.sh.
 #   everything else — per suite name.
 #
 #   dns-resolver is the one leg still compared at leg granularity rather than
@@ -134,7 +135,21 @@ for name, entries in arrays.items():
 with open(ci_yml_path, encoding="utf-8") as fh:
     doc = yaml.safe_load(fh)
 
-include = doc["jobs"]["integration"]["strategy"]["matrix"]["include"]
+# Sweep every job's matrix rather than one named job: the install legs live in
+# a job of their own so the rest of the integration matrix does not wait on the
+# package build, and a guard keyed to a job name reports them as local-only the
+# moment they move. Identity comes from the leg's own fields, so where a leg
+# lives does not matter; a leg deleted from every job still shows up as
+# local-only, because the local side is the reference.
+include = []
+for job in (doc.get("jobs") or {}).values():
+    legs = (((job.get("strategy") or {}).get("matrix") or {}).get("include") or [])
+    if isinstance(legs, list):
+        include += [leg for leg in legs if isinstance(leg, dict)]
+if not include:
+    print("check-ci-parity: no matrix include: found in any job of "
+          f"{ci_yml_path}; cannot verify CI parity", file=sys.stderr)
+    sys.exit(2)
 github_chaos, github_deb, github = {}, set(), set()
 malformed = []
 for leg in include:

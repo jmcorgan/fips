@@ -7,7 +7,7 @@ and `make apk` write to `dist/` instead.
 ## Quick Start
 
 ```sh
-make deb        # Debian/Ubuntu .deb
+make deb        # Debian/Ubuntu .deb (built in the pinned container)
 make tarball    # systemd install tarball
 make ipk        # OpenWrt .ipk (opkg, OpenWrt 24.x and earlier)
 make apk        # OpenWrt .apk (apk-tools, mandatory on OpenWrt 25+)
@@ -18,7 +18,28 @@ make zip        # Windows .zip package
 make all        # deb + tarball (default)
 ```
 
+## The two Debian build paths
+
+`make deb` builds in a container pinned to the oldest supported
+distribution, named with the glibc floor in
+[build-floor.env](build-floor.env), and checks the package it produced
+against that floor before handing it back. Its only host prerequisite is
+docker: the toolchain and the build dependencies live in the image. This
+is the path the release workflow, the integration suite and the internal
+builder all take, so a package that passes locally is built the way the
+shipped one is.
+
+`make deb-host` is the old path. It builds on the host, at whatever glibc
+the host has, and it is checked against nothing. Use it for local
+iteration only. A package built on a current distribution records a
+version dependency that the loader refuses on Debian 12 and Ubuntu 22.04,
+which is what shipped in every Linux artifact from v0.3.0 through v0.5.0,
+so it must not produce anything anyone else installs.
+
 ## Build Prerequisites
+
+The prerequisites below apply to the host-build targets. `make deb` needs
+docker and nothing else.
 
 These targets build FIPS from source, so the host needs a build
 environment in addition to a Rust toolchain (the version pinned in

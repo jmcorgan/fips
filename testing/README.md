@@ -125,11 +125,12 @@ machines. Not a Docker harness.
 
 [`ci-local.sh`](ci-local.sh) runs the full local CI pipeline — build,
 clippy, unit tests, and the integration suites (including the chaos
-scenarios) — mirroring the GitHub `ci.yml` integration matrix. Run
+scenarios) — mirroring the GitHub `ci.yml` integration matrices. Run
 `./ci-local.sh --help` for the full option list and `--list` for the
 available suites. Every run starts with a parity check that verifies the
 local suite set covers the same work as the GitHub matrix, per scenario for
-chaos and per distro for deb-install; a divergence fails the run. GitHub
+chaos and per distro for deb-install, across every job that carries a
+matrix; a divergence fails the run. GitHub
 runs the same check as its own `ci-parity` job. `--check-parity` runs it
 alone (see [check-ci-parity.sh](check-ci-parity.sh)).
 

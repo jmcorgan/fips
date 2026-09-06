@@ -1,0 +1,15 @@
+# Keep the build context small.
+#
+# Several test harnesses build images with the repository root as the context
+# (testing/deb-install/test.sh and testing/dns-resolver/test.sh among them), and
+# without this every one of them uploads the whole Cargo target directory to the
+# daemon before running a build that does not use a single file from it. On a
+# developer's machine that directory reaches double-digit gigabytes.
+#
+# Deliberately narrow. Nothing here excludes testing/**/.cache, which
+# testing/deb-install/test.sh copies a package out of, and no Dockerfile in the
+# tree copies from target/ on the host: examples/k8s-sidecar/Dockerfile builds
+# its own inside the image with a multi-stage COPY --from.
+target/
+.git/
+deploy/

@@ -27,7 +27,8 @@ env:
 # ─────────────────────────────────────────────────────────────────────────────
 # CI parity invariant
 #
-# This GitHub integration matrix and the local default suite set
+# This workflow's integration matrices — the `integration:` job and the
+# `deb-install:` job — and the local default suite set
 # (testing/ci-local.sh) MUST run the same integration suites, EXCEPT for the
 # deliberate local-only entries below. Adding a suite to one runner without
 # the other means "local green" and "GitHub green" stop being equivalent.
@@ -504,29 +505,6 @@ jobs:
           # recovers from delay, and never panics.
           - suite: stun-faults
             type: stun-faults
-          # ── Real-deb install across target distros ─────────────────────
-          # Boots a privileged systemd container per distro, runs
-          # `apt install ./fips_*.deb` with the locally-built package,
-          # then asserts end-to-end `.fips` resolution + the
-          # gateway/daemon default-pairing. The most thorough single
-          # test surface — exercises packaging, maintainer scripts,
-          # systemd unit ordering, real TUN, and the DNS responder
-          # filter on a per-distro resolver backend.
-          - suite: deb-install-debian12
-            type: deb-install
-            scenario: debian12
-          - suite: deb-install-debian13
-            type: deb-install
-            scenario: debian13
-          - suite: deb-install-ubuntu22
-            type: deb-install
-            scenario: ubuntu22
-          - suite: deb-install-ubuntu24
-            type: deb-install
-            scenario: ubuntu24
-          - suite: deb-install-ubuntu26
-            type: deb-install
-            scenario: ubuntu26
           # ── DNS resolver multi-backend coverage ────────────────────────
           # Exercises every fips-dns-setup backend (resolved, dnsmasq,
           # NM+dnsmasq, dns-delegate, no-resolver) across five distros,
@@ -734,36 +712,6 @@ jobs:
           docker compose -f testing/static/docker-compose.yml \
             --profile gateway down --volumes --remove-orphans
 
-      # ── Real-deb install integration ────────────────────────────────────
-      # The deb-install harness builds its own .deb from source in a
-      # cargo-deb builder image; the pre-built Linux binary from the
-      # build job is intentionally not used here so the test exercises
-      # the full packaging pipeline. ~5-7 min cold-cache on a fresh
-      # runner (.deb build dominates), ~1-2 min warm-cache.
-      - name: Run deb-install scenario
-        if: matrix.type == 'deb-install'
-        timeout-minutes: 25
-        run: bash testing/deb-install/test.sh ${{ matrix.scenario }}
-
-      - name: Collect logs on failure (deb-install)
-        if: matrix.type == 'deb-install' && failure()
-        run: |
-          docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
-            echo "--- ${c} fips.service ---"
-            docker exec "$c" journalctl -u fips.service --no-pager 2>&1 | tail -100 || true
-            echo "--- ${c} fips-dns.service ---"
-            docker exec "$c" journalctl -u fips-dns.service --no-pager 2>&1 | tail -100 || true
-            echo "--- ${c} fips-gateway.service ---"
-            docker exec "$c" journalctl -u fips-gateway.service --no-pager 2>&1 | tail -100 || true
-          done
-
-      - name: Stop containers (deb-install)
-        if: matrix.type == 'deb-install' && always()
-        run: |
-          docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
-            docker rm -f "$c" >/dev/null 2>&1 || true
-          done
-
       # ── Native datagram API ─────────────────────────────────────────────
       # Reads FIPS_TEST_IMAGE rather than defaulting to a name, so it runs
       # against the image this workflow built. The two-node check creates and
@@ -815,5 +763,115 @@ jobs:
         if: matrix.type == 'dns-resolver' && always()
         run: |
           docker ps -a --filter "name=fips-dns-test-" --format '{{.Names}}' | while read -r c; do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 4 – The .deb the install suite installs
+#
+# Built once, here, by the same script the release workflow and a local run
+# call, so the package the suite installs is built the way the shipped one is.
+# That was not true before: each install leg built its own package on a fresh
+# runner with no cache, so one run performed five complete Rust release builds
+# and four were waste — and none of them was built the way the release is, so
+# the suite could not exhibit a defect that only the release environment
+# produced.
+#
+# The script builds in the pinned container from packaging/build-floor.env and
+# runs testing/check-glibc-floor.sh on the result, so this job is also where a
+# floor violation stops the run.
+# ─────────────────────────────────────────────────────────────────────────────
+  deb-package:
+    name: Build .deb
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: ${{ !inputs.skip_integration }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Build the .deb in the pinned build container
+        timeout-minutes: 30
+        run: bash packaging/debian/build-deb-container.sh --output-dir deploy
+
+      - name: Upload the .deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fips-deb
+          path: deploy/fips_*.deb
+          if-no-files-found: error
+          retention-days: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 5 – Real-deb install across target distros
+#
+# Boots a privileged systemd container per distro, runs `apt install
+# ./fips_*.deb` with the package job 4 built, then asserts end-to-end `.fips`
+# resolution + the gateway/daemon default-pairing. The most thorough single
+# test surface — exercises packaging, maintainer scripts, systemd unit
+# ordering, real TUN, and the DNS responder filter on a per-distro resolver
+# backend.
+#
+# A job of its own rather than legs of the integration matrix: the install legs
+# are the only ones that need the package, and as integration legs every other
+# integration suite would wait on the package build.
+#
+# The legs keep `type: deb-install` and `scenario:` because
+# testing/check-ci-parity.sh reads those to match this matrix against the local
+# suite's distro list; the steps below use `scenario:` only.
+# ─────────────────────────────────────────────────────────────────────────────
+  deb-install:
+    name: Deb install (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    needs: [deb-package]
+    if: ${{ !inputs.skip_integration }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - type: deb-install
+            scenario: debian12
+          - type: deb-install
+            scenario: debian13
+          - type: deb-install
+            scenario: ubuntu22
+          - type: deb-install
+            scenario: ubuntu24
+          - type: deb-install
+            scenario: ubuntu26
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download the .deb
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: fips-deb
+          path: _deb
+
+      - name: Run deb-install scenario
+        timeout-minutes: 25
+        run: |
+          deb=$(find _deb -maxdepth 1 -type f -name 'fips_*.deb' | sort | head -1)
+          [ -n "$deb" ] || { echo "no .deb in the downloaded artifact" >&2; exit 1; }
+          bash testing/deb-install/test.sh --deb "$deb" ${{ matrix.scenario }}
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
+            echo "--- ${c} fips.service ---"
+            docker exec "$c" journalctl -u fips.service --no-pager 2>&1 | tail -100 || true
+            echo "--- ${c} fips-dns.service ---"
+            docker exec "$c" journalctl -u fips-dns.service --no-pager 2>&1 | tail -100 || true
+            echo "--- ${c} fips-gateway.service ---"
+            docker exec "$c" journalctl -u fips-gateway.service --no-pager 2>&1 | tail -100 || true
+          done
+
+      - name: Stop containers
+        if: always()
+        run: |
+          docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
             docker rm -f "$c" >/dev/null 2>&1 || true
           done
