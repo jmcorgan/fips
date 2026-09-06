@@ -314,9 +314,11 @@ with v0.5.x or earlier peers.
   it looked healthy while the daemon was dead. No source code caused this and
   none was changed. The Linux artifacts are now built in a container pinned to
   the oldest supported distribution, declared with the floor in
-  `packaging/build-floor.env`, and every producer runs
+  `packaging/build-floor.env`, and every producer on the release path runs
   `testing/check-glibc-floor.sh` on what it made, so a package or a tarball that
-  would not load fails the build rather than reaching a user. The declared
+  would not load fails the build rather than reaching a user. The deprecated
+  host-build targets in `packaging/Makefile` are not on that path and are not
+  floor-checked. The declared
   dependency is derived from the binaries instead of hand-written, so it states
   the floor it was built against.
 
@@ -338,6 +340,73 @@ with v0.5.x or earlier peers.
   expectation held in a field that has no setter so the handshake cannot
   overwrite it. Anonymous dials still promote whoever answers, which is what
   shared-media discovery means.
+
+## [0.5.1] - 2026-09-06
+
+### Fixed
+
+#### Discovery
+
+- A node no longer relays away the answer to its own lookup. A request is
+  flooded to every tree peer whose bloom filter claims the target, so a false
+  positive can send a copy out into the wider network and circulate it back to
+  the node that originated it. The only identity test on arrival was whether
+  the request named this node as the target, which a lookup this node
+  originated never satisfies, so the copy was filed in the request dedup cache
+  as ordinary transit under this node's own `request_id`. When the target
+  answered, the reply was reverse-path forwarded to the peer that looped the
+  request, the pending lookup was never satisfied, and discovery reported that
+  its requests went unanswered while the answers were in fact arriving. An
+  inbound response is now matched against this node's outstanding lookups
+  before the transit dedup record, and a returning copy of this node's own
+  request is dropped as the duplicate it is rather than recorded, so that id
+  never enters the transit cache at all. This was a race rather than a hard
+  failure: a reply that beat the looped copy found a clean cache and
+  succeeded, and the failure grew likelier as the bloom fill ratio rose.
+  Contributed by Arjen.
+
+- A lookup request of this node's own, returning to it, is no longer counted as
+  a duplicate from the peer that delivered it. The fix above drops that copy,
+  and it recorded the drop under the existing `req_duplicate` rejection, whose
+  documented meaning is that a peer resent a request. A returning copy has a
+  nonzero floor in healthy operation and rises with the bloom fill ratio, so
+  folding the two together put a permanent number on a counter an operator
+  reads as neighbour misbehaviour, and made the two events indistinguishable.
+  It now has its own rejection reason and counter, `req_own_loopback`, shown in
+  `fipstop` as "Own Loopback". `req_duplicate` returns to meaning only what it
+  says.
+
+#### Packaging
+
+- The Linux `.deb` and the systemd tarball now install and run on Debian 12 and
+  Ubuntu 22.04. Every Linux artifact from v0.3.0 through v0.5.0 was built on the
+  newest available runner, whose C library made the standard library's `pidfd`
+  references a hard `GLIBC_2.39` version requirement instead of the weak,
+  runtime-checked ones it is meant to compile to. The loader refuses an image on
+  that entry alone, so `fips`, `fipstop` and `fips-gateway` could not start;
+  `fipsctl` was unaffected, which is why an install that was checked by running
+  it looked healthy while the daemon was dead. No source code caused this and
+  none was changed. The Linux artifacts are now built in a container pinned to
+  the oldest supported distribution, declared with the floor in
+  `packaging/build-floor.env`, and every producer on the release path runs
+  `testing/check-glibc-floor.sh` on what it made, so a package or a tarball that
+  would not load fails the build rather than reaching a user. The deprecated
+  host-build targets in `packaging/Makefile` are not on that path and are not
+  floor-checked. The declared
+  dependency is derived from the binaries instead of hand-written, so it states
+  the floor it was built against.
+
+- The `.deb` install suite no longer hangs when the daemon it installed cannot
+  run. It started `fips-dns.service` with no timeout, and that unit is
+  `Type=oneshot` with `Requires=fips.service`, so a daemon that cannot execute
+  is restarted every five seconds for ever, the oneshot start job is never
+  dispatched, and `systemctl start` never returns. The suite then produced no
+  failure line, no results line and no exit status at all, which is the whole
+  class of fault it exists to find: it stopped reporting at exactly the point it
+  was most needed. Observed at 21 minutes against a package whose binaries could
+  not load. The start is now queued rather than waited on, with a bounded wait
+  for the unit to become active, so a dead daemon fails the suite instead of
+  stalling the run that gates artifact publication.
 
 ## [0.5.0] - 2026-08-30
 

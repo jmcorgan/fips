@@ -19,12 +19,12 @@ not compiled pending FreeBSD-specific `SO_REUSEPORT` validation.
 ```
 
 Output: `deploy/fips-<version>-freebsd-<arch>.pkg` (e.g.
-`fips-0.5.0.dev-freebsd-amd64.pkg` — pkg versions cannot contain `-`).
+`fips-0.5.1.dev-freebsd-amd64.pkg` — pkg versions cannot contain `-`).
 
 ## Install
 
 ```sh
-pkg add ./deploy/fips-0.5.0.dev-freebsd-amd64.pkg
+pkg add ./deploy/fips-0.5.1-freebsd-amd64.pkg
 # post-install seeds this from the sample if absent, at mode 0600
 vi /usr/local/etc/fips/fips.yaml
 sysrc fips_enable=YES fips_dns_enable=YES

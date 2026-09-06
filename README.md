@@ -183,9 +183,14 @@ and Android. Linux is not one target. Debian, Ubuntu, Arch and NixOS
 are the same glibc build, and what
 differs is the packaging: Debian and Ubuntu take the same `.deb`, Arch
 takes `fips` from the AUR, and NixOS uses the Nix flake described
-below. **Only the `.deb` is exercised per release**, by the
+below. **Only the `.deb` is exercised by an install test**, by the
 `deb-install` suite across debian12, debian13, ubuntu22, ubuntu24 and
-ubuntu26; neither the AUR package nor the flake is. OpenWrt is a musl
+ubuntu26; neither the AUR package nor the flake is. That suite runs on
+every push and pull request, on x86_64, against a `.deb` built by the same
+pinned container as the released one. It does not run at a tag, and the
+arm64 package is install-tested by nothing: no workflow installs a published
+artifact, so the released packages are checked by
+hand. OpenWrt is a musl
 target rather than glibc, and it takes an `.ipk` on 24.x and earlier or
 an `.apk` on 25 and later; both carry the `fips-mesh-setup` and
 `fips-ap-setup` helpers.
@@ -250,7 +255,7 @@ Nix / NixOS section of [packaging/README.md](packaging/README.md).
   then [fips-architecture.md](docs/design/fips-architecture.md) for
   the protocol stack.
 - **[Release notes](docs/releases/)** — per-version notes, including
-  [v0.5.0](docs/releases/release-notes-v0.5.0.md).
+  [v0.5.1](docs/releases/release-notes-v0.5.1.md).
 
 If you want to contribute, see [CONTRIBUTING.md](CONTRIBUTING.md)
 and [testing/README.md](testing/README.md).
@@ -292,8 +297,10 @@ testing/      Docker-based integration test harnesses + chaos simulation
 ## Status & roadmap
 
 FIPS is at **v1.0.0-dev** on the `next` branch.
-[v0.5.0](https://github.com/jmcorgan/fips/releases/tag/v0.5.0)
-has shipped from `master`; this development line carries
+[v0.5.1](https://github.com/jmcorgan/fips/releases/tag/v0.5.1) is the
+current release, from the `maint` line, and
+[v0.5.0](https://github.com/jmcorgan/fips/releases/tag/v0.5.0) was the last
+feature release from `master`; this development line carries
 wire-format-breaking work for v1.0.0 — unified Noise XX handshake
 at both layers, FMP node profiles, slimmer MMP reports, and an
 extensible bloom-filter encoding — that will not interoperate with

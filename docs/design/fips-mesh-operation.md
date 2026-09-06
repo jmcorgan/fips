@@ -280,8 +280,10 @@ network and back to the originator, which would otherwise file its own
 originator arm therefore wins: a response naming a target with a lookup
 outstanding, carrying a `request_id` that lookup issued, is accepted here
 whatever the dedup cache holds. A returning copy of the request is likewise
-dropped as a duplicate rather than recorded, so the originator's id never
-enters the transit cache.
+dropped rather than recorded, so the originator's id never enters the transit
+cache. The drop is counted as `req_own_loopback` rather than as a duplicate: a
+returning copy has a nonzero floor in healthy operation and says nothing about
+the peer that delivered it.
 
 **Response-forwarded flag**: Each `recent_requests` entry tracks whether a
 response has already been forwarded for that `request_id`. If a second

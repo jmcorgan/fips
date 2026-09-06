@@ -66,6 +66,16 @@ per-platform installer:
 - Windows: `.zip` with service-install scripts
 - Generic systemd Linux: `.tar.gz` with an `install.sh` script
 
+The `.deb` and the systemd tarball support every version of a glibc
+distribution that its vendor still supports for free: currently Ubuntu
+22.04, Debian 12, Ubuntu 24.04, Debian 13 and Ubuntu 26.04. Those binaries
+are built in a container pinned to the oldest of them, so they run on all
+five, and the glibc floor that follows is declared in
+`packaging/build-floor.env` and checked by `testing/check-glibc-floor.sh` on
+what the release workflow produces. Arch and NixOS build from source on your
+own machine, and OpenWrt is a musl target rather than glibc, so none of them
+depends on that floor.
+
 See the [project README's Quick start section](../README.md#quick-start)
 for download links and per-platform invocations.
 
