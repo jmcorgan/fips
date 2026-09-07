@@ -38,8 +38,9 @@ use zeroize::{Zeroize, Zeroizing};
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
-    NativeApiConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy, RateLimitConfig,
-    RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, TreeConfig,
+    NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy,
+    RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig,
+    TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{

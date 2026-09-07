@@ -44,3 +44,8 @@ __pycache__/
 /fips.key
 /fips.pub
 /fips.yaml
+
+# Per-run node configs written by the medium-change suite. `test.sh` renders
+# them from the topology before compose starts and leaves them for post-mortem,
+# and the run suffix means each run leaves its own directory behind.
+/testing/medium-change/generated-configs*/

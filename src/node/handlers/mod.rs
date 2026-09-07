@@ -5,6 +5,7 @@ pub(crate) mod lookup;
 mod mmp;
 mod native;
 pub(in crate::node) use native::PendingNative;
+pub(in crate::node) mod netmon;
 pub(crate) mod probe;
 // Widened from private by the rekey drain cap: `node::session` calls
 // `rekey::drain_max_retention_ms` to bound how long a superseded epoch is

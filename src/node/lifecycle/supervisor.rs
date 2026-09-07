@@ -731,6 +731,19 @@ pub(crate) struct Supervisor {
     #[cfg(unix)]
     pub(crate) decrypt_workers: Option<crate::node::decrypt_worker::DecryptWorkerPool>,
 
+    /// Transport-medium change detection: the receiver the rx loop drains and
+    /// the detector task behind it.
+    ///
+    /// Deliberately **not** a [`Child`]. The FSM's children are the substrate
+    /// the node's health is defined against — a detector that dies makes
+    /// recovery slower, not the node unhealthy, and giving it a `Child` would
+    /// put it in the start plan, the teardown order and the N-of-M health
+    /// policy for no gain. It is spawned after bring-up and aborted in
+    /// teardown, like the runtime child-liveness monitor.
+    pub(in crate::node) netmon_rx: Option<crate::node::netmon::NetChangeRx>,
+    /// Handle for the detector task, aborted at teardown.
+    pub(in crate::node) netmon_task: Option<tokio::task::JoinHandle<()>>,
+
     /// The sans-IO lifecycle FSM authoring spawn/teardown ordering.
     pub(in crate::node) fsm: SupervisorFsm,
 }
@@ -759,6 +772,8 @@ impl Supervisor {
             encrypt_workers: None,
             #[cfg(unix)]
             decrypt_workers: None,
+            netmon_rx: None,
+            netmon_task: None,
             fsm: SupervisorFsm::new(),
         }
     }

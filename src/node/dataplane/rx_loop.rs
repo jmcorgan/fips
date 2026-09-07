@@ -179,6 +179,18 @@ impl Node {
             (rx, guard)
         };
 
+        // Transport-medium change receiver, or a dummy channel when detection
+        // is disabled (or the node was seeded straight into Running without a
+        // start()). Same guard pattern as TUN outbound and DNS identity: the
+        // held sender keeps the channel open so the arm never sees it closed.
+        let (mut netmon_rx, _netmon_guard) = match self.supervisor.netmon_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
         // Decrypt-worker fallback receiver. The worker pushes each
         // authenticated FMP plaintext here so rx_loop can finish the
         // per-peer side-effects (stats, MMP, ECN, link dispatch).
@@ -355,6 +367,14 @@ impl Node {
                         "Registering identity from DNS resolution"
                     );
                     self.register_identity(identity.node_addr, identity.pubkey);
+                }
+                // A transport medium change (WLAN -> LAN -> 5G, a BLE adapter
+                // arriving or leaving). Placed after the hot inbound path so
+                // the `biased` priority of packet processing is unchanged; the
+                // detector coalesces into a single-slot channel, so this arm
+                // never sees a burst and needs no drain loop.
+                Some(change) = netmon_rx.recv() => {
+                    self.handle_net_change(change).await;
                 }
                 // Native API datagrams a client wrote to its descriptor. Drained
                 // in a burst like the TUN arm, for the same reason: one wake-up

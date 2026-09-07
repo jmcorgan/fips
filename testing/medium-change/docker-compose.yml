@@ -1,0 +1,130 @@
+# Transport-medium change lab.
+#
+#   node-a ──┬── mc-primary ───┐
+#            │                 ├── router ── mc-far ── node-b
+#            └── mc-secondary ─┘
+#
+# node-a is multi-homed with two equally usable paths to the router; node-b
+# sits beyond it and is reachable only through the router. That last part is
+# the whole design: node-b has to be off-link so the route to it follows
+# node-a's *default* route, which is what the suite moves. Put node-b on a
+# shared bridge instead and the directly-connected route wins, the source
+# address never changes, and the bug under test cannot reproduce.
+
+networks:
+  mc-primary:
+    driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
+    ipam:
+      config:
+        - subnet: ${MC_PRIMARY_PREFIX:-172.31.60}.0/24
+  mc-secondary:
+    driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
+    ipam:
+      config:
+        - subnet: ${MC_SECONDARY_PREFIX:-172.31.61}.0/24
+  mc-far:
+    driver: bridge
+    labels:
+      - "com.corganlabs.fips-ci=1"
+    ipam:
+      config:
+        - subnet: ${MC_FAR_PREFIX:-172.31.62}.0/24
+
+x-fips-common: &fips-common
+  image: ${FIPS_TEST_IMAGE:-fips-test:latest}
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+  restart: "no"
+  entrypoint:
+    - /usr/local/bin/mc-node-entrypoint.sh
+  environment:
+    - RUST_LOG=info,fips::node::netmon=debug,fips::node::handlers::netmon=debug
+    - PRIMARY_PREFIX=${MC_PRIMARY_PREFIX:-172.31.60}
+    - SECONDARY_PREFIX=${MC_SECONDARY_PREFIX:-172.31.61}
+    - FAR_PREFIX=${MC_FAR_PREFIX:-172.31.62}
+    - ROUTER_OCTET=254
+
+services:
+  router:
+    build:
+      context: ./router
+    container_name: fips-mc-router${FIPS_CI_NAME_SUFFIX:-}
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+      # Strict reverse-path filtering, and the suite does not work without it.
+      #
+      # It is what makes a stale source address *hurt*. Both of node-a's
+      # interfaces stay up and both stay routable, so a packet still sourced
+      # from the old path is otherwise forwarded and answered quite happily —
+      # the pin is stale but harmless, the bug does not bite, and the negative
+      # control passes, which would make every assertion in this suite vacuous.
+      #
+      # A real gateway drops that packet as spoofed, because the reverse route
+      # for its source points out a different interface. That is the actual
+      # reason a medium change black-holes traffic in the field, so it is the
+      # thing the lab has to model.
+      - net.ipv4.conf.all.rp_filter=1
+      - net.ipv4.conf.default.rp_filter=1
+    restart: "no"
+    networks:
+      mc-primary:
+        ipv4_address: ${MC_PRIMARY_PREFIX:-172.31.60}.254
+      mc-secondary:
+        ipv4_address: ${MC_SECONDARY_PREFIX:-172.31.61}.254
+      mc-far:
+        ipv4_address: ${MC_FAR_PREFIX:-172.31.62}.254
+
+  # The node under test. Two paths up at once, default route on the primary,
+  # and the suite moves it to the secondary mid-traffic.
+  node-a:
+    <<: *fips-common
+    container_name: fips-mc-node-a${FIPS_CI_NAME_SUFFIX:-}
+    hostname: fips-mc-node-a
+    depends_on:
+      - router
+    environment:
+      - RUST_LOG=info,fips::node::netmon=debug,fips::node::handlers::netmon=debug
+      - PRIMARY_PREFIX=${MC_PRIMARY_PREFIX:-172.31.60}
+      - SECONDARY_PREFIX=${MC_SECONDARY_PREFIX:-172.31.61}
+      - ROUTER_OCTET=254
+      - DEFAULT_VIA=primary
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./node/entrypoint.sh:/usr/local/bin/mc-node-entrypoint.sh:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      mc-primary:
+        ipv4_address: ${MC_PRIMARY_PREFIX:-172.31.60}.10
+      mc-secondary:
+        ipv4_address: ${MC_SECONDARY_PREFIX:-172.31.61}.10
+
+  # The far peer. Single-homed and stationary — it never moves, so anything
+  # the suite observes at this end is a consequence of node-a's move.
+  node-b:
+    <<: *fips-common
+    container_name: fips-mc-node-b${FIPS_CI_NAME_SUFFIX:-}
+    hostname: fips-mc-node-b
+    depends_on:
+      - router
+    environment:
+      - RUST_LOG=info
+      - FAR_PREFIX=${MC_FAR_PREFIX:-172.31.62}
+      - ROUTER_OCTET=254
+      - DEFAULT_VIA=far
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./node/entrypoint.sh:/usr/local/bin/mc-node-entrypoint.sh:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      mc-far:
+        ipv4_address: ${MC_FAR_PREFIX:-172.31.62}.20
