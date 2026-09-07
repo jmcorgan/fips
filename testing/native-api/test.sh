@@ -409,11 +409,17 @@ check_descriptor_carries_datagrams() {
     # Three writes must reach the daemon as three datagrams. The byte count
     # matters as much as the datagram count: a boundary loss would show up as
     # one datagram of nine bytes rather than three of three.
+    #
+    # The read settles. The daemon counts a datagram on the flow's own reader
+    # task, and nothing orders that task against the client's write, so a single
+    # ask can be answered while the writes are still queued in the kernel and
+    # read back as zero. Re-asking is the only barrier the protocol offers; the
+    # deadline keeps a datagram that never arrives a failure rather than a hang.
     local script='[
       {"command":"connect","params":{"peer":"'"$PEER"'","remote_port":4242},
        "keep_fd":"a","keep_flow":"a","expect":{"status":"ok"}},
       {"fd":"a","write":"00ff10","repeat":3},
-      {"command":"stats","params":{"flow_id":"@a"},
+      {"command":"stats","params":{"flow_id":"@a"},"settle":true,
        "expect":{"status":"ok","data.rx_datagrams":3,"data.rx_bytes":9,"data.closed":false}}
     ]'
     if run_client "$script"; then
@@ -452,34 +458,43 @@ check_close_reaches_the_daemon() {
     # The node forgets a released flow, so `stats` answers for it the way it
     # answers for any name it does not hold. The step before the close is what
     # makes that discriminating: the same flow answered a moment earlier, so the
-    # refusal afterwards can only be the release. The sleep is the task hop
-    # between the daemon reading end of file and giving the entry back.
+    # refusal afterwards can only be the release. Both reads settle: the same
+    # task hop that delays a datagram count also delays the daemon noticing end
+    # of file, and a bounded re-ask is a barrier where a fixed sleep was a guess.
     local script='[
       {"command":"connect","params":{"peer":"'"$PEER"'","remote_port":4242},
        "keep_fd":"a","keep_flow":"a","expect":{"status":"ok"}},
       {"fd":"a","write":"aa"},
-      {"command":"stats","params":{"flow_id":"@a"},
+      {"command":"stats","params":{"flow_id":"@a"},"settle":true,
        "expect":{"status":"ok","data.closed":false,"data.rx_datagrams":1}},
       {"fd":"a","close":true},
-      {"sleep":1},
-      {"command":"stats","params":{"flow_id":"@a"},"expect":{"status":"error"}}
+      {"command":"stats","params":{"flow_id":"@a"},"settle":true,
+       "expect":{"status":"error"}}
     ]'
     if run_client "$script"; then
         pass "the daemon saw the close and gave the flow back"
     else
-        fail "the daemon did not release the closed flow"
+        fail "the close script did not hold; the failing step is above"
     fi
 }
 
 check_flows_are_independent() {
     log "Two flows on one connection stay separate"
+    # Flow a's read settles; flow b's cannot and is left as it is. A settling
+    # step re-asks until its expectation HOLDS, and "b counted 0" holds on the
+    # first ask whether or not b's reader task has ever run. So this stays a
+    # false green: if traffic ever did cross, b could read 0 for the same
+    # scheduling reason and the check would pass. Closing it needs a positive
+    # claim on b, writing a known count there and settling it, which is a
+    # larger change than this one.
     local script='[
       {"command":"connect","params":{"peer":"'"$PEER"'","remote_port":4242},
        "keep_fd":"a","keep_flow":"a","expect":{"status":"ok"}},
       {"command":"connect","params":{"peer":"'"$PEER2"'","remote_port":4243},
        "keep_fd":"b","keep_flow":"b","expect":{"status":"ok"}},
       {"fd":"a","write":"11","repeat":2},
-      {"command":"stats","params":{"flow_id":"@a"},"expect":{"data.rx_datagrams":2}},
+      {"command":"stats","params":{"flow_id":"@a"},"settle":true,
+       "expect":{"data.rx_datagrams":2}},
       {"command":"stats","params":{"flow_id":"@b"},"expect":{"data.rx_datagrams":0}},
       {"command":"inject","params":{"flow_id":"@b","data":"22"},"expect":{"status":"ok"}},
       {"fd":"b","read":1,"expect_bytes":"22"},
@@ -488,7 +503,7 @@ check_flows_are_independent() {
     if run_client "$script"; then
         pass "each flow saw only its own traffic"
     else
-        fail "traffic crossed between flows"
+        fail "the two-flow script did not hold; the failing step is above"
     fi
 }
 

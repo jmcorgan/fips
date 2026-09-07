@@ -64,7 +64,13 @@ send_stun_probe() {
     local stun_host="$2"
     local stun_port="$3"
 
-    docker exec "$container" python3 - "$stun_host" "$stun_port" <<'PY' 2>&1 || true
+    # `-i` is required: without it docker attaches no stdin, `python3 -` reads an
+    # empty program, and the probe silently does nothing while exiting 0.
+    # Coverage gap, deliberate and not discharged: this probe is diagnostic only,
+    # all four callers sitting inside dump_* helpers on failure paths, so nothing
+    # reds if the flag is removed again. The `|| true` stays for the same reason:
+    # a diagnostic dump must not abort part-way because one probe failed.
+    docker exec -i "$container" python3 - "$stun_host" "$stun_port" <<'PY' 2>&1 || true
 import os
 import socket
 import struct

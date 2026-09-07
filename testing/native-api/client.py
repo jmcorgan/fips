@@ -12,6 +12,7 @@ it exits.
 Kinds of step:
 
   RPC step:  {"command": str, "params": {...}?, "expect": {"dotted.key": val}?,
+              "settle": bool?,
               "keep_fd": name?, "keep_listener": name?, "keep_flow": name?}
              Sends a command and checks the reply. `keep_fd` stores a flow
              descriptor under that name, `keep_listener` a listener descriptor;
@@ -75,6 +76,13 @@ from typing import Any
 # correctly by accident.
 FLOW = "flow"
 LISTENER = "listener"
+
+# How long a settling step keeps re-asking, and how long it pauses between
+# tries. The wait is for a task hop on a host that may be loaded, so it is
+# seconds rather than milliseconds; it is bounded because a datagram that
+# never arrives has to end the run red rather than hold it open.
+SETTLE_SECONDS = 5.0
+SETTLE_PAUSE = 0.02
 
 
 def recvfds(sock: socket.socket, bufsize: int, maxfds: int) -> tuple[bytes, list[int]]:
@@ -287,7 +295,16 @@ def store(client: Client, step: dict, body: dict, fd: int | None) -> list[str]:
 
 
 def run_rpc(client: Client, step: dict) -> list[str]:
-    """Send one command and report what did not hold."""
+    """Send one command and report what did not hold.
+
+    A step naming `settle` is asked again until its expectations hold or the
+    deadline passes. What `stats` reports is advanced by the daemon's per-flow
+    reader task, and nothing orders that task against the client's write on the
+    flow descriptor: one ask can be answered while a datagram is still queued in
+    the kernel socket buffer, and it reads back as zero. Re-asking is the only
+    barrier this protocol offers, and the deadline is what keeps a datagram that
+    never arrives a failure rather than a hang.
+    """
     command = step["command"]
     try:
         params = substitute(step.get("params"), client.flows)
@@ -295,8 +312,23 @@ def run_rpc(client: Client, step: dict) -> list[str]:
     except KeyError as error:
         return [str(error)]
 
-    reply, fd = client.call(command, params)
-    problems = check(reply, expect)
+    settle = bool(step.get("settle"))
+    if settle and (step.get("keep_fd") or step.get("keep_listener")):
+        # Every ask but the last is discarded, and a discarded reply's
+        # descriptor has no owner. Refusing beats closing one a later step
+        # meant to keep.
+        return ["settle: a step that keeps a descriptor cannot be re-asked"]
+
+    deadline = time.monotonic() + SETTLE_SECONDS
+    while True:
+        reply, fd = client.call(command, params)
+        problems = check(reply, expect)
+        if not problems or not settle or time.monotonic() >= deadline:
+            break
+        if fd is not None:
+            os.close(fd)
+        time.sleep(SETTLE_PAUSE)
+
     problems += store(client, step, reply, fd)
 
     if problems:

@@ -165,15 +165,25 @@ dump_diagnostics() {
 }
 
 # Publish a malformed Kind-37195 (overlay-advert) event directly to the
-# relay. The event is signed with a fresh ephemeral keypair (so the
-# relay accepts it on the wire) but its `content` is gibberish that
-# cannot deserialize as OverlayAdvert. Both consumer daemons must log a
-# parse error and stay alive.
+# relay. The event is signed with a fresh ephemeral keypair, so the relay
+# accepts it on the wire, and both consumer daemons must reject it and
+# stay alive.
+#
+# Which rejection they take is not what the event's gibberish `content`
+# suggests. `parse_overlay_advert_event` looks for the `protocol` tag
+# first (src/nostr/runtime.rs:1665-1671) and this event carries only `d`
+# and `app`, so it fails with `missing required protocol tag` and never
+# reaches the `serde_json::from_str` at :1679. The content is therefore
+# belt and braces rather than the thing under test.
+#
+# Neither branch logs anything: see the coverage-gap note in run_test.
 publish_malformed_advert() {
     local relay_host="$1"
     local relay_port="$2"
 
-    docker exec "$NODE_A" python3 - "$relay_host" "$relay_port" <<'PY'
+    # `-i` is required: without it docker attaches no stdin, `python3 -` reads an
+    # empty program, runs nothing and exits 0, so the stimulus is never injected.
+    docker exec -i "$NODE_A" python3 - "$relay_host" "$relay_port" <<'PY'
 import base64
 import hashlib
 import json
@@ -281,6 +291,13 @@ while int.from_bytes(secret, "big") == 0 or int.from_bytes(secret, "big") >= N:
 
 pubkey = xonly_pubkey(secret).hex()
 created_at = int(time.time())
+# Both of these must match the consumers' subscription filter, which is
+# kind + identifier and no author clause (src/nostr/runtime.rs:1042-1044).
+# The literals are ADVERT_KIND and ADVERT_IDENTIFIER in src/nostr/types.rs
+# and are duplicated here rather than derived, so changing either there
+# silently stops this event reaching the daemons while the relay goes on
+# accepting it. `next` uses `fips-overlay-v1-next`, which is the one line
+# that differs between the branches' copies of this script.
 kind = 37195
 tags = [
     ["d", "fips-overlay-v1-next"],
@@ -355,13 +372,75 @@ else:
 frame += mask + masked
 sock.sendall(bytes(frame))
 
-# Read the relay's OK/NOTICE response (best-effort).
-sock.settimeout(3)
+# The relay's verdict decides whether the stimulus was delivered at all.
+# strfry verifies the event id and the BIP-340 signature and answers
+# ["OK",<id>,false,"invalid: ..."] on refusal; a refused event is never
+# stored and never broadcast, so the consumers never see it and phase 3
+# proves nothing. Reading the reply and continuing regardless is what let
+# that pass unnoticed.
+#
+# The timeout is 10s rather than 3s: this is a loopback docker network to a
+# local relay, and a missing ack is a failure below, so the margin is there
+# to keep that from becoming a flake.
+sock.settimeout(10)
+
+
+def server_frame_payload(buf):
+    """Return the payload of the first server frame in buf, or None."""
+    # Decoded rather than pattern-matched: a payload of 91 bytes puts a
+    # literal '[' in the length byte, so searching for the JSON would find
+    # the header instead of the body.
+    if len(buf) < 2:
+        return None
+    n = buf[1] & 0x7F
+    off = 2
+    if n == 126:
+        if len(buf) < 4:
+            return None
+        n = struct.unpack("!H", buf[2:4])[0]
+        off = 4
+    elif n == 127:
+        if len(buf) < 10:
+            return None
+        n = struct.unpack("!Q", buf[2:10])[0]
+        off = 10
+    if buf[1] & 0x80:
+        # A server must not mask, but tolerate one that does.
+        mask = buf[off:off + 4]
+        off += 4
+        body = bytes(b ^ mask[i % 4] for i, b in enumerate(buf[off:off + n]))
+    else:
+        body = buf[off:off + n]
+    return body if len(body) == n else None
+
+
+def relay_verdict(reply, want_id):
+    """Classify the relay's answer to our EVENT. Only "accepted" means stored."""
+    payload = server_frame_payload(reply)
+    if payload is None:
+        return "unreadable-frame"
+    try:
+        msg = json.loads(payload.decode("utf-8", "replace"))
+    except ValueError:
+        return "unparsable-frame"
+    # NIP-01: an OK is FOUR elements, ["OK", <id>, <true|false>, <message>],
+    # and the message is mandatory even on success. Matching a substring such
+    # as `,true]` therefore never fires against a conformant relay, which is
+    # why this parses the array instead.
+    if isinstance(msg, list) and len(msg) >= 3 and msg[0] == "OK" and msg[1] == want_id:
+        return "accepted" if msg[2] is True else "rejected"
+    if isinstance(msg, list) and msg and msg[0] == "NOTICE":
+        return "notice"
+    return "unrecognised-frame"
+
+
+verdict = "no-ack"
 try:
     reply = sock.recv(4096)
     print("relay reply:", reply[:200])
+    verdict = relay_verdict(reply, event_id.hex())
 except socket.timeout:
-    print("relay reply: <timeout — frame sent but no ack>")
+    print("relay reply: <timeout - frame sent but no ack>")
 
 # Polite close (opcode 0x88 = close), then drop.
 try:
@@ -369,7 +448,9 @@ try:
 except OSError:
     pass
 sock.close()
-print("malformed advert published")
+print("malformed advert published:", verdict)
+if verdict != "accepted":
+    raise SystemExit(3)
 PY
 }
 
@@ -441,7 +522,31 @@ run_test() {
 
     echo ""
     echo "=== nostr-relay-test: phase 3 (malformed advert) ==="
-    publish_malformed_advert "$RELAY_HOST" "$RELAY_PORT"
+    # The publisher's verdict line is the evidence that the relay STORED the
+    # event. Without this check the phase passes whether or not anything was
+    # published: the assertions below re-test properties that phases 1 and 2
+    # already established, so they all hold when the stimulus is absent.
+    #
+    # Accepted by the relay is one hop short of received by the consumers.
+    # A daemon whose relay socket is down at that moment, or whose `d` tag no
+    # longer matches the one published above, never sees a stored event and
+    # this check still passes. That hop is unguarded.
+    local publish_out
+    if ! publish_out="$(publish_malformed_advert "$RELAY_HOST" "$RELAY_PORT" 2>&1)"; then
+        printf '%s\n' "$publish_out"
+        echo "malformed-advert publisher failed: nothing was published, so" >&2
+        echo "phase 3 would prove nothing about ingest." >&2
+        dump_diagnostics
+        return 1
+    fi
+    printf '%s\n' "$publish_out"
+    if ! grep -q "malformed advert published: accepted" <<<"$publish_out"; then
+        echo "malformed-advert publisher reported no accepted relay verdict:" >&2
+        echo "the relay did not store the event, so it reached no consumer" >&2
+        echo "and phase 3 would prove nothing about the reject path." >&2
+        dump_diagnostics
+        return 1
+    fi
 
     # Give consumers a moment to ingest and reject.
     sleep 5
@@ -451,6 +556,11 @@ run_test() {
     assert_no_panic "$NODE_A"      || { dump_diagnostics; return 1; }
     assert_no_panic "$NODE_B"      || { dump_diagnostics; return 1; }
 
+    # Coverage gap, deliberate and not discharged: this phase asserts that
+    # the daemons did not crash on the malformed advert, not that they
+    # rejected it. The reject path emits no log - src/nostr/runtime.rs:755
+    # discards the error with `let Ok(advert) =` and no diagnostic - so
+    # there is nothing observable from outside the process to assert on.
     # Existing peer link must still be healthy (consumer didn't tear
     # down on a bad advert).
     if ! docker exec "$NODE_A" ping6 -c 3 -W 5 "${NPUB_B}.fips" >/dev/null; then
