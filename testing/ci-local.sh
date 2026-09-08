@@ -831,31 +831,50 @@ run_firewall() {
 # labels are stamped so ci-cleanup.sh's label sweep can recover the networks
 # when a run is SIGKILLed, which no inline removal can cover.
 CI_NAT_NET_BASE="10.41"
-CI_NAT_NET_CANDIDATES=256
+# 10.42.0.0/16 for the medium-change lab, on the same reasoning as 10.41 above
+# and adjacent to it so the two stay legible as a pair. Its three bridges are
+# claimed per suite invocation exactly as the nat pair are; before that they
+# were three fixed /24s under 172.31.6x, which two concurrent runs both
+# requested and the second lost with `Pool overlaps`.
+CI_MC_NET_BASE="10.42"
+CI_V4_NET_CANDIDATES=256
 CI_NAT_CLAIMED_PREFIX=""
+CI_CLAIMED_V4_PREFIX=""
 
+# Claim one free /24 for `net` by walking candidates under `base` and letting
+# docker's own create be the atomic arbiter. Sets CI_CLAIMED_V4_PREFIX.
+#
 # Deliberately does NOT discard stderr: only an address-pool conflict is worth
 # advancing on. Any other failure is real, and burning through 256 candidates
 # would bury the reason.
-ci_claim_nat_net() {
-    local net="$1" i err
-    CI_NAT_CLAIMED_PREFIX=""
-    for (( i = 0; i < CI_NAT_NET_CANDIDATES; i++ )); do
+#
+# `tag` is the suite word for the log lines only. Both labels are stamped so
+# ci-cleanup.sh's label sweep can recover the network when a run is SIGKILLed,
+# which no inline removal can cover.
+ci_claim_v4_net() {
+    local net="$1" base="$2" tag="$3" i err
+    CI_CLAIMED_V4_PREFIX=""
+    for (( i = 0; i < CI_V4_NET_CANDIDATES; i++ )); do
         if err=$(docker network create \
-                --subnet "${CI_NAT_NET_BASE}.${i}.0/24" \
+                --subnet "${base}.${i}.0/24" \
                 --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
                 "$net" 2>&1); then
-            CI_NAT_CLAIMED_PREFIX="${CI_NAT_NET_BASE}.${i}"
-            info "[nat] Claimed $net on ${CI_NAT_CLAIMED_PREFIX}.0/24"
+            CI_CLAIMED_V4_PREFIX="${base}.${i}"
+            info "[$tag] Claimed $net on ${CI_CLAIMED_V4_PREFIX}.0/24"
             return 0
         fi
         case "$err" in
             *"Pool overlaps"*|*"pool overlaps"*) continue ;;
-            *) fail "[nat] docker network create: $err"; return 1 ;;
+            *) fail "[$tag] docker network create: $err"; return 1 ;;
         esac
     done
-    fail "[nat] no free /24 in ${CI_NAT_NET_BASE}.0.0/16 after ${CI_NAT_NET_CANDIDATES} attempts"
+    fail "[$tag] no free /24 in ${base}.0.0/16 after ${CI_V4_NET_CANDIDATES} attempts"
     return 1
+}
+
+ci_claim_nat_net() {
+    ci_claim_v4_net "$1" "$CI_NAT_NET_BASE" nat || return 1
+    CI_NAT_CLAIMED_PREFIX="$CI_CLAIMED_V4_PREFIX"
 }
 
 # Claim both lab networks and export the prefixes every lab address derives
@@ -901,6 +920,63 @@ ci_release_nat_networks() {
         { docker network rm "$FIPS_NAT_WAN_NET" >/dev/null 2>&1 || true; }
     [[ -n "${FIPS_NAT_LAN_NET:-}" ]] && \
         { docker network rm "$FIPS_NAT_LAN_NET" >/dev/null 2>&1 || true; }
+    return 0
+}
+
+# Claim all three medium-change lab networks and export both the names the
+# overlay attaches to and the prefixes every lab address derives from. A
+# partial claim is rolled back here, because nothing downstream will run to
+# release it.
+#
+# Three, not two: the lab's whole design rests on node-b being off-link, so the
+# route to it follows node-a's default route. A mix of claimed and compose-made
+# bridges would still come up, with the wrong topology and no error.
+ci_claim_mc_networks() {
+    unset MC_PRIMARY_PREFIX MC_SECONDARY_PREFIX MC_FAR_PREFIX
+    export FIPS_MC_PRIMARY_NET="fips-mc-primary${FIPS_CI_NAME_SUFFIX:-}"
+    export FIPS_MC_SECONDARY_NET="fips-mc-secondary${FIPS_CI_NAME_SUFFIX:-}"
+    export FIPS_MC_FAR_NET="fips-mc-far${FIPS_CI_NAME_SUFFIX:-}"
+
+    ci_claim_v4_net "$FIPS_MC_PRIMARY_NET" "$CI_MC_NET_BASE" medium-change || return 1
+    local primary="$CI_CLAIMED_V4_PREFIX"
+
+    if ! ci_claim_v4_net "$FIPS_MC_SECONDARY_NET" "$CI_MC_NET_BASE" medium-change; then
+        docker network rm "$FIPS_MC_PRIMARY_NET" >/dev/null 2>&1 || true
+        return 1
+    fi
+    local secondary="$CI_CLAIMED_V4_PREFIX"
+
+    if ! ci_claim_v4_net "$FIPS_MC_FAR_NET" "$CI_MC_NET_BASE" medium-change; then
+        docker network rm "$FIPS_MC_SECONDARY_NET" >/dev/null 2>&1 || true
+        docker network rm "$FIPS_MC_PRIMARY_NET" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    export MC_PRIMARY_PREFIX="$primary"
+    export MC_SECONDARY_PREFIX="$secondary"
+    export MC_FAR_PREFIX="$CI_CLAIMED_V4_PREFIX"
+}
+
+# Release all three claimed networks. Left behind they would not merely leak:
+# the next medium-change invocation in this run would hit `network with name
+# ... already exists`, which is not a pool overlap, so the allocator correctly
+# refuses to advance and fails.
+#
+# The `down` before the removals is load-bearing, not tidiness. `docker network
+# rm` silently no-ops on a network that still has endpoints attached and
+# reports success, and the suite leaves its containers up on some paths. Without
+# the `down` the removal fails to remove exactly when it matters. The overlay is
+# included so the `down` addresses the same project the `up` created.
+ci_release_mc_networks() {
+    docker compose \
+        -f testing/medium-change/docker-compose.yml \
+        -f testing/medium-change/docker-compose.external-net.yml \
+        down --volumes --remove-orphans >/dev/null 2>&1 || true
+    local net
+    for net in "${FIPS_MC_PRIMARY_NET:-}" "${FIPS_MC_SECONDARY_NET:-}" \
+               "${FIPS_MC_FAR_NET:-}"; do
+        [[ -n "$net" ]] && { docker network rm "$net" >/dev/null 2>&1 || true; }
+    done
     return 0
 }
 
@@ -1011,12 +1087,31 @@ run_native_api() {
 # Owns its own compose project and its own three bridges, so it neither
 # shares container names with the NAT lab nor has to run after it.
 run_medium_change() {
+    # Its own project, like every other suite. Without this the lab inherited
+    # whichever COMPOSE_PROJECT_NAME the previous suite exported, so its
+    # containers and networks were filed under that suite's project — visible
+    # in a failure as `fipsci_<runid>_nat_mc-far`, a medium-change network
+    # under the nat project.
+    local -x COMPOSE_PROJECT_NAME="$(ci_project medium-change)"
+
+    # Claim before generate-configs: the suite renders every address in the
+    # compose file, the node configs and its own assertions from these
+    # prefixes, so all of them must see the claimed values.
+    info "[medium-change] Claiming lab networks"
+    if ! ci_claim_mc_networks; then
+        record "medium-change" 1
+        return
+    fi
+
     info "[medium-change] Running transport-medium change test"
-    if FIPS_TEST_IMAGE="$CI_IMAGE_TEST" bash testing/medium-change/scripts/test.sh 2>&1; then
+    if MC_EXTRA_COMPOSE="testing/medium-change/docker-compose.external-net.yml" \
+       FIPS_TEST_IMAGE="$CI_IMAGE_TEST" \
+       bash testing/medium-change/scripts/test.sh 2>&1; then
         record "medium-change" 0
     else
         record "medium-change" 1
     fi
+    ci_release_mc_networks
 }
 
 # Run dns-resolver harness (multi-distro + e2e scenarios)

@@ -1,0 +1,32 @@
+# Override: attach the medium-change lab's three bridges to pre-created
+# external networks instead of letting compose create them from the base
+# file's fixed pins.
+#
+# Applied only by ci-local.sh's run_medium_change, which claims a free /24 per
+# network per suite invocation (ci_claim_mc_networks) and exports
+# FIPS_MC_PRIMARY_NET / FIPS_MC_SECONDARY_NET / FIPS_MC_FAR_NET alongside
+# MC_PRIMARY_PREFIX / MC_SECONDARY_PREFIX / MC_FAR_PREFIX before `up`. That is
+# what makes two concurrent local runs collision-safe: each claims distinct
+# ranges, so neither requests address space the other holds.
+#
+# The GitHub matrix, the README invocation and any standalone
+# `docker compose up` do NOT apply this overlay; they use the base file's
+# normal networks with the `:-` defaults, which render today's exact
+# addresses. This mirrors nat/docker-compose.external-net.yml,
+# static/docker-compose.gateway-external-net.yml and
+# sidecar/docker-compose.external-net.yml.
+#
+# One file carries all three: they are claimed and released together, and
+# splitting them would let the lab attach to a mix of claimed and compose-made
+# bridges — which is the state that produces a half-addressed topology rather
+# than a clean failure.
+networks:
+  mc-primary:
+    external: true
+    name: ${FIPS_MC_PRIMARY_NET:-fips-mc-primary}
+  mc-secondary:
+    external: true
+    name: ${FIPS_MC_SECONDARY_NET:-fips-mc-secondary}
+  mc-far:
+    external: true
+    name: ${FIPS_MC_FAR_NET:-fips-mc-far}

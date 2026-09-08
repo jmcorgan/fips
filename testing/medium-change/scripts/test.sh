@@ -36,6 +36,23 @@ NODE_B="fips-mc-node-b${FIPS_CI_NAME_SUFFIX:-}"
 
 COMPOSE=(docker compose -f "$MC_DIR/docker-compose.yml")
 
+# Extra compose overlays, colon-separated, appended in order. ci-local.sh sets
+# this to docker-compose.external-net.yml so the lab attaches to the /24s it
+# claimed rather than the base file's fixed pins; nothing else sets it, so the
+# GitHub matrix and a bare `docker compose up` keep today's addresses. Applied
+# to the whole COMPOSE array, so teardown matches bring-up — a `down` that
+# omitted the overlay would not know the networks are external and would try to
+# delete networks it does not own.
+if [ -n "${MC_EXTRA_COMPOSE:-}" ]; then
+    IFS=':' read -ra _MC_EXTRA <<< "${MC_EXTRA_COMPOSE}"
+    for _f in "${_MC_EXTRA[@]}"; do
+        case "$_f" in
+            /*) COMPOSE+=(-f "$_f") ;;
+            *)  COMPOSE+=(-f "$ROOT_DIR/$_f") ;;
+        esac
+    done
+fi
+
 # Ping cadence during a move. 5/s is fast enough to resolve a sub-second gap
 # without the send loop itself becoming the thing under test.
 PING_INTERVAL=0.2

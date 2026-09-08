@@ -69,6 +69,27 @@ claim, not a test, and the claim is cheap to make and expensive to trust.
 | `MC_PRIMARY_PREFIX` | `172.31.60` | first access path `/24` |
 | `MC_SECONDARY_PREFIX` | `172.31.61` | second access path `/24` |
 | `MC_FAR_PREFIX` | `172.31.62` | far segment `/24` |
+| `MC_EXTRA_COMPOSE` | unset | extra compose overlays, colon-separated |
 
 The gap budget sits far below the 30 s liveness timeout on purpose: a pass
 must mean the move was absorbed, not that the reaper was quick.
+
+## Running two of these at once
+
+The three prefixes above are fixed defaults, and two runs that both take them
+do not both get them: docker refuses the second with `Pool overlaps with other
+one on this address space`, and the suite fails at topology start having tested
+nothing. The compose project name is unique per run, so the containers and the
+networks get distinct *names* — it is only the address pools that are shared.
+
+`testing/ci-local.sh` avoids that by claiming a free `/24` per network under
+`10.42.0.0/16` before it starts the lab, letting docker's own `network create`
+be the arbiter of who owns what, and pointing compose at the result with
+`docker-compose.external-net.yml` via `MC_EXTRA_COMPOSE`. It exports the
+claimed prefixes as the three `MC_*_PREFIX` variables, so everything the suite
+renders from them follows.
+
+Nothing else applies that overlay. The GitHub matrix runs one job per runner
+and the README invocation above is a single lab, so both keep the fixed
+defaults and the addresses in this document stay literal. If you want to run
+two by hand on one host, set the three prefixes yourself.
