@@ -42,9 +42,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
@@ -271,6 +270,7 @@ impl TcpTransport {
         let mut pool = self.pool.lock().await;
         for (addr, conn) in pool.drain() {
             conn.recv_task.abort();
+            conn.send_task.abort();
             let _ = conn.recv_task.await;
             match conn.direction {
                 Direction::Inbound => self.stats.record_pool_inbound_removed(),
@@ -323,46 +323,56 @@ impl TcpTransport {
             });
         }
 
-        // Get or create connection
-        let writer = {
+        // Get or create connection. What comes back is the queue into the
+        // connection's writer task, never the write half itself: this function
+        // must not be able to await the wire (see `tcp_send_loop`).
+        let send_tx = {
             let pool = self.pool.lock().await;
-            pool.get(addr).map(|c| c.writer.clone())
+            pool.get(addr).map(|c| c.send_tx.clone())
         };
 
-        let writer = match writer {
-            Some(w) => w,
+        let send_tx = match send_tx {
+            Some(tx) => tx,
             None => {
                 // Connect-on-send
                 self.connect(addr).await?
             }
         };
 
-        // Write packet directly (no framing transformation needed)
-        let mut w = writer.lock().await;
-        match w.write_all(data).await {
-            Ok(()) => {
-                self.stats.record_send(data.len());
-                trace!(
+        // Hand the frame to the writer task. The copy buys the caller its
+        // freedom from the wire: `write_all` borrows, a queue must own. One
+        // memcpy of at most an MTU is a good trade for not stalling the rx
+        // loop on a peer that has stopped reading.
+        //
+        // `try_send` rather than `send`: awaiting a full queue would reinstate
+        // exactly the block this removes, one level up. A full queue means the
+        // writer task has not drained a frame in the time it took to fill 64 of
+        // them, which is a peer that is not receiving, so the send fails and
+        // the caller's own retry policy takes over.
+        //
+        // The byte count is what was queued, not what reached the wire — the
+        // same prediction the UDP fast path reports when it dispatches to the
+        // encrypt workers. Bytes actually written are recorded by the writer
+        // task as they go.
+        match send_tx.try_send(data.to_vec()) {
+            Ok(()) => Ok(data.len()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.stats.record_send_error();
+                debug!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
-                    bytes = data.len(),
-                    "TCP packet sent"
+                    depth = crate::transport::tcp::pool::SEND_QUEUE_DEPTH,
+                    "TCP outbound queue full; peer is not draining"
                 );
-                Ok(data.len())
+                Err(TransportError::SendFailed(
+                    "outbound queue full: peer not draining".to_string(),
+                ))
             }
-            Err(e) => {
+            Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.stats.record_send_error();
-                drop(w);
-                // Remove failed connection from pool
-                let mut pool = self.pool.lock().await;
-                if let Some(conn) = pool.remove(addr) {
-                    conn.recv_task.abort();
-                    match conn.direction {
-                        Direction::Inbound => self.stats.record_pool_inbound_removed(),
-                        Direction::Outbound => self.stats.record_pool_outbound_removed(),
-                    }
-                }
-                Err(TransportError::SendFailed(format!("{}", e)))
+                Err(TransportError::SendFailed(
+                    "connection writer gone".to_string(),
+                ))
             }
         }
     }
@@ -371,10 +381,7 @@ impl TcpTransport {
     ///
     /// Configures socket options, reads TCP_MAXSEG for MTU, splits the
     /// stream, spawns a receive task, and stores in the pool.
-    async fn connect(
-        &self,
-        addr: &TransportAddr,
-    ) -> Result<Arc<Mutex<OwnedWriteHalf>>, TransportError> {
+    async fn connect(&self, addr: &TransportAddr) -> Result<mpsc::Sender<Vec<u8>>, TransportError> {
         let socket_addr = resolve_socket_addr(addr).await?;
         let timeout_ms = self.config.connect_timeout_ms();
 
@@ -411,7 +418,6 @@ impl TcpTransport {
 
         // Split and spawn receive task
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
@@ -438,8 +444,19 @@ impl TcpTransport {
             .await;
         });
 
+        let (send_tx, send_rx) = mpsc::channel(crate::transport::tcp::pool::SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(tcp_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            addr.clone(),
+            self.pool.clone(),
+            self.stats.clone(),
+        ));
+
         let conn = TcpConnection {
-            writer: writer.clone(),
+            send_tx: send_tx.clone(),
+            send_task,
             recv_task,
             mtu: mss_mtu,
             established_at: Instant::now(),
@@ -459,7 +476,7 @@ impl TcpTransport {
             "TCP connection established (connect-on-send)"
         );
 
-        Ok(writer)
+        Ok(send_tx)
     }
 
     /// Close a specific connection asynchronously.
@@ -470,6 +487,7 @@ impl TcpTransport {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = pool.remove(addr) {
             conn.recv_task.abort();
+            conn.send_task.abort();
             match conn.direction {
                 Direction::Inbound => self.stats.record_pool_inbound_removed(),
                 Direction::Outbound => self.stats.record_pool_outbound_removed(),
@@ -665,7 +683,6 @@ impl TcpTransport {
     /// Called from `connection_state_sync()` when a background task completes.
     fn promote_connection(&self, addr: &TransportAddr, stream: TcpStream, mss_mtu: u16) {
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
@@ -691,8 +708,19 @@ impl TcpTransport {
             .await;
         });
 
+        let (send_tx, send_rx) = mpsc::channel(crate::transport::tcp::pool::SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(tcp_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            addr.clone(),
+            self.pool.clone(),
+            self.stats.clone(),
+        ));
+
         let conn = TcpConnection {
-            writer,
+            send_tx,
+            send_task,
             recv_task,
             mtu: mss_mtu,
             established_at: Instant::now(),
@@ -714,6 +742,7 @@ impl TcpTransport {
         } else {
             // Pool locked — abort the recv task, connection will be retried
             conn.recv_task.abort();
+            conn.send_task.abort();
             warn!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
@@ -892,7 +921,6 @@ async fn accept_loop(
 
                 // Split and spawn receive task
                 let (read_half, write_half) = stream.into_split();
-                let writer = Arc::new(Mutex::new(write_half));
 
                 let recv_pool = pool.clone();
                 let recv_packet_tx = packet_tx.clone();
@@ -921,8 +949,20 @@ async fn accept_loop(
                     .await;
                 });
 
+                let (send_tx, send_rx) =
+                    mpsc::channel(crate::transport::tcp::pool::SEND_QUEUE_DEPTH);
+                let send_task = tokio::spawn(tcp_send_loop(
+                    write_half,
+                    send_rx,
+                    transport_id,
+                    remote_addr.clone(),
+                    pool.clone(),
+                    stats.clone(),
+                ));
+
                 let conn = TcpConnection {
-                    writer,
+                    send_tx,
+                    send_task,
                     recv_task,
                     mtu: conn_mtu,
                     established_at: Instant::now(),
@@ -959,8 +999,79 @@ async fn accept_loop(
 }
 
 // ============================================================================
-// Receive Loop (per-connection)
+// Per-connection Loops (writer and receiver)
 // ============================================================================
+
+/// Per-connection writer task: the only place a TCP write is ever awaited.
+///
+/// This exists so the caller does not await the wire. `write_all` on a stream
+/// blocks once the kernel send buffer fills, which is precisely what a peer
+/// that has stopped draining causes — and the callers are the rx loop's tick
+/// handlers, where blocking holds every other arm of the select behind it. The
+/// loop owns the write half outright, so no other task can hold it and no
+/// other task can be held by it.
+///
+/// On a write error the connection is removed from the pool, mirroring
+/// `tcp_receive_loop`'s teardown contract: the pool entry is removed and the
+/// direction counter decremented only when the removal returned `Some`, so a
+/// concurrent `close`/`stop` of the same address cannot double-count. The
+/// receive task is aborted here rather than left to notice on its own, because
+/// a half-closed connection is not something either side should keep.
+///
+/// Frames are written whole. A partial write followed by an error takes the
+/// connection down with it, so the peer never sees a frame it cannot
+/// resynchronise from.
+async fn tcp_send_loop(
+    mut writer: tokio::net::tcp::OwnedWriteHalf,
+    mut frames: mpsc::Receiver<Vec<u8>>,
+    transport_id: TransportId,
+    remote_addr: TransportAddr,
+    pool: ConnectionPool,
+    stats: Arc<TcpStats>,
+) {
+    while let Some(frame) = frames.recv().await {
+        match writer.write_all(&frame).await {
+            Ok(()) => {
+                stats.record_send(frame.len());
+                trace!(
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    bytes = frame.len(),
+                    "TCP packet sent"
+                );
+            }
+            Err(e) => {
+                stats.record_send_error();
+                debug!(
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    error = %e,
+                    "TCP write failed; dropping connection"
+                );
+                let removed = {
+                    let mut pool = pool.lock().await;
+                    pool.remove(&remote_addr)
+                };
+                if let Some(conn) = removed {
+                    conn.recv_task.abort();
+                    conn.send_task.abort();
+                    match conn.direction {
+                        Direction::Inbound => stats.record_pool_inbound_removed(),
+                        Direction::Outbound => stats.record_pool_outbound_removed(),
+                    }
+                }
+                return;
+            }
+        }
+    }
+    // The sender side is gone: the pool entry was dropped, so the connection
+    // is already being torn down and there is nothing to clean up here.
+    trace!(
+        transport_id = %transport_id,
+        remote_addr = %remote_addr,
+        "TCP writer task exiting"
+    );
+}
 
 /// Per-connection TCP receive loop.
 ///
@@ -1549,6 +1660,68 @@ mod tests {
         assert!(!transport.accept_connections());
     }
 
+    /// **The property this transport's send path exists to guarantee.**
+    ///
+    /// A peer that stops reading fills its receive window, then this node's
+    /// kernel send buffer, and from that moment `write_all` blocks until the
+    /// peer drains or the connection dies. The callers are the rx loop's tick
+    /// handlers — the heartbeat sweep among them — so a blocking send holds
+    /// every other arm of the select behind it: control RPCs, forwarding,
+    /// every other peer's liveness. A medium change is precisely the condition
+    /// that produces such a peer, which is how this was found.
+    ///
+    /// The writer task owns the write half, so `send_async` can only ever
+    /// enqueue. This drives a peer that accepts the connection and then never
+    /// reads, pushes far more than any socket buffer will hold, and asserts
+    /// every call returns promptly — failing once the queue fills, rather than
+    /// blocking on a peer that is not listening.
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_cannot_block_the_sender() {
+        let (tx1, _rx1) = packet_channel(100);
+        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx1);
+        t1.start_async().await.unwrap();
+
+        // A listener that accepts and then never reads a byte. Holding the
+        // stream is the point: dropping it would close the connection and turn
+        // the writes into fast errors, which is not the case under test.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let deaf = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(stream);
+        });
+        let remote = TransportAddr::from_string(&listen_addr.to_string());
+
+        // Enough to overrun any plausible socket buffer plus the queue behind
+        // it, so the blocking case cannot be missed by sending too little.
+        let frame = vec![0xAB; 1400];
+        let mut queued = 0usize;
+        let mut refused = 0usize;
+        for _ in 0..8000 {
+            // The budget is per call and generous: a healthy enqueue is
+            // microseconds, while the old unbounded write parked here until
+            // the peer drained, which it never does.
+            match timeout(Duration::from_secs(2), t1.send_async(&remote, &frame)).await {
+                Ok(Ok(_)) => queued += 1,
+                Ok(Err(_)) => refused += 1,
+                Err(_) => panic!(
+                    "send blocked on a peer that stopped reading; \
+                     the write is back on the caller's task"
+                ),
+            }
+        }
+
+        assert!(queued > 0, "the first sends must be accepted");
+        assert!(
+            refused > 0,
+            "a peer that never drains must eventually have sends refused rather than \
+             queued without bound: queued={queued}"
+        );
+
+        deaf.abort();
+    }
+
     #[tokio::test]
     async fn test_connection_drop_and_reconnect() {
         let (tx1, _rx1) = packet_channel(100);
@@ -2050,14 +2223,15 @@ mod tests {
         let client = TcpStream::connect(listen).await.unwrap();
         let (server, peer_addr) = listener.accept().await.unwrap();
         let remote = TransportAddr::from_string(&peer_addr.to_string());
-        let (read_half, write_half) = server.into_split();
+        let (read_half, _write_half) = server.into_split();
 
         let pool: ConnectionPool = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(TcpStats::new());
         pool.lock().await.insert(
             remote.clone(),
             TcpConnection {
-                writer: Arc::new(Mutex::new(write_half)),
+                send_tx: mpsc::channel(1).0,
+                send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1400,
                 established_at: Instant::now(),

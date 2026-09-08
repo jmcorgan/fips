@@ -41,11 +41,11 @@
 //!    side re-pins on receipt instead of waiting out its own
 //!    `heartbeat_interval_secs`. Without it the forward direction is fixed but
 //!    the reverse still points at the old address until the node next happens
-//!    to send. This runs on the rx loop, so it covers the connectionless
+//!    to send. This runs on the rx loop, and it covers the connectionless
 //!    transports only — see
-//!    [`Node::heartbeat_all_peers_after_net_change`] for why awaiting a
-//!    connection-oriented write here would hold the loop, and what a peer on
-//!    one of those gets instead.
+//!    [`Node::heartbeat_all_peers_after_net_change`] for what a peer on a
+//!    connection-oriented transport gets instead, and for why that filter has
+//!    outlived the reason it was written for.
 //!
 //! Nothing here tears a peering down. On a live node both WLAN→LAN and
 //! LAN→WLAN now cost no reconnection at all — the Noise session, the tree
@@ -112,21 +112,24 @@ impl Node {
     /// learns the node's new source address in one RTT rather than at the next
     /// due interval. Returns how many went out.
     ///
-    /// The filter is not an optimisation. A connectionless transport's send
-    /// completes without ever awaiting the wire: the UDP fast path hands the
-    /// frame to the encrypt workers and returns, and a raw datagram write does
-    /// not wait for a peer. A connection-oriented one awaits `write_all` on a
-    /// stream, unbounded — the connect above it is wrapped in a timeout, the
-    /// write is not — and a medium change is precisely the condition that
-    /// leaves a send window full against a path that has just gone away. This
-    /// runs on the rx loop, so that write would hold every other arm of the
-    /// select for as long as the stranded socket takes to fail.
+    /// The filter was written for a hazard that no longer exists, and it is
+    /// kept deliberately rather than by oversight. It was this: a
+    /// connectionless transport's send completes without ever awaiting the
+    /// wire, because the UDP fast path hands the frame to the encrypt workers
+    /// and returns and a raw datagram write does not wait for a peer, while a
+    /// connection-oriented one awaited `write_all` on a stream, unbounded. A
+    /// medium change is precisely the condition that leaves a send window full
+    /// against a path that has just gone away, and this runs on the rx loop, so
+    /// that write held every other arm of the select for as long as the
+    /// stranded socket took to fail.
     ///
-    /// Bounding it with a timeout is not the fix either: dropping a partial
-    /// `write_all` would leave a half-written frame on the stream, which the
-    /// peer cannot resynchronise from. Nor can the fan-out simply be spawned,
-    /// because the send needs `&mut self` for the session counter and the MMP
-    /// sender record.
+    /// Every connection-oriented send now enqueues onto its connection's
+    /// bounded queue and returns, so none of them can await the wire from here.
+    /// Widening the fan-out to those transports is therefore open work rather
+    /// than something the send path forbids; it is left out of the change that
+    /// removed the hazard so the two stay separable. Note that the fan-out
+    /// still cannot simply be spawned, because the send needs `&mut self` for
+    /// the session counter and the MMP sender record.
     ///
     /// So a peer on TCP, Tor, Nym or BLE keeps the periodic heartbeat it had
     /// before this detector existed. It is not stranded by the omission: those

@@ -6,8 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -24,10 +23,26 @@ pub(crate) enum Direction {
     Outbound,
 }
 
+/// How many frames may be queued for one connection before sends to it start
+/// failing.
+///
+/// The queue exists so the caller never awaits the wire; the bound exists so a
+/// peer that has stopped draining cannot turn that into unbounded memory. Deep
+/// enough to absorb a burst — a heartbeat sweep plus the forwarding this node
+/// does for one peer — and shallow enough that a stranded peer is recognised
+/// within a tick or two rather than after megabytes have piled up behind it.
+pub(crate) const SEND_QUEUE_DEPTH: usize = 64;
+
 /// State for a single TCP connection to a peer.
 pub(crate) struct TcpConnection {
-    /// Write half of the split stream.
-    pub(crate) writer: Arc<Mutex<OwnedWriteHalf>>,
+    /// Frames queued for the writer task. Sending is an enqueue, never a
+    /// write: the write half belongs to `send_task` and nothing else can
+    /// block on it. A full queue is a peer that has stopped draining, and the
+    /// send fails rather than waiting.
+    pub(crate) send_tx: mpsc::Sender<Vec<u8>>,
+    /// Writer task for this connection. Owns the write half of the split
+    /// stream, so the only code that can ever await `write_all` is this task.
+    pub(crate) send_task: JoinHandle<()>,
     /// Receive task for this connection.
     pub(crate) recv_task: JoinHandle<()>,
     /// MSS-derived MTU for this connection (used for dynamic MTU re-reading).

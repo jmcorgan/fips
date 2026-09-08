@@ -159,6 +159,14 @@ impl ProxiedStats for TorStats {
     fn record_recv_error(&self) {
         self.base.record_recv_error();
     }
+
+    fn record_send(&self, bytes: usize) {
+        TorStats::record_send(self, bytes);
+    }
+
+    fn record_send_error(&self) {
+        TorStats::record_send_error(self);
+    }
 }
 
 /// Point-in-time snapshot of Tor stats (non-atomic, copyable).

@@ -94,6 +94,14 @@ impl ProxiedStats for NymStats {
     fn record_recv_error(&self) {
         self.base.record_recv_error();
     }
+
+    fn record_send(&self, bytes: usize) {
+        NymStats::record_send(self, bytes);
+    }
+
+    fn record_send_error(&self) {
+        NymStats::record_send_error(self);
+    }
 }
 
 /// Point-in-time snapshot of Nym stats (non-atomic, copyable).

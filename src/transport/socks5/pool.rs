@@ -13,10 +13,12 @@ use std::time::Duration;
 use futures::FutureExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, trace};
+
+use tokio::io::AsyncWriteExt;
 
 use crate::transport::framing::read_fmp_packet;
 use crate::transport::{
@@ -28,8 +30,12 @@ use crate::transport::{
 /// `M` is per-transport metadata: `Direction` for tor (drives
 /// inbound/outbound pool accounting), `()` for nym.
 pub(crate) struct ProxiedConnection<M> {
-    /// Write half of the split stream.
-    pub writer: Arc<Mutex<OwnedWriteHalf>>,
+    /// Frames queued for the writer task. Sending is an enqueue, never a
+    /// write: the write half belongs to `send_task`, so no caller can block on
+    /// the wire. A full queue is a peer that has stopped draining.
+    pub send_tx: mpsc::Sender<Vec<u8>>,
+    /// Writer task for this connection.
+    pub send_task: JoinHandle<()>,
     /// Receive task for this connection.
     pub recv_task: JoinHandle<()>,
     /// MTU for this connection.
@@ -124,6 +130,79 @@ pub(crate) trait ProxiedStats: Send + Sync + 'static {
     fn record_recv(&self, bytes: usize);
     /// Record a receive error.
     fn record_recv_error(&self);
+    /// Record `bytes` actually written to the wire.
+    fn record_send(&self, bytes: usize);
+    /// Record a send error.
+    fn record_send_error(&self);
+}
+
+/// How many frames may be queued for one connection before sends to it fail.
+/// See `crate::transport::tcp::pool::SEND_QUEUE_DEPTH`, which this mirrors.
+pub(crate) const SEND_QUEUE_DEPTH: usize = 64;
+
+/// Per-connection writer task: the only place a write to a proxied stream is
+/// ever awaited.
+///
+/// The reasoning is the TCP transport's, and the shape is deliberately the
+/// same. `write_all` blocks once the local socket to the proxy stops draining,
+/// and the callers are the rx loop's tick handlers, where that holds every
+/// other arm of the select. The loop owns the write half, so nothing else can
+/// block on it.
+///
+/// Teardown mirrors [`proxied_receive_loop`]: the pool entry is removed and
+/// `on_remove` fires only when the removal returned `Some`, taking the
+/// metadata from the removed entry, so a concurrent `close`/`stop` of the same
+/// address cannot double-count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxied_send_loop<S: ProxiedStats, M>(
+    mut writer: OwnedWriteHalf,
+    mut frames: mpsc::Receiver<Vec<u8>>,
+    transport_id: TransportId,
+    remote_addr: TransportAddr,
+    pool: ProxiedPool<M>,
+    stats: Arc<S>,
+    label: &'static str,
+    on_remove: impl Fn(&S, &M) + Send + 'static,
+) {
+    while let Some(frame) = frames.recv().await {
+        match writer.write_all(&frame).await {
+            Ok(()) => {
+                stats.record_send(frame.len());
+                trace!(
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    bytes = frame.len(),
+                    "{} packet sent",
+                    label
+                );
+            }
+            Err(e) => {
+                stats.record_send_error();
+                debug!(
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    error = %e,
+                    "{} write failed; dropping connection",
+                    label
+                );
+                let removed = {
+                    let mut guard = pool.lock().await;
+                    guard.remove(&remote_addr)
+                };
+                if let Some(conn) = removed {
+                    conn.recv_task.abort();
+                    on_remove(&stats, &conn.meta);
+                }
+                return;
+            }
+        }
+    }
+    trace!(
+        transport_id = %transport_id,
+        remote_addr = %remote_addr,
+        "{} writer task exiting",
+        label
+    );
 }
 
 /// Shared per-connection receive loop for the proxied transports.

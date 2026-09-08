@@ -30,8 +30,9 @@ use super::{
 };
 use crate::config::TorConfig;
 use crate::transport::socks5::{
-    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, Socks5Auth,
-    Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
+    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, SEND_QUEUE_DEPTH,
+    Socks5Auth, Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
+    proxied_send_loop,
 };
 use crate::transport::tcp::INBOUND_FIRST_FRAME_TIMEOUT;
 use control::{ControlAuth, TorControlClient, TorMonitoringInfo};
@@ -42,13 +43,11 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 // ============================================================================
 // Address Parsing
@@ -497,6 +496,7 @@ impl TorTransport {
         let mut pool = self.pool.lock().await;
         for (addr, conn) in pool.drain() {
             conn.recv_task.abort();
+            conn.send_task.abort();
             let _ = conn.recv_task.await;
             match conn.meta {
                 Direction::Inbound => self.stats.record_pool_inbound_removed(),
@@ -639,45 +639,42 @@ impl TorTransport {
         }
 
         // Get or create connection
-        let writer = {
+        let send_tx = {
             let pool = self.pool.lock().await;
-            pool.get(addr).map(|c| c.writer.clone())
+            pool.get(addr).map(|c| c.send_tx.clone())
         };
 
-        let writer = match writer {
-            Some(w) => w,
+        let send_tx = match send_tx {
+            Some(tx) => tx,
             None => {
                 // Connect-on-send
                 self.connect(addr).await?
             }
         };
 
-        // Write packet directly (no framing transformation needed)
-        let mut w = writer.lock().await;
-        match w.write_all(data).await {
-            Ok(()) => {
-                self.stats.record_send(data.len());
-                trace!(
+        // Queue the frame for the connection's writer task. `try_send`, not
+        // `send`: awaiting a full queue would reinstate the block this removes
+        // one level up. The byte count is what was queued; bytes on the wire
+        // are recorded by the writer task.
+        match send_tx.try_send(data.to_vec()) {
+            Ok(()) => Ok(data.len()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.stats.record_send_error();
+                debug!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
-                    bytes = data.len(),
-                    "Tor packet sent"
+                    depth = SEND_QUEUE_DEPTH,
+                    "Tor outbound queue full; peer is not draining"
                 );
-                Ok(data.len())
+                Err(TransportError::SendFailed(
+                    "outbound queue full: peer not draining".to_string(),
+                ))
             }
-            Err(e) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 self.stats.record_send_error();
-                drop(w);
-                // Remove failed connection from pool
-                let mut pool = self.pool.lock().await;
-                if let Some(conn) = pool.remove(addr) {
-                    conn.recv_task.abort();
-                    match conn.meta {
-                        Direction::Inbound => self.stats.record_pool_inbound_removed(),
-                        Direction::Outbound => self.stats.record_pool_outbound_removed(),
-                    }
-                }
-                Err(TransportError::SendFailed(format!("{}", e)))
+                Err(TransportError::SendFailed(
+                    "connection writer gone".to_string(),
+                ))
             }
         }
     }
@@ -690,7 +687,7 @@ impl TorTransport {
     async fn connect(
         &self,
         addr: &TransportAddr,
-    ) -> Result<Arc<Mutex<OwnedWriteHalf>>, TransportError> {
+    ) -> Result<tokio::sync::mpsc::Sender<Vec<u8>>, TransportError> {
         let tor_addr = parse_tor_addr(addr)?;
         let proxy_addr = self.config.socks5_addr();
         let timeout_ms = self.config.connect_timeout_ms();
@@ -752,7 +749,6 @@ impl TorTransport {
 
         // Split and spawn receive task
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
@@ -779,8 +775,24 @@ impl TorTransport {
             .await;
         });
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(proxied_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            addr.clone(),
+            self.pool.clone(),
+            self.stats.clone(),
+            "Tor",
+            |stats: &TorStats, meta: &Direction| match meta {
+                Direction::Inbound => stats.record_pool_inbound_removed(),
+                Direction::Outbound => stats.record_pool_outbound_removed(),
+            },
+        ));
+
         let conn = ProxiedConnection {
-            writer: writer.clone(),
+            send_tx: send_tx.clone(),
+            send_task,
             recv_task,
             mtu,
             established_at: Instant::now(),
@@ -800,7 +812,7 @@ impl TorTransport {
             "Tor circuit established via SOCKS5"
         );
 
-        Ok(writer)
+        Ok(send_tx)
     }
 
     /// Initiate a non-blocking connection to a remote address.
@@ -922,7 +934,6 @@ impl TorTransport {
     /// Called from `connection_state_sync()` when a background task completes.
     fn promote_connection(&self, addr: &TransportAddr, stream: TcpStream, mtu: u16) {
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
@@ -948,8 +959,24 @@ impl TorTransport {
             .await;
         });
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(proxied_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            addr.clone(),
+            self.pool.clone(),
+            self.stats.clone(),
+            "Tor",
+            |stats: &TorStats, meta: &Direction| match meta {
+                Direction::Inbound => stats.record_pool_inbound_removed(),
+                Direction::Outbound => stats.record_pool_outbound_removed(),
+            },
+        ));
+
         let conn = ProxiedConnection {
-            writer,
+            send_tx,
+            send_task,
             recv_task,
             mtu,
             established_at: Instant::now(),
@@ -970,6 +997,7 @@ impl TorTransport {
         } else {
             // Pool locked — abort the recv task, connection will be retried
             conn.recv_task.abort();
+            conn.send_task.abort();
             warn!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
@@ -983,6 +1011,7 @@ impl TorTransport {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = pool.remove(addr) {
             conn.recv_task.abort();
+            conn.send_task.abort();
             match conn.meta {
                 Direction::Inbound => self.stats.record_pool_inbound_removed(),
                 Direction::Outbound => self.stats.record_pool_outbound_removed(),
@@ -1196,7 +1225,6 @@ async fn tor_accept_loop(
 
         // Split stream and spawn receive task
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let recv_pool = pool.clone();
         let recv_stats = stats.clone();
@@ -1225,8 +1253,24 @@ async fn tor_accept_loop(
             .await;
         });
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(proxied_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            remote_addr.clone(),
+            pool.clone(),
+            stats.clone(),
+            "Tor",
+            |stats: &TorStats, meta: &Direction| match meta {
+                Direction::Inbound => stats.record_pool_inbound_removed(),
+                Direction::Outbound => stats.record_pool_outbound_removed(),
+            },
+        ));
+
         let conn = ProxiedConnection {
-            writer,
+            send_tx,
+            send_task,
             recv_task,
             mtu,
             established_at: Instant::now(),
@@ -1294,6 +1338,7 @@ fn validate_host_port(addr: &str, field_name: &str) -> Result<(), TransportError
 mod tests {
     use super::*;
     use crate::transport::packet_channel;
+    use tokio::io::AsyncWriteExt;
 
     fn make_config() -> TorConfig {
         TorConfig {
@@ -2090,16 +2135,6 @@ mod tests {
     // Accept-loop readiness barrier
     // ========================================================================
 
-    /// Build a throwaway `OwnedWriteHalf` for a hand-planted pool entry.
-    async fn spare_write_half() -> OwnedWriteHalf {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client = TcpStream::connect(addr).await.unwrap();
-        let (_server, _) = listener.accept().await.unwrap();
-        let (_read, write) = client.into_split();
-        write
-    }
-
     /// The accept loop can be torn down between the pool insert and the
     /// `ready_tx.send()`: the sender is dropped, so `ready_rx.await` returns
     /// `Err`. The receive loop must still fall through to its cleanup, or the
@@ -2114,14 +2149,15 @@ mod tests {
         let client = TcpStream::connect(listen).await.unwrap();
         let (server, peer_addr) = listener.accept().await.unwrap();
         let remote = TransportAddr::from_string(&peer_addr.to_string());
-        let (read_half, write_half) = server.into_split();
+        let (read_half, _write_half) = server.into_split();
 
         let pool: ProxiedPool<Direction> = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(TorStats::new());
         pool.lock().await.insert(
             remote.clone(),
             ProxiedConnection {
-                writer: Arc::new(Mutex::new(write_half)),
+                send_tx: tokio::sync::mpsc::channel(1).0,
+                send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1400,
                 established_at: Instant::now(),
@@ -2178,7 +2214,7 @@ mod tests {
         let (server, peer_addr) = listener.accept().await.unwrap();
         let remote = TransportAddr::from_string(&peer_addr.to_string());
         drop(client);
-        let (read_half, write_half) = server.into_split();
+        let (read_half, _write_half) = server.into_split();
 
         let pool: ProxiedPool<Direction> = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(TorStats::new());
@@ -2214,7 +2250,8 @@ mod tests {
         pool.lock().await.insert(
             remote.clone(),
             ProxiedConnection {
-                writer: Arc::new(Mutex::new(write_half)),
+                send_tx: tokio::sync::mpsc::channel(1).0,
+                send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(async {}),
                 mtu: 1400,
                 established_at: Instant::now(),
@@ -2270,7 +2307,8 @@ mod tests {
         pool.lock().await.insert(
             remote.clone(),
             ProxiedConnection {
-                writer: Arc::new(Mutex::new(spare_write_half().await)),
+                send_tx: tokio::sync::mpsc::channel(1).0,
+                send_task: tokio::spawn(async {}),
                 recv_task: tokio::spawn(std::future::pending::<()>()),
                 mtu: 1400,
                 established_at: Instant::now(),

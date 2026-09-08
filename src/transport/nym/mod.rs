@@ -20,8 +20,9 @@ use super::{
 };
 use crate::config::NymConfig;
 use crate::transport::socks5::{
-    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, Socks5Auth,
-    Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
+    ConnectingEntry, ConnectingPool, DialError, ProxiedConnection, ProxiedPool, SEND_QUEUE_DEPTH,
+    Socks5Auth, Socks5Dialer, SocksTarget, poll_connecting, proxied_receive_loop,
+    proxied_send_loop,
 };
 use stats::NymStats;
 
@@ -29,12 +30,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 // ============================================================================
 // Nym Transport
@@ -214,6 +213,7 @@ impl NymTransport {
         let mut pool = self.pool.lock().await;
         for (addr, conn) in pool.drain() {
             conn.recv_task.abort();
+            conn.send_task.abort();
             let _ = conn.recv_task.await;
             debug!(
                 transport_id = %self.transport_id,
@@ -256,42 +256,45 @@ impl NymTransport {
             });
         }
 
-        // Get or create connection
-        let writer = {
+        // Get or create the connection's send queue. Never the write half:
+        // this function must not be able to await the wire (see
+        // `proxied_send_loop`).
+        let send_tx = {
             let pool = self.pool.lock().await;
-            pool.get(addr).map(|c| c.writer.clone())
+            pool.get(addr).map(|c| c.send_tx.clone())
         };
 
-        let writer = match writer {
-            Some(w) => w,
+        let send_tx = match send_tx {
+            Some(tx) => tx,
             None => {
                 // Connect-on-send
                 self.connect(addr).await?
             }
         };
 
-        // Write packet
-        let mut w = writer.lock().await;
-        match w.write_all(data).await {
-            Ok(()) => {
-                self.stats.record_send(data.len());
-                trace!(
+        // Queue the frame. `try_send`, not `send`: awaiting a full queue would
+        // reinstate one level up exactly the block this removes. The byte
+        // count is what was queued; bytes on the wire are recorded by the
+        // writer task.
+        match send_tx.try_send(data.to_vec()) {
+            Ok(()) => Ok(data.len()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.stats.record_send_error();
+                debug!(
                     transport_id = %self.transport_id,
                     remote_addr = %addr,
-                    bytes = data.len(),
-                    "Nym packet sent"
+                    depth = SEND_QUEUE_DEPTH,
+                    "Nym outbound queue full; peer is not draining"
                 );
-                Ok(data.len())
+                Err(TransportError::SendFailed(
+                    "outbound queue full: peer not draining".to_string(),
+                ))
             }
-            Err(e) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 self.stats.record_send_error();
-                drop(w);
-                // Remove failed connection from pool
-                let mut pool = self.pool.lock().await;
-                if let Some(conn) = pool.remove(addr) {
-                    conn.recv_task.abort();
-                }
-                Err(TransportError::SendFailed(format!("{}", e)))
+                Err(TransportError::SendFailed(
+                    "connection writer gone".to_string(),
+                ))
             }
         }
     }
@@ -300,7 +303,7 @@ impl NymTransport {
     async fn connect(
         &self,
         addr: &TransportAddr,
-    ) -> Result<Arc<Mutex<OwnedWriteHalf>>, TransportError> {
+    ) -> Result<tokio::sync::mpsc::Sender<Vec<u8>>, TransportError> {
         let target_addr = parse_target_addr(addr)?;
         let proxy_addr = self.config.socks5_addr();
         let timeout_ms = self.config.connect_timeout_ms();
@@ -348,7 +351,6 @@ impl NymTransport {
 
         // Split and spawn receive task
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
@@ -370,8 +372,21 @@ impl NymTransport {
             .await;
         });
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(proxied_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            addr.clone(),
+            self.pool.clone(),
+            self.stats.clone(),
+            "Nym",
+            |_stats: &NymStats, _meta: &()| {},
+        ));
+
         let conn = ProxiedConnection {
-            writer: writer.clone(),
+            send_tx: send_tx.clone(),
+            send_task,
             recv_task,
             mtu,
             established_at: Instant::now(),
@@ -390,7 +405,7 @@ impl NymTransport {
             "Nym mixnet connection established via SOCKS5"
         );
 
-        Ok(writer)
+        Ok(send_tx)
     }
 
     /// Initiate a non-blocking connection to a remote address.
@@ -500,7 +515,6 @@ impl NymTransport {
     /// Promote a completed background connection to the established pool.
     fn promote_connection(&self, addr: &TransportAddr, stream: TcpStream, mtu: u16) {
         let (read_half, write_half) = stream.into_split();
-        let writer = Arc::new(Mutex::new(write_half));
 
         let transport_id = self.transport_id;
         let packet_tx = self.packet_tx.clone();
@@ -521,8 +535,21 @@ impl NymTransport {
             .await;
         });
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(proxied_send_loop(
+            write_half,
+            send_rx,
+            transport_id,
+            addr.clone(),
+            self.pool.clone(),
+            self.stats.clone(),
+            "Nym",
+            |_stats: &NymStats, _meta: &()| {},
+        ));
+
         let conn = ProxiedConnection {
-            writer,
+            send_tx,
+            send_task,
             recv_task,
             mtu,
             established_at: Instant::now(),
@@ -539,6 +566,7 @@ impl NymTransport {
             );
         } else {
             conn.recv_task.abort();
+            conn.send_task.abort();
             warn!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
@@ -552,6 +580,7 @@ impl NymTransport {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = pool.remove(addr) {
             conn.recv_task.abort();
+            conn.send_task.abort();
             debug!(
                 transport_id = %self.transport_id,
                 remote_addr = %addr,
