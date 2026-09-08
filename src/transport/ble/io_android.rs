@@ -700,6 +700,14 @@ impl BleStream for AndroidStream {
         // this out via `next_send`. The queue is shallow (`SEND_QUEUE_CAP`) and
         // this waits for a slot rather than dropping, so backpressure reaches
         // the layers above instead of the link bufferbloating.
+        //
+        // The wait is only safe because of who calls it, and on this line there
+        // is exactly one caller: the connection's writer task. An embedder that
+        // stops draining parks that task alone, and the layer above it is the
+        // connection's own bounded queue, which fills and starts refusing sends
+        // without waiting on anything. Adding a caller on any other task would
+        // put an unbounded wait back on the rx loop, which is the defect the
+        // writer task exists to remove.
         let mut payload = data.to_vec();
         loop {
             if self.closed.load(Ordering::Relaxed) {

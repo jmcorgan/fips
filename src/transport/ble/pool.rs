@@ -12,10 +12,23 @@ use crate::transport::{TransportAddr, TransportError};
 
 use super::addr::BleAddr;
 
+/// How many frames may be queued for one BLE connection before sends to it
+/// fail. Shallower than the IP transports': a BLE link carries a fraction of
+/// their throughput, so a queue of the same depth would represent seconds of
+/// backlog rather than a burst.
+pub const SEND_QUEUE_DEPTH: usize = 16;
+
 /// A single BLE connection in the pool.
 pub struct BleConnection<S> {
     /// The L2CAP stream for this connection.
     pub stream: S,
+    /// Frames queued for the writer task. Sending is an enqueue, never a
+    /// write: the write is awaited only by `send_task`, so no caller can be
+    /// held by a peer that has stopped draining — and, on this transport in
+    /// particular, no caller holds the pool lock while it happens.
+    pub send_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Writer task for this connection.
+    pub send_task: Option<JoinHandle<()>>,
     /// Background receive task handle.
     pub recv_task: Option<JoinHandle<()>>,
     /// Negotiated L2CAP send MTU.
@@ -40,6 +53,9 @@ impl<S> BleConnection<S> {
 impl<S> Drop for BleConnection<S> {
     fn drop(&mut self) {
         if let Some(task) = self.recv_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.send_task.take() {
             task.abort();
         }
     }
@@ -189,6 +205,8 @@ mod tests {
     fn test_conn(n: u8, is_static: bool) -> BleConnection<()> {
         BleConnection {
             stream: (),
+            send_tx: tokio::sync::mpsc::channel(1).0,
+            send_task: None,
             recv_task: None,
             send_mtu: 2048,
             recv_mtu: 2048,

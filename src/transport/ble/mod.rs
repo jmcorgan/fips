@@ -318,7 +318,7 @@ impl<I: BleIo> BleTransport<I> {
             }
         }
 
-        // Drain established connections (recv tasks aborted via Drop)
+        // Drain established connections (recv and writer tasks aborted via Drop)
         {
             let mut pool = self.pool.lock().await;
             for addr in pool.addrs() {
@@ -342,12 +342,19 @@ impl<I: BleIo> BleTransport<I> {
         addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
-        let pool = self.pool.lock().await;
-        let conn = match pool.get(addr) {
-            Some(c) => c,
+        // Take the MTU and the connection's send queue, then release the pool
+        // lock. Everything after this point must be lock-free: the previous
+        // shape awaited the L2CAP write while still holding this guard, so a
+        // peer that stopped draining blocked not just its own sender but every
+        // other BLE operation — connect, eviction, the receive loops' teardown.
+        let found = {
+            let pool = self.pool.lock().await;
+            pool.get(addr)
+                .map(|c| (c.effective_mtu() as usize, c.send_tx.clone()))
+        };
+        let (mtu, send_tx) = match found {
+            Some(pair) => pair,
             None => {
-                // Drop pool lock before triggering background connect
-                drop(pool);
                 // Fire-and-forget: connect_async spawns a background task
                 let _ = self.connect_async(addr).await;
                 return Err(TransportError::SendFailed("not connected".into()));
@@ -355,7 +362,6 @@ impl<I: BleIo> BleTransport<I> {
         };
 
         // MTU check
-        let mtu = conn.effective_mtu() as usize;
         if data.len() > mtu {
             self.stats.record_mtu_exceeded();
             return Err(TransportError::MtuExceeded {
@@ -364,19 +370,28 @@ impl<I: BleIo> BleTransport<I> {
             });
         }
 
-        match conn.stream.send(data).await {
-            Ok(()) => {
-                self.stats.record_send(data.len());
-                Ok(data.len())
-            }
-            Err(e) => {
+        // Queue the frame for the connection's writer task. `try_send`, not
+        // `send`: waiting for a slot is the same stall in a different shape,
+        // which is what the Android backend's own queue does one layer down.
+        // The byte count is what was queued; bytes on the link are recorded by
+        // the writer task, and so is a write error, which also removes the
+        // connection from the pool rather than returning here.
+        match send_tx.try_send(data.to_vec()) {
+            Ok(()) => Ok(data.len()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.stats.record_send_error();
-                // Drop pool lock before removing to avoid deadlock
-                drop(pool);
-                let mut pool = self.pool.lock().await;
-                pool.remove(addr);
-                warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
-                Err(e)
+                debug!(
+                    addr = %addr,
+                    depth = pool::SEND_QUEUE_DEPTH,
+                    "BLE outbound queue full; peer is not draining"
+                );
+                Err(TransportError::SendFailed(
+                    "outbound queue full: peer not draining".into(),
+                ))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.stats.record_send_error();
+                Err(TransportError::SendFailed("connection writer gone".into()))
             }
         }
     }
@@ -455,8 +470,19 @@ impl<I: BleIo> BleTransport<I> {
             recv_mtu,
         ));
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(send_loop(
+            Arc::clone(&stream),
+            send_rx,
+            addr.clone(),
+            Arc::clone(&self.pool),
+            Arc::clone(&self.stats),
+        ));
+
         let conn = BleConnection {
             stream,
+            send_tx,
+            send_task: Some(send_task),
             recv_task: Some(recv_task),
             send_mtu,
             recv_mtu,
@@ -551,8 +577,19 @@ impl<I: BleIo> BleTransport<I> {
                         recv_mtu,
                     ));
 
+                    let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+                    let send_task = tokio::spawn(send_loop(
+                        Arc::clone(&stream),
+                        send_rx,
+                        addr_clone.clone(),
+                        Arc::clone(&pool),
+                        Arc::clone(&stats),
+                    ));
+
                     let conn = BleConnection {
                         stream,
+                        send_tx,
+                        send_task: Some(send_task),
                         recv_task: Some(recv_task),
                         send_mtu,
                         recv_mtu,
@@ -627,7 +664,7 @@ impl<I: BleIo> BleTransport<I> {
         let mut pool = self.pool.lock().await;
         if let Some(conn) = pool.remove(addr) {
             debug!(addr = %addr, "BLE connection closed");
-            drop(conn); // recv_task aborted via Drop
+            drop(conn); // recv and writer tasks aborted via Drop
         }
     }
 
@@ -758,8 +795,19 @@ async fn accept_loop<A>(
                     recv_mtu,
                 ));
 
+                let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+                let send_task = tokio::spawn(send_loop(
+                    Arc::clone(&stream),
+                    send_rx,
+                    ta.clone(),
+                    Arc::clone(&pool),
+                    Arc::clone(&stats),
+                ));
+
                 let conn = BleConnection {
                     stream,
+                    send_tx,
+                    send_task: Some(send_task),
                     recv_task: Some(recv_task),
                     send_mtu,
                     recv_mtu,
@@ -791,6 +839,41 @@ async fn accept_loop<A>(
             Err(e) => {
                 warn!(error = %e, "BLE accept error");
                 break;
+            }
+        }
+    }
+}
+
+/// Per-connection writer task: the only place a BLE write is ever awaited.
+///
+/// The BLE case was the worst of the connection-oriented transports. The write
+/// was awaited by the caller *while holding the pool mutex*, so a peer that
+/// stopped draining its L2CAP link blocked every other BLE operation as well
+/// as the caller's task — connects, evictions and each receive loop's
+/// teardown all queue behind that one guard. Moving the write here removes
+/// both halves of that: the caller enqueues and returns, and the pool lock is
+/// never held across the link.
+///
+/// On a write error the connection is removed from the pool, which is where
+/// the old inline path put it too. Dropping the pool entry aborts this task
+/// and the receive task through `BleConnection`'s `Drop`; the abort does not
+/// block and nothing is awaited after the `return`, so aborting ourselves here
+/// is benign.
+async fn send_loop<S: BleStream + 'static>(
+    stream: Arc<S>,
+    mut frames: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    addr: TransportAddr,
+    pool: Arc<Mutex<ConnectionPool<Arc<S>>>>,
+    stats: Arc<BleStats>,
+) {
+    while let Some(frame) = frames.recv().await {
+        match stream.send(&frame).await {
+            Ok(()) => stats.record_send(frame.len()),
+            Err(e) => {
+                stats.record_send_error();
+                warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
+                pool.lock().await.remove(&addr);
+                return;
             }
         }
     }
@@ -1133,8 +1216,19 @@ async fn scan_probe_loop<I: io::BleIo>(
             recv_mtu,
         ));
 
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(send_loop(
+            Arc::clone(&stream),
+            send_rx,
+            ta.clone(),
+            Arc::clone(&pool),
+            Arc::clone(&stats),
+        ));
+
         let conn = BleConnection {
             stream,
+            send_tx,
+            send_task: Some(send_task),
             recv_task: Some(recv_task),
             send_mtu,
             recv_mtu,
@@ -1188,6 +1282,7 @@ mod tests {
     use super::*;
     use crate::transport::framing::build_established_frame;
     use io::{MockBleIo, MockBleStream};
+    use std::time::Duration;
 
     // ------------------------------------------------------------------
     // PendingProbes — the retry/backoff policy for discovered addresses
@@ -1670,6 +1765,10 @@ mod tests {
                 ta.clone(),
                 BleConnection {
                     stream: Arc::new(parked),
+                    // Nothing is sent to this connection: it exists so that its
+                    // removal is observable, so a dropped receiver is correct.
+                    send_tx: tokio::sync::mpsc::channel(1).0,
+                    send_task: None,
                     recv_task: None,
                     send_mtu: 2048,
                     recv_mtu: 2048,
@@ -1949,6 +2048,96 @@ mod tests {
         transport.stop_async().await.unwrap();
     }
 
+    /// **The property the writer task exists to guarantee, on the transport
+    /// where it mattered most.**
+    ///
+    /// BLE was the worst of the connection-oriented transports: `send_async`
+    /// awaited the L2CAP write *while holding the pool mutex*, so a peer that
+    /// stopped draining blocked not only its own sender but every other BLE
+    /// operation — connects, evictions, and each receive loop's teardown all
+    /// queue behind that guard.
+    ///
+    /// The mock stream's send half is a bounded channel, so a peer that never
+    /// reads is a peer whose link has stopped draining. This inserts such a
+    /// connection with a real writer task behind it, pushes far more than
+    /// either queue holds, and asserts that every call returns promptly and
+    /// that the pool stays lockable throughout.
+    ///
+    /// It builds its connection by hand, so it does not exercise any of the
+    /// four production construction sites; a site that stored a queue nobody
+    /// writes would still pass this.
+    #[tokio::test]
+    async fn a_ble_peer_that_stops_reading_cannot_block_the_sender_or_the_pool() {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let (transport, _rx) = make_transport(io);
+
+        // `_deaf` is the far end. Holding it without ever calling `recv` is
+        // what makes this a stalled link rather than a closed one.
+        let (near, _deaf) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        let stream = Arc::new(near);
+        let ta = TransportAddr::from_string("AA:BB:CC:DD:EE:02");
+
+        let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
+        let send_task = tokio::spawn(send_loop(
+            Arc::clone(&stream),
+            send_rx,
+            ta.clone(),
+            Arc::clone(&transport.pool),
+            Arc::clone(&transport.stats),
+        ));
+
+        transport
+            .pool
+            .lock()
+            .await
+            .insert(
+                ta.clone(),
+                BleConnection {
+                    stream,
+                    send_tx,
+                    send_task: Some(send_task),
+                    recv_task: None,
+                    send_mtu: 2048,
+                    recv_mtu: 2048,
+                    established_at: tokio::time::Instant::now(),
+                    is_static: false,
+                    addr: test_addr(2),
+                },
+            )
+            .unwrap();
+
+        let frame = vec![0xAB; 512];
+        let mut queued = 0usize;
+        let mut refused = 0usize;
+        for _ in 0..512 {
+            match tokio::time::timeout(Duration::from_secs(2), transport.send_async(&ta, &frame))
+                .await
+            {
+                Ok(Ok(_)) => queued += 1,
+                Ok(Err(_)) => refused += 1,
+                Err(_) => panic!(
+                    "send blocked on a BLE peer that stopped reading; the write is back \
+                     on the caller's task"
+                ),
+            }
+
+            // The pool must stay available the whole time. Before the writer
+            // task this guard was held across the L2CAP write, so a stalled
+            // link froze every other BLE operation too.
+            let guard = tokio::time::timeout(Duration::from_millis(100), transport.pool.lock())
+                .await
+                .expect("the pool lock must never be held across a BLE write");
+            drop(guard);
+        }
+
+        assert!(queued > 0, "the first sends must be accepted");
+        assert!(
+            refused > 0,
+            "a BLE peer that never drains must eventually have sends refused rather \
+             than queued without bound: queued={queued}"
+        );
+    }
+
     /// An oversized packet is a caller bug, not a property of the peer's
     /// link. Folding it into `send_errors` would make that number useless as
     /// evidence.
@@ -1961,6 +2150,13 @@ mod tests {
 
         let ta = test_addr(2).to_transport_addr();
         let (parked, _peer) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
+        // The receiver is held for the length of the test so that the queue is
+        // open and the MTU check is what refuses the send. Dropping it would
+        // still fail this test if the check moved below the enqueue, because a
+        // closed queue returns `SendFailed` rather than `MtuExceeded` and
+        // records a send error — so this is fidelity rather than added
+        // coverage.
+        let (send_tx, _send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
         transport
             .pool
             .lock()
@@ -1969,6 +2165,8 @@ mod tests {
                 ta.clone(),
                 BleConnection {
                     stream: Arc::new(parked),
+                    send_tx,
+                    send_task: None,
                     recv_task: None,
                     send_mtu: 64,
                     recv_mtu: 64,
