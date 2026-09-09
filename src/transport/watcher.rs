@@ -57,6 +57,30 @@ impl Drop for LinkEventSocket {
 }
 
 impl LinkEventSocket {
+    /// The multicast group mask this socket is actually subscribed to, read
+    /// back from the kernel rather than remembered from the bind.
+    ///
+    /// `getsockname` on a netlink socket fills `sockaddr_nl.nl_groups` with the
+    /// legacy 32-bit subscription mask, which covers every group in
+    /// [`groups`]. Reading it back is the only way to tell a watcher that
+    /// *asked* for the right groups from one that got them: a bind with a
+    /// wrong mask succeeds just as happily as a bind with the right one, and
+    /// then silently never delivers the messages the caller subscribed for.
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+    fn bound_groups(&self) -> Option<u32> {
+        let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+        // SAFETY: `self.fd` is the netlink socket this struct owns, and `sa` /
+        // `len` are a correctly sized out-parameter pair for `getsockname`.
+        let rc = unsafe {
+            libc::getsockname(self.fd, &mut sa as *mut _ as *mut libc::sockaddr, &mut len)
+        };
+        if rc < 0 {
+            return None;
+        }
+        Some(sa.nl_groups)
+    }
+
     fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = unsafe { libc::recv(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
         if n < 0 {
@@ -216,6 +240,22 @@ impl LinkWatcher {
             errors: AtomicU32::new(0),
             given_up: AtomicBool::new(false),
         }
+    }
+
+    /// The netlink multicast groups this watcher is actually subscribed to, as
+    /// the kernel reports them.
+    ///
+    /// `None` when there is no live source, and on every platform whose backend
+    /// is `PF_ROUTE`, which has no group selection to report.
+    ///
+    /// This exists to be asserted on. A bind with the wrong group mask succeeds
+    /// exactly like a bind with the right one and then silently never delivers
+    /// what the caller subscribed for, so nothing short of reading the
+    /// subscription back can tell the two apart without provoking a real
+    /// kernel event — which needs privileges CI does not have.
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+    pub(crate) fn subscribed_groups(&self) -> Option<u32> {
+        self.inner.as_ref()?.get_ref().bound_groups()
     }
 
     /// Whether an event source is actually backing this watcher.

@@ -18,6 +18,7 @@
 //! also advances only on the tick.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::identity::NodeAddr;
@@ -629,6 +630,43 @@ pub(crate) struct PeerRow {
     pub is_parent: bool,
     pub is_child: bool,
     pub transport_addr: Option<String>,
+    /// The peer's current transport address as a numeric IP endpoint, when it
+    /// is one. Not rendered anywhere: this is the medium-change detector's
+    /// read of the peer table (see [`crate::node::netmon`]), carried here
+    /// because the detector is a detached task and this snapshot is the
+    /// node's existing lock-free read side.
+    ///
+    /// `None` covers everything that is not a probeable IP destination — a
+    /// MAC on Ethernet or BLE, a `.onion` or Nym recipient, a peer still
+    /// carrying the hostname it was configured with, an IPv6 literal with a
+    /// scope suffix. Typed rather than re-parsed from `transport_addr` above
+    /// so a change to that string's rendering cannot silently leave the
+    /// detector with nothing to probe.
+    pub probe_target: Option<SocketAddr>,
+    /// Source address this peer's per-peer `connect()`-ed UDP socket was
+    /// pinned to by `connect(2)`, when it has one. Also not rendered, and read by the same detector:
+    /// it is what the send path is *actually* using, as against the
+    /// `probe_target` lookup's answer for what the kernel would choose now.
+    ///
+    /// `None` where there is no such socket — every platform but Linux and
+    /// macOS, a peer on another transport, and a peer whose socket has not
+    /// been installed yet or was just released — and also where the kernel
+    /// declined to name a source, which is not an address and must not be
+    /// compared as one.
+    pub bound_source: Option<IpAddr>,
+    /// Address this peer's transport is bound to, when that bind is not the
+    /// wildcard. Read by the same detector, which has to put its probe the
+    /// same constrained question the send path answers.
+    ///
+    /// `open_connected_fd` binds the transport's configured address verbatim
+    /// and only then connects, so a non-wildcard `bind_addr` pins the source
+    /// whatever the routing table says, while an unconstrained probe takes the
+    /// kernel's choice. Left unequal, those two answers differ permanently and
+    /// every first-seen peer reports a move that never happened.
+    ///
+    /// `None` for the wildcard bind, which is the default and the case where
+    /// the kernel chooses on both sides.
+    pub probe_bind: Option<IpAddr>,
     pub link_info: Option<PeerLinkInfo>,
     pub tree_depth: Option<usize>,
     /// `effective_depth = tree_depth + link_cost` — the same quantity

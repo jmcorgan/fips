@@ -2180,7 +2180,8 @@ impl Node {
         // not health.
         let netmon_cfg = self.config().node.netmon.clone();
         if netmon_cfg.enabled {
-            let (rx, task) = crate::node::netmon::spawn_detector(netmon_cfg);
+            let (rx, task) =
+                crate::node::netmon::spawn_detector(netmon_cfg, self.entities_snapshot.clone());
             self.supervisor.netmon_rx = Some(rx);
             self.supervisor.netmon_task = Some(task);
         } else {

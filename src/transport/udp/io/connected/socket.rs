@@ -4,7 +4,7 @@
 //! and closes it on drop. See that function's docs for why established
 //! peers get their own connected socket.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 
 /// A `connect()`-ed UDP socket for one established peer.
@@ -28,6 +28,9 @@ pub(crate) struct ConnectedPeerSocket {
     fd: OwnedFd,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    /// The source address `connect(2)` actually pinned, read back once at
+    /// construction. See [`ConnectedPeerSocket::pinned_source`].
+    pinned_source: Option<IpAddr>,
 }
 
 impl ConnectedPeerSocket {
@@ -35,10 +38,12 @@ impl ConnectedPeerSocket {
     /// `crate::transport::udp::open_connected_fd`) into an owning
     /// handle. Takes ownership of the fd; the `OwnedFd` closes it on drop.
     pub(crate) fn from_fd(fd: OwnedFd, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
+        let pinned_source = pinned_source_of(fd.as_raw_fd());
         Self {
             fd,
             peer_addr,
             local_addr,
+            pinned_source,
         }
     }
 
@@ -50,6 +55,52 @@ impl ConnectedPeerSocket {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
+
+    /// The source address the kernel bound when this socket was
+    /// `connect(2)`-ed, as opposed to [`Self::local_addr`], which is the
+    /// wildcard the bind was *requested* with and carries no interface
+    /// information at all.
+    ///
+    /// This is the quantity the whole connected-socket fast path turns on: the
+    /// kernel resolves the route once at connect time and pins the source
+    /// address to whichever interface was carrying it then, and never
+    /// re-evaluates. Read back once here rather than per call, because it
+    /// cannot change for the life of the socket — that being exactly the
+    /// problem. `crate::node::netmon` compares it against the address the
+    /// routing table would choose now, which is how a peer whose socket is
+    /// already stale is recognised without any earlier sample to compare
+    /// against.
+    ///
+    /// `None` if `getsockname` fails or reports a family this does not decode,
+    /// which is treated as "no answer" rather than guessed at.
+    pub(crate) fn pinned_source(&self) -> Option<IpAddr> {
+        self.pinned_source
+    }
+}
+
+/// `getsockname` on a connected UDP socket, reduced to the local IP.
+///
+/// Returns `None` on any failure: the caller's contract is that an unknown
+/// pinned source is indistinguishable from not having one, and both mean "do
+/// not draw a conclusion from this socket".
+fn pinned_source_of(fd: RawFd) -> Option<IpAddr> {
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `fd` is the socket this handle owns, and `storage` / `len` are a
+    // correctly sized and initialised out-parameter pair for `getsockname`,
+    // which writes at most `len` bytes and updates `len` to what it wrote.
+    let rc =
+        unsafe { libc::getsockname(fd, &mut storage as *mut _ as *mut libc::sockaddr, &mut len) };
+    if rc < 0 {
+        return None;
+    }
+    let addr = super::super::unix::sockaddr_to_socket_addr(&storage).ok()?;
+    // An unspecified source means the kernel declined to choose — no route of
+    // that family — which is not an address and must not be compared as one.
+    if addr.ip().is_unspecified() {
+        return None;
+    }
+    Some(addr.ip())
 }
 
 impl AsRawFd for ConnectedPeerSocket {

@@ -210,8 +210,21 @@ an interface arriving or leaving — and rebinds the send path immediately.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.netmon.enabled` | bool | `true` | Whether medium-change detection runs |
-| `node.netmon.poll_interval_secs` | u64 | `5` | How often the host's network attachment is sampled (backstop period where an event-driven backend exists) |
-| `node.netmon.debounce_ms` | u64 | `250` | How long to wait for the picture to settle before acting (`0` disables) |
+| `node.netmon.poll_interval_secs` | u64 | `5` | How often the path to each peer is sampled (backstop period where an event-driven backend exists). **Must be at least 1 while `enabled`; `0` is refused at startup.** |
+| `node.netmon.debounce_ms` | u64 | `250` | How long to wait for the picture to settle before acting (`0` disables). **Refused at startup when `debounce_ms × 8` reaches `node.link_dead_timeout_secs`** — see below. |
+
+Both refusals stop the node rather than degrade it, so they are worth knowing
+before they are met.
+
+A handover is ridden out for up to **8** settling rounds (`MAX_DEBOUNCE_ROUNDS`)
+of `debounce_ms` each before a change is reported. If that worst case reaches
+`node.link_dead_timeout_secs`, the liveness reaper tears the peering down before
+the detector ever reports, so the machinery runs and cannot help — the node
+refuses to start rather than run in that shape. At the shipped defaults the
+margin is wide (8 × 250 ms = 2 s against 30 s), but the constraint couples two
+keys in different blocks: **shortening `link_dead_timeout_secs` for fast
+failover can make an untouched `debounce_ms` illegal.** The refusal names both
+values and the multiplier.
 
 Established UDP peers use a per-peer `connect()`-ed socket for the send fast
 path. `connect(2)` makes the kernel resolve the route once and pin the local
@@ -221,15 +234,62 @@ from an abandoned address while the peer answers where it last heard the node �
 the peering reports itself connected and carries nothing until
 `link_dead_timeout_secs` tears it down, typically 60–90s per switch.
 
-On a detected change the node drops those sockets (the wildcard listen socket
-resolves a route per packet, so sends keep working, and a correctly bound
-connected socket is reinstalled on a later tick) and heartbeats every peer on a
-connectionless transport at once so the far side re-pins to the new source
-address. A peer reached over TCP, Tor, Nym or BLE is left to its periodic
-heartbeat, since sending to it here would block the node's receive loop on a
-stream the medium change has very likely just stranded; those transports
-re-dial on send. No peering is torn down: sessions, tree positions and routes
-survive the switch.
+On a detected change the node drops the sockets of the peers the change names
+(the wildcard listen socket resolves a route per packet, so sends keep working,
+and a correctly bound connected socket is reinstalled on a later tick) and
+heartbeats those of them on a connectionless transport at once so the far side
+re-pins to the new source address. A peer reached over TCP, Tor, Nym or BLE is
+left to its periodic heartbeat, since sending to it here would block the node's
+receive loop on a stream the medium change has very likely just stranded. A peer
+the change does not name is left alone entirely. No peering is torn down:
+sessions, tree positions and routes survive the switch.
+
+**What counts as a change.** For each peer whose transport address is a numeric
+IP endpoint, the node asks the kernel which local address it would use to reach
+*that peer* — a `connect(2)` on a UDP socket, which resolves the route and sends
+nothing. A change is reported when a peer present in two consecutive samples is
+now reached from a different local address, or has stopped being reachable at
+all.
+
+Because the question is asked per peer, an interface the node does not peer over
+cannot trigger anything: a container bridge, a VPN, a `veth` pair or a tunnel
+appearing is not the route to any peer, so it does not enter the sample. A peer
+on the same LAN, reached by its subnet route rather than the default route, is
+covered as well as one across the internet, and so is a more specific route
+moving under a single peer.
+
+The converse is the residual. The probe answers for the peer's *current*
+address, and that address is the source of the last authentic packet it sent,
+so a peer that roams between two of its own addresses which leave this host by
+different interfaces is indistinguishable from a local path move. The reaction
+is scoped to the peers named in the change, so such a peer moves nothing but
+its own send path — but it is the peer, not this host, that decided the
+fingerprint changed.
+
+Peers appearing and leaving are ignored on their own — that is ordinary node
+behaviour and says nothing about the medium. A peer seen for the first time is
+the one exception, and it is not judged against history but against its own
+send path: if its `connect()`-ed socket is pinned to a source the routing table
+would no longer choose, it is reported. Without that, a medium change in the
+window between a peer authenticating and the detector's next sample would be
+the detector's first sight of that peer, and would be adopted silently while
+the peer's socket stayed pinned to the path the host had just left. A peer
+joining onto a path that has not moved has its socket pinned exactly where its
+traffic goes, so it still reports nothing. A peer whose address is not a
+probeable IP endpoint contributes nothing: a MAC on Ethernet or BLE, a `.onion`
+or Nym recipient reached through a local proxy, an IPv6 literal with a scope
+suffix, or a peer still carrying the hostname it was configured with (resolving
+one would put a DNS lookup on the sample path; the address becomes numeric as
+soon as an authenticated packet arrives from the peer). A node holding no peers
+detects nothing, which is correct — it has nothing bound to the old path.
+
+The cost is five non-blocking syscalls per peer per sample, read from the
+probe's own code rather than measured: `socket(2)` and `bind(2)`, a `connect(2)`
+that sends no packet, a `getsockname(2)`, and the `close(2)` the socket takes on
+drop. Nothing goes on the wire and no name is resolved.
+`node.limits.max_peers` bounds the per-sample total only where it is set: at
+`max_peers: 0`, which means unlimited, there is no bound and the cost tracks the
+live peer count instead.
 
 Detection uses the best backend the platform has:
 

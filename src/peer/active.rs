@@ -270,8 +270,16 @@ pub struct ActivePeer {
     send_rr: bool,
 
     // === Heartbeat ===
-    /// When we last sent a heartbeat to this peer.
+    /// When a heartbeat to this peer last *succeeded*. A send that failed does
+    /// not move this: it told the peer nothing, and treating it as if it had
+    /// would leave the peer un-heartbeated for a full interval on the strength
+    /// of a send that never landed.
     last_heartbeat_sent: Option<Instant>,
+    /// When a heartbeat to this peer was last *attempted*, whatever came of it.
+    /// Paired with the above so a peer whose send failed is retried sooner than
+    /// the heartbeat interval without being retried on every tick — see
+    /// `HEARTBEAT_RETRY_INTERVAL`.
+    last_heartbeat_attempt: Option<Instant>,
 
     // === Handshake Resend ===
     /// Wire-format msg2 for resend on duplicate msg1 (responder only).
@@ -354,6 +362,7 @@ impl ActivePeer {
             send_sr: true,
             send_rr: true,
             last_heartbeat_sent: None,
+            last_heartbeat_attempt: None,
             handshake_msg2: None,
             session_established_at: now,
             rekey_jitter_secs: draw_rekey_jitter(),
@@ -448,6 +457,7 @@ impl ActivePeer {
             send_sr,
             send_rr,
             last_heartbeat_sent: None,
+            last_heartbeat_attempt: None,
             handshake_msg2: None,
             session_established_at: now,
             rekey_jitter_secs: draw_rekey_jitter(),
@@ -876,14 +886,33 @@ impl ActivePeer {
 
     // === Heartbeat ===
 
-    /// When we last sent a heartbeat to this peer.
+    /// When a heartbeat to this peer last succeeded.
     pub fn last_heartbeat_sent(&self) -> Option<Instant> {
         self.last_heartbeat_sent
     }
 
-    /// Record that we sent a heartbeat.
+    /// Record that a heartbeat reached the transport without error.
+    ///
+    /// Call this *after* the send, and only when it returned cleanly. Marking
+    /// before the send makes a failed heartbeat indistinguishable from a
+    /// delivered one, which then suppresses the next attempt for a full
+    /// `heartbeat_interval_secs` although the peer has heard nothing.
     pub fn mark_heartbeat_sent(&mut self, now: Instant) {
         self.last_heartbeat_sent = Some(now);
+        self.last_heartbeat_attempt = Some(now);
+    }
+
+    /// When a heartbeat to this peer was last attempted, whatever came of it.
+    pub(crate) fn last_heartbeat_attempt(&self) -> Option<Instant> {
+        self.last_heartbeat_attempt
+    }
+
+    /// Record that a heartbeat send was attempted.
+    ///
+    /// Call this *before* the send, so an attempt that fails, or one that never
+    /// returns, still spaces the next one out.
+    pub(crate) fn mark_heartbeat_attempt(&mut self, now: Instant) {
+        self.last_heartbeat_attempt = Some(now);
     }
 
     // === State Updates ===

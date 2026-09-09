@@ -2242,6 +2242,23 @@ impl Node {
                     is_parent,
                     is_child,
                     transport_addr: peer.current_addr().map(|a| format!("{}", a)),
+                    probe_target: peer
+                        .current_addr()
+                        .and_then(|a| a.as_str())
+                        .and_then(|s| s.parse::<std::net::SocketAddr>().ok()),
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    bound_source: peer.connected_udp().and_then(|s| s.pinned_source()),
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    bound_source: None,
+                    probe_bind: peer
+                        .transport_id()
+                        .and_then(|id| self.transports.get(&id))
+                        .and_then(|t| match t {
+                            TransportHandle::Udp(u) => u.local_addr(),
+                            _ => None,
+                        })
+                        .map(|sa| sa.ip())
+                        .filter(|ip| !ip.is_unspecified()),
                     link_info,
                     tree_depth: peer.coords().map(|c| c.depth()),
                     effective_depth,

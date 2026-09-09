@@ -121,13 +121,32 @@ with v0.5.x or earlier peers.
 #### Node lifecycle
 
 - Transport-medium change detection, controlled by the new `node.netmon.*`
-  block (on by default). The node samples a coarse fingerprint of its network
-  attachment — the source addresses the routing table would pick for an off-link
-  destination, plus the set of up, non-loopback interface addresses — and
-  reports a change once the picture settles. A handover is not atomic (the old
-  address goes, briefly nothing has a route, the new one arrives), so a short
-  debounce coalesces the burst into one event and a fingerprint that settles
-  back where it started reports nothing. Linux subscribes to `NETLINK_ROUTE`
+  block (on by default). For each peer whose transport address is a numeric IP
+  endpoint, the node asks the kernel which local address it would use to reach
+  *that peer* — a `connect(2)` on a UDP socket, which resolves the route and
+  sends nothing — and reports a change once some peer held across two
+  consecutive samples is reached from a different local address, or has stopped
+  being reachable at all. Asking the question per peer rather than about the
+  host is what keeps it quiet: a container bridge, a VPN, a `veth` pair or a
+  tunnel appearing is not the route to any peer and cannot move the
+  fingerprint, while a peer on the same LAN — reached by its subnet route, not
+  the default route — is covered, as is a more specific route moving under a
+  single peer. Peers joining and leaving are ignored on their own, being
+  ordinary node behaviour rather than a statement about the medium — except
+  that a peer seen for the first time is checked against its own
+  `connect()`-ed socket, and reported if that socket is pinned to a source the
+  routing table would no longer choose, so a medium change in the window
+  between a peer authenticating and the next sample is not adopted silently
+  while that peer sits stranded on the old path. A peer
+  addressed by MAC, by `.onion` or Nym recipient, by a scoped IPv6 literal, or
+  by a hostname it has not yet been heard from on, has no route to ask about
+  and contributes nothing; a node with no peers detects nothing, having nothing
+  bound to the old path to repair. The peer table is read through the node's
+  existing lock-free entity snapshot, so the detector stays a detached task
+  holding no node state. A handover is not atomic (the route goes, briefly
+  there is none, the new one arrives), so a short debounce coalesces the burst
+  into one event and a fingerprint that settles back where it started reports
+  nothing. Linux subscribes to `NETLINK_ROUTE`
   multicast (the groups `ip monitor` uses) and macOS and FreeBSD to a
   `PF_ROUTE` socket, both reacting to the kernel event in milliseconds; every
   other platform samples on a timer at `node.netmon.poll_interval_secs`, which
@@ -142,6 +161,18 @@ with v0.5.x or earlier peers.
   rebind described under Fixed above.
   Bluetooth is not covered: an adapter's state is not an IP attachment and is
   invisible to this detector.
+  **Upgrade note: this couples a new key to one that has already shipped.** A
+  handover is ridden out for up to eight settling rounds of
+  `node.netmon.debounce_ms` before a change is reported, and if that worst case
+  reaches `node.link_dead_timeout_secs` the reaper tears the peering down
+  before the change is ever acted on, so the node refuses to start rather than
+  run in that shape. At the shipped defaults the margin is wide (8 × 250ms = 2s
+  against 30s), but detection is on by default, so **a node that shortened
+  `node.link_dead_timeout_secs` to 1 or 2 seconds for fast failover will be
+  refused at startup after the upgrade**, naming a `node.netmon.*` key its
+  operator never set. Raise the timeout, lower `debounce_ms` so eight rounds
+  stay under it, or set `node.netmon.enabled: false`. A
+  `node.link_dead_timeout_secs` of 0 is exempt from the check.
 
 ### Changed
 
@@ -327,6 +358,27 @@ with v0.5.x or earlier peers.
   `fipstop` as "Own Loopback". `req_duplicate` returns to meaning only what it
   says.
 
+#### Node lifecycle
+
+- A heartbeat whose send failed no longer counts as one that was delivered.
+  The peer's "last heartbeat" timestamp was stamped before the send and left
+  alone whatever came back, so a failure suppressed the next attempt for a
+  full `node.heartbeat_interval_secs` even though the peer had heard nothing —
+  on a 10s interval against a 30s `link_dead_timeout_secs`, three failures in
+  a row were the whole budget. The timestamp now moves only on a send that
+  returned cleanly, and a separate record of the *attempt* spaces the retries
+  so a peer that keeps failing is retried in seconds rather than either
+  hammered every tick or left for a full interval. That retry spacing
+  applies to the failure path only: gating a healthy peer on it as well
+  would have floored `node.heartbeat_interval_secs` at two seconds, so a
+  configured value below that would silently not have been honoured.
+
+- A peer that rotates its address no longer keeps sending from a socket
+  aimed where it used to be. The authenticated-frame path updated the
+  peer's address and discarded the flag saying it had changed, so the
+  per-peer `connect()`-ed UDP socket stayed pinned to the old 5-tuple;
+  the sibling path already cleared it.
+
 #### Data plane
 
 - A peer that stops reading can no longer stall the node. TCP, Tor, Nym and
@@ -366,15 +418,16 @@ with v0.5.x or earlier peers.
   medium-change detection added below, which is exactly that missing signal.
   Dropping the sockets is self-healing rather than disruptive: the wildcard
   listen socket resolves a route per packet, so sends keep working immediately,
-  and a correctly-bound connected socket is reinstalled on a later tick. Every
-  peer on a connectionless transport is also heartbeated at once, so the far
-  side re-pins to the new source address rather than waiting out its own
-  heartbeat interval. A peer on a connection-oriented transport keeps the
-  periodic heartbeat instead. That was because such a send awaited an unbounded
-  `write_all` on a stream the medium change had very likely just stranded, and
-  this reaction runs on the rx loop; the writer-task change below removes that
-  hazard, so widening the fan-out to those transports is now open work rather
-  than something the design forbids. Measured on a live
+  and a correctly-bound connected socket is reinstalled on a later tick. The
+  reaction is scoped to the peers the change names: only their sockets are
+  dropped, and each of those on a connectionless transport is heartbeated at
+  once, so the far side re-pins to the new source address rather than waiting
+  out its own heartbeat interval. A peer on a connection-oriented transport
+  keeps the periodic heartbeat instead. That was because such a send awaited an
+  unbounded `write_all` on a stream the medium change had very likely just
+  stranded, and this reaction runs on the rx loop; the writer-task change below
+  removes that hazard, so widening the fan-out to those transports is now open
+  work rather than something the design forbids. Measured on a live
   node, a WLAN/LAN switch in either direction now costs no reconnection at all —
   the Noise session, tree position and routes survive it. Linux and macOS (the
   platforms with the connected-socket fast path); elsewhere the heartbeat alone

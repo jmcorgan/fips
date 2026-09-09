@@ -1115,6 +1115,44 @@ impl Config {
             }
         }
 
+        // Medium-change detection. Both checks are about the detector being
+        // able to do its job at all, not about taste in numbers.
+        let netmon = &self.node.netmon;
+        if netmon.enabled {
+            if netmon.poll_interval_secs == 0 {
+                return Err(ConfigError::Validation(
+                    "`node.netmon.poll_interval_secs` must be at least 1; it is the backstop \
+                     period behind the kernel event source, and the only detection signal at \
+                     all on a platform without one"
+                        .to_string(),
+                ));
+            }
+            // A handover is ridden out for up to `MAX_DEBOUNCE_ROUNDS` rounds
+            // of `debounce_ms` before the change is reported. If that can
+            // outlast the liveness timeout, the reaper tears the peering down
+            // first and the detector never gets to rebind anything — the
+            // machinery runs and cannot help.
+            // Saturating: both operands are operator-supplied `u64`s, and an
+            // overflow here would wrap to a small number and silently accept
+            // the very configuration this refuses.
+            let worst_case_debounce_ms = netmon
+                .debounce_ms
+                .saturating_mul(u64::from(crate::node::netmon::MAX_DEBOUNCE_ROUNDS));
+            let dead_timeout_ms = self.node.link_dead_timeout_secs.saturating_mul(1000);
+            if dead_timeout_ms > 0 && worst_case_debounce_ms >= dead_timeout_ms {
+                return Err(ConfigError::Validation(format!(
+                    "`node.netmon.debounce_ms` = {} can hold a report for up to {}ms across \
+                     {} settling rounds, which meets or exceeds \
+                     `node.link_dead_timeout_secs` = {}s: the peering would be reaped \
+                     before the medium change was ever acted on",
+                    netmon.debounce_ms,
+                    worst_case_debounce_ms,
+                    crate::node::netmon::MAX_DEBOUNCE_ROUNDS,
+                    self.node.link_dead_timeout_secs,
+                )));
+            }
+        }
+
         let native = &self.node.native_api;
         // Both floors refuse a node that would start, answer every setup call
         // and then drop every datagram a peer sent. A zero `backlog` makes the
@@ -2345,6 +2383,65 @@ node:
         assert_eq!(config.node.lookup.attempt_timeouts_secs, vec![1, 2, 4, 8]);
         // The compat block is consumed by normalize.
         assert!(config.node.discovery.is_none());
+    }
+
+    #[test]
+    fn test_a_zero_netmon_poll_interval_is_refused() {
+        // It was silently clamped to 1s, so a typo produced a node that polled
+        // twenty times more often than asked and said nothing about it.
+        let mut config = Config::default();
+        config.node.netmon.poll_interval_secs = 0;
+
+        let err = config.validate().expect_err("validation should fail");
+        assert!(err.to_string().contains("poll_interval_secs"), "{}", err);
+    }
+
+    #[test]
+    fn test_a_zero_netmon_poll_interval_is_allowed_when_detection_is_off() {
+        // Nothing reads it, so refusing the node over it would be pedantry.
+        let mut config = Config::default();
+        config.node.netmon.enabled = false;
+        config.node.netmon.poll_interval_secs = 0;
+
+        config
+            .validate()
+            .expect("a disabled detector imposes no constraint on its own knobs");
+    }
+
+    #[test]
+    fn test_a_debounce_that_outlasts_the_dead_timeout_is_refused() {
+        // The detector rides out a handover for up to MAX_DEBOUNCE_ROUNDS
+        // rounds before reporting. If that can exceed the liveness timeout the
+        // peering is reaped first and the detector cannot help — the node runs
+        // the machinery and still takes the outage it was meant to prevent.
+        let mut config = Config::default();
+        config.node.link_dead_timeout_secs = 30;
+        // 8 rounds x 4000ms = 32s > 30s.
+        config.node.netmon.debounce_ms = 4000;
+
+        let err = config.validate().expect_err("validation should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("debounce_ms"), "{}", msg);
+        assert!(msg.contains("link_dead_timeout_secs"), "{}", msg);
+        // This message is the whole diagnostic for the only refusal an operator
+        // reaches by editing `node.netmon.debounce_ms`, and substring
+        // assertions cannot see how it reads. A run of spaces mid-sentence is
+        // what a continuation join leaves behind, and rustfmt does not touch
+        // string literals, so nothing else would catch it.
+        assert!(
+            !msg.contains("  "),
+            "the refusal message has a run of literal spaces in it: {:?}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_the_default_netmon_block_validates() {
+        // The shipped defaults must not be a config the node refuses to start
+        // on, which is the failure mode a cross-field check invites.
+        Config::default()
+            .validate()
+            .expect("the default configuration must validate");
     }
 
     #[test]

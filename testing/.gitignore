@@ -4,8 +4,9 @@ fipsctl
 fipstop
 fips-gateway
 
-# Generated test configs
-generated-configs/
+# Generated test configs. The suffixed form is what a run with
+# FIPS_CI_NAME_SUFFIX set writes, so the glob has to cover both.
+generated-configs*/
 
 # Simulation results
 sim-results/

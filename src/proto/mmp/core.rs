@@ -39,8 +39,11 @@ pub(crate) struct PeerLivenessSnapshot {
     /// An FMP rekey handshake is genuinely in flight with retransmission budget
     /// left; suppresses teardown of an otherwise-silent rekey link.
     pub rekey_active: bool,
-    /// A heartbeat is due (`last_heartbeat_sent` is none, or elapsed since it is
-    /// >= the heartbeat interval).
+    /// A heartbeat is due. Two conditions, both resolved shell-side: elapsed
+    /// since the last heartbeat that *landed* is >= the heartbeat interval (or
+    /// none has), and — only when the last attempt failed — the failure-retry
+    /// gap has passed since that attempt. The retry gap deliberately does not
+    /// apply to a healthy peer, or it would floor the configured interval.
     pub heartbeat_due: bool,
 }
 
@@ -169,8 +172,15 @@ pub(crate) enum MmpAction {
     /// Reap a dead peer: the shell runs `remove_active_peer` +
     /// `schedule_reconnect` (with its wall-clock `now_ms`).
     ReapPeer { peer: NodeAddr },
-    /// Send a heartbeat to `peer`: the shell runs `mark_heartbeat_sent` and the
-    /// encrypted link send.
+    /// Send a heartbeat to `peer`: the shell runs `mark_heartbeat_attempt`,
+    /// then the encrypted link send, and `mark_heartbeat_sent` **only if that
+    /// send returned cleanly**.
+    ///
+    /// The order and the condition are the contract, not an implementation
+    /// detail. Stamping the success before the send makes a failed heartbeat
+    /// indistinguishable from a delivered one, which suppresses the next
+    /// attempt for a full interval even though the peer heard nothing; the
+    /// separate attempt stamp is what spaces the retries without doing that.
     Heartbeat { peer: NodeAddr },
     /// Build (shell: `proto/mmp/` `build_report` + `encode`) and send the given
     /// link report over the encrypted link. The interval-advancing

@@ -34,6 +34,70 @@ fn set_link_dead_timeout(node: &mut crate::node::Node, secs: u64) {
     });
 }
 
+/// Set `node.heartbeat_interval_secs` on an already-constructed node, the same
+/// way `set_link_dead_timeout` does. This is the knob the retry gate must not
+/// floor.
+fn set_heartbeat_interval(node: &mut crate::node::Node, secs: u64) {
+    node.replace_context(|ctx| {
+        let mut cfg = (*ctx.config).clone();
+        cfg.node.heartbeat_interval_secs = secs;
+        ctx.config = std::sync::Arc::new(cfg);
+    });
+}
+
+/// A heartbeat whose send failed is not recorded as having landed, and the
+/// failed attempt is not retried on the very next tick.
+///
+/// The failure is forced by taking the node's transport handles away, so the
+/// encrypted send fails before any I/O with `TransportNotFound`. Marking the
+/// send before it happens, which is what this replaced, would record the peer
+/// as heartbeated and suppress the next attempt for a whole interval although
+/// the peer heard nothing.
+#[tokio::test]
+async fn a_failed_heartbeat_send_is_not_recorded_as_landed() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+
+    let addr_1 = *nodes[1].node.node_addr();
+    assert!(nodes[0].node.get_peer(&addr_1).is_some());
+
+    // Whatever landed during convergence is the baseline this asserts against.
+    let landed_before = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .unwrap()
+        .last_heartbeat_sent();
+
+    // Due on every tick, so the only variable is what the send does.
+    set_heartbeat_interval(&mut nodes[0].node, 0);
+    nodes[0].node.transports.clear();
+
+    nodes[0].node.check_link_heartbeats().await;
+
+    let peer = nodes[0].node.get_peer(&addr_1).expect("peer present");
+    let failed_at = peer
+        .last_heartbeat_attempt()
+        .expect("the attempt is recorded even though the send failed");
+    assert_eq!(
+        peer.last_heartbeat_sent(),
+        landed_before,
+        "a heartbeat whose send failed was recorded as having landed"
+    );
+
+    // The retry gate spaces the next attempt out rather than letting a failing
+    // peer be retried on every tick.
+    nodes[0].node.check_link_heartbeats().await;
+
+    let peer = nodes[0].node.get_peer(&addr_1).expect("peer present");
+    assert_eq!(
+        peer.last_heartbeat_attempt(),
+        Some(failed_at),
+        "a peer whose send failed was retried inside the retry interval"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// A peer past the link-dead timeout is NOT reaped while an FMP rekey is in
 /// progress with its msg1 budget unexhausted.
 #[tokio::test]
@@ -156,6 +220,157 @@ async fn heartbeat_unaffected_without_rekey() {
     assert!(
         nodes[0].node.get_peer(&addr_1).is_none(),
         "dead peer with no rekey in flight should be reaped"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Rewind a peer's heartbeat bookkeeping by `age`, as if that long had passed
+/// since its last successful send.
+///
+/// The sweep reads `std::time::Instant`, which tokio's paused clock does not
+/// move, so elapsed time is staged on the peer rather than waited out. Sets
+/// both timestamps, which is the state a *healthy* peer is in.
+fn age_heartbeat(node: &mut crate::node::Node, addr: &NodeAddr, age: Duration) {
+    let then = std::time::Instant::now() - age;
+    node.peers
+        .get_mut(addr)
+        .expect("peer present")
+        .mark_heartbeat_sent(then);
+}
+
+/// **The retry gate must not floor a healthy peer's configured interval.**
+///
+/// A successful send stamps `last_heartbeat_sent` and `last_heartbeat_attempt`
+/// with the same instant. Gating every peer on the attempt timestamp therefore
+/// gates the healthy path too, and the effective interval becomes the larger of
+/// the configured value and `HEARTBEAT_RETRY_INTERVAL` — so a configured 1s
+/// becomes 2s, silently, with nothing validating the value and nothing saying
+/// why. `src/node/tests/tcp.rs` already configures 1s against a 3s dead
+/// timeout, which is the margin that would quietly halve.
+#[tokio::test]
+async fn a_healthy_peer_is_heartbeated_on_its_configured_interval() {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+
+    let addr_1 = *nodes[1].node.node_addr();
+    set_heartbeat_interval(&mut nodes[0].node, 1);
+
+    // Past the configured interval, short of the failure-retry interval. That
+    // window is the whole defect: healthy, due, and gated anyway.
+    age_heartbeat(&mut nodes[0].node, &addr_1, Duration::from_millis(1_200));
+    let before = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("peer 1 is established")
+        .last_heartbeat_sent()
+        .expect("staged above");
+
+    nodes[0].node.check_link_heartbeats().await;
+
+    let after = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("peer 1 is still established")
+        .last_heartbeat_sent()
+        .expect("still sent");
+    assert!(
+        after > before,
+        "a healthy peer must be heartbeated on its configured interval, not \
+         floored at the failure-retry interval"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The other half: after a send that *failed*, the retry is spaced out rather
+/// than reattempted on the very next tick.
+///
+/// Without that spacing a peer whose send keeps failing is retried every tick,
+/// and the send behind it can await an unbounded stream write on the rx loop.
+/// The peer is re-pinned onto a UDP transport that was never started, so its
+/// send fails with `NotStarted` before touching a socket.
+#[tokio::test]
+async fn a_failing_peer_is_retried_after_the_gap_and_not_before() {
+    use crate::transport::{TransportAddr, TransportHandle, TransportId, packet_channel};
+
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+
+    let addr_1 = *nodes[1].node.node_addr();
+    set_heartbeat_interval(&mut nodes[0].node, 1);
+
+    let dead_id = TransportId::new(91);
+    let (tx, _rx) = packet_channel(64);
+    nodes[0].node.transports.insert(
+        dead_id,
+        TransportHandle::Udp(crate::transport::udp::UdpTransport::new(
+            dead_id,
+            None,
+            crate::config::UdpConfig::default(),
+            tx,
+        )),
+    );
+    nodes[0]
+        .node
+        .peers
+        .get_mut(&addr_1)
+        .expect("peer 1 is established")
+        .set_current_addr(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
+
+    // Long overdue and healthy-looking, so the sweep will try.
+    age_heartbeat(&mut nodes[0].node, &addr_1, Duration::from_secs(10));
+    nodes[0].node.check_link_heartbeats().await;
+
+    let attempt_1 = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("peer 1 is established")
+        .last_heartbeat_attempt()
+        .expect("a failed send is still an attempt");
+    assert!(
+        nodes[0]
+            .node
+            .get_peer(&addr_1)
+            .unwrap()
+            .last_heartbeat_sent()
+            .expect("staged")
+            < attempt_1,
+        "the failed send must not have stamped a success"
+    );
+
+    // Immediately after: still inside the gap, so no second attempt.
+    nodes[0].node.check_link_heartbeats().await;
+    assert_eq!(
+        nodes[0]
+            .node
+            .get_peer(&addr_1)
+            .expect("peer 1 is established")
+            .last_heartbeat_attempt(),
+        Some(attempt_1),
+        "a failing peer must not be retried on the very next tick"
+    );
+
+    // Stage the gap as elapsed, keeping the attempt newer than the success so
+    // the peer still reads as "last one failed".
+    let past = std::time::Instant::now() - Duration::from_secs(3);
+    nodes[0]
+        .node
+        .peers
+        .get_mut(&addr_1)
+        .expect("peer present")
+        .mark_heartbeat_attempt(past);
+
+    nodes[0].node.check_link_heartbeats().await;
+    let attempt_2 = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("peer 1 is established")
+        .last_heartbeat_attempt()
+        .expect("still attempted");
+    assert!(
+        attempt_2 > past,
+        "a failing peer must be retried once the gap has passed"
     );
 
     cleanup_nodes(&mut nodes).await;
