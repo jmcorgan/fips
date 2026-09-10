@@ -370,21 +370,41 @@ class NetemManager:
         # Re-apply Ethernet veth netem
         veth_states = self.veth_states.get(container)
         if veth_states:
-            for iface, state in veth_states.items():
-                cmd = (
-                    f"tc qdisc del dev {iface} root 2>/dev/null || true && "
-                    f"tc qdisc add dev {iface} root netem {state.params.to_tc_args()}"
-                )
-                result = docker_exec_quiet(container, cmd, timeout=10)
-                if result is not None:
-                    log.debug("Re-applied veth netem on %s:%s", container, iface)
-                else:
-                    log.warning("Failed to re-apply veth netem on %s:%s", container, iface)
+            for state in veth_states.values():
+                self._apply_veth(state)
             log.info(
                 "Re-applied veth netem on %s (%d Ethernet peers)",
                 container,
                 len(veth_states),
             )
+
+        # And on each running neighbour's end of those links. The restore
+        # recreates the whole pair, so the survivor's end is a new interface
+        # with no qdisc, and without this that direction of every restored
+        # link ran unshaped for the rest of the run.
+        for peer_id in sorted(self.topology.nodes[node_id].peers):
+            if peer_id in self.down_nodes:
+                continue
+            if self.topology.transport_for_edge(node_id, peer_id) != "ethernet":
+                continue
+            peer_container = self.topology.container_name(peer_id)
+            state = self.veth_states.get(peer_container, {}).get(
+                veth_interface_name(peer_id, node_id)
+            )
+            if state is not None:
+                self._apply_veth(state)
+
+    def _apply_veth(self, state: VethNetemState):
+        """Install a veth end's current netem parameters as its root qdisc."""
+        cmd = (
+            f"tc qdisc del dev {state.iface} root 2>/dev/null || true && "
+            f"tc qdisc add dev {state.iface} root netem {state.params.to_tc_args()}"
+        )
+        result = docker_exec_quiet(state.container, cmd, timeout=10)
+        if result is not None:
+            log.debug("Re-applied veth netem on %s:%s", state.container, state.iface)
+        else:
+            log.warning("Failed to re-apply veth netem on %s:%s", state.container, state.iface)
 
     def mutate(self):
         """Randomly mutate netem params on a fraction of links."""

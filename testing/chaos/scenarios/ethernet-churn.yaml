@@ -1,0 +1,127 @@
+# Ethernet rebind under active traffic
+#
+# The one case dynamic interface binding has no coverage for anywhere:
+# traffic crossing an Ethernet link while the interface underneath it goes
+# away and comes back.
+#
+# The other Ethernet scenarios cannot reach it. `ethernet-only` and
+# `ethernet-mesh` both run with `traffic.enabled: false`, so no datagram
+# crosses an Ethernet link in either — framing, the length field that trims
+# NIC minimum-frame padding, and AEAD over Ethernet are all control-plane
+# assumptions there. And `link_flaps` cannot produce a rebind whatever it is
+# pointed at: it simulates a down link with netem 100% loss, so the interface
+# stays IFF_UP and the presence machine never sees an edge.
+#
+# `node_churn` is what actually moves an interface. Stopping a container
+# destroys its network namespace, which deletes every veth in it — and
+# deleting one end of a veth deletes its peer — so a *surviving* node watches
+# its Ethernet interface disappear outright. On restart the harness recreates
+# the pair (`NodeChurnManager._start_node`), and the survivor watches it come
+# back. That is a real detach and a real rebind, driven from outside the
+# daemon, with iperf3 running across the mesh throughout.
+#
+# Topology: a 4-node ring, so removing any single node leaves the remaining
+# three connected in a line and `protect_connectivity` has something to
+# protect.
+#
+#   n01 ---eth--- n02
+#    |             |
+#   eth           eth
+#    |             |
+#   n04 ---eth--- n03
+
+scenario:
+  name: "ethernet-churn"
+  seed: 42
+  duration_secs: 240
+
+topology:
+  algorithm: explicit
+  num_nodes: 4
+  default_transport: ethernet
+  params:
+    adjacency:
+      - [n01, n02]
+      - [n02, n03]
+      - [n03, n04]
+      - [n04, n01]
+
+# Mild, and deliberately so. The variable under test is the interface going
+# away, not the link being bad while it is there; heavy loss here would make a
+# traffic shortfall ambiguous between the two.
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 5]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.5]
+
+# Off on purpose. A netem-simulated down link would add outage that never
+# reaches the presence machine, which is the opposite of what this isolates.
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: true
+  max_concurrent: 2
+  interval_secs: {min: 10, max: 20}
+  duration_secs: {min: 15, max: 25}
+  parallel_streams: 2
+
+# The mechanism. One node down at a time, long enough to outlast the
+# ten-second bring-up window so the absence is a real one rather than a race,
+# and to give traffic time to run against the reduced mesh before it returns.
+node_churn:
+  enabled: true
+  interval_secs: {min: 45, max: 60}
+  max_down_nodes: 1
+  down_duration_secs: {min: 20, max: 35}
+  protect_connectivity: true
+
+assertions:
+  # The mesh re-forms after each interface comes back, fully.
+  #
+  # Calibrated 2026-09-10 against sixteen runs, eight on master-line code and
+  # eight on next-line code, on a harness that fails a veth restore it cannot
+  # complete and waits for the tree to settle before the final snapshot. Twelve
+  # ran beside the other five CI chaos scenarios and four CPU busy loops; seeds
+  # 42 (twelve runs), 7 and 1234:
+  #
+  #   nodes answering  4 in all sixteen
+  #   distinct roots   1 in all sixteen
+  #   nodes parented   3 in all sixteen
+  #   settle           11-22 s
+  #   traffic          4-11 sessions per run, 3.8-11.7 GB
+  #
+  # So the thresholds are full convergence: every node answers, one root, three
+  # parented. A red here is a mesh that did not re-form.
+  #
+  # READ BEFORE RETUNING: the 2026-09-02 calibration recorded 2 roots and 2
+  # parented in all four of its runs, and that was not the daemon. The veth
+  # restore then failed silently whenever a stopped node's namespace outlived
+  # the stop, and in every later run that was inspected, the node islanded at
+  # the snapshot was one whose links the harness had left down. Before widening these, read the red run's runner.log for a
+  # harness fault; a failed restore now aborts the run rather than reaching
+  # this assertion.
+  baseline:
+    min_nodes_reporting: 4
+    max_roots: 1
+    min_nodes_parented: 3
+
+  # The point of the scenario. Traffic must actually have crossed Ethernet
+  # links while interfaces were being taken away underneath it — a green tree
+  # with zero bytes moved is the failure this catches, and is exactly what a
+  # control-plane-only assertion would have called a pass.
+  min_traffic:
+    min_sessions_ok: 2
+
+  # Chaos Ethernet transports are `optional: true` (see config_gen), precisely
+  # because a neighbour's interface disappearing is the scenario here rather
+  # than a fault. So absence must stay silent: any ERROR means something other
+  # than the churn went wrong.
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info"
+  output_dir: "./sim-results"

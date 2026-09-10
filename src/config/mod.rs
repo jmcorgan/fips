@@ -1057,6 +1057,68 @@ impl Config {
 
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_ethernet_interfaces()?;
+        self.validate_rendezvous()
+    }
+
+    /// Reject interface names no kernel could ever hand back.
+    ///
+    /// The presence machine deliberately cannot tell a typo from an interface
+    /// that has not been created yet — both are simply absent, and waiting is
+    /// the right answer for the second. That is what makes this check worth
+    /// having: a name that is *impossible* is the one case still separable
+    /// from "not there yet", and without it a typo costs a permanently
+    /// `Degraded` node whose only symptom is an interface that never arrives.
+    ///
+    /// Syntax only. Whether a well-formed name exists is the binder's
+    /// question, asked once a second, forever.
+    fn validate_ethernet_interfaces(&self) -> Result<(), ConfigError> {
+        // Kernel limit: `IFNAMSIZ` is 16 including the terminating NUL, on
+        // both Linux and the BSDs.
+        const MAX_INTERFACE_NAME: usize = 15;
+
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+
+        for (name, cfg) in self.transports.ethernet.iter() {
+            let label = name.unwrap_or("ethernet");
+            let iface = cfg.interface.as_str();
+
+            if iface.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "transport `{label}` has an empty `interface`"
+                )));
+            }
+            if iface.len() > MAX_INTERFACE_NAME {
+                return Err(ConfigError::Validation(format!(
+                    "transport `{label}` interface `{iface}` is {} bytes; \
+                     the kernel limit is {MAX_INTERFACE_NAME}, so no such \
+                     interface can exist",
+                    iface.len()
+                )));
+            }
+            if iface.contains('/') || iface.chars().any(char::is_whitespace) {
+                return Err(ConfigError::Validation(format!(
+                    "transport `{label}` interface `{iface}` contains a \
+                     character no interface name may hold"
+                )));
+            }
+
+            // Two transports on one netdev means two sockets on the same
+            // device at the same ethertype, each receiving every frame the
+            // other does.
+            if let Some(prior) = seen.insert(iface, label) {
+                return Err(ConfigError::Validation(format!(
+                    "transports `{prior}` and `{label}` both bind interface \
+                     `{iface}`"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Cross-checks between transports, peers and the Nostr rendezvous.
+    fn validate_rendezvous(&self) -> Result<(), ConfigError> {
         let nostr = &self.node.rendezvous.nostr;
 
         let any_transport_advertises_on_nostr = self
@@ -1407,81 +1469,63 @@ node:
     }
 
     /// The fips.yaml shipped in the OpenWrt package must keep parsing as the
-    /// config schema evolves. Both the 802.11s mesh backhaul entries
+    /// config schema evolves, and must keep the absence policy it depends on.
+    ///
+    /// The 802.11s mesh backhaul entries
     /// (docs/how-to/set-up-80211s-mesh-backhaul.md) and the open-access SSID
-    /// entries (docs/how-to/set-up-open-access-ssid.md) ship commented out —
-    /// one per radio, so dual-band routers can run either on both bands — so
-    /// a stock install that never creates fips-mesh*/fips-ap* logs no
-    /// per-boot bind warning; `fips-mesh-setup`/`fips-ap-setup` uncomment the
-    /// matching block when they create the interface. Verify both states
-    /// parse: as shipped (both inactive), and after the uncomment the helpers
-    /// perform.
+    /// entries (docs/how-to/set-up-open-access-ssid.md) ship **enabled** — one
+    /// per radio, so dual-band routers can run either on both bands — and
+    /// marked `optional: true`. They used to ship commented out, with
+    /// `fips-mesh-setup`/`fips-ap-setup` uncommenting the matching block; that
+    /// was a workaround for a transport whose missing interface was skipped
+    /// for the life of the process. The daemon now waits for the interface and
+    /// binds it when it appears, and `optional: true` is what keeps a stock
+    /// install that never runs those helpers quiet and un-`Degraded` about a
+    /// radio it was never going to have.
     #[test]
     fn shipped_openwrt_config_parses() {
         let yaml = include_str!("../../packaging/openwrt-ipk/files/etc/fips/fips.yaml");
-
-        // As shipped: parses, and the mesh/ap entries are commented out (a
-        // running daemon binds no fips-mesh*/fips-ap* transport, no warning).
         let config: Config = serde_yaml::from_str(yaml).expect("shipped OpenWrt fips.yaml");
-        for name in ["mesh0", "mesh1", "ap0", "ap1"] {
-            assert!(
-                !config
-                    .transports
-                    .ethernet
-                    .iter()
-                    .any(|(n, _)| n == Some(name)),
-                "{name} must ship commented out, not active, in fips.yaml"
-            );
-        }
 
-        // What `fips-mesh-setup`/`fips-ap-setup` produce: uncomment each
-        // block, which must still parse into a transport bound to the right
-        // netdev.
-        let uncommented =
-            uncomment_transport_blocks(&uncomment_transport_blocks(yaml, "mesh"), "ap");
-        let config: Config = serde_yaml::from_str(&uncommented)
-            .expect("fips.yaml with mesh and ap transports uncommented");
+        let eth = |name: &str| {
+            config
+                .transports
+                .ethernet
+                .iter()
+                .find(|(n, _)| *n == Some(name))
+                .map(|(_, cfg)| cfg.clone())
+        };
+
+        // The interfaces the setup helpers create: present, bound to the right
+        // netdev, and optional. A regression to `optional: false` here would
+        // report every stock router `Degraded` for a mesh it never configured.
         for (name, interface) in [
             ("mesh0", "fips-mesh0"),
             ("mesh1", "fips-mesh1"),
             ("ap0", "fips-ap0"),
             ("ap1", "fips-ap1"),
         ] {
+            let cfg = eth(name).unwrap_or_else(|| panic!("{name} entry missing from fips.yaml"));
+            assert_eq!(cfg.interface, interface, "{name} binds the wrong netdev");
+            assert!(cfg.optional(), "{name} must ship optional");
+        }
+
+        // `phy0-sta0` only exists while a radio is in station mode.
+        assert!(
+            eth("wwan").expect("wwan entry").optional(),
+            "wwan must ship optional"
+        );
+
+        // The wired ports exist on every supported board, so their absence is
+        // a real fault and must stay loud. Marking these optional too would
+        // make the whole ethernet block silent, which is the failure mode the
+        // presence mechanism exists to stop hiding.
+        for name in ["wan", "lan"] {
             assert!(
-                config
-                    .transports
-                    .ethernet
-                    .iter()
-                    .any(|(n, eth)| n == Some(name) && eth.interface == interface),
-                "{name} entry missing after uncommenting shipped fips.yaml"
+                !eth(name).expect("wired entry").optional(),
+                "{name} must stay required"
             );
         }
-    }
-
-    /// Mirror the setup helpers' block uncomment: strip the `    # ` prefix
-    /// from each `# <prefix><N>:` header and its `    #   ` continuation
-    /// lines, leaving every other comment untouched.
-    fn uncomment_transport_blocks(yaml: &str, prefix: &str) -> String {
-        let header = format!("    # {prefix}");
-        let mut out = String::new();
-        let mut in_block = false;
-        for line in yaml.lines() {
-            let is_header = line
-                .strip_prefix(&header)
-                .and_then(|r| r.strip_suffix(':'))
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-            if is_header {
-                in_block = true;
-                out.push_str(&line.replacen("    # ", "    ", 1));
-            } else if in_block && line.starts_with("    #   ") {
-                out.push_str(&line.replacen("    # ", "    ", 1));
-            } else {
-                in_block = false;
-                out.push_str(line);
-            }
-            out.push('\n');
-        }
-        out
     }
 
     #[test]

@@ -80,6 +80,35 @@ impl PathMtuEntry {
 /// address).
 pub type PathMtuLookup = Arc<RwLock<HashMap<FipsAddress, PathMtuEntry>>>;
 
+/// The node-global TCP MSS ceiling, shared live with the TUN reader and
+/// writer threads.
+///
+/// Shared rather than copied because the value it is derived from moves at
+/// runtime. `Node::transport_mtu()` is the minimum across *bound* transports,
+/// and since dynamic interface binding a transport can bind minutes after
+/// start or unbind mid-operation — so a narrow interface appearing must
+/// tighten the clamp, and its departure must release it. Every other consumer
+/// of `transport_mtu()` already reads it live (`show_status`, the snapshot,
+/// the session-layer fragmentation check); these two threads captured a `u16`
+/// at spawn and were the only place left where the daemon could report one
+/// effective MTU and clamp to another.
+///
+/// A relaxed load per packet, beside the `PathMtuLookup` read that already
+/// happens on the same packet — strictly the cheaper of the two. Ordering is
+/// irrelevant: this is a clamp, and a packet that reads the previous value
+/// during the store is clamped by the ceiling that was correct a microsecond
+/// earlier. The per-flow ceiling has always had that property.
+/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
+/// this large, so an MSS derived from it fits anywhere.
+///
+/// Two callers, and they must not disagree: the cold-flow fallback in
+/// [`per_flow_max_mss`], and the seed for the node's [`MssCeiling`] before any
+/// transport has bound — which is the same value `Node::transport_mtu()` falls
+/// back to when nothing is bound.
+pub const IPV6_MIN_MTU: u16 = 1280;
+
+pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
+
 /// Compute the effective TCP MSS ceiling for a packet given its peer
 /// address bytes (a 16-byte IPv6 destination on outbound, source on
 /// inbound). Returns `min(global_max_mss, learned_path_max_mss)` when
@@ -115,7 +144,6 @@ pub(crate) fn per_flow_max_mss(
     // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
     // payload (1203) → TCP segment after IPv6+TCP headers (1143).
     // Used as the conservative ceiling for empty-lookup destinations.
-    const IPV6_MIN_MTU: u16 = 1280;
     let conservative_max_mss = mss_ceiling(IPV6_MIN_MTU);
     let empty_lookup_ceiling = std::cmp::min(global_max_mss, conservative_max_mss);
 
@@ -435,13 +463,14 @@ impl TunDevice {
     /// a channel sender for submitting packets to be written.
     ///
     /// `max_mss` is the global TCP MSS ceiling derived from the local
-    /// `transport_mtu()` floor. `path_mtu_lookup` is a read-only handle to
-    /// the per-destination path MTU map populated by discovery; the writer
-    /// reads it on each inbound SYN-ACK to compute a per-flow ceiling that
-    /// honors learned narrow paths through the mesh.
+    /// `transport_mtu()` floor, shared live so a transport that binds or
+    /// unbinds after start moves it (see [`MssCeiling`]). `path_mtu_lookup`
+    /// is a read-only handle to the per-destination path MTU map populated by
+    /// discovery; the writer reads both on each inbound SYN-ACK to compute a
+    /// per-flow ceiling that honors learned narrow paths through the mesh.
     pub fn create_writer(
         &self,
-        max_mss: u16,
+        max_mss: MssCeiling,
         path_mtu_lookup: PathMtuLookup,
     ) -> Result<(TunWriter, TunTx), TunError> {
         let fd = self.device.as_raw_fd();
@@ -517,7 +546,7 @@ pub struct TunWriter {
     file: File,
     rx: mpsc::Receiver<Vec<u8>>,
     name: String,
-    max_mss: u16,
+    max_mss: MssCeiling,
     path_mtu_lookup: PathMtuLookup,
 }
 
@@ -531,16 +560,23 @@ impl TunWriter {
     pub fn run(mut self) {
         use super::tcp_mss::clamp_tcp_mss;
 
-        debug!(name = %self.name, max_mss = self.max_mss, "TUN writer starting");
+        debug!(
+            name = %self.name,
+            max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed),
+            "TUN writer starting"
+        );
 
         for mut packet in self.rx {
+            // Read per packet, not once: a transport binding or unbinding
+            // moves the node's egress floor at runtime. See `MssCeiling`.
+            let global_max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed);
             // Per-destination clamp: peer IPv6 source address (bytes 8..24)
             // identifies the flow's remote end. If discovery has learned a
             // smaller path MTU for that peer, tighten the ceiling.
             let effective_max_mss = if packet.len() >= 24 {
-                per_flow_max_mss(&self.path_mtu_lookup, &packet[8..24], self.max_mss)
+                per_flow_max_mss(&self.path_mtu_lookup, &packet[8..24], global_max_mss)
             } else {
-                self.max_mss
+                global_max_mss
             };
             // Clamp TCP MSS on inbound SYN-ACK packets
             if clamp_tcp_mss(&mut packet, effective_max_mss) {
@@ -622,17 +658,17 @@ pub fn run_tun_reader(
     our_addr: FipsAddress,
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
-    transport_mtu: u16,
+    max_mss: MssCeiling,
     path_mtu_lookup: PathMtuLookup,
 ) {
-    let (name, mut buf, max_mss) = tun_reader_setup(device.name(), mtu, transport_mtu);
+    let (name, mut buf) = tun_reader_setup(device.name(), mtu, &max_mss);
 
     loop {
         match device.read_packet(&mut buf) {
             Ok(n) if n > 0 => {
                 if !handle_tun_packet(
                     &mut buf[..n],
-                    max_mss,
+                    max_mss.load(std::sync::atomic::Ordering::Relaxed),
                     &name,
                     our_addr,
                     &tun_tx,
@@ -685,13 +721,13 @@ pub fn run_tun_reader(
     our_addr: FipsAddress,
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
-    transport_mtu: u16,
+    max_mss: MssCeiling,
     path_mtu_lookup: PathMtuLookup,
     shutdown_fd: std::os::unix::io::RawFd,
 ) {
     let _shutdown_fd = ShutdownFd(shutdown_fd);
     let tun_fd = device.device().as_raw_fd();
-    let (name, mut buf, max_mss) = tun_reader_setup(device.name(), mtu, transport_mtu);
+    let (name, mut buf) = tun_reader_setup(device.name(), mtu, &max_mss);
 
     // Set TUN fd to non-blocking so we can use select + read without blocking
     // past the point where select returns readable.
@@ -741,7 +777,7 @@ pub fn run_tun_reader(
                 Ok(n) if n > 0 => {
                     if !handle_tun_packet(
                         &mut buf[..n],
-                        max_mss,
+                        max_mss.load(std::sync::atomic::Ordering::Relaxed),
                         &name,
                         our_addr,
                         &tun_tx,
@@ -774,30 +810,25 @@ pub fn run_tun_reader(
     // _shutdown_fd closes on drop
 }
 
-/// Common setup for TUN reader: allocates buffer, computes max MSS.
-fn tun_reader_setup(device_name: &str, mtu: u16, transport_mtu: u16) -> (String, Vec<u8>, u16) {
-    use super::icmp::effective_ipv6_mtu;
-
+/// Common setup for TUN reader: allocates the buffer and names the device.
+///
+/// The MSS ceiling is deliberately *not* returned. It is read from the shared
+/// [`MssCeiling`] on every packet, because a transport binding or unbinding
+/// moves it after this function has run; returning it here is what let the
+/// reader clamp to a floor derived from the transports that happened to be
+/// bound at spawn.
+fn tun_reader_setup(device_name: &str, mtu: u16, max_mss: &MssCeiling) -> (String, Vec<u8>) {
     let name = device_name.to_string();
     let buf = vec![0u8; mtu as usize + 100];
-
-    const IPV6_HEADER: u16 = 40;
-    const TCP_HEADER: u16 = 20;
-    let effective_mtu = effective_ipv6_mtu(transport_mtu);
-    let max_mss = effective_mtu
-        .saturating_sub(IPV6_HEADER)
-        .saturating_sub(TCP_HEADER);
 
     debug!(
         name = %name,
         tun_mtu = mtu,
-        transport_mtu = transport_mtu,
-        effective_mtu = effective_mtu,
-        max_mss = max_mss,
+        max_mss = max_mss.load(std::sync::atomic::Ordering::Relaxed),
         "TUN reader starting"
     );
 
-    (name, buf, max_mss)
+    (name, buf)
 }
 
 /// Process a single TUN packet. Returns `false` if the reader should exit.
@@ -1076,12 +1107,13 @@ mod windows_tun {
         /// packets independently. Returns the writer and a channel sender for
         /// submitting packets to be written.
         ///
-        /// `max_mss` is the global TCP MSS ceiling. `path_mtu_lookup` is a
-        /// read-only handle to per-destination path MTU learned via
-        /// discovery.
+        /// `max_mss` is the global TCP MSS ceiling, shared live so a transport
+        /// that binds or unbinds after start moves it (see [`MssCeiling`]).
+        /// `path_mtu_lookup` is a read-only handle to per-destination path MTU
+        /// learned via discovery.
         pub fn create_writer(
             &self,
-            max_mss: u16,
+            max_mss: MssCeiling,
             path_mtu_lookup: PathMtuLookup,
         ) -> Result<(TunWriter, TunTx), TunError> {
             let (tx, rx) = mpsc::channel();
@@ -1119,7 +1151,7 @@ mod windows_tun {
         session: Arc<wintun::Session>,
         rx: mpsc::Receiver<Vec<u8>>,
         name: String,
-        max_mss: u16,
+        max_mss: MssCeiling,
         path_mtu_lookup: PathMtuLookup,
     }
 
@@ -1132,14 +1164,21 @@ mod windows_tun {
             use super::per_flow_max_mss;
             use crate::upper::tcp_mss::clamp_tcp_mss;
 
-            debug!(name = %self.name, max_mss = self.max_mss, "TUN writer starting");
+            debug!(
+                name = %self.name,
+                max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed),
+                "TUN writer starting"
+            );
 
             for mut packet in self.rx {
+                // Read per packet, not once: a transport binding or unbinding
+                // moves the node's egress floor. See `MssCeiling`.
+                let global_max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed);
                 // Per-destination clamp (peer source IPv6 = bytes 8..24)
                 let effective_max_mss = if packet.len() >= 24 {
-                    per_flow_max_mss(&self.path_mtu_lookup, &packet[8..24], self.max_mss)
+                    per_flow_max_mss(&self.path_mtu_lookup, &packet[8..24], global_max_mss)
                 } else {
-                    self.max_mss
+                    global_max_mss
                 };
                 // Clamp TCP MSS on inbound SYN-ACK packets
                 if clamp_tcp_mss(&mut packet, effective_max_mss) {
@@ -1188,17 +1227,17 @@ mod windows_tun {
         our_addr: FipsAddress,
         tun_tx: TunTx,
         outbound_tx: TunOutboundTx,
-        transport_mtu: u16,
+        max_mss: MssCeiling,
         path_mtu_lookup: PathMtuLookup,
     ) {
-        let (name, mut buf, max_mss) = super::tun_reader_setup(device.name(), mtu, transport_mtu);
+        let (name, mut buf) = super::tun_reader_setup(device.name(), mtu, &max_mss);
 
         loop {
             match device.read_packet(&mut buf) {
                 Ok(n) if n > 0 => {
                     if !super::handle_tun_packet(
                         &mut buf[..n],
-                        max_mss,
+                        max_mss.load(std::sync::atomic::Ordering::Relaxed),
                         &name,
                         our_addr,
                         &tun_tx,

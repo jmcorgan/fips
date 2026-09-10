@@ -1000,15 +1000,37 @@ impl Node {
                 let connected = self.peers.contains_key(&node_addr);
 
                 if connected {
-                    // Active peer: skip a candidate whose path is already the
-                    // current, still-fresh one (avoid churning a healthy link).
-                    let transport_name = transport.transport_type().name;
-                    let peer_addr_candidate =
-                        PeerAddress::new(transport_name, remote_addr.to_string());
-                    if self.active_peer_candidate_is_fresh_enough_to_skip(
-                        &node_addr,
-                        std::slice::from_ref(&peer_addr_candidate),
-                    ) {
+                    // Active peer: skip every candidate while the link we
+                    // already hold is live — the current path *and* any
+                    // alternate one.
+                    //
+                    // Only the same-path case used to be skipped, which left
+                    // the stated intent ("avoid churning a healthy link")
+                    // covering exactly the case that could not churn anything.
+                    // A peer reachable twice — the ordinary result of two
+                    // machines sharing a LAN and a cable, since each beacons on
+                    // both — was therefore re-dialled on its alternate path
+                    // every discovery tick, forever. Each dial that completed
+                    // promoted and displaced the incumbent, so the peer's link
+                    // migrated back and forth on a fixed cadence, tearing down
+                    // and re-establishing its session each time. Measured on
+                    // real hardware: seventeen dials to one peer in fifteen
+                    // minutes, alternating wifi and cable, displacing a link
+                    // reporting `etx = 1.0` and `loss = 0.0`.
+                    //
+                    // When that peer is the parent — which the best path
+                    // usually is — every migration also switched parents,
+                    // invalidating the downstream coordinate cache and
+                    // re-announcing to every peer. The cost of the churn was
+                    // therefore mesh-wide while the benefit was nil: the link
+                    // being replaced was already perfect.
+                    //
+                    // Failover is unaffected. Liveness is the gate, so a peer
+                    // that stops answering goes stale within a heartbeat
+                    // interval and every path, alternate included, is dialled
+                    // again. What is given up is switching away from a link
+                    // that is working, which is not a thing worth doing.
+                    if self.active_peer_link_is_live(&node_addr) {
                         continue;
                     }
                     if self.is_connecting_to_peer_on_path(
@@ -1617,6 +1639,17 @@ impl Node {
         self.child_exit_tx = Some(child_exit_tx);
         self.child_exit_rx = Some(child_exit_rx);
 
+        // Interface-presence channel. Created before `create_transports` so
+        // every interface-bound transport gets the sender at construction and
+        // its very first bind attempt — the one `start_async` makes inline —
+        // is already reportable. A boot race therefore reaches the FSM while
+        // it is still `Starting`, and start-completion health resolves to
+        // `Degraded` on the first publish rather than publishing `Full` and
+        // correcting it a moment later.
+        let (presence_tx, presence_rx) = tokio::sync::mpsc::channel(16);
+        self.transport_presence_tx = Some(presence_tx);
+        self.transport_presence_rx = Some(presence_rx);
+
         // Initialize transports first (before TUN, before Nostr discovery).
         // Creation allocates each transport's id; the supervisor FSM authors
         // the start order over those ids.
@@ -1878,12 +1911,20 @@ impl Node {
                             info!("  address: {}", device.address());
                             info!("      mtu: {}", mtu);
 
-                            // Calculate max MSS for TCP clamping
+                            // Seed the shared MSS ceiling from whatever is bound
+                            // right now. Both TUN threads read it live from here
+                            // on, so a transport binding or unbinding later moves
+                            // the clamp instead of leaving it at this instant's
+                            // value — see `crate::upper::tun::MssCeiling`.
+                            self.refresh_tun_mss_ceiling();
+                            let max_mss = self.tun_mss_ceiling.clone();
                             let effective_mtu = self.effective_ipv6_mtu();
-                            let max_mss = effective_mtu.saturating_sub(40).saturating_sub(20); // IPv6 + TCP headers
 
                             info!("effective MTU: {} bytes", effective_mtu);
-                            debug!("   max TCP MSS: {} bytes", max_mss);
+                            debug!(
+                                "   max TCP MSS: {} bytes",
+                                max_mss.load(std::sync::atomic::Ordering::Relaxed)
+                            );
 
                             // On macOS and FreeBSD, create a shutdown pipe. Writing to it
                             // unblocks the reader thread's select() loop without closing
@@ -1907,8 +1948,8 @@ impl Node {
                             // Create writer (dups the fd for independent write access).
                             // Pass path_mtu_lookup so inbound SYN-ACK clamp can read
                             // per-destination path MTU learned via discovery.
-                            let (writer, tun_tx) =
-                                device.create_writer(max_mss, self.path_mtu_lookup.clone())?;
+                            let (writer, tun_tx) = device
+                                .create_writer(max_mss.clone(), self.path_mtu_lookup.clone())?;
 
                             // Spawn writer thread. On exit it self-reports
                             // `Child::Tun` (sync context → `blocking_send`); TUN
@@ -1934,7 +1975,6 @@ impl Node {
                             // self-reports `Child::Tun` on exit (sync context →
                             // `blocking_send`). Exactly one cfg variant compiles,
                             // so the single clone is moved into that closure.
-                            let transport_mtu = self.transport_mtu();
                             let path_mtu_lookup = self.path_mtu_lookup.clone();
                             let reader_child_tx = self.child_exit_tx.clone();
                             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
@@ -1945,7 +1985,7 @@ impl Node {
                                     our_addr,
                                     reader_tun_tx,
                                     outbound_tx,
-                                    transport_mtu,
+                                    max_mss,
                                     path_mtu_lookup,
                                     shutdown_read_fd,
                                 );
@@ -1961,7 +2001,7 @@ impl Node {
                                     our_addr,
                                     reader_tun_tx,
                                     outbound_tx,
-                                    transport_mtu,
+                                    max_mss,
                                     path_mtu_lookup,
                                 );
                                 if let Some(tx) = &reader_child_tx {
@@ -2092,12 +2132,28 @@ impl Node {
                 }
             };
 
+            // Drain any presence edges this child's start produced *before*
+            // reporting the child itself. An interface-bound transport whose
+            // interface is missing reports absence from inside `start_async`
+            // and then reports `SubstrateUp` (absence is a state, not a start
+            // failure), so ordering the drain first means start-completion
+            // health already knows about the absence when `pending` empties.
+            // Otherwise a boot race publishes `Full` and corrects itself a
+            // moment later, and every consumer sees a spurious transition.
+            let _ = self.drain_transport_presence();
+
             let feedback_actions = self.supervisor.fsm.step(feedback);
             for action in &feedback_actions {
                 if let Action::PublishState(ns) = action {
                     start_outcome = Some(*ns);
                 }
             }
+        }
+
+        // Late edges: a transport that bound after its `SubstrateUp` was
+        // reported, or one that detached during a later child's bring-up.
+        if let Some(ns) = self.drain_transport_presence() {
+            start_outcome = Some(ns);
         }
 
         // Seams that never triggered inside the loop: the "Transports
@@ -2138,8 +2194,10 @@ impl Node {
                 // children. Enumerate them for the operator, then proceed —
                 // a degraded node serves traffic.
                 warn!(
-                    degraded_children = ?self.supervisor.fsm.failed(),
-                    "Node started DEGRADED: one or more configured optional children failed to start"
+                    degraded_children = ?self.supervisor.fsm.degraded_children(),
+                    absent_interfaces = ?self.supervisor.fsm.absent(),
+                    "Node started DEGRADED: one or more configured optional children failed to \
+                     start, or a configured interface is absent"
                 );
             }
             _ => {}
@@ -2496,6 +2554,50 @@ impl Node {
         if matches!(child, Child::Dns) {
             self.supervisor.dns_local_addr.take();
         }
+    }
+
+    /// Feed every queued interface-presence edge to the supervisor FSM,
+    /// returning the last [`NodeState`] it asked to publish (if any).
+    ///
+    /// Non-blocking: it drains what is already queued and returns. Used during
+    /// bring-up, where the rx_loop's presence arm is not running yet — from
+    /// then on that arm owns the same translation.
+    pub(in crate::node) fn drain_transport_presence(&mut self) -> Option<NodeState> {
+        let mut edges = Vec::new();
+        if let Some(rx) = self.transport_presence_rx.as_mut() {
+            while let Ok(edge) = rx.try_recv() {
+                edges.push(edge);
+            }
+        }
+
+        let mut published = None;
+        let saw_edge = !edges.is_empty();
+        for edge in edges {
+            // Health is policy-filtered; the MTU refresh below is not. See
+            // `saw_edge`.
+            if !edge.health_relevant {
+                continue;
+            }
+            let child = Child::Transport(edge.transport_id);
+            let event = if edge.present {
+                Event::ChildPresent { child }
+            } else {
+                Event::ChildAbsent { child }
+            };
+            for action in self.supervisor.fsm.step(event) {
+                if let Action::PublishState(ns) = action {
+                    published = Some(ns);
+                }
+            }
+        }
+        if saw_edge {
+            // A bind or unbind changes which transports are bound, and so the
+            // node's egress MTU floor. During bring-up this runs before the
+            // TUN threads exist, which is exactly when it must: they read the
+            // ceiling this leaves behind.
+            self.refresh_tun_mss_ceiling();
+        }
+        published
     }
 
     /// Reconstruct the supervised up-set from observed runtime presence, so the
@@ -3425,14 +3527,13 @@ impl Node {
         candidates
     }
 
-    pub(in crate::node) fn active_peer_candidate_is_fresh_enough_to_skip(
-        &self,
-        peer_node_addr: &NodeAddr,
-        candidates: &[PeerAddress],
-    ) -> bool {
-        if !self.active_peer_matches_any_candidate(peer_node_addr, candidates) {
-            return false;
-        }
+    /// Whether the link we already hold to this peer is answering.
+    ///
+    /// The gate on dialling an active peer at all. Phrased as liveness rather
+    /// than as a property of the candidate, because the candidate's path is
+    /// not the question: a live link should not be replaced by *any* path,
+    /// and a dead one should be replaced by whichever path answers.
+    pub(in crate::node) fn active_peer_link_is_live(&self, peer_node_addr: &NodeAddr) -> bool {
         !self.active_peer_needs_same_path_refresh(peer_node_addr)
     }
 
@@ -3449,17 +3550,7 @@ impl Node {
         peer.idle_time(Self::now_ms()) > stale_after_ms
     }
 
-    fn active_peer_matches_any_candidate(
-        &self,
-        peer_node_addr: &NodeAddr,
-        candidates: &[PeerAddress],
-    ) -> bool {
-        candidates
-            .iter()
-            .any(|candidate| self.active_peer_matches_candidate(peer_node_addr, candidate))
-    }
-
-    fn active_peer_matches_candidate(
+    pub(in crate::node) fn active_peer_matches_candidate(
         &self,
         peer_node_addr: &NodeAddr,
         candidate: &PeerAddress,

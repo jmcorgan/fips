@@ -20,6 +20,7 @@ from .assertions import (
     evaluate_max_errors,
     evaluate_max_parent_switches,
     evaluate_min_parent_switches,
+    evaluate_min_traffic,
     evaluate_tree_parents,
 )
 from .compose import generate_compose
@@ -41,11 +42,21 @@ from .veth import VethManager
 
 log = logging.getLogger(__name__)
 
+# The final snapshot waits for this many identical consecutive tree reads,
+# taken this far apart, so the tree must hold still for two intervals.
+SETTLE_READS = 3
+SETTLE_INTERVAL_SECS = 5
+SETTLE_TIMEOUT_SECS = 90
+
 
 class SimRunner:
     def __init__(self, scenario: Scenario):
         self.scenario = scenario
+        # Setup draws only: the topology and the ephemeral node choice, made
+        # once and in a fixed order. Everything drawn while the simulation
+        # runs comes from `_stream` instead.
         self.rng = random.Random(scenario.seed)
+        self._streams: dict[str, random.Random] = {}
         self.topology: SimTopology | None = None
         self.compose_file: str | None = None
         # Claimed in _setup; the compose file refers to it as external, so
@@ -316,14 +327,16 @@ class SimRunner:
         if s.netem.enabled:
             bw = s.bandwidth if s.bandwidth.enabled else None
             ig = s.ingress if s.ingress.enabled else None
-            self.netem_mgr = NetemManager(self.topology, s.netem, self.rng, bandwidth=bw, ingress=ig)
+            self.netem_mgr = NetemManager(
+                self.topology, s.netem, self._stream("netem"), bandwidth=bw, ingress=ig
+            )
             self.netem_mgr.down_nodes = self._down_nodes
             log.info("Applying initial per-link netem...")
             self.netem_mgr.setup_initial()
 
         if s.link_flaps.enabled:
             self.link_mgr = LinkManager(
-                self.topology, s.link_flaps, self.rng, netem_mgr=self.netem_mgr
+                self.topology, s.link_flaps, self._stream("flaps"), netem_mgr=self.netem_mgr
             )
 
         if s.link_swap.enabled:
@@ -332,7 +345,7 @@ class SimRunner:
                     "link_swap requires netem.enabled (depends on per-link tc state)"
                 )
             self.link_swap_mgr = LinkSwapManager(
-                self.topology, s.link_swap, self.netem_mgr, self.rng,
+                self.topology, s.link_swap, self.netem_mgr, self._stream("swap"),
             )
 
         if s.assertions.bloom_send_rate is not None:
@@ -342,12 +355,12 @@ class SimRunner:
 
         if s.traffic.enabled:
             self.traffic_mgr = TrafficManager(
-                self.topology, s.traffic, self.rng, down_nodes=self._down_nodes
+                self.topology, s.traffic, self._stream("traffic"), down_nodes=self._down_nodes
             )
 
         if s.node_churn.enabled:
             self.node_mgr = NodeManager(
-                self.topology, s.node_churn, self.rng,
+                self.topology, s.node_churn, self._stream("churn"),
                 netem_mgr=self.netem_mgr, down_nodes=self._down_nodes,
                 veth_mgr=self.veth_mgr,
                 on_node_restart=self._handle_node_restart,
@@ -355,7 +368,7 @@ class SimRunner:
 
         if s.peer_churn.enabled:
             self.peer_churn_mgr = PeerChurnManager(
-                self.topology, s.peer_churn, self.rng,
+                self.topology, s.peer_churn, self._stream("peer-churn"),
                 down_nodes=self._down_nodes,
                 ephemeral_nodes=self._ephemeral_nodes,
             )
@@ -410,11 +423,11 @@ class SimRunner:
         log.info("Simulation running for %ds...", duration)
 
         # Schedule first events
-        next_netem = self._schedule_next(start, s.netem.mutation.interval_secs) if self.netem_mgr else float("inf")
-        next_flap = self._schedule_next(start, s.link_flaps.interval_secs) if self.link_mgr else float("inf")
-        next_traffic = self._schedule_next(start, s.traffic.interval_secs) if self.traffic_mgr else float("inf")
-        next_churn = self._schedule_next(start, s.node_churn.interval_secs) if self.node_mgr else float("inf")
-        next_peer_churn = self._schedule_next(start, s.peer_churn.interval_secs) if self.peer_churn_mgr else float("inf")
+        next_netem = self._schedule_next(start, s.netem.mutation.interval_secs, "netem") if self.netem_mgr else float("inf")
+        next_flap = self._schedule_next(start, s.link_flaps.interval_secs, "flaps") if self.link_mgr else float("inf")
+        next_traffic = self._schedule_next(start, s.traffic.interval_secs, "traffic") if self.traffic_mgr else float("inf")
+        next_churn = self._schedule_next(start, s.node_churn.interval_secs, "churn") if self.node_mgr else float("inf")
+        next_peer_churn = self._schedule_next(start, s.peer_churn.interval_secs, "peer-churn") if self.peer_churn_mgr else float("inf")
 
         # Bloom-send-rate assertion: sample at window_secs before end.
         bloom_window_start_at = float("inf")
@@ -451,34 +464,34 @@ class SimRunner:
             # Netem mutation
             if self.netem_mgr and now >= next_netem:
                 self.netem_mgr.mutate()
-                next_netem = self._schedule_next(now, s.netem.mutation.interval_secs)
+                next_netem = self._schedule_next(now, s.netem.mutation.interval_secs, "netem")
 
             # Link flaps
             if self.link_mgr:
                 if now >= next_flap:
                     self.link_mgr.maybe_flap()
-                    next_flap = self._schedule_next(now, s.link_flaps.interval_secs)
+                    next_flap = self._schedule_next(now, s.link_flaps.interval_secs, "flaps")
                 self.link_mgr.restore_expired()
 
             # Traffic generation
             if self.traffic_mgr:
                 if now >= next_traffic:
                     self.traffic_mgr.maybe_spawn()
-                    next_traffic = self._schedule_next(now, s.traffic.interval_secs)
+                    next_traffic = self._schedule_next(now, s.traffic.interval_secs, "traffic")
                 self.traffic_mgr.cleanup_expired()
 
             # Node churn
             if self.node_mgr:
                 if now >= next_churn:
                     self.node_mgr.maybe_kill()
-                    next_churn = self._schedule_next(now, s.node_churn.interval_secs)
+                    next_churn = self._schedule_next(now, s.node_churn.interval_secs, "churn")
                 self.node_mgr.restore_expired()
 
             # Peer churn (topology mutation)
             if self.peer_churn_mgr:
                 if now >= next_peer_churn:
                     self.peer_churn_mgr.maybe_churn()
-                    next_peer_churn = self._schedule_next(now, s.peer_churn.interval_secs)
+                    next_peer_churn = self._schedule_next(now, s.peer_churn.interval_secs, "peer-churn")
 
             # Status line
             down_links = self.link_mgr.down_count if self.link_mgr else 0
@@ -699,6 +712,7 @@ class SimRunner:
                 self.node_mgr.restore_all()
 
             # Collect iperf3 throughput results before containers stop
+            iperf_results: list[dict] = []
             if self.traffic_mgr:
                 iperf_results = self.traffic_mgr.collect_results()
                 if iperf_results:
@@ -707,7 +721,11 @@ class SimRunner:
                         json.dump(iperf_results, f, indent=2)
                     log.info("Saved %d iperf3 results to %s", len(iperf_results), iperf_path)
 
-            # Take final tree snapshot while nodes are still running
+            # Take final tree snapshot while nodes are still running, once the
+            # tree has stopped moving. A node restored a moment ago is its own
+            # root until it re-parents, so a snapshot taken straight after the
+            # restore reads a mesh still converging.
+            self._settle_tree()
             self._take_snapshot("final")
 
             # Collect logs before stopping containers
@@ -757,6 +775,13 @@ class SimRunner:
             err_cfg = self.scenario.assertions.max_errors
             if err_cfg is not None:
                 outcome = evaluate_max_errors(err_cfg, result.errors)
+                self.assertion_outcomes.append(outcome)
+
+            # Traffic. Evaluated even when no session completed, because
+            # "nothing ran" is the failure this exists to catch.
+            traffic_cfg = self.scenario.assertions.min_traffic
+            if traffic_cfg is not None:
+                outcome = evaluate_min_traffic(traffic_cfg, iperf_results)
                 self.assertion_outcomes.append(outcome)
                 if outcome.passed:
                     log.info("%s", outcome.detail)
@@ -838,6 +863,46 @@ class SimRunner:
 
         return result
 
+    def _settle_tree(self):
+        """Wait until consecutive tree reads agree, or the settle time runs out.
+
+        Compares each answering node's root and parent. A fixed delay would
+        either waste time on a mesh that settled at once or cut off one that
+        had not. Running out is logged and is not a failure in itself: the
+        final snapshot is taken anyway, and the assertions judge what it
+        shows.
+
+        A read that no node answered never counts toward agreement. It does
+        not catch a node that stays its own root for longer than the reads
+        span, which is a tree that is stable and wrong, and is left to the
+        assertions.
+        """
+        started = time.time()
+        previous = None
+        agreeing = 0
+        while not self._interrupted:
+            trees = snapshot_all_trees(self.topology)
+            shape = {
+                nid: (data.get("root"), data.get("parent"))
+                for nid, data in trees.items()
+            }
+            if not shape:
+                agreeing = 0
+            else:
+                agreeing = agreeing + 1 if shape == previous else 1
+            previous = shape
+            waited = time.time() - started
+            if agreeing >= SETTLE_READS:
+                log.info("Tree settled after %.0fs", waited)
+                return
+            if waited >= SETTLE_TIMEOUT_SECS:
+                log.warning(
+                    "Tree still changing after %.0fs; taking the final snapshot anyway",
+                    waited,
+                )
+                return
+            self._sleep(SETTLE_INTERVAL_SECS)
+
     def _take_snapshot(self, label: str):
         """Query all nodes via control socket and save tree/MMP/congestion snapshots."""
         if not self.topology:
@@ -874,9 +939,24 @@ class SimRunner:
             len(self.topology.nodes),
         )
 
-    def _schedule_next(self, now: float, interval) -> float:
-        """Schedule the next event using a Range interval."""
-        return now + self.rng.uniform(interval.min, interval.max)
+    def _schedule_next(self, now: float, interval, kind: str) -> float:
+        """Schedule the next event of one kind using a Range interval."""
+        return now + self._stream(f"{kind}-schedule").uniform(interval.min, interval.max)
+
+    def _stream(self, name: str) -> random.Random:
+        """Return the random stream for one consumer, derived from the seed.
+
+        One stream shared by every manager was drawn in wall-clock order, and
+        a manager that returns early draws nothing, so host load changed
+        which node the churn stopped next. Under heavy host load that walked
+        the stops around the ring. A stream per consumer means one manager's
+        draws no longer shift another's. It does not make a schedule a
+        function of the seed alone: a manager's own draws can still depend on
+        mesh state at the tick, such as which nodes are down.
+        """
+        if name not in self._streams:
+            self._streams[name] = random.Random(f"{self.scenario.seed}:{name}")
+        return self._streams[name]
 
     def _sleep(self, seconds: float):
         """Sleep in small increments so SIGINT can break out."""

@@ -44,7 +44,10 @@ class TrafficManager:
         self.topology = topology
         self.config = config
         self.rng = rng
-        self.down_nodes = down_nodes or set()
+        # `is not None`, not `or`: the runner passes its shared set while it
+        # is still empty, and an empty set is falsy, so `or` replaced it with
+        # a private one and no other manager ever saw a node go down.
+        self.down_nodes = down_nodes if down_nodes is not None else set()
         self.npub_cache = npub_cache or {}
         self.active_sessions: list[TrafficSession] = []
         self.completed_results: list[dict] = []

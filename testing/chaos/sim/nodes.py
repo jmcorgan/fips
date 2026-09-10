@@ -50,7 +50,10 @@ class NodeManager:
         self.rng = rng
         self.netem_mgr = netem_mgr
         self.veth_mgr = veth_mgr
-        self.down_nodes = down_nodes or set()
+        # `is not None`, not `or`: the runner passes its shared set while it
+        # is still empty, and an empty set is falsy, so `or` replaced it with
+        # a private one and no other manager ever saw a node go down.
+        self.down_nodes = down_nodes if down_nodes is not None else set()
         self.on_node_restart = on_node_restart
         self.node_states: dict[str, NodeState] = {
             nid: NodeState(node_id=nid) for nid in topology.nodes
@@ -173,7 +176,11 @@ class NodeManager:
         # Re-create veth pairs (container restart destroys netns)
         if self.veth_mgr:
             time.sleep(1)
-            self.veth_mgr.setup_node(node_id)
+            # Churn's own record, not the shared set: netem's safety net also
+            # adds to that set, on a docker hiccup or a crash churn did not
+            # cause, and a pair deferred on that basis would never be rebuilt.
+            stopped = {nid for nid, ns in self.node_states.items() if ns.is_down}
+            self.veth_mgr.setup_node(node_id, stopped)
 
         # Re-apply netem after a brief delay for the container to initialize
         if self.netem_mgr:

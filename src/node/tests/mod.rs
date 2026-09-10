@@ -11,6 +11,7 @@ mod ble;
 mod bloom;
 mod bloom_poison;
 mod bootstrap;
+mod connected_udp;
 mod control;
 mod decrypt_failure;
 mod disconnect;
@@ -55,6 +56,39 @@ pub(super) fn make_healthy_node() -> Node {
 /// post-construction field to poke, so set limits/config on the `Config` here.
 pub(super) fn make_node_with(config: Config) -> Node {
     Node::new(config).unwrap()
+}
+
+/// Install a real `connect()`-ed UDP socket on a peer, the way the tick-driven
+/// activation in `dataplane::connected_udp` does.
+///
+/// The socket is opened against the loopback discard port: nothing is ever sent
+/// through it, and the callers only care whether the handle is still installed
+/// afterwards.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn install_connected_udp(
+    node: &mut Node,
+    addr: &NodeAddr,
+    transport_id: crate::transport::TransportId,
+) {
+    let local: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let peer_sa: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+
+    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536)
+        .expect("open a connected UDP socket");
+    let bound = crate::transport::udp::ConnectedPeerSocket::from_fd(owned, peer_sa, local);
+    let socket = std::sync::Arc::new(bound);
+    let (packet_tx, _packet_rx) = packet_channel(8);
+    let drain = crate::transport::udp::PeerRecvDrain::spawn(
+        socket.clone(),
+        transport_id,
+        peer_sa,
+        packet_tx,
+    )
+    .expect("spawn the peer recv drain");
+
+    node.get_peer_mut(addr)
+        .expect("peer present")
+        .set_connected_udp(socket, drain);
 }
 
 /// Build a test node with an explicit `max_peers` limit (replaces the removed

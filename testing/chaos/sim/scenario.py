@@ -324,6 +324,27 @@ class MaxErrorsAssertion:
 
 
 @dataclass
+class MinTrafficAssertion:
+    """Floor on how much iperf3 traffic actually completed.
+
+    Traffic has always been generated and its results saved to
+    ``iperf3-results.json``, but nothing read them: a scenario could carry
+    ``traffic.enabled: true``, have every single session fail, and still
+    exit 0 on a green control plane. That gap matters most for the
+    scenarios where traffic is the point — a datagram crossing an Ethernet
+    link while its interface rebinds underneath is not observable in the
+    tree snapshot at all.
+
+    ``min_sessions_ok`` counts sessions that finished with bytes actually
+    received. ``min_bytes_total`` is the aggregate floor across them; 0
+    disables it and leaves the session count as the only gate.
+    """
+
+    min_sessions_ok: int = 1
+    min_bytes_total: int = 0
+
+
+@dataclass
 class AssertionsConfig:
     """Optional post-run assertions evaluated against control-socket data."""
 
@@ -334,6 +355,7 @@ class AssertionsConfig:
     congestion_signals: CongestionSignalsAssertion | None = None
     tree_parents: TreeParentsAssertion | None = None
     baseline: BaselineAssertion | None = None
+    min_traffic: MinTrafficAssertion | None = None
 
 
 @dataclass
@@ -414,6 +436,7 @@ _SECTION_KEYS = {
     "assertions": {
         "bloom_send_rate", "min_parent_switches", "max_parent_switches",
         "max_errors", "congestion_signals", "tree_parents", "baseline",
+        "min_traffic",
     },
     "logging": {"rust_log", "output_dir"},
 }
@@ -422,6 +445,7 @@ _ASSERTION_KEYS = {
     "min_parent_switches": {"min_total"},
     "max_parent_switches": {"max_total", "node"},
     "max_errors": {"max_total"},
+    "min_traffic": {"min_sessions_ok", "min_bytes_total"},
     "congestion_signals": {
         "min_nodes_detected", "min_nodes_ce_forwarded", "min_nodes_ce_received",
     },
@@ -739,6 +763,27 @@ def load_scenario(path: str) -> Scenario:
                 f"got {err_total}"
             )
         s.assertions.max_errors = MaxErrorsAssertion(max_total=err_total)
+
+    if "min_traffic" in asrt:
+        mt = asrt["min_traffic"]
+        _reject_unknown(
+            mt, _ASSERTION_KEYS["min_traffic"], "assertions.min_traffic",
+        )
+        sessions = mt.get("min_sessions_ok", 1)
+        if not isinstance(sessions, int) or isinstance(sessions, bool) or sessions < 1:
+            raise ValueError(
+                "assertions.min_traffic: min_sessions_ok must be a positive "
+                f"integer, got {sessions!r} — a floor of zero asserts nothing"
+            )
+        min_bytes = mt.get("min_bytes_total", 0)
+        if not isinstance(min_bytes, int) or isinstance(min_bytes, bool) or min_bytes < 0:
+            raise ValueError(
+                "assertions.min_traffic: min_bytes_total must be a "
+                f"non-negative integer, got {min_bytes!r}"
+            )
+        s.assertions.min_traffic = MinTrafficAssertion(
+            min_sessions_ok=sessions, min_bytes_total=min_bytes,
+        )
     else:
         # Default-on. See MaxErrorsAssertion for why this one assertion is
         # applied without being asked for: it is the floor on what a green
@@ -835,14 +880,21 @@ def load_scenario(path: str) -> Scenario:
                 + ", ".join(sorted(_ASSERTION_KEYS["baseline"]))
                 + "; a block with none asserts nothing"
             )
-        if vals.get("min_nodes_parented", 0) > 0 or vals.get("max_roots"):
+        if vals.get("min_nodes_parented", 0) > 0:
+            # Every root is its own parent, so a mesh with R roots has at most
+            # n - R nodes parented. Checked against the roots ceiling rather
+            # than against one root: a floor above n - max_roots reds a run
+            # that sits exactly at the ceiling the file itself allows, so the
+            # two thresholds contradict each other there.
             n = s.topology.num_nodes
-            if vals.get("min_nodes_parented", 0) > n - 1:
+            roots = vals.get("max_roots", 1)
+            floor = vals["min_nodes_parented"]
+            if floor > n - roots:
                 raise ValueError(
-                    f"assertions.baseline.min_nodes_parented: "
-                    f"{vals['min_nodes_parented']} exceeds {n - 1}, the most a "
-                    f"{n}-node mesh can reach — the root is its own parent, so "
-                    f"this could never pass"
+                    f"assertions.baseline.min_nodes_parented: {floor} exceeds "
+                    f"{n - roots}, the most a {n}-node mesh with {roots} "
+                    f"root(s) can reach — each root is its own parent, so a "
+                    f"run at the max_roots ceiling could never pass"
                 )
         s.assertions.baseline = BaselineAssertion(**vals)
 

@@ -1374,8 +1374,17 @@ pub(crate) fn show_connections_from_handle(
 
 /// `show_transports` — Transport instances.
 pub fn show_transports(node: &Node) -> Value {
-    let transports: Vec<Value> = node
-        .transport_ids()
+    // Ascending id, which is creation order: UDP, then Ethernet, then TCP,
+    // Tor, Nym, BLE, with each type's instances in config order. The map
+    // behind `transport_ids` is a `HashMap`, so without this the array order
+    // is whatever the hash seed produced — arbitrary, and different on every
+    // daemon restart. Anything scripting against this output, and every view
+    // rendering it, inherits that. Sorting by id groups the list by transport
+    // type for free, because the ids were handed out that way.
+    let mut ids: Vec<_> = node.transport_ids().copied().collect();
+    ids.sort_by_key(|id| id.as_u32());
+    let transports: Vec<Value> = ids
+        .iter()
         .map(|id| {
             let handle = node.get_transport(id).unwrap();
             let mut t_json = json!({
@@ -1401,6 +1410,21 @@ pub fn show_transports(node: &Node) -> Value {
             }
             if let Some(monitoring) = handle.tor_monitoring() {
                 t_json["tor_monitoring"] = serde_json::to_value(&monitoring).unwrap_or_default();
+            }
+
+            // Interface presence, for the transports that have an interface.
+            // Absent from the payload entirely for the ones that do not, rather
+            // than reported as a permanently-`present` interface named "".
+            if let Some(p) = handle.interface_presence() {
+                t_json["interface"] = json!({
+                    "name": handle.interface_name().unwrap_or_default(),
+                    "presence": p.presence,
+                    "carrier": p.carrier,
+                    "policy": p.policy,
+                    "since_secs": p.since_secs,
+                    "binds": p.binds,
+                    "failed_attempts": p.failed_attempts,
+                });
             }
 
             t_json["stats"] = handle.transport_stats();
@@ -1445,6 +1469,18 @@ pub(crate) fn show_transports_from_handle(handle: &super::read_handle::ControlRe
             }
             if let Some(monitoring) = &t.tor_monitoring {
                 t_json["tor_monitoring"] = monitoring.clone();
+            }
+
+            if let Some(iface) = &t.interface {
+                t_json["interface"] = json!({
+                    "name": iface.name,
+                    "presence": iface.presence,
+                    "carrier": iface.carrier,
+                    "policy": iface.policy,
+                    "since_secs": iface.since_secs,
+                    "binds": iface.binds,
+                    "failed_attempts": iface.failed_attempts,
+                });
             }
 
             t_json["stats"] = t.stats.clone();
@@ -2568,6 +2604,8 @@ mod tests {
         "idle_ms",
         "first_seen_secs_ago",
         "last_contact_secs_ago",
+        // Interface presence: elapsed since the current phase began.
+        "since_secs",
     ];
 
     /// Build a Node with a fixed identity, default config, and empty
@@ -2698,6 +2736,56 @@ mod tests {
     }
 
     // ---- 19 handler snapshot tests --------------------------------------
+
+    /// The `interface` block, which `build_test_node` cannot produce: it
+    /// keeps every transport list empty, so the nineteen snapshots above pin
+    /// `show_transports` only in its empty form. The block is emitted by two
+    /// hand-duplicated sites (the live handler and the read-handle variant)
+    /// that agree today with nothing enforcing it, and the control-socket
+    /// reference states the response schema is pinned by these snapshots.
+    ///
+    /// A separate node rather than a richer `build_test_node`, so the other
+    /// snapshots keep their empty-state determinism.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn snapshot_show_transports_with_interface() {
+        use crate::config::EthernetConfig;
+        use crate::transport::ethernet::EthernetTransport;
+        use crate::transport::{TransportHandle, TransportId};
+
+        let mut node = build_test_node();
+
+        // An interface no host has, so presence is deterministically absent
+        // and carrier deterministically false on every machine this runs on.
+        let config = EthernetConfig {
+            interface: "fips-absent-x0".to_string(),
+            ethertype: None,
+            mtu: None,
+            recv_buf_size: None,
+            send_buf_size: None,
+            listen: Some(true),
+            announce: Some(false),
+            auto_connect: None,
+            accept_connections: None,
+            beacon_interval_secs: None,
+            optional: Some(false),
+        };
+        let (tx, _rx) = crate::transport::packet_channel(8);
+        let mut eth = EthernetTransport::new(TransportId::new(1), Some("lab".into()), config, tx);
+
+        // Started, because "up with its interface absent" is the state an
+        // operator actually meets — and the one whose shape is new here.
+        eth.start_async()
+            .await
+            .expect("absence is not a start failure");
+
+        node.insert_transport_for_test(TransportId::new(1), TransportHandle::Ethernet(eth));
+
+        assert_snapshot(
+            "show_transports_with_interface",
+            &render(show_transports(&node)),
+        );
+    }
 
     #[test]
     fn snapshot_show_status() {

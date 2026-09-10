@@ -117,6 +117,71 @@ with v0.5.x or earlier peers.
 - The receive-path `RejectReason` classification (shipped in 0.4.0) is
   additionally wired into the Noise XX handshake cluster
   (msg1/msg2/msg3) and the rekey-initiator outbound sites on `next`.
+- Dynamic interface binding for the Ethernet transport. An interface-bound
+  transport is now a long-lived object that is *sometimes bound*: the interface
+  it names need not exist when the daemon starts, may appear minutes later, and
+  may vanish and return mid-operation. `start_async` returns `Ok` with the
+  transport **absent** rather than failing, and a per-transport binder task
+  binds when the interface appears, unbinds when it goes away, and rebinds when
+  it returns. Start-time absence and runtime detach are one code path.
+  Detection is event-driven where the kernel offers a source — netlink
+  `RTNLGRP_LINK` on Linux, `PF_ROUTE` on macOS and FreeBSD — with a 1 s
+  `getifaddrs` poll underneath as a backstop. Presence means
+  `IFF_UP` — the interface exists and is administratively up — and
+  deliberately not `IFF_RUNNING`. Binding needs no carrier and a socket
+  outlives a carrier flap, so a bridge with nothing plugged into it (`br-lan`
+  on a wifi-only router) is bound and healthy rather than permanently
+  `Degraded`, and starts carrying traffic the moment a port comes up. Whether
+  an interface has carrier is reported separately as `interface.carrier` in
+  `show_transports`, never acted on.
+
+  This closes the OpenWrt boot race (procd starts `fips` before wifi has
+  created `fips-mesh0` / `fips-ap0`; both transports were skipped for the life
+  of the process while the 802.11s peer link formed anyway, so the node looked
+  healthy and reached nothing), the intermittent-adapter case, and the
+  mid-operation `wifi reload` that destroyed and recreated an interface under a
+  live socket.
+
+- `transports.ethernet.*.optional` (bool, default `false`). Naming an interface
+  in configuration is a statement that you expect it, so the default is to
+  complain: while a required interface is missing the node reports `Degraded`
+  and logs the edge, at a severity that follows how long the absence lasts
+  (see below). `optional: true` makes absence silent (`info` on the edge, no
+  health impact) for hardware that is legitimately not always there. It describes the interface's *presence*, not the transport's
+  importance — an optional interface that is present is used exactly as hard as
+  any other — and no value of it makes a missing interface fatal at startup.
+
+- `fipsctl show transports` reports interface presence per transport under a new
+  `interface` block: `name`, `presence` (`absent` / `binding` / `present`),
+  `carrier`, `policy` (`required` / `optional`), `since_secs`, `binds` and
+  `failed_attempts`. The original boot-race bug was expensive precisely because
+  nothing an operator could see said the node was deaf.
+
+- `fipstop`'s transports view carries the same interface presence. The State
+  column shows an interface-bound transport's presence rather than its
+  lifecycle state — `up` is true from the moment the transport starts and stays
+  true while its interface is missing, which is precisely the wrong answer in
+  the one case someone is scanning that column for — and a new Policy column
+  reads `required` or `optional` beside it, with an absent required interface
+  red and an absent optional one yellow: the same split the daemon makes
+  between staying `Full` and reporting `Degraded`. The instance name and the
+  thing a transport is bound to are now separate columns, so netdev names line
+  up down the list instead of trailing ragged inside a packed label. The detail
+  pane gains an Interface block: netdev, presence and how long it has been
+  held, carrier, what the absence policy means rather than which key sets it,
+  bind count (flagged once it has rebound) and failed binds when there are any.
+  The table fits an 80-column terminal — the OpenWrt serial console and the
+  xterm and tmux default — dropping the byte counters below 100 columns and
+  stacking the detail pane below 110, rather than shrinking every column until
+  none of them can be read.
+
+- `testing/iface-binding/` integration suite (`ci-local.sh --only
+  iface-binding`, and a GitHub matrix leg): two daemons whose only transports
+  are interface-bound, run against a veth pair the harness creates, downs,
+  deletes and recreates underneath them. Asserts the boot race, the late
+  attach and peering over it, the flap in both directions,
+  destroy-and-recreate, that an `optional` interface never moves node health,
+  and that absence is logged once on the edge rather than once per retry.
 
 #### Node lifecycle
 
@@ -174,7 +239,22 @@ with v0.5.x or earlier peers.
   stay under it, or set `node.netmon.enabled: false`. A
   `node.link_dead_timeout_secs` of 0 is exempt from the check.
 
+#### Library surface and internals
+
+- `TransportError::InterfaceUnavailable { interface }`. A missing interface and
+  a typo'd interface name were previously the same flat
+  `StartFailed(String)`; nothing downstream could branch on absence.
+
 ### Changed
+
+- The lockfile moves `chacha20` from 0.10.1 to 0.10.2, because 0.10.1 is yanked.
+  It arrives through `rand`, a direct dependency,
+  so it sits on the built path rather than off to one side. The requirement in
+  `Cargo.toml` already admitted 0.10.2, so this is a lockfile change and no code
+  changed with it. **This is not a security fix**: `cargo audit` reports nothing
+  against `chacha20` at either version, and 0.10.1 was withdrawn by its
+  maintainer rather than flagged by an advisory. What it buys is that a fresh
+  checkout can resolve the lockfile without reaching for a yanked version.
 
 - `node.rekey.enabled` now means "initiate rekeys" and nothing else. The
   responder half of the establish decision was also gated on it, and once the
@@ -253,6 +333,127 @@ with v0.5.x or earlier peers.
   dial then matches and the peer comes up. Dials that name nobody, meaning
   shared-media legs and every inbound leg, are unaffected and still promote
   whoever answers.
+
+- `Degraded` is now a level rather than a latch. The supervisor's reason set
+  was monotonic, which was correct while no child could recover; with recovery
+  it would have meant "something broke at some point since boot" rather than
+  "something is broken now". Interface absence is tracked in its own reversible
+  set and node health is recomputed on every transition **in both directions**,
+  so plugging the WAN back in clears `Degraded` without a restart. A transport
+  whose interface is absent still counts as up, so a single-interface node that
+  boots before its wifi degrades rather than exiting on "no transports".
+
+- The OpenWrt package ships the `mesh0`/`mesh1` and `ap0`/`ap1` Ethernet
+  transports **enabled** with `optional: true`, instead of commented out.
+  `fips-mesh-setup` and `fips-ap-setup` no longer comment-toggle blocks in
+  `fips.yaml`, and no longer tell the operator to restart the daemon after
+  creating an interface — the daemon binds it on its own. `phy0-sta0` (`wwan`)
+  is marked `optional: true` for the same reason: it only exists while a radio
+  is in station mode.
+
+  **Upgrade note: an existing `/etc/fips/fips.yaml` is preserved and does not
+  gain the new key.** It is a package conffile, so on a router where
+  `fips-mesh-setup` or `fips-ap-setup` had already uncommented a block, that
+  block stays as it was, with no `optional` key — and `optional` defaults to
+  false. Such a block is therefore `required`, so an absent `fips-mesh0` keeps
+  the node `Degraded` and is reported once at `error` ten seconds in, where the
+  same block in the shipped file is silent. Add `optional: true` to the block
+  to match what the package now ships.
+
+- The Ethernet receive loop backs off and exits on a dead socket instead of
+  spinning on `Err` with a `warn!` per iteration, and the ad-hoc ENXIO
+  socket-reopen in the beacon sender is gone. Both hand recovery to the
+  presence machine: one mechanism for every cause rather than one hack per
+  symptom. Beacons pause while an interface is absent.
+
+- The absence edge is not itself an error, and there is exactly one deadline
+  after it. An interface missing when the daemon starts logs at `info` — that
+  is the boot race the mechanism exists to absorb, not a fault — and a runtime
+  detach at `warn`, because a link coming and going is ordinary weather for a
+  mesh daemon. Ten seconds is the whole grace: past it, absence is no longer a
+  race against a radio or a container, so a **required** interface still
+  missing is reported once at `error`. Start-time absence and a runtime detach
+  share that one deadline rather than getting one each. An `optional`
+  interface never reaches `error`. Node health does not wait for any of it,
+  publishing `Degraded` on the first edge either way.
+
+- The TUN boundary's TCP MSS clamp now tracks the node's egress MTU at
+  runtime instead of freezing it at startup. `transport_mtu()` is the minimum
+  across *bound* transports, so a transport that binds minutes after start can
+  be the narrow one — but the TUN reader and writer were handed a `u16`
+  computed once when they spawned, while every other consumer
+  (`show_status`, the control-socket snapshot, the session-layer fragmentation
+  check) read it live. A node could therefore report one effective IPv6 MTU
+  and clamp to another. The ceiling is now shared with those threads and
+  recomputed whenever the bound set changes, in both directions: a narrow
+  interface appearing tightens it, and its departure releases it. MSS is
+  negotiated per connection, so a change applies to connections opened after
+  it; existing ones are not disturbed.
+
+- Rebinds that keep succeeding into a socket that dies moments later are
+  damped: consecutive bindings shorter than ten seconds back off on the
+  1 s → 30 s curve, and past three of them the binder stops announcing each
+  bind as a recovery until one lasts. Undamped, a persistently broken socket
+  behind a healthy interface produced a log pair and a `Degraded`→`Running`
+  health flap every second.
+
+- A bind failure that is **not** absence — no `CAP_NET_RAW`, no readable
+  `/dev/bpf*`, a buffer the kernel refused — fails the daemon's start as it
+  always has, rather than being waited out. It is a fault, not a state, and
+  will not resolve on its own; only a missing interface is retried at start.
+  A non-absence failure during a later rebind still backs off, since the node
+  is serving by then.
+
+- The binder cannot outlive its transport, and a teardown that races a bind
+  cannot leave a live receive loop on a socket nothing owns. A shared stop flag
+  is raised before teardown and checked by the binder after it stores a
+  binding, so whichever order the two interleave exactly one of them cleans up;
+  `EthernetTransport` gained a `Drop` that raises the flag, aborts the binder
+  and releases the socket, for handles dropped without `stop_async`.
+
+- Presence edges are published with `try_send` and retried on the next tick
+  rather than awaited. A bounded channel could previously park the binder
+  mid-publish — a health channel able to deadlock the machine whose health it
+  carries — freezing the interface in whatever state it held.
+
+- `TransportHandle::is_bound()` joins `is_operational()`: the latter means the
+  transport was *started*, which for an interface-bound transport no longer
+  implies a live socket. `Node::transport_mtu` now filters on the former,
+  because an interface that has never existed was clamping the whole node's
+  IPv6 MTU to a number derived from absent hardware.
+
+- An interface deleted and recreated under the same name is detected as a
+  detach. Both backends bind by device rather than by name, so the old socket
+  is attached to nothing while the name still resolves — and a stale
+  `AF_PACKET` socket never becomes readable, so nothing errors and nothing
+  exits. Detection previously rested entirely on the beacon sender failing,
+  which a node with `announce: false` does not have. The bound interface index
+  is now captured at bind and compared on every poll.
+
+- The link-event watcher distinguishes a genuine receive error from
+  `WouldBlock`. `try_io` clears readiness only on the latter, so a persistent
+  error — `ENOBUFS` after a burst of link events overflows the socket buffer —
+  span a core flat with nothing logged. Errors are now counted, logged once,
+  backed off, and after five the source is abandoned for the presence poll.
+
+- Presence probes are coalesced to at most ten a second. Linux netlink is
+  filtered to `RTNLGRP_LINK`, but `PF_ROUTE` has no group filter, so the macOS
+  source delivers every routing message on the host — route churn, ARP, DHCP
+  renewals, a VPN going up and down — and each would otherwise drive a full
+  `getifaddrs` walk.
+
+- CI runs the library tests on musl (Alpine) as well as glibc. Presence is
+  built on `getifaddrs` and `ifa_flags`, musl reimplements both independently,
+  and the interfaces this feature exists for (`fips-mesh0`, `fips-ap0` on
+  OpenWrt) are unbridged with no IP address at all — the case where
+  implementations most plausibly differ. It was previously asserted on a libc
+  no test had ever run it against, on the target it was written for.
+
+- Interface presence state ignores lock poisoning. Treating a poisoned lock as
+  a failure meant reading "no socket, tasks dead", which is the destructive
+  direction: a transport reporting itself present while every send fails, or a
+  binder tearing down and rebinding every second while teardown silently
+  declined to abort anything.
 
 ### Fixed
 
@@ -359,6 +560,59 @@ with v0.5.x or earlier peers.
   says.
 
 #### Node lifecycle
+
+- Losing an interface no longer leaves its peers in the routing table. The
+  peers stayed in the registry, the routes through them stayed selectable, and
+  the node kept advertising reachability it no longer had — so transit traffic
+  was dropped in silence and other nodes kept routing toward this one for those
+  destinations, until the liveness reaper noticed up to
+  `node.link_dead_timeout_secs` later. Measured on real hardware, a detached
+  dongle took the node's parent with it and no new parent was chosen for
+  twenty-seven seconds, with four alternative peers available the whole time. A
+  transport's detach edge now withdraws every peer whose active link runs over
+  it, on the same path the liveness reaper uses, so sessions, path MTU, session
+  indices, the link, the control machine, tree cleanup and re-announce, and
+  bloom withdrawal unwind exactly as they already did. It is not filtered by
+  `optional`: whether an interface's absence is normal is a statement about
+  node health, and says nothing about whether the routes over it still work.
+  The trade is that an absence shorter than the dead timeout that then recovers
+  now costs a re-peer where it previously cost nothing, accepted because
+  black-holing is silent, poisons other nodes' routing and takes the full
+  timeout to clear, where a re-peer is bounded, visible and self-healing.
+
+- A local interface flap during a handshake is no longer charged to the remote.
+  A msg2 send refused because the interface is absent or mid-rebind was treated
+  as a failed handshake: the link was removed, the reverse-address entry
+  dropped, the session index freed, the control machine torn down, and the
+  whole thing recorded under the reject reason that means "the remote sent
+  something invalid", which is what an operator reading the rejects would have
+  concluded. The initiator meanwhile resent msg1 into a link that no longer
+  existed and had to rebuild from nothing. A transport error the daemon is
+  already working to clear now leaves the half-built link exactly where it is
+  for that resend to land on; only a terminal error still tears down, and a
+  link nobody resends to is reaped at `node.rate_limit.handshake_timeout_secs`
+  like every other abandoned handshake. The rekey msg1 send site keeps its
+  teardown, which was already benign, and stops reporting a local self-clearing
+  condition at `warn`.
+
+- A peer reachable over two interfaces is no longer re-dialled on the path it
+  is not using. Beacon discovery skipped only a candidate naming the peer's
+  *current* path, which is the one case that could not churn anything, so the
+  alternate path was dialled every discovery tick; each dial that completed
+  promoted and displaced a healthy incumbent, tore down the session, and, when
+  that peer was the parent, switched parents and re-announced mesh-wide.
+  Measured on real hardware, seventeen dials to one peer in fifteen minutes,
+  alternating wifi and cable, displacing a link reporting etx 1.0 and loss 0.0.
+  Discovery now asks whether the link it already holds is answering rather than
+  which path the candidate names. Failover is unchanged: a peer that goes quiet
+  for longer than `node.heartbeat_interval_secs` is dialled again on every
+  path, alternate included. **One behaviour goes with it.** A peer held on an
+  adopted NAT-traversal transport that is *also* reachable by Ethernet or BLE
+  beacon used to drift onto the local path on the next discovery tick, and now
+  stays on the traversed path for as long as that path answers. Migrating it is
+  still done by the configured-peer refresh (a config reload, a runtime peer
+  update, or `fipsctl connect`), and a traversed link that goes quiet still
+  releases the peer to every path.
 
 - A heartbeat whose send failed no longer counts as one that was delivered.
   The peer's "last heartbeat" timestamp was stamped before the send and left

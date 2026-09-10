@@ -41,7 +41,7 @@ query on its first activation and on every refresh tick while active.
 | --- | ----- | ----- |
 | **Node** | `show_status` (+ `show_listening_sockets`) | Identity, version, uptime, peer/link/session counts, sparklines for mesh size, tree depth, peer count, bytes, loss. The Traffic block on this tab is split: TUN counters on the left, the **Listening on fips0** panel on the right (see below). |
 | **Peers** | `show_peers` (+ `show_links`, `show_transports` cross-refs) | Authenticated peers in a table. Selecting a row and pressing Enter opens a detail view. |
-| **Transports** | `show_transports` (+ `show_links`, `show_peers` cross-refs) | Tree of transport instances with per-link children when expanded. |
+| **Transports** | `show_transports` (+ `show_links`, `show_peers` cross-refs) | Tree of transport instances with per-link children when expanded. An interface-bound transport also carries an interface block; see [Interface block](#interface-block-transports-tab). |
 | **Sessions** | `show_sessions` | End-to-end FSP sessions. |
 | **Tree** | `show_tree` | Spanning-tree state and per-peer coordinates. |
 | **Filters** | `show_bloom` | Per-peer Bloom-filter state. |
@@ -127,6 +127,26 @@ the keys the current context accepts.
 | `Left` | Collapse the selected transport row. |
 | `e` | Expand all transports. |
 | `c` | Collapse all transports. |
+
+### Interface block (Transports tab)
+
+A transport bound to a named interface carries an extra detail block.
+It exists because the observability data shipped as JSON before it
+reached this view, which left the live view reporting `up` for a
+transport bound to nothing. The original OpenWrt failure was expensive
+for that reason: the 802.11s link formed regardless, so nothing an
+operator could see said the node was deaf.
+
+| Field | Meaning |
+| ----- | ------- |
+| Interface | The interface name the instance is bound to. |
+| Presence | Whether the interface is present, and for how long. |
+| Carrier | Whether a present interface has carrier. Present without carrier is a distinct state. |
+| Bound to | The address bound now, or nothing while absent. |
+| On absence | The policy: `required` degrades the node, `optional` does not. |
+| Binds, Failed binds | Counts over the instance's life, so a flapping interface reads as churn. |
+
+**A transport with no interface has no block**, rather than an empty one.
 
 ### Multi-pane scrolling tabs (Tree, Filters, Routing)
 

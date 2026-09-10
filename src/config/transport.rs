@@ -302,6 +302,25 @@ pub struct EthernetConfig {
     /// Announcement beacon interval in seconds. Default: 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beacon_interval_secs: Option<u64>,
+
+    /// Whether the absence of this interface is normal. Default: false.
+    ///
+    /// Naming an interface in configuration is a statement that you expect it,
+    /// so the default is to complain: while the interface is missing the node
+    /// reports `Degraded`, the edge is logged (`info` at startup, `warn` on a
+    /// runtime detach), and an absence that outlasts the bring-up window — ten
+    /// seconds, past which it is no longer a race against a radio or a
+    /// container — is reported once at `error`. Set `optional: true` for
+    /// hardware that is legitimately not always there — a dock adapter, a
+    /// radio that only some boards carry — and its absence becomes silent
+    /// (`info` on the edge, no health impact, no error).
+    ///
+    /// This describes **the interface's presence, not the transport's
+    /// importance**. An optional interface that is present is used exactly as
+    /// hard as any other; setting it does not deprioritize the transport, and
+    /// no value of this field makes a missing interface fatal at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
 }
 
 impl EthernetConfig {
@@ -338,6 +357,11 @@ impl EthernetConfig {
     /// Whether to accept incoming connections. Default: false.
     pub fn accept_connections(&self) -> bool {
         self.accept_connections.unwrap_or(false)
+    }
+
+    /// Whether absence of the interface is normal. Default: false.
+    pub fn optional(&self) -> bool {
+        self.optional.unwrap_or(false)
     }
 
     /// Get the beacon interval, clamped to minimum. Default: 30s.
@@ -1070,5 +1094,41 @@ mod tests {
         let bogus: Result<EthernetConfig, _> =
             serde_yaml::from_str("interface: eth0\nbogus: true\n");
         assert!(bogus.is_err());
+    }
+
+    #[test]
+    fn ethernet_absence_is_an_error_unless_opted_out() {
+        // Naming an interface is a statement that you expect it, so the
+        // default has to be the loud one. A default of `true` here would make
+        // every missing interface silent, which is the failure mode the
+        // whole presence mechanism exists to stop hiding.
+        let bare: EthernetConfig = serde_yaml::from_str("interface: eth0\n").unwrap();
+        assert_eq!(bare.optional, None);
+        assert!(!bare.optional(), "absence must default to an error");
+
+        let opted: EthernetConfig =
+            serde_yaml::from_str("interface: enx00e04c680001\noptional: true\n").unwrap();
+        assert!(opted.optional());
+
+        let explicit: EthernetConfig =
+            serde_yaml::from_str("interface: eth0\noptional: false\n").unwrap();
+        assert!(!explicit.optional());
+    }
+
+    #[test]
+    fn ethernet_optional_survives_a_round_trip() {
+        // The packaged OpenWrt config ships `optional: true` on the mesh and
+        // access blocks; a serializer that dropped it would silently turn
+        // every stock router Degraded.
+        let opted: EthernetConfig =
+            serde_yaml::from_str("interface: fips-mesh0\noptional: true\n").unwrap();
+        let round: EthernetConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&opted).unwrap()).unwrap();
+        assert!(round.optional());
+
+        // ... and the default stays absent from the output rather than being
+        // written back as an explicit `false`.
+        let bare: EthernetConfig = serde_yaml::from_str("interface: eth0\n").unwrap();
+        assert!(!serde_yaml::to_string(&bare).unwrap().contains("optional"));
     }
 }

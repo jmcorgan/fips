@@ -109,6 +109,16 @@ impl Node {
             }
         };
 
+        // Interface-presence receiver, or a dummy channel — same pattern and
+        // same reason as the child-liveness receiver above.
+        let (mut presence_rx, _presence_guard) = match self.transport_presence_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
         let tick_period = Duration::from_secs(self.config().node.tick_interval_secs);
         let mut tick = tokio::time::interval(tick_period);
 
@@ -344,6 +354,71 @@ impl Node {
                                 action
                             {
                                 self.supervisor.state = ns;
+                            }
+                        }
+                        // A transport child exiting leaves the bound set, so
+                        // it can be the one that was holding the node's egress
+                        // MTU down. `is_bound()` is `is_operational()` plus the
+                        // presence refinement, and this moves the first half.
+                        self.refresh_tun_mss_ceiling();
+                    }
+                }
+                // Interface presence. An interface-bound transport's binder
+                // reports attach and detach; the FSM folds it into health.
+                // Unlike `ChildExited` this is reversible in both directions —
+                // the interface coming back republishes `Running` — which is
+                // the whole point of `Degraded` being a level rather than a
+                // latch.
+                maybe_presence = presence_rx.recv() => {
+                    if let Some(edge) = maybe_presence {
+                        // Health is policy-filtered; the MTU floor below is
+                        // not. An `optional` interface's absence is normal and
+                        // must not move the node off `Full`, but it changes
+                        // the bound set all the same.
+                        if edge.health_relevant {
+                            let child = crate::node::lifecycle::supervisor::Child::Transport(
+                                edge.transport_id,
+                            );
+                            let event = if edge.present {
+                                crate::node::lifecycle::supervisor::Event::ChildPresent { child }
+                            } else {
+                                crate::node::lifecycle::supervisor::Event::ChildAbsent { child }
+                            };
+                            let actions = self.supervisor.fsm.step(event);
+                            for action in actions {
+                                if let crate::node::lifecycle::supervisor::Action::PublishState(
+                                    ns,
+                                ) = action
+                                {
+                                    self.supervisor.state = ns;
+                                }
+                            }
+                        }
+                        // The bound set just changed, so the node's egress MTU
+                        // floor may have. Both directions: an interface that
+                        // binds can be the narrow one, and one that detaches
+                        // can be the reason the clamp was tight.
+                        self.refresh_tun_mss_ceiling();
+
+                        // A peer reachable only through an interface that has
+                        // gone is not reachable. Withdraw it now rather than
+                        // leaving the liveness reaper to notice up to
+                        // `link_dead_timeout_secs` later, during which this
+                        // node both drops transit traffic in silence and keeps
+                        // advertising reachability it does not have.
+                        //
+                        // Not policy-filtered: whether an interface's absence
+                        // is normal is a statement about node *health*, not
+                        // about whether the routes over it still work.
+                        if !edge.present {
+                            let reaped =
+                                self.reap_peers_on_transport(edge.transport_id).await;
+                            if reaped > 0 {
+                                info!(
+                                    transport_id = %edge.transport_id,
+                                    peers = reaped,
+                                    "Withdrew peers whose interface went away"
+                                );
                             }
                         }
                     }

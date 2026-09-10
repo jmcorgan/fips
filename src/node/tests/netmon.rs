@@ -31,35 +31,6 @@ fn identity_of(nodes: &[TestNode], j: usize) -> PeerIdentity {
     PeerIdentity::from_pubkey_full(nodes[j].node.identity().pubkey_full())
 }
 
-/// Install a real `connect()`-ed UDP socket on a peer, the way the tick-driven
-/// activation does.
-///
-/// The socket is opened against a discard port on loopback: nothing is ever
-/// sent through it, and the test only cares whether the handle survives a
-/// medium change.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn install_connected_udp(node: &mut Node, addr: &NodeAddr, transport_id: TransportId) {
-    let local: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let peer_sa: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
-
-    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536)
-        .expect("open a connected UDP socket");
-    let bound = crate::transport::udp::ConnectedPeerSocket::from_fd(owned, peer_sa, local);
-    let socket = std::sync::Arc::new(bound);
-    let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
-    let drain = crate::transport::udp::PeerRecvDrain::spawn(
-        socket.clone(),
-        transport_id,
-        peer_sa,
-        packet_tx,
-    )
-    .expect("spawn the peer recv drain");
-
-    node.get_peer_mut(addr)
-        .expect("peer present")
-        .set_connected_udp(socket, drain);
-}
-
 /// **The defect this feature exists for.**
 ///
 /// Established UDP peers get a per-peer `connect()`-ed socket. `open_connected_fd`

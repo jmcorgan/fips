@@ -204,13 +204,19 @@ VETH_NODE_ID='(0[0-9]|[1-9][0-9]+)'
 # from the simulation itself rather than repeated here, so widening it cannot
 # leave this matching the old width. Empty output means "reap nothing".
 #
-# Two producers, two shapes. The chaos simulation makes vh{token}{NN}{MM}{a,b};
-# the NAT lab (nat/scripts/setup-topology.sh) makes vn{a,b}{token}{0,1}, using
-# the RUN-wide suffix rather than any chaos scenario's. Widening this regex is
+# Three producers, three shapes. The chaos simulation makes
+# vh{token}{NN}{MM}{a,b}; the NAT lab (nat/scripts/setup-topology.sh) makes
+# vn{a,b}{token}{0,1}; the interface-binding suite
+# (iface-binding/test.sh) makes vhifb{token}{a,b,c,d}. The last two use the
+# RUN-wide suffix rather than any chaos scenario's. Widening this regex is
 # only half the fix: the token set is derived separately below, so a suffix
-# list carrying no NAT suffix leaves the NAT half matching nothing while
+# list carrying no run-wide suffix leaves those halves matching nothing while
 # looking correct. ci-local.sh's ci_teardown therefore appends the run-wide
 # suffix to --veth-suffixes.
+#
+# vhifb is listed before the bare vh shape in each alternation only for
+# readability; the shapes are anchored and cannot overlap, because a node id
+# is digits and `ifb` is not.
 veth_pattern() {
     # vh{token}{NN}{MM}{a,b}: the token is 4 hex or wholly absent — never a
     # part of one — and the two node ids follow. Anchored and shaped this
@@ -219,7 +225,7 @@ veth_pattern() {
     # single run, no missing or empty suffix list may widen this back out to
     # every run.
     if [[ -z "$RUN_ID" && -z "$VETH_SUFFIXES" ]]; then
-        printf '^vh([0-9a-f]{4})?%s%s[ab]$|^vn[ab]([0-9a-f]{4})?[01]$' \
+        printf '^vhifb([0-9a-f]{4})?[a-d]$|^vh([0-9a-f]{4})?%s%s[ab]$|^vn[ab]([0-9a-f]{4})?[01]$' \
             "$VETH_NODE_ID" "$VETH_NODE_ID"
         return 0
     fi
@@ -253,8 +259,8 @@ veth_pattern() {
         veth_warn "no interface tokens derived from: ${sfx[*]}"
         return 0
     fi
-    printf '^vh(%s)%s%s[ab]$|^vn[ab](%s)[01]$' \
-        "$alt" "$VETH_NODE_ID" "$VETH_NODE_ID" "$alt"
+    printf '^vhifb(%s)[a-d]$|^vh(%s)%s%s[ab]$|^vn[ab](%s)[01]$' \
+        "$alt" "$alt" "$VETH_NODE_ID" "$VETH_NODE_ID" "$alt"
 }
 
 # ip(8) in a privileged --net=host container, matching how the simulation

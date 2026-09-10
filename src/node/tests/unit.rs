@@ -1258,7 +1258,7 @@ async fn test_try_peer_addresses_skips_connecting_peer() {
 }
 
 #[test]
-fn active_peer_same_path_discovery_skips_fresh_peer() {
+fn a_peer_heard_from_within_the_heartbeat_interval_has_a_live_link() {
     let mut node = make_node();
     let peer_full = Identity::generate();
     let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
@@ -1268,16 +1268,14 @@ fn active_peer_same_path_discovery_skips_fresh_peer() {
     let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
     active_peer.set_current_addr(transport_id, current_addr.clone());
     node.peers.insert(peer_node_addr, active_peer);
-    let candidate = crate::config::PeerAddress::new("udp", "127.0.0.1:9");
 
-    assert!(node.active_peer_candidate_is_fresh_enough_to_skip(
-        &peer_node_addr,
-        std::slice::from_ref(&candidate),
-    ));
+    // A link heard from just now is live, so discovery must not dial this
+    // peer at all — on this path or on any other.
+    assert!(node.active_peer_link_is_live(&peer_node_addr));
 }
 
 #[test]
-fn active_peer_same_path_discovery_refreshes_stale_peer() {
+fn a_peer_quiet_past_the_heartbeat_interval_no_longer_has_a_live_link() {
     let mut node = make_node();
     let peer_full = Identity::generate();
     let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
@@ -1294,12 +1292,62 @@ fn active_peer_same_path_discovery_refreshes_stale_peer() {
     let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), stale_at);
     active_peer.set_current_addr(transport_id, current_addr.clone());
     node.peers.insert(peer_node_addr, active_peer);
-    let candidate = crate::config::PeerAddress::new("udp", "127.0.0.1:9");
 
-    assert!(!node.active_peer_candidate_is_fresh_enough_to_skip(
-        &peer_node_addr,
-        std::slice::from_ref(&candidate),
-    ));
+    // Gone quiet past the heartbeat interval: every path is dialable again,
+    // which is what keeps failover working now that a live link is never
+    // displaced.
+    assert!(!node.active_peer_link_is_live(&peer_node_addr));
+}
+
+/// A bootstrap-held peer is never its own configured candidate.
+///
+/// `adopt_established_traversal` refuses a peer that is already connected, so
+/// an adopted NAT-traversal transport is the way *on* to a traversed path and
+/// not the way off. Now that beacon discovery asks only whether the link it
+/// holds is answering, the configured-peer refresh is the one automatic
+/// off-ramp left, and it works only because a bootstrap-held peer is refused
+/// as a match for its own address: a configured `udp` address can be
+/// byte-identical to the traversal's remote address and the transport kinds
+/// match, so without this carve-out `has_alternative` would be false and the
+/// peer could never be moved off the traversed socket at all.
+#[test]
+fn a_bootstrap_held_peer_is_never_its_own_configured_candidate() {
+    let mut node = make_node();
+    let peer_full = Identity::generate();
+    let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
+    let peer_node_addr = *peer_identity.node_addr();
+    let npub = peer_identity.npub();
+    let transport_id = TransportId::new(1);
+    let current_addr = TransportAddr::from_string("203.0.113.5:41234");
+
+    let (packet_tx, _packet_rx) = packet_channel(8);
+    let udp = UdpTransport::new(
+        transport_id,
+        Some("main".to_string()),
+        crate::config::UdpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            ..Default::default()
+        },
+        packet_tx,
+    );
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(udp));
+
+    let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
+    active_peer.set_current_addr(transport_id, current_addr);
+    node.peers.insert(peer_node_addr, active_peer);
+    node.supervisor
+        .nostr_rendezvous
+        .insert_bootstrap_transport(transport_id, npub);
+
+    assert!(
+        !node.active_peer_matches_candidate(
+            &peer_node_addr,
+            &crate::config::PeerAddress::new("udp", "203.0.113.5:41234")
+        ),
+        "a bootstrap-held peer must not count its own traversal address as its \
+         current path, or the configured-peer refresh can never migrate it off"
+    );
 }
 
 /// An instance-qualified candidate is the peer's *current* path only when it
@@ -1341,12 +1389,11 @@ async fn an_instance_qualified_candidate_matches_only_its_own_instance() {
     active_peer.set_current_addr(main_id, TransportAddr::from_string("127.0.0.1:9"));
     node.peers.insert(peer_node_addr, active_peer);
 
+    // Path matching, which still gates the *configured-peer* refresh even
+    // though beacon discovery now gates on liveness alone.
     let matches = |transport: &str| {
         let candidate = crate::config::PeerAddress::new(transport, "127.0.0.1:9");
-        node.active_peer_candidate_is_fresh_enough_to_skip(
-            &peer_node_addr,
-            std::slice::from_ref(&candidate),
-        )
+        node.active_peer_matches_candidate(&peer_node_addr, &candidate)
     };
 
     assert!(
@@ -1839,6 +1886,115 @@ async fn test_transport_mtu_returns_min_across_operational() {
     // effective_ipv6_mtu = 1280 - 77 = 1203, max_mss = 1203 - 60 = 1143
     // (verifies the downstream clamp value).
     assert_eq!(node.effective_ipv6_mtu(), 1203);
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn the_tun_mss_ceiling_follows_a_transport_arriving_and_leaving() {
+    // The TUN reader and writer used to be handed a `u16` computed once at
+    // spawn. Every other consumer of `transport_mtu()` reads it live, so once
+    // a transport could bind minutes after start the daemon reported one
+    // effective MTU in `show_status` and clamped to another.
+    //
+    // Both directions. A narrow transport arriving has to tighten the ceiling
+    // or traffic egressing over it is clamped too loose; the same transport
+    // leaving has to release it, or unplugging a low-MTU adapter leaves the
+    // node over-clamped until it restarts.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let wide = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), wide);
+    node.refresh_tun_mss_ceiling();
+    let wide_ceiling = node.tun_mss_ceiling();
+    assert_eq!(
+        wide_ceiling,
+        crate::upper::icmp::mss_ceiling(1452),
+        "the seeded ceiling must match the only bound transport"
+    );
+
+    // A narrower transport arrives after the TUN threads would already be
+    // running. The shared ceiling has to tighten.
+    let narrow = make_udp_transport_with_mtu(2, 1280).await;
+    node.transports.insert(TransportId::new(2), narrow);
+    node.refresh_tun_mss_ceiling();
+    let narrow_ceiling = node.tun_mss_ceiling();
+    assert_eq!(narrow_ceiling, crate::upper::icmp::mss_ceiling(1280));
+    assert!(
+        narrow_ceiling < wide_ceiling,
+        "a narrower transport must tighten the clamp, not be ignored"
+    );
+    assert_eq!(
+        narrow_ceiling,
+        crate::upper::icmp::mss_ceiling(node.transport_mtu()),
+        "the clamp and the reported MTU must not disagree"
+    );
+
+    // ...and leaving has to release it again.
+    if let Some(mut gone) = node.transports.remove(&TransportId::new(2)) {
+        gone.stop().await.ok();
+    }
+    node.refresh_tun_mss_ceiling();
+    assert_eq!(
+        node.tun_mss_ceiling(),
+        wide_ceiling,
+        "the ceiling must rise again when the narrow transport goes away"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[tokio::test]
+async fn a_presence_edge_refreshes_the_tun_mss_ceiling_without_being_asked() {
+    // The one above pins the arithmetic; this pins the wiring. A presence
+    // edge arriving has to refresh the ceiling on its own — if the refresh is
+    // dropped from the edge handlers the value silently stops tracking, which
+    // is the defect in its original form.
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+
+    let (presence_tx, presence_rx) = tokio::sync::mpsc::channel(4);
+    node.transport_presence_tx = Some(presence_tx.clone());
+    node.transport_presence_rx = Some(presence_rx);
+
+    // Nothing bound: the conservative seed.
+    node.refresh_tun_mss_ceiling();
+    let seeded = node.tun_mss_ceiling();
+    assert_eq!(seeded, crate::upper::icmp::mss_ceiling(1280));
+
+    // A wide transport appears, and an edge announces it. No explicit
+    // refresh call here — draining the edge is the whole trigger.
+    let wide = make_udp_transport_with_mtu(1, 1452).await;
+    node.transports.insert(TransportId::new(1), wide);
+    presence_tx
+        .send(crate::transport::TransportPresence {
+            transport_id: TransportId::new(1),
+            present: true,
+            health_relevant: true,
+        })
+        .await
+        .expect("presence edge queued");
+    node.drain_transport_presence();
+
+    assert_eq!(
+        node.tun_mss_ceiling(),
+        crate::upper::icmp::mss_ceiling(1452),
+        "draining a presence edge must refresh the ceiling on its own"
+    );
+    assert_ne!(
+        node.tun_mss_ceiling(),
+        seeded,
+        "the ceiling stayed at its seed, so the edge did not refresh it"
+    );
 
     for transport in node.transports.values_mut() {
         transport.stop().await.ok();
