@@ -1029,7 +1029,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_socket_addr_invalid() {
-        let invalid = TransportAddr::from_string("nonexistent.invalid:2121");
+        let invalid = TransportAddr::from_string("nonexistent.invalid.:2121");
         assert!(resolve_socket_addr(&invalid).await.is_err());
 
         let binary = TransportAddr::new(vec![0xff, 0x80]);

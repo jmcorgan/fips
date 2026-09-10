@@ -18,13 +18,14 @@ not compiled pending FreeBSD-specific `SO_REUSEPORT` validation.
 ./packaging/freebsd/build-pkg.sh --no-build # package existing release binaries
 ```
 
-Output: `deploy/fips-<version>-freebsd-<arch>.pkg` (e.g.
-`fips-0.5.1.dev-freebsd-amd64.pkg` — pkg versions cannot contain `-`).
+Output: `deploy/fips-<version>-freebsd-<arch>.pkg`. pkg versions cannot
+contain `-` or `+`, so both are mapped to `.`: a Cargo version of
+`<x.y.z>-dev` becomes `fips-<x.y.z>.dev-freebsd-amd64.pkg`.
 
 ## Install
 
 ```sh
-pkg add ./deploy/fips-0.5.1-freebsd-amd64.pkg
+pkg add ./deploy/fips-<version>-freebsd-<arch>.pkg
 # post-install seeds this from the sample if absent, at mode 0600
 vi /usr/local/etc/fips/fips.yaml
 sysrc fips_enable=YES fips_dns_enable=YES
