@@ -47,13 +47,13 @@ pub use loadlog::LoadLog;
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
     NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy,
-    RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig,
-    TreeConfig,
+    PathConfig, RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig,
+    SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
     BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, TcpConfig, TorConfig,
-    TransportInstances, TransportsConfig, UdpConfig,
+    TransportInstances, TransportRole, TransportsConfig, UdpConfig,
 };
 
 /// Default config filename.

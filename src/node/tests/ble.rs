@@ -762,7 +762,11 @@ async fn a_verified_link_stops_being_protected_when_its_peer_disconnects() {
         crate::proto::fmp::wire::DisconnectReason::Shutdown,
     )
     .encode();
-    nodes[1].node.dispatch_link_message(&n0, &bye, false).await;
+    let arrival = (nodes[1].transport_id, &link);
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bye, false, arrival)
+        .await;
     assert!(
         nodes[1].node.get_peer(&n0).is_none(),
         "node 1 dropped the peer"
@@ -1017,7 +1021,11 @@ async fn a_malformed_disconnect_keeps_its_link_verified() {
         crate::proto::fmp::Disconnect::decode(&bad[1..]).is_err(),
         "the payload really is malformed"
     );
-    nodes[1].node.dispatch_link_message(&n0, &bad, false).await;
+    let arrival = (nodes[1].transport_id, &link);
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bad, false, arrival)
+        .await;
     assert!(
         nodes[1].node.get_peer(&n0).is_some(),
         "node 1 keeps the peer"
@@ -1037,7 +1045,11 @@ async fn a_frame_processed_after_its_peer_left_does_not_verify_the_link() {
         crate::proto::fmp::wire::DisconnectReason::Shutdown,
     )
     .encode();
-    nodes[1].node.dispatch_link_message(&n0, &bye, false).await;
+    let arrival = (nodes[1].transport_id, &link);
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bye, false, arrival)
+        .await;
     assert!(nodes[1].node.get_peer(&n0).is_none());
     assert_eq!(verified_at(&nodes[1], &link).await, Some(false));
 
@@ -1410,7 +1422,11 @@ async fn a_link_whose_peer_disconnected_gets_its_grace_again() {
         crate::proto::fmp::wire::DisconnectReason::Shutdown,
     )
     .encode();
-    nodes[1].node.dispatch_link_message(&n0, &bye, false).await;
+    let arrival = (nodes[1].transport_id, &link);
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bye, false, arrival)
+        .await;
     assert!(
         nodes[1].node.get_peer(&n0).is_none(),
         "node 1 dropped the peer"
