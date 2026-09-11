@@ -18,12 +18,16 @@
 #   No args = run all scenarios.
 #   Named args = run only those (e.g., ./test.sh debian12-resolved e2e-debian12)
 #
-# Requirements: Docker with privileged container support. The e2e
-# scenario also needs /dev/net/tun on the host (standard).
+# Requirements: Docker able to grant SYS_ADMIN and NET_ADMIN and an
+# unconfined AppArmor profile (the containers are not privileged; see
+# testing/lib/systemd-container.sh). The e2e scenario also needs
+# /dev/net/tun on the host (standard).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=SCRIPTDIR/../lib/systemd-container.sh
+source "$SCRIPT_DIR/../lib/systemd-container.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SETUP_SCRIPT="$REPO_ROOT/packaging/common/fips-dns-setup"
 TEARDOWN_SCRIPT="$REPO_ROOT/packaging/common/fips-dns-teardown"
@@ -93,33 +97,45 @@ build_image() {
         docker build -t "$tag" -f - "$REPO_ROOT"
 }
 
-# Start a systemd container in the background.
+# Start a systemd container in the background. Not privileged: see
+# testing/lib/systemd-container.sh for the flags and why.
 start_systemd_container() {
     local name="$1" image="$2"
     cleanup_container "$name"
     run_quiet "docker run $name" \
         docker run -d --name "$name" \
         --label com.corganlabs.fips-ci=1 \
-        --privileged \
+        "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         --tmpfs /run --tmpfs /run/lock \
-        "$image"
+        "$image" || return
+    check_isolation "$name"
+    return
 }
 
 # Same, but with TUN device for the e2e scenario.
+#
+# IPv6 forwarding is set here rather than inside the container because
+# /proc/sys is read-only there. fips-gateway checks it before its DNS upstream
+# check, so the gateway parity check needs it; the cost is that forwarding is
+# on for every check in the scenario, including the daemon, setup and dig
+# checks that run before the gateway.
 start_systemd_container_with_tun() {
     local name="$1" image="$2"
     cleanup_container "$name"
     run_quiet "docker run $name (with tun)" \
         docker run -d --name "$name" \
         --label com.corganlabs.fips-ci=1 \
-        --privileged \
+        "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         --device /dev/net/tun \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         --tmpfs /run --tmpfs /run/lock \
-        "$image"
+        "$image" || return
+    check_isolation "$name"
+    return
 }
 
 # Report why systemd never reached a running state. Every probe is
@@ -900,9 +916,9 @@ gateway:
   lan_interface: "eth0"
 EOF'
     # fips-gateway checks IPv6 forwarding before the DNS upstream
-    # reachability check; enable forwarding so we get to the check we
+    # reachability check; the container is started with forwarding on
+    # (see start_systemd_container_with_tun) so we get to the check we
     # actually want to test.
-    docker exec "$name" sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
     docker exec -d "$name" bash -c '/usr/bin/fips-gateway --config /tmp/gateway-test.yaml >/var/log/fips-gateway.log 2>&1 || true'
 
     # Wait briefly for the upstream-reachability log line to appear

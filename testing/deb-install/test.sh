@@ -1,9 +1,9 @@
 #!/bin/bash
 # Test the fips Debian package install path across target distros.
 #
-# Each scenario builds (or reuses) the .deb in a Debian 12 cargo-deb
-# builder image (cached), boots a privileged systemd container with
-# TUN access for the target distro, installs the .deb via `apt
+# Each scenario builds (or reuses) the .deb in a cached Debian 12
+# cargo-deb image, boots a systemd container with TUN access for the
+# target distro, installs the .deb via `apt
 # install ./fips_*.deb`, waits for fips.service + fips-dns.service
 # to come up, and verifies that `dig @127.0.0.53 AAAA <npub>.fips`
 # returns a non-empty AAAA answer through the resolver backend that
@@ -22,12 +22,15 @@
 #   No args = run all scenarios.
 #   Named args = run only those (e.g., ./test.sh ubuntu26 debian12)
 #
-# Requirements: Docker with privileged container support, /dev/net/tun
-# on the host (standard).
+# Requirements: Docker able to grant SYS_ADMIN and NET_ADMIN and an
+# unconfined AppArmor profile (the containers are not privileged; see
+# testing/lib/systemd-container.sh), /dev/net/tun on the host (standard).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=SCRIPTDIR/../lib/systemd-container.sh
+source "$SCRIPT_DIR/../lib/systemd-container.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CACHE_DIR="$SCRIPT_DIR/.cache"
 DEB_CACHE_DIR="$CACHE_DIR/deb"
@@ -76,17 +79,28 @@ build_image() {
     echo "$@" | docker build -t "$tag" -f - "$REPO_ROOT" >/dev/null 2>&1
 }
 
+# Start the scenario's systemd container. Not privileged: see
+# testing/lib/systemd-container.sh for the flags and why.
+#
+# IPv6 forwarding is set here rather than inside the container because
+# /proc/sys is read-only there. fips-gateway checks it before its DNS upstream
+# check, so the gateway block needs it; the cost is that forwarding is on for
+# every check in the scenario, including the install and resolver checks that
+# run before the gateway block.
 start_systemd_container_with_tun() {
     local name="$1" image="$2"
     cleanup_container "$name"
     docker run -d --name "$name" \
         --label com.corganlabs.fips-ci=1 \
-        --privileged \
+        "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         --device /dev/net/tun \
+        --sysctl net.ipv6.conf.all.forwarding=1 \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         --tmpfs /run --tmpfs /run/lock \
-        "$image" >/dev/null 2>&1
+        "$image" >/dev/null 2>&1 || return
+    check_isolation "$name"
+    return
 }
 
 wait_for_systemd() {
@@ -499,8 +513,8 @@ DOCKERFILE
     # the gateway/daemon default-pairing on a real .deb install (no
     # custom config). Requires enabling the unit (it's not in the
     # default preset) and ipv6 forwarding (gateway checks before
-    # the DNS upstream check).
-    docker exec "$name" sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    # the DNS upstream check), which the container is started with;
+    # see start_systemd_container_with_tun.
     timeout "$CONFIG_RESTART_TIMEOUT" docker exec "$name" bash -c '
         systemctl unmask fips-gateway.service 2>/dev/null
         # Patch in a minimal gateway config since the shipped fips.yaml

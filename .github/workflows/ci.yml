@@ -1019,7 +1019,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 5 – Real-deb install across target distros
 #
-# Boots a privileged systemd container per distro, runs `apt install
+# Boots a systemd container per distro (not privileged), runs `apt install
 # ./fips_*.deb` with the package job 4 built, then asserts end-to-end `.fips`
 # resolution + the gateway/daemon default-pairing. The most thorough single
 # test surface — exercises packaging, maintainer scripts, systemd unit

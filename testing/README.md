@@ -127,7 +127,7 @@ through the configured backend.
 
 ### [deb-install/](deb-install/) -- Debian Package Install
 
-Installs the built `.deb` in privileged systemd containers for each
+Installs the built `.deb` in systemd containers for each
 target distro and verifies unit enablement, conffile placement and
 end-to-end `.fips` resolution as a user would meet it.
 
