@@ -140,6 +140,23 @@ Tell the daemon to drop a peer link.
 | -------- | ----------- |
 | `peer` | npub (bech32) or hostname from `/etc/fips/hosts`. |
 
+### `path <what>`
+
+A peer reachable over more than one transport holds one Noise session and a
+*path* per transport; traffic moves between paths on failure or degradation
+without a handshake. These commands show and override that choice.
+
+| Subcommand | Description |
+| ---------- | ----------- |
+| `path show <peer>` | Every path to the peer: its transport, address, state (`probing`, `live`, `suspect`, `dead`), whether it is the one this node sends on (`active`) and the one the peer sends on (`remote_active`), role, pin, how long since each direction was last proven, the min/last RTT, sample count, per-path ETX and score. Also the link cost the tree sees and whether a post-switch hold is in force. |
+| `path pin <peer> <transport>` | Pin this node's traffic to the peer to one transport, named by its configured instance name (e.g. `cable`) or numeric id. The pin holds while the path is eligible (live, and answering probes); while it is not — suspect, dead, or unproven — selection is measured as if unpinned, and the pin re-applies the moment the path is eligible again, with no margin or dwell. `unpin` clears it. |
+| `path unpin <peer>` | Clear the pin; selection is measured again from the next tick. |
+
+`peer` is an npub (bech32) or a hostname from `/etc/fips/hosts`. Selection
+between paths is measured, not configured (see `node.path.*` in
+[configuration.md](configuration.md)); the pin and a transport's
+`role: backup` are the only overrides.
+
 ### `probe <target>`
 
 Diagnose whether a mesh endpoint is reachable, in five stages, and

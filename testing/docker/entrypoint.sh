@@ -34,14 +34,14 @@ enable_ecn() {
 }
 
 wait_for_ethernet() {
-    # If config references ethernet transports, wait for interfaces to appear.
-    # Veth pairs are created from the host after the container starts.
+    # If config binds any transport to an interface (Ethernet, or a UDP
+    # instance with `interface:`), wait for those interfaces to appear. Veth
+    # pairs are created from the host after the container starts, and a UDP
+    # instance bound to an interface that is not there yet fails to start.
     local eth_ifaces=""
-    if grep -q 'ethernet:' "$CONFIG" 2>/dev/null; then
-        eth_ifaces=$(grep '^\s*interface:' "$CONFIG" \
-            | sed 's/.*interface:\s*//' \
-            | tr -d ' ' || true)
-    fi
+    eth_ifaces=$(grep '^\s*interface:' "$CONFIG" 2>/dev/null \
+        | sed 's/.*interface:\s*//' \
+        | tr -d ' "' || true)
 
     if [ -n "$eth_ifaces" ]; then
         echo "Waiting for Ethernet interfaces: $eth_ifaces"

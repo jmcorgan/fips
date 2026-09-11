@@ -308,9 +308,13 @@ impl Node {
         {
             return true;
         }
-        if self.peers.values().any(|p| {
-            p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
-        }) {
+        // Any path, not only the one we send on: a rekey msg1 arrives on the
+        // path the *peer* sends on.
+        if self
+            .peers
+            .values()
+            .any(|p| p.is_reachable_at(transport_id, remote_addr))
+        {
             return true;
         }
         false
@@ -383,9 +387,7 @@ impl Node {
         // yields an identity when it matches.
         self.peers
             .values()
-            .find(|p| {
-                p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
-            })
+            .find(|p| p.is_reachable_at(transport_id, remote_addr))
             .map(|p| Msg1Waiver::Expect(*p.node_addr()))
             .unwrap_or(Msg1Waiver::Unattributed)
     }
@@ -2262,6 +2264,13 @@ impl Node {
                     self.config().node.tree.announce_min_interval_ms,
                 );
 
+                new_peer.set_path_role(
+                    transport_id,
+                    self.transports
+                        .get(&transport_id)
+                        .map(|t| t.role())
+                        .unwrap_or_default(),
+                );
                 self.peers.insert(peer_node_addr, new_peer);
                 self.peers_by_index
                     .insert(our_index.as_u32(), peer_node_addr);
@@ -2377,6 +2386,13 @@ impl Node {
                 new_peer.set_last_tree_announce_sent_ms(ts);
             }
 
+            new_peer.set_path_role(
+                transport_id,
+                self.transports
+                    .get(&transport_id)
+                    .map(|t| t.role())
+                    .unwrap_or_default(),
+            );
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index
                 .insert(our_index.as_u32(), peer_node_addr);

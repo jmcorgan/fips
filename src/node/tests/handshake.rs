@@ -2212,6 +2212,7 @@ async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
     // `InterfaceUnavailable` — the real error, from the real code path,
     // rather than a stub that merely returns something transient.
     let config = EthernetConfig {
+        role: None,
         interface: "fips-absent-x0".to_string(),
         ethertype: None,
         mtu: None,
@@ -2294,6 +2295,7 @@ async fn a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pendi
     // An interface no host has, so every send off this transport reports
     // `InterfaceUnavailable` — the real error from the real code path.
     let config = EthernetConfig {
+        role: None,
         interface: "fips-absent-x0".to_string(),
         ethertype: None,
         mtu: None,

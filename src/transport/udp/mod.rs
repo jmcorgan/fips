@@ -487,6 +487,10 @@ impl UdpTransport {
 }
 
 impl Transport for UdpTransport {
+    fn role(&self) -> crate::config::TransportRole {
+        self.config.role()
+    }
+
     fn transport_id(&self) -> TransportId {
         self.transport_id
     }

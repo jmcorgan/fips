@@ -37,7 +37,7 @@ import subprocess
 import time
 
 from .docker_exec import DockerExecError, docker_exec, docker_exec_quiet
-from .topology import SimTopology, veth_interface_name
+from .topology import UDP_VETH, SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
 
@@ -111,14 +111,14 @@ class VethManager:
         4. Rename to final names and bring up
         5. Query MACs and store in SimNode.ethernet_macs
         """
-        eth_edges = self.topology.ethernet_edges()
-        if not eth_edges:
+        edges = self.topology.veth_edges()
+        if not edges:
             return
 
         image = self._get_image()
-        log.info("Setting up %d Ethernet veth pairs (helper image: %s)...", len(eth_edges), image)
+        log.info("Setting up %d veth pairs (helper image: %s)...", len(edges), image)
 
-        for a, b in eth_edges:
+        for a, b in edges:
             self._create_veth_pair(a, b, image)
 
         log.info(
@@ -135,7 +135,7 @@ class VethManager:
         stopped, whose pairs are left for their own restart.
         """
         image = self._get_image()
-        for a, b in self.topology.ethernet_edges():
+        for a, b in self.topology.veth_edges():
             if a != node_id and b != node_id:
                 continue
             # Remove existing pair if any (host-side might still exist)
@@ -216,8 +216,15 @@ class VethManager:
         _require_host(["ip", "link", "set", host_a, "netns", str(pid_a)], image)
         _require_host(["ip", "link", "set", host_b, "netns", str(pid_b)], image)
 
-        _raise_link(container_a, host_a, final_a)
-        _raise_link(container_b, host_b, final_b)
+        # A udp-veth edge carries IP: address each end before it comes up,
+        # so the daemon's interface wait never sees the interface without
+        # its address.
+        ip_a = ip_b = None
+        if self.topology.transport_for_edge(node_a, node_b) == UDP_VETH:
+            ip_a = self.topology.udp_veth_ip(node_a, node_b)
+            ip_b = self.topology.udp_veth_ip(node_b, node_a)
+        _raise_link(container_a, host_a, final_a, ip_a)
+        _raise_link(container_b, host_b, final_b, ip_b)
         _await_up(container_a, final_a)
         _await_up(container_b, final_b)
 
@@ -272,11 +279,13 @@ def _require_host(cmd: list[str], image: str):
         raise VethSetupError(f"host command failed: {' '.join(cmd)}")
 
 
-def _raise_link(container: str, temp: str, final: str):
-    """Rename a moved veth end to its final name and set it up."""
+def _raise_link(container: str, temp: str, final: str, ip: str | None = None):
+    """Rename a moved veth end to its final name, address it if asked,
+    and set it up."""
+    addr = f" && ip addr add {ip}/24 dev {final}" if ip else ""
     _in_container(
         container,
-        f"ip link set {temp} name {final} && ip link set {final} up",
+        f"ip link set {temp} name {final}{addr} && ip link set {final} up",
         f"renaming {temp} to {final}",
     )
 
