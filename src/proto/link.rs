@@ -47,6 +47,16 @@ pub enum LinkMessageType {
     /// Periodic heartbeat for link liveness detection.
     /// No payload — the msg_type byte alone is sufficient.
     Heartbeat = 0x51,
+    /// Probe a candidate path to a peer under the existing session.
+    /// Payload is a [`PathMessage`].
+    PathProbe = 0x52,
+    /// Answer to a [`LinkMessageType::PathProbe`], sent back on the path
+    /// the probe arrived on. Payload is a [`PathMessage`].
+    PathAck = 0x53,
+    /// "I am closing this path": sent on any other path when the sender
+    /// knows a path is going (interface gone, carrier lost). Payload is a
+    /// [`PathClose`].
+    PathClose = 0x54,
 }
 
 impl LinkMessageType {
@@ -62,6 +72,9 @@ impl LinkMessageType {
             0x31 => Some(LinkMessageType::LookupResponse),
             0x50 => Some(LinkMessageType::Disconnect),
             0x51 => Some(LinkMessageType::Heartbeat),
+            0x52 => Some(LinkMessageType::PathProbe),
+            0x53 => Some(LinkMessageType::PathAck),
+            0x54 => Some(LinkMessageType::PathClose),
             _ => None,
         }
     }
@@ -84,8 +97,162 @@ impl fmt::Display for LinkMessageType {
             LinkMessageType::LookupResponse => "LookupResponse",
             LinkMessageType::Disconnect => "Disconnect",
             LinkMessageType::Heartbeat => "Heartbeat",
+            LinkMessageType::PathProbe => "PathProbe",
+            LinkMessageType::PathAck => "PathAck",
+            LinkMessageType::PathClose => "PathClose",
         };
         write!(f, "{}", name)
+    }
+}
+
+// ============================================================================
+// Path Probe / Path Ack
+// ============================================================================
+
+/// Payload shared by `PathProbe` (0x52) and `PathAck` (0x53).
+///
+/// A probe is an ordinary encrypted frame under the current session, sent on
+/// a candidate transport. The receiver, having decrypted it against the
+/// session found by index, has proof the peer is reachable there: it adds
+/// the path and answers with an ack **on that same path**. The prober's
+/// receipt of the ack proves the reverse direction. One round trip, no
+/// handshake, no new key material, no index allocation.
+///
+/// ## Wire Format
+///
+/// | Offset | Field         | Size    | Notes                                   |
+/// |--------|---------------|---------|-----------------------------------------|
+/// | 0      | msg_type      | 1 byte  | 0x52 or 0x53                            |
+/// | 1      | probe_id      | 4 bytes | LE; the ack echoes the probe's          |
+/// | 5      | flags         | 1 byte  | bit 0: `remote_active`                  |
+/// | 6      | path_id       | 4 bytes | LE; the sender's id for its path        |
+/// | 10     | padding       | any     | ignored; a full-size probe pads to MTU  |
+///
+/// Trailing bytes are ignored on decode, so a probe may be padded to the
+/// link MTU: a path that forwards small frames and drops large ones then
+/// never proves itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathMessage {
+    /// Per-path sequence chosen by the prober; the ack carries it back.
+    pub probe_id: u32,
+    /// "This path is where I currently send." Costs one bit and is a free
+    /// detection signal: a peer that stops sending here may have stopped
+    /// hearing us here too.
+    pub remote_active: bool,
+    /// The sender's own identifier for the path this travels on. Transport
+    /// ids are local to each node; each side learns the other's id from its
+    /// probes and acks, and a later [`PathClose`] names the path by the
+    /// *receiver's* id, so the receiver needs no lookup table.
+    pub path_id: u32,
+}
+
+impl PathMessage {
+    /// Encoded size including the msg_type byte.
+    pub const WIRE_SIZE: usize = 10;
+
+    const FLAG_REMOTE_ACTIVE: u8 = 0x01;
+
+    /// Encode as a `PathProbe` link message (msg_type included).
+    pub fn encode_probe(&self) -> [u8; Self::WIRE_SIZE] {
+        self.encode(LinkMessageType::PathProbe)
+    }
+
+    /// Encode as a `PathAck` link message (msg_type included).
+    pub fn encode_ack(&self) -> [u8; Self::WIRE_SIZE] {
+        self.encode(LinkMessageType::PathAck)
+    }
+
+    fn encode(&self, kind: LinkMessageType) -> [u8; Self::WIRE_SIZE] {
+        let mut out = [0u8; Self::WIRE_SIZE];
+        out[0] = kind.to_byte();
+        out[1..5].copy_from_slice(&self.probe_id.to_le_bytes());
+        if self.remote_active {
+            out[5] |= Self::FLAG_REMOTE_ACTIVE;
+        }
+        out[6..10].copy_from_slice(&self.path_id.to_le_bytes());
+        out
+    }
+
+    /// Decode from the link-layer payload (after the msg_type byte).
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
+        let mut reader = crate::proto::codec::Reader::new(payload);
+        let probe_id = reader.read_u32_le()?;
+        let flags = reader.read_u8()?;
+        let path_id = reader.read_u32_le()?;
+        Ok(Self {
+            probe_id,
+            remote_active: flags & Self::FLAG_REMOTE_ACTIVE != 0,
+            path_id,
+        })
+    }
+}
+
+/// Why a path is being closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PathCloseReason {
+    /// No particular reason given.
+    Unspecified = 0,
+    /// The interface under the path went away.
+    InterfaceGone = 1,
+    /// The interface lost carrier.
+    CarrierLost = 2,
+    /// An operator asked for it.
+    Operator = 3,
+}
+
+impl PathCloseReason {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::InterfaceGone,
+            2 => Self::CarrierLost,
+            3 => Self::Operator,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+/// `PathClose` (0x54): the sender is closing the path it identifies.
+///
+/// Sent on any path that still works, so the peer learns at once rather
+/// than after an echo timeout. The peer withdraws its side of that path
+/// (keeping its history) and moves its traffic if it was on it. Advisory:
+/// a later probe on the path revives it.
+///
+/// ## Wire Format
+///
+/// | Offset | Field    | Size    | Notes                                     |
+/// |--------|----------|---------|-------------------------------------------|
+/// | 0      | msg_type | 1 byte  | 0x54                                      |
+/// | 1      | path_id  | 4 bytes | LE; the *receiver's* id for the path      |
+/// | 5      | reason   | 1 byte  | [`PathCloseReason`]                       |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathClose {
+    /// The receiver's identifier for the path, as it carried in its own
+    /// probes and acks on it.
+    pub path_id: u32,
+    pub reason: PathCloseReason,
+}
+
+impl PathClose {
+    /// Encoded size including the msg_type byte.
+    pub const WIRE_SIZE: usize = 6;
+
+    /// Encode as a link message (msg_type included).
+    pub fn encode(&self) -> [u8; Self::WIRE_SIZE] {
+        let mut out = [0u8; Self::WIRE_SIZE];
+        out[0] = LinkMessageType::PathClose.to_byte();
+        out[1..5].copy_from_slice(&self.path_id.to_le_bytes());
+        out[5] = self.reason as u8;
+        out
+    }
+
+    /// Decode from the link-layer payload (after the msg_type byte).
+    pub fn decode(payload: &[u8]) -> Result<Self, Error> {
+        let mut reader = crate::proto::codec::Reader::new(payload);
+        let path_id = reader.read_u32_le()?;
+        let reason = PathCloseReason::from_byte(reader.read_u8()?);
+        Ok(Self { path_id, reason })
     }
 }
 

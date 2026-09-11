@@ -67,7 +67,7 @@ pub(in crate::node) const PATH_MTU_RELEASE_MIN_INTERVAL: std::time::Duration =
 /// import above, which is `#[cfg(unix)]`. This constant feeds `link_wire_len`,
 /// whose caller `send_session_datagram` is compiled on every platform, so
 /// taking the name from that import fails to build on Windows.
-const LINK_FRAME_OVERHEAD: usize =
+pub(in crate::node) const LINK_FRAME_OVERHEAD: usize =
     crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE + 4 + crate::noise::TAG_SIZE;
 
 /// Wire size of an encoded `SessionDatagram` of `encoded_len` bytes.

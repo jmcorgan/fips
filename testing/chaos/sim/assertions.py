@@ -25,7 +25,10 @@ from .scenario import (
     CongestionSignalsAssertion,
     MaxErrorsAssertion,
     MaxParentSwitchesAssertion,
+    MaxPromotionsAssertion,
+    MaxStallAssertion,
     MinParentSwitchesAssertion,
+    SwitchLatencyAssertion,
     TreeParentsAssertion,
 )
 from .topology import SimTopology
@@ -499,5 +502,242 @@ def evaluate_min_traffic(
             f"(need {cfg.min_sessions_ok}); {total} byte(s) total (need "
             f"{cfg.min_bytes_total}). A green control plane with no traffic "
             f"means the data path did not survive what the scenario did to it."
+        ),
+    )
+
+
+def evaluate_path_switches(cfg, count: int) -> AssertionOutcome:
+    """Band on path switches (traffic moving between transports under one
+    session) over the run.
+
+    ``min_total`` catches a harness that flapped a link nothing was
+    switching over: a dual-path scenario in which no switch happened
+    tested nothing. ``max_total`` is the stability ceiling: a healthy
+    dual-path pair should switch only when a link goes and comes back,
+    never on its own.
+    """
+    if cfg.min_total is not None and count < cfg.min_total:
+        return AssertionOutcome(
+            name="path_switches",
+            passed=False,
+            detail=(
+                f"FAIL path_switches: {count} switches < floor {cfg.min_total} "
+                f"— the flaps did not move traffic between paths. Check that "
+                f"both paths came up (fipsctl path show) before the first flap."
+            ),
+        )
+    if cfg.max_total is not None and count > cfg.max_total:
+        return AssertionOutcome(
+            name="path_switches",
+            passed=False,
+            detail=(
+                f"FAIL path_switches: {count} switches > ceiling {cfg.max_total} "
+                f"— traffic is moving between paths more than the flaps "
+                f"account for. Look for discretionary switches on a healthy "
+                f"pair: the margin or the dwell is too small."
+            ),
+        )
+    return AssertionOutcome(
+        name="path_switches",
+        passed=True,
+        detail=(
+            f"PASS path_switches: {count} switches within "
+            f"[{cfg.min_total if cfg.min_total is not None else 0}, "
+            f"{cfg.max_total if cfg.max_total is not None else 'inf'}]"
+        ),
+    )
+
+
+def evaluate_max_promotions(
+    cfg: MaxPromotionsAssertion,
+    promotions: list[tuple[str, str]],
+) -> AssertionOutcome:
+    """Per-node ceiling on "Peer promoted to active" lines.
+
+    ``promotions`` is ``AnalysisResult.peers_promoted``: ``(source, line)``
+    pairs, one per handshake that completed on that node. The first per
+    peer is the pair meeting; any beyond the ceiling is a re-peering — the
+    session was torn down and rebuilt — which a switchover scenario exists
+    to prove does not happen. Liveness is no backstop here: standby probes
+    keep a peer alive while its data path is blackholed, so this counts
+    the one event a blackhole that lasts to the reaper cannot avoid.
+    """
+    per_node: dict[str, int] = {}
+    for source, _line in promotions:
+        per_node[source] = per_node.get(source, 0) + 1
+    over = {src: n for src, n in per_node.items() if n > cfg.per_node}
+    if not over:
+        return AssertionOutcome(
+            name="max_promotions",
+            passed=True,
+            detail=(
+                f"PASS max_promotions: every node promoted at most "
+                f"{cfg.per_node} time(s) ({len(promotions)} total)"
+            ),
+        )
+    breakdown = ", ".join(f"{src}={n}" for src, n in sorted(over.items()))
+    samples = "\n".join(
+        f"    [{src}] {line.strip()}"
+        for src, line in promotions
+        if src in over
+    )
+    return AssertionOutcome(
+        name="max_promotions",
+        passed=False,
+        detail=(
+            f"FAIL max_promotions: {breakdown} exceed(s) the per-node ceiling "
+            f"of {cfg.per_node}. A second promotion is a re-peering: the "
+            f"session was lost and rebuilt, so a switchover did not carry.\n"
+            f"{samples}"
+        ),
+    )
+
+
+def _line_epoch(line: str) -> float | None:
+    """Epoch seconds of a node log line's leading RFC 3339 timestamp, if any.
+
+    ``tracing`` writes ``2026-09-13T13:39:01.123456Z`` first on every line.
+    Anything else (a bare stderr line, a runner line) is not timed.
+    """
+    from datetime import datetime, timezone
+
+    head = line.strip().split(" ", 1)[0]
+    if not head.endswith("Z"):
+        return None
+    try:
+        return datetime.fromisoformat(head.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def evaluate_switch_latency(
+    cfg: SwitchLatencyAssertion,
+    flap_events: list[tuple[float, str, str, str]],
+    switches: list[tuple[str, str]],
+) -> AssertionOutcome:
+    """Ceiling on the time from each link-down to the first switch on
+    either endpoint.
+
+    ``flap_events`` is the link manager's record: ``(epoch, "down" | "up",
+    a, b)``. ``switches`` is ``AnalysisResult.path_switches``: ``(source,
+    line)``, where ``source`` is the node id and the line carries its own
+    timestamp. For each down edge, the latency is the earliest switch line
+    on ``a`` or ``b`` stamped at or after the down; a down with no switch
+    inside ``max_ms`` fails. The worst flap is what is reported.
+    """
+    downs = [(t, a, b) for t, kind, a, b in flap_events if kind == "down"]
+    if not downs:
+        return AssertionOutcome(
+            name="switch_latency",
+            passed=False,
+            detail="FAIL switch_latency: no link was taken down, nothing measured",
+        )
+    timed: list[tuple[str, float]] = []
+    for source, line in switches:
+        t = _line_epoch(line)
+        if t is not None:
+            timed.append((source, t))
+    limit = cfg.max_ms / 1000.0
+    worst: tuple[float, str, str] | None = None
+    missing: list[str] = []
+    for down_at, a, b in downs:
+        after = [
+            t - down_at
+            for src, t in timed
+            if src in (a, b) and t >= down_at and t - down_at <= limit
+        ]
+        if not after:
+            from datetime import datetime, timezone
+
+            when = datetime.fromtimestamp(down_at, timezone.utc).strftime("%H:%M:%S")
+            missing.append(f"{a}--{b} down at {when}Z")
+            continue
+        latency = min(after)
+        if worst is None or latency > worst[0]:
+            worst = (latency, a, b)
+    if missing:
+        return AssertionOutcome(
+            name="switch_latency",
+            passed=False,
+            detail=(
+                f"FAIL switch_latency: {len(missing)} of {len(downs)} link-down(s) "
+                f"had no path switch on either endpoint within {cfg.max_ms} ms: "
+                + "; ".join(missing)
+            ),
+        )
+    assert worst is not None
+    return AssertionOutcome(
+        name="switch_latency",
+        passed=True,
+        detail=(
+            f"PASS switch_latency: worst {worst[0] * 1000:.0f} ms "
+            f"({worst[1]}--{worst[2]}) over {len(downs)} link-down(s), "
+            f"ceiling {cfg.max_ms} ms"
+        ),
+    )
+
+
+def _longest_stall_secs(result: dict) -> float:
+    """Longest run of consecutive zero-byte intervals in one iperf3 result,
+    in seconds. 0 for a result with no intervals."""
+    intervals = result.get("intervals") if isinstance(result, dict) else None
+    if not isinstance(intervals, list):
+        return 0.0
+    longest = 0.0
+    run = 0.0
+    for iv in intervals:
+        summary = iv.get("sum") if isinstance(iv, dict) else None
+        if not isinstance(summary, dict):
+            continue
+        seconds = summary.get("seconds", 1.0)
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            seconds = 1.0
+        if summary.get("bytes", 0) == 0:
+            run += seconds
+            longest = max(longest, run)
+        else:
+            run = 0.0
+    return longest
+
+
+def evaluate_max_stall(
+    cfg: MaxStallAssertion,
+    results: list[dict],
+) -> AssertionOutcome:
+    """Ceiling on the longest zero-byte run inside any iperf3 session.
+
+    ``min_traffic`` cannot see a hole: a session that stalls for ten
+    seconds mid-run still moves bytes before and after. This reads the
+    per-interval totals iperf3 records and fails on the longest run of
+    zeros across every session, which is the stall a switchover leaves
+    when it does not carry.
+    """
+    if not results:
+        return AssertionOutcome(
+            name="max_stall",
+            passed=False,
+            detail="FAIL max_stall: no iperf3 session ran, nothing measured",
+        )
+    stalls = [(_longest_stall_secs(r), r) for r in results]
+    worst_secs, worst = max(stalls, key=lambda pair: pair[0])
+    if worst_secs <= cfg.max_secs:
+        return AssertionOutcome(
+            name="max_stall",
+            passed=True,
+            detail=(
+                f"PASS max_stall: longest zero-byte run {worst_secs:.0f} s "
+                f"across {len(results)} session(s), ceiling {cfg.max_secs:g} s"
+            ),
+        )
+    start = worst.get("start", {}) if isinstance(worst, dict) else {}
+    when = start.get("timestamp", {}).get("time", "?") if isinstance(start, dict) else "?"
+    return AssertionOutcome(
+        name="max_stall",
+        passed=False,
+        detail=(
+            f"FAIL max_stall: a session starting {when} moved nothing for "
+            f"{worst_secs:.0f} s, over the ceiling of {cfg.max_secs:g} s. Bytes "
+            f"either side of the hole satisfied min_traffic; the hole is a "
+            f"switchover that did not carry."
         ),
     )

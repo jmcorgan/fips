@@ -41,6 +41,23 @@ const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
 /// Default UDP send buffer size (2 MB).
 const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 
+/// What a transport is *for*, as far as path selection is concerned.
+///
+/// Not a rank. Selection between paths is measured, never configured
+/// (`docs/design/fips-multi-path-switchover.md` §8); this is the one
+/// statement an operator can make about a transport's purpose: a `backup`
+/// transport never carries a peer's traffic while any non-backup path to
+/// that peer is eligible. "Drop BLE when something better is stable."
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportRole {
+    /// Carries traffic whenever it is the best measured path.
+    #[default]
+    Normal,
+    /// Carries traffic only while no `normal` path is eligible.
+    Backup,
+}
+
 /// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +70,10 @@ pub struct UdpConfig {
     /// from any interface there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<String>,
+
+    /// Path-selection role (`role: normal | backup`). Default: normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TransportRole>,
 
     /// Bind address (`bind_addr`). Defaults to "0.0.0.0:2121".
     ///
@@ -118,6 +139,11 @@ pub struct UdpConfig {
 }
 
 impl UdpConfig {
+    /// Path-selection role. Default: normal.
+    pub fn role(&self) -> TransportRole {
+        self.role.unwrap_or_default()
+    }
+
     /// Get the bind address, using default if not configured.
     ///
     /// When `outbound_only = true`, returns `0.0.0.0:0` so the kernel picks
@@ -269,6 +295,10 @@ const MIN_BEACON_INTERVAL_SECS: u64 = 10;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EthernetConfig {
+    /// Path-selection role (`role: normal | backup`). Default: normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TransportRole>,
+
     /// Network interface name (e.g., "eth0", "enp3s0"). Required.
     pub interface: String,
 
@@ -333,6 +363,11 @@ pub struct EthernetConfig {
 }
 
 impl EthernetConfig {
+    /// Path-selection role. Default: normal.
+    pub fn role(&self) -> TransportRole {
+        self.role.unwrap_or_default()
+    }
+
     /// Get the EtherType, using default if not configured.
     pub fn ethertype(&self) -> u16 {
         self.ethertype.unwrap_or(DEFAULT_ETHERNET_ETHERTYPE)
@@ -407,6 +442,10 @@ const DEFAULT_TCP_MAX_INBOUND: usize = 256;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpConfig {
+    /// Path-selection role (`role: normal | backup`). Default: normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TransportRole>,
+
     /// Listen address (e.g., "0.0.0.0:443"). If not set, outbound-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_addr: Option<String>,
@@ -457,6 +496,11 @@ pub struct TcpConfig {
 }
 
 impl TcpConfig {
+    /// Path-selection role. Default: normal.
+    pub fn role(&self) -> TransportRole {
+        self.role.unwrap_or_default()
+    }
+
     /// Get the default MTU.
     pub fn mtu(&self) -> u16 {
         self.mtu.unwrap_or(DEFAULT_TCP_MTU)
@@ -555,6 +599,10 @@ const DEFAULT_TOR_ADVERTISED_PORT: u16 = 443;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TorConfig {
+    /// Path-selection role (`role: normal | backup`). Default: normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TransportRole>,
+
     /// Tor access mode: "socks5", "control_port", or "directory".
     /// Default: "socks5".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -652,6 +700,11 @@ impl DirectoryServiceConfig {
 }
 
 impl TorConfig {
+    /// Path-selection role. Default: normal.
+    pub fn role(&self) -> TransportRole {
+        self.role.unwrap_or_default()
+    }
+
     /// Get the access mode. Default: "socks5".
     pub fn mode(&self) -> &str {
         self.mode.as_deref().unwrap_or("socks5")
@@ -739,6 +792,10 @@ const DEFAULT_BLE_PROBE_COOLDOWN_SECS: u64 = 30;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BleConfig {
+    /// Path-selection role (`role: normal | backup`). Default: normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TransportRole>,
+
     /// HCI adapter name (e.g., "hci0"). Required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
@@ -788,6 +845,11 @@ pub struct BleConfig {
 }
 
 impl BleConfig {
+    /// Path-selection role. Default: normal.
+    pub fn role(&self) -> TransportRole {
+        self.role.unwrap_or_default()
+    }
+
     /// Get the adapter name. Default: "hci0".
     pub fn adapter(&self) -> &str {
         self.adapter.as_deref().unwrap_or("hci0")
@@ -868,6 +930,10 @@ const DEFAULT_NYM_STARTUP_TIMEOUT_SECS: u64 = 120;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NymConfig {
+    /// Path-selection role (`role: normal | backup`). Default: normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<TransportRole>,
+
     /// SOCKS5 proxy address (host:port). Defaults to "127.0.0.1:1080".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socks5_addr: Option<String>,
@@ -887,6 +953,11 @@ pub struct NymConfig {
 }
 
 impl NymConfig {
+    /// Path-selection role. Default: normal.
+    pub fn role(&self) -> TransportRole {
+        self.role.unwrap_or_default()
+    }
+
     /// Get the SOCKS5 proxy address. Default: "127.0.0.1:1080".
     pub fn socks5_addr(&self) -> &str {
         self.socks5_addr

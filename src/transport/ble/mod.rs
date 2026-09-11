@@ -790,6 +790,10 @@ impl<I: BleIo> BleTransport<I> {
 }
 
 impl<I: BleIo> Transport for BleTransport<I> {
+    fn role(&self) -> crate::config::TransportRole {
+        self.config.role()
+    }
+
     fn transport_id(&self) -> TransportId {
         self.transport_id
     }

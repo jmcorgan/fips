@@ -20,6 +20,10 @@ from .assertions import (
     evaluate_max_errors,
     evaluate_max_parent_switches,
     evaluate_min_parent_switches,
+    evaluate_path_switches,
+    evaluate_max_promotions,
+    evaluate_switch_latency,
+    evaluate_max_stall,
     evaluate_min_traffic,
     evaluate_tree_parents,
 )
@@ -318,9 +322,9 @@ class SimRunner:
         # The entrypoint script waits for configured Ethernet interfaces
         # to appear before starting FIPS, so we just need to create the
         # veth pairs promptly after containers are running.
-        if self.topology.has_ethernet():
+        if self.topology.has_veth():
             self.veth_mgr = VethManager(self.topology)
-            log.info("Setting up Ethernet veth pairs...")
+            log.info("Setting up veth pairs...")
             self.veth_mgr.setup_all()
 
         # 7. Initialize managers
@@ -385,6 +389,11 @@ class SimRunner:
         self._sleep(wait)
         self._take_snapshot("warmup")
 
+        # The veth half of every udp-veth+udp edge: UDP has no beacon, so
+        # the runner hands the daemon the address once the pair has peered
+        # over the bridge, and it becomes a path under that session.
+        self._add_udp_veth_paths()
+
         # Populate npub cache after convergence (nodes must be running)
         if self.peer_churn_mgr:
             self.peer_churn_mgr.refresh_all_npubs()
@@ -395,13 +404,67 @@ class SimRunner:
         if self.link_swap_mgr:
             self.link_swap_mgr.setup_initial()
 
+    def _add_udp_veth_paths(self, only_node: str | None = None):
+        """Give each dual udp-veth edge its veth path.
+
+        Sent from the edge's dial owner (the side whose static config holds
+        the bridge address) as a control-socket ``connect`` naming the
+        interface-bound instance: to a peer it already holds a session with,
+        the daemon adds that as a path rather than dialling. Waits for the
+        bridge session first, so the command cannot become the first dial.
+        """
+        from .control import send_command
+
+        outbound = self.topology.directed_outbound()
+        for node_id in sorted(self.topology.nodes):
+            if only_node is not None and node_id != only_node:
+                continue
+            for link in self.topology.udp_veth_links(node_id):
+                if not self.topology.is_dual_udp_edge(node_id, link.peer_id):
+                    continue
+                if link.peer_id not in outbound.get(node_id, []):
+                    continue
+                if node_id in self._down_nodes or link.peer_id in self._down_nodes:
+                    continue
+                container = self.topology.container_name(node_id)
+                npub = self.topology.nodes[link.peer_id].npub
+                params = {
+                    "npub": npub,
+                    "address": link.peer_addr,
+                    "transport": f"udp/{link.instance}",
+                }
+                added = None
+                for _ in range(30):
+                    if send_command(container, "path_show", {"npub": npub}) is None:
+                        time.sleep(1)  # not peered over the bridge yet
+                        continue
+                    added = send_command(container, "connect", params)
+                    break
+                if added is None:
+                    log.warning(
+                        "udp-veth path %s -> %s via %s not added",
+                        node_id, link.peer_id, link.instance,
+                    )
+                else:
+                    log.info(
+                        "udp-veth path %s -> %s via %s (%s)",
+                        node_id, link.peer_id, link.instance, link.peer_addr,
+                    )
+
     def _handle_node_restart(self, node_id: str):
         """Called after a node container is restarted.
 
-        For ephemeral identity nodes, waits briefly for the daemon to
-        start, then queries its new npub and updates the peer churn
-        manager's cache.
+        Re-adds the node's udp-veth paths once it has re-peered, and for
+        ephemeral identity nodes waits briefly for the daemon to start,
+        then queries its new npub and updates the peer churn manager's
+        cache.
         """
+        if any(
+            self.topology.is_dual_udp_edge(node_id, link.peer_id)
+            for link in self.topology.udp_veth_links(node_id)
+        ):
+            time.sleep(2)
+            self._add_udp_veth_paths(only_node=node_id)
         if not self.peer_churn_mgr:
             return
         if node_id not in self.peer_churn_mgr.ephemeral_nodes:
@@ -763,6 +826,45 @@ class SimRunner:
                 outcome = self._evaluate_max_parent_switches(
                     xps_cfg, result.parent_switches
                 )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            ps_cfg = self.scenario.assertions.path_switches
+            if ps_cfg is not None:
+                outcome = evaluate_path_switches(ps_cfg, len(result.path_switches))
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            mp_cfg = self.scenario.assertions.max_promotions
+            if mp_cfg is not None:
+                outcome = evaluate_max_promotions(mp_cfg, result.peers_promoted)
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            sl_cfg = self.scenario.assertions.switch_latency
+            if sl_cfg is not None:
+                flap_events = self.link_mgr.flap_events if self.link_mgr else []
+                outcome = evaluate_switch_latency(
+                    sl_cfg, flap_events, result.path_switches
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            stall_cfg = self.scenario.assertions.max_stall
+            if stall_cfg is not None:
+                outcome = evaluate_max_stall(stall_cfg, iperf_results)
                 self.assertion_outcomes.append(outcome)
                 if outcome.passed:
                     log.info("%s", outcome.detail)

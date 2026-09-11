@@ -173,6 +173,9 @@ not reproduced here to avoid duplicating the source.
 | `probe_start` | `npub` (bech32) | Admits a diagnostic probe job and returns immediately. `data`: `probe_id`, `npub`, `node_addr`, `display_name`, `budget_ms`. |
 | `probe_poll` | `probe_id` (integer) | Reports a probe's progress. `data`: `state` (`running` / `done`) and `report`. A terminal job is removed on the poll that observes it, so the report is delivered once. |
 | `probe_cancel` | `probe_id` (integer) | Runs the probe's terminal actions immediately, without the teardown grace tick. |
+| `path_show` | `npub` (bech32) | Every path to the peer. `data`: `peer`, `link_cost`, `link_cost_held`, and `paths[]` with `transport_id`, `transport` (instance name or null), `addr`, `state`, `active`, `remote_active`, `role`, `pinned`, `rx_live_ms_ago`, `tx_live_ms_ago`, `acked_once`, `last_rtt_ms`, `min_rtt_ms`, `rtt_samples`, `etx`, `score`. |
+| `path_pin` | `npub` (bech32), `transport` (instance name or numeric id) | Pins this node's traffic to the peer to that transport's path. Applies on the next selection tick. Error if the peer has no path there. |
+| `path_unpin` | `npub` (bech32) | Clears the pin. |
 
 `connect` on a peer the node is **already connected to** neither tears the
 live link down nor ignores the address: the address is tried as an alternate

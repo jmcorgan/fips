@@ -16,6 +16,9 @@ pub async fn dispatch(node: &mut Node, command: &str, params: Option<&Value>) ->
         "probe_start" => probe_start(node, params).await,
         "probe_poll" => probe_poll(node, params),
         "probe_cancel" => probe_cancel(node, params).await,
+        "path_show" => path_show(node, params),
+        "path_pin" => path_pin(node, params),
+        "path_unpin" => path_unpin(node, params),
         _ => Response::error(format!("unknown command: {command}")),
     }
 }
@@ -122,6 +125,64 @@ async fn probe_cancel(node: &mut Node, params: Option<&Value>) -> Response {
 
 fn probe_id(params: Option<&Value>) -> Option<u64> {
     params?.get("probe_id").and_then(|v| v.as_u64())
+}
+
+fn npub_param<'a>(params: Option<&'a Value>, what: &str) -> Result<&'a str, Response> {
+    params
+        .and_then(|p| p.get("npub"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Response::error(format!("missing 'npub' parameter for {what}")))
+}
+
+/// Show every path to a peer.
+///
+/// Params: `{"npub": "npub1..."}`
+fn path_show(node: &mut Node, params: Option<&Value>) -> Response {
+    let npub = match npub_param(params, "path_show") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    match node.api_path_show(npub) {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
+}
+
+/// Pin a peer's traffic to one transport.
+///
+/// Params: `{"npub": "npub1...", "transport": "cable"}`
+fn path_pin(node: &mut Node, params: Option<&Value>) -> Response {
+    let npub = match npub_param(params, "path_pin") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let transport = match params
+        .and_then(|p| p.get("transport"))
+        .and_then(|v| v.as_str())
+    {
+        Some(v) => v,
+        None => return Response::error("missing 'transport' parameter"),
+    };
+    debug!(npub = %npub, transport = %transport, "API path pin requested");
+    match node.api_path_pin(npub, transport) {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
+}
+
+/// Clear a peer's path pin.
+///
+/// Params: `{"npub": "npub1..."}`
+fn path_unpin(node: &mut Node, params: Option<&Value>) -> Response {
+    let npub = match npub_param(params, "path_unpin") {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    debug!(npub = %npub, "API path unpin requested");
+    match node.api_path_unpin(npub) {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
 }
 
 #[cfg(test)]

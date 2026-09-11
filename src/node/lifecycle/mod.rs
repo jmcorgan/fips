@@ -779,6 +779,9 @@ impl Node {
         // dataplane maps are unmutated, so the core's per-peer cap sees a stable
         // in-flight count — the same guarantee the old collect-then-dial had.
         let mut transport_neighbors: Vec<Candidate> = Vec::new();
+        // Live peers beaconing on a transport we hold no path to them over.
+        // Added after the loop, which borrows the transport table.
+        let mut path_candidates: Vec<(NodeAddr, TransportId, TransportAddr)> = Vec::new();
         for (transport_id, transport) in &self.transports {
             if !transport.is_operational() {
                 continue;
@@ -840,6 +843,11 @@ impl Node {
                     // again. What is given up is switching away from a link
                     // that is working, which is not a thing worth doing.
                     if self.active_peer_link_is_live(&node_addr) {
+                        // A live peer beaconing on a transport we hold no
+                        // path to it over is a path to add, not a link to
+                        // replace: the heartbeat tick probes it under the
+                        // existing session instead of dialling.
+                        path_candidates.push((node_addr, candidate_transport_id, remote_addr));
                         continue;
                     }
                     if self.is_connecting_to_peer_on_path(
@@ -865,6 +873,10 @@ impl Node {
                     active_refresh: connected,
                 });
             }
+        }
+
+        for (node_addr, transport_id, remote_addr) in path_candidates {
+            self.add_path_candidate(node_addr, transport_id, remote_addr);
         }
 
         if transport_neighbors.is_empty() {
@@ -3434,10 +3446,7 @@ impl Node {
     /// Notifies the peer, removes it locally, closes the transport connection
     /// it was using, and suppresses auto-reconnect.
     pub(crate) async fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
-        let peer_identity =
-            PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
-        let node_addr = *peer_identity.node_addr();
-
+        let node_addr = self.resolve_peer_npub(npub)?;
         let Some(peer) = self.peers.get(&node_addr) else {
             return Err(format!("peer not found: {npub}"));
         };

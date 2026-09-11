@@ -446,6 +446,41 @@ Controls tree construction and parent selection.
 | `node.tree.flap_window_secs`           | u64   | `60`    | Sliding window for counting parent switches          |
 | `node.tree.flap_dampening_secs`        | u64   | `120`   | Extended hold-down duration when flap threshold exceeded |
 
+### Path Selection (`node.path.*`)
+
+A peer reachable over more than one transport keeps one Noise session and
+holds a *path* per transport. Further paths are added by a probe under the
+existing session (a beacon from a live peer on a transport with no path to
+it yet is probed, not dialled), each path is heartbeated on its own, and
+this node's traffic moves between them on failure or degradation with no
+handshake. Selection is measured, not configured: a path's score is
+`etx × (1 + min_rtt_ms / 100)` from its own probes. These knobs bound when a
+measured difference is acted on; their defaults are placeholders pending
+calibration.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.path.switch_margin` | f64 | `1.3` | Discretionary switch margin `K`: the active path's score must exceed the best standby's by this factor. Encodes the fail-back policy: a cable returning under working wifi (1.00 vs about 1.10) is under `K`, so traffic stays until the wifi degrades. |
+| `node.path.switch_dwell_secs` | u64 | `2` | The margin must hold this long before a discretionary switch. Also how long the link cost the tree sees is held at its pre-switch value after any switch. |
+| `node.path.standby_heartbeat_ms` | u64 | `1000` | Heartbeat interval on a standby path. A standby is only as warm as its last echo; this bounds how stale a proven standby can be when the active path dies. A standby the peer has never acknowledged (an old node, or a medium it cannot hear us on) is probed full-size on a backoff that doubles from this up to `node.heartbeat_interval_secs`, eight times, then given up as dead and forgotten after the five-minute grace; a fresh address starts the count over. |
+| `node.path.min_samples` | u32 | `2` | RTT samples a standby needs before it is eligible. |
+| `node.path.active_heartbeat_ms` | u64 | `200` | Heartbeat interval on a path that either side sends on. A heartbeat unanswered for two of these on a path the peer has acknowledged before, with nothing heard from the peer on it either, marks it suspect, and selection leaves it at once; a late echo on a path still carrying the peer's frames is counted as loss only, and a late echo still measures the path, so the timeout can stretch on a medium slower than it. Both the interval and the timeout stretch with a path's own measured round trip, so a Tor or Nym path is neither flooded nor declared dead every round trip. The first probe on a standby, and one a minute after on every path, is padded to the link MTU so a medium that passes small frames and drops large ones never proves itself. A peer with a single live path is not path-heartbeated at all — there is nothing to switch to — so on a mesh of single-homed peers this costs nothing. |
+
+A path losing its transport (interface gone), carrier (cable unplugged), or a
+route (`ENETUNREACH` on send) is left immediately when another proven path
+exists, and the peer is told on a surviving path so it moves too rather than
+waiting for its own timeout; only a peer with no path left is dropped. The
+interface and carrier signals exist for Ethernet transports, which are bound
+per interface; a UDP instance bound with `transports.udp.interface` gets no
+presence or carrier signal, so the loss of its path is detected by the
+unreachable-on-send error and the heartbeat echo timeout only (two
+`active_heartbeat_ms`, about half a second). A transport that returns
+within five minutes of going revives its dead paths with their measured
+history rather than starting from nothing. On a connection-oriented
+transport (`tcp`, `tor`, `nym`) a path's connection is the one a dial or
+a probe opened; a `disconnect` closes every path's connection. See
+`fipsctl path` in [cli-fipsctl.md](cli-fipsctl.md).
+
 ### Bloom Filter (`node.bloom.*`)
 
 | Parameter | Type | Default | Description |
@@ -645,6 +680,12 @@ adding entries and the precedence rules:
 
 ## Transports (`transports.*`)
 
+Every transport accepts `role: normal | backup` (default `normal`). A
+`backup` transport never carries a peer's traffic while any `normal` path to
+that peer is eligible, whatever the measurements say; it is a statement about
+the transport's purpose ("drop BLE when something better is stable"), not a
+rank. See `node.path.*`.
+
 ### UDP (`transports.udp.*`)
 
 | Parameter | Type | Default | Description |
@@ -656,8 +697,9 @@ adding entries and the precedence rules:
 | `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts. Implicitly forced false when `outbound_only: true`. |
 | `transports.udp.public` | bool | `false` | If advertised: `true` publishes direct `host:port`; `false` publishes `udp:nat` rendezvous |
 | `transports.udp.external_addr` | string | *(none)* | Explicit advertise-as override. Bare IP (`"203.0.113.45"` — bind port is appended) or full `host:port`. Takes precedence over the bound address and STUN autodiscovery. Useful when the public IP isn't on a local interface (cloud 1:1 NAT, EIP) or to skip STUN for a deterministic value. |
-| `transports.udp.interface` | string | *(none)* | Bind the socket to one interface (e.g. `en0`), making this instance one path. Two instances bound to two interfaces give a peer reachable over both two paths. Linux binds both directions (`SO_BINDTODEVICE`); macOS binds egress only (`IP_BOUND_IF`), so inbound on a wildcard `bind_addr` still arrives from any interface there. Unsupported elsewhere (fails to start). The interface must exist when the daemon starts: unlike an Ethernet transport, an interface-bound UDP instance is not retried when its interface appears later, and it gets no presence or carrier signal while running (see `node.path.*` above). |
 | `transports.udp.outbound_only` | bool | `false` | Pure-client posture. When `true`, the transport binds to `0.0.0.0:0` (kernel-assigned ephemeral port) regardless of `bind_addr`, refuses inbound handshake msg1, and is never advertised on Nostr regardless of `advertise_on_nostr`. |
+| `transports.udp.interface` | string | *(none)* | Bind the socket to one interface (e.g. `en0`), making this instance one path. Two instances bound to two interfaces give a peer reachable over both two paths. Linux binds both directions (`SO_BINDTODEVICE`); macOS binds egress only (`IP_BOUND_IF`), so inbound on a wildcard `bind_addr` still arrives from any interface there. Unsupported elsewhere (fails to start). The interface must exist when the daemon starts: unlike an Ethernet transport, an interface-bound UDP instance is not retried when its interface appears later, and it gets no presence or carrier signal while running (see `node.path.*` above). |
+| `transports.udp.role` | string | `normal` | `normal` or `backup`; see above. |
 | `transports.udp.accept_connections` | bool | `true` | Accept inbound handshake msg1 from new peers. Combine with `outbound_only: false` and `accept_connections: false` (plus `auto_connect` on peer entries) for a node that initiates outbound links but rejects fresh inbound handshakes. The handshake handler carves out msg1 from peers already established on this transport so rekey continues to work. |
 
 ### Ethernet (`transports.ethernet.*`)
@@ -1032,6 +1074,15 @@ Static peer list. Each entry defines a peer to connect to.
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
 | `peers[].via_nostr` | bool | `false` | Append Nostr advert-derived endpoints after static addresses for this peer |
 
+**Several addresses, one session.** A peer entry may list addresses on
+several transports (`udp/main` and `udp/eth0`, or `udp` and `tor`). All
+are dialled; the first handshake to complete makes the session, and a
+later one to the same live peer over a transport that has no path yet is
+kept as a *path* under that session at both ends, not as a second
+session. A configured address whose transport was down at dial time is
+added as a path once the transport is up and the peer is live. Paths are
+listed by `fipsctl path show <peer>`.
+
 **Named UDP instances.** Where several UDP transports are configured
 under named sub-keys, a peer address can name the one it belongs to by
 writing the transport field as `udp/<instance>`, for example
@@ -1282,6 +1333,12 @@ node:
   heartbeat_interval_secs: 10
   link_dead_timeout_secs: 30
   # drain_timeout_secs: 2            # bounded Draining phase; absent = 2s
+  path:
+    switch_margin: 1.3               # K: active score must exceed best standby's by this
+    switch_dwell_secs: 2             # D: margin must hold this long
+    min_samples: 2                   # N: RTT samples before a standby is eligible
+    active_heartbeat_ms: 200         # heartbeat on a path either side sends on
+    standby_heartbeat_ms: 1000       # heartbeat on a standby path
   limits:
     max_connections: 256
     max_peers: 128

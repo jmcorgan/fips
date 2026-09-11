@@ -7,7 +7,7 @@ from copy import deepcopy
 
 import yaml
 
-from .topology import SimTopology
+from .topology import UDP_VETH, SimTopology
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -33,6 +33,7 @@ def _load_template() -> str:
 
 _TRANSPORT_PORTS = {
     "udp": 2121,
+    "udp-veth": 2122,
     "tcp": 443,
 }
 
@@ -49,16 +50,32 @@ def generate_peers_block(
     if not outbound_peers:
         return "  []"
 
+    # With interface-bound UDP instances the UDP transport is named, and a
+    # bare ``udp`` address would resolve to the lowest instance id, which
+    # may be the one bound to a veth: qualify the bridge half.
+    bridge = "udp/main" if topology.udp_veth_links(node_id) else "udp"
     lines = []
     for peer_id in sorted(outbound_peers):
         peer = topology.nodes[peer_id]
         transport = topology.transport_for_edge(node_id, peer_id)
-        port = _TRANSPORT_PORTS.get(transport, 2121)
+        if topology.is_dual_udp_edge(node_id, peer_id):
+            # The veth half of a dual edge is found by beacon (Ethernet) or
+            # added as a path by the runner after the pair has peered
+            # (udp-veth); the bridge half is dialled from here.
+            transport = "udp"
+        if transport == UDP_VETH:
+            link = next(l for l in topology.udp_veth_links(node_id) if l.peer_id == peer_id)
+            transport = f"udp/{link.instance}"
+            addr = link.peer_addr
+        else:
+            addr = f"{peer.docker_ip}:{_TRANSPORT_PORTS.get(transport, 2121)}"
+            if transport == "udp":
+                transport = bridge
         lines.append(f'  - npub: "{peer.npub}"')
         lines.append(f'    alias: "{peer_id}"')
         lines.append(f"    addresses:")
         lines.append(f"      - transport: {transport}")
-        lines.append(f'        addr: "{peer.docker_ip}:{port}"')
+        lines.append(f'        addr: "{addr}"')
         lines.append(f"    connect_policy: auto_connect")
     return "\n".join(lines)
 
@@ -110,6 +127,28 @@ def _inject_ethernet_transports(parsed: dict, eth_ifaces: list[str]):
         }
 
 
+def _inject_udp_instances(parsed: dict, topology: SimTopology, node_id: str, has_udp: bool):
+    """Turn the template's single UDP transport into named instances: ``main``
+    (the bridge, kept only if the node has bridge-UDP peers) plus one
+    interface-bound instance per ``udp-veth`` edge, named after its veth.
+    """
+    links = topology.udp_veth_links(node_id)
+    if not links:
+        return
+    transports = parsed.setdefault("transports", {})
+    main = transports.pop("udp", None) or {"bind_addr": "0.0.0.0:2121"}
+    instances = {}
+    if has_udp:
+        instances["main"] = main
+    for link in links:
+        instances[link.instance] = {
+            "bind_addr": f"0.0.0.0:{_TRANSPORT_PORTS['udp-veth']}",
+            "interface": link.iface,
+            "mtu": main.get("mtu", 1472),
+        }
+    transports["udp"] = instances
+
+
 def _inject_tcp_transport(parsed: dict):
     """Inject TCP transport config into a parsed FIPS config."""
     transports = parsed.setdefault("transports", {})
@@ -152,9 +191,12 @@ def generate_node_config(
     eth_ifaces = topology.ethernet_interfaces(node_id)
     has_tcp = bool(topology.tcp_peers(node_id))
     has_udp = _has_transport_peers(topology, node_id, "udp")
+    has_udp_veth = bool(topology.udp_veth_links(node_id))
 
     # Inject non-UDP transport configs and handle pure-transport nodes
-    needs_yaml_rewrite = eth_ifaces or has_tcp or not has_udp or fips_overrides
+    needs_yaml_rewrite = (
+        eth_ifaces or has_tcp or has_udp_veth or not has_udp or fips_overrides
+    )
 
     if needs_yaml_rewrite:
         parsed = yaml.safe_load(config)
@@ -164,7 +206,9 @@ def generate_node_config(
             _inject_ethernet_transports(parsed, eth_ifaces)
         if has_tcp:
             _inject_tcp_transport(parsed)
-        if not has_udp:
+        if has_udp_veth:
+            _inject_udp_instances(parsed, topology, node_id, has_udp)
+        elif not has_udp:
             # No UDP edges: remove UDP transport
             transports = parsed.get("transports", {})
             transports.pop("udp", None)
@@ -178,6 +222,8 @@ def _has_transport_peers(topology: SimTopology, node_id: str, transport: str) ->
     for peer_id in topology.nodes[node_id].peers:
         edge = (min(node_id, peer_id), max(node_id, peer_id))
         if topology.edge_transport.get(edge, "udp") == transport:
+            return True
+        if transport == "udp" and edge in topology.dual_udp_edges:
             return True
     return False
 

@@ -67,6 +67,11 @@ enum Commands {
         #[arg(short = 'k', long = "key", conflicts_with = "identity")]
         key: Option<PathBuf>,
     },
+    /// Paths to a peer: show them, or pin traffic to one
+    Path {
+        #[command(subcommand)]
+        what: PathCommands,
+    },
     /// Connect to a peer
     Connect {
         /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
@@ -188,6 +193,27 @@ enum ShowCommands {
     IdentityCache,
     /// Native datagram API flows and listeners
     NativeFlows,
+}
+
+#[derive(Subcommand, Debug)]
+enum PathCommands {
+    /// Show every path to a peer, per direction
+    Show {
+        /// Peer npub or hostname
+        peer: String,
+    },
+    /// Pin the peer's traffic to one transport until unpinned or the path dies
+    Pin {
+        /// Peer npub or hostname
+        peer: String,
+        /// Transport instance name (as configured) or numeric id
+        transport: String,
+    },
+    /// Clear the pin
+    Unpin {
+        /// Peer npub or hostname
+        peer: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -597,6 +623,23 @@ fn main() {
             let npub = resolve_peer(peer);
             build_command("disconnect", serde_json::json!({"npub": npub}))
         }
+        Commands::Path { what } => match what {
+            PathCommands::Show { peer } => {
+                let npub = resolve_peer(peer);
+                build_command("path_show", serde_json::json!({"npub": npub}))
+            }
+            PathCommands::Pin { peer, transport } => {
+                let npub = resolve_peer(peer);
+                build_command(
+                    "path_pin",
+                    serde_json::json!({"npub": npub, "transport": transport}),
+                )
+            }
+            PathCommands::Unpin { peer } => {
+                let npub = resolve_peer(peer);
+                build_command("path_unpin", serde_json::json!({"npub": npub}))
+            }
+        },
         Commands::Probe {
             target,
             json,

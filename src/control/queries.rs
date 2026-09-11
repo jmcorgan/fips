@@ -306,7 +306,7 @@ pub fn show_peers(node: &Node) -> Value {
                 if any_peer_has_srtt && !peer.has_srtt() {
                     None
                 } else {
-                    Some(coords.depth() as f64 + peer.link_cost())
+                    Some(coords.depth() as f64 + peer.link_cost(crate::time::mono_ms()))
                 }
             });
             peer_json["effective_depth"] = match effective_depth {
@@ -2746,6 +2746,7 @@ mod tests {
         // An interface no host has, so presence is deterministically absent
         // and carrier deterministically false on every machine this runs on.
         let config = EthernetConfig {
+            role: None,
             interface: "fips-absent-x0".to_string(),
             ethertype: None,
             mtu: None,

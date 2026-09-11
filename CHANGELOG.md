@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-path switchover: a peer reachable over more than one transport keeps
+  one Noise session and moves its traffic between transports on failure or
+  degradation, with no handshake. Encrypted frames are demuxed by session
+  index alone, so a frame from a known peer decrypts whichever transport
+  delivered it. A peer holds a *path* per transport: the first from the
+  handshake, further ones proven by a `PathProbe`/`PathAck` exchange under
+  the existing session. Every path is heartbeated on its own once a peer
+  has more than one — fast on a path either side sends on, slow on a
+  standby — and a lost carrier, a route gone on send, an interface gone, or
+  two unanswered heartbeats on a path the peer is also silent on moves
+  traffic to the best proven standby inside a second; only a peer with no
+  path left is dropped. Selection is measured, not configured: per-path
+  `etx × (1 + min_rtt / 100)` with a margin and a dwell (`node.path.*`), so
+  a cable coming back under working wifi does not take traffic back until
+  the wifi degrades. A switch re-seeds the path MTU, tightens session MTUs
+  and holds the tree-visible link cost for the dwell, and until the two
+  receiver reports that span the switch have arrived, so neither the
+  switch nor the one-report loss spike it leaves ripples mesh-wide. A transport that returns inside the five-minute grace revives
+  its dead paths with their history. Design:
+  `docs/design/fips-multi-path-switchover.md`; defaults are placeholders,
+  and `testing/chaos/scenarios/dual-path-flap` and `dual-udp-flap` are the
+  scenarios that calibrate them, each failing on a re-peering, a switch
+  slower than a second, or an iperf stall past two seconds.
+
+- Wire, for multi-path: three inner link-message types in the link-control
+  block, `0x52 PathProbe`, `0x53 PathAck` (probe id, `remote_active` flag,
+  the sender's path id) and `0x54 PathClose` (the receiver's path id and a
+  reason). Ordinary encrypted FMP frames under the session; no header,
+  handshake or index change. Old nodes drop them at debug after
+  authenticating the frame. The first probe on a standby and one a minute
+  after on every path are padded to the link MTU, so a medium that passes
+  small frames and drops large ones never proves itself; a node that loses
+  a path tells the peer with a `PathClose` on a surviving path, so the
+  peer moves at once rather than after its own timeout.
+
+- Operator surface, for multi-path: `role: backup` on any transport (never
+  carries a peer's traffic while a normal path is eligible);
+  `fipsctl path show|pin|unpin` and the `path_show`, `path_pin`,
+  `path_unpin` control commands; `node.path.*` (`switch_margin`, validated
+  finite and at least 1.0, `switch_dwell_secs`, `min_samples`,
+  `active_heartbeat_ms`, `standby_heartbeat_ms`).
+
 - An authentic frame arriving on a transport the peer has no path on no
   longer re-pins the peer's send side to that transport, and a decrypt
   failure on such a transport is not counted toward force-removal. Both
@@ -42,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a wifi-only router) is bound and healthy rather than permanently
   `Degraded`, and starts carrying traffic the moment a port comes up. Whether
   an interface has carrier is reported separately as `interface.carrier` in
-  `show_transports`, never acted on.
+  `show_transports`; path selection reads it, presence does not.
+
   This closes the OpenWrt boot race (procd starts `fips` before wifi has
   created `fips-mesh0` / `fips-ap0`; both transports were skipped for the life
   of the process while the 802.11s peer link formed anyway, so the node looked
