@@ -225,3 +225,26 @@ fn set_current_addr_roams_inside_the_bound_transport_only() {
         Some(&TransportAddr::from_string("10.0.0.7:1"))
     );
 }
+
+#[test]
+fn a_promoted_peer_holds_one_path_and_rebind_repoints_it() {
+    let cable = TransportId::new(1);
+    let wifi = TransportId::new(2);
+    let (node, node_addr, _our_index, _far_side) = promoted_peer_with_the_far_side_session(cable);
+    let peer = node.get_peer(&node_addr).unwrap();
+    assert_eq!(peer.paths().len(), 1, "promotion binds exactly one path");
+    assert_eq!(peer.active_path().map(|p| p.transport_id()), Some(cable));
+    assert_eq!(
+        peer.active_path().map(|p| p.addr()),
+        Some(&TransportAddr::from_string(PROMOTED_ADDR))
+    );
+
+    // Until the probe exchange adds paths, a rebind re-points the single
+    // path rather than growing the set.
+    let mut peer = crate::peer::ActivePeer::new(make_peer_identity(), LinkId::new(1), 0);
+    assert!(peer.paths().is_empty());
+    assert!(peer.rebind_transport(cable, TransportAddr::from_string("10.0.0.1:1")));
+    assert!(peer.rebind_transport(wifi, TransportAddr::from_string("10.0.0.7:1")));
+    assert_eq!(peer.paths().len(), 1);
+    assert_eq!(peer.transport_id(), Some(wifi));
+}

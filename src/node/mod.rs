@@ -2523,10 +2523,7 @@ impl Node {
                 let metrics = &mmp.metrics;
                 let srtt_ms = metrics.srtt_ms();
                 let smoothed_etx = metrics.smoothed_etx();
-                let lqi = match (srtt_ms, smoothed_etx) {
-                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-                    _ => None,
-                };
+                let lqi = metrics.quality_index();
                 let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
@@ -2564,10 +2561,7 @@ impl Node {
                 let metrics = &mmp.metrics;
                 let srtt_ms = metrics.srtt_ms();
                 let smoothed_etx = metrics.smoothed_etx();
-                let sqi = match (srtt_ms, smoothed_etx) {
-                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-                    _ => None,
-                };
+                let sqi = metrics.quality_index();
                 let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
@@ -4033,10 +4027,7 @@ fn project_entity_mmp(
 ) -> crate::control::snapshot::EntityMmp {
     let srtt_ms = metrics.srtt_ms();
     let smoothed_etx = metrics.smoothed_etx();
-    let quality_index = match (srtt_ms, smoothed_etx) {
-        (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-        _ => None,
-    };
+    let quality_index = metrics.quality_index();
     crate::control::snapshot::EntityMmp {
         mode,
         srtt_ms,

@@ -393,10 +393,8 @@ pub fn show_peers(node: &Node) -> Value {
                 if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                     mmp_json["smoothed_etx"] = json!(smoothed_etx);
                 }
-                if let Some(srtt) = mmp.metrics.srtt_ms()
-                    && let Some(setx) = mmp.metrics.smoothed_etx()
-                {
-                    mmp_json["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+                if let Some(qi) = mmp.metrics.quality_index() {
+                    mmp_json["lqi"] = json!(qi);
                 }
                 peer_json["mmp"] = mmp_json;
             }
@@ -813,10 +811,8 @@ pub fn show_sessions(node: &Node) -> Value {
                 if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                     mmp_json["smoothed_etx"] = json!(smoothed_etx);
                 }
-                if let Some(srtt) = mmp.metrics.srtt_ms()
-                    && let Some(setx) = mmp.metrics.smoothed_etx()
-                {
-                    mmp_json["sqi"] = json!(setx * (1.0 + srtt / 100.0));
+                if let Some(qi) = mmp.metrics.quality_index() {
+                    mmp_json["sqi"] = json!(qi);
                 }
                 session_json["mmp"] = mmp_json;
             }
@@ -1013,9 +1009,9 @@ pub fn show_mmp(node: &Node) -> Value {
         }
         if let Some(srtt) = metrics.srtt_ms() {
             link_layer["srtt_ms"] = json!(srtt);
-            if let Some(setx) = metrics.smoothed_etx() {
-                link_layer["lqi"] = json!(setx * (1.0 + srtt / 100.0));
-            }
+        }
+        if let Some(qi) = metrics.quality_index() {
+            link_layer["lqi"] = json!(qi);
         }
 
         // Trend indicators
@@ -1065,9 +1061,9 @@ pub fn show_mmp(node: &Node) -> Value {
             }
             if let Some(srtt) = metrics.srtt_ms() {
                 session_layer["srtt_ms"] = json!(srtt);
-                if let Some(setx) = metrics.smoothed_etx() {
-                    session_layer["sqi"] = json!(setx * (1.0 + srtt / 100.0));
-                }
+            }
+            if let Some(qi) = metrics.quality_index() {
+                session_layer["sqi"] = json!(qi);
             }
 
             // Session-layer trend indicators (srtt / loss / etx), mirroring the

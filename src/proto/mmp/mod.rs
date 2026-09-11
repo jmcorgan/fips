@@ -38,7 +38,7 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use algorithms::DualEwma;
+pub(crate) use algorithms::{DualEwma, quality_index};
 pub(crate) use core::{
     BackoffUpdate, LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, SendResult,
     SessionReportKind, SessionReportSnapshot,

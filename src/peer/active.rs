@@ -54,6 +54,74 @@ impl fmt::Display for ConnectivityState {
     }
 }
 
+/// One transport-level path to a peer.
+///
+/// Path identity is the transport instance: one transport holds at most one
+/// path to a given peer, and an address roams *inside* a path. Everything
+/// that is per session (Noise slots, K-bit, indices, rekey state) stays on
+/// the peer; a path carries only what is bound to the medium it runs over.
+/// See `docs/design/fips-multi-path-switchover.md` §1–2.
+///
+/// Today a peer holds at most one path, added at promotion. The probe
+/// exchange that adds further paths under the existing session is the next
+/// step of that design; nothing here assumes a single path.
+#[derive(Debug)]
+pub struct PeerPath {
+    /// The transport instance this path runs over.
+    transport_id: TransportId,
+    /// The peer's current address on that transport (roams).
+    addr: TransportAddr,
+
+    /// Unix UDP fast-path: per-path `connect()`-ed socket (paired with
+    /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
+    /// the connected 5-tuple, so inbound packets land here; the
+    /// encrypt-worker send path sends with `msg_name = NULL`, skipping
+    /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
+    /// in-flight worker jobs survive rekey/address-change rotations.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    connected_udp: Option<std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>>,
+
+    /// Recv drain thread for `connected_udp`. Always paired with it: the
+    /// kernel routes inbound packets from this peer to the connected
+    /// socket, so it *must* be drained or the kernel recv buffer fills.
+    /// Drop signals shutdown via self-pipe.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    peer_recv_drain: Option<crate::transport::udp::PeerRecvDrain>,
+}
+
+impl PeerPath {
+    fn new(transport_id: TransportId, addr: TransportAddr) -> Self {
+        Self {
+            transport_id,
+            addr,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            connected_udp: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            peer_recv_drain: None,
+        }
+    }
+
+    /// The transport instance this path runs over.
+    pub fn transport_id(&self) -> TransportId {
+        self.transport_id
+    }
+
+    /// The peer's current address on this path.
+    pub fn addr(&self) -> &TransportAddr {
+        &self.addr
+    }
+
+    /// Drop the connected socket and its drain. The drain goes first so
+    /// its last fd reference is released cleanly; the kernel fd closes on
+    /// the last `Arc` drop, so in-flight worker jobs holding the old `Arc`
+    /// stay valid until they complete.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn clear_connected_udp(&mut self) {
+        self.peer_recv_drain = None;
+        self.connected_udp = None;
+    }
+}
+
 /// Published active-send-state for a peer (the two-tier boundary).
 ///
 /// This is the send-critical subset of an `ActivePeer` that the data plane
@@ -104,29 +172,14 @@ struct PeerSendState {
     session_start: Instant,
 
     // === Transport target ===
-    /// Transport ID for this peer's link.
-    transport_id: Option<TransportId>,
-    /// Current transport address (for roaming support).
-    current_addr: Option<TransportAddr>,
+    /// The paths this peer is reachable over, one per transport instance.
+    /// Empty for a peer that has not been bound to a transport yet.
+    paths: Vec<PeerPath>,
+    /// Index into `paths` of the path *our* frames go out on. `None` only
+    /// while `paths` is empty.
+    active: Option<usize>,
     /// Link used to reach this peer.
     link_id: LinkId,
-
-    // === Connected-UDP handles ===
-    /// Unix UDP fast-path: per-peer `connect()`-ed socket (paired with
-    /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
-    /// the connected 5-tuple, so inbound packets land here; the
-    /// encrypt-worker send path sends with `msg_name = NULL`, skipping
-    /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
-    /// in-flight worker jobs survive rekey/address-change rotations.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    connected_udp: Option<std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>>,
-
-    /// Per-peer recv drain thread. Always paired with `connected_udp`:
-    /// the kernel routes inbound packets from this peer to the
-    /// connected socket, so it *must* be drained or the kernel recv
-    /// buffer fills. Drop signals shutdown via self-pipe.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    peer_recv_drain: Option<crate::transport::udp::PeerRecvDrain>,
 
     // === Hot counters ===
     /// Link statistics.
@@ -157,19 +210,24 @@ impl PeerSendState {
             pending_their_index: None,
             current_k_bit: false,
             session_start,
-            transport_id: None,
-            current_addr: None,
+            paths: Vec::new(),
+            active: None,
             link_id,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            connected_udp: None,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            peer_recv_drain: None,
             link_stats: LinkStats::new(),
             last_seen,
             replay_suppressed_count: 0,
             consecutive_decrypt_failures: 0,
             mmp: None,
         }
+    }
+
+    /// The path our frames go out on, if any.
+    fn active_path(&self) -> Option<&PeerPath> {
+        self.active.and_then(|i| self.paths.get(i))
+    }
+
+    fn active_path_mut(&mut self) -> Option<&mut PeerPath> {
+        self.active.and_then(|i| self.paths.get_mut(i))
     }
 }
 
@@ -360,8 +418,8 @@ impl ActivePeer {
         send.noise_session = Some(noise_session);
         send.our_index = Some(our_index);
         send.their_index = Some(their_index);
-        send.transport_id = Some(transport_id);
-        send.current_addr = Some(current_addr);
+        send.paths.push(PeerPath::new(transport_id, current_addr));
+        send.active = Some(0);
         send.link_stats = link_stats;
         send.mmp = Some(MmpPeerState::new(
             mmp_config.mode,
@@ -404,42 +462,48 @@ impl ActivePeer {
 
     // === Connected-UDP fast path ===
 
-    /// Refcount the per-peer `connect()`-ed UDP socket if installed.
+    /// Refcount the active path's `connect()`-ed UDP socket if installed.
     /// Encrypt-worker send path uses this to bypass the wildcard
     /// listen socket's per-packet sockaddr handling.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn connected_udp(
         &self,
     ) -> Option<std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>> {
-        self.send.connected_udp.clone()
+        self.send
+            .active_path()
+            .and_then(|path| path.connected_udp.clone())
     }
 
-    /// Install a per-peer `connect()`-ed UDP socket with its paired
-    /// recv drain thread. The two own each other's lifetime: the drain
-    /// is the only consumer of packets on this socket.
+    /// Install a `connect()`-ed UDP socket with its paired recv drain
+    /// thread on the active path. The two own each other's lifetime: the
+    /// drain is the only consumer of packets on this socket. A no-op on a
+    /// peer with no path: there is no address to have connected to.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn set_connected_udp(
         &mut self,
         socket: std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>,
         drain: crate::transport::udp::PeerRecvDrain,
     ) {
+        let Some(path) = self.send.active_path_mut() else {
+            return;
+        };
         // Drop the old drain BEFORE the old socket so its last fd
         // reference is released cleanly.
-        self.send.peer_recv_drain = None;
-        self.send.connected_udp = None;
-        self.send.connected_udp = Some(socket);
-        self.send.peer_recv_drain = Some(drain);
+        path.clear_connected_udp();
+        path.connected_udp = Some(socket);
+        path.peer_recv_drain = Some(drain);
     }
 
-    /// Clear the per-peer connected UDP socket + drain. The drain
+    /// Clear the active path's connected UDP socket + drain. The drain
     /// exits via self-pipe signal; the kernel fd closes on last `Arc`
     /// drop (any in-flight worker jobs holding the old `Arc` stay
     /// valid until they complete).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[allow(dead_code)] // called from session-deregister + rekey follow-up
     pub(crate) fn clear_connected_udp(&mut self) {
-        self.send.peer_recv_drain = None;
-        self.send.connected_udp = None;
+        if let Some(path) = self.send.active_path_mut() {
+            path.clear_connected_udp();
+        }
     }
 
     // === Identity Accessors ===
@@ -554,53 +618,106 @@ impl ActivePeer {
         old_our_index
     }
 
-    /// Get the transport ID for this peer.
+    /// The transport our frames to this peer go out on: the active path's.
     pub fn transport_id(&self) -> Option<TransportId> {
-        self.send.transport_id
+        self.send.active_path().map(|path| path.transport_id)
     }
 
-    /// Get the current transport address.
+    /// The address our frames to this peer go to: the active path's.
     pub fn current_addr(&self) -> Option<&TransportAddr> {
-        self.send.current_addr.as_ref()
+        self.send.active_path().map(|path| &path.addr)
+    }
+
+    /// Every path this peer is reachable over. The active one is
+    /// [`active_path`](Self::active_path).
+    pub fn paths(&self) -> &[PeerPath] {
+        &self.send.paths
+    }
+
+    /// The path our frames go out on, if the peer has one.
+    pub fn active_path(&self) -> Option<&PeerPath> {
+        self.send.active_path()
     }
 
     /// Update the current address (for roaming support).
     ///
     /// Called when we receive a valid authenticated packet from a new address.
-    /// An address roams only *inside* the transport the peer is bound to. A
-    /// frame that arrives on another transport is still delivered (the demux
-    /// is by index alone) but does not move the peer: an authentic frame
-    /// proves the peer produced it, not that it came from where it claims,
-    /// so an on-path relay rewriting the source (a rogue AP, anyone on a
-    /// shared L2) could otherwise move the whole send side onto another
-    /// transport, undamped and unprobed. Only a deliberate
-    /// [`rebind_transport`](Self::rebind_transport) changes the transport.
+    /// An address roams only *inside* a path: the frame updates the address
+    /// of the path on `transport_id` if the peer has one. A frame that
+    /// arrives on a transport the peer has no path on is still delivered
+    /// (the demux is by index alone) but creates nothing and moves nothing:
+    /// an authentic frame proves the peer produced it, not that it came from
+    /// where it claims, so an on-path relay rewriting the source (a rogue
+    /// AP, anyone on a shared L2) could otherwise move the whole send side
+    /// onto another transport, undamped and unprobed. A peer with no path
+    /// at all is bound by its first authentic frame, as before. Only a
+    /// deliberate [`rebind_transport`](Self::rebind_transport) changes which
+    /// transport the peer sends on.
     ///
-    /// Returns `true` if the address actually changed — callers use this to
-    /// invalidate per-peer `connect(2)`-ed UDP sockets whose 5-tuple just
-    /// went stale. A frame refused for being on another transport returns
-    /// `false`: nothing moved.
+    /// Returns `true` if the *active* path's address changed — callers use
+    /// this to invalidate the `connect(2)`-ed UDP socket whose 5-tuple just
+    /// went stale. A roam on a standby path clears that path's own socket
+    /// here and returns `false`; a frame refused for being on an unknown
+    /// transport returns `false` too: nothing moved.
     pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
-        if let Some(bound) = self.send.transport_id
-            && bound != transport_id
-        {
+        if self.send.paths.is_empty() {
+            return self.rebind_transport(transport_id, addr);
+        }
+        let Some(idx) = self
+            .send
+            .paths
+            .iter()
+            .position(|path| path.transport_id == transport_id)
+        else {
+            return false;
+        };
+        let path = &mut self.send.paths[idx];
+        if path.addr == addr {
             return false;
         }
-        self.rebind_transport(transport_id, addr)
+        path.addr = addr;
+        let on_active = self.send.active == Some(idx);
+        // A standby's connected socket is its own to drop; the active one
+        // is the caller's, on the `true` return.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if !on_active {
+            path.clear_connected_udp();
+        }
+        on_active
     }
 
-    /// Bind the peer to `(transport_id, addr)` outright, whatever it was on.
+    /// Bind the peer's send side to `(transport_id, addr)` outright.
     ///
     /// The deliberate counterpart of [`set_current_addr`](Self::set_current_addr):
-    /// that one is the roaming rule and refuses to cross transports; this one
-    /// is a path change and does not. Returns `true` if either the transport
-    /// or the address changed.
+    /// that one is the roaming rule and never crosses transports; this one
+    /// is a path change. If the peer already has a path on `transport_id`
+    /// it becomes the active one at `addr`; otherwise the active path is
+    /// re-pointed at the new transport, or created if there was none.
+    /// Returns `true` if either the active transport or its address changed.
     pub fn rebind_transport(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
-        let changed = self.send.transport_id != Some(transport_id)
-            || self.send.current_addr.as_ref() != Some(&addr);
-        self.send.transport_id = Some(transport_id);
-        self.send.current_addr = Some(addr);
-        changed
+        let changed =
+            self.transport_id() != Some(transport_id) || self.current_addr() != Some(&addr);
+        if !changed {
+            return false;
+        }
+        if let Some(idx) = self
+            .send
+            .paths
+            .iter()
+            .position(|path| path.transport_id == transport_id)
+        {
+            self.send.paths[idx].addr = addr;
+            self.send.active = Some(idx);
+        } else if let Some(path) = self.send.active_path_mut() {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            path.clear_connected_udp();
+            path.transport_id = transport_id;
+            path.addr = addr;
+        } else {
+            self.send.paths.push(PeerPath::new(transport_id, addr));
+            self.send.active = Some(0);
+        }
+        true
     }
 
     // === Handshake Resend ===
@@ -749,7 +866,8 @@ impl ActivePeer {
     /// Link cost for routing decisions.
     ///
     /// Returns a scalar cost where lower is better (1.0 = ideal).
-    /// Computed as RTT-weighted ETX: `etx * (1.0 + srtt_ms / 100.0)`.
+    /// The [`quality_index`](crate::proto::mmp::quality_index) of the link's
+    /// ETX and smoothed RTT.
     ///
     /// Returns 1.0 (optimistic default) when MMP metrics are not yet
     /// available, matching depth-only parent selection behavior.
@@ -758,7 +876,7 @@ impl ActivePeer {
             Some(mmp) => {
                 let etx = mmp.metrics.etx;
                 match mmp.metrics.srtt_ms() {
-                    Some(srtt_ms) => etx * (1.0 + srtt_ms / 100.0),
+                    Some(srtt_ms) => crate::proto::mmp::quality_index(etx, srtt_ms),
                     None => 1.0,
                 }
             }
