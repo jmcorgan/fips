@@ -553,6 +553,10 @@ impl Drop for EthernetTransport {
 }
 
 impl Transport for EthernetTransport {
+    fn role(&self) -> crate::config::TransportRole {
+        self.config.role()
+    }
+
     fn transport_id(&self) -> TransportId {
         self.transport_id
     }
@@ -1641,6 +1645,7 @@ mod tests {
         // A name no host has. `fips` is not a valid netdev prefix anywhere and
         // the suffix keeps it clear of the test harness's own veth pairs.
         let config = EthernetConfig {
+            role: None,
             interface: "fips-absent-x0".to_string(),
             ethertype: None,
             mtu: None,
@@ -1825,6 +1830,7 @@ mod tests {
         let can_open = PacketSocket::open(loopback, 0x2121).is_ok();
 
         let config = EthernetConfig {
+            role: None,
             interface: loopback.to_string(),
             ethertype: None,
             mtu: None,
@@ -2405,6 +2411,7 @@ mod tests {
         }
 
         let config = EthernetConfig {
+            role: None,
             interface: iface.to_string(),
             ethertype: None,
             mtu: None,

@@ -1718,8 +1718,14 @@ fn test_seam_link_cost_etx_orders_bloom_candidates() {
     seam_set_cost(&mut node, &low, 3.0, 1_000);
     seam_set_cost(&mut node, &high, 1.0, 1_000);
 
-    let cost_low = node.get_peer(&low).unwrap().link_cost();
-    let cost_high = node.get_peer(&high).unwrap().link_cost();
+    let cost_low = node
+        .get_peer(&low)
+        .unwrap()
+        .link_cost(crate::time::mono_ms());
+    let cost_high = node
+        .get_peer(&high)
+        .unwrap()
+        .link_cost(crate::time::mono_ms());
     assert!(
         cost_high < cost_low,
         "fixture: ETX alone must make high cheaper ({cost_high} vs {cost_low})"
@@ -1750,8 +1756,14 @@ fn test_seam_link_cost_srtt_orders_bloom_candidates() {
     seam_set_cost(&mut node, &low, 1.0, 50_000); // 50 ms -> cost 1.5
     seam_set_cost(&mut node, &high, 1.0, 1_000); // 1 ms -> cost 1.01
 
-    let cost_low = node.get_peer(&low).unwrap().link_cost();
-    let cost_high = node.get_peer(&high).unwrap().link_cost();
+    let cost_low = node
+        .get_peer(&low)
+        .unwrap()
+        .link_cost(crate::time::mono_ms());
+    let cost_high = node
+        .get_peer(&high)
+        .unwrap()
+        .link_cost(crate::time::mono_ms());
     assert!(
         cost_high < cost_low,
         "fixture: SRTT alone must make high cheaper ({cost_high} vs {cost_low})"
@@ -1952,7 +1964,10 @@ fn test_seam_routing_view_reads_match_live_peer_state() {
         let addr = view.peer_addr(*peer);
         let live = node.peers.get(&addr).unwrap();
         assert_eq!(view.peer_may_reach(*peer, &dest), live.may_reach(&dest));
-        assert_eq!(view.peer_link_cost(*peer), live.link_cost());
+        assert_eq!(
+            view.peer_link_cost(*peer),
+            live.link_cost(crate::time::mono_ms())
+        );
         assert_eq!(
             view.peer_coords(*peer),
             node.tree_state().peer_coords(&addr)

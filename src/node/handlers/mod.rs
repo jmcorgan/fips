@@ -8,6 +8,7 @@ pub(in crate::node) use native::PendingNative;
 pub(in crate::node) mod netmon;
 // The node's end of the link to the IPv6 adapter.
 pub(in crate::node) mod host_link;
+pub(in crate::node) mod path;
 pub(crate) mod probe;
 // Visible to `node`, which builds the link record store and the transports'
 // idle timeout from `rekey`. `rx_loop` is not declared here; master moved it

@@ -2458,6 +2458,7 @@ async fn test_ipv6_shortfall_is_none_when_the_only_transport_is_an_ethernet_one_
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: None,
     };
     let (tx, _rx) = packet_channel(8);
     let mut eth = EthernetTransport::new(TransportId::new(1), Some("lab".into()), config, tx);

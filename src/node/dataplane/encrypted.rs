@@ -271,6 +271,7 @@ impl Node {
             }
             address_changed =
                 peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
+            peer.note_path_rx(packet.transport_id, now_ms);
             peer.link_stats_mut()
                 .record_recv(packet.data.len(), packet.timestamp_ms);
             first_frame = !peer.heard();
@@ -312,8 +313,14 @@ impl Node {
         }
 
         // Dispatch to link message handler
-        self.dispatch_authentic(&node_addr, slot, link_message, ce_flag)
-            .await;
+        self.dispatch_authentic(
+            &node_addr,
+            slot,
+            link_message,
+            ce_flag,
+            (packet.transport_id, &packet.remote_addr),
+        )
+        .await;
     }
 
     /// Dispatch the link message of an authenticated frame. A ReceiverReport
@@ -327,6 +334,7 @@ impl Node {
         slot: LinkSlot,
         link_message: &[u8],
         ce_flag: bool,
+        arrival: (TransportId, &TransportAddr),
     ) {
         if slot == LinkSlot::Previous
             && link_message.first() == Some(&(LinkMessageType::ReceiverReport as u8))
@@ -337,7 +345,7 @@ impl Node {
             );
             return;
         }
-        self.dispatch_link_message(node_addr, link_message, ce_flag)
+        self.dispatch_link_message(node_addr, link_message, ce_flag, arrival)
             .await;
     }
 
@@ -441,6 +449,7 @@ impl Node {
                 prior = peer.transport_id().zip(peer.current_addr().cloned());
             }
             address_changed = peer.set_current_addr(transport_id, remote_addr.clone());
+            peer.note_path_rx(transport_id, now_ms);
             peer.link_stats_mut()
                 .record_recv(packet_len, packet_timestamp_ms);
             first_frame = !peer.heard();
@@ -483,8 +492,14 @@ impl Node {
             self.relink(node_addr, prior, Some(link)).await;
         }
         let link_message = &fmp_plaintext[INNER_TIMESTAMP_LEN..];
-        self.dispatch_authentic(node_addr, slot, link_message, ce_flag)
-            .await;
+        self.dispatch_authentic(
+            node_addr,
+            slot,
+            link_message,
+            ce_flag,
+            (transport_id, remote_addr),
+        )
+        .await;
     }
 
     /// Process a decrypt-worker bounce (FMP plaintext only — the
@@ -674,10 +689,10 @@ impl Node {
         node_addr: &crate::NodeAddr,
         transport_id: crate::transport::TransportId,
     ) {
-        let on_path = self.peers.get(node_addr).is_some_and(|peer| {
-            peer.transport_id()
-                .is_none_or(|bound| bound == transport_id)
-        });
+        let on_path = self
+            .peers
+            .get(node_addr)
+            .is_some_and(|peer| peer.paths().is_empty() || peer.path_on(transport_id).is_some());
         if !on_path {
             trace!(
                 peer = %self.peer_display_name(node_addr),
