@@ -92,9 +92,8 @@ pub(crate) struct DecryptJob {
     /// with the full ciphertext + tag intact.
     pub packet_data: Vec<u8>,
     /// Lookup key into the worker's owned session HashMap. Mirrors the
-    /// `peers_by_index` key on the Node side: `(transport_id,
-    /// receiver_idx)`.
-    pub cache_key: (TransportId, u32),
+    /// `peers_by_index` key on the Node side: `receiver_idx`.
+    pub cache_key: u32,
     /// Source kernel transport. Forwarded into the bounced
     /// `DecryptFallback` so rx_loop can update per-peer last-seen +
     /// link stats (otherwise the MMP link-dead timer fires at 30s
@@ -180,6 +179,10 @@ pub(crate) struct DecryptFallback {
 /// the worker thread.
 pub(crate) struct DecryptFailureReport {
     pub source_node_addr: NodeAddr,
+    /// Transport the failing frame arrived on. rx_loop charges the failure
+    /// to the peer only if this is a transport the peer is on; the demux is
+    /// by index alone, so the frame may have come from anywhere.
+    pub transport_id: TransportId,
     pub fmp_counter: u64,
     pub fmp_replay_highest: u64,
 }
@@ -203,11 +206,11 @@ pub(crate) enum DecryptWorkerEvent {
 pub(crate) enum WorkerMsg {
     Job(DecryptJob),
     RegisterSession {
-        cache_key: (TransportId, u32),
+        cache_key: u32,
         state: OwnedSessionState,
     },
     UnregisterSession {
-        cache_key: (TransportId, u32),
+        cache_key: u32,
     },
 }
 
@@ -240,7 +243,7 @@ impl DecryptWorkerPool {
     /// Stable hash from session key → worker index. Same hash is used
     /// for session registration and per-packet dispatch so packets and
     /// registration arrive at the same shard.
-    fn worker_idx_for(&self, cache_key: (TransportId, u32)) -> usize {
+    fn worker_idx_for(&self, cache_key: u32) -> usize {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         cache_key.hash(&mut h);
@@ -295,11 +298,7 @@ impl DecryptWorkerPool {
     /// "re-register on a later event" — is documented at the only
     /// call site (`register_decrypt_worker_session`).
     #[must_use = "registration may have failed under queue pressure; caller must gate its own session-registered flag on the returned bool"]
-    pub fn register_session(
-        &self,
-        cache_key: (TransportId, u32),
-        state: OwnedSessionState,
-    ) -> bool {
+    pub fn register_session(&self, cache_key: u32, state: OwnedSessionState) -> bool {
         if self.senders.is_empty() {
             return false;
         }
@@ -325,7 +324,7 @@ impl DecryptWorkerPool {
 
     /// Drop a session from its worker (rekey, peer removed). Fire and
     /// forget — if the worker is gone we don't care.
-    pub fn unregister_session(&self, cache_key: (TransportId, u32)) {
+    pub fn unregister_session(&self, cache_key: u32) {
         if self.senders.is_empty() {
             return;
         }
@@ -339,7 +338,7 @@ fn run_worker(idx: usize, rx: Receiver<WorkerMsg>) {
 
     // The shard's owned session table. Lives entirely on this OS
     // thread — never observed by any other thread.
-    let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
+    let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
 
     while let Ok(msg) = rx.recv() {
         handle_msg(idx, &mut sessions, msg);
@@ -353,11 +352,7 @@ fn run_worker(idx: usize, rx: Receiver<WorkerMsg>) {
     trace!(worker = idx, "FMP+FSP decrypt worker thread exiting");
 }
 
-fn handle_msg(
-    idx: usize,
-    sessions: &mut HashMap<(TransportId, u32), OwnedSessionState>,
-    msg: WorkerMsg,
-) {
+fn handle_msg(idx: usize, sessions: &mut HashMap<u32, OwnedSessionState>, msg: WorkerMsg) {
     match msg {
         WorkerMsg::Job(job) => {
             if let Err(err) = handle_job(sessions, job) {
@@ -380,7 +375,7 @@ fn handle_msg(
 }
 
 fn handle_job(
-    sessions: &mut HashMap<(TransportId, u32), OwnedSessionState>,
+    sessions: &mut HashMap<u32, OwnedSessionState>,
     job: DecryptJob,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let DecryptJob {
@@ -446,6 +441,7 @@ fn handle_job(
         Err(_) => {
             let _ = fallback_tx.send(DecryptWorkerEvent::DecryptFailure(DecryptFailureReport {
                 source_node_addr,
+                transport_id,
                 fmp_counter,
                 fmp_replay_highest,
             }));
@@ -586,8 +582,8 @@ mod tests {
         wire.extend_from_slice(tag.as_ref());
 
         // Owning state held by the worker for this session.
-        let cache_key = (TransportId::new(1), 99u32);
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
+        let cache_key = 99u32;
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
         sessions.insert(
             cache_key,
             OwnedSessionState {
@@ -656,8 +652,8 @@ mod tests {
     /// growing the worker's `sessions` map unboundedly.
     #[test]
     fn handle_msg_unregister_session_removes_entry() {
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
-        let cache_key = (TransportId::new(1), 42u32);
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
+        let cache_key = 42u32;
         sessions.insert(cache_key, make_test_session_state());
         assert!(
             sessions.contains_key(&cache_key),
@@ -679,9 +675,9 @@ mod tests {
     /// have moved between slots before removal.
     #[test]
     fn handle_msg_unregister_session_idempotent_on_unknown_key() {
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
-        let key1 = (TransportId::new(1), 1u32);
-        let key2 = (TransportId::new(1), 2u32);
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
+        let key1 = 1u32;
+        let key2 = 2u32;
 
         sessions.insert(key1, make_test_session_state());
 
@@ -732,8 +728,8 @@ mod tests {
         wire.push(0xAB);
         wire.extend_from_slice(&[0u8; 16]); // invalid AEAD tag
 
-        let cache_key = (TransportId::new(1), 77u32);
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
+        let cache_key = 77u32;
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
         sessions.insert(
             cache_key,
             OwnedSessionState {

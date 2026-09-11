@@ -40,7 +40,7 @@ fn test_decrypt_failure_threshold_removes_peer() {
         .and_then(|p| p.our_index())
         .expect("promoted peer must have our_index");
     assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.get(&our_index.as_u32()),
         Some(&node_addr),
         "peers_by_index must be populated after promote"
     );
@@ -84,9 +84,7 @@ fn test_decrypt_failure_threshold_removes_peer() {
         "peer_count must be zero after eviction"
     );
     assert!(
-        !node
-            .peers_by_index
-            .contains_key(&(transport_id, our_index.as_u32())),
+        !node.peers_by_index.contains_key(&our_index.as_u32()),
         "peers_by_index entry must be cleaned up at threshold"
     );
 }

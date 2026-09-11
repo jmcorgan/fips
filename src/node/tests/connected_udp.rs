@@ -21,7 +21,7 @@ use crate::proto::fmp::wire::{build_encrypted, build_established_header, prepend
 
 /// The address `seed_completed_connection` promotes a peer on, and so
 /// the peer's `current_addr` before anything rotates it.
-const PROMOTED_ADDR: &str = "127.0.0.1:5000";
+pub(super) const PROMOTED_ADDR: &str = "127.0.0.1:5000";
 
 /// The address the peer is made to move to.
 const ROAMED_ADDR: &str = "127.0.0.1:5001";
@@ -37,7 +37,7 @@ const ROAMED_ADDR: &str = "127.0.0.1:5001";
 /// Returns the node, the peer's `NodeAddr`, the session index an
 /// inbound frame must name to be routed to that peer, and the session
 /// to encrypt those frames with.
-fn promoted_peer_with_the_far_side_session(
+pub(super) fn promoted_peer_with_the_far_side_session(
     transport_id: TransportId,
 ) -> (Node, NodeAddr, SessionIndex, NoiseSession) {
     let mut node = make_node();
@@ -99,7 +99,7 @@ fn promoted_peer_with_the_far_side_session(
 /// The link message is a heartbeat (`0x51`), which the dispatcher
 /// handles as a no-op — these tests are about the side effects that run
 /// before the dispatch, so the message must not have any of its own.
-fn far_side_frame(session: &mut NoiseSession, receiver_idx: SessionIndex) -> Vec<u8> {
+pub(super) fn far_side_frame(session: &mut NoiseSession, receiver_idx: SessionIndex) -> Vec<u8> {
     let inner = prepend_inner_header(0, &[0x51]);
     let counter = session.current_send_counter();
     let header = build_established_header(receiver_idx, counter, 0, inner.len() as u16);

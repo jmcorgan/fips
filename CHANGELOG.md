@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An authentic frame arriving on a transport the peer has no path on no
+  longer re-pins the peer's send side to that transport, and a decrypt
+  failure on such a transport is not counted toward force-removal. Both
+  follow from index-only demux: without them an on-path relay rewriting a
+  source address, or twenty garbage frames carrying a sniffed index from
+  any bound transport, could move or tear down a peering.
+
 - Dynamic interface binding for the Ethernet transport. An interface-bound
   transport is now a long-lived object that is *sometimes bound*: the interface
   it names need not exist when the daemon starts, may appear minutes later, and

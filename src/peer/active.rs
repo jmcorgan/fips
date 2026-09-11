@@ -567,10 +567,35 @@ impl ActivePeer {
     /// Update the current address (for roaming support).
     ///
     /// Called when we receive a valid authenticated packet from a new address.
-    /// Returns `true` if `(transport_id, addr)` actually changed — callers
-    /// use this to invalidate per-peer `connect(2)`-ed UDP sockets whose
-    /// 5-tuple just went stale.
+    /// An address roams only *inside* the transport the peer is bound to. A
+    /// frame that arrives on another transport is still delivered (the demux
+    /// is by index alone) but does not move the peer: an authentic frame
+    /// proves the peer produced it, not that it came from where it claims,
+    /// so an on-path relay rewriting the source (a rogue AP, anyone on a
+    /// shared L2) could otherwise move the whole send side onto another
+    /// transport, undamped and unprobed. Only a deliberate
+    /// [`rebind_transport`](Self::rebind_transport) changes the transport.
+    ///
+    /// Returns `true` if the address actually changed — callers use this to
+    /// invalidate per-peer `connect(2)`-ed UDP sockets whose 5-tuple just
+    /// went stale. A frame refused for being on another transport returns
+    /// `false`: nothing moved.
     pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
+        if let Some(bound) = self.send.transport_id
+            && bound != transport_id
+        {
+            return false;
+        }
+        self.rebind_transport(transport_id, addr)
+    }
+
+    /// Bind the peer to `(transport_id, addr)` outright, whatever it was on.
+    ///
+    /// The deliberate counterpart of [`set_current_addr`](Self::set_current_addr):
+    /// that one is the roaming rule and refuses to cross transports; this one
+    /// is a path change and does not. Returns `true` if either the transport
+    /// or the address changed.
+    pub fn rebind_transport(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
         let changed = self.send.transport_id != Some(transport_id)
             || self.send.current_addr.as_ref() != Some(&addr);
         self.send.transport_id = Some(transport_id);

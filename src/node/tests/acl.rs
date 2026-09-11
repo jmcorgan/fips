@@ -127,7 +127,7 @@ async fn outbound_denied_at_msg2(
         .insert((transport_id, remote_addr.clone()), link_id_a);
     node_a
         .pending_outbound
-        .insert((transport_id, our_index_a.as_u32()), link_id_a);
+        .insert(our_index_a.as_u32(), link_id_a);
 
     let mut conn_b = inbound_leg(LinkId::new(2), 1000);
     let responder_epoch = [0x11; 8];

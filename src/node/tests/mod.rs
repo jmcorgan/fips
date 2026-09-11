@@ -21,6 +21,7 @@ mod forwarding;
 mod handshake;
 mod heartbeat;
 mod mmp_chartests;
+mod multi_path;
 mod netmon;
 mod probe;
 mod routing;

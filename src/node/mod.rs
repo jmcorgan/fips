@@ -622,12 +622,14 @@ pub struct Node {
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
-    /// O(1) lookup: (transport_id, our_index) → NodeAddr.
+    /// O(1) lookup: our_index → NodeAddr. Keyed by index alone: indices come
+    /// from one global allocator, so a frame carrying a known `receiver_idx`
+    /// resolves to its peer no matter which transport delivered it.
     /// This maps our session index to the peer that uses it.
-    peers_by_index: HashMap<(TransportId, u32), NodeAddr>,
+    peers_by_index: HashMap<u32, NodeAddr>,
     /// Pending outbound handshakes by our sender_idx.
     /// Tracks which LinkId corresponds to which session index.
-    pending_outbound: HashMap<(TransportId, u32), LinkId>,
+    pending_outbound: HashMap<u32, LinkId>,
     /// When each peer identity's last ACCEPTED epoch change tore down its
     /// peering. Keyed on identity rather than address, and held here rather
     /// than on `ActivePeer`, because the teardown being dampened destroys
@@ -722,7 +724,7 @@ pub struct Node {
     /// fall through to the legacy synchronous decrypt (test mode +
     /// not-yet-registered first packets).
     #[cfg(unix)]
-    pub(crate) decrypt_registered_sessions: std::collections::HashSet<(TransportId, u32)>,
+    pub(crate) decrypt_registered_sessions: std::collections::HashSet<u32>,
 
     /// Decrypt worker fallback channel: workers bounce
     /// authenticated-FMP-plaintext back here for the rx_loop to

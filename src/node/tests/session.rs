@@ -1707,7 +1707,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
         !nodes[1]
             .node
             .peers_by_index
-            .contains_key(&(nodes[1].transport_id, pending_idx.as_u32())),
+            .contains_key(&pending_idx.as_u32()),
         "the retired pending index must be unregistered"
     );
     assert!(

@@ -266,10 +266,9 @@ impl Node {
                 debug_assert!(
                     peer.transport_id().is_some()
                         && peer.our_index().is_some()
-                        && self.peers_by_index.contains_key(&(
-                            peer.transport_id().unwrap(),
-                            peer.our_index().unwrap().as_u32()
-                        )),
+                        && self
+                            .peers_by_index
+                            .contains_key(&peer.our_index().unwrap().as_u32()),
                     "peers_by_index should contain pre-registered new index after cutover"
                 );
                 debug!(
@@ -284,7 +283,7 @@ impl Node {
             false
         };
         // Re-register the new session with the decrypt worker — the cache_key
-        // (transport_id, our_index) just changed, so the old worker entry is
+        // (our_index) just changed, so the old worker entry is
         // stale and every packet on the new session would miss the lookup.
         #[cfg(unix)]
         if did_cutover {
@@ -302,11 +301,9 @@ impl Node {
         let retired = self
             .peers
             .get_mut(node_addr)
-            .and_then(|peer| peer.retire_pending().map(|idx| (idx, peer.transport_id())));
-        if let Some((idx, transport_id)) = retired {
-            if let Some(tid) = transport_id {
-                self.peers_by_index.remove(&(tid, idx.as_u32()));
-            }
+            .and_then(|peer| peer.retire_pending());
+        if let Some(idx) = retired {
+            self.peers_by_index.remove(&idx.as_u32());
             let _ = self.index_allocator.free(idx);
             debug!(
                 peer = %self.peer_display_name(node_addr),
@@ -320,20 +317,18 @@ impl Node {
     /// the (should-be-impossible) missing-machine case. Byte-identical to the old
     /// inline `ConnAction::Drain` arm and to the executor's `CompleteDrain` arm.
     fn drain_peer_inline(&mut self, node_addr: &NodeAddr) {
-        // Extract the old index and transport_id under the peer borrow, then drop
-        // the borrow so the cache_key cleanup below can take &mut self for
+        // Extract the old index under the peer borrow, then drop the borrow so
+        // the cache_key cleanup below can take &mut self for
         // unregister_decrypt_worker_session.
         let drained = self
             .peers
             .get_mut(node_addr)
-            .and_then(|peer| peer.complete_drain().map(|idx| (idx, peer.transport_id())));
-        if let Some((old_our_index, transport_id)) = drained {
-            if let Some(tid) = transport_id {
-                let cache_key = (tid, old_our_index.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-            }
+            .and_then(|peer| peer.complete_drain());
+        if let Some(old_our_index) = drained {
+            let cache_key = old_our_index.as_u32();
+            self.peers_by_index.remove(&cache_key);
+            #[cfg(unix)]
+            self.unregister_decrypt_worker_session(cache_key);
             let _ = self.index_allocator.free(old_our_index);
             trace!(
                 peer = %self.peer_display_name(node_addr),
@@ -475,8 +470,7 @@ impl Node {
         }
 
         // Register in pending_outbound for msg2 dispatch (maps to existing link)
-        self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+        self.pending_outbound.insert(our_index.as_u32(), link_id);
     }
 
     /// Resend pending rekey msg1s and abandon timed-out rekeys.
@@ -514,26 +508,13 @@ impl Node {
                     // only from the msg1-resend-budget classification, so no rekey
                     // msg2 ever arrived and nothing was inserted.
                     //
-                    // Known exposure, kept for parity rather than closed here:
-                    // `transport_id()` is RE-READ, while the `pending_outbound`
-                    // entry was keyed by whatever it was when rekey msg1 went out.
-                    // A roam in between (`set_current_addr` overwrites
-                    // `send.transport_id`) makes the removal miss, so the index is
-                    // freed with a stale entry still pointing at the peer's live
-                    // link. Walked to its end: a later msg2 naming that index on
-                    // the old transport resolves the stale link, finds the
-                    // promoted peer's machine leg-less, finds no peer with a
-                    // matching `rekey_our_index` (this arm cleared it), and takes
-                    // the "not a rekey" arm, which removes the stale entry and
-                    // records a reject. No teardown, no wrong-peer effect.
-                    // Removing by index VALUE would close it outright.
+                    // Both maps are keyed by index value alone, so a roam between
+                    // rekey msg1 and this abandon cannot make the removal miss.
                     if let Some(peer) = self.peers.get_mut(&node_addr)
                         && let Some(idx) = peer.abandon_rekey()
                     {
-                        if let Some(tid) = peer.transport_id() {
-                            self.peers_by_index.remove(&(tid, idx.as_u32()));
-                            self.pending_outbound.remove(&(tid, idx.as_u32()));
-                        }
+                        self.peers_by_index.remove(&idx.as_u32());
+                        self.pending_outbound.remove(&idx.as_u32());
                         let _ = self.index_allocator.free(idx);
                     }
                     debug!(

@@ -187,7 +187,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
     initiator
         .node
         .pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+        .insert(our_index.as_u32(), link_id);
 
     let transport = initiator.node.transports.get(&transport_id).unwrap();
     transport

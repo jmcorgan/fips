@@ -89,7 +89,7 @@ async fn test_two_node_handshake_udp() {
     node_a.links.insert(link_id_a, link_a);
     node_a
         .pending_outbound
-        .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+        .insert(our_index_a.as_u32(), link_id_a);
 
     // Send msg1 from A to B over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -124,9 +124,7 @@ async fn test_two_node_handshake_udp() {
     );
     let our_index_b = peer_a_on_b.our_index().expect("B should have our_index");
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id_b, our_index_b.as_u32())),
+        node_b.peers_by_index.contains_key(&our_index_b.as_u32()),
         "Node B peers_by_index should be populated"
     );
 
@@ -158,9 +156,7 @@ async fn test_two_node_handshake_udp() {
         "Peer B on A should have our_index matching what we allocated"
     );
     assert!(
-        node_a
-            .peers_by_index
-            .contains_key(&(transport_id_a, our_index_a.as_u32())),
+        node_a.peers_by_index.contains_key(&our_index_a.as_u32()),
         "Node A peers_by_index should be populated"
     );
 
@@ -319,7 +315,7 @@ async fn test_run_rx_loop_handshake() {
     node_a.links.insert(link_id_a, link_a);
     node_a
         .pending_outbound
-        .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
+        .insert(our_index_a.as_u32(), link_id_a);
 
     // Send msg1 from A to B over real UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -368,9 +364,7 @@ async fn test_run_rx_loop_handshake() {
         "B should have their_index"
     );
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id_b, our_index_b.as_u32())),
+        node_b.peers_by_index.contains_key(&our_index_b.as_u32()),
         "Node B peers_by_index should be populated"
     );
 
@@ -411,9 +405,7 @@ async fn test_run_rx_loop_handshake() {
         "A should know B's index"
     );
     assert!(
-        node_a
-            .peers_by_index
-            .contains_key(&(transport_id_a, our_index_a.as_u32())),
+        node_a.peers_by_index.contains_key(&our_index_a.as_u32()),
         "Node A peers_by_index should be populated"
     );
 
@@ -517,7 +509,7 @@ async fn test_cross_connection_both_initiate() {
         .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
     node_a
         .pending_outbound
-        .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
+        .insert(our_index_a.as_u32(), link_id_a_out);
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
@@ -554,7 +546,7 @@ async fn test_cross_connection_both_initiate() {
         .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
     node_b
         .pending_outbound
-        .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
+        .insert(our_index_b.as_u32(), link_id_b_out);
 
     // Both send msg1 over UDP
     let transport = node_a.transports.get(&transport_id_a).unwrap();
@@ -705,16 +697,12 @@ async fn test_stale_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+    node.pending_outbound.insert(our_index.as_u32(), link_id);
 
     // Verify state before timeout check
     assert_eq!(node.connection_count(), 1);
     assert_eq!(node.link_count(), 1);
-    assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, our_index.as_u32()))
-    );
+    assert!(node.pending_outbound.contains_key(&our_index.as_u32()));
     assert_eq!(node.index_allocator.count(), 1);
 
     // Connection was created at time 1000ms. check_timeouts uses SystemTime::now(),
@@ -729,9 +717,7 @@ async fn test_stale_connection_cleanup() {
     );
     assert_eq!(node.link_count(), 0, "Stale link should be removed");
     assert!(
-        !node
-            .pending_outbound
-            .contains_key(&(transport_id, our_index.as_u32())),
+        !node.pending_outbound.contains_key(&our_index.as_u32()),
         "pending_outbound should be cleaned up"
     );
     assert_eq!(
@@ -788,8 +774,7 @@ async fn test_failed_connection_cleanup() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+    node.pending_outbound.insert(our_index.as_u32(), link_id);
 
     // Simulate a stored-handshake send failure through the control machine —
     // the failure carrier the stale-connection sweep now reads (the leg no
@@ -896,8 +881,7 @@ async fn test_resend_scheduling() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+    node.pending_outbound.insert(our_index.as_u32(), link_id);
 
     // The msg1-resend counter and its due timer live on the per-peer machine,
     // which also carries the pending connection. Dial it to `SentMsg1`
@@ -977,8 +961,7 @@ async fn test_handshake_timeout_drive() {
     node.links.insert(link_id, link);
     node.addr_to_link
         .insert((transport_id, remote_addr.clone()), link_id);
-    node.pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+    node.pending_outbound.insert(our_index.as_u32(), link_id);
 
     // Machine in SentMsg1, carrying the pending connection, with a
     // HandshakeTimeout timer armed at dial + 30s.
@@ -1275,7 +1258,7 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
 /// Build a promoted peer and return the node, the peer's address, and the
 /// session index inbound frames must name to reach it.
 ///
-/// `handle_encrypted_frame` looks a frame up by `(transport_id, receiver_idx)`
+/// `handle_encrypted_frame` looks a frame up by `receiver_idx`
 /// in `peers_by_index`, so a frame carrying this index reaches the decrypt and
 /// bumps the peer's failure counter. That counter is how the tests below tell
 /// "the frame reached its handler" apart from "the frame was dropped before

@@ -279,7 +279,7 @@ async fn a_failing_peer_is_retried_after_the_gap_and_not_before() {
         .peers
         .get_mut(&addr_1)
         .expect("peer 1 is established")
-        .set_current_addr(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
+        .rebind_transport(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
 
     // Long overdue and healthy-looking, so the sweep will try.
     age_heartbeat(&mut nodes[0].node, &addr_1, Duration::from_secs(10));

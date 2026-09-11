@@ -667,8 +667,7 @@ impl Node {
         let first_resend_at_ms = current_time_ms + resend_interval;
 
         // Track in pending_outbound for msg2 dispatch
-        self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+        self.pending_outbound.insert(our_index.as_u32(), link_id);
 
         let machine = self
             .peer_machines

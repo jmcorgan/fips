@@ -593,7 +593,7 @@ fn test_node_promote_connection() {
     // Verify peers_by_index is populated
     let our_index = peer.our_index().unwrap();
     assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.get(&our_index.as_u32()),
         Some(&node_addr)
     );
 }
@@ -620,10 +620,7 @@ fn test_node_cross_connection_resolution() {
     // Verify first promotion populated peers_by_index
     let peer = node.get_peer(&node_addr).unwrap();
     let our_idx = peer.our_index().unwrap();
-    assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_idx.as_u32())),
-        Some(&node_addr)
-    );
+    assert_eq!(node.peers_by_index.get(&our_idx.as_u32()), Some(&node_addr));
 
     // Still only one peer
     assert_eq!(node.peer_count(), 1);
@@ -729,23 +726,20 @@ fn test_node_index_allocator_initialized() {
 #[test]
 fn test_node_pending_outbound_tracking() {
     let mut node = make_node();
-    let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
 
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in pending_outbound
-    node.pending_outbound
-        .insert((transport_id, index.as_u32()), link_id);
+    node.pending_outbound.insert(index.as_u32(), link_id);
 
     // Verify we can look it up
-    let found = node.pending_outbound.get(&(transport_id, index.as_u32()));
+    let found = node.pending_outbound.get(&index.as_u32());
     assert_eq!(found, Some(&link_id));
 
     // Clean up
-    node.pending_outbound
-        .remove(&(transport_id, index.as_u32()));
+    node.pending_outbound.remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert_eq!(node.index_allocator.count(), 0);
@@ -755,22 +749,20 @@ fn test_node_pending_outbound_tracking() {
 #[test]
 fn test_node_peers_by_index_tracking() {
     let mut node = make_node();
-    let transport_id = TransportId::new(1);
     let node_addr = make_node_addr(42);
 
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in peers_by_index
-    node.peers_by_index
-        .insert((transport_id, index.as_u32()), node_addr);
+    node.peers_by_index.insert(index.as_u32(), node_addr);
 
     // Verify lookup
-    let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
+    let found = node.peers_by_index.get(&index.as_u32());
     assert_eq!(found, Some(&node_addr));
 
     // Clean up
-    node.peers_by_index.remove(&(transport_id, index.as_u32()));
+    node.peers_by_index.remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert!(node.peers_by_index.is_empty());
@@ -878,7 +870,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     node.addr_to_link
         .insert((transport_id, pending_addr.clone()), pending_link_id);
     node.pending_outbound
-        .insert((transport_id, pending_index.as_u32()), pending_link_id);
+        .insert(pending_index.as_u32(), pending_link_id);
 
     // Verify pending state
     assert_eq!(node.connection_count(), 1);
@@ -945,8 +937,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     );
     assert_eq!(node.peer_count(), 1, "Promoted peer should exist");
     assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, pending_index.as_u32())),
+        node.pending_outbound.contains_key(&pending_index.as_u32()),
         "pending_outbound entry should still exist (awaiting msg2)"
     );
     assert_eq!(
