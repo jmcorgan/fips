@@ -14,6 +14,7 @@ make apk        # OpenWrt .apk (apk-tools, mandatory on OpenWrt 25+)
 make aur        # Arch Linux AUR package (fips-git, local build + namcap)
 make pkg        # macOS .pkg installer
 make freebsd    # FreeBSD .pkg package (on FreeBSD; use gmake)
+make pfsense    # pfSense .pkg package (on FreeBSD; use gmake)
 make zip        # Windows .zip package
 make all        # deb + tarball (default)
 ```
@@ -70,9 +71,11 @@ runtime dependency and is not needed to build.
 ```text
 packaging/
   aur/            Arch Linux AUR packaging (PKGBUILD, supporting files)
-  common/         Shared assets (default config, hosts file)
+  common/         Shared assets (default config, hosts file) and pkg-lib.sh,
+                  the helpers the FreeBSD and pfSense builders share
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
   freebsd/        FreeBSD .pkg packaging via pkg-create(8)
+  pfsense/        pfSense .pkg packaging (FreeBSD-based, but not the same)
   macos/          macOS .pkg installer via pkgbuild
   nixos/          NixOS flake module (services.fips.*)
   systemd/        Generic Linux systemd tarball packaging
@@ -211,6 +214,58 @@ service fips_dns start
 
 See [freebsd/README.md](freebsd/README.md) for host resolver setup and
 field-tested caveats.
+
+### pfSense (`.pkg`)
+
+pfSense is FreeBSD underneath, but the FreeBSD package does not work
+there, and fails silently in three ways: pfSense boots packages by
+globbing `/usr/local/etc/rc.d/*.sh` (a suffixless rc script is never
+run), it generates `unbound.conf` from `config.xml` and reads no
+`conf.d` directory (the DNS drop-in is never read), and it writes
+`do-ip6: no` unless "Allow IPv6" is enabled (so a responder on `[::1]`
+is unreachable). This package ships `fips.sh`, integrates DNS through
+the DNS Resolver custom options in `config.xml`, and binds the
+responder on `127.0.0.1`.
+
+Unlike the other packages, this one **links statically by default**
+(`--dynamic` opts out). pfSense runs a FreeBSD base you cannot
+obtain — Netgate builds Plus from its own 16.0-CURRENT snapshot — so
+a dynamically linked binary can reference a libc symbol the appliance
+does not export, install cleanly, and then refuse to start. A static
+package declares no shared libraries at all.
+
+**On aarch64 this is refused, not applied.** A statically linked
+aarch64 FreeBSD binary faults where `posix_spawn` should be, so the
+daemon dies the first time it shells out. ARM builds must pass
+`--dynamic`, and then `ldd` on the appliance is the check that the
+base drift is not real.
+
+The build host's architecture and FreeBSD major must still match the
+target's: pfSense CE 2.8.1 is FreeBSD 15 amd64; CE 2.9.0 and Plus 26.x are
+FreeBSD 16 (amd64, plus aarch64 for Plus on ARM appliances), and `pkg` refuses a
+mismatched ABI. No aarch64 package is published: rustup ships no
+toolchain for aarch64 FreeBSD, so such a build cannot honour the
+`rust-toolchain.toml` pin. It is build-it-yourself.
+
+```sh
+# Build (on FreeBSD; this Makefile needs GNU make — pkg install gmake)
+gmake pfsense
+# or directly, no gmake needed:
+./packaging/pfsense/build-pkg.sh
+
+# Validate the package before shipping it
+./testing/check-pfsense-pkg.sh deploy/fips-<version>-pfsense-ce2.8-amd64.pkg
+
+# Install (on the firewall, as root)
+pkg add ./fips-<version>-pfsense-ce2.8-amd64.pkg
+/usr/local/etc/rc.d/fips.sh start
+/usr/local/libexec/fips/fips-dns-setup   # edits config.xml; run deliberately
+```
+
+Not a Netgate-supported package, and a pfSense firmware upgrade removes
+it. See [pfsense/README.md](pfsense/README.md) for the "Allow IPv6"
+prerequisite the mesh depends on, firewall-rule notes, and removal
+behaviour.
 
 ### Windows (`.zip`)
 

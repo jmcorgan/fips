@@ -124,7 +124,8 @@ default `/etc/fips/fips.yaml` you can edit before starting. The package
 enables `fips` and `fips-dns` but starts neither, which is why the
 second command is there.
 
-For macOS, Windows, FreeBSD, OpenWrt, the systemd tarball or a Nix
+For macOS, Windows, FreeBSD (including a pfSense build under
+`packaging/pfsense/`), OpenWrt, the systemd tarball or a Nix
 flake, see [docs/getting-started.md](docs/getting-started.md)
 for the full multi-platform installation guide.
 

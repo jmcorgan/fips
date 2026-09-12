@@ -1,0 +1,19 @@
+dns:
+  enabled: true
+  # Bound to IPv4 loopback rather than the ::1 default. pfSense
+  # generates unbound.conf with `do-ip6: no` unless System > Advanced >
+  # Networking has "Allow IPv6" set, and in that state unbound cannot
+  # reach a responder on [::1] at all: every .fips query fails with
+  # nothing in any log naming the cause. IPv4 loopback works either way
+  # (unbound's do-ip4 is hardcoded yes), and the answers are AAAA
+  # records regardless of the transport that carried the query.
+  #
+  # A firewall with "Allow IPv6" off is a separate matter: pfSense then
+  # emits `block ... quick inet6 all`, which no rule overrides, so the
+  # fd00::/8 mesh cannot pass traffic. That setting is ON by default, so
+  # most installs are unaffected; the IPv4 bind here is robustness against
+  # the do-ip6 case above, not a workaround for a failure a default
+  # install would hit. See packaging/pfsense/README.md.
+  bind_addr: "127.0.0.1"
+  port: 5354
+

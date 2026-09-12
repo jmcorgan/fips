@@ -1,0 +1,15 @@
+# newsyslog(8) rotation for the FIPS daemon log. Installed by the package
+# under /usr/local/etc/fips and copied by fips.sh into
+# /var/etc/newsyslog.conf.d/fips.conf on every start, because pfSense
+# regenerates /etc/newsyslog.conf itself and, on a box using RAM disks,
+# rebuilds /var/etc at boot — a file put there by pkg would not survive.
+#
+# 5 generations, rotate at 1000 KB, compressed (J = bzip2), C = create the
+# file if missing. The pid file is the daemon(8) supervisor's, so after
+# rotation newsyslog sends it SIGHUP; daemon(8) is started with -H, which
+# makes it close and reopen its -o output file on SIGHUP. Without that the
+# daemon would keep writing to the rotated inode, and once the compressed
+# generation is unlinked it would write into a deleted file — on a RAM-disk
+# /var, space never reclaimed and /var/log/fips.log left empty.
+# logfilename          [owner:group]  mode count size when  flags [/pid_file]            [sig_num]
+/var/log/fips.log                     644  5     1000 *     JC   /var/run/fips/daemon.pid

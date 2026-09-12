@@ -227,6 +227,99 @@ jobs:
           echo "Build Summary for freebsd/x86_64:"
           echo "  Package: ${{ steps.freebsd-assets.outputs.pkg }}"
 
+  pfsense:
+    name: Build and check the pfSense package (x86_64)
+    # A job of its own, and deliberately NOT a dependency of `release`. A
+    # pfSense-only failure — a new key in the common dns: block, a
+    # dependency that stops linking statically, a checker regression — reds
+    # this check and nothing else; it can never hide behind the FreeBSD
+    # job's result, and it cannot block the FreeBSD release asset. The
+    # pfSense package is therefore never a release asset. It is published
+    # here as a workflow artifact (30-day retention) for anyone to test,
+    # until someone has installed it on a real pfSense box; see
+    # packaging/pfsense/README.md.
+    #
+    # This VM is FreeBSD 15.1, so the package it produces is FreeBSD:15:amd64
+    # (pfSense CE 2.8.1). CE 2.9 and Plus 26.x are FreeBSD 16 and need a
+    # FreeBSD 16 host this workflow does not have. No aarch64 package is built
+    # here or published anywhere: rustup ships no toolchain for
+    # aarch64-unknown-freebsd, so such a build cannot honour the
+    # rust-toolchain.toml pin every published artifact is built with. ARM is
+    # build-it-yourself, per the README.
+    runs-on: ubuntu-latest
+    needs: determine-versioning
+    # Its own full release build in an emulated FreeBSD VM, like the build
+    # job; the same generous bound applies.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build and check the pfSense package in a FreeBSD VM
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1
+        env:
+          FREEBSD_PACKAGE_VERSION: ${{ needs.determine-versioning.outputs.freebsd_package_version }}
+        with:
+          release: "15.1"
+          usesh: true
+          sync: rsync
+          copyback: true
+          mem: 6144
+          envs: "SOURCE_DATE_EPOCH CARGO_TERM_COLOR FREEBSD_PACKAGE_VERSION"
+          prepare: |
+            # curl for rustup; bash and php for testing/check-pfsense-pkg.sh
+            # (the checker is bash, and it runs php -l plus a fips_strip_block
+            # unit test on the config.xml helper).
+            pkg install -y curl bash php85
+          run: |
+            set -e
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs               | sh -s -- -y --default-toolchain none --profile minimal
+            . "$HOME/.cargo/env"
+
+            # Builds the release binaries (static by default) and packages
+            # them; on a FreeBSD 15.1 VM this yields the FreeBSD:15:amd64
+            # package for pfSense CE 2.8.1.
+            packaging/pfsense/build-pkg.sh --version "$FREEBSD_PACKAGE_VERSION"
+
+            PKG=$(ls deploy/fips-*-pfsense-*.pkg)
+            testing/check-pfsense-pkg.sh "$PKG"
+            php -l packaging/pfsense/fips-unbound-custom.php
+
+            ( cd deploy && sha256 -q "$(basename "$PKG")" \
+                | { read -r h; printf '%s  %s\n' "$h" "$(basename "$PKG")"; } \
+                > "$(basename "$PKG").sha256" )
+
+            rm -rf target
+
+      - name: Resolve pfSense asset path
+        id: pfsense-asset
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          set -euo pipefail
+          VER="${{ needs.determine-versioning.outputs.freebsd_pkg_file_version }}"
+          PKG=$(ls deploy/fips-${VER}-pfsense-*.pkg)
+          if [[ ! -f "$PKG" ]]; then
+            echo "No pfSense package was produced" >&2
+            ls -la deploy >&2 || true
+            exit 1
+          fi
+          echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload pfSense artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fips_${{ needs.determine-versioning.outputs.freebsd_package_version }}_x86_64_pfsense
+          path: |
+            ${{ steps.pfsense-asset.outputs.pkg }}
+            ${{ steps.pfsense-asset.outputs.pkg }}.sha256
+          retention-days: 30
+
   release:
     name: Publish FreeBSD assets to GitHub Release
     runs-on: ubuntu-latest
@@ -239,6 +332,11 @@ jobs:
       - name: Download FreeBSD artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          # Only the FreeBSD artifact. Without a pattern this action downloads
+          # every artifact in the run — including the pfSense package from the
+          # `pfsense` job, which is a workflow artifact by design and must never
+          # reach a release. `needs` only orders jobs; it does not scope this.
+          pattern: fips_*_x86_64_freebsd
           path: dist
           merge-multiple: true
 
@@ -247,6 +345,15 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
+
+          # The pfSense package is never a release asset (see the `pfsense`
+          # job). The download step is scoped to the FreeBSD artifact; this
+          # keeps the rule if that artifact is ever renamed or a new one added.
+          if compgen -G '*-pfsense-*' >/dev/null; then
+            echo "FAIL: a pfSense package reached the release stage; it must stay a workflow artifact:" >&2
+            ls -la ./*-pfsense-* >&2 || true
+            exit 1
+          fi
 
           pkgs=$(find . -maxdepth 1 -type f -name '*.pkg' | LC_ALL=C sort)
           if [[ -z "$pkgs" ]]; then

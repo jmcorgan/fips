@@ -1,0 +1,17 @@
+FIPS (Free Internetworking Peering System) is a self-organizing
+encrypted mesh network built on Nostr identities, operating over
+arbitrary transports (UDP, TCP, Tor) with no central infrastructure.
+
+A TUN interface maps each remote peer to an fd00::/8 address,
+so unmodified IPv6 applications work over the mesh, with a built-in
+DNS responder for <npub>.fips names. Peer discovery and NAT traversal
+are Nostr-mediated; traffic is encrypted hop-by-hop (Noise IK) and
+end-to-end (Noise XK) with periodic rekey.
+
+This is the pfSense build: it ships the fips daemon, the fipsctl
+control CLI, the fipstop live-status TUI, a boot script pfSense
+actually runs (/usr/local/etc/rc.d/fips.sh), and helpers that wire the
+.fips zone into the DNS Resolver through config.xml. It is not a
+Netgate-supported package and has no GUI. A firmware upgrade keeps it
+(it is a plain pkg, not a pfSense-pkg-*); after a major base change,
+reinstall the package built for the new base.

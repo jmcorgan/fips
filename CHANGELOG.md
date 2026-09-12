@@ -245,6 +245,31 @@ with v0.5.x or earlier peers.
   a typo'd interface name were previously the same flat
   `StartFailed(String)`; nothing downstream could branch on absence.
 
+#### Packaging
+
+- A pfSense package (`packaging/pfsense/`, `gmake pfsense`). pfSense is
+  FreeBSD underneath, but the FreeBSD package fails there in three
+  silent ways: pfSense runs only `/usr/local/etc/rc.d/*.sh` at boot and
+  re-runs them on WAN IP changes, so the suffixless rc script never
+  starts; `unbound.conf` is generated from `config.xml` with no `conf.d`,
+  so the DNS drop-in is never read; and — on a firewall where the
+  default-on "Allow IPv6" has been turned off — the responder's `::1`
+  default is unreachable when unbound is then generated with
+  `do-ip6: no`, so it binds `127.0.0.1` for robustness. The package
+  ships `fips.sh`, wires the `fips.` zone into the DNS Resolver through
+  `config.xml`, and binds the responder on `127.0.0.1`. It links
+  statically by default, since pfSense runs a FreeBSD base that cannot
+  be obtained to link against; aarch64 is refused, where static binaries
+  fault at `posix_spawn`. Mechanics shared with the FreeBSD builder live
+  in `packaging/common/pkg-lib.sh`, which both source; the FreeBSD
+  package is byte-identical before and after. The pfSense package is
+  built and checked in its own CI job and published as a workflow
+  artifact, not attached to a release, until it has been installed on a
+  real pfSense box; CI produces the CE 2.8.1 (`FreeBSD:15:amd64`)
+  package, while CE 2.9 and Plus 26.x on Intel need a FreeBSD 16 build
+  host the CI does not have, and ARM stays build-it-yourself because
+  rustup ships no toolchain for it. See `packaging/pfsense/README.md`.
+
 ### Changed
 
 - The lockfile moves `chacha20` from 0.10.1 to 0.10.2, because 0.10.1 is yanked.

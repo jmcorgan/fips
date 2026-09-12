@@ -1,0 +1,29 @@
+#!/bin/sh
+# fips-dns-teardown - remove the .fips DNS routing added by fips-dns-setup.
+#
+# Deliberately separate from package removal: the block lives in
+# config.xml, which outlives the package (see fips-dns-setup for why
+# that is the point), so leaving it behind on a `pkg delete` would leave
+# the firewall forwarding fips. to a port nothing listens on. The
+# package's pre-deinstall calls this on removal; run it by hand to undo
+# the DNS integration while keeping the daemon.
+
+set -eu
+
+PHP_HELPER="/usr/local/libexec/fips/fips-unbound-custom.php"
+
+log() { echo "fips-dns: $*"; }
+
+if [ ! -f /etc/inc/config.inc ] || [ ! -x /usr/local/bin/php ]; then
+    log "not a pfSense system (no /etc/inc/config.inc or php); nothing to remove"
+    exit 0
+fi
+
+if [ ! -f "$PHP_HELPER" ]; then
+    log "WARNING: ${PHP_HELPER} is missing, so the .fips block cannot be removed"
+    log "WARNING: automatically. Delete the block between the FIPS markers under"
+    log "WARNING: Services > DNS Resolver > Custom options and save."
+    exit 0
+fi
+
+/usr/local/bin/php -f "$PHP_HELPER" -- remove

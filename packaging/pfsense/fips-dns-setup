@@ -1,0 +1,223 @@
+#!/bin/sh
+# fips-dns-setup - route .fips DNS queries to the FIPS daemon on pfSense.
+#
+# pfSense generates /var/unbound/unbound.conf from config.xml on every
+# apply, and unbound.inc emits no conf.d include and no generic drop-in
+# mechanism - the include: lines it writes name specific generated files
+# (access_lists.conf, host_entries.conf, domainoverrides.conf, ...).
+# So the stock FreeBSD fips-dns-setup, which drops a file into
+# /var/unbound/conf.d/, configures nothing here: the file is never read
+# and the next GUI apply does not so much as mention it.
+#
+# The writable surface pfSense does offer is the DNS Resolver "Custom
+# options" box, which unbound.inc splices into the generated config
+# verbatim. It is stored base64-encoded in config.xml, which is the part
+# that makes it the right home: config.xml is what survives a reboot, a
+# firmware upgrade and a config restore, whereas everything this package
+# installs under /usr/local does not. So the .fips zone keeps resolving
+# across an upgrade that removes the daemon, which is a loud failure
+# (SERVFAIL on .fips) rather than a quiet one.
+#
+# This edits the firewall's live configuration, so it is deliberately
+# NOT run from the package's post-install: installing a package should
+# not rewrite config.xml behind the operator's back. Run it by hand.
+# write_config() records a config-history entry, so the edit is
+# revertable from Diagnostics > Backup & Restore > Config History.
+#
+# Usage: fips-dns-setup [--config <fips.yaml>]
+
+set -eu
+
+FIPS_CONFIG="/usr/local/etc/fips/fips.yaml"
+PHP_HELPER="/usr/local/libexec/fips/fips-unbound-custom.php"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config) FIPS_CONFIG="${2:?--config requires an argument}"; shift ;;
+        *) echo "usage: $0 [--config <fips.yaml>]" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+log() { echo "fips-dns: $*"; }
+
+[ -f /etc/inc/config.inc ] || {
+    log "ERROR: /etc/inc/config.inc not found - this is not a pfSense system."
+    log "ERROR: On stock FreeBSD use the FreeBSD package's fips-dns-setup."
+    exit 1
+}
+[ -f "$PHP_HELPER" ] || { log "ERROR: ${PHP_HELPER} is missing"; exit 1; }
+[ -f "$FIPS_CONFIG" ] || { log "ERROR: ${FIPS_CONFIG} is missing"; exit 1; }
+
+# Read dns.bind_addr and dns.port out of fips.yaml.
+#
+# Scoped to the top-level `dns:` block on purpose: `bind_addr` also
+# appears under every transport, and a plain grep would happily hand
+# back the UDP transport's 0.0.0.0:2121 and point unbound at it.
+yaml_dns_field() {
+    awk -v field="$1" '
+        # A line starting in column 1 with a key opens a new top-level
+        # block; anything indented belongs to the block above it.
+        /^[^[:space:]#]/ { section = $1; sub(/:.*/, "", section); next }
+        section != "dns" { next }
+        {
+            line = $0
+            sub(/[[:space:]]*#.*$/, "", line)          # strip trailing comment
+            if (line !~ "^[[:space:]]+" field ":") next
+            sub("^[[:space:]]+" field ":[[:space:]]*", "", line)
+            gsub(/^["'"'"']|["'"'"']$/, "", line)      # strip quotes
+            if (line != "") { print line; exit }
+        }
+    ' "$FIPS_CONFIG"
+}
+
+BIND_ADDR="$(yaml_dns_field bind_addr)"
+DNS_PORT="$(yaml_dns_field port)"
+
+# Defaults match src/upper/config.rs (DEFAULT_DNS_BIND_ADDR, DEFAULT_DNS_PORT).
+[ -n "$BIND_ADDR" ] || BIND_ADDR="::1"
+[ -n "$DNS_PORT" ] || DNS_PORT="5354"
+
+# forward-addr needs a specific address to send to. A wildcard bind is
+# valid for the daemon (it listens everywhere) but names nothing unbound
+# could query, so refuse it here rather than write a forward-zone that
+# can never answer.
+case "$BIND_ADDR" in
+    0.0.0.0 | :: | '[::]')
+        log "ERROR: dns.bind_addr is ${BIND_ADDR}, a wildcard. unbound's forward-addr"
+        log "ERROR: needs one address to send to. Set in ${FIPS_CONFIG}:"
+        log "ERROR:     dns:"
+        log "ERROR:       bind_addr: \"127.0.0.1\""
+        log "ERROR: then restart: /usr/local/etc/rc.d/fips.sh restart && $0"
+        exit 1
+        ;;
+esac
+
+# unbound wants a bare address in forward-addr; the @port suffix carries
+# the port, and pfSense's own domain-override code uses the same form.
+FORWARD_ADDR="${BIND_ADDR}@${DNS_PORT}"
+
+case "$BIND_ADDR" in
+    *:*)
+        # An IPv6 bind means unbound has to query over IPv6, and pfSense
+        # writes `do-ip6: {$ipv6_allow}` from the system "Allow IPv6"
+        # setting. With IPv6 disallowed, do-ip6: no makes every .fips
+        # query fail with nothing in the log to say why. `do-ip6: yes`
+        # in custom options cannot be relied on to override the
+        # generated one, so point the operator at the fix that always
+        # works: bind the responder on IPv4 loopback.
+        log "NOTE: dns.bind_addr is ${BIND_ADDR} (IPv6). unbound only queries over"
+        log "NOTE: IPv6 when System > Advanced > Networking has 'Allow IPv6' set."
+        log "NOTE: If .fips does not resolve, set in ${FIPS_CONFIG}:"
+        log "NOTE:     dns:"
+        log "NOTE:       bind_addr: \"127.0.0.1\""
+        log "NOTE: then restart: /usr/local/etc/rc.d/fips.sh restart && $0"
+        ;;
+esac
+
+# Refuse to touch config.xml for a daemon that is not answering. Without
+# this the script edits the firewall's configuration, restarts unbound
+# and reports success while nothing is listening — which is a far worse
+# failure than declining, because the operator then has a healthy-looking
+# resolver forwarding into a void and no message saying so.
+wait_for_daemon() {
+    # sockstat prints IPv6 endpoints bracketed ([::1]:5354) and IPv4 bare.
+    case "$BIND_ADDR" in
+        *:*) SOCK_ADDR="[${BIND_ADDR}]" ;;
+        *)   SOCK_ADDR="$BIND_ADDR" ;;
+    esac
+    i=0
+    while [ "$i" -lt 30 ]; do
+        sockstat -l -p "$DNS_PORT" 2>/dev/null \
+            | grep -Fq "${SOCK_ADDR}:${DNS_PORT}" && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    log "ERROR: nothing is listening on ${BIND_ADDR}:${DNS_PORT} after 30s."
+    log "ERROR: config.xml has NOT been modified. Check the daemon first:"
+    log "ERROR:     /usr/local/etc/rc.d/fips.sh status"
+    log "ERROR:     tail -50 /var/log/fips.log"
+    log "ERROR: and confirm dns.enabled is true in ${FIPS_CONFIG}."
+    return 1
+}
+
+# A resolver can be configured perfectly and still never be asked. If the
+# firewall's own stub resolver points at a public server rather than at
+# unbound, .fips queries leave the box and come back NXDOMAIN from the
+# root servers, with nothing in unbound's log because unbound never saw
+# them. `drill <npub>.fips` reporting SERVER: 8.8.8.8 is exactly this.
+warn_if_not_system_resolver() {
+    if grep -Eq '^[[:space:]]*nameserver[[:space:]]+(127\.0\.0\.1|::1)' \
+        /etc/resolv.conf 2>/dev/null; then
+        return 0
+    fi
+    log "WARNING: /etc/resolv.conf has no 127.0.0.1/::1 nameserver, so this"
+    log "WARNING: firewall does not ask its own resolver — .fips queries go"
+    log "WARNING: straight to the upstream servers and come back NXDOMAIN."
+    log "WARNING: The forward-zone just written is correct but unreachable."
+    log "WARNING:"
+    log "WARNING: Fix in the GUI: System > General Setup > DNS Server Settings,"
+    log "WARNING: set 'DNS Resolution Behavior' to"
+    log "WARNING:     Use local DNS (127.0.0.1), fall back to remote DNS servers"
+    log "WARNING: and make sure Services > DNS Resolver is enabled."
+    log "WARNING:"
+    log "WARNING: Current /etc/resolv.conf nameservers:"
+    grep -E '^[[:space:]]*nameserver' /etc/resolv.conf 2>/dev/null \
+        | sed 's/^/fips-dns:     /' || true
+    return 0
+}
+
+wait_for_daemon || exit 1
+
+log "Pointing the fips. zone at ${FORWARD_ADDR} via DNS Resolver custom options"
+
+# The snippet itself. Three directives beyond the forward-zone, each one
+# load-bearing:
+#
+#   domain-insecure     - the .fips zone is unsigned, and pfSense enables
+#                         DNSSEC validation by default; without this every
+#                         answer is thrown away as bogus.
+#   do-not-query-localhost: no
+#                       - unbound's default is to refuse loopback
+#                         forwarders outright, which SERVFAILs every
+#                         .fips query instead of asking the daemon.
+#                         pfSense's unbound.inc never sets this.
+#   forward-first: no   - never fall back to the public resolvers for a
+#                         name the daemon declined; .fips does not exist
+#                         outside the mesh, and leaking the query would
+#                         publish which npubs this firewall talks to.
+SNIPPET="$(cat <<EOS
+server:
+    domain-insecure: "fips."
+    do-not-query-localhost: no
+
+forward-zone:
+    name: "fips."
+    forward-addr: ${FORWARD_ADDR}
+    forward-first: no
+
+# Custom options are spliced in last, so anything added below the END
+# marker would otherwise continue this forward-zone clause.
+server:
+EOS
+)"
+
+# `--` separates the script's arguments from php's own options; with -f,
+# php is entitled to read what follows the filename as its own flags.
+printf '%s\n' "$SNIPPET" | /usr/local/bin/php -f "$PHP_HELPER" -- add "$BIND_ADDR" "$DNS_PORT"
+rc=$?
+case "$rc" in
+    0) ;;
+    3)  # Written, but the DNS Resolver is disabled: the block is inert and
+        # the helper has already said what to do instead. Nothing to verify.
+        exit 0 ;;
+    *)  exit "$rc" ;;
+esac
+
+# The block is in place; whether anything will ever ask unbound for it
+# is a separate question, and the answer is not always yes.
+warn_if_not_system_resolver
+
+log "Done. Verify with:"
+log "    drill -p ${DNS_PORT} <npub>.fips @${BIND_ADDR} AAAA   # the daemon directly"
+log "    drill <npub>.fips AAAA                                # the full chain"

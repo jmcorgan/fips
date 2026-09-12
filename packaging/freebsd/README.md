@@ -4,6 +4,11 @@ Builds a native FreeBSD `.pkg` shipping `fips`, `fipsctl`, `fipstop`,
 rc.d services, and `.fips` DNS integration. `fips-gateway` is excluded
 (its NAT backend is nftables, Linux-only).
 
+**On pfSense?** Use [`packaging/pfsense/`](../pfsense/README.md)
+instead. pfSense is FreeBSD underneath, but it boots packages, wires up
+DNS and handles upgrades differently enough that this package does not
+work there; the pfSense one addresses each difference.
+
 Platform notes: the Ethernet and BLE transports are not available on
 FreeBSD (UDP, TCP, Tor, and Nym are). The UDP datapath deliberately
 uses the portable single-packet receive loop — FreeBSD's `recvmmsg(2)`

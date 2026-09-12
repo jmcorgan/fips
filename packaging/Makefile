@@ -12,6 +12,7 @@
 #   make aur        Build fips-git AUR package and validate with namcap
 #   make pkg        Build a macOS .pkg installer
 #   make freebsd    Build a FreeBSD .pkg package (on FreeBSD; use gmake)
+#   make pfsense    Build a pfSense .pkg package (on FreeBSD; use gmake)
 #   make zip        Build a Windows .zip package
 #   make all        Build deb and tarball (default)
 #   make clean      Remove deploy/ directory
@@ -20,7 +21,7 @@ SHELL := /bin/bash
 PACKAGING_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT  := $(abspath $(PACKAGING_DIR)/..)
 
-.PHONY: all deb deb-host tarball ipk apk aur pkg freebsd zip clean
+.PHONY: all deb deb-host tarball ipk apk aur pkg freebsd pfsense zip clean
 
 all: deb tarball
 
@@ -56,6 +57,12 @@ pkg:
 
 freebsd:
 	@sh $(PACKAGING_DIR)/freebsd/build-pkg.sh
+
+# pfSense is FreeBSD underneath but boots, resolves and is upgraded
+# differently enough that the FreeBSD package does not work there; see
+# packaging/pfsense/README.md for the three divergences.
+pfsense:
+	@sh $(PACKAGING_DIR)/pfsense/build-pkg.sh
 
 zip:
 	@powershell -File $(PACKAGING_DIR)/windows/build-zip.ps1

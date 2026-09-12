@@ -88,6 +88,12 @@ included: its NAT backend is nftables, which is Linux-only. The
 Ethernet and BLE transports are unavailable on FreeBSD; UDP, TCP,
 Tor, and Nym are.
 
+On **pfSense** (CE or Plus) use `packaging/pfsense/` rather than this
+package: pfSense diverges from stock FreeBSD in how it boots packages,
+generates the DNS resolver config, and applies upgrades, and the pfSense
+package handles each. See
+[packaging/pfsense/README.md](../packaging/pfsense/README.md).
+
 **One architecture.** The published artifact is
 `fips-<version>-freebsd-amd64.pkg`. There is no aarch64 FreeBSD
 build, so on any other architecture use the from-source path below.
