@@ -203,10 +203,17 @@ run_rekey_family() {
 
     (
         cd "$REPO_ROOT" || exit 1
-        env "${env_args[@]}" bash testing/static/scripts/generate-configs.sh "$variant" \
-            >>"$REP_DIR/setup.log" 2>&1
-        env "${env_args[@]}" bash testing/static/scripts/rekey-test.sh inject-config \
-            >>"$REP_DIR/setup.log" 2>&1
+        if [ "${#env_args[@]}" -gt 0 ]; then
+            env "${env_args[@]}" bash testing/static/scripts/generate-configs.sh "$variant" \
+                >>"$REP_DIR/setup.log" 2>&1
+            env "${env_args[@]}" bash testing/static/scripts/rekey-test.sh inject-config \
+                >>"$REP_DIR/setup.log" 2>&1
+        else
+            bash testing/static/scripts/generate-configs.sh "$variant" \
+                >>"$REP_DIR/setup.log" 2>&1
+            bash testing/static/scripts/rekey-test.sh inject-config \
+                >>"$REP_DIR/setup.log" 2>&1
+        fi
         docker compose "${compose_args[@]}" up -d \
             >>"$REP_DIR/setup.log" 2>&1
     )
@@ -240,7 +247,11 @@ run_rekey_family() {
     local rc=0
     (
         cd "$REPO_ROOT" || exit 1
-        env "${env_args[@]}" bash testing/static/scripts/rekey-test.sh
+        if [ "${#env_args[@]}" -gt 0 ]; then
+            env "${env_args[@]}" bash testing/static/scripts/rekey-test.sh
+        else
+            bash testing/static/scripts/rekey-test.sh
+        fi
     ) >"$REP_DIR/test-output.log" 2>&1 || rc=$?
 
     # Capture container logs before teardown
