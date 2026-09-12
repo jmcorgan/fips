@@ -163,6 +163,9 @@ run_rekey_family() {
     local variant="$1"   # rekey, rekey-accept-off, rekey-outbound-only
     local REP_DIR="$2"
     local compose_profile="$variant"
+    # Expanded below as ${env_args[@]+"${env_args[@]}"}: under set -u,
+    # bash 3.2 (macOS /bin/bash) rejects "${env_args[@]}" on an empty
+    # array, and the plain rekey variant leaves it empty.
     local env_args=()
 
     case "$variant" in
@@ -203,9 +206,9 @@ run_rekey_family() {
 
     (
         cd "$REPO_ROOT" || exit 1
-        env "${env_args[@]}" bash testing/static/scripts/generate-configs.sh "$variant" \
+        env ${env_args[@]+"${env_args[@]}"} bash testing/static/scripts/generate-configs.sh "$variant" \
             >>"$REP_DIR/setup.log" 2>&1
-        env "${env_args[@]}" bash testing/static/scripts/rekey-test.sh inject-config \
+        env ${env_args[@]+"${env_args[@]}"} bash testing/static/scripts/rekey-test.sh inject-config \
             >>"$REP_DIR/setup.log" 2>&1
         docker compose "${compose_args[@]}" up -d \
             >>"$REP_DIR/setup.log" 2>&1
@@ -240,7 +243,7 @@ run_rekey_family() {
     local rc=0
     (
         cd "$REPO_ROOT" || exit 1
-        env "${env_args[@]}" bash testing/static/scripts/rekey-test.sh
+        env ${env_args[@]+"${env_args[@]}"} bash testing/static/scripts/rekey-test.sh
     ) >"$REP_DIR/test-output.log" 2>&1 || rc=$?
 
     # Capture container logs before teardown
