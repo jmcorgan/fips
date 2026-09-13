@@ -44,6 +44,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a path tells the peer with a `PathClose` on a surviving path, so the
   peer moves at once rather than after its own timeout.
 
+- Connect semantics, for multi-path. A peer that holds a session is never
+  dialled again: an address for it on a transport it has no path over —
+  from a beacon, `update_peers`, `fipsctl connect`, a runtime peer lane,
+  or a configured address whose transport came up later — becomes a
+  candidate path, probed under the session by the next heartbeat tick;
+  one on a transport whose path has stopped answering re-points that
+  path; one on a transport whose path carries acknowledged traffic changes
+  nothing. A handshake never creates path state: a second handshake to a
+  peer with a session (two configured addresses dialled at startup)
+  resolves as it always did — rekey, duplicate or cross-connection
+  tie-break, whichever transport it ran over — and the address it ran to
+  is left as a candidate for the probe exchange. A standby the peer never
+  answers on is given up after eight probes, and until it is answered it
+  does not count as a transport the peer is on for the decrypt-failure
+  gate. On a connection-oriented transport the connection a dial opened
+  is kept as the candidate's socket rather than closed.
+
 - Operator surface, for multi-path: `role: backup` on any transport (never
   carries a peer's traffic while a normal path is eligible);
   `fipsctl path show|pin|unpin` and the `path_show`, `path_pin`,

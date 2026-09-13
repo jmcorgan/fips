@@ -551,6 +551,12 @@ impl Node {
     /// landing on an index the allocator has already handed to a new owner:
     /// index reuse is immediate, with no quarantine.
     ///
+    /// Only a path the peer has proven counts: the active one, or one the
+    /// peer has acknowledged a probe on. A `Probing` path is an address we
+    /// were *told* about — a beacon, a config entry, a handshake source —
+    /// and until the peer answers there, garbage arriving on its transport
+    /// says nothing about the peer.
+    ///
     /// A peer with no transport bound yet is charged unconditionally, as
     /// before.
     pub(in crate::node) fn charge_decrypt_failure(
@@ -558,10 +564,13 @@ impl Node {
         node_addr: &crate::NodeAddr,
         transport_id: crate::transport::TransportId,
     ) {
-        let on_path = self
-            .peers
-            .get(node_addr)
-            .is_some_and(|peer| peer.paths().is_empty() || peer.path_on(transport_id).is_some());
+        let on_path = self.peers.get(node_addr).is_some_and(|peer| {
+            peer.paths().is_empty()
+                || peer.transport_id() == Some(transport_id)
+                || peer
+                    .path_on(transport_id)
+                    .is_some_and(|path| path.acked_once())
+        });
         if !on_path {
             trace!(
                 peer = %self.peer_display_name(node_addr),

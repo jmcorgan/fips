@@ -150,13 +150,11 @@ async fn test_api_connect_on_current_fresh_path_is_a_no_op() {
 }
 
 /// `connect` naming a *different* address for a peer the node is already
-/// connected to starts an alternate-path handshake instead of silently doing
-/// nothing — the fix.
-///
-/// The existing peer stays put while that handshake runs: promotion is the
-/// handshake's job, not the command's.
+/// connected to takes it as a path under the session it has — never a
+/// second handshake, which the far side would read as a rekey. The peer and
+/// its link stay put; the heartbeat tick probes the path from here.
 #[tokio::test]
-async fn test_api_connect_starts_alternate_path_for_active_peer() {
+async fn test_api_connect_takes_an_alternate_address_as_a_path() {
     let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
 
     let node1_addr = *nodes[1].node.node_addr();
@@ -182,26 +180,25 @@ async fn test_api_connect_starts_alternate_path_for_active_peer() {
 
     assert_eq!(
         data["refreshed"], true,
-        "a new path for an active peer must start a refresh"
+        "a new address for an active peer is taken as a path"
     );
     assert!(
-        nodes[0]
+        !nodes[0]
             .node
             .is_connecting_to_peer_on_path(&node1_addr, transport_id, &alternate),
-        "an outbound leg should exist on the alternate path"
+        "no handshake: a peer with a session is probed, not dialled"
     );
+    assert_eq!(nodes[0].node.connection_count(), 0);
     let peer = nodes[0]
         .node
         .get_peer(&node1_addr)
-        .expect("the existing peer must survive the parallel handshake");
-    assert_eq!(
-        peer.link_id(),
-        link_before,
-        "the alternate handshake must not tear the live link down before it authenticates"
+        .expect("the existing peer is untouched");
+    assert_eq!(peer.link_id(), link_before, "the live link must not change");
+    assert!(
+        peer.path_on(transport_id).is_some(),
+        "the transport still has its one path"
     );
 
-    // Let the alternate handshake run to completion; the peer must still be
-    // there afterwards.
     for _ in 0..20 {
         if process_available_packets(&mut nodes).await == 0 {
             break;
@@ -209,7 +206,7 @@ async fn test_api_connect_starts_alternate_path_for_active_peer() {
     }
     assert!(
         nodes[0].node.get_peer(&node1_addr).is_some(),
-        "node 1 should still be a peer after the alternate path resolves"
+        "node 1 is still a peer"
     );
 
     cleanup_nodes(&mut nodes).await;

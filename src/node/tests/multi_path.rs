@@ -307,6 +307,22 @@ async fn dual_homed_pair() -> (Vec<TestNode>, TransportAddr, TransportAddr) {
     (nodes, wifi_0, wifi_1)
 }
 
+/// Hand `nodes[i]` the address `addr` for `peer` on `transport` and run one
+/// heartbeat tick: the production route by which a path gets probed
+/// (`add_path_candidate` is what a beacon, a config entry or a completed
+/// dial leaves behind; the tick is the one issuer of probes). Nothing is
+/// delivered here — the caller drives `process_available_packets`.
+async fn probe_candidate(
+    nodes: &mut [TestNode],
+    i: usize,
+    peer: NodeAddr,
+    transport: TransportId,
+    addr: TransportAddr,
+) {
+    nodes[i].node.add_path_candidate(peer, transport, addr);
+    nodes[i].node.run_path_heartbeats().await;
+}
+
 #[test]
 fn path_message_round_trips_on_the_wire() {
     let probe = PathMessage {
@@ -345,10 +361,7 @@ async fn a_probe_adds_a_path_at_both_ends_and_the_ack_makes_it_live() {
     let cable = nodes[0].transport_id;
 
     // Node 1 probes node 0 over the wifi.
-    nodes[1]
-        .node
-        .maybe_probe_path(addr_0, wifi(), wifi_0.clone())
-        .await;
+    probe_candidate(&mut nodes, 1, addr_0, wifi(), wifi_0.clone()).await;
     {
         let peer = nodes[1].node.get_peer(&addr_0).unwrap();
         let path = peer
@@ -358,8 +371,9 @@ async fn a_probe_adds_a_path_at_both_ends_and_the_ack_makes_it_live() {
         assert!(path.tx_live_at_ms().is_none());
     }
 
-    // Probe reaches node 0.
-    assert_eq!(process_available_packets(&mut nodes).await, 1);
+    // The probe reaches node 0 (the tick heartbeats the active path too,
+    // now that the peer has two).
+    assert!(process_available_packets(&mut nodes).await >= 1);
     {
         let peer = nodes[0].node.get_peer(&addr_1).unwrap();
         let path = peer.path_on(wifi()).expect("the receiver adds the path");
@@ -374,8 +388,8 @@ async fn a_probe_adds_a_path_at_both_ends_and_the_ack_makes_it_live() {
         assert_eq!(peer.paths().len(), 2);
     }
 
-    // Ack reaches node 1.
-    assert_eq!(process_available_packets(&mut nodes).await, 1);
+    // The ack reaches node 1.
+    assert!(process_available_packets(&mut nodes).await >= 1);
     {
         let peer = nodes[1].node.get_peer(&addr_0).unwrap();
         let path = peer.path_on(wifi()).unwrap();
@@ -447,6 +461,121 @@ async fn a_beacon_from_a_live_peer_on_a_new_transport_probes_instead_of_dialling
 }
 
 #[tokio::test]
+async fn a_second_handshake_creates_no_path_state_and_the_address_is_probed_instead() {
+    let (mut nodes, wifi_0, _wifi_1) = dual_homed_pair().await;
+    let addr_0 = *nodes[0].node.node_addr();
+    let addr_1 = *nodes[1].node.node_addr();
+    let cable = nodes[0].transport_id;
+    let session_before = (
+        nodes[0].node.get_peer(&addr_1).unwrap().our_index(),
+        nodes[1].node.get_peer(&addr_0).unwrap().our_index(),
+    );
+
+    // Node 1 dials node 0 over the wifi, as a static config listing both
+    // addresses does at startup, while the cable session is live. The
+    // responder answers it as it would any msg1 from a peer it holds a
+    // session with — a duplicate here, the session being seconds old —
+    // and neither end derives a path from the handshake.
+    let identity_0 = PeerIdentity::from_pubkey_full(nodes[0].node.identity().pubkey_full());
+    nodes[1]
+        .node
+        .initiate_connection(wifi(), wifi_0.clone(), identity_0)
+        .await
+        .expect("dial starts");
+    for _ in 0..8 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+
+    // Neither end re-peered: one peer each, the session untouched.
+    assert_eq!(nodes[0].node.peer_count(), 1);
+    assert_eq!(nodes[1].node.peer_count(), 1);
+    assert_eq!(
+        (
+            nodes[0].node.get_peer(&addr_1).unwrap().our_index(),
+            nodes[1].node.get_peer(&addr_0).unwrap().our_index(),
+        ),
+        session_before,
+        "the handshake did not replace the session"
+    );
+    // The dialler holds the address as an unproven candidate, traffic on
+    // the cable; the responder learned nothing from the handshake.
+    let p1 = nodes[1].node.get_peer(&addr_0).unwrap();
+    assert_eq!(p1.transport_id(), Some(cable), "traffic stays on the cable");
+    let wifi_path = p1
+        .path_on(wifi())
+        .expect("the dialled address is a candidate");
+    assert_eq!(wifi_path.state(), PathState::Probing);
+    assert!(!wifi_path.acked_once(), "a handshake proves no path");
+    assert!(
+        nodes[0]
+            .node
+            .get_peer(&addr_1)
+            .unwrap()
+            .path_on(wifi())
+            .is_none(),
+        "the responder derives no path from a handshake"
+    );
+
+    // The connection the dial opened is left for the probe to ride: on a
+    // connection-oriented transport it is the path's socket, and closing
+    // it would have the first probe dial again (or, at the responder, find
+    // an ephemeral port that cannot be dialled). Loopback records the
+    // close it would have been asked for.
+    for node in &nodes {
+        let closed = match node.node.transports.get(&wifi()).expect("wifi transport") {
+            TransportHandle::Loopback(t) => t.closed(),
+            _ => unreachable!("tests run over loopback"),
+        };
+        assert!(
+            closed.is_empty(),
+            "the dial's connection is kept for the candidate: {closed:?}"
+        );
+    }
+
+    // The heartbeat tick proves it, at both ends, under the shared session.
+    nodes[1].node.run_path_heartbeats().await;
+    for _ in 0..8 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+    let p1 = nodes[1].node.get_peer(&addr_0).unwrap();
+    assert_eq!(p1.path_on(wifi()).unwrap().state(), PathState::Live);
+    assert_eq!(p1.transport_id(), Some(cable), "traffic still on the cable");
+    let p0 = nodes[0].node.get_peer(&addr_1).unwrap();
+    assert!(
+        p0.path_on(wifi()).is_some(),
+        "the probe taught the responder the path"
+    );
+    assert_eq!(p0.transport_id(), Some(cable));
+
+    // An operator disconnect closes every path's connection, the standby's
+    // included: on a connection-oriented transport each holds a pool entry.
+    let npub_0 = nodes[0].node.identity().npub();
+    nodes[1]
+        .node
+        .api_disconnect(&npub_0)
+        .await
+        .expect("disconnect");
+    let closed_wifi = match nodes[1].node.transports.get(&wifi()).unwrap() {
+        TransportHandle::Loopback(t) => t.closed(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        closed_wifi,
+        vec![wifi_0.clone()],
+        "the standby's connection is closed too"
+    );
+    let closed_cable = match nodes[1].node.transports.get(&cable).unwrap() {
+        TransportHandle::Loopback(t) => t.closed(),
+        _ => unreachable!(),
+    };
+    assert_eq!(closed_cable.len(), 1, "and the active path's");
+}
+
+#[tokio::test]
 async fn a_beaconed_path_is_probed_by_the_next_heartbeat_tick_and_once_only() {
     let (mut nodes, wifi_0, _wifi_1) = dual_homed_pair().await;
     let addr_0 = *nodes[0].node.node_addr();
@@ -509,24 +638,6 @@ async fn an_ack_for_no_outstanding_probe_changes_nothing() {
     );
 }
 
-#[tokio::test]
-async fn the_active_path_is_not_probed() {
-    let (mut nodes, _wifi_0, _wifi_1) = dual_homed_pair().await;
-    let addr_0 = *nodes[0].node.node_addr();
-    let cable = nodes[0].transport_id;
-    let cable_addr_0 = nodes[0].addr.clone();
-
-    nodes[1]
-        .node
-        .maybe_probe_path(addr_0, cable, cable_addr_0)
-        .await;
-    assert_eq!(
-        nodes[0].packet_rx.len(),
-        0,
-        "the handshake proved the active path"
-    );
-}
-
 // ============================================================================
 // Presence loss withdraws a path (design §5–6)
 // ============================================================================
@@ -537,14 +648,8 @@ async fn pair_with_wifi_live() -> (Vec<TestNode>, TransportAddr, TransportAddr) 
     let (mut nodes, wifi_0, wifi_1) = dual_homed_pair().await;
     let addr_0 = *nodes[0].node.node_addr();
     let addr_1 = *nodes[1].node.node_addr();
-    nodes[1]
-        .node
-        .maybe_probe_path(addr_0, wifi(), wifi_0.clone())
-        .await;
-    nodes[0]
-        .node
-        .maybe_probe_path(addr_1, wifi(), wifi_1.clone())
-        .await;
+    probe_candidate(&mut nodes, 1, addr_0, wifi(), wifi_0.clone()).await;
+    probe_candidate(&mut nodes, 0, addr_1, wifi(), wifi_1.clone()).await;
     for _ in 0..4 {
         if process_available_packets(&mut nodes).await == 0 {
             break;
@@ -595,7 +700,9 @@ async fn losing_the_active_transport_moves_traffic_to_the_live_standby() {
     assert_eq!(seeded_by, Some(wifi()));
 
     // The same session carries on: a frame sent now goes out on the wifi
-    // and decrypts at the far end, which never saw a switch.
+    // and decrypts at the far end. (The withdrawal also told the far end,
+    // with a PathClose on the wifi, that the cable is gone: it moves its
+    // own traffic to the wifi on hearing it, and re-peers nowhere.)
     let before = nodes[0].packet_rx.len();
     nodes[1]
         .node
@@ -603,15 +710,21 @@ async fn losing_the_active_transport_moves_traffic_to_the_live_standby() {
         .await
         .expect("send over the standby");
     assert_eq!(nodes[0].packet_rx.len(), before + 1);
-    let packet = nodes[0].packet_rx.try_recv().unwrap();
-    assert_eq!(packet.transport_id, wifi());
-    nodes[0].node.handle_encrypted_frame(packet).await;
+    while let Ok(packet) = nodes[0].packet_rx.try_recv() {
+        assert_eq!(packet.transport_id, wifi());
+        nodes[0].node.handle_encrypted_frame(packet).await;
+    }
     let far = nodes[0]
         .node
         .get_peer(nodes[1].node.node_addr())
         .expect("no re-peering");
     assert_eq!(far.consecutive_decrypt_failures(), 0);
-    assert_eq!(far.transport_id(), Some(cable), "the far end did not move");
+    assert_eq!(nodes[0].node.peer_count(), 1);
+    assert_eq!(
+        far.transport_id(),
+        Some(wifi()),
+        "told the cable is gone, the far end moved too"
+    );
 }
 
 #[tokio::test]
@@ -621,10 +734,7 @@ async fn losing_the_active_transport_with_only_a_probing_standby_reaps() {
     let cable = nodes[1].transport_id;
 
     // Probe sent, ack never processed: the wifi path is unproven.
-    nodes[1]
-        .node
-        .maybe_probe_path(addr_0, wifi(), wifi_0.clone())
-        .await;
+    probe_candidate(&mut nodes, 1, addr_0, wifi(), wifi_0.clone()).await;
     assert_eq!(
         nodes[1]
             .node
@@ -662,21 +772,39 @@ async fn a_dead_path_is_reprobed_when_its_transport_returns_and_forgotten_after_
     let (mut nodes, wifi_0, _wifi_1) = pair_with_wifi_live().await;
     let addr_0 = *nodes[0].node.node_addr();
 
-    nodes[1].node.withdraw_transport(wifi()).await;
-
-    // Presence returns: the next discovery tick probes it again, and the
-    // ack brings it back Live with its history. (The withdrawal also sent
-    // node 0 a PathClose on the cable, which it processes here too.)
-    nodes[1].node.reset_probe_backoff_on_transport(wifi());
-    nodes[1]
+    let samples_before = nodes[1]
         .node
-        .maybe_probe_path(addr_0, wifi(), wifi_0.clone())
-        .await;
+        .get_peer(&addr_0)
+        .unwrap()
+        .path_on(wifi())
+        .unwrap()
+        .rtt_samples();
+    assert!(samples_before > 0);
+    nodes[1].node.withdraw_transport(wifi()).await;
+    // (The withdrawal also sent node 0 a PathClose on the cable.)
     for _ in 0..4 {
         if process_available_packets(&mut nodes).await == 0 {
             break;
         }
     }
+    let dead = nodes[1]
+        .node
+        .get_peer(&addr_0)
+        .unwrap()
+        .path_on(wifi())
+        .unwrap();
+    assert_eq!(dead.state(), PathState::Dead);
+    assert_eq!(dead.addr(), &wifi_0);
+    // Dead: the heartbeat tick leaves it alone.
+    nodes[1].node.run_path_heartbeats().await;
+    assert!(
+        nodes[0].packet_rx.try_recv().is_err(),
+        "a Dead path is not probed"
+    );
+
+    // Presence returns: the path is Probing again, the next heartbeat tick
+    // probes it, and the ack brings it back Live with its history.
+    nodes[1].node.reset_probe_backoff_on_transport(wifi());
     assert_eq!(
         nodes[1]
             .node
@@ -685,7 +813,24 @@ async fn a_dead_path_is_reprobed_when_its_transport_returns_and_forgotten_after_
             .path_on(wifi())
             .unwrap()
             .state(),
-        PathState::Live
+        PathState::Probing
+    );
+    nodes[1].node.run_path_heartbeats().await;
+    for _ in 0..4 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+    let revived = nodes[1]
+        .node
+        .get_peer(&addr_0)
+        .unwrap()
+        .path_on(wifi())
+        .unwrap();
+    assert_eq!(revived.state(), PathState::Live);
+    assert!(
+        revived.rtt_samples() > samples_before,
+        "re-proved on top of its history, not from nothing"
     );
 
     // Dead again, and this time the grace expires.
@@ -749,6 +894,49 @@ async fn garbage_on_a_standby_path_counts_against_the_peer() {
         3,
         "a path in the set is a transport the peer is on"
     );
+}
+
+#[tokio::test]
+async fn garbage_on_a_path_the_peer_never_acknowledged_is_not_counted() {
+    // A candidate is an address we were told about — a beacon, a config
+    // entry, a handshake source, possibly a replayed one. Until the peer
+    // answers a probe there, garbage on its transport says nothing about
+    // the peer, and cannot tear the peering down.
+    let (mut nodes, _wifi_0, wifi_1) = dual_homed_pair().await;
+    let addr_1 = *nodes[1].node.node_addr();
+    nodes[0]
+        .node
+        .add_path_candidate(addr_1, wifi(), wifi_1.clone());
+    assert!(
+        !nodes[0]
+            .node
+            .get_peer(&addr_1)
+            .unwrap()
+            .path_on(wifi())
+            .unwrap()
+            .acked_once()
+    );
+    let our_index = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .unwrap()
+        .our_index()
+        .unwrap();
+    for counter in 0..(THRESHOLD * 2) as u64 {
+        nodes[0]
+            .node
+            .handle_encrypted_frame(ReceivedPacket::new(
+                wifi(),
+                wifi_1.clone(),
+                garbage_frame(our_index, counter),
+            ))
+            .await;
+    }
+    let peer = nodes[0]
+        .node
+        .get_peer(&addr_1)
+        .expect("an unproven path is not a transport the peer is on");
+    assert_eq!(peer.consecutive_decrypt_failures(), 0);
 }
 
 // ============================================================================
@@ -1039,24 +1227,124 @@ fn a_timed_out_echo_on_an_acknowledged_path_makes_it_suspect_and_selection_leave
 }
 
 #[test]
-fn a_path_the_peer_never_acknowledged_backs_off_instead_of_going_suspect() {
+fn a_peer_with_one_live_path_is_not_heartbeated() {
     let mut peer = ActivePeer::new(make_peer_identity(), LinkId::new(1), 0);
     peer.rebind_transport(tid(CABLE), TransportAddr::from_string("10.0.0.1:1"));
-    // Promotion-style: Live and tx_live from the handshake, never acked.
+    // Promotion-style: one Live path from the handshake. Nothing to decide,
+    // nothing sent — the link heartbeat keeps liveness.
+    let t0 = 1_000_000;
+    for k in 0..20 {
+        assert!(
+            peer.plan_heartbeats(t0 + k * FAST, &TIMING)
+                .sends
+                .is_empty(),
+            "a single-path peer gets no path probes"
+        );
+    }
+    // A candidate makes it two: probes start, on the candidate and on the
+    // active path alike.
+    peer.add_path(tid(WIFI), TransportAddr::from_string("10.0.0.7:1"));
+    let plan = peer.plan_heartbeats(t0 + 21 * FAST, &TIMING);
+    assert_eq!(plan.sends.len(), 2);
+    assert!(
+        plan.sends
+            .iter()
+            .any(|s| s.transport_id == tid(WIFI) && s.full_size),
+        "the candidate's first probe is the full-size discovery probe"
+    );
+    assert!(
+        plan.sends
+            .iter()
+            .any(|s| s.transport_id == tid(CABLE) && !s.full_size),
+        "the handshake proved the active path: its first probe is small"
+    );
+}
+
+#[test]
+fn an_active_path_the_peer_never_acknowledged_backs_off_instead_of_going_suspect() {
+    let mut peer = ActivePeer::new(make_peer_identity(), LinkId::new(1), 0);
+    peer.rebind_transport(tid(CABLE), TransportAddr::from_string("10.0.0.1:1"));
+    // A candidate on the wifi makes the peer two-path, so the cable — Live
+    // from the handshake, never acked: an old node — is probed too.
+    peer.add_path(tid(WIFI), TransportAddr::from_string("10.0.0.7:1"));
     let t0 = 1_000_000;
     let plan = peer.plan_heartbeats(t0, &TIMING);
-    assert_eq!(plan.sends.len(), 1);
+    assert!(plan.sends.iter().any(|s| s.transport_id == tid(CABLE)));
     let plan = peer.plan_heartbeats(t0 + TIMEOUT, &TIMING);
     assert!(plan.suspects.is_empty(), "an old node is not a dead path");
     let cable = peer.path_on(tid(CABLE)).unwrap();
     assert_eq!(cable.state(), PathState::Live);
-    assert_eq!(plan.sends.len(), 1, "tried again, with the backoff doubled");
     assert!(
-        peer.plan_heartbeats(t0 + TIMEOUT + 2 * FAST - 1, &TIMING)
+        plan.sends.iter().any(|s| s.transport_id == tid(CABLE)),
+        "tried again, with the backoff doubled"
+    );
+    assert!(
+        !peer
+            .plan_heartbeats(t0 + TIMEOUT + 2 * FAST - 1, &TIMING)
             .sends
-            .is_empty(),
+            .iter()
+            .any(|s| s.transport_id == tid(CABLE)),
         "the unanswered probe pushed the next one out"
     );
+    // However long it goes unanswered, the active path is never given up:
+    // the handshake proved it, and an old node answers no probe.
+    let mut t = t0 + TIMEOUT + 2 * FAST;
+    for _ in 0..200 {
+        peer.plan_heartbeats(t, &TIMING);
+        t += TIMEOUT;
+    }
+    assert_eq!(peer.path_on(tid(CABLE)).unwrap().state(), PathState::Live);
+    assert_eq!(peer.transport_id(), Some(tid(CABLE)));
+}
+
+#[test]
+fn a_standby_the_peer_never_acknowledges_is_given_up_after_the_discovery_budget() {
+    let mut peer = dual_path_peer(1, 5);
+    // A third address the peer never answers on: a NIC it no longer sends
+    // from, a replayed source, an old node's transport.
+    peer.add_path(tid(3), TransportAddr::from_string("10.0.0.9:1"));
+    let mut t = 1_000_000;
+    let mut probes = 0;
+    for _ in 0..400 {
+        let plan = peer.plan_heartbeats(t, &TIMING);
+        assert!(
+            plan.suspects.is_empty(),
+            "never acknowledged: never Suspect"
+        );
+        probes += plan
+            .sends
+            .iter()
+            .filter(|s| s.transport_id == tid(3))
+            .count();
+        for s in plan.sends {
+            if s.transport_id != tid(3) {
+                peer.note_path_ack(s.transport_id, s.probe_id, false, 1, t + 1, u64::MAX);
+            }
+        }
+        if peer.path_on(tid(3)).unwrap().state() == PathState::Dead {
+            break;
+        }
+        t += TIMEOUT;
+    }
+    assert_eq!(
+        peer.path_on(tid(3)).unwrap().state(),
+        PathState::Dead,
+        "given up after the budget"
+    );
+    assert_eq!(probes, crate::peer::MAX_DISCOVERY_PROBES as usize);
+    // Dead: not probed again, and forgotten after the grace.
+    assert!(
+        !peer
+            .plan_heartbeats(t + TIMEOUT, &TIMING)
+            .sends
+            .iter()
+            .any(|s| s.transport_id == tid(3))
+    );
+    peer.prune_dead_paths(t + 10 * 60_000, 5 * 60_000);
+    assert!(peer.path_on(tid(3)).is_none());
+    // The proven paths are untouched.
+    assert_eq!(peer.path_on(tid(CABLE)).unwrap().state(), PathState::Live);
+    assert_eq!(peer.path_on(tid(WIFI)).unwrap().state(), PathState::Live);
 }
 
 #[test]
@@ -1097,22 +1385,31 @@ fn withdrawing_our_only_path_leaves_it_suspect_and_still_probed() {
 fn presence_return_resets_the_discovery_backoff() {
     let mut peer = ActivePeer::new(make_peer_identity(), LinkId::new(1), 0);
     peer.rebind_transport(tid(CABLE), TransportAddr::from_string("10.0.0.1:1"));
+    // Two-path, so the never-acked cable is probed at all.
+    peer.add_path(tid(WIFI), TransportAddr::from_string("10.0.0.7:1"));
     let t0 = 1_000_000;
+    let on_cable = |plan: &crate::peer::HeartbeatPlan| {
+        plan.sends
+            .iter()
+            .filter(|s| s.transport_id == tid(CABLE))
+            .count()
+    };
     // Never answered: each timeout doubles the wait.
-    assert_eq!(peer.plan_heartbeats(t0, &TIMING).sends.len(), 1);
-    assert_eq!(peer.plan_heartbeats(t0 + TIMEOUT, &TIMING).sends.len(), 1);
+    assert_eq!(on_cable(&peer.plan_heartbeats(t0, &TIMING)), 1);
+    assert_eq!(on_cable(&peer.plan_heartbeats(t0 + TIMEOUT, &TIMING)), 1);
     assert_eq!(
-        peer.plan_heartbeats(t0 + 2 * TIMEOUT, &TIMING).sends.len(),
+        on_cable(&peer.plan_heartbeats(t0 + 2 * TIMEOUT, &TIMING)),
         1
     );
     let t = t0 + 3 * TIMEOUT;
-    assert!(
-        peer.plan_heartbeats(t, &TIMING).sends.is_empty(),
+    assert_eq!(
+        on_cable(&peer.plan_heartbeats(t, &TIMING)),
+        0,
         "the third timeout pushed the next probe past now"
     );
     // The transport's presence cycles: probed at once.
     peer.reset_probe_backoff_on(tid(CABLE));
-    assert_eq!(peer.plan_heartbeats(t, &TIMING).sends.len(), 1);
+    assert_eq!(on_cable(&peer.plan_heartbeats(t, &TIMING)), 1);
 }
 
 #[test]
@@ -1127,7 +1424,7 @@ fn the_discovery_backoff_is_capped_and_never_goes_suspect() {
         discovery_cap_ms: 2_000,
         ..TIMING
     };
-    // Drive the wifi standby through many unanswered probes.
+    // Drive the wifi standby through its unanswered probes.
     let mut t = 1_000_000;
     let mut sent_at = Vec::new();
     for _ in 0..40 {
@@ -1136,8 +1433,18 @@ fn the_discovery_backoff_is_capped_and_never_goes_suspect() {
             plan.suspects.is_empty(),
             "never acknowledged: not a dead path"
         );
+        assert!(
+            plan.sends
+                .iter()
+                .filter(|s| s.transport_id == tid(WIFI))
+                .all(|s| s.full_size),
+            "every probe on an unproven path is full-size"
+        );
         if plan.sends.iter().any(|s| s.transport_id == tid(WIFI)) {
             sent_at.push(t);
+        }
+        if peer.path_on(tid(WIFI)).unwrap().state() == PathState::Dead {
+            break;
         }
         t += TIMEOUT;
     }
@@ -1147,14 +1454,12 @@ fn the_discovery_backoff_is_capped_and_never_goes_suspect() {
         gaps.iter().all(|g| *g <= 2_000 + TIMEOUT),
         "the backoff is capped at discovery_cap_ms: {gaps:?}"
     );
-    assert!(
-        peer.plan_heartbeats(t, &timing)
-            .sends
-            .iter()
-            .filter(|s| s.transport_id == tid(WIFI))
-            .all(|s| s.full_size),
-        "every probe on an unproven path is full-size"
+    assert_eq!(
+        sent_at.len(),
+        crate::peer::MAX_DISCOVERY_PROBES as usize,
+        "and the budget bounds it: the path is given up, not probed forever"
     );
+    assert_eq!(peer.path_on(tid(WIFI)).unwrap().state(), PathState::Dead);
 }
 
 #[test]
@@ -1298,7 +1603,7 @@ fn unreachable_send_errors_are_classified() {
 
 #[tokio::test]
 async fn the_fast_tick_heartbeats_the_active_path_and_the_ack_measures_it() {
-    let (mut nodes, _wifi_0, _wifi_1) = pair_with_wifi_live().await;
+    let (mut nodes, wifi_0, _wifi_1) = dual_homed_pair().await;
     let addr_0 = *nodes[0].node.node_addr();
     let cable = nodes[1].transport_id;
     assert!(
@@ -1312,6 +1617,11 @@ async fn the_fast_tick_heartbeats_the_active_path_and_the_ack_measures_it() {
         "the handshake proved the cable; no probe has yet"
     );
 
+    // A second path makes the peer worth heartbeating; the tick then
+    // probes the active cable as well as the wifi candidate.
+    nodes[1]
+        .node
+        .add_path_candidate(addr_0, wifi(), wifi_0.clone());
     nodes[1].node.run_path_heartbeats().await;
     let queued = nodes[0].packet_rx.len();
     assert!(queued >= 1, "a heartbeat probe went out on the cable");
@@ -1556,11 +1866,16 @@ fn a_probe_reaching_a_dead_path_revives_it() {
 async fn the_first_probe_on_a_path_is_full_size_and_so_is_its_ack() {
     let (mut nodes, wifi_0, _wifi_1) = dual_homed_pair().await;
     let addr_0 = *nodes[0].node.node_addr();
-    nodes[1]
-        .node
-        .maybe_probe_path(addr_0, wifi(), wifi_0.clone())
-        .await;
-    let probe = nodes[0].packet_rx.try_recv().expect("probe queued");
+    probe_candidate(&mut nodes, 1, addr_0, wifi(), wifi_0.clone()).await;
+    // The tick also heartbeated the active cable, small; the wifi probe
+    // is the discovery one.
+    let mut probe = None;
+    while let Ok(packet) = nodes[0].packet_rx.try_recv() {
+        if packet.transport_id == wifi() {
+            probe = Some(packet);
+        }
+    }
+    let probe = probe.expect("probe queued");
     let mtu = usize::from(
         nodes[1]
             .node
@@ -1592,9 +1907,14 @@ fn a_proven_path_is_probed_full_size_once_a_minute() {
     let t0 = 1_000_000;
     let plan = peer.plan_heartbeats(t0, &TIMING);
     // dual_path_peer acked via take_probe, which sets no full-size stamp,
-    // so the first heartbeat is full-size; after that, small until a
-    // minute has passed.
-    assert!(plan.sends.iter().all(|s| s.full_size));
+    // so the standby's first heartbeat is full-size — the active path's is
+    // not, the handshake having proved it; after that, small until a
+    // minute has passed, then full-size on both.
+    assert!(
+        plan.sends
+            .iter()
+            .all(|s| s.full_size == (s.transport_id == tid(WIFI)))
+    );
     for s in plan.sends {
         peer.note_path_ack(s.transport_id, s.probe_id, false, 1, t0 + 1, u64::MAX);
     }
@@ -1611,7 +1931,8 @@ fn a_proven_path_is_probed_full_size_once_a_minute() {
         );
     }
     let plan = peer.plan_heartbeats(t0 + 61_000, &TIMING);
-    assert!(plan.sends.iter().any(|s| s.full_size));
+    assert_eq!(plan.sends.len(), 2);
+    assert!(plan.sends.iter().all(|s| s.full_size));
 }
 
 #[tokio::test]
@@ -1772,4 +2093,109 @@ fn an_outage_does_not_keep_charging_the_path_s_etx() {
         after_one,
         "an outage is one event, not a lossy medium"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A handshake proves a path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_known_transport_at_a_new_address_is_re_pointed_there() {
+    let mut peer = ActivePeer::new(make_peer_identity(), LinkId::new(1), 0);
+    peer.rebind_transport(tid(CABLE), TransportAddr::from_string("10.0.0.1:1"));
+    peer.add_path(tid(WIFI), TransportAddr::from_string("10.0.0.7:1"));
+
+    // `add_path` is "add or return": the address it carries is ignored for
+    // a path that exists. A move is a separate, explicit step.
+    peer.add_path(tid(WIFI), TransportAddr::from_string("10.0.0.8:1"));
+    assert_eq!(
+        peer.path_on(tid(WIFI)).unwrap().addr(),
+        &TransportAddr::from_string("10.0.0.7:1")
+    );
+    assert!(peer.refresh_path_addr(tid(WIFI), TransportAddr::from_string("10.0.0.8:1")));
+    assert_eq!(
+        peer.path_on(tid(WIFI)).unwrap().addr(),
+        &TransportAddr::from_string("10.0.0.8:1")
+    );
+    assert!(
+        !peer.refresh_path_addr(tid(WIFI), TransportAddr::from_string("10.0.0.8:1")),
+        "the same address is not a move"
+    );
+    assert!(
+        !peer.refresh_path_addr(tid(3), TransportAddr::from_string("10.0.0.9:1")),
+        "a transport with no path is not re-pointed: that is add_path's job"
+    );
+    assert!(peer.path_on(tid(3)).is_none());
+}
+
+#[tokio::test]
+async fn a_dial_to_a_stale_peer_over_another_transport_is_probed_and_taken_when_it_answers() {
+    let (mut nodes, wifi_0, _wifi_1) = dual_homed_pair().await;
+    let addr_0 = *nodes[0].node.node_addr();
+    let cable = nodes[0].transport_id;
+
+    // Node 1 has not heard node 0 in a long time: the cable is not live.
+    nodes[1].node.get_peer_mut(&addr_0).unwrap().touch(0);
+    assert!(!nodes[1].node.active_peer_link_is_live(&addr_0));
+
+    // An address on another transport arrives. Discovery never dials a
+    // peer with a session; a caller that does gets the same outcome: the
+    // handshake settles as a cross-connection, the address is a candidate.
+    let identity_0 = PeerIdentity::from_pubkey_full(nodes[0].node.identity().pubkey_full());
+    nodes[1]
+        .node
+        .initiate_connection(wifi(), wifi_0.clone(), identity_0)
+        .await
+        .expect("dial starts");
+    for _ in 0..8 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+    assert_eq!(nodes[0].node.peer_count(), 1);
+    assert_eq!(nodes[1].node.peer_count(), 1);
+    let p = nodes[1].node.get_peer(&addr_0).unwrap();
+    assert_eq!(
+        p.transport_id(),
+        Some(cable),
+        "nothing moved on the handshake"
+    );
+    assert_eq!(p.path_on(wifi()).unwrap().state(), PathState::Probing);
+
+    // The heartbeat tick proves the wifi. The cable's own echoes then time
+    // out (the peer is silent there, which is why we are here): a hard
+    // signal, and the mandatory switch takes the path that answered.
+    nodes[1].node.run_path_heartbeats().await;
+    for _ in 0..8 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+    assert!(
+        nodes[1]
+            .node
+            .get_peer_mut(&addr_0)
+            .unwrap()
+            .mark_path_suspect(cable)
+    );
+    nodes[1].node.run_path_selection();
+    let p = nodes[1].node.get_peer(&addr_0).unwrap();
+    assert_eq!(p.path_on(wifi()).unwrap().state(), PathState::Live);
+    assert_eq!(
+        p.transport_id(),
+        Some(wifi()),
+        "traffic moved to the path that answered"
+    );
+    assert_eq!(p.current_addr(), Some(&wifi_0));
+    // The link record followed the traffic.
+    let link = nodes[1].node.links.get(&p.link_id()).expect("peer's link");
+    assert_eq!(link.transport_id(), wifi());
+    assert_eq!(link.remote_addr(), &wifi_0);
+    assert!(
+        p.path_on(cable).is_some(),
+        "the cable stays for the heartbeat tick to probe"
+    );
+    // And the session is still shared.
+    assert_eq!(nodes[0].node.peer_count(), 1);
+    assert_eq!(nodes[1].node.peer_count(), 1);
 }

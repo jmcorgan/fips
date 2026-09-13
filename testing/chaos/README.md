@@ -115,11 +115,10 @@ Explicit topologies exercising non-UDP transports.
   `node.path.*`; see the file header for what to read from a run.
 - **dual-udp-flap**: the all-IP twin (`[n01, n02, udp-veth+udp]`): a veth
   carrying IP with an interface-bound UDP instance at each end, plus UDP
-  over the bridge. The veth half is handed to the daemon by the runner
-  (`fipsctl connect ... udp/<veth>`) once the pair has peered, and becomes a
-  path under the existing session. Exercises `udp.interface` on the listen
-  and per-peer connected sockets, and a configured address on a new
-  transport becoming a path.
+  over the bridge. Both are static addresses on the dial owner, so two
+  handshakes run at startup and the second is kept as a path under the
+  first's session. Exercises `udp.interface` on the listen and per-peer
+  connected sockets, and a second handshake to a live peer becoming a path.
 - **tcp-mesh**: 6-node mesh with 4 UDP and 3 TCP edges. Both transports use
   static peer config. Netem mutation (30% fraction, every 20-40s) and link
   flaps (1 link max, 10-20s down).

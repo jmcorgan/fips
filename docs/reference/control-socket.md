@@ -116,7 +116,8 @@ table below lists every command currently registered.
 | ------- | ------ | ----------------------------- |
 | `show_status` | — | `version`, `npub`, `node_addr`, `ipv6_addr`, `state`, `is_leaf_only`, `is_root` (bool — this node is the spanning-tree root), `root` (hex node-addr of the current tree root), `persistent` (bool — identity is persisted, i.e. `persistent` set or an `nsec` configured), `peer_count`, `session_count`, `link_count`, `transport_count`, `connection_count`, `transport_peer_counts` (object mapping transport-type name to its connected-peer count; configured transports appear with `0`), `tun_state`, `tun_name`, `effective_ipv6_mtu`, `control_socket`, `pid`, `exe_path`, `uptime_secs`, `estimated_mesh_size`, `forwarding`, `sparklines`. |
 | `show_acl` | — | `allow_file`, `deny_file`, `enforcement_active`, `effective_mode`, `default_decision`, `allow_all`, `deny_all`, `allow_file_entries`, `deny_file_entries`, `allow_entries`, `deny_entries`. |
-| `show_peers` | — | `peers[]` — per-peer object: `node_addr`, `npub`, `display_name`, `ipv6_addr`, `connectivity`, `link_id`, `direction`, `transport_addr`, `transport_type`, `is_parent`, `is_child`, `tree_depth`, `effective_depth` (`tree_depth + link_cost` — the metric `evaluate_parent` ranks on; `null` when the peer has no coords, or is unmeasured while another peer has an SRTT sample, per the cold-start gate), `stats`, `noise`, `current_k_bit`, `mmp`, `paths[]` (every path to the peer: `transport_id`, `transport`, `transport_type`, `addr`, `state`, `active`, `remote_active`, `role`, `pinned`, `last_rtt_ms`, `min_rtt_ms`, `rtt_samples`, `etx`, `score` — the `path_show` fields minus the now-relative ages), plus optional `nostr_traversal`, `rekey_in_progress`, `rekey_draining`. |
+| `show_peers` | — | `peers[]` — per-peer object: `node_addr`, `npub`, `display_name`, `ipv6_addr`, `connectivity`, `link_id`, `direction`, `transport_addr`, `transport_type`, `is_parent`, `is_child`, `tree_depth`, `effective_depth` (`tree_depth + link_cost` — the metric `evaluate_parent` ranks on; `null` when the peer has no coords, or is unmeasured while another peer has an SRTT sample, per the cold-start gate), `stats`, `noise`, `current_k_bit`, `mmp`, `paths[]` (every path to the peer: `transport_id`, `transport` (instance name or null), `transport_type`, `addr`, `state` (`probing` / `live` / `suspect` / `dead`), `active`, `remote_active`, `role` (`normal` / `backup`), `pinned`, `last_rtt_ms`, `min_rtt_ms`, `rtt_samples`, `etx`, `score`), plus optional `nostr_traversal`, `rekey_in_progress`, `rekey_draining`. |
+| `path_show` | `npub` (bech32) | Every path to one peer. `data`: `peer`, `link_cost`, `link_cost_held`, and `paths[]` — the `show_peers` per-path object plus `rx_live_ms_ago`, `tx_live_ms_ago` (ms since the last authentic frame heard there / the last ack proving the peer hears us there; `null` if never) and `acked_once`. Takes a parameter, so it is served on the daemon's main task like the mutating commands, not from the snapshot. |
 | `show_links` | — | `links[]` — `link_id`, `transport_id`, `remote_addr`, `direction`, `state`, `created_at_ms`, `stats`. |
 | `show_tree` | — | `my_node_addr`, `root`, `root_npub` (bech32 npub of the current tree root), `is_root`, `depth`, `my_coords[]`, `parent`, `parent_display_name`, `declaration_sequence`, `declaration_signed`, `peer_tree_count`, `peers[]`, `stats`. |
 | `show_sessions` | — | `sessions[]` — `remote_addr`, `npub`, `display_name`, `state` (`established`, `initiating`, `awaiting_msg3`, `unknown`), `is_initiator`, `last_activity_ms`, `stats`, optional `mmp`, `current_k_bit`, `is_draining`. |
@@ -173,17 +174,24 @@ not reproduced here to avoid duplicating the source.
 | `probe_start` | `npub` (bech32) | Admits a diagnostic probe job and returns immediately. `data`: `probe_id`, `npub`, `node_addr`, `display_name`, `budget_ms`. |
 | `probe_poll` | `probe_id` (integer) | Reports a probe's progress. `data`: `state` (`running` / `done`) and `report`. A terminal job is removed on the poll that observes it, so the report is delivered once. |
 | `probe_cancel` | `probe_id` (integer) | Runs the probe's terminal actions immediately, without the teardown grace tick. |
-| `path_show` | `npub` (bech32) | Every path to the peer. `data`: `peer`, `link_cost`, `link_cost_held`, and `paths[]` with `transport_id`, `transport` (instance name or null), `addr`, `state`, `active`, `remote_active`, `role`, `pinned`, `rx_live_ms_ago`, `tx_live_ms_ago`, `acked_once`, `last_rtt_ms`, `min_rtt_ms`, `rtt_samples`, `etx`, `score`. |
-| `path_pin` | `npub` (bech32), `transport` (instance name or numeric id) | Pins this node's traffic to the peer to that transport's path. Applies on the next selection tick. Error if the peer has no path there. |
-| `path_unpin` | `npub` (bech32) | Clears the pin. |
+| `path_pin` | `npub` (bech32), `transport` (instance name or numeric id) | Pins this node's traffic to the peer to that transport's path. Applies on the next selection tick, and is suspended while that path is not eligible and re-applied when it is again. `data`: `{"pinned": <transport_id>}`. Error if the peer has no path there. |
+| `path_unpin` | `npub` (bech32) | Clears the pin. `data`: `{"pinned": null}`. |
 
-`connect` on a peer the node is **already connected to** neither tears the
-live link down nor ignores the address: the address is tried as an alternate
-path alongside the existing one, and the peer moves to it only if that
-handshake authenticates. The response carries `refreshed` — `true` when such a
-handshake was started, `false` when the peer is already on this exact path and
-that path is fresh (a successful no-op). A `connect` that starts an ordinary
-dial to a peer the node does not yet hold also reports `refreshed: false`.
+`connect` has three outcomes, told apart by whether the node already holds
+a session with the peer and by the response's `refreshed` field:
+
+- **No session:** an ordinary dial over the named transport. `refreshed:
+  false`; the peer appears in `show_peers` once the handshake completes.
+- **Session, and the address is on a transport the peer has no path over,
+  or one whose path has stopped answering:** no handshake. The address
+  becomes a path candidate under the existing session (or re-points the
+  unanswering path), the next heartbeat tick probes it, and selection
+  moves traffic to it if it measures better or the current path stops
+  answering. `refreshed: true`. `path_show` lists it as `probing` until
+  the peer acknowledges, `live` after.
+- **Session, and the peer is already reachable at exactly that address,
+  or that transport's path is carrying acknowledged traffic:** nothing
+  changes. `refreshed: false`.
 
 `connect` is ephemeral either way: the peer is not written to the config file
 and gets no auto-reconnect, so an attempt that fails leaves no residue.

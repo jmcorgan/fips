@@ -58,24 +58,31 @@ def generate_peers_block(
     for peer_id in sorted(outbound_peers):
         peer = topology.nodes[peer_id]
         transport = topology.transport_for_edge(node_id, peer_id)
-        if topology.is_dual_udp_edge(node_id, peer_id):
-            # The veth half of a dual edge is found by beacon (Ethernet) or
-            # added as a path by the runner after the pair has peered
-            # (udp-veth); the bridge half is dialled from here.
-            transport = "udp"
+        dual = topology.is_dual_udp_edge(node_id, peer_id)
+        # (transport, addr, priority) per address. A dual edge's Ethernet
+        # half is found by beacon, so only its bridge half is listed; a dual
+        # udp-veth edge lists both halves, bridge first, and the daemon takes
+        # the second completed handshake as a path under the first's session.
+        addresses = []
         if transport == UDP_VETH:
             link = next(l for l in topology.udp_veth_links(node_id) if l.peer_id == peer_id)
-            transport = f"udp/{link.instance}"
-            addr = link.peer_addr
+            if dual:
+                addresses.append((bridge, f"{peer.docker_ip}:{_TRANSPORT_PORTS['udp']}", 1))
+            addresses.append((f"udp/{link.instance}", link.peer_addr, 10 if dual else 1))
         else:
+            if dual:
+                transport = "udp"
             addr = f"{peer.docker_ip}:{_TRANSPORT_PORTS.get(transport, 2121)}"
             if transport == "udp":
                 transport = bridge
+            addresses.append((transport, addr, 1))
         lines.append(f'  - npub: "{peer.npub}"')
         lines.append(f'    alias: "{peer_id}"')
         lines.append(f"    addresses:")
-        lines.append(f"      - transport: {transport}")
-        lines.append(f'        addr: "{addr}"')
+        for transport, addr, priority in addresses:
+            lines.append(f"      - transport: {transport}")
+            lines.append(f'        addr: "{addr}"')
+            lines.append(f"        priority: {priority}")
         lines.append(f"    connect_policy: auto_connect")
     return "\n".join(lines)
 

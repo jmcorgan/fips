@@ -389,11 +389,6 @@ class SimRunner:
         self._sleep(wait)
         self._take_snapshot("warmup")
 
-        # The veth half of every udp-veth+udp edge: UDP has no beacon, so
-        # the runner hands the daemon the address once the pair has peered
-        # over the bridge, and it becomes a path under that session.
-        self._add_udp_veth_paths()
-
         # Populate npub cache after convergence (nodes must be running)
         if self.peer_churn_mgr:
             self.peer_churn_mgr.refresh_all_npubs()
@@ -404,67 +399,13 @@ class SimRunner:
         if self.link_swap_mgr:
             self.link_swap_mgr.setup_initial()
 
-    def _add_udp_veth_paths(self, only_node: str | None = None):
-        """Give each dual udp-veth edge its veth path.
-
-        Sent from the edge's dial owner (the side whose static config holds
-        the bridge address) as a control-socket ``connect`` naming the
-        interface-bound instance: to a peer it already holds a session with,
-        the daemon adds that as a path rather than dialling. Waits for the
-        bridge session first, so the command cannot become the first dial.
-        """
-        from .control import send_command
-
-        outbound = self.topology.directed_outbound()
-        for node_id in sorted(self.topology.nodes):
-            if only_node is not None and node_id != only_node:
-                continue
-            for link in self.topology.udp_veth_links(node_id):
-                if not self.topology.is_dual_udp_edge(node_id, link.peer_id):
-                    continue
-                if link.peer_id not in outbound.get(node_id, []):
-                    continue
-                if node_id in self._down_nodes or link.peer_id in self._down_nodes:
-                    continue
-                container = self.topology.container_name(node_id)
-                npub = self.topology.nodes[link.peer_id].npub
-                params = {
-                    "npub": npub,
-                    "address": link.peer_addr,
-                    "transport": f"udp/{link.instance}",
-                }
-                added = None
-                for _ in range(30):
-                    if send_command(container, "path_show", {"npub": npub}) is None:
-                        time.sleep(1)  # not peered over the bridge yet
-                        continue
-                    added = send_command(container, "connect", params)
-                    break
-                if added is None:
-                    log.warning(
-                        "udp-veth path %s -> %s via %s not added",
-                        node_id, link.peer_id, link.instance,
-                    )
-                else:
-                    log.info(
-                        "udp-veth path %s -> %s via %s (%s)",
-                        node_id, link.peer_id, link.instance, link.peer_addr,
-                    )
-
     def _handle_node_restart(self, node_id: str):
         """Called after a node container is restarted.
 
-        Re-adds the node's udp-veth paths once it has re-peered, and for
-        ephemeral identity nodes waits briefly for the daemon to start,
-        then queries its new npub and updates the peer churn manager's
-        cache.
+        For ephemeral identity nodes, waits briefly for the daemon to
+        start, then queries its new npub and updates the peer churn
+        manager's cache.
         """
-        if any(
-            self.topology.is_dual_udp_edge(node_id, link.peer_id)
-            for link in self.topology.udp_veth_links(node_id)
-        ):
-            time.sleep(2)
-            self._add_udp_veth_paths(only_node=node_id)
         if not self.peer_churn_mgr:
             return
         if node_id not in self.peer_churn_mgr.ephemeral_nodes:

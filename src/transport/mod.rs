@@ -248,6 +248,20 @@ pub enum TransportError {
 }
 
 impl TransportError {
+    /// Whether the kernel refused the send for want of a route: the
+    /// interface is up but nothing is reachable through it. A hard signal
+    /// that the path is gone (`ENETUNREACH`, `EHOSTUNREACH`), distinct from
+    /// `is_transient`: the binder is not going to fix this.
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::HostUnreachable
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether this failure is expected to clear on its own.
     ///
     /// The distinction callers need is not *what* went wrong but whether
@@ -268,20 +282,6 @@ impl TransportError {
     /// which is a statement about the peer rather than about this node's
     /// ability to transmit, and the existing retry paths for them already sit
     /// at a different layer.
-    /// Whether the kernel refused the send for want of a route: the
-    /// interface is up but nothing is reachable through it. A hard signal
-    /// that the path is gone (`ENETUNREACH`, `EHOSTUNREACH`), distinct from
-    /// `is_transient`: the binder is not going to fix this.
-    pub fn is_unreachable(&self) -> bool {
-        match self {
-            Self::Io(e) => matches!(
-                e.kind(),
-                std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::HostUnreachable
-            ),
-            _ => false,
-        }
-    }
-
     pub fn is_transient(&self) -> bool {
         match self {
             // The interface is absent or mid-rebind. The binder is polling for
@@ -1250,7 +1250,7 @@ impl TransportHandle {
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
-            TransportHandle::Loopback(_) => {} // connectionless no-op
+            TransportHandle::Loopback(t) => t.record_close(addr), // connectionless; recorded for tests
         }
     }
 

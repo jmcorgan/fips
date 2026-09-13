@@ -345,8 +345,9 @@ impl Node {
                                         "executor CrossConnectionLost is unreachable on \
                                          driven net-new establish paths"
                                     );
-                                    // Close this (losing) connection, drop its link,
-                                    // and restore `addr_to_link` to the winner.
+                                    // Close this connection, drop its link, and
+                                    // point `addr_to_link` for the new address at the
+                                    // winner, so a msg1 from it is recognised.
                                     if let Some(transport) =
                                         self.transports.get(&ambient.transport_id)
                                     {

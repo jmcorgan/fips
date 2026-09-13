@@ -646,6 +646,13 @@ impl Fmp {
 
         if snap.has_existing_peer {
             let peer_addr = *wire.peer_identity.node_addr();
+            // Which transport the msg1 arrived on plays no part here: a
+            // handshake never creates path state. A peer dialling us over
+            // a second transport gets the same answer as one dialling over
+            // the first — a rekey or a duplicate — and the transport becomes
+            // a path only through the authenticated, replay-checked probe
+            // exchange. Both ends then resolve on the same information; a
+            // rule that read this end's view of its own liveness split them.
             match (snap.existing_peer_epoch, wire.remote_epoch) {
                 (Some(existing), Some(new)) if existing != new => {
                     // Epoch mismatch → peer restart.

@@ -707,3 +707,29 @@ fn retirements_are_grouped_after_drains_and_before_rekey_initiations() {
         matches!(actions[4], ConnAction::InitiateRekey { peer } if peer == make_node_addr(0x03))
     );
 }
+
+#[test]
+fn a_live_peer_s_msg1_is_classified_the_same_on_every_transport() {
+    // Same epoch, session old enough to rekey. The transport the msg1
+    // arrived on is not an input: a handshake never creates path state, so
+    // a live peer dialling over a second transport is the rekey it looks
+    // like, exactly as a dial over the first would be. Both ends then
+    // decide from the same facts.
+    let mut snap = establish_snapshot();
+    snap.has_existing_peer = true;
+    snap.existing_peer_epoch = Some([1u8; 8]);
+    snap.has_session = true;
+    snap.existing_session_age_secs = 31;
+    let wire = wire_outcome(Some([1u8; 8]));
+    assert!(matches!(
+        Fmp::new().establish_inbound(&snap, &wire),
+        InboundDecision::RekeyRespond { .. }
+    ));
+
+    // A restart is a restart, whatever transport it arrives on.
+    let restarted = wire_outcome(Some([2u8; 8]));
+    assert!(matches!(
+        Fmp::new().establish_inbound(&snap, &restarted),
+        InboundDecision::RestartThenPromote { .. }
+    ));
+}

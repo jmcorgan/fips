@@ -1433,7 +1433,7 @@ async fn node_context_mirrors_config_and_immutable_facades() {
 }
 
 #[tokio::test]
-async fn update_peers_races_new_alternative_without_dropping_active_peer() {
+async fn update_peers_takes_a_new_alternative_as_a_path_without_dropping_active_peer() {
     // The node's *current* (pre-update) peer set must contain `old_peer`, so it
     // is baked into the Config at construction (immutable context = sole store).
     let peer_full = Identity::generate();
@@ -1497,16 +1497,18 @@ async fn update_peers_races_new_alternative_without_dropping_active_peer() {
 
     assert_eq!(outcome.updated, 1);
     assert_eq!(node.peer_count(), 1, "existing link must stay live");
-    assert_eq!(node.connection_count(), 1);
     assert_eq!(
-        node.connections()
-            .next()
-            .and_then(|(_, machine)| machine.conn_source_addr()),
-        Some(&new_addr)
+        node.connection_count(),
+        0,
+        "a peer with a session is not dialled on a new address: the address is a path"
     );
     let active = node.get_peer(&peer_node_addr).unwrap();
     assert_eq!(active.link_id(), old_link_id);
-    assert_eq!(active.current_addr(), Some(&current_addr));
+    // The path on this transport was never acknowledged (bound by
+    // `set_current_addr`, no ack), so it is not eligible and the new address
+    // re-points it; the heartbeat tick probes it there. An eligible path
+    // would have kept its address.
+    assert_eq!(active.current_addr(), Some(&new_addr));
 
     for transport in node.transports.values_mut() {
         transport.stop().await.ok();

@@ -22,6 +22,16 @@ use std::time::{Duration, Instant};
 /// How often a full-size (MTU-padded) probe goes out on a proven path.
 const FULL_SIZE_PROBE_INTERVAL_MS: u64 = 60_000;
 
+/// Discovery probes a never-acknowledged standby path gets before it is
+/// given up as `Dead`. At the doubling backoff from the fast interval,
+/// capped at the heartbeat interval, that is about half a minute. An
+/// address we were told about but the peer never answers on — an old
+/// node's transport, a replayed handshake source, a beacon from a NIC the
+/// peer no longer sends on — is then no longer probed, and no longer
+/// counts as a transport the peer is on. `prune_dead_paths` forgets it
+/// after the grace; a fresh candidate starts the count over.
+pub const MAX_DISCOVERY_PROBES: u32 = 8;
+
 /// Fold one probe outcome into a path's ETX: the long EWMA (α = 1/32) of
 /// the delivery ratio, inverted and clamped like the link ETX. Per report a
 /// raw value is a flap generator on a lightly loaded link; the long average
@@ -86,6 +96,20 @@ pub enum PathState {
     Dead,
 }
 
+impl PathState {
+    /// The control-socket spelling: `probing`, `live`, `suspect`, `dead`.
+    /// A fixed string per variant, so a rename here cannot silently change
+    /// what `show_peers` and `path_show` emit and what fipstop matches.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Probing => "probing",
+            Self::Live => "live",
+            Self::Suspect => "suspect",
+            Self::Dead => "dead",
+        }
+    }
+}
+
 /// Probe bookkeeping for one path: what is outstanding, and when the next
 /// one may go.
 #[derive(Clone, Copy, Debug, Default)]
@@ -118,16 +142,6 @@ pub struct PathPolicy {
     /// The min-RTT window, ms. At least `N` standby heartbeat intervals,
     /// otherwise a standby never accumulates a min.
     pub rtt_window_ms: u64,
-}
-
-impl PathPolicy {
-    /// Everything selectable at once; for tests.
-    pub const PERMISSIVE: Self = Self {
-        margin: 1.5,
-        dwell_ms: 0,
-        min_samples: 0,
-        rtt_window_ms: u64::MAX,
-    };
 }
 
 /// A post-switch hold on the link cost the tree sees.
@@ -1111,6 +1125,34 @@ impl ActivePeer {
         &mut self.send.paths[idx]
     }
 
+    /// The peer's address on `transport_id` is `addr` now. Roams the path
+    /// there, if any, without touching its state; a `Dead` path brought back
+    /// at a new address is `Probing` again. Returns whether anything changed.
+    /// Nothing happens for a transport the peer has no path on — that is
+    /// [`add_path`](Self::add_path)'s job — nor for the same address.
+    ///
+    /// A peer's address on a transport does change under it: a Wi-Fi Aware
+    /// data path that re-forms comes up with a new link-local, and an
+    /// address that has moved is not one a probe can reach. Without this the
+    /// path kept the dead address for as long as it lived.
+    pub fn refresh_path_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
+        let Some(path) = self.path_on_mut(transport_id) else {
+            return false;
+        };
+        if path.addr == addr {
+            return false;
+        }
+        path.addr = addr;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        path.clear_connected_udp();
+        if path.state == PathState::Dead {
+            path.state = PathState::Probing;
+            path.dead_since_ms = None;
+        }
+        path.probe.next_at_ms = 0;
+        true
+    }
+
     /// An authentic frame arrived on `transport_id`: the path there, if any,
     /// is `rx_live` as of `now_ms`.
     pub fn note_path_rx(&mut self, transport_id: TransportId, now_ms: u64) {
@@ -1125,9 +1167,10 @@ impl ActivePeer {
     /// backoff has not expired. `backoff_cap_ms` bounds the retry interval,
     /// which doubles from `base_ms` per unanswered probe.
     ///
-    /// Tests only. In production [`plan_heartbeats`](Self::plan_heartbeats)
-    /// is the one issuer of probes, so no two writers race for
-    /// `probe.outstanding`.
+    /// Unit-test sampler for the selection tests, which need a path fed a
+    /// chosen round trip without driving a whole heartbeat schedule. Every
+    /// node-level test goes through [`plan_heartbeats`](Self::plan_heartbeats),
+    /// the one issuer of probes in production.
     #[cfg(test)]
     pub fn take_probe(
         &mut self,
@@ -1163,12 +1206,11 @@ impl ActivePeer {
         remote_id: u32,
         now_ms: u64,
     ) {
-        let path = self.add_path(transport_id, addr.clone());
-        if path.addr != addr {
-            path.addr = addr;
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            path.clear_connected_udp();
-        }
+        self.add_path(transport_id, addr.clone());
+        self.refresh_path_addr(transport_id, addr);
+        let path = self
+            .path_on_mut(transport_id)
+            .expect("path added just above");
         path.remote_id = Some(remote_id);
         if path.state == PathState::Dead {
             // The peer is probing a path we had given up on: it is back,
@@ -1497,6 +1539,15 @@ impl ActivePeer {
     /// The silence hint: our active path silent for two of the peer's
     /// intervals on it while a standby hears the peer triggers a probe now,
     /// never `Suspect` (see §7 for the loop that would otherwise follow).
+    ///
+    /// A peer with one `Live` path is not heartbeated here at all.
+    /// Selection has nothing to move to, so a `Suspect` mark on it changes
+    /// nothing, and the link heartbeat already keeps its liveness; five
+    /// probes a second on every single-path link would be cost without a
+    /// decision behind it. Probes start the moment a second path — a
+    /// candidate included — exists, which is when a verdict can act; and a
+    /// lone path that is `Suspect` (the peer closed it, nowhere to go) is
+    /// probed so its ack can bring it back.
     pub fn plan_heartbeats(&mut self, now_ms: u64, timing: &HeartbeatTiming) -> HeartbeatPlan {
         let HeartbeatTiming {
             fast_ms,
@@ -1506,6 +1557,23 @@ impl ActivePeer {
         } = *timing;
         let mut plan = HeartbeatPlan::default();
         let active = self.send.active;
+        let alone_and_live = self
+            .send
+            .paths
+            .iter()
+            .filter(|p| p.state != PathState::Dead)
+            .count()
+            < 2
+            && active
+                .and_then(|i| self.send.paths.get(i))
+                .is_some_and(|p| p.state == PathState::Live);
+        if alone_and_live {
+            for path in self.send.paths.iter_mut() {
+                path.probe.outstanding = None;
+                path.probe.timed_out = None;
+            }
+            return plan;
+        }
         let newest_rx = self.send.paths.iter().filter_map(|p| p.rx_live_at_ms).max();
         for (i, path) in self.send.paths.iter_mut().enumerate() {
             if path.state == PathState::Dead {
@@ -1549,6 +1617,16 @@ impl ActivePeer {
                     path.probe.next_at_ms = 0;
                 } else {
                     path.probe.unanswered = path.probe.unanswered.saturating_add(1);
+                    // A standby the peer has never answered on is given up
+                    // after the discovery budget. Never the active path:
+                    // an old node answers no probe there either, and the
+                    // handshake proved it.
+                    if !ours && path.probe.unanswered >= MAX_DISCOVERY_PROBES {
+                        path.state = PathState::Dead;
+                        path.dead_since_ms = Some(now_ms);
+                        path.probe.timed_out = None;
+                        continue;
+                    }
                 }
             }
 
@@ -1582,11 +1660,16 @@ impl ActivePeer {
                     .min(discovery_cap_ms.max(interval))
             };
             path.probe.next_at_ms = now_ms.saturating_add(delay.max(1));
-            let full_size = !path.acked_once
-                || path
-                    .last_full_probe_ms
-                    .is_none_or(|t| now_ms.saturating_sub(t) >= FULL_SIZE_PROBE_INTERVAL_MS);
-            if full_size {
+            // Discovery probes are full-size so a medium that passes small
+            // frames and drops large ones never proves itself — except on
+            // the active path, which the handshake proved and whose MTU it
+            // seeded; there the once-a-minute full-size probe is enough.
+            let full_size = (!path.acked_once && !ours)
+                || match path.last_full_probe_ms {
+                    Some(t) => now_ms.saturating_sub(t) >= FULL_SIZE_PROBE_INTERVAL_MS,
+                    None => !ours,
+                };
+            if full_size || path.last_full_probe_ms.is_none() {
                 path.last_full_probe_ms = Some(now_ms);
             }
             plan.sends.push(HeartbeatSend {
@@ -1658,11 +1741,24 @@ impl ActivePeer {
         self.send.active = Some(new_active);
     }
 
-    /// Clear the probe backoff on every path over `transport_id`.
-    pub fn reset_probe_backoff_on(&mut self, transport_id: TransportId) {
-        if let Some(path) = self.path_on_mut(transport_id) {
-            path.reset_probe_backoff();
+    /// The transport `transport_id` is back: clear the probe backoff on
+    /// its path, and a path given up as `Dead` while it was gone is
+    /// `Probing` again, its RTT window and ETX intact, so the next
+    /// heartbeat tick re-proves it rather than measuring it from nothing.
+    /// Returns whether a `Dead` path was revived.
+    pub fn reset_probe_backoff_on(&mut self, transport_id: TransportId) -> bool {
+        let Some(path) = self.path_on_mut(transport_id) else {
+            return false;
+        };
+        path.reset_probe_backoff();
+        if path.state == PathState::Dead {
+            path.state = PathState::Probing;
+            path.dead_since_ms = None;
+            path.probe.outstanding = None;
+            path.probe.timed_out = None;
+            return true;
         }
+        false
     }
 
     // === Handshake Resend ===
