@@ -119,6 +119,21 @@ the keys the current context accepts.
 | --- | ------ |
 | `Del` | Disconnect the selected peer. Opens a `Y`/`N` confirmation modal first; this is the only state-mutating action in `fipstop`. |
 
+A peer reachable over more than one transport is drawn as a tree: its own
+row keeps the peer-level columns (name, npub, direction, effective depth,
+goodput, packet counts) and one child row per path, under it, carries the
+path's transport (instance name, or type), its state in the Npub column —
+`active` for the path this node sends on, otherwise `live`, `probing`,
+`suspect` or `dead`, with `,pinned`, `,remote` (the peer sends here) and
+`,backup` markers — the transport type and address, the last probe round
+trip under SRTT and the path score under LQI. The active path is green, a
+live standby dim, a `probing` path (never acknowledged: an older peer, or
+a medium it cannot hear us on) yellow, a `suspect` or `dead` one red. The
+cursor lands on peer rows only. A peer with one path stays one line with
+its transport inline. The detail view (`Enter`) adds a **Paths** section
+with every path's transport, address, state, round trips, sample count,
+ETX and score; `fipsctl path show` gives the same with the liveness ages.
+
 ### Transports tab (extra)
 
 | Key | Action |
