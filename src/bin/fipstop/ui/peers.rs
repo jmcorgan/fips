@@ -92,8 +92,12 @@ fn draw_table(
 
     // Build the grouped display: a styled label row before each non-empty
     // group, the group's peer rows, and a blank separator before the next
-    // group. `peer_display_idx[p]` is the display-row index of sorted peer `p`,
-    // so the stored peer-index selection (used by detail + navigation) can be
+    // group. A peer with more than one path is a tree: its row keeps the
+    // peer-level columns (Dir, EffD, Goodput, packets) and one child row per
+    // path carries the path-specific ones (transport, RTT, score), the
+    // active path in green. A single-path peer stays one line, as before.
+    // `peer_display_idx[p]` is the display-row index of sorted peer `p`, so
+    // the stored peer-index selection (used by detail + navigation) can be
     // translated to the display row to highlight, and the cursor only ever
     // lands on peer rows.
     let mut rows: Vec<Row> = Vec::new();
@@ -170,6 +174,15 @@ fn draw_table(
             Style::default()
         };
 
+        // Multi-path: the path-specific columns move to the child rows.
+        let paths = peer_paths(peer);
+        let multi = paths.len() > 1;
+        let (transport, srtt, loss, lqi) = if multi {
+            (String::new(), String::new(), String::new(), String::new())
+        } else {
+            (transport, srtt, loss, lqi)
+        };
+
         peer_display_idx.push(rows.len());
         rows.push(
             Row::new(vec![
@@ -187,6 +200,21 @@ fn draw_table(
             ])
             .style(row_style),
         );
+
+        // One child row per path, tree-drawn under the peer:
+        //   peer
+        //    ├─ cable   active   udp/10.0.0.2:2121
+        //    └─ wifi    live     udp/10.0.1.2:2121
+        if multi {
+            for (i, path) in paths.iter().enumerate() {
+                let branch = if i + 1 == paths.len() {
+                    "└─"
+                } else {
+                    "├─"
+                };
+                rows.push(path_row(path, branch));
+            }
+        }
     }
 
     let widths = [
@@ -241,6 +269,108 @@ fn draw_table(
             &mut scrollbar_state,
         );
     }
+}
+
+/// The `paths` array of a `show_peers` row: every transport the peer is
+/// reachable over. Empty on daemons that predate multi-path.
+fn peer_paths(peer: &serde_json::Value) -> Vec<serde_json::Value> {
+    peer.get("paths")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The transport a path runs over, by instance name when it has one and
+/// type otherwise (`cable`, `udp`).
+fn path_transport_label(path: &serde_json::Value) -> String {
+    let name = path.get("transport").and_then(|v| v.as_str());
+    let t_type = path.get("transport_type").and_then(|v| v.as_str());
+    match (name, t_type) {
+        (Some(n), _) if !n.is_empty() => n.to_string(),
+        (_, Some(t)) if !t.is_empty() => t.to_string(),
+        _ => format!("#{}", helpers::u64_field(path, "transport_id")),
+    }
+}
+
+/// Path state as shown in the table: `active` for the path we send on,
+/// otherwise its lifecycle state, with `pinned` / `remote` markers.
+fn path_state_label(path: &serde_json::Value) -> String {
+    let active = path
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut label = if active {
+        "active".to_string()
+    } else {
+        helpers::str_field(path, "state").to_string()
+    };
+    if path
+        .get("pinned")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        label.push_str(",pinned");
+    }
+    if path
+        .get("remote_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        && !active
+    {
+        label.push_str(",remote");
+    }
+    if path.get("role").and_then(|v| v.as_str()) == Some("backup") {
+        label.push_str(",backup");
+    }
+    label
+}
+
+/// A path's own RTT / score fill the peer table's SRTT / LQI columns; the
+/// rest (Dir, Loss, EffD, Goodput, packets) are link-level and stay on the
+/// peer row. The active path is green, a live standby dim, an unproven one
+/// (probing: never acked, as with a peer that predates multi-path) yellow,
+/// a failing one red.
+fn path_row(path: &serde_json::Value, branch: &str) -> Row<'static> {
+    let active = path
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let state = helpers::str_field(path, "state");
+    let style = if active {
+        Style::default().fg(Color::Green)
+    } else if state == "probing" {
+        Style::default().fg(Color::Yellow)
+    } else if state == "suspect" || state == "dead" {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let t_type = path
+        .get("transport_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let addr = path.get("addr").and_then(|v| v.as_str()).unwrap_or("");
+    let transport = if t_type.is_empty() {
+        addr.to_string()
+    } else {
+        format!("{t_type}/{addr}")
+    };
+    let rtt = path
+        .get("last_rtt_ms")
+        .and_then(|v| v.as_u64())
+        .map(|ms| ms.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let score = helpers::opt_f64_field(path, "score", 2);
+    Row::new(vec![
+        Cell::from(format!(" {branch} {}", path_transport_label(path))),
+        Cell::from(path_state_label(path)),
+        Cell::from(transport),
+        Cell::from(""),
+        Cell::from(rtt),
+        Cell::from(""),
+        Cell::from(score),
+    ])
+    .style(style)
 }
 
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Value]) {
@@ -360,6 +490,35 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Va
             "State",
             helpers::str_field(&transport, "state"),
         ));
+        lines.push(Line::from(""));
+    }
+
+    // Every path to the peer, active first.
+    let paths = peer_paths(peer);
+    if !paths.is_empty() {
+        lines.push(helpers::section_header("Paths"));
+        for path in &paths {
+            let addr = helpers::str_field(path, "addr");
+            let t_type = helpers::str_field(path, "transport_type");
+            lines.push(helpers::kv_line(
+                &path_transport_label(path),
+                &format!("{t_type}/{addr}  {}", path_state_label(path)),
+            ));
+            let rtt = |key: &str| {
+                path.get(key)
+                    .and_then(|v| v.as_u64())
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_else(|| "-".to_string())
+            };
+            lines.push(Line::from(format!(
+                "      rtt {} min {} n={}  etx {}  score {}",
+                rtt("last_rtt_ms"),
+                rtt("min_rtt_ms"),
+                helpers::u64_field(path, "rtt_samples"),
+                helpers::opt_f64_field(path, "etx", 2),
+                helpers::opt_f64_field(path, "score", 2),
+            )));
+        }
         lines.push(Line::from(""));
     }
 
