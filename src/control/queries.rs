@@ -294,6 +294,8 @@ pub fn show_peers(node: &Node) -> Value {
                 }
             }
 
+            peer_json["paths"] = render_peer_paths(&node.project_peer_paths(peer));
+
             // Add tree depth if available
             if let Some(coords) = peer.coords() {
                 peer_json["tree_depth"] = json!(coords.depth());
@@ -411,6 +413,33 @@ pub fn show_peers(node: &Node) -> Value {
 /// peers, `sqi` for sessions). Reproduces the on-loop key insertion order
 /// exactly. `path_mtu` is emitted (inside the leading literal) only when
 /// present (session-layer); for peers it is `None` and omitted.
+/// Render a peer's path rows as the `paths` array of `show_peers`.
+fn render_peer_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
+    Value::Array(
+        paths
+            .iter()
+            .map(|p| {
+                json!({
+                    "transport_id": p.transport_id,
+                    "transport": p.transport,
+                    "transport_type": p.transport_type,
+                    "addr": p.addr,
+                    "state": p.state,
+                    "active": p.active,
+                    "remote_active": p.remote_active,
+                    "role": p.role,
+                    "pinned": p.pinned,
+                    "last_rtt_ms": p.last_rtt_ms,
+                    "min_rtt_ms": p.min_rtt_ms,
+                    "rtt_samples": p.rtt_samples,
+                    "etx": p.etx,
+                    "score": p.score,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn render_entity_mmp(mmp: &super::snapshot::EntityMmp, quality_key: &str) -> Value {
     // The on-loop `show_sessions` block places loss_rate/etx/goodput_bps/
     // delivery ratios/path_mtu in the leading json! literal, while `show_peers`
@@ -503,6 +532,8 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
                     peer_json["transport_type"] = json!(tt);
                 }
             }
+
+            peer_json["paths"] = render_peer_paths(&peer.paths);
 
             if let Some(depth) = peer.tree_depth {
                 peer_json["tree_depth"] = json!(depth);
