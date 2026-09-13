@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finite and at least 1.0, `switch_dwell_secs`, `min_samples`,
   `active_heartbeat_ms`, `standby_heartbeat_ms`).
 
+- Views, for multi-path: `show_peers` lists every path under its peer
+  (`paths[]`; `path_show` is the same rows plus the now-relative liveness
+  ages and `acked_once`), and `fipstop`'s Peers tab draws a peer with more
+  than one path as a tree — the peer row keeps the peer-level columns, one
+  child row per path carries transport, address,
+  `active`/`live`/`probing`/`suspect`/`dead` with `pinned` / `backup`
+  markers, RTT and score, the active path in green, an unproven one in
+  yellow — with a Paths section in the detail pane. A single-path peer
+  stays one line.
+
 - An authentic frame arriving on a transport the peer has no path on no
   longer re-pins the peer's send side to that transport, and a decrypt
   failure on such a transport is not counted toward force-removal. Both

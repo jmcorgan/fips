@@ -1438,6 +1438,55 @@ async fn fipsctl_path_show_pin_and_unpin_go_through_the_control_api() {
     );
 }
 
+/// `show_peers` carries every path under its peer, from both the on-loop
+/// query and the tick-published snapshot fipstop reads, so the Peers tab
+/// can draw the transports a peer is reachable over without a per-peer
+/// `path show` round trip.
+#[tokio::test]
+async fn show_peers_lists_every_path_on_and_off_loop() {
+    let (mut nodes, _wifi_0, _wifi_1) = pair_with_wifi_live().await;
+    let addr_0 = *nodes[0].node.node_addr();
+
+    let check = |peers: &serde_json::Value| {
+        let peer = peers["peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["node_addr"] == hex::encode(addr_0.as_bytes()))
+            .expect("peer 0 listed");
+        let paths = peer["paths"].as_array().expect("paths array");
+        assert_eq!(paths.len(), 2, "both transports listed");
+        assert_eq!(
+            paths.iter().filter(|p| p["active"] == true).count(),
+            1,
+            "exactly one active path"
+        );
+        assert!(paths.iter().all(|p| p["state"] == "live"));
+        assert!(paths.iter().all(|p| p["transport_type"] == "loopback"));
+        assert!(paths.iter().all(|p| p["addr"].is_string()));
+        let ids: std::collections::HashSet<u64> = paths
+            .iter()
+            .map(|p| p["transport_id"].as_u64().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&u64::from(wifi().as_u32())),
+            "wifi path listed"
+        );
+    };
+
+    check(&crate::control::queries::show_peers(&nodes[1].node));
+
+    nodes[1].node.record_stats_history();
+    let handle = nodes[1].node.control_read_handle();
+    let off_loop = crate::control::queries::show_peers_from_handle(&handle);
+    check(&off_loop);
+    assert_eq!(
+        serde_json::to_string(&crate::control::queries::show_peers(&nodes[1].node)).unwrap(),
+        serde_json::to_string(&off_loop).unwrap(),
+        "off-loop show_peers matches on-loop, paths included"
+    );
+}
+
 #[test]
 fn udp_interface_config_parses() {
     let cfg: crate::config::UdpConfig = serde_yaml::from_str("interface: en0\n").unwrap();

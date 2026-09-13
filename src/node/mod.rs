@@ -2367,6 +2367,7 @@ impl Node {
                         .map(|sa| sa.ip())
                         .filter(|ip| !ip.is_unspecified()),
                     link_info,
+                    paths: self.project_peer_paths(peer),
                     tree_depth: peer.coords().map(|c| c.depth()),
                     effective_depth,
                     stats: snap::PeerLinkStats {
@@ -2678,6 +2679,37 @@ impl Node {
         let id = TransportId::new(self.next_transport_id);
         self.next_transport_id += 1;
         id
+    }
+
+    /// Project every path to `peer` into the `show_peers` rows shared by the
+    /// on-loop query and the tick-published snapshot.
+    pub(crate) fn project_peer_paths(
+        &self,
+        peer: &ActivePeer,
+    ) -> Vec<crate::control::snapshot::PeerPathRow> {
+        let active = peer.transport_id();
+        peer.paths()
+            .iter()
+            .map(|path| {
+                let handle = self.transports.get(&path.transport_id());
+                crate::control::snapshot::PeerPathRow {
+                    transport_id: path.transport_id().as_u32(),
+                    transport: handle.and_then(|t| t.name().map(str::to_string)),
+                    transport_type: handle.map(|t| t.transport_type().name.to_string()),
+                    addr: path.addr().to_string(),
+                    state: format!("{:?}", path.state()).to_lowercase(),
+                    active: Some(path.transport_id()) == active,
+                    remote_active: path.remote_active(),
+                    role: format!("{:?}", path.role()).to_lowercase(),
+                    pinned: path.pinned(),
+                    last_rtt_ms: path.last_rtt_ms(),
+                    min_rtt_ms: path.min_rtt_ms(),
+                    rtt_samples: path.rtt_samples(),
+                    etx: path.etx(),
+                    score: path.score(),
+                }
+            })
+            .collect()
     }
 
     /// Get a transport by ID.
