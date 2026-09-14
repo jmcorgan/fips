@@ -41,6 +41,7 @@ documents cover specific subsystems in detail.
 | -------- | ----------- |
 | [fips-mmp.md](fips-mmp.md) | Metrics Measurement Protocol (link + session) |
 | [fips-mtu.md](fips-mtu.md) | Path MTU model, encapsulation overhead, PMTUD |
+| [fips-multi-path-switchover.md](fips-multi-path-switchover.md) | One peer, several paths: probe/ack, per-path heartbeats, measured selection, switchover without a second handshake |
 | [fips-security.md](fips-security.md) | `fips0` interface threat model and default-deny baseline |
 
 ### Mesh Behavior
