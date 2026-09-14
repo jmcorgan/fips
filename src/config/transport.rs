@@ -45,6 +45,15 @@ const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UdpConfig {
+    /// Bind the socket to one interface (`interface: en0`). Makes this UDP
+    /// instance one path: with several instances each bound to an
+    /// interface, a peer reachable over two of them holds two paths. Linux
+    /// binds both directions (`SO_BINDTODEVICE`); macOS binds egress only
+    /// (`IP_BOUND_IF`), so inbound on a wildcard `bind_addr` still arrives
+    /// from any interface there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+
     /// Bind address (`bind_addr`). Defaults to "0.0.0.0:2121".
     ///
     /// When `outbound_only = true`, this field is ignored and the transport

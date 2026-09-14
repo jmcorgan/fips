@@ -248,3 +248,29 @@ fn a_promoted_peer_holds_one_path_and_rebind_repoints_it() {
     assert_eq!(peer.paths().len(), 1);
     assert_eq!(peer.transport_id(), Some(wifi));
 }
+
+// ============================================================================
+// UDP `interface:` binding
+// ============================================================================
+
+#[test]
+fn udp_interface_config_parses() {
+    let cfg: crate::config::UdpConfig = serde_yaml::from_str("interface: en0\n").unwrap();
+    assert_eq!(cfg.interface.as_deref(), Some("en0"));
+    let cfg: crate::config::UdpConfig = serde_yaml::from_str("bind_addr: 0.0.0.0:1\n").unwrap();
+    assert!(cfg.interface.is_none());
+}
+
+#[test]
+fn binding_udp_to_a_missing_interface_fails_to_start() {
+    use crate::transport::udp::io::UdpRawSocket;
+    let err = UdpRawSocket::open_on_interface(
+        "127.0.0.1:0".parse().unwrap(),
+        65_536,
+        65_536,
+        Some("fips-absent-x0"),
+    )
+    .err()
+    .expect("an absent interface cannot be bound");
+    assert!(err.to_string().contains("fips-absent-x0"), "{err}");
+}

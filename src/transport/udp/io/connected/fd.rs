@@ -33,12 +33,16 @@ use super::super::macos as sys;
 /// sizes, applied best-effort: on Linux with `SO_*BUFFORCE` first,
 /// falling back to the normal `SO_*BUF` if the process can't bypass the
 /// kernel ceiling; on macOS with `SO_*BUF` alone, which has no force
-/// variant.
+/// variant. `interface`, if named, binds the socket to that interface the
+/// way the listen socket is (`udp.interface`): without it the connected
+/// socket would route by the kernel's table and an interface-bound
+/// transport's data could leave by another NIC, making the path a lie.
 pub(crate) fn open_connected_fd(
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     recv_buf: usize,
     send_buf: usize,
+    interface: Option<&str>,
 ) -> io::Result<OwnedFd> {
     // Family must match between local and peer.
     if local_addr.is_ipv4() != peer_addr.is_ipv4() {
@@ -76,6 +80,10 @@ pub(crate) fn open_connected_fd(
 
     // Buffer sizes — best effort; see the per-platform implementation.
     sys::set_buf_sizes(raw, recv_buf, send_buf);
+
+    if let Some(name) = interface {
+        super::super::bind_device::bind_to_interface(raw, name, local_addr.is_ipv4())?;
+    }
 
     // Bind to the wildcard local address (same port as listen socket).
     let local_sa: socket2::SockAddr = local_addr.into();
@@ -149,7 +157,7 @@ mod tests {
         let holder = UdpSocket::bind("127.0.0.1:0").expect("holder bind");
         let holder_addr = holder.local_addr().expect("holder addr");
 
-        let err = open_connected_fd(holder_addr, "127.0.0.1:9".parse().unwrap(), BUF, BUF)
+        let err = open_connected_fd(holder_addr, "127.0.0.1:9".parse().unwrap(), BUF, BUF, None)
             .expect_err("bind must fail against a non-reuseport holder");
 
         assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "{err}");
@@ -168,6 +176,7 @@ mod tests {
             "255.255.255.255:9999".parse().unwrap(),
             BUF,
             BUF,
+            None,
         )
         .expect_err("connect to broadcast without SO_BROADCAST must fail");
 

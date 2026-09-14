@@ -21,6 +21,21 @@ pub struct UdpRawSocket {
 }
 
 impl UdpRawSocket {
+    /// [`open`](Self::open); naming an interface is not supported here.
+    pub fn open_on_interface(
+        bind_addr: SocketAddr,
+        recv_buf_size: usize,
+        send_buf_size: usize,
+        interface: Option<&str>,
+    ) -> Result<Self, TransportError> {
+        if let Some(name) = interface {
+            return Err(TransportError::NotSupported(format!(
+                "udp.interface ({name}) is supported on Linux and macOS only"
+            )));
+        }
+        Self::open(bind_addr, recv_buf_size, send_buf_size)
+    }
+
     /// Create, bind, and configure a UDP socket.
     ///
     /// Sets non-blocking mode and configures buffer sizes. The socket

@@ -75,7 +75,7 @@ pub(super) fn install_connected_udp(
     let local: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
     let peer_sa: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
 
-    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536)
+    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536, None)
         .expect("open a connected UDP socket");
     let bound = crate::transport::udp::ConnectedPeerSocket::from_fd(owned, peer_sa, local);
     let socket = std::sync::Arc::new(bound);

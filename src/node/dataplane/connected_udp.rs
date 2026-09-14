@@ -119,7 +119,7 @@ impl Node {
         // the UDP transport's DNS cache. This may await on a DNS
         // lookup the very first time we see a hostname; subsequent
         // calls hit the cache.
-        let (peer_socket_addr, local_addr, recv_buf, send_buf, packet_tx) = {
+        let (peer_socket_addr, local_addr, recv_buf, send_buf, interface, packet_tx) = {
             let Some(transport) = self.transports.get(&transport_id) else {
                 return Ok(());
             };
@@ -136,8 +136,9 @@ impl Node {
                 .ok_or_else(|| "udp transport not started".to_string())?;
             let recv_buf = udp.recv_buf_size();
             let send_buf = udp.send_buf_size();
+            let interface = udp.interface().map(str::to_string);
             let tx = udp.clone_packet_tx();
-            (peer_sa, local, recv_buf, send_buf, tx)
+            (peer_sa, local, recv_buf, send_buf, interface, tx)
         };
 
         // Open the connected socket on the kernel side, then adopt the
@@ -147,6 +148,7 @@ impl Node {
             peer_socket_addr,
             recv_buf,
             send_buf,
+            interface.as_deref(),
         )
         .map_err(|e| format!("open_connected_fd: {e}"))?;
         let socket = std::sync::Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
