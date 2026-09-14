@@ -29,6 +29,7 @@ if (!getenv('FIPS_UNBOUND_HELPER_TEST')) {
 	require_once("config.inc");
 	require_once("util.inc");
 	require_once("unbound.inc");
+	require_once("services.inc");
 }
 
 define('FIPS_BEGIN', '# BEGIN FIPS - managed by fips-dns-setup, do not edit this block');
@@ -218,9 +219,13 @@ if (!fips_resolver_enabled()) {
 }
 
 /* Regenerate /var/unbound/unbound.conf from config.xml and restart the
- * resolver. Nothing shorter works: the file is generated wholesale, so
- * a reload alone would re-read the config we have not rewritten yet. */
-sync_unbound_service();
+ * resolver, the way the GUI's Apply does (services_unbound.php). It has to
+ * be this function: sync_unbound_service() regenerates the file too, but
+ * then only *starts* unbound, which is a no-op while one is running, so
+ * the running resolver kept its old forward set and answered NXDOMAIN for
+ * .fips (found on Plus 26.07 amd64). services_unbound_configure() TERMs
+ * the running instance first. */
+services_unbound_configure();
 
 fips_log("DNS Resolver updated and restarted");
 exit(0);

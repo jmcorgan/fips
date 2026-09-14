@@ -506,20 +506,34 @@ gate — nothing re-checks it when this code changes.
 
 Known still-unexercised paths, from that same run: `fips-dns-setup`'s
 refusal path (it has only ever run against a responder that was already
-answering), its DNS Forwarder branch, and `pkg delete`.
+answering) and its DNS Forwarder branch.
 (`fips-dns-teardown` has since been run on the same box and restored
 `custom_options` byte for byte.)
 
-**No amd64 package has ever been installed.** The CE 2.8.1 (FreeBSD 15)
-and the CE 2.9 / Plus 26.x (FreeBSD 16) amd64 packages are built and
-pass the checker, and nothing more. The one hardware run was aarch64;
-the amd64 packages share every script here and have had none of that
-exposure, so read a passing check as "the package is well-formed", not
-"it works".
+The FreeBSD 16 amd64 package has been run once on pfSense Plus
+26.07-RELEASE amd64, in a KVM virtual machine installed with the Netgate
+installer (the same `FreeBSD:16:amd64` package serves CE 2.9.0):
+`pkg add`, the boot script through start, re-entrant start, restart and
+stop with the daemon answering `fipsctl` and DNS, `pfSctl -c 'service
+reload packages'` (the WAN-address-change path) leaving the running
+daemon alone, a reboot bringing up exactly one daemon with the DNS
+Resolver block regenerated from `config.xml`, `fips-dns-teardown`
+leaving `custom_options` empty as it was, and `pkg delete`. That run
+found the defect fixed alongside this text: `fips-dns-setup` wrote the
+block and reported "updated and restarted", but the running unbound was
+never restarted and answered NXDOMAIN for `.fips` until it was. What the
+VM did not cover: mesh traffic (no peer), the TUN datapath under pf, and
+CE itself. The CE 2.8.1 (FreeBSD 15) package is still built and checked
+only.
 
-That matters because the aarch64 run found several defects, every one in
-this packaging rather than the daemon — a boot script whose pid check
-never succeeded, a DNS setup that reported success while nothing was
-listening, and a static build that faulted at `posix_spawn`. The daemon
-itself needed no changes. An untested path in the amd64 packages is
-exactly where the next one would sit.
+Left behind by `pkg delete`, by design or as known gaps:
+`/usr/local/etc/fips/fips.key` if the daemon generated one (it may be the
+node's identity), `/var/log/fips.log`, and the newsyslog entry under
+`/var/etc`, which a RAM-disk `/var` drops at the next boot anyway.
+
+The hardware and VM runs found several defects, every one in this
+packaging rather than the daemon — a boot script whose pid check never
+succeeded, a DNS setup that reported success while nothing was
+listening, a static build that faulted at `posix_spawn`, and the
+resolver restart above. The daemon itself needed no changes. An untested
+path is exactly where the next one would sit.

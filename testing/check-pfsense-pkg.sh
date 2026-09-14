@@ -527,6 +527,20 @@ fi
 # ── 6. PHP helper ───────────────────────────────────────────────────────────
 echo "-- php helper"
 HELPER="$PAYLOAD/libexec/fips/fips-unbound-custom.php"
+# After editing config.xml the helper must restart the running resolver the
+# way the GUI's Apply does, services_unbound_configure(): it TERMs unbound
+# and starts it on the regenerated unbound.conf. sync_unbound_service()
+# regenerates the file too but then only *starts* unbound, a no-op while one
+# is running, so the resolver kept its old forward set and answered NXDOMAIN
+# for .fips while setup reported success (Plus 26.07 amd64). A static check,
+# since the call needs pfSense's includes to run.
+if grep -qE '^[^*/#]*services_unbound_configure\(' "$HELPER" \
+    && ! grep -qE '^[^*/#]*sync_unbound_service\(' "$HELPER"; then
+    pass "helper restarts unbound with services_unbound_configure()"
+else
+    fail "helper does not restart unbound with services_unbound_configure()" \
+         "sync_unbound_service() leaves a running unbound on its old config."
+fi
 if ! command -v php >/dev/null 2>&1; then
     skip "php -l and the fips_strip_block unit test (no php on this host)"
 else
