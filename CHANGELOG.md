@@ -157,10 +157,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package is byte-identical before and after. The pfSense package is
   built and checked in its own CI job and published as a workflow
   artifact, not attached to a release, until it has been installed on a
-  real pfSense box; CI produces the CE 2.8.1 (`FreeBSD:15:amd64`)
-  package, while CE 2.9 and Plus 26.x on Intel need a FreeBSD 16 build
-  host the CI does not have, and ARM stays build-it-yourself because
-  rustup ships no toolchain for it. See `packaging/pfsense/README.md`.
+  real pfSense box. CI produces both Intel packages: CE 2.8.1
+  (`FreeBSD:15:amd64`) on a FreeBSD 15.1 VM, and CE 2.9 / Plus 26.x
+  (`FreeBSD:16:amd64`) on a pinned 16.0-CURRENT snapshot image the
+  workflow boots under qemu itself, since FreeBSD 16 has no release image
+  yet; each is then installed in its VM and run through the boot script's
+  start, re-entrant start, restart, stop and `pkg delete`
+  (`testing/pfsense-install-smoke.sh`, also the first thing to run on a
+  real box). ARM stays build-it-yourself because rustup ships no toolchain
+  for it. See `packaging/pfsense/README.md`.
 
 ### Changed
 

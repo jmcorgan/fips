@@ -112,24 +112,27 @@ difference decides which may be published:
 
 | Artifact | linkage | toolchain pin | CI |
 |---|---|---|---|
-| `…-pfsense-ce2.8-amd64.pkg` | static | honoured | built + checked, workflow artifact |
-| `…-pfsense-ce2.9-plus26-amd64.pkg` | static | honoured | not built — CI has no FreeBSD 16 host |
+| `…-pfsense-ce2.8-amd64.pkg` | static | honoured | built, checked, install-smoked; workflow artifact |
+| `…-pfsense-ce2.9-plus26-amd64.pkg` | static | honoured | built, checked, install-smoked; workflow artifact |
 | `…-pfsense-plus26-aarch64.pkg` | dynamic | **not** honoured | not built — build it yourself |
 
 No pfSense package is attached to a release. It is built and checked in
 its own CI job (so a pfSense-only failure reds that job without blocking
 the FreeBSD asset) and kept as a 30-day workflow artifact, until one has
-been installed on a real pfSense box.
+been installed on a real pfSense box. "Install-smoked" means
+`testing/pfsense-install-smoke.sh` ran it on the plain FreeBSD VM of the
+same major: `pkg add`, the boot script's start, re-entrant start, restart
+and stop with the real daemon answering `fipsctl` and DNS queries, then
+`pkg delete`. That is the same script to run first on a real box; its
+header says what a plain-FreeBSD pass does not prove.
 
-The two absences are not the same. The FreeBSD 16 Intel package builds
-cleanly with the pinned compiler and links statically, so it is
-releasable in principle and waits only on a FreeBSD 16 amd64 builder;
-the CI VM is 15.1 and `vmactions/freebsd-vm` offers nothing newer, and
-FreeBSD 16 is not released, so such a builder means a moving
-16.0-CURRENT snapshot. Until then, CI builds and checks only the package
-for the *older* supported CE release, as a workflow artifact. ARM cannot
-honour the pin at all, so it
-stays build-it-yourself regardless of infrastructure.
+The two Intel packages come from different builders. CE 2.8.1's is a
+FreeBSD 15.1 VM from `vmactions/freebsd-vm`. FreeBSD 16 is not released
+and that action offers nothing newer than 15.1, so the CE 2.9 / Plus 26.x
+package is built on a 16.0-CURRENT snapshot VM image the workflow boots
+under qemu itself, pinned by SHA-512 (see [Refreshing the FreeBSD 16 CI
+image](#refreshing-the-freebsd-16-ci-image)). ARM cannot honour the pin
+at all, so it stays build-it-yourself regardless of infrastructure.
 
 ### There is no cross-compiling out of this
 
@@ -206,8 +209,10 @@ annotations, and flags `pin_honoured: no` in its output.
 pfSense CE 2.9 and Plus 26.x are built from FreeBSD **16.0-CURRENT**, a development
 branch; 16.0-RELEASE does not exist yet. So a FreeBSD 16 builder means a
 [16.0-CURRENT snapshot](https://download.freebsd.org/snapshots/), not a
-release image — and `vmactions/freebsd-vm`, which this repo's CI uses,
-only goes up to 15.1.
+release image — and `vmactions/freebsd-vm`, which this repo's CI uses
+for FreeBSD 15, only goes up to 15.1. CI therefore boots a pinned
+snapshot image itself; see [Refreshing the FreeBSD 16 CI
+image](#refreshing-the-freebsd-16-ci-image).
 
 That makes base-library drift a real risk rather than a theoretical one:
 Netgate's `16.0-CURRENT@<hash>` and a FreeBSD snapshot from another date
@@ -221,6 +226,58 @@ actually needs:
 pkg info -F <the .pkg> | grep -A5 "Shared Libs"   # on the build host
 ldd /usr/local/bin/fips                           # on the appliance
 ```
+
+### Refreshing the FreeBSD 16 CI image
+
+The `pfsense-freebsd16` job boots a 16.0-CURRENT VM image under qemu,
+through `.github/scripts/freebsd16-vm.sh`, which pins one snapshot by file
+name, SHA-512 and origin directory and fetches it from this repository's
+`ci-images` release before falling back to download.freebsd.org. The
+script's header has the reasoning. Refresh the pin on a decision (a
+snapshot that fixes something the build hits, a new major), not on a
+schedule; the snapshot's date does not affect a statically linked
+package. To refresh:
+
+1. Pick the newest dated directory under
+   <https://download.freebsd.org/snapshots/VM-IMAGES/16.0-CURRENT/amd64/>
+   and download its `FreeBSD-16.0-CURRENT-amd64-ufs-<date>-<hash>-<build>.raw.xz`.
+   Never the unsuffixed name under `Latest/`, which changes content without
+   changing name.
+2. Verify it. Snapshot directories carry no checksum file, but each
+   build's announcement on the [freebsd-snapshots
+   list](https://lists.freebsd.org/archives/freebsd-snapshots/) is
+   PGP-signed and lists the SHA-512 of every VM image. Compare `sha512sum`
+   against it. A build with no announcement (its file name then carries
+   `nullhash-nullcount` where the git hash and build number belong) has
+   only HTTPS from freebsd.org as provenance; prefer an announced one.
+3. Upload it to the `ci-images` release. A GitHub release is a tag, and a
+   tag reachable from `master` would be picked up by the OpenWrt builders'
+   `git describe --tags` version fallback, so the release is anchored to an
+   empty commit on no branch. Once, to create it:
+
+   ```sh
+   git switch --orphan ci-images-anchor
+   git commit --allow-empty -m "Anchor for the ci-images release; on no branch"
+   git push origin HEAD:refs/tags/ci-images
+   git switch master
+   gh release create ci-images --verify-tag --prerelease --title "CI images" \
+       --notes "VM images the CI pins; see packaging/pfsense/README.md."
+   ```
+
+   Then, each time:
+
+   ```sh
+   gh release upload ci-images FreeBSD-16.0-CURRENT-amd64-ufs-<date>-<hash>-<build>.raw.xz
+   ```
+
+4. Update `FREEBSD16_IMAGE`, `FREEBSD16_IMAGE_SHA512`,
+   `FREEBSD16_IMAGE_ORIGIN` and the pin date in
+   `.github/scripts/freebsd16-vm.sh`, in one commit that says which
+   announcement the hash was checked against.
+
+On a fork, `GITHUB_REPOSITORY` names the fork, so a fork's run looks for
+the asset on the fork's own `ci-images` release before falling back to
+download.freebsd.org.
 
 ## Build
 

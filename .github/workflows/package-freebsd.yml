@@ -240,9 +240,10 @@ jobs:
     # packaging/pfsense/README.md.
     #
     # This VM is FreeBSD 15.1, so the package it produces is FreeBSD:15:amd64
-    # (pfSense CE 2.8.1). CE 2.9 and Plus 26.x are FreeBSD 16 and need a
-    # FreeBSD 16 host this workflow does not have. No aarch64 package is built
-    # here or published anywhere: rustup ships no toolchain for
+    # (pfSense CE 2.8.1). CE 2.9 and Plus 26.x are FreeBSD 16, which
+    # vmactions/freebsd-vm does not offer; the `pfsense-freebsd16` job below
+    # builds that package on a pinned 16.0-CURRENT snapshot. No aarch64 package
+    # is built here or published anywhere: rustup ships no toolchain for
     # aarch64-unknown-freebsd, so such a build cannot honour the
     # rust-toolchain.toml pin every published artifact is built with. ARM is
     # build-it-yourself, per the README.
@@ -289,6 +290,10 @@ jobs:
             PKG=$(ls deploy/fips-*-pfsense-*.pkg)
             testing/check-pfsense-pkg.sh "$PKG"
             php -l packaging/pfsense/fips-unbound-custom.php
+            # Install it and run the daemon through the boot script's life on
+            # this FreeBSD 15 kernel; see the script header for what that does
+            # and does not prove about pfSense itself.
+            testing/pfsense-install-smoke.sh "$PKG"
 
             ( cd deploy && sha256 -q "$(basename "$PKG")" \
                 | { read -r h; printf '%s  %s\n' "$h" "$(basename "$PKG")"; } \
@@ -320,6 +325,136 @@ jobs:
             ${{ steps.pfsense-asset.outputs.pkg }}.sha256
           retention-days: 30
 
+  pfsense-freebsd16:
+    name: Build and check the pfSense package (x86_64, FreeBSD 16)
+    # The FreeBSD:16:amd64 package, for pfSense CE 2.9.0 and Plus 26.x on
+    # Intel, which is every fresh pfSense install today. Same rules as the
+    # `pfsense` job above: its own job, not a dependency of `release`, a
+    # 30-day workflow artifact and never a release asset until someone has
+    # installed it on a real pfSense box.
+    #
+    # vmactions/freebsd-vm stops at 15.1 and FreeBSD 16 has no release image,
+    # so this job boots a pinned 16.0-CURRENT snapshot under qemu itself. The
+    # pin, where its copy lives and why the snapshot's date does not matter to
+    # a statically linked package are in .github/scripts/freebsd16-vm.sh.
+    runs-on: ubuntu-latest
+    needs: determine-versioning
+    # A full release build like the `pfsense` job, plus fetching and booting
+    # the image. Under KVM the whole job is expected well inside this; the
+    # bound is loose enough to pass a TCG fallback run and tight enough that
+    # a stalled VM fails in an hour rather than at GitHub's six-hour ceiling.
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install qemu and open /dev/kvm
+        # GitHub-hosted Linux x64 runners expose /dev/kvm; this udev rule is
+        # the documented way to let the runner user open it. If it is not
+        # there the VM script falls back to TCG and says so.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf mtools
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Lint the scripts this job runs
+        # Same arrangement as package-openwrt.yml's install-nak.sh lint: none
+        # of these ship in the package, and they are bash and python, so the
+        # guards for shipped sh scripts do not apply.
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends shellcheck
+          fi
+          shellcheck --shell=bash .github/scripts/freebsd16-vm.sh
+          shellcheck --shell=sh testing/pfsense-install-smoke.sh
+          python3 -m py_compile .github/scripts/freebsd16-console.py
+
+      - name: Boot the FreeBSD 16.0-CURRENT VM
+        run: .github/scripts/freebsd16-vm.sh up
+
+      - name: Build and check the pfSense package in the VM
+        env:
+          FREEBSD_PACKAGE_VERSION: ${{ needs.determine-versioning.outputs.freebsd_package_version }}
+        run: |
+          set -euo pipefail
+          VM=.github/scripts/freebsd16-vm.sh
+          "$VM" push . /root/fips
+
+          # The same steps as the `pfsense` job's prepare/run, in a plain sh
+          # script the VM runs: curl for rustup; bash and php for
+          # testing/check-pfsense-pkg.sh (the checker is bash, and it runs
+          # php -l plus a fips_strip_block unit test on the config.xml helper).
+          cat > "$RUNNER_TEMP/ci-build.sh" <<'EOF'
+          set -e
+          pkg install -y curl bash php85
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          . "$HOME/.cargo/env"
+          cd /root/fips
+
+          # Builds the release binaries (static by default) and packages them;
+          # on this FreeBSD 16 VM that is the FreeBSD:16:amd64 package for
+          # pfSense CE 2.9.0 and Plus 26.x on Intel.
+          packaging/pfsense/build-pkg.sh --version "$FREEBSD_PACKAGE_VERSION"
+
+          PKG=$(ls deploy/fips-*-pfsense-*.pkg)
+          testing/check-pfsense-pkg.sh "$PKG"
+          php -l packaging/pfsense/fips-unbound-custom.php
+          # Install it and run the daemon through the boot script's life on
+          # this FreeBSD 16 kernel; see the script header for what that does
+          # and does not prove about pfSense itself.
+          testing/pfsense-install-smoke.sh "$PKG"
+
+          ( cd deploy && sha256 -q "$(basename "$PKG")" \
+              | { read -r h; printf '%s  %s\n' "$h" "$(basename "$PKG")"; } \
+              > "$(basename "$PKG").sha256" )
+          EOF
+          "$VM" ssh 'cat > /root/ci-build.sh' < "$RUNNER_TEMP/ci-build.sh"
+          "$VM" ssh "env SOURCE_DATE_EPOCH='$SOURCE_DATE_EPOCH' \
+                         FREEBSD_PACKAGE_VERSION='$FREEBSD_PACKAGE_VERSION' \
+                         CARGO_TERM_COLOR='$CARGO_TERM_COLOR' \
+                         sh -e /root/ci-build.sh"
+          "$VM" pull /root/fips/deploy .
+
+      - name: Shut the VM down
+        if: always()
+        run: .github/scripts/freebsd16-vm.sh down
+
+      - name: Resolve pfSense asset path
+        id: pfsense-asset
+        shell: bash
+        run: |
+          : ${GITHUB_OUTPUT:=/tmp/github_output}
+          set -euo pipefail
+          VER="${{ needs.determine-versioning.outputs.freebsd_pkg_file_version }}"
+          # The product tag in the name is what build-pkg.sh derives from the
+          # host ABI; assert it, so a VM that is not FreeBSD 16 fails here
+          # rather than uploading a mislabelled artifact.
+          PKG="deploy/fips-${VER}-pfsense-ce2.9-plus26-amd64.pkg"
+          if [[ ! -f "$PKG" ]]; then
+            echo "No FreeBSD 16 pfSense package was produced; expected $PKG" >&2
+            ls -la deploy >&2 || true
+            exit 1
+          fi
+          echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
+
+      - name: Upload pfSense artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fips_${{ needs.determine-versioning.outputs.freebsd_package_version }}_x86_64_pfsense_freebsd16
+          path: |
+            ${{ steps.pfsense-asset.outputs.pkg }}
+            ${{ steps.pfsense-asset.outputs.pkg }}.sha256
+          retention-days: 30
+
   release:
     name: Publish FreeBSD assets to GitHub Release
     runs-on: ubuntu-latest
@@ -333,9 +468,10 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           # Only the FreeBSD artifact. Without a pattern this action downloads
-          # every artifact in the run — including the pfSense package from the
-          # `pfsense` job, which is a workflow artifact by design and must never
-          # reach a release. `needs` only orders jobs; it does not scope this.
+          # every artifact in the run — including the pfSense packages from the
+          # `pfsense` and `pfsense-freebsd16` jobs, which are workflow artifacts
+          # by design and must never reach a release. `needs` only orders jobs;
+          # it does not scope this.
           pattern: fips_*_x86_64_freebsd
           path: dist
           merge-multiple: true
