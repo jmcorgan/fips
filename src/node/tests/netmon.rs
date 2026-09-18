@@ -635,3 +635,44 @@ async fn a_transports_bind_address_reaches_the_probe_target() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// The detector's own tests attach a trigger to a wake source by hand, so they
+/// would all still pass if `start()` handed the detector some other trigger
+/// than the one [`Node::netmon_trigger`] gives out. The observable here is the
+/// held poke: a running detector wired to this trigger consumes it, and
+/// anything else leaves it sitting there for the test to collect. Twice,
+/// because the same handle has to reach the detector a `stop()` and another
+/// `start()` later as well.
+#[tokio::test]
+async fn the_nodes_trigger_reaches_the_running_detector_across_a_restart() {
+    let mut node = make_healthy_node();
+    // Fetched before `start()`, which is when an embedder registering its
+    // platform callback early would fetch it.
+    let trigger = node.netmon_trigger();
+
+    for round in ["first start", "restart"] {
+        node.start().await.unwrap();
+        trigger.poke();
+
+        let consumed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let still_held =
+                    tokio::time::timeout(Duration::from_millis(1), trigger.poked()).await;
+                match still_held {
+                    // Nobody took it, and collecting it just consumed it: put
+                    // it back and give the detector another turn.
+                    Ok(()) => trigger.poke(),
+                    Err(_) => break,
+                }
+            }
+        })
+        .await;
+        assert!(
+            consumed.is_ok(),
+            "{round}: the detector never took the poke, so it is not listening on the node's trigger"
+        );
+
+        node.stop().await.unwrap();
+    }
+}

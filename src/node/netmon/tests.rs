@@ -598,6 +598,99 @@ async fn an_event_ping_wakes_the_detector_before_the_timer_would() {
     assert_eq!(change.summary.moved[0].after, Some(v4(10, 40, 0, 7)));
 }
 
+/// An embedder's push is the Android path: the netlink group bind is refused
+/// for an app there, so the platform source is the timer alone, and the app's
+/// own network callback is what knows the moment the medium moved. The poll
+/// period here is an hour, so only the poke can be what woke the detector.
+#[tokio::test(start_paused = true)]
+async fn an_embedder_poke_wakes_the_detector_before_the_timer_would() {
+    let wlan = all_from(&[peer(1)], Some(v4(192, 168, 1, 10)));
+    let cell = all_from(&[peer(1)], Some(v4(10, 40, 0, 7)));
+    let (sampler, _) = scripted(vec![wlan, cell]);
+    let (tx, mut rx) = mpsc::channel(1);
+    let trigger = NetmonTrigger::new();
+
+    let wake = WakeSource::timer_only(Duration::from_secs(3600)).with_push(trigger.clone());
+    tokio::spawn(run_detector(tx, cfg(3600, 0), sampler, wake));
+    // Let the detector take its baseline and park on `wait()`; a poke that
+    // lands before that must also work (the permit is held), but the common
+    // case is the parked one.
+    tokio::task::yield_now().await;
+
+    trigger.poke();
+
+    let change = expect_change(&mut rx).await;
+    assert_eq!(change.summary.moved[0].after, Some(v4(10, 40, 0, 7)));
+}
+
+/// A poke that lands while the detector is not waiting — here, before it has
+/// even started — is held as a permit rather than dropped, so the embedder
+/// never has to sequence its callback against the detector's own loop.
+#[tokio::test(start_paused = true)]
+async fn a_poke_before_the_detector_waits_is_not_lost() {
+    let wlan = all_from(&[peer(1)], Some(v4(192, 168, 1, 10)));
+    let cell = all_from(&[peer(1)], Some(v4(10, 40, 0, 7)));
+    let (sampler, calls) = scripted(vec![wlan, cell]);
+    let (tx, mut rx) = mpsc::channel(1);
+    let trigger = NetmonTrigger::new();
+    trigger.poke();
+    trigger.poke(); // a burst coalesces into one wake-up
+
+    let wake = WakeSource::timer_only(Duration::from_secs(3600)).with_push(trigger.clone());
+    tokio::spawn(run_detector(tx, cfg(3600, 0), sampler, wake));
+
+    let change = expect_change(&mut rx).await;
+    assert_eq!(change.summary.moved[0].after, Some(v4(10, 40, 0, 7)));
+
+    // The baseline and the one sample the burst bought. A second wake-up for
+    // the second poke would show up here as a third.
+    expect_quiet(&mut rx, "the second poke of a burst must not wake it again").await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// A platform callback is not ordered against the routing table it reports
+/// on: the poke can land while the kernel still answers with the old source.
+/// A kernel source would be woken again by the route message itself, but a
+/// push is a single shot, so the detector looks once more a debounce period
+/// later rather than spending the poke on the old picture and leaving the
+/// change to an hour-long timer.
+#[tokio::test(start_paused = true)]
+async fn a_poke_that_runs_ahead_of_the_route_change_still_catches_it() {
+    let wlan = all_from(&[peer(1)], Some(v4(192, 168, 1, 10)));
+    let cell = all_from(&[peer(1)], Some(v4(10, 40, 0, 7)));
+    // Baseline, the sample the poke buys (still the old picture), then the
+    // second look.
+    let (sampler, _) = scripted(vec![wlan.clone(), wlan, cell]);
+    let (tx, mut rx) = mpsc::channel(1);
+    let trigger = NetmonTrigger::new();
+
+    let wake = WakeSource::timer_only(Duration::from_secs(3600)).with_push(trigger.clone());
+    tokio::spawn(run_detector(tx, cfg(3600, 250), sampler, wake));
+    tokio::task::yield_now().await;
+
+    trigger.poke();
+
+    let change = expect_change(&mut rx).await;
+    assert_eq!(change.summary.moved[0].after, Some(v4(10, 40, 0, 7)));
+}
+
+/// The second look belongs to a push alone. A timer tick that finds nothing
+/// moved must go back to sleep, or every quiet poll period would cost two
+/// samples instead of one.
+#[tokio::test(start_paused = true)]
+async fn a_timer_wake_that_finds_nothing_does_not_take_a_second_look() {
+    let wlan = all_from(&[peer(1)], Some(v4(192, 168, 1, 10)));
+    let (sampler, calls) = scripted(vec![wlan]);
+    let (tx, mut rx) = mpsc::channel(1);
+
+    let wake = WakeSource::timer_only(Duration::from_secs(20));
+    tokio::spawn(run_detector(tx, cfg(20, 250), sampler, wake));
+
+    // One tick inside the quiet window: the baseline plus one sample.
+    expect_quiet(&mut rx, "nothing moved").await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
 /// A netlink socket drops messages under memory pressure, and a backend can go
 /// quiet without going away. The backstop timer must still get the node there,
 /// so an event-driven backend is never worse than the poller it replaced.

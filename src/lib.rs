@@ -103,4 +103,4 @@ pub use peer::{ActivePeer, ConnectivityState, PeerError};
 // Re-export node types
 #[cfg(unix)]
 pub use node::AppOwnedUdpSocket;
-pub use node::{Node, NodeError, NodeState, UpdatePeersOutcome};
+pub use node::{NetmonTrigger, Node, NodeError, NodeState, UpdatePeersOutcome};

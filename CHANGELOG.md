@@ -133,6 +133,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Library surface and internals
 
+- `Node::netmon_trigger()` and `NetmonTrigger::poke()`, an embedder push into
+  the medium-change detector
+  ([#146](https://github.com/jmcorgan/fips/issues/146)). The detector's
+  channel was private end to end, so an embedder whose platform announces a
+  network change had nowhere to put it. That is Android's position: the
+  netlink group bind is refused to an app there, which leaves detection on the
+  poll timer, while the app's `ConnectivityManager` callback knows the moment
+  the default network moved. `poke()` is a bare wake-up with no payload — the
+  detector still samples, and the fingerprint comparison, the debounce, the
+  settled-back suppression and the minimum spacing between reports apply to a
+  pushed wake-up exactly as they do to a kernel event, so a spurious callback
+  costs one sample rather than a socket rebind. It is synchronous and callable
+  from any thread, before or after `start()`; a poke that lands while the
+  detector is sampling is held rather than lost, and a burst coalesces into
+  one wake-up. A platform callback is not ordered against the routing table it
+  reports on, so a pushed wake-up whose sample shows nothing moved looks once
+  more after `node.netmon.debounce_ms` instead of leaving the change to the
+  timer; wake-ups from the kernel and the timer are unchanged. The push is selected beside the platform's own source and the
+  timer backstop, never instead of them. The platform wiring
+  (`registerNetworkCallback`, or `NWPathMonitor` on iOS) stays with the
+  embedder, since the crate has no JNI layer.
 - `TransportError::InterfaceUnavailable { interface }`. A missing interface and
   a typo'd interface name were previously the same flat
   `StartFailed(String)`; nothing downstream could branch on absence.
