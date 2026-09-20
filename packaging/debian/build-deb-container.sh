@@ -187,8 +187,32 @@ fi
 # could return one of those, and a package that sorts higher by name was
 # returned in preference to the one just built. The name travels through a
 # directory of its own, created fresh for this run, so a name left by an
-# earlier run cannot be read and nothing extra is left in the output directory.
-NAME_DIR=$(mktemp -d)
+# earlier run cannot be read.
+#
+# The directory lives inside the output directory, not under /tmp, and that
+# placement is the whole point rather than a detail. A bind-mount source is
+# resolved by the Docker daemon in the host's mount namespace. Where this
+# script runs with a private /tmp -- systemd's PrivateTmp=, which the CI
+# worker on the builder sets -- a path from a bare `mktemp -d` exists only in
+# this process's namespace: the daemon finds nothing at it, creates its own
+# directory at the same path in the host's /tmp, and the container writes the
+# name there while this script reads an empty directory and reports that the
+# build named nothing. The output directory is already bind-mounted as /out
+# and so already resolves the same way in both namespaces, which makes it the
+# one place the name can travel through unconditionally. testing/native-api's
+# shared_tmpdir() exists for the same reason and says the same thing.
+# The trap below clears the directory on any ordinary exit, but not on a
+# SIGKILL, and the builder's watch loop group-kills a run that overruns its
+# ceiling or is superseded by a newer tip. Nothing else sweeps the output
+# directory, so clear siblings old enough that no live run can own them. Two
+# hours is far above any build and far below the interval at which a killed
+# run's leftovers would accumulate.
+find "$DEST_ABS" -maxdepth 1 -type d -name '.name.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || :
+
+NAME_DIR=$(mktemp -d "$DEST_ABS/.name.XXXXXX") || {
+    echo "build-deb-container: could not create a name directory in $DEST_ABS" >&2
+    exit 1
+}
 trap 'rm -rf "$NAME_DIR"' EXIT
 
 # The source is mounted read-only so a build cannot leave artifacts in the tree.
@@ -212,6 +236,9 @@ DEB_NAME=""
 [ -f "$NAME_DIR/deb" ] && DEB_NAME=$(head -n 1 "$NAME_DIR/deb")
 [ -n "$DEB_NAME" ] || {
     echo "build-deb-container: the build did not name its package" >&2
+    echo "build-deb-container: the name travels through $NAME_DIR, bind-mounted as /name." >&2
+    echo "build-deb-container: if that path is not visible to the Docker daemon -- a private" >&2
+    echo "build-deb-container: /tmp is the usual cause -- the container wrote the name elsewhere." >&2
     exit 1
 }
 if [[ "$DEB_NAME" == */* || "$DEB_NAME" != fips_*_*.deb ]]; then
