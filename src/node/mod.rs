@@ -18,6 +18,7 @@ mod handlers;
 mod lifecycle;
 pub(crate) mod metrics;
 pub(crate) mod netmon;
+pub use netmon::NetmonTrigger;
 mod peer_error_budget;
 mod peering;
 mod rate_limit;
@@ -458,6 +459,10 @@ pub struct Node {
     /// removal is one of its callers, so a peer that never comes back leaves
     /// nothing behind.
     path_mtu_seeded_by: Arc<std::sync::RwLock<HashMap<crate::FipsAddress, TransportId>>>,
+    /// The embedder's wake-up for the medium-change detector, handed out by
+    /// [`Node::netmon_trigger`] and into the detector at `start()`. Always
+    /// allocated so the trigger works whenever it is fetched.
+    netmon_trigger: netmon::NetmonTrigger,
 
     // === Transports & Links ===
     /// Active transports (owned by Node).
@@ -978,6 +983,7 @@ impl Node {
                 crate::upper::icmp::mss_ceiling(crate::upper::tun::IPV6_MIN_MTU),
             )),
             path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
             #[cfg(unix)]
@@ -1155,6 +1161,7 @@ impl Node {
                 crate::upper::icmp::mss_ceiling(crate::upper::tun::IPV6_MIN_MTU),
             )),
             path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
             #[cfg(unix)]
@@ -3792,6 +3799,25 @@ impl Node {
     /// one this accessor tries to close.
     pub fn dns_local_addr(&self) -> Option<std::net::SocketAddr> {
         self.supervisor.dns_local_addr
+    }
+
+    /// A handle that wakes the medium-change detector (`node.netmon.*`) now
+    /// rather than at its next poll — see [`NetmonTrigger`].
+    ///
+    /// For an embedder whose platform tells it when the network moved but
+    /// refuses the node its kernel event source: an Android `VpnService` gets
+    /// a `ConnectivityManager` callback the moment the default network
+    /// changes, while the netlink group bind the detector would otherwise use
+    /// is denied to apps, leaving the detector on its poll timer. Poking from
+    /// the callback turns a poll-period latency into a debounce-period one.
+    /// Callable before or after [`Self::start`], from any thread, and the
+    /// same handle keeps working across a [`Self::stop`] and another
+    /// [`Self::start`]; a poke while no detector is running is held for the
+    /// next one — and with `node.netmon.enabled: false` there is no next one,
+    /// so the poke does nothing. A new `Node` has a new trigger — an embedder
+    /// that rebuilds the node must fetch it again.
+    pub fn netmon_trigger(&self) -> NetmonTrigger {
+        self.netmon_trigger.clone()
     }
 
     // === Sending ===
