@@ -5491,6 +5491,85 @@ async fn initial_msg3_resends_stop_at_the_budget_and_release_the_payload() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// A lost initial msg3 must be kept and resent as the whole encoded
+/// SessionMsg3, negotiation payload included, not as the bare handshake
+/// message.
+///
+/// A bare msg3 would still establish the responder: it treats the
+/// negotiation payload as optional, and the transport keys come from the
+/// chaining key alone. What a bare msg3 changes is the responder's
+/// handshake hash, which the negotiation ciphertext is mixed into. So the
+/// retained bytes are pinned by length, and after the resend both ends must
+/// hold the same handshake hash; the session completing cannot tell the two
+/// apart.
+#[tokio::test]
+async fn a_lost_initial_msg3_is_retained_and_resent_with_its_negotiation_payload() {
+    let mut nodes = pair_with_lost_initial_msg3().await;
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let retained = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .expect("initiator entry present")
+        .handshake_payload()
+        .expect("node 0 must hold its msg3 for resend")
+        .to_vec();
+    assert_eq!(
+        retained[0], 0x03,
+        "the retained bytes must be an encoded SessionMsg3"
+    );
+    let msg3 = SessionMsg3::decode(&retained[4..]).expect("the retained SessionMsg3 must decode");
+    // What the initiator appends: the encrypted negotiation payload, that is
+    // its plaintext plus the AEAD tag.
+    let negotiation_len = crate::proto::fmp::NegotiationPayload::new(0, 0, 0)
+        .encode()
+        .len()
+        + crate::noise::TAG_SIZE;
+    assert_eq!(
+        msg3.handshake_payload.len(),
+        crate::noise::HANDSHAKE_MSG3_SIZE + negotiation_len,
+        "the retained msg3 must carry the encrypted negotiation payload"
+    );
+
+    let interval_ms = nodes[0]
+        .node
+        .config()
+        .node
+        .rate_limit
+        .handshake_resend_interval_ms;
+    nodes[0]
+        .node
+        .resend_pending_session_handshakes(Node::now_ms() + interval_ms + 1)
+        .await;
+    pump_until_quiet(&mut nodes).await;
+
+    let hash0 = match nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .expect("initiator entry present")
+        .state()
+    {
+        EndToEndState::Established(session) => *session.handshake_hash(),
+        _ => panic!("node 0 must stay established"),
+    };
+    let hash1 = match nodes[1]
+        .node
+        .get_session(&node0_addr)
+        .expect("responder entry present")
+        .state()
+    {
+        EndToEndState::Established(session) => *session.handshake_hash(),
+        _ => panic!("node 1 must complete the session on the resent msg3"),
+    };
+    assert_eq!(
+        hash0, hash1,
+        "the responder must have read the negotiation payload the initiator sent"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// A SessionAck that fails to read must not end an FSP rekey the node
 /// initiated.
 ///
@@ -7468,6 +7547,105 @@ async fn test_an_unreadable_session_ack_does_not_push_out_the_rekey_deadline() {
             .initiated_ms(),
         armed_at,
         "the restore must not restamp the deadline"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Putting a handshake back after a SessionAck made under a stranger's
+/// static key leaves the stamp its deadline runs from exactly where arming
+/// wrote it.
+#[tokio::test]
+async fn a_rekey_ack_under_a_strangers_key_does_not_push_out_the_rekey_deadline() {
+    let mut nodes = make_rekey_disabled_pair().await;
+    establish_pair_session(&mut nodes).await;
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let msg1 = arm_rekey(&mut nodes[0].node, &node1_addr);
+    let armed_at = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .unwrap()
+        .initiated_ms();
+    assert_ne!(armed_at, 0, "arming must stamp the deadline");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let forged = rekey_ack(&msg1, &Identity::generate(), &nodes[1].node);
+    nodes[0]
+        .node
+        .handle_session_payload(&node1_addr, &node1_addr, &forged, 1280, false)
+        .await;
+    assert_eq!(
+        nodes[0].node.stats().session.rekey_key_mismatch,
+        1,
+        "the stranger's ack must be refused as a key mismatch"
+    );
+    assert!(
+        rekey_initiated(&nodes[0], &node1_addr),
+        "the refused ack must have put the handshake back"
+    );
+    assert_eq!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .initiated_ms(),
+        armed_at,
+        "the restore must not restamp the deadline"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A SessionAck under a stranger's static key arriving midway through an
+/// unanswered rekey must not restart its deadline: the rekey is retired on
+/// the timeout measured from when it was armed.
+///
+/// No rekey trigger can fire on either node, so the only rekey in flight is
+/// the one armed here.
+#[tokio::test]
+async fn stranger_keyed_rekey_acks_do_not_hold_an_unanswered_rekey_open_past_its_deadline() {
+    let mut nodes = rekey_pair([false, false], Some(1)).await;
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let msg1 = arm_rekey(&mut nodes[0].node, &node1_addr);
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let forged = rekey_ack(&msg1, &Identity::generate(), &nodes[1].node);
+    nodes[0]
+        .node
+        .handle_session_payload(&node1_addr, &node1_addr, &forged, 1280, false)
+        .await;
+    assert_eq!(
+        nodes[0].node.stats().session.rekey_key_mismatch,
+        1,
+        "the stranger's ack must be refused as a key mismatch"
+    );
+    assert!(
+        rekey_initiated(&nodes[0], &node1_addr),
+        "the refused ack must have put the handshake back"
+    );
+
+    let forged_at = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    nodes[0].node.check_session_rekey().await;
+    println!(
+        "stranger ack to check: {} ms",
+        forged_at.elapsed().as_millis()
+    );
+    assert!(
+        !nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .has_rekey_in_progress(),
+        "an ack under a stranger's key must not restart the deadline of the \
+         rekey this node initiated"
+    );
+    assert_eq!(
+        nodes[0].node.stats().session.rekey_unanswered,
+        1,
+        "the retired handshake must be counted once"
     );
 
     cleanup_nodes(&mut nodes).await;
