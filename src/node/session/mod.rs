@@ -123,8 +123,11 @@ pub(crate) struct SessionEntry {
     bytes_recv: u64,
 
     // === Handshake Resend ===
-    /// Encoded session-layer payload for resend (SessionSetup or SessionAck).
-    /// Cleared on Established transition.
+    /// The last initial-handshake message this side sent and has no proof the
+    /// peer received: SessionSetup while initiating, SessionAck while awaiting
+    /// msg3, and on an established initiator its SessionMsg3 until an inbound
+    /// frame authenticates on the session or the resend budget is spent. The
+    /// state says which one it is, and which sweep resends it.
     handshake_payload: Option<Vec<u8>>,
     /// Number of resends performed.
     resend_count: u32,
@@ -160,6 +163,14 @@ pub(crate) struct SessionEntry {
     rekey_initiator: bool,
     /// Dampening: last time peer sent us a rekey msg1 (Unix ms).
     last_peer_rekey_ms: u64,
+    /// When this node armed its current rekey handshake as initiator (Unix
+    /// ms), which bounds how long that handshake waits for a SessionAck.
+    ///
+    /// Written only by `begin_rekey`, so putting the handshake back after
+    /// an unreadable SessionAck, or after one made under a key other than
+    /// the peer's, does not move it. Read only while a handshake is armed
+    /// and `rekey_initiator` is set, which is why it is never cleared.
+    initiated_ms: u64,
     /// When this side's FSP rekey handshake completed and produced the
     /// `pending` session (Unix ms): the initiator sending msg3, or the
     /// responder accepting it. Cleared on cutover.
@@ -229,6 +240,7 @@ impl SessionEntry {
             pending_new_session: None,
             rekey_initiator: false,
             last_peer_rekey_ms: 0,
+            initiated_ms: 0,
             rekey_completed_ms: 0,
             rekey_msg3_payload: None,
             rekey_msg3_next_resend_ms: 0,
@@ -407,6 +419,8 @@ impl SessionEntry {
     ///
     /// For initiators, this is the SessionSetup payload bytes.
     /// For responders, this is the SessionAck payload bytes.
+    /// For an initiator that has just become established, this is its
+    /// SessionMsg3 payload bytes, held until the responder is heard from.
     /// The payload is re-wrapped in a fresh SessionDatagram on each resend
     /// so routing can adapt to topology changes.
     pub(crate) fn set_handshake_payload(&mut self, payload: Vec<u8>, next_resend_at_ms: u64) {
@@ -420,7 +434,8 @@ impl SessionEntry {
         self.handshake_payload.as_deref()
     }
 
-    /// Clear the stored handshake payload (called on Established transition).
+    /// Clear the stored handshake payload (an inbound frame authenticated on
+    /// the session, or the msg3 resend budget is spent).
     pub(crate) fn clear_handshake_payload(&mut self) {
         self.handshake_payload = None;
         self.next_resend_at_ms = 0;
@@ -478,6 +493,15 @@ impl SessionEntry {
     /// including a pending session derived from it.
     pub(crate) fn last_peer_rekey_ms(&self) -> u64 {
         self.last_peer_rekey_ms
+    }
+
+    /// When this node armed its current rekey handshake as initiator, or 0
+    /// if it never has.
+    ///
+    /// Bounds the age of a handshake this node armed, independently of any
+    /// rekey the peer started.
+    pub(crate) fn initiated_ms(&self) -> u64 {
+        self.initiated_ms
     }
 
     /// Record that the peer initiated a rekey (for dampening).
@@ -679,6 +703,19 @@ impl SessionEntry {
         self.rekey_initiator = is_initiator;
     }
 
+    /// Arm a rekey handshake this node initiated, and stamp its deadline.
+    ///
+    /// The only writer of `initiated_ms`. The two restores, after an
+    /// unreadable SessionAck and after one made under a key other than the
+    /// peer's, go through `set_rekey_state` instead and must stay there: a
+    /// restamping restore would let a stream of forged acks hold the rekey
+    /// open for good.
+    pub(crate) fn begin_rekey(&mut self, state: HandshakeState, now_ms: u64) {
+        self.rekey_state = Some(state);
+        self.rekey_initiator = true;
+        self.initiated_ms = now_ms;
+    }
+
     /// Take the rekey state for processing.
     pub(crate) fn take_rekey_state(&mut self) -> Option<HandshakeState> {
         self.rekey_state.take()
@@ -830,10 +867,11 @@ impl SessionEntry {
     /// Abandon an in-progress rekey handshake, keeping any completed
     /// session already waiting for cut-over.
     ///
-    /// Used when a handshake the peer armed times out without its msg3.
-    /// The handshake holds no key material either endpoint can be using,
-    /// so dropping it costs nothing; a `pending` session alongside it is
-    /// the epoch the peer may already have moved to and must survive.
+    /// Used when an armed handshake times out: one the peer armed without
+    /// its msg3, or one this node armed without a SessionAck. The handshake
+    /// holds no key material either endpoint can be using, so dropping it
+    /// costs nothing; a `pending` session alongside it is the epoch the
+    /// peer may already have moved to and must survive.
     ///
     /// `rekey_initiator` is deliberately left alone: it describes whichever
     /// rekey artefact the entry still holds, and every reader gates on a

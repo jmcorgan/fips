@@ -65,6 +65,12 @@ pub struct SessionStats {
     /// the handshake timeout without a msg3 and was discarded. The
     /// established session is retained.
     pub rekey_expired: u64,
+    /// A rekey this node initiated got no readable SessionAck within the
+    /// handshake timeout, and its handshake was discarded so the trigger
+    /// can retry. The established session is retained. A sustained rate
+    /// means setups or acks to that peer are being lost, or the peer holds
+    /// a stuck handshake of its own and wins the tie-break.
+    pub rekey_unanswered: u64,
     /// A completed rekey session still waiting for the peer's cut-over was
     /// replaced by a newer one, completed from a msg3 carrying the same
     /// authenticated peer key. This drops key material the peer may
@@ -108,6 +114,7 @@ impl SessionStats {
             rekey_yielded: self.rekey_yielded,
             rekey_pending: self.rekey_pending,
             rekey_expired: self.rekey_expired,
+            rekey_unanswered: self.rekey_unanswered,
             pending_replaced: self.pending_replaced,
             ack_handshake_failed: self.ack_handshake_failed,
             ack_identity_mismatch: self.ack_identity_mismatch,
@@ -420,6 +427,7 @@ pub struct SessionStatsSnapshot {
     pub rekey_yielded: u64,
     pub rekey_pending: u64,
     pub rekey_expired: u64,
+    pub rekey_unanswered: u64,
     pub pending_replaced: u64,
     pub ack_handshake_failed: u64,
     pub ack_identity_mismatch: u64,

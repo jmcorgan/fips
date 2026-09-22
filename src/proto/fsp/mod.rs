@@ -12,7 +12,8 @@
 //! address-only coordinate helpers downward from `crate::proto::stp`.
 //!
 //! - `core.rs` — the stateless [`Fsp`] anchor + [`FspAction`]: the pure rekey
-//!   choreography (`poll_rekey`/`poll_rekey_msg3_resends`), the post-decrypt
+//!   choreography (`poll_rekey`/`poll_rekey_msg3_resends`), the initial-handshake
+//!   msg3 resend decision (`poll_initial_msg3_resends`), the post-decrypt
 //!   `classify_epoch`, the initiation tie-break, and the pure MTU-clamp /
 //!   bounded-queue / ECN transforms. No clock/crypto/I/O/tracing.
 //! - `limits.rs` — the session-rekey timing constants.
@@ -27,8 +28,9 @@ pub(crate) mod wire;
 mod tests;
 
 pub(crate) use core::{
-    DecryptSlot, EpochReaction, Fsp, FspAction, RekeyCfg, RekeyMsg3ResendSnapshot, SessionSnapshot,
-    cutover_timer_elapsed, initiation_winner, mark_ipv6_ecn_ce, push_bounded_pending,
+    DecryptSlot, EpochReaction, Fsp, FspAction, InitialMsg3ResendSnapshot, RekeyCfg,
+    RekeyMsg3ResendSnapshot, SessionSnapshot, cutover_timer_elapsed, initiation_winner,
+    mark_ipv6_ecn_ce, push_bounded_pending,
 };
 pub use wire::{
     FspInnerFlags, SessionAck, SessionFlags, SessionMessageType, SessionMsg3, SessionSetup,

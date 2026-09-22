@@ -2,9 +2,9 @@
 
 use crate::FipsAddress;
 use crate::proto::fsp::core::{
-    DecryptSlot, EpochReaction, Fsp, FspAction, RekeyCfg, RekeyMsg3ResendSnapshot, SessionSnapshot,
-    cutover_timer_elapsed, initiation_winner, mark_ipv6_ecn_ce, push_bounded_pending,
-    should_apply_path_mtu,
+    DecryptSlot, EpochReaction, Fsp, FspAction, InitialMsg3ResendSnapshot, RekeyCfg,
+    RekeyMsg3ResendSnapshot, SessionSnapshot, cutover_timer_elapsed, initiation_winner,
+    mark_ipv6_ecn_ce, push_bounded_pending, should_apply_path_mtu,
 };
 use crate::proto::fsp::limits::FSP_CUTOVER_DELAY_MS;
 use crate::proto::stp::TreeCoordinate;
@@ -16,7 +16,8 @@ fn coords(byte: u8) -> TreeCoordinate {
 }
 
 /// A quiescent established-session snapshot: no pending cutover, no drain, no
-/// dampening, zero ages/counter/jitter. Tests set only the fields they exercise.
+/// dampening, no expired initiation, zero ages/counter/jitter. Tests set only
+/// the fields they exercise.
 fn session_snapshot(addr_byte: u8) -> SessionSnapshot {
     SessionSnapshot {
         addr: make_node_addr(addr_byte),
@@ -29,6 +30,7 @@ fn session_snapshot(addr_byte: u8) -> SessionSnapshot {
         has_rekey_msg3_payload: false,
         is_dampened: false,
         armed_handshake_expired: false,
+        initiation_expired: false,
         elapsed_secs: 0,
         counter: 0,
         jitter_secs: 0,
@@ -252,28 +254,135 @@ fn poll_rekey_abandons_the_handshake_without_touching_a_completed_pending() {
     );
 }
 
+/// A handshake this node armed whose setup or SessionAck was lost, past the
+/// handshake timeout on its own clock and carrying no peer stamp, with the
+/// send counter over the rekey threshold.
+fn unanswered_initiation(addr_byte: u8) -> SessionSnapshot {
+    let mut s = session_snapshot(addr_byte);
+    s.rekey_in_progress = true;
+    s.is_rekey_initiator = true;
+    s.initiation_expired = true;
+    s.armed_handshake_expired = false;
+    s.counter = 5000;
+    s
+}
+
+/// A rekey this node initiated whose setup or ack was lost is retired on its
+/// own deadline, and once the handshake is gone the trigger fires again.
 #[test]
-fn poll_rekey_does_not_abandon_a_fresh_or_locally_initiated_handshake() {
+fn poll_rekey_retires_an_expired_handshake_this_node_initiated_so_the_trigger_fires_again() {
     let fsp = Fsp::new();
-    // Still inside the handshake timeout: the peer's msg3 may be in flight.
+    let addr = make_node_addr(9);
+
+    let mut s = unanswered_initiation(9);
+    assert_eq!(
+        fsp.poll_rekey(vec![unanswered_initiation(9)], &cfg(100, 1000)),
+        vec![FspAction::ExpireInitiation { addr }],
+        "the unanswered handshake must be retired, and the trigger must not \
+         fire in the same tick"
+    );
+
+    // What the executor does for ExpireInitiation: `abandon_handshake` drops
+    // the handshake and leaves `rekey_initiator` as it was.
+    s.rekey_in_progress = false;
+    assert_eq!(
+        fsp.poll_rekey(vec![s], &cfg(100, 1000)),
+        vec![FspAction::InitiateRekey { addr }],
+        "with the handshake retired, the trigger must start a fresh rekey"
+    );
+}
+
+/// A handshake is retired only on the deadline of the side that armed it,
+/// and nothing that is not an armed handshake is retired at all.
+#[test]
+fn poll_rekey_retires_an_initiated_handshake_only_on_its_own_deadline() {
+    let fsp = Fsp::new();
+
     let mut fresh = session_snapshot(9);
     fresh.rekey_in_progress = true;
-    fresh.armed_handshake_expired = false;
-    assert!(fsp.poll_rekey(vec![fresh], &cfg(100, 1000)).is_empty());
+    fresh.is_rekey_initiator = true;
+    assert!(
+        fsp.poll_rekey(vec![fresh], &cfg(100, 1000)).is_empty(),
+        "a handshake this node armed inside the timeout may still be answered"
+    );
 
-    // Expired, but this side is the initiator: the abandon-on-timeout rule is
-    // anchored on the peer's setup message and does not reach our own cycle,
-    // which the msg3 retransmission budget bounds instead.
-    let mut ours = session_snapshot(9);
-    ours.rekey_in_progress = true;
-    ours.is_rekey_initiator = true;
-    ours.armed_handshake_expired = true;
-    assert!(fsp.poll_rekey(vec![ours], &cfg(100, 1000)).is_empty());
+    let mut peer_older = session_snapshot(9);
+    peer_older.rekey_in_progress = true;
+    peer_older.is_rekey_initiator = true;
+    peer_older.armed_handshake_expired = true;
+    assert!(
+        fsp.poll_rekey(vec![peer_older], &cfg(100, 1000)).is_empty(),
+        "the peer's older rekey stamp must not retire a fresh handshake this \
+         node armed"
+    );
 
-    // Expired stamp but no handshake left to abandon.
+    let mut theirs = session_snapshot(9);
+    theirs.rekey_in_progress = true;
+    theirs.initiation_expired = true;
+    assert!(
+        fsp.poll_rekey(vec![theirs], &cfg(100, 1000)).is_empty(),
+        "this node's stale initiation stamp must not retire a handshake the \
+         peer armed"
+    );
+
+    let mut responder_fresh = session_snapshot(9);
+    responder_fresh.rekey_in_progress = true;
+    assert!(
+        fsp.poll_rekey(vec![responder_fresh], &cfg(100, 1000))
+            .is_empty(),
+        "a handshake the peer armed inside the timeout may still get its msg3"
+    );
+
     let mut none = session_snapshot(9);
     none.armed_handshake_expired = true;
-    assert!(fsp.poll_rekey(vec![none], &cfg(100, 1000)).is_empty());
+    none.initiation_expired = true;
+    assert!(
+        fsp.poll_rekey(vec![none], &cfg(100, 1000)).is_empty(),
+        "expired stamps with no handshake armed leave nothing to retire"
+    );
+
+    let mut completed = session_snapshot(9);
+    completed.is_rekey_initiator = true;
+    completed.has_pending = true;
+    completed.initiation_expired = true;
+    assert!(
+        fsp.poll_rekey(vec![completed], &cfg(100, 1000)).is_empty(),
+        "a completed cycle awaiting its cutover is not an expiring handshake"
+    );
+}
+
+/// The expiry of a handshake this node armed does not depend on whether
+/// periodic rekey is enabled, and it is grouped with the other abandoned
+/// handshakes in input order.
+#[test]
+fn poll_rekey_retires_an_expired_initiation_with_periodic_rekey_off() {
+    let fsp = Fsp::new();
+    assert_eq!(
+        fsp.poll_rekey(vec![unanswered_initiation(9)], &cfg_rekey_off(100, 1000)),
+        vec![FspAction::ExpireInitiation {
+            addr: make_node_addr(9)
+        }],
+        "an existing handshake must be retired whatever the trigger policy"
+    );
+
+    let mut peer_armed = session_snapshot(7);
+    peer_armed.rekey_in_progress = true;
+    peer_armed.armed_handshake_expired = true;
+    assert_eq!(
+        fsp.poll_rekey(
+            vec![peer_armed, unanswered_initiation(9)],
+            &cfg_rekey_off(100, 1000)
+        ),
+        vec![
+            FspAction::AbandonHandshake {
+                addr: make_node_addr(7)
+            },
+            FspAction::ExpireInitiation {
+                addr: make_node_addr(9)
+            },
+        ],
+        "both expiries sit in the abandon group, in input order"
+    );
 }
 
 #[test]
@@ -438,6 +547,85 @@ fn poll_msg3_abandons_first() {
             },
         ],
         "abandons are grouped before resends"
+    );
+}
+
+// ===== poll_initial_msg3_resends =====
+
+/// Build an initial-handshake msg3 resend snapshot for the decision under test.
+fn initial_msg3_snapshot(
+    addr_byte: u8,
+    resend_count: u32,
+    resend_due: bool,
+) -> InitialMsg3ResendSnapshot {
+    InitialMsg3ResendSnapshot {
+        addr: make_node_addr(addr_byte),
+        resend_count,
+        resend_due,
+    }
+}
+
+/// A candidate that is not yet due gets nothing, whether or not its budget is
+/// spent.
+#[test]
+fn poll_initial_msg3_not_due_is_noop() {
+    let fsp = Fsp::new();
+    assert!(
+        fsp.poll_initial_msg3_resends(vec![initial_msg3_snapshot(1, 0, false)], 3)
+            .is_empty()
+    );
+    assert!(
+        fsp.poll_initial_msg3_resends(vec![initial_msg3_snapshot(1, 99, false)], 3)
+            .is_empty()
+    );
+}
+
+/// A due candidate within its budget is resent.
+#[test]
+fn poll_initial_msg3_resends_when_due_in_budget() {
+    let fsp = Fsp::new();
+    assert_eq!(
+        fsp.poll_initial_msg3_resends(vec![initial_msg3_snapshot(2, 1, true)], 3),
+        vec![FspAction::ResendInitialMsg3 {
+            addr: make_node_addr(2)
+        }]
+    );
+}
+
+/// A due candidate whose budget is spent is released, not resent.
+#[test]
+fn poll_initial_msg3_releases_when_due_at_budget() {
+    let fsp = Fsp::new();
+    assert_eq!(
+        fsp.poll_initial_msg3_resends(vec![initial_msg3_snapshot(3, 3, true)], 3),
+        vec![FspAction::ReleaseInitialMsg3 {
+            addr: make_node_addr(3)
+        }]
+    );
+}
+
+/// Releases are returned before resends.
+#[test]
+fn poll_initial_msg3_releases_before_resends() {
+    let fsp = Fsp::new();
+    let actions = fsp.poll_initial_msg3_resends(
+        vec![
+            initial_msg3_snapshot(1, 0, true),
+            initial_msg3_snapshot(2, 5, true),
+        ],
+        3,
+    );
+    assert_eq!(
+        actions,
+        vec![
+            FspAction::ReleaseInitialMsg3 {
+                addr: make_node_addr(2)
+            },
+            FspAction::ResendInitialMsg3 {
+                addr: make_node_addr(1)
+            },
+        ],
+        "releases are grouped before resends"
     );
 }
 

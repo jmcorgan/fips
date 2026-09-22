@@ -6,6 +6,7 @@ use crate::peer::machine::TimerKind;
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
 };
+use crate::proto::fsp::{FspAction, InitialMsg3ResendSnapshot};
 use crate::transport::LinkId;
 use tracing::{debug, info, warn};
 
@@ -417,6 +418,10 @@ impl Node {
     /// - If the handshake has exceeded the timeout window, remove the session.
     /// - If a resend is due and under max resends, resend the stored payload
     ///   wrapped in a fresh SessionDatagram (so routing can adapt).
+    ///
+    /// For an established initiator still holding its msg3, resend it until
+    /// the peer is heard from or the budget is spent (see
+    /// `resend_initial_msg3`). Established sessions are never removed here.
     pub(in crate::node) async fn resend_pending_session_handshakes(&mut self, now_ms: u64) {
         if self.sessions.is_empty() {
             return;
@@ -488,6 +493,96 @@ impl Node {
                 );
             }
         }
+
+        self.resend_initial_msg3(now_ms).await;
+    }
+
+    /// Resend an established initiator's retained msg3 until the responder is
+    /// heard from, and stop retaining it once the resend budget is spent.
+    ///
+    /// The initiator is established the moment msg3 leaves; the responder only
+    /// once it arrives. Nothing else repairs a lost msg3: the responder's
+    /// resent SessionAck reaches an entry that is no longer initiating and is
+    /// refused. The payload is released by the first inbound frame that
+    /// authenticates on the session (`handle_encrypted_session_msg`) or, here,
+    /// when the budget is spent. Runs whether or not periodic rekey is enabled.
+    async fn resend_initial_msg3(&mut self, now_ms: u64) {
+        use crate::proto::link::SessionDatagram;
+
+        let candidates = self.initial_msg3_resend_snapshots(now_ms);
+        if candidates.is_empty() {
+            return;
+        }
+        let max_resends = self.config().node.rate_limit.handshake_max_resends;
+        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
+        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
+        let ttl = self.config().node.session.default_ttl;
+        let my_addr = *self.node_addr();
+
+        for action in self.fsp.poll_initial_msg3_resends(candidates, max_resends) {
+            match action {
+                FspAction::ReleaseInitialMsg3 { addr } => {
+                    if let Some(entry) = self.sessions.get_mut(&addr) {
+                        entry.clear_handshake_payload();
+                    }
+                    info!(
+                        dest = %self.peer_display_name(&addr),
+                        "Session msg3 unconfirmed after max resends, no longer resending"
+                    );
+                }
+                FspAction::ResendInitialMsg3 { addr } => {
+                    let payload = match self.sessions.get(&addr).and_then(|e| e.handshake_payload())
+                    {
+                        Some(p) => p.to_vec(),
+                        None => continue,
+                    };
+                    let mut datagram = SessionDatagram::new(my_addr, addr, payload).with_ttl(ttl);
+                    let sent = match self.send_session_datagram(&mut datagram).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            debug!(
+                                dest = %self.peer_display_name(&addr),
+                                error = %e,
+                                "Session msg3 resend failed"
+                            );
+                            false
+                        }
+                    };
+                    if sent && let Some(entry) = self.sessions.get_mut(&addr) {
+                        let count = entry.resend_count() + 1;
+                        let next =
+                            now_ms + (interval_ms as f64 * backoff.powi(count as i32)) as u64;
+                        entry.record_resend(next);
+                        debug!(
+                            dest = %self.peer_display_name(&addr),
+                            resend = count,
+                            "Resent session msg3"
+                        );
+                    }
+                }
+                #[allow(unreachable_patterns)]
+                _ => {}
+            }
+        }
+    }
+
+    /// Snapshot every established session still retaining its initial msg3,
+    /// pre-evaluating the resend-due predicate against `now_ms` so the core
+    /// reads no clock.
+    ///
+    /// `is_established()` partitions the shared handshake resend slot: a
+    /// non-established entry's SessionSetup or SessionAck belongs to the passes
+    /// above, an established entry's msg3 to this one.
+    fn initial_msg3_resend_snapshots(&self, now_ms: u64) -> Vec<InitialMsg3ResendSnapshot> {
+        self.sessions
+            .iter()
+            .filter(|(_, entry)| entry.is_established() && entry.handshake_payload().is_some())
+            .map(|(addr, entry)| InitialMsg3ResendSnapshot {
+                addr: *addr,
+                resend_count: entry.resend_count(),
+                resend_due: entry.next_resend_at_ms() != 0 && now_ms >= entry.next_resend_at_ms(),
+            })
+            .collect()
     }
 
     /// Remove established sessions that have been idle too long.

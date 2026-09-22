@@ -742,6 +742,9 @@ impl Node {
     ///   out, abandon it (the handshake only — a completed rekey session
     ///   is never discarded on a timer, see
     ///   [`FspAction::AbandonHandshake`])
+    /// - If a handshake this node initiated got no SessionAck within the
+    ///   handshake timeout, drop it so the trigger can start a fresh one
+    ///   (see [`FspAction::ExpireInitiation`])
     /// - If the rekey timer/counter fires, initiate a new XK handshake
     ///   (this last one only when `node.rekey.enabled`)
     ///
@@ -807,6 +810,24 @@ impl Node {
                         );
                     }
                 }
+                FspAction::ExpireInitiation { addr } => {
+                    // The handshake only: the trigger starts a fresh rekey
+                    // on a later tick.
+                    let age_ms = self
+                        .sessions
+                        .get(&addr)
+                        .map(|entry| now_ms.saturating_sub(entry.initiated_ms()))
+                        .unwrap_or(0);
+                    if let Some(entry) = self.sessions.get_mut(&addr) {
+                        entry.abandon_handshake();
+                        self.stats_mut().session.rekey_unanswered += 1;
+                        info!(
+                            peer = %self.peer_display_name(&addr),
+                            age_ms,
+                            "FSP rekey we initiated got no answer within the handshake timeout, retrying, session retained"
+                        );
+                    }
+                }
                 FspAction::InitiateRekey { addr } => {
                     self.initiate_session_rekey(&addr).await;
                 }
@@ -826,6 +847,14 @@ impl Node {
         // finished, anchored on the peer's last accepted setup message, which
         // is the only stamp that path writes. A *completed* rekey has no such
         // bound and must not acquire one: see `FspAction::AbandonHandshake`.
+        //
+        // A handshake this node initiated has its own deadline, measured from
+        // the setup this node sent, and neither clock may stand in for the
+        // other: the peer's stamp says nothing about our setup, and ours
+        // says nothing about the peer's. Unlike the peer predicate, ours has
+        // no `!= 0` conjunct, deliberately: an initiator handshake armed
+        // without the stamp reads as expired, because dropping one costs a
+        // retry and keeping one stops rotation.
         let stale_handshake_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
         // Absolute ceiling on `previous`-slot retention, measured from the
         // cutover. The sliding drain deadline is peer-progress-aware, so an
@@ -849,6 +878,8 @@ impl Node {
                 is_dampened: entry.is_rekey_dampened(now_ms, dampening_ms),
                 armed_handshake_expired: entry.last_peer_rekey_ms() != 0
                     && now_ms.saturating_sub(entry.last_peer_rekey_ms()) > stale_handshake_ms,
+                initiation_expired: now_ms.saturating_sub(entry.initiated_ms())
+                    > stale_handshake_ms,
                 elapsed_secs: now_ms.saturating_sub(entry.session_start_ms()) / 1000,
                 counter: entry.send_counter(),
                 jitter_secs: entry.rekey_jitter_secs(),
@@ -859,7 +890,8 @@ impl Node {
     /// Initiate an FSP session rekey.
     ///
     /// Creates a new XX handshake as initiator, sends SessionSetup msg1
-    /// through the mesh, and stores the handshake state on the existing entry.
+    /// through the mesh, and stores the handshake state on the existing entry,
+    /// stamping the deadline by which a SessionAck must complete it.
     async fn initiate_session_rekey(&mut self, dest_addr: &NodeAddr) {
         // Check route availability before paying crypto cost
         if self.find_next_hop(dest_addr).is_none() {
@@ -928,9 +960,10 @@ impl Node {
             return;
         }
 
-        // Store rekey state on the existing session entry
+        // Store rekey state on the existing session entry. The deadline is
+        // stamped only now, so it runs from the setup actually on the wire.
         if let Some(entry) = self.sessions.get_mut(dest_addr) {
-            entry.set_rekey_state(handshake, true);
+            entry.begin_rekey(handshake, Self::now_ms());
         }
 
         debug!(

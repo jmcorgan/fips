@@ -332,6 +332,12 @@ impl Node {
             }
         };
 
+        // A frame that authenticates on this session, in any epoch slot,
+        // proves the peer completed the handshake, so a msg3 still held for
+        // resend has arrived. Only an established initiator holds one; for
+        // every other entry this is a no-op.
+        entry.clear_handshake_payload();
+
         // React to the epoch the frame decrypted against. The shell opened
         // the frame; the core classifies the post-decrypt reaction over the
         // plain-data slot + session flags, and the shell applies the
@@ -910,13 +916,15 @@ impl Node {
         // arm of `handle_session_msg3`, and the difference rests on an
         // invariant rather than on a different judgement: an entry with
         // `rekey_initiator` set holds no pending session, so the two calls
-        // are the same action here. `set_rekey_state(_, true)` has one
-        // caller, `initiate_session_rekey`, which `check_session_rekey`
-        // never reaches for an entry holding a pending session; and
-        // `set_pending_session` clears `rekey_state`, so a completed
-        // initiator cycle leaves at most one of the two set. If that ever
-        // stops holding, these three sites become instances of the epoch
-        // discard the responder arm was fixed for.
+        // are the same action here. Arming as initiator has one caller,
+        // `initiate_session_rekey` through `begin_rekey`, and
+        // `set_rekey_state(_, true)` remains only at the two restores below;
+        // `check_session_rekey` never reaches `initiate_session_rekey` for
+        // an entry holding a pending session; and `set_pending_session`
+        // clears `rekey_state`, so a completed initiator cycle leaves at
+        // most one of the two set. If that ever stops holding, these three
+        // sites become instances of the epoch discard the responder arm was
+        // fixed for.
         if entry.is_established() && entry.has_rekey_in_progress() && entry.is_rekey_initiator() {
             let mut handshake = match entry.take_rekey_state() {
                 Some(hs) => hs,
@@ -935,7 +943,9 @@ impl Node {
             // ack, and the refusal is counted. The rollback matters because
             // `read_message_2` mixes the sender's ephemeral in before it
             // authenticates. The rollback is kept past the read because the
-            // identity check below needs the same way back.
+            // identity check below needs the same way back. The restore does
+            // not restamp the deadline, which runs from the setup this node
+            // sent, so an unreadable ack cannot hold the rekey open.
             let rollback = match handshake.try_read_message_2(&ack.handshake_payload) {
                 Ok(rollback) => rollback,
                 Err(e) => {
@@ -961,8 +971,10 @@ impl Node {
             // handshake learns the true point. A mismatch keeps the rekey,
             // rolled back, for the same reason a failed read does:
             // abandoning would let anyone able to answer our msg1 end the
-            // cycle. A successful read always sets the remote static, so a
-            // missing one is refused by the same branch; no test reaches it.
+            // cycle. This restore does not restamp the deadline either, so an
+            // ack under another key cannot hold the rekey open. A successful
+            // read always sets the remote static, so a missing one is refused
+            // by the same branch; no test reaches it.
             let expected_xonly = entry.remote_pubkey().x_only_public_key().0;
             let proved = handshake
                 .remote_static()
@@ -1195,7 +1207,7 @@ impl Node {
         let msg3_wire = SessionMsg3::new(msg3);
         let msg3_payload = msg3_wire.encode();
         let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload)
+        let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload.clone())
             .with_ttl(self.config().node.session.default_ttl);
 
         if let Err(e) = self.send_session_datagram(&mut datagram).await {
@@ -1213,11 +1225,19 @@ impl Node {
         };
 
         let now_ms = Self::now_ms();
+        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
         entry.set_state(EndToEndState::Established(session));
         entry.set_coords_warmup_remaining(self.config().node.session.coords_warmup_packets);
         entry.mark_established(now_ms);
         entry.init_mmp(&self.config().node.session_mmp);
-        entry.clear_handshake_payload();
+        // Keep msg3 for resend. This end is established once msg3 leaves, the
+        // responder only once it arrives, and nothing else repairs a lost
+        // msg3: the responder's resent SessionAck lands on the not-initiating
+        // arm above and is refused. `resend_pending_session_handshakes`
+        // resends it until a frame from the peer authenticates on this
+        // session or the resend budget is spent. The rekey arm keeps its
+        // msg3 for the same reason.
+        entry.set_handshake_payload(msg3_payload, now_ms + resend_interval);
         entry.touch(now_ms);
         self.sessions.insert(*src_addr, entry);
         self.insert_coord_hint(*src_addr, ack.src_coords.clone(), now_ms);
