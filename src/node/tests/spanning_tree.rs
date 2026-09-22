@@ -945,6 +945,23 @@ pub(super) async fn run_tree_test_with_configs(
     converge_nodes(nodes, edges).await
 }
 
+/// Like `run_tree_test_with_configs` but with a caller-chosen identity per
+/// node.
+///
+/// Used by tests whose outcome depends on a property of a node's key, such as
+/// its parity, which a freshly generated identity leaves to chance.
+pub(super) async fn pinned_tree(
+    nodes: Vec<(Config, Identity)>,
+    edges: &[(usize, usize)],
+) -> Vec<TestNode> {
+    let mut built = Vec::new();
+    for (config, identity) in nodes {
+        built.push(make_test_node_inner_with_identity(config, 1280, Some(identity)).await);
+    }
+
+    converge_nodes(built, edges).await
+}
+
 /// Drive the given nodes to convergence over `edges` and assert every edge
 /// established a bidirectional peer.
 async fn converge_nodes(mut nodes: Vec<TestNode>, edges: &[(usize, usize)]) -> Vec<TestNode> {

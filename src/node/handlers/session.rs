@@ -934,19 +934,56 @@ impl Node {
             // back to its pre-read state so it can still read the genuine
             // ack, and the refusal is counted. The rollback matters because
             // `read_message_2` mixes the sender's ephemeral in before it
-            // authenticates.
-            if let Err(e) = handshake.try_read_message_2(&ack.handshake_payload) {
-                debug!(error = %e, "Failed to process rekey XX msg2, keeping the rekey");
+            // authenticates. The rollback is kept past the read because the
+            // identity check below needs the same way back.
+            let rollback = match handshake.try_read_message_2(&ack.handshake_payload) {
+                Ok(rollback) => rollback,
+                Err(e) => {
+                    debug!(error = %e, "Failed to process rekey XX msg2, keeping the rekey");
+                    entry.set_rekey_state(handshake, true);
+                    self.sessions.insert(*src_addr, entry);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
+                    return;
+                }
+            };
+
+            // The key msg2 authenticated under must be this session's peer
+            // key before anything built from the read leaves the node. Under
+            // XX a msg2 that reads proves only that its sender holds some
+            // key; the source address is an envelope field, and anyone on
+            // the path who saw our rekey msg1 can answer it under their own
+            // key. The check sits before the msg3 write, not at the install,
+            // because msg3 is the first thing derived from the read that
+            // reaches the wire, and sending it to a stranger is already the
+            // loss. Keys are compared x-only: the stored key may carry a
+            // synthesized even parity (npubs carry none), while the
+            // handshake learns the true point. A mismatch keeps the rekey,
+            // rolled back, for the same reason a failed read does:
+            // abandoning would let anyone able to answer our msg1 end the
+            // cycle. A successful read always sets the remote static, so a
+            // missing one is refused by the same branch; no test reaches it.
+            let expected_xonly = entry.remote_pubkey().x_only_public_key().0;
+            let proved = handshake
+                .remote_static()
+                .is_some_and(|pk| pk.x_only_public_key().0 == expected_xonly);
+            if !proved {
+                warn!(
+                    src = %self.peer_display_name(src_addr),
+                    "FSP rekey: responder static key differs from the established peer key, keeping the rekey"
+                );
+                handshake.restore_message_2(rollback);
                 entry.set_rekey_state(handshake, true);
                 self.sessions.insert(*src_addr, entry);
                 self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
+                    .record_reject(RejectReason::Session(SessionReject::RekeyKeyMismatch));
                 return;
             }
 
             // The three abandons below stay abandons. Each is a local
-            // failure after msg2 has read (writing msg3, sending it, or
-            // completing the session), not a refusal of the ack.
+            // failure after msg2 has read and matched this session's peer
+            // (writing msg3, sending it, or completing the session), not a
+            // refusal of the ack.
 
             // Generate XX msg3
             let msg3 = match handshake.write_message_3() {

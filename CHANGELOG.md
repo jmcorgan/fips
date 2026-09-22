@@ -1056,6 +1056,16 @@ with v0.5.x or earlier peers.
   expectation held in a field that has no setter so the handshake cannot
   overwrite it. Anonymous dials still promote whoever answers, which is what
   shared-media discovery means.
+- A session rekey now checks that its SessionAck came from the session's peer
+  before answering it. Under Noise XX the responder's static key arrives in
+  msg2, and the rekey path wrote and sent msg3 and installed the new keys as
+  pending without comparing that key to the peer the session was opened with,
+  although the first-contact path did. Anyone on the path who saw the rekey
+  msg1 could answer it under their own key, receive msg3, and have the
+  initiator adopt that session at cutover. The key is now compared, x-only,
+  before msg3 is written; a mismatch rolls the handshake back, keeps the rekey
+  for the peer's own ack, and is counted as `rekey_key_mismatch`. The wire
+  format is unchanged.
 
 ## [0.5.1] - 2026-09-06
 

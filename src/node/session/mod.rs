@@ -662,6 +662,12 @@ impl SessionEntry {
     }
 
     /// Store a completed rekey session.
+    ///
+    /// The caller must already have compared the x-only form of the
+    /// handshake's proved remote static key with `remote_pubkey()`, and on
+    /// the initiator side before writing msg3: under XX a handshake that
+    /// reads proves only that its sender holds some key, not that it is this
+    /// session's peer.
     pub(crate) fn set_pending_session(&mut self, session: NoiseSession) {
         self.pending_new_session = Some(session);
         self.rekey_state = None;

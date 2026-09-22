@@ -36,9 +36,10 @@ pub struct SessionStats {
     /// source address the datagram claimed. The half-open session is
     /// dropped and no identity is registered.
     pub addr_mismatch: u64,
-    /// Inbound rekey XK msg3 whose initiator static key differs from
-    /// the key the session was established with. The rekey is
-    /// abandoned and the existing session is left intact.
+    /// Rekey XX msg3 (responder) or msg2 (initiator) authenticated under a
+    /// static key other than the session's peer key. The responder
+    /// abandons its handshake, the initiator keeps its rekey rolled back,
+    /// and the existing session is left intact either way.
     pub rekey_key_mismatch: u64,
     /// A setup message naming an already-established peer armed a
     /// responder-side handshake alongside the running session and a

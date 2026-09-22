@@ -4,7 +4,7 @@ use super::*;
 use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
-    lock_large_network_test, make_test_node_with_config, populate_all_coord_caches,
+    lock_large_network_test, make_test_node_with_config, pinned_tree, populate_all_coord_caches,
     process_available_packets, run_tree_test, run_tree_test_with_configs, run_tree_test_with_mtus,
     run_tree_test_with_profiles, run_tree_test_with_profiles_leaf_smallest,
     verify_tree_convergence,
@@ -4214,13 +4214,22 @@ async fn make_rekey_disabled_pair() -> Vec<TestNode> {
 /// Establish an FSP session from nodes[0] to nodes[1] and assert both sides
 /// reached Established.
 async fn establish_pair_session(nodes: &mut [TestNode]) {
+    let node1_pubkey = nodes[1].node.identity().pubkey_full();
+    establish_under(nodes, node1_pubkey).await;
+}
+
+/// Establish an FSP session from nodes[0] to nodes[1], dialling nodes[1]
+/// under `key`, and assert both sides reached Established.
+///
+/// `key` is what nodes[0] stores as the session's peer key, so a caller can
+/// pin a key that differs from nodes[1]'s own in parity.
+async fn establish_under(nodes: &mut [TestNode], key: secp256k1::PublicKey) {
     let node0_addr = *nodes[0].node.node_addr();
     let node1_addr = *nodes[1].node.node_addr();
-    let node1_pubkey = nodes[1].node.identity().pubkey_full();
 
     nodes[0]
         .node
-        .initiate_session(node1_addr, node1_pubkey)
+        .initiate_session(node1_addr, key)
         .await
         .expect("initiate_session failed");
 
@@ -5372,6 +5381,405 @@ async fn test_forged_session_ack_leaves_the_rekey_able_to_complete_on_the_genuin
         recv0_before + 1,
         "node 1 to node 0 must decode on the new epoch"
     );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// Integration tests: a rekey SessionAck under a key other than the peer's
+// ============================================================================
+
+/// Arm a rekey on `node`'s established session with `peer` and return its
+/// XX msg1, without sending anything.
+///
+/// Builds and stores the initiator handshake exactly as rekey initiation
+/// does. Nothing on the session retains a sent rekey msg1, so a test that
+/// needs to answer it has to arm the rekey itself.
+fn arm_rekey(node: &mut Node, peer: &NodeAddr) -> Vec<u8> {
+    let mut handshake = crate::noise::HandshakeState::new_initiator(node.identity().keypair());
+    handshake.set_local_epoch(node.startup_epoch());
+    let msg1 = handshake.write_message_1().expect("rekey msg1");
+    node.sessions
+        .get_mut(peer)
+        .expect("established session present")
+        .set_rekey_state(handshake, true);
+    msg1
+}
+
+/// Encode the rekey SessionSetup `from` would send `to`, carrying `msg1`.
+fn rekey_setup(from: &Node, to: &Node, msg1: &[u8]) -> Vec<u8> {
+    crate::proto::fsp::SessionSetup::new(
+        from.tree_state().my_coords().clone(),
+        to.tree_state().my_coords().clone(),
+    )
+    .with_handshake(msg1.to_vec())
+    .encode()
+}
+
+/// Answer `msg1` as a rekey responder holding `responder`'s static key, and
+/// encode the msg2 as a SessionAck carrying `from`'s coordinates.
+///
+/// No negotiation payload is appended: the rekey arm reads the whole
+/// handshake payload as a bare msg2, so anything appended would fail the
+/// read and the caller would be measuring a msg2 that never read.
+fn rekey_ack(msg1: &[u8], responder: &Identity, from: &Node) -> Vec<u8> {
+    let mut handshake = crate::noise::HandshakeState::new_responder(responder.keypair());
+    handshake.set_local_epoch([0x5a; 8]);
+    handshake.read_message_1(msg1).expect("stranger reads msg1");
+    let msg2 = handshake.write_message_2().expect("stranger writes msg2");
+    let coords = from.tree_state().my_coords().clone();
+    SessionAck::new(coords.clone(), coords)
+        .with_handshake(msg2)
+        .encode()
+}
+
+/// A SessionAck whose msg2 reads under a stranger's static key must be
+/// refused before msg3 is written: nothing reaches the wire, nothing is
+/// installed, the rekey stays in flight as ours, and the refusal is counted
+/// as a rekey key mismatch.
+///
+/// Under XX a msg2 that reads proves only that its sender holds some key.
+/// The ack's source address is an envelope field, so anyone who saw our
+/// rekey msg1 can answer it under their own key.
+#[tokio::test]
+async fn test_a_rekey_ack_under_a_strangers_static_key_sends_no_msg3_installs_nothing_and_keeps_the_rekey()
+ {
+    let mut nodes = make_rekey_disabled_pair().await;
+    establish_pair_session(&mut nodes).await;
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let msg1 = arm_rekey(&mut nodes[0].node, &node1_addr);
+    let stranger = Identity::generate();
+    let forged = rekey_ack(&msg1, &stranger, &nodes[1].node);
+
+    // Sibling control: node 0 originated its SessionSetup and msg3 through
+    // this counter while establishing, so it is live on this node.
+    let originated_before = nodes[0].node.metrics().forwarding.originated_packets.get();
+    assert!(
+        originated_before > 0,
+        "the originated-packets counter must be live on node 0"
+    );
+
+    nodes[0]
+        .node
+        .handle_session_payload(&node1_addr, &node1_addr, &forged, 1280, false)
+        .await;
+
+    assert_eq!(
+        nodes[0].node.stats().session.ack_handshake_failed,
+        0,
+        "the stranger's msg2 must read, or this test measures a failed read"
+    );
+    assert_eq!(
+        nodes[0].node.metrics().forwarding.originated_packets.get(),
+        originated_before,
+        "no msg3 may reach a key the session was not opened with"
+    );
+    let entry = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .expect("a refused ack must not remove the session");
+    assert!(
+        entry.pending_new_session().is_none(),
+        "a session keyed with the stranger must not be installed"
+    );
+    assert!(
+        entry.has_rekey_in_progress() && entry.is_rekey_initiator(),
+        "the rekey must still be in flight as ours"
+    );
+    assert_eq!(
+        nodes[0].node.stats().session.rekey_key_mismatch,
+        1,
+        "the refusal must be counted as a rekey key mismatch"
+    );
+    assert!(entry.is_established(), "the session must stay established");
+
+    // The current session still carries data.
+    let recv1_before = nodes[1]
+        .node
+        .get_session(&node0_addr)
+        .unwrap()
+        .traffic_counters()
+        .1;
+    nodes[0]
+        .node
+        .send_session_data(&node1_addr, 0, 0, b"after the refused ack")
+        .await
+        .expect("send_session_data failed");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await;
+    assert_eq!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .traffic_counters()
+            .1,
+        recv1_before + 1,
+        "the current session must still decode"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// After refusing a SessionAck under a stranger's static key, the initiator
+/// must still complete the rekey on the peer's genuine ack and cut over to a
+/// working session.
+///
+/// This is what proves the handshake is rolled back rather than merely put
+/// back: left at its post-read state holding the stranger's material, it
+/// could not read the genuine msg2.
+#[tokio::test]
+async fn test_a_rekey_ack_under_a_strangers_static_key_leaves_the_rekey_able_to_complete_on_the_genuine_ack()
+ {
+    use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED};
+    use crate::transport::ReceivedPacket;
+
+    let mut nodes = make_rekey_disabled_pair().await;
+    establish_pair_session(&mut nodes).await;
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let msg1 = arm_rekey(&mut nodes[0].node, &node1_addr);
+
+    // node 1 answers the genuine msg1; its SessionAck waits in node 0's queue.
+    let setup = rekey_setup(&nodes[0].node, &nodes[1].node, &msg1);
+    nodes[1]
+        .node
+        .handle_session_payload(&node0_addr, &node0_addr, &setup, 1280, false)
+        .await;
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .is_some_and(|e| e.has_rekey_in_progress() && !e.is_rekey_initiator()),
+        "node 1 must have armed as the rekey responder"
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let held: Vec<ReceivedPacket> =
+        std::iter::from_fn(|| nodes[0].packet_rx.try_recv().ok()).collect();
+    assert!(
+        !held.is_empty(),
+        "node 1's SessionAck must be queued at node 0"
+    );
+    for packet in &held {
+        assert_eq!(
+            CommonPrefix::parse(&packet.data).map(|p| p.phase),
+            Some(PHASE_ESTABLISHED),
+            "every held packet must be a link frame"
+        );
+    }
+
+    // The stranger's ack arrives first, under node 1's address.
+    let stranger = Identity::generate();
+    let forged = rekey_ack(&msg1, &stranger, &nodes[1].node);
+    nodes[0]
+        .node
+        .handle_session_payload(&node1_addr, &node1_addr, &forged, 1280, false)
+        .await;
+    let entry = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .expect("a refused ack must not remove the session");
+    assert!(
+        entry.has_rekey_in_progress() && entry.is_rekey_initiator(),
+        "the rekey must still be in flight after an ack under a stranger's key"
+    );
+    assert!(
+        entry.pending_new_session().is_none(),
+        "a session keyed with the stranger must not be installed"
+    );
+    assert_eq!(
+        nodes[0].node.stats().session.rekey_key_mismatch,
+        1,
+        "the refusal must be counted"
+    );
+
+    // Release the genuine ack.
+    for packet in held {
+        nodes[0].node.handle_encrypted_frame(packet).await;
+    }
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some(),
+        "node 0 must complete the rekey on the genuine ack"
+    );
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some(),
+        "node 1 must hold the new session after msg3"
+    );
+    assert_eq!(
+        nodes[0].node.stats().session.ack_handshake_failed,
+        0,
+        "the genuine msg2 must read against the restored handshake"
+    );
+    assert_eq!(
+        nodes[0].node.stats().session.rekey_key_mismatch,
+        1,
+        "the genuine ack must not be counted as a mismatch"
+    );
+
+    // node 0 cuts over on its liveness timer, and data decodes both ways on
+    // the new epoch.
+    let now_ms = wall_clock_ms();
+    nodes[0]
+        .node
+        .sessions
+        .get_mut(&node1_addr)
+        .unwrap()
+        .set_rekey_completed_ms(now_ms - 10_000);
+    nodes[0].node.check_session_rekey().await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_none(),
+        "node 0 must have cut over"
+    );
+
+    let recv1_before = nodes[1]
+        .node
+        .get_session(&node0_addr)
+        .unwrap()
+        .traffic_counters()
+        .1;
+    nodes[0]
+        .node
+        .send_session_data(&node1_addr, 0, 0, b"after the rekey 0 to 1")
+        .await
+        .expect("send_session_data failed");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await;
+    let entry1 = nodes[1].node.get_session(&node0_addr).unwrap();
+    assert_eq!(
+        entry1.traffic_counters().1,
+        recv1_before + 1,
+        "node 0 to node 1 must decode on the new epoch"
+    );
+    assert!(
+        entry1.pending_new_session().is_none(),
+        "node 0's first new-epoch frame must complete node 1's cutover"
+    );
+
+    let recv0_before = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .unwrap()
+        .traffic_counters()
+        .1;
+    nodes[1]
+        .node
+        .send_session_data(&node0_addr, 0, 0, b"after the rekey 1 to 0")
+        .await
+        .expect("send_session_data failed");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut nodes).await;
+    assert_eq!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .traffic_counters()
+            .1,
+        recv0_before + 1,
+        "node 1 to node 0 must decode on the new epoch"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A rekey with a peer whose key has odd parity, dialled by the even-parity
+/// key an npub gives, must complete on the peer's genuine ack.
+///
+/// The stored key and the key msg2 proves differ as full keys and agree as
+/// x-only keys, so this is the pair that tells an x-only comparison from a
+/// full-key one.
+#[tokio::test]
+async fn test_a_rekey_ack_from_an_odd_parity_peer_dialled_by_its_even_parity_key_completes_the_rekey()
+ {
+    let mut cfg = Config::new();
+    cfg.node.rekey.enabled = false;
+    let mut nodes = pinned_tree(
+        vec![
+            (cfg.clone(), Identity::generate()),
+            (cfg, generate_odd_parity_identity()),
+        ],
+        &[(0, 1)],
+    )
+    .await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    let stored =
+        crate::identity::PeerIdentity::from_pubkey(nodes[1].node.identity().pubkey()).pubkey_full();
+    assert_ne!(
+        stored,
+        nodes[1].node.identity().pubkey_full(),
+        "test fixture must actually differ in parity"
+    );
+    establish_under(&mut nodes, stored).await;
+    assert_eq!(
+        *nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .remote_pubkey(),
+        stored,
+        "node 0 must hold the even-parity key as the session's peer key"
+    );
+
+    let msg1 = arm_rekey(&mut nodes[0].node, &node1_addr);
+    let setup = rekey_setup(&nodes[0].node, &nodes[1].node, &msg1);
+    nodes[1]
+        .node
+        .handle_session_payload(&node0_addr, &node0_addr, &setup, 1280, false)
+        .await;
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some(),
+        "node 0 must complete the rekey with an odd-parity peer"
+    );
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some(),
+        "node 1 must hold the new session after msg3"
+    );
+    assert_eq!(nodes[0].node.stats().session.rekey_key_mismatch, 0);
+    assert_eq!(nodes[0].node.stats().session.ack_handshake_failed, 0);
 
     cleanup_nodes(&mut nodes).await;
 }

@@ -870,11 +870,9 @@ impl Node {
             return;
         }
 
-        let entry = match self.sessions.get(dest_addr) {
-            Some(e) => e,
-            None => return,
-        };
-        let _dest_pubkey = *entry.remote_pubkey();
+        if !self.sessions.contains_key(dest_addr) {
+            return;
+        }
 
         // Create Noise XX initiator handshake (rekey: no negotiation payload)
         // This frame's own copy of the node's long-term private key; the

@@ -223,7 +223,8 @@ pub enum HandshakeReject {
 ///
 /// `UnknownSession` and `BadState` cover the session unknown-session
 /// and state-machine cluster. `AddrMismatch` and `RekeyKeyMismatch`
-/// cover the peer-identity binding checks on the XK msg3 receive path.
+/// cover the peer-identity binding checks on the XX msg3 receive path
+/// and the rekey msg2 path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SessionReject {
@@ -248,10 +249,12 @@ pub enum SessionReject {
     /// address. Tracked via
     /// [`SessionStats::addr_mismatch`](crate::node::stats::SessionStats).
     AddrMismatch,
-    /// Inbound XK msg3 completed a responder-side rekey, but the
-    /// initiator's static key differs from the key the session was
-    /// established with — the rekey is not from the established peer.
-    /// Tracked via
+    /// A rekey handshake message (XX msg3 at the responder, msg2 at the
+    /// initiator) authenticated under a static key other than the
+    /// session's peer key. The responder abandons its handshake; the
+    /// initiator rolls its handshake back and keeps the rekey for the
+    /// peer's own ack. A sustained rate means someone on the path is
+    /// answering or initiating rekeys under their own key. Tracked via
     /// [`SessionStats::rekey_key_mismatch`](crate::node::stats::SessionStats).
     RekeyKeyMismatch,
     /// A setup message named an established peer while our own rekey of
