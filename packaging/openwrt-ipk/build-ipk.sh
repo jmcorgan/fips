@@ -173,9 +173,6 @@ install -d "$DATA_DIR/etc/fips"
 install -m 0600 "$FILES_DIR/etc/fips/fips.yaml"   "$DATA_DIR/etc/fips/fips.yaml"
 install -m 0755 "$FILES_DIR/etc/fips/firewall.sh" "$DATA_DIR/etc/fips/firewall.sh"
 
-install -d "$DATA_DIR/etc/dnsmasq.d"
-install -m 0644 "$FILES_DIR/etc/dnsmasq.d/fips.conf" "$DATA_DIR/etc/dnsmasq.d/fips.conf"
-
 install -d "$DATA_DIR/etc/sysctl.d"
 install -m 0644 "$FILES_DIR/etc/sysctl.d/fips-bridge.conf" "$DATA_DIR/etc/sysctl.d/fips-bridge.conf"
 install -m 0644 "$FILES_DIR/etc/sysctl.d/fips-gateway.conf" "$DATA_DIR/etc/sysctl.d/fips-gateway.conf"

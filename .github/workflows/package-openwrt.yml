@@ -489,7 +489,6 @@ jobs:
             ./etc/init.d/fips-gateway
             ./etc/fips/fips.yaml
             ./etc/fips/firewall.sh
-            ./etc/dnsmasq.d/fips.conf
             ./etc/sysctl.d/fips-gateway.conf
             ./etc/sysctl.d/fips-bridge.conf
             ./etc/hotplug.d/net/99-fips
@@ -830,7 +829,7 @@ jobs:
             usr/bin/fips usr/bin/fipsctl usr/bin/fipstop usr/bin/fips-gateway \
             usr/bin/fips-mesh-setup usr/bin/fips-ap-setup \
             etc/init.d/fips etc/init.d/fips-gateway \
-            etc/fips/fips.yaml etc/fips/firewall.sh etc/dnsmasq.d/fips.conf \
+            etc/fips/fips.yaml etc/fips/firewall.sh \
             etc/sysctl.d/fips-gateway.conf etc/sysctl.d/fips-bridge.conf \
             etc/hotplug.d/net/99-fips etc/uci-defaults/90-fips-setup \
             lib/upgrade/keep.d/fips; do

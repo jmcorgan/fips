@@ -7,8 +7,10 @@
 # What it checks is which maintainer scripts the .apk registers and what each
 # one does with apk's upgrade arguments and environment (apk-tools v3 passes
 # "<new-version> <old-version>" and a PATH-only environment to pre-upgrade and
-# post-upgrade). Whether a real `apk mkpkg` accepts the result is left to the
-# GitHub packaging workflow, which builds with the real tool.
+# post-upgrade), and which files the .apk and the .ipk install. The .ipk is
+# built for real by build-ipk.sh, which needs only tar. Whether a real
+# `apk mkpkg` accepts the result is left to the GitHub packaging workflow,
+# which builds with the real tool.
 #
 # Usage: package-test.sh [--keep <dir>]
 #   --keep <dir>  copy the captured apk scripts into <dir> as post-install,
@@ -221,6 +223,83 @@ for pair in pre-upgrade:prerm post-upgrade:postinst; do
             ;;
     esac
 done
+
+# ── Build the .ipk ──────────────────────────────────────────────────────────
+
+echo "==> build-ipk.sh"
+if ! PKG_VERSION="$PKG_VERSION" \
+    bash "$PROJECT_ROOT/packaging/openwrt-ipk/build-ipk.sh" --arch x86_64 --bin-dir "$BINS" \
+    > "$TMP/build-ipk.log" 2>&1; then
+    cat "$TMP/build-ipk.log" >&2
+    harness_fail "build-ipk.sh failed, so the .ipk was not checked"
+fi
+IPK="$PROJECT_ROOT/dist/fips_${PKG_VERSION}_x86_64.ipk"
+[[ -f "$IPK" ]] || harness_fail "build-ipk.sh exited 0 but wrote no $IPK"
+tar -xzf "$IPK" -O ./data.tar.gz | tar -tzf - > "$TMP/ipk-data" \
+    || harness_fail "cannot list data.tar.gz in $IPK"
+tar -xzf "$IPK" -O ./control.tar.gz | tar -tzf - > "$TMP/ipk-control" \
+    || harness_fail "cannot list control.tar.gz in $IPK"
+
+# ── P1 and P2. Neither package ships the dnsmasq drop-in ────────────────────
+# OpenWrt's dnsmasq builds its config from UCI and reads no directory under
+# /etc, so .fips forwarding comes from the UCI entry 90-fips-setup adds. The
+# match is on the directory prefix: tar lists the directory with a trailing
+# slash and the stub's find without one.
+for pair in "P1:apk:$CAPTURE/payload" "P2:ipk:$TMP/ipk-data"; do
+    id="${pair%%:*}"
+    rest="${pair#*:}"
+    kind="${rest%%:*}"
+    listing="${rest#*:}"
+    hits="$(grep -F './etc/dnsmasq.d' "$listing" | tr '\n' ' ')"
+    if [[ -z "$hits" ]]; then
+        ok "$id the .$kind installs nothing under /etc/dnsmasq.d"
+    else
+        bad "$id the .$kind still installs: $hits"
+    fi
+done
+
+# ── P3. Positive control for P1 and P2 ──────────────────────────────────────
+# An empty or unreadable listing would pass P1 and P2, so each listing must
+# show files that are known to ship.
+for pair in "apk:$CAPTURE/payload" "ipk:$TMP/ipk-data"; do
+    kind="${pair%%:*}"
+    listing="${pair#*:}"
+    for path in ./etc/init.d/fips-gateway ./etc/uci-defaults/90-fips-setup; do
+        if grep -qxF "$path" "$listing"; then
+            ok "P3 the .$kind payload lists $path"
+        else
+            bad "P3 the .$kind payload does not list $path, so P1/P2 saw no real listing"
+        fi
+    done
+done
+for path in ./postinst ./prerm; do
+    if grep -qxF "$path" "$TMP/ipk-control"; then
+        ok "P3 the .ipk control archive lists $path"
+    else
+        bad "P3 the .ipk control archive does not list $path"
+    fi
+done
+
+# ── P4. No source still names the drop-in ───────────────────────────────────
+# This is the only check on the SDK feed Makefile, which nothing here builds.
+# grep exits 1 when nothing matches and 2 when it could not read a path; only
+# the first is a pass.
+(cd "$PROJECT_ROOT" && grep -rlF 'dnsmasq.d/fips.conf' \
+    packaging/openwrt-ipk packaging/openwrt-apk .github/workflows/package-openwrt.yml) \
+    > "$TMP/refs"
+rc=$?
+[[ $rc -le 1 ]] || harness_fail "the drop-in reference search failed (grep exit $rc)"
+refs="$(tr '\n' ' ' < "$TMP/refs")"
+if [[ -z "$refs" ]]; then
+    ok "P4 no OpenWrt packaging file names the dnsmasq drop-in"
+else
+    bad "P4 the dnsmasq drop-in is still named in: $refs"
+fi
+if [[ -e "$PROJECT_ROOT/packaging/openwrt-ipk/files/etc/dnsmasq.d/fips.conf" ]]; then
+    bad "P4 packaging/openwrt-ipk/files/etc/dnsmasq.d/fips.conf still exists"
+else
+    ok "P4 the drop-in source file is gone"
+fi
 
 # ── Hand the scripts to the ash scenarios ───────────────────────────────────
 if [[ -n "$KEEP" ]]; then

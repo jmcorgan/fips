@@ -201,9 +201,6 @@ install -m 0755 "$FILES_DIR/etc/fips/firewall.sh" "$STAGE_DIR/etc/fips/firewall.
 # of the file; operators can still edit /etc/fips/fips.yaml for non-standard boards.
 sed -i 's|interface: "eth0"|interface: "wan"|' "$STAGE_DIR/etc/fips/fips.yaml"
 
-install -d "$STAGE_DIR/etc/dnsmasq.d"
-install -m 0644 "$FILES_DIR/etc/dnsmasq.d/fips.conf" "$STAGE_DIR/etc/dnsmasq.d/fips.conf"
-
 install -d "$STAGE_DIR/etc/sysctl.d"
 install -m 0644 "$FILES_DIR/etc/sysctl.d/fips-bridge.conf"  "$STAGE_DIR/etc/sysctl.d/fips-bridge.conf"
 install -m 0644 "$FILES_DIR/etc/sysctl.d/fips-gateway.conf" "$STAGE_DIR/etc/sysctl.d/fips-gateway.conf"

@@ -17,11 +17,10 @@ OpenWrt 22.03+ router via the standard `opkg` package system.
 | `/etc/init.d/fips-gateway` | procd service for the gateway (disabled by default) |
 | `/etc/fips/fips.yaml` | Node configuration (edit before first start) |
 | `/etc/fips/firewall.sh` | Firewall helper — accepts traffic on `fips0` |
-| `/etc/dnsmasq.d/fips.conf` | Forwards `.fips` DNS queries to the daemon |
 | `/etc/sysctl.d/fips-bridge.conf` | `br_netfilter` settings for Ethernet transport |
 | `/etc/sysctl.d/fips-gateway.conf` | `proxy_ndp` and IPv6 forwarding for the gateway |
 | `/etc/hotplug.d/net/99-fips` | Applies firewall rules when `fips0` comes up |
-| `/etc/uci-defaults/90-fips-setup` | First-boot kernel module and firewall setup |
+| `/etc/uci-defaults/90-fips-setup` | First-boot kernel module, firewall and dnsmasq `.fips` forwarding setup |
 | `/lib/upgrade/keep.d/fips` | Preserves `/etc/fips/` across `sysupgrade` |
 
 ## Requirements

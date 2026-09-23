@@ -59,9 +59,10 @@ uci commit firewall
 # ---------------------------------------------------------------------------
 # 3. dnsmasq UCI registration
 # ---------------------------------------------------------------------------
-# /etc/dnsmasq.d/fips.conf already handles runtime forwarding.
-# Register via UCI as well so the settings survive a full dnsmasq config
-# regeneration (e.g. after a firmware upgrade that rebuilds dnsmasq.conf).
+# This UCI entry is what forwards .fips queries to the daemon: OpenWrt's
+# dnsmasq init script builds its config from UCI and loads no directory under
+# /etc. The daemon's DNS responder binds ::1. The 127.0.0.1 del_list removes
+# the entry older packages added.
 
 uci -q del_list dhcp.@dnsmasq[0].server="/fips/127.0.0.1#5354" 2>/dev/null || true
 uci -q del_list dhcp.@dnsmasq[0].server="/fips/::1#5354" 2>/dev/null || true

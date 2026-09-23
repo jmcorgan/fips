@@ -114,10 +114,6 @@ define Package/fips/install
 	# Firewall helper script (called by UCI include and hotplug)
 	$(INSTALL_BIN) $(CURDIR)/files/etc/fips/firewall.sh $(1)/etc/fips/firewall.sh
 
-	# dnsmasq drop-in: forward .fips queries to the FIPS DNS responder
-	$(INSTALL_DIR) $(1)/etc/dnsmasq.d
-	$(INSTALL_DATA) $(CURDIR)/files/etc/dnsmasq.d/fips.conf $(1)/etc/dnsmasq.d/fips.conf
-
 	# sysctl: enable br_netfilter so AF_PACKET sees frames on bridge member ports
 	$(INSTALL_DIR) $(1)/etc/sysctl.d
 	$(INSTALL_DATA) $(CURDIR)/files/etc/sysctl.d/fips-bridge.conf $(1)/etc/sysctl.d/fips-bridge.conf

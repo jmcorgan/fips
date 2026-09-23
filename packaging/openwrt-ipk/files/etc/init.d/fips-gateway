@@ -189,11 +189,6 @@ dnsmasq_swap_fips_upstream() {
 	uci add_list dhcp.@dnsmasq[0].server="/fips/::1#${port}"
 	uci commit dhcp
 
-	# Update the drop-in config file as well (belt-and-suspenders).
-	if [ -f /etc/dnsmasq.d/fips.conf ]; then
-		sed -i "s|^server=/fips/.*|server=/fips/::1#${port}|" /etc/dnsmasq.d/fips.conf
-	fi
-
 	# Restart dnsmasq to pick up the change.
 	/etc/init.d/dnsmasq restart 2>/dev/null || true
 }
