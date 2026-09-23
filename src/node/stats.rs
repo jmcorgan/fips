@@ -65,11 +65,13 @@ pub struct SessionStats {
     /// the handshake timeout without a msg3 and was discarded. The
     /// established session is retained.
     pub rekey_expired: u64,
-    /// A rekey this node initiated got no readable SessionAck within the
-    /// handshake timeout, and its handshake was discarded so the trigger
-    /// can retry. The established session is retained. A sustained rate
-    /// means setups or acks to that peer are being lost, or the peer holds
-    /// a stuck handshake of its own and wins the tie-break.
+    /// A rekey this node initiated got no SessionAck from its peer within
+    /// the handshake timeout, and its handshake was discarded so the trigger
+    /// can retry. An ack that does not read, or that reads under a key other
+    /// than the peer's, does not count as an answer. The established
+    /// session is retained. A sustained rate means setups or acks to that
+    /// peer are being lost, or the peer holds a stuck handshake of its own
+    /// and wins the tie-break.
     pub rekey_unanswered: u64,
     /// A completed rekey session still waiting for the peer's cut-over was
     /// replaced by a newer one, completed from a msg3 carrying the same
