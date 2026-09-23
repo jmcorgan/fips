@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER: u64 = 2;
 const MAX_PARALLEL_PATH_CANDIDATES_PER_PEER: usize = 4;
@@ -36,6 +36,48 @@ fn socket_addr_families_compatible(local: SocketAddr, remote: SocketAddr) -> boo
         (local, remote),
         (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_))
     )
+}
+
+/// Run a supervised child's async body, then report the child's exit on `tx`,
+/// whether the body returned or panicked.
+///
+/// A panic would otherwise unwind past the report and leave the node healthy
+/// with the child gone. Aborting the task still reports nothing: the abort
+/// drops this whole future, so a deliberate stop does not read as a death.
+pub(in crate::node) async fn report_exit(
+    child: Child,
+    body: impl std::future::Future<Output = ()>,
+    tx: Option<tokio::sync::mpsc::Sender<Child>>,
+) {
+    use futures::FutureExt;
+
+    if std::panic::AssertUnwindSafe(body)
+        .catch_unwind()
+        .await
+        .is_err()
+    {
+        // The panic hook has already printed the payload.
+        error!(child = ?child, "Supervised child panicked; reporting its exit");
+    }
+    if let Some(tx) = tx {
+        let _ = tx.send(child).await;
+    }
+}
+
+/// Run a supervised child's thread body, then report the child's exit on `tx`,
+/// whether the body returned or panicked.
+pub(in crate::node) fn report_thread(
+    child: Child,
+    body: impl FnOnce(),
+    tx: Option<&tokio::sync::mpsc::Sender<Child>>,
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        // The panic hook has already printed the payload.
+        error!(child = ?child, "Supervised child panicked; reporting its exit");
+    }
+    if let Some(tx) = tx {
+        let _ = tx.blocking_send(child);
+    }
 }
 
 impl Node {
@@ -1951,16 +1993,18 @@ impl Node {
                             let (writer, tun_tx) = device
                                 .create_writer(max_mss.clone(), self.path_mtu_lookup.clone())?;
 
-                            // Spawn writer thread. On exit it self-reports
-                            // `Child::Tun` (sync context → `blocking_send`); TUN
-                            // is one compound child, so both threads reporting is
-                            // fine (the FSM de-dups via `up.remove`).
+                            // Spawn writer thread. On exit, including a panic,
+                            // it self-reports `Child::Tun` (sync context →
+                            // `blocking_send`); TUN is one compound child, so
+                            // both threads reporting is fine (the FSM de-dups
+                            // via `up.remove`).
                             let writer_child_tx = self.child_exit_tx.clone();
                             let writer_handle = thread::spawn(move || {
-                                writer.run();
-                                if let Some(tx) = &writer_child_tx {
-                                    let _ = tx.blocking_send(Child::Tun);
-                                }
+                                report_thread(
+                                    Child::Tun,
+                                    move || writer.run(),
+                                    writer_child_tx.as_ref(),
+                                );
                             });
 
                             // Clone tun_tx for the reader
@@ -1972,41 +2016,48 @@ impl Node {
                                 tokio::sync::mpsc::channel(tun_channel_size);
 
                             // Spawn reader thread. Like the writer, it
-                            // self-reports `Child::Tun` on exit (sync context →
-                            // `blocking_send`). Exactly one cfg variant compiles,
-                            // so the single clone is moved into that closure.
+                            // self-reports `Child::Tun` on exit or panic (sync
+                            // context → `blocking_send`). Exactly one cfg
+                            // variant compiles, so the single clone is moved
+                            // into that closure.
                             let path_mtu_lookup = self.path_mtu_lookup.clone();
                             let reader_child_tx = self.child_exit_tx.clone();
                             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
                             let reader_handle = thread::spawn(move || {
-                                run_tun_reader(
-                                    device,
-                                    mtu,
-                                    our_addr,
-                                    reader_tun_tx,
-                                    outbound_tx,
-                                    max_mss,
-                                    path_mtu_lookup,
-                                    shutdown_read_fd,
+                                report_thread(
+                                    Child::Tun,
+                                    move || {
+                                        run_tun_reader(
+                                            device,
+                                            mtu,
+                                            our_addr,
+                                            reader_tun_tx,
+                                            outbound_tx,
+                                            max_mss,
+                                            path_mtu_lookup,
+                                            shutdown_read_fd,
+                                        )
+                                    },
+                                    reader_child_tx.as_ref(),
                                 );
-                                if let Some(tx) = &reader_child_tx {
-                                    let _ = tx.blocking_send(Child::Tun);
-                                }
                             });
                             #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
                             let reader_handle = thread::spawn(move || {
-                                run_tun_reader(
-                                    device,
-                                    mtu,
-                                    our_addr,
-                                    reader_tun_tx,
-                                    outbound_tx,
-                                    max_mss,
-                                    path_mtu_lookup,
+                                report_thread(
+                                    Child::Tun,
+                                    move || {
+                                        run_tun_reader(
+                                            device,
+                                            mtu,
+                                            our_addr,
+                                            reader_tun_tx,
+                                            outbound_tx,
+                                            max_mss,
+                                            path_mtu_lookup,
+                                        )
+                                    },
+                                    reader_child_tx.as_ref(),
                                 );
-                                if let Some(tx) = &reader_child_tx {
-                                    let _ = tx.blocking_send(Child::Tun);
-                                }
                             });
 
                             self.tun_state = TunState::Active;
@@ -2096,23 +2147,24 @@ impl Node {
                                     );
                                     // Self-report on exit so the supervisor FSM
                                     // routes health when the DNS task dies at
-                                    // runtime. On a deliberate stop the task is
-                                    // `.abort()`ed before this send; even if it
-                                    // fired, the FSM ignores it outside `Running`.
+                                    // runtime. The responder never returns, so
+                                    // in practice that is a panic. On a
+                                    // deliberate stop the task is `.abort()`ed,
+                                    // which drops the report with it; even if
+                                    // one fired, the FSM ignores it outside
+                                    // `Running`.
                                     let dns_child_tx = self.child_exit_tx.clone();
-                                    let handle = tokio::spawn(async move {
+                                    let handle = tokio::spawn(report_exit(
+                                        Child::Dns,
                                         crate::upper::dns::run_dns_responder(
                                             socket,
                                             identity_tx,
                                             dns_ttl,
                                             reloader,
                                             mesh_ifindex,
-                                        )
-                                        .await;
-                                        if let Some(tx) = dns_child_tx {
-                                            let _ = tx.send(Child::Dns).await;
-                                        }
-                                    });
+                                        ),
+                                        dns_child_tx,
+                                    ));
                                     self.supervisor.dns_identity_rx = Some(identity_rx);
                                     self.supervisor.dns_task = Some(handle);
                                     self.supervisor.dns_local_addr = Some(local_addr);
@@ -2546,13 +2598,10 @@ impl Node {
     /// reads it to rebuild the teardown set, and aborting an already-finished
     /// handle there is harmless.
     ///
-    /// **Dormant for `Dns` as written.** `run_dns_responder` is an unconditional
-    /// loop whose every failure arm continues, so it never returns and the
-    /// `Child::Dns` send that follows it is unreachable — nothing produces the
-    /// event this consumes. The consumer side is correct and lands here so the
-    /// producer fix does not have to rediscover it. A responder that *panics* is
-    /// not covered either way, since the unwind goes past the send rather than
-    /// through it; that is true of every child producer, not just this one.
+    /// For `Dns` the event comes only from a panic. `run_dns_responder` is an
+    /// unconditional loop whose every failure arm continues, so it has no
+    /// ordinary exit; [`report_exit`] catches a panic in it and reports
+    /// `Child::Dns`, which is what reaches this.
     pub(in crate::node) fn retract_child_publications(&mut self, child: Child) {
         if matches!(child, Child::Dns) {
             self.supervisor.dns_local_addr.take();

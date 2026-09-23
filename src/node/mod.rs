@@ -1290,7 +1290,7 @@ impl Node {
         }
 
         // Create BLE transport instances
-        #[cfg(bluer_available)]
+        #[cfg(all(bluer_available, not(test)))]
         {
             let ble_instances: Vec<_> = self
                 .config()
@@ -1300,7 +1300,6 @@ impl Node {
                 .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
                 .collect();
 
-            #[cfg(all(bluer_available, not(test)))]
             for (name, ble_config) in ble_instances {
                 let transport_id = self.allocate_transport_id();
                 let adapter = ble_config.adapter().to_string();
@@ -1320,12 +1319,6 @@ impl Node {
                         tracing::warn!(adapter = %adapter, error = %e, "failed to initialize BLE adapter");
                     }
                 }
-            }
-
-            #[cfg(any(not(bluer_available), test))]
-            if !ble_instances.is_empty() {
-                #[cfg(not(test))]
-                tracing::warn!("BLE transport configured but this build lacks BlueZ support");
             }
         }
 
@@ -1354,8 +1347,54 @@ impl Node {
                 transports.push(TransportHandle::Ble(ble));
             }
         }
+        // `BleConfig` always parses, so on a build that cannot construct a
+        // BLE transport a configured `ble:` block would otherwise be dropped
+        // silently and the node would report healthy without it.
+        if let Some(reason) = self.ble_blocker() {
+            for (name, _) in self.config().transports.ble.iter() {
+                tracing::warn!(
+                    instance = name.unwrap_or("default"),
+                    reason,
+                    "BLE transport unavailable; ignoring configured instance"
+                );
+            }
+        }
 
         transports
+    }
+
+    /// Why this build cannot construct a configured BLE instance, or `None`
+    /// when it can.
+    ///
+    /// The three arms are disjoint and together cover every build, so a
+    /// target matching none or two of them fails to compile rather than
+    /// guessing.
+    #[cfg(all(bluer_available, not(test)))]
+    fn ble_blocker(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Why this build cannot construct a configured BLE instance, or `None`
+    /// when it can. The embedder-supplied backend needs its radio slot armed
+    /// before `start()`.
+    #[cfg(all(target_os = "android", not(bluer_available), not(test)))]
+    fn ble_blocker(&self) -> Option<&'static str> {
+        if self.ble_radio.is_some() {
+            None
+        } else {
+            Some("no BLE radio was armed before start")
+        }
+    }
+
+    /// Why this build cannot construct a configured BLE instance: it has no
+    /// backend at all. A test build lands here too, since its BLE transport
+    /// is the in-memory double and is never built from config.
+    #[cfg(not(any(
+        all(bluer_available, not(test)),
+        all(target_os = "android", not(bluer_available), not(test))
+    )))]
+    fn ble_blocker(&self) -> Option<&'static str> {
+        Some("this build has no BLE backend")
     }
 
     /// Find an operational transport that matches the given transport type name.

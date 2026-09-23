@@ -265,6 +265,11 @@ impl Node {
             );
         }
 
+        // Sample before the TreeState write below: is_tree_peer reads the
+        // declaration that write stores, so sampling after it would always
+        // see the new value and never detect a flip.
+        let was_tree = self.is_tree_peer(from);
+
         // Update in TreeState
         let updated = self
             .tree_state
@@ -277,6 +282,17 @@ impl Node {
         }
 
         self.metrics().tree.accepted.inc();
+
+        // A peer that starts or stops naming us as parent joins or leaves the
+        // set of filters merged into our outgoing filters, so every other
+        // peer's outgoing filter may have changed. Mark only the peers whose
+        // filter actually differs from what was last sent. This runs before
+        // the parent re-evaluation below so no early return there can skip it.
+        if self.is_tree_peer(from) != was_tree {
+            let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
+            let peer_filters = self.peer_inbound_filters();
+            self.bloom_state.mark_changed(&peer_addrs, &peer_filters);
+        }
 
         debug!(
             from = %self.peer_display_name(from),
@@ -322,9 +338,11 @@ impl Node {
         }
 
         // Bloom filter exchange initiation is handled at handshake completion
-        // ([handshake.rs] mark_update_needed on the new peer) and on actual
+        // ([handshake.rs] mark_update_needed on the new peer), on actual
         // content changes via [bloom.rs::handle_filter_announce]'s
-        // `mark_changed_peers`. Marking the peer on every received TreeAnnounce
+        // `mark_changed_peers`, and above when this peer starts or stops
+        // naming us as parent (marked by content change only, and only on
+        // the flip). Marking the peer on every received TreeAnnounce
         // is redundant — and under high TreeAnnounce churn (rapid mid-chain
         // swap propagation) it amplifies bloom traffic proportionally with
         // the tree announce rate, even when the local outgoing filter

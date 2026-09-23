@@ -718,3 +718,273 @@ async fn test_bloom_filter_convergence_100_nodes() {
     print_filter_cardinality(&nodes);
     cleanup_nodes(&mut nodes).await;
 }
+
+// ===== Outgoing filter re-announce on a tree-peer flip =====
+//
+// These tests read only what M actually sent (`last_sent_filter`, written
+// after a successful send) or what M has marked (`needs_update`). Recomputing
+// an outgoing filter would read live peer state and bypass the marking under
+// test, so none of them does.
+
+use crate::node::tree::sign_declaration;
+use crate::proto::bloom::{BloomFilter, FilterAnnounce};
+use crate::proto::stp::{ParentDeclaration, TreeAnnounce, TreeCoordinate};
+
+/// Three loopback nodes, P -- M -- C, with M's tree view forced so that P is
+/// M's parent and C either names M as parent (a child) or names an unrelated
+/// node (not a tree peer).
+struct FlipFixture {
+    nodes: Vec<TestNode>,
+    m: NodeAddr,
+    p: NodeAddr,
+    c: NodeAddr,
+    root: NodeAddr,
+    fake: NodeAddr,
+}
+
+/// Index of M in `FlipFixture::nodes`.
+const M: usize = 1;
+/// Index of C in `FlipFixture::nodes`.
+const C: usize = 2;
+
+/// Synthetic address carried in C's filter and in no real one.
+fn marker() -> NodeAddr {
+    make_node_addr(0xab)
+}
+
+/// Build the fixture and flush whatever convergence left pending at M.
+///
+/// With `child_start`, C's stored declaration names M as parent; otherwise it
+/// names `fake`. Every stored declaration uses sequence 1, so the sequence-5
+/// announces from `deliver_tree_announce` are fresher.
+async fn flip_fixture(child_start: bool) -> FlipFixture {
+    let nodes = run_tree_test(3, &[(0, 1), (1, 2)], false).await;
+    let p = *nodes[0].node.node_addr();
+    let m = *nodes[M].node.node_addr();
+    let c = *nodes[C].node.node_addr();
+    // All zero bytes: smaller than any real address, so it stays root.
+    let root = make_node_addr(0);
+    let fake = make_node_addr(1);
+    let mut fx = FlipFixture {
+        nodes,
+        m,
+        p,
+        c,
+        root,
+        fake,
+    };
+
+    {
+        let ts = fx.nodes[M].node.tree_state_mut();
+        ts.remove_peer(&p);
+        ts.update_peer(
+            ParentDeclaration::new(p, root, 1, 1000),
+            TreeCoordinate::from_addrs(vec![p, root]).unwrap(),
+        );
+        ts.set_parent(p, 1, 1000, 1000);
+        ts.recompute_coords();
+        ts.remove_peer(&c);
+        let (parent, coords) = if child_start {
+            (m, vec![c, m, p, root])
+        } else {
+            (fake, vec![c, fake, root])
+        };
+        ts.update_peer(
+            ParentDeclaration::new(c, parent, 1, 1000),
+            TreeCoordinate::from_addrs(coords).unwrap(),
+        );
+    }
+    {
+        let identity = fx.nodes[M].node.identity().clone();
+        let decl_mut = fx.nodes[M].node.tree_state_mut().my_declaration_mut();
+        sign_declaration(decl_mut, &identity).unwrap();
+    }
+
+    // Debounce is a brake, not the mechanism under test: send on every drain.
+    fx.nodes[M].node.bloom_state.set_update_debounce_ms(0);
+    fx.nodes[M].node.send_pending_filter_announces().await;
+
+    let node = &fx.nodes[M].node;
+    assert_eq!(
+        node.is_tree_peer(&c),
+        child_start,
+        "setup: C's starting tree-peer state"
+    );
+    assert_eq!(
+        node.tree_state().my_declaration().parent_id(),
+        &p,
+        "setup: M's parent must be P"
+    );
+    fx
+}
+
+/// Deliver a FilterAnnounce from C to M holding exactly `addrs`, and check M
+/// stored it, so a rejected announce cannot decide a later assertion.
+async fn deliver_filter(fx: &mut FlipFixture, addrs: &[NodeAddr]) {
+    let c = fx.c;
+    let mut filter = BloomFilter::new();
+    for addr in addrs {
+        filter.insert(addr);
+    }
+    let seq = fx.nodes[M].node.get_peer(&c).unwrap().filter_sequence() + 1;
+    let mut payload = FilterAnnounce::new(filter.clone(), seq).encode().unwrap();
+    payload.remove(0); // strip msg_type byte
+    fx.nodes[M].node.handle_filter_announce(&c, &payload).await;
+
+    let stored = fx.nodes[M].node.get_peer(&c).unwrap().inbound_filter();
+    assert_eq!(
+        stored,
+        Some(&filter),
+        "setup: M must store C's delivered filter"
+    );
+}
+
+/// Deliver a signed sequence-5 TreeAnnounce from C to M through the real
+/// handler, declaring `parent` with ancestry `coords`. Checks the announce was
+/// accepted and that M did not switch parent, since a switch marks every peer
+/// and would pass the tests for a reason unrelated to the flip.
+async fn deliver_tree_announce(fx: &mut FlipFixture, parent: NodeAddr, coords: Vec<NodeAddr>) {
+    let c = fx.c;
+    let mut decl = ParentDeclaration::new(c, parent, 5, 2000);
+    sign_declaration(&mut decl, fx.nodes[C].node.identity()).unwrap();
+    let announce = TreeAnnounce::new(decl, TreeCoordinate::from_addrs(coords).unwrap());
+    let encoded = announce.encode().unwrap();
+
+    let node = &mut fx.nodes[M].node;
+    let accepted_before = node.metrics().tree.accepted.get();
+    let switches_before = node.metrics().tree.parent_switches.get();
+    node.handle_tree_announce(&c, &encoded[1..]).await;
+
+    assert_eq!(
+        node.metrics().tree.accepted.get(),
+        accepted_before + 1,
+        "setup: C's tree announce must be accepted"
+    );
+    assert_eq!(
+        node.tree_state().my_declaration().parent_id(),
+        &fx.p,
+        "setup: M's parent must still be P"
+    );
+    assert_eq!(
+        node.metrics().tree.parent_switches.get(),
+        switches_before,
+        "setup: M must not switch parent"
+    );
+}
+
+/// The filter M last sent to P, which must exist.
+fn sent_to_parent(fx: &FlipFixture) -> &BloomFilter {
+    fx.nodes[M]
+        .node
+        .bloom_state
+        .last_sent_filter(&fx.p)
+        .expect("M has sent a filter to P")
+}
+
+/// When C starts naming M as parent, M must re-announce to P a filter that
+/// now includes C's contribution.
+#[tokio::test]
+async fn test_bloom_outgoing_filter_to_parent_reannounced_when_peer_becomes_child() {
+    let mut fx = flip_fixture(false).await;
+    let (m, c, p, root) = (fx.m, fx.c, fx.p, fx.root);
+
+    deliver_filter(&mut fx, &[c, marker()]).await;
+    fx.nodes[M].node.send_pending_filter_announces().await;
+    assert!(
+        !sent_to_parent(&fx).contains(&marker()),
+        "control: a non-tree peer's filter must not reach P"
+    );
+
+    deliver_tree_announce(&mut fx, m, vec![c, m, p, root]).await;
+    assert!(fx.nodes[M].node.is_tree_peer(&c));
+    fx.nodes[M].node.send_pending_filter_announces().await;
+
+    assert!(
+        sent_to_parent(&fx).contains(&marker()),
+        "P must be sent C's filter once C becomes M's child"
+    );
+    cleanup_nodes(&mut fx.nodes).await;
+}
+
+/// When C stops naming M as parent, M must re-announce to P a filter that no
+/// longer includes C's contribution.
+#[tokio::test]
+async fn test_bloom_outgoing_filter_to_parent_reannounced_when_child_leaves() {
+    let mut fx = flip_fixture(true).await;
+    let (c, root, fake) = (fx.c, fx.root, fx.fake);
+
+    deliver_filter(&mut fx, &[c, marker()]).await;
+    fx.nodes[M].node.send_pending_filter_announces().await;
+    assert!(
+        sent_to_parent(&fx).contains(&marker()),
+        "control: a child's filter must reach P"
+    );
+
+    deliver_tree_announce(&mut fx, fake, vec![c, fake, root]).await;
+    assert!(!fx.nodes[M].node.is_tree_peer(&c));
+    fx.nodes[M].node.send_pending_filter_announces().await;
+
+    assert!(
+        !sent_to_parent(&fx).contains(&marker()),
+        "P must stop being sent C's filter once C leaves"
+    );
+    cleanup_nodes(&mut fx.nodes).await;
+}
+
+/// A child's filter that arrives after its tree announce reaches the parent
+/// through the ordinary filter-announce marking.
+#[tokio::test]
+async fn test_bloom_child_filter_after_tree_announce_reaches_parent() {
+    let mut fx = flip_fixture(false).await;
+    let (m, c, p, root) = (fx.m, fx.c, fx.p, fx.root);
+
+    deliver_tree_announce(&mut fx, m, vec![c, m, p, root]).await;
+    fx.nodes[M].node.send_pending_filter_announces().await;
+    deliver_filter(&mut fx, &[c, marker()]).await;
+    fx.nodes[M].node.send_pending_filter_announces().await;
+
+    assert!(
+        sent_to_parent(&fx).contains(&marker()),
+        "P must be sent a child's filter delivered after its tree announce"
+    );
+    cleanup_nodes(&mut fx.nodes).await;
+}
+
+/// A tree-peer flip that changes no outgoing filter marks no peer: C's filter
+/// holds only M's own address, which M's base filter already carries.
+#[tokio::test]
+async fn test_bloom_tree_peer_flip_without_filter_change_marks_no_peer() {
+    let mut fx = flip_fixture(false).await;
+    let (m, c, p, root) = (fx.m, fx.c, fx.p, fx.root);
+
+    deliver_filter(&mut fx, &[m]).await;
+    fx.nodes[M].node.send_pending_filter_announces().await;
+    let bloom = &fx.nodes[M].node.bloom_state;
+    assert!(!bloom.needs_update(&p) && !bloom.needs_update(&c));
+
+    deliver_tree_announce(&mut fx, m, vec![c, m, p, root]).await;
+    assert!(fx.nodes[M].node.is_tree_peer(&c));
+    let bloom = &fx.nodes[M].node.bloom_state;
+    assert!(!bloom.needs_update(&p), "P must not be marked");
+    assert!(!bloom.needs_update(&c), "C must not be marked");
+    cleanup_nodes(&mut fx.nodes).await;
+}
+
+/// A fresher tree announce that leaves C a child of M marks no peer.
+#[tokio::test]
+async fn test_bloom_tree_announce_without_tree_peer_flip_marks_no_peer() {
+    let mut fx = flip_fixture(true).await;
+    let (m, c, p, root) = (fx.m, fx.c, fx.p, fx.root);
+
+    deliver_filter(&mut fx, &[c, marker()]).await;
+    fx.nodes[M].node.send_pending_filter_announces().await;
+    let bloom = &fx.nodes[M].node.bloom_state;
+    assert!(!bloom.needs_update(&p) && !bloom.needs_update(&c));
+
+    deliver_tree_announce(&mut fx, m, vec![c, m, p, root]).await;
+    assert!(fx.nodes[M].node.is_tree_peer(&c));
+    let bloom = &fx.nodes[M].node.bloom_state;
+    assert!(!bloom.needs_update(&p), "P must not be marked");
+    assert!(!bloom.needs_update(&c), "C must not be marked");
+    cleanup_nodes(&mut fx.nodes).await;
+}

@@ -177,8 +177,19 @@ impl BloomState {
             .filter(|addr| *addr != exclude_from)
             .copied()
             .collect();
+        self.mark_changed(&targets, peer_filters);
+    }
 
-        for (peer_addr, new_filter) in self.compute_outgoing_filters(&targets, peer_filters) {
+    /// Mark every target whose outgoing filter differs from what was last sent.
+    ///
+    /// A target never sent to counts as changed. Unlike
+    /// [`mark_changed_peers`](Self::mark_changed_peers), no peer is excluded.
+    pub fn mark_changed(
+        &mut self,
+        targets: &[NodeAddr],
+        peer_filters: &BTreeMap<NodeAddr, BloomFilter>,
+    ) {
+        for (peer_addr, new_filter) in self.compute_outgoing_filters(targets, peer_filters) {
             let changed = match self.last_sent_filters.get(&peer_addr) {
                 Some(last) => *last != new_filter,
                 None => true, // never sent → must send
