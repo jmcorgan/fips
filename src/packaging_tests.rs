@@ -161,6 +161,53 @@ fn logical_lines(sh: &str) -> Vec<String> {
     out
 }
 
+/// Returns the feature names declared in the `[features]` table of a
+/// Cargo.toml.
+fn cargo_features(cargo_toml: &str) -> Vec<String> {
+    toml_section(cargo_toml, "[features]")
+        .into_iter()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.split_once('=').map(|(key, _)| key.trim().to_string()))
+        .collect()
+}
+
+/// Returns the cargo feature names a config file's comments mention: on each
+/// `#` comment line, the token before the word `feature` or `features` when
+/// that token is wrapped in `'`, `"` or `` ` ``.
+fn feature_mentions(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if !line.starts_with('#') {
+            continue;
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for pair in words.windows(2) {
+            let word = pair[1].trim_end_matches(|c: char| c.is_ascii_punctuation());
+            if word != "feature" && word != "features" {
+                continue;
+            }
+            let quoted = ['\'', '"', '`'].iter().find_map(|q| {
+                pair[0]
+                    .strip_prefix(*q)
+                    .and_then(|rest| rest.strip_suffix(*q))
+            });
+            if let Some(name) = quoted {
+                found.push(name.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Whether a config line, commented out or not, starts a `ble:` block.
+fn is_ble_key(line: &str) -> bool {
+    line.trim()
+        .trim_start_matches('#')
+        .trim_start()
+        .starts_with("ble:")
+}
+
 #[test]
 fn deb_and_aur_packages_declare_nftables_for_the_firewall_units_nft() {
     let unit = repo_file("packaging/debian/fips-firewall.service");
@@ -314,5 +361,59 @@ fn freebsd_newsyslog_entry_signals_the_daemon8_supervisor_started_with_sighup_re
     assert!(
         plist.contains(&"etc/newsyslog.conf.d/fips.conf"),
         "build-pkg.sh pkg-plist does not list etc/newsyslog.conf.d/fips.conf: {plist:?}"
+    );
+}
+
+const COMMON_CONFIG: &str = "packaging/common/fips.yaml";
+const OPENWRT_CONFIG: &str = "packaging/openwrt-ipk/files/etc/fips/fips.yaml";
+
+#[test]
+fn shipped_configs_name_only_cargo_features_that_exist() {
+    assert_eq!(
+        feature_mentions(
+            "  # Bluetooth Low Energy transport — requires BlueZ and the 'ble' feature."
+        ),
+        ["ble"],
+        "control: the feature-mention scanner no longer finds a quoted feature name"
+    );
+    let features = cargo_features(&repo_file("Cargo.toml"));
+    assert!(
+        features.iter().any(|f| f == "profiling"),
+        "control: expected the profiling feature in Cargo.toml [features], read {features:?}"
+    );
+
+    let mut unknown = Vec::new();
+    for rel in [COMMON_CONFIG, OPENWRT_CONFIG] {
+        for name in feature_mentions(&repo_file(rel)) {
+            if !features.contains(&name) {
+                unknown.push(format!("{rel}: '{name}'"));
+            }
+        }
+    }
+    assert!(
+        unknown.is_empty(),
+        "shipped configs name cargo features that Cargo.toml does not define \
+         (it defines {features:?}):\n  {}",
+        unknown.join("\n  ")
+    );
+}
+
+#[test]
+fn openwrt_config_offers_no_ble_block_because_musl_builds_have_no_ble() {
+    assert!(
+        repo_file(COMMON_CONFIG).lines().any(is_ble_key),
+        "control: expected the ble: example in {COMMON_CONFIG}"
+    );
+    let text = repo_file(OPENWRT_CONFIG);
+    let found: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| is_ble_key(l))
+        .map(|(i, l)| (i + 1, l.trim_end()))
+        .collect();
+    assert!(
+        found.is_empty(),
+        "{OPENWRT_CONFIG} offers a ble: block, but OpenWrt builds target musl, \
+         where the BLE transport is not compiled: {found:?}"
     );
 }

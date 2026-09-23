@@ -702,7 +702,7 @@ const DEFAULT_BLE_PROBE_COOLDOWN_SECS: u64 = 30;
 /// BLE transport instance configuration.
 ///
 /// BleConfig is always compiled (for config parsing on any platform),
-/// but the transport runtime requires Linux and the `ble` feature.
+/// but the transport runtime is compiled only for glibc Linux and Android.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BleConfig {

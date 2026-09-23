@@ -103,7 +103,8 @@ transports:
   #   auto_connect: true
   #   accept_connections: true
 
-  # Bluetooth Low Energy transport — requires BlueZ and the 'ble' feature.
+  # Bluetooth Low Energy transport: Linux (glibc) builds only, with BlueZ
+  # (bluetoothd) running. Not available on macOS, FreeBSD, Windows or OpenWrt.
   # ble:
   #   adapter: "hci0"
   #   mtu: 2048

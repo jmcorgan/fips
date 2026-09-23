@@ -162,14 +162,7 @@ transports:
     #   auto_connect: true
     #   accept_connections: true
 
-  # Bluetooth Low Energy transport — requires BlueZ and the 'ble' feature.
-  # ble:
-  #   adapter: "hci0"
-  #   mtu: 2048
-  #   advertise: true
-  #   scan: true
-  #   auto_connect: true
-  #   accept_connections: true
+  # No BLE transport: OpenWrt builds target musl, which has no BlueZ backend.
 
 # Outbound LAN gateway. dnsmasq forwards .fips queries to listen=[::1]:5353
 # (configured by the fips init script). Requires IPv6 forwarding enabled.
