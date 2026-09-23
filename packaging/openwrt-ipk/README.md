@@ -123,13 +123,18 @@ vi /etc/fips/fips.yaml
 ```
 
 The default config enables:
-- Persistent identity (key generated on first start, saved to `/etc/fips/fips.key`)
-- TUN interface `fips0`
-- DNS responder on `127.0.0.1:5354`
-- UDP transport on `0.0.0.0:2121`
 
-For Ethernet transport, uncomment the `ethernet:` section and set the correct
-physical interface names for your router. **Always use physical port names
+- An ephemeral identity, generated on each start. Uncomment
+  `node.identity.persistent: true` to keep one; the key is then saved next to
+  the config, as `/etc/fips/fips.key`.
+- TUN interface `fips0`
+- DNS responder on `[::1]:5354`
+- UDP transport on `[::]:2121`
+- TCP transport on `0.0.0.0:8443`
+- Ethernet transport, including the `wan`, `wwan` and `lan` entries
+
+For Ethernet transport, edit the interface names in the `ethernet:` section to
+match your router. **Always use physical port names
 (`eth0`, `eth1`, or DSA port names like `wan`/`lan1`), never bridge names
 (`br-lan`).** The shipped default WAN port is `eth0` (OpenWrt 24); on OpenWrt
 25 (DSA) boards the WAN port is named `wan` — the `.apk` package ships that
@@ -187,12 +192,43 @@ for the full subcommand list.
 
 ## Upgrading
 
-Install the new `.ipk` over the existing one:
+Install the new `.ipk` with a plain `opkg install`:
 
 ```bash
-opkg install --force-reinstall fips_<new-version>_<arch>.ipk
+opkg install /tmp/fips_<new-version>_<arch>.ipk
 ```
 
+opkg runs this as an upgrade. The installed package's `prerm` stops `fips` and
+`fips-gateway` without disabling them, and the new package's `postinst` starts
+`fips` and starts `fips-gateway` again if it was enabled.
+
+An upgrade from 0.5.1 or earlier is the exception. The `prerm` in those
+packages disables `fips-gateway` and records nothing about whether it was
+enabled, so the new `postinst` enables it again. If you had the gateway
+disabled, disable it again after that first upgrade:
+
+```bash
+/etc/init.d/fips-gateway stop
+/etc/init.d/fips-gateway disable
+```
+
+If opkg refuses because the new file's version sorts lower than the installed
+one, as it can between development builds, add `--force-downgrade`. opkg then
+takes the same upgrade path.
+
+Do not use `--force-reinstall`. opkg runs it as a removal followed by a fresh
+install, so `fips-gateway` ends up disabled. To turn it back on:
+
+```bash
+/etc/init.d/fips-gateway enable
+/etc/init.d/fips-gateway start
+```
+
+On OpenWrt 25 and later, install and upgrade the `.apk` package with
+`apk add --allow-untrusted` instead; see
+[`../openwrt-apk/README.md`](../openwrt-apk/README.md).
+
 The config in `/etc/fips/fips.yaml` and the identity key `/etc/fips/fips.key`
-are preserved by `opkg` (the yaml is installed as a conffile; the key is not a
-package file). Both survive `sysupgrade` via `/lib/upgrade/keep.d/fips`.
+(when persistent identity is on) are preserved by `opkg` (the yaml is installed
+as a conffile; the key is not a package file). Both survive `sysupgrade` via
+`/lib/upgrade/keep.d/fips`.
