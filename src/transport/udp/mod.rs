@@ -11,7 +11,7 @@ pub(crate) mod io;
 pub(crate) use io::{ConnectedPeerSocket, PeerRecvDrain, open_connected_fd};
 mod dns;
 mod stats;
-use super::resolve_socket_addr;
+use super::{family_name, resolve_socket_addr_for};
 use crate::config::UdpConfig;
 use crate::nostr::is_punch_packet;
 #[cfg(test)]
@@ -222,8 +222,12 @@ impl UdpTransport {
                 return dns::resolve_with(&self.dns_cache, addr, now, move |a| r(a)).await;
             }
         }
-        dns::resolve_with(&self.dns_cache, addr, now, |a| async move {
-            resolve_socket_addr(&a).await
+        // Prefer this socket's family: the answer order is the resolver's
+        // (DNS64 puts a synthesized AAAA first) and a wildcard IPv4 socket
+        // cannot send to an IPv6 address.
+        let local = self.local_addr;
+        dns::resolve_with(&self.dns_cache, addr, now, move |a| async move {
+            resolve_socket_addr_for(&a, local).await
         })
         .await
     }
@@ -461,6 +465,24 @@ impl UdpTransport {
         let Some(socket_addr) = self.send_target(addr, data).await? else {
             return Ok(data.len());
         };
+        // An IPv4 socket cannot send to an IPv6 address: sendto fails with
+        // EAFNOSUPPORT ("Address family not supported by protocol"), which
+        // says nothing about which side is wrong. Say it here instead. The
+        // other direction is left to the kernel, since a dual-stack IPv6
+        // socket can send to an IPv4 address.
+        if let Some(local) = self.local_addr
+            && local.is_ipv4()
+            && socket_addr.is_ipv6()
+        {
+            self.stats.record_send_error();
+            return Err(TransportError::InvalidAddress(format!(
+                "{} is {} but this transport is bound to {} ({})",
+                socket_addr,
+                family_name(socket_addr),
+                local,
+                family_name(local)
+            )));
+        }
         let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
 
         match socket.send_to(data, &socket_addr).await {
@@ -1322,26 +1344,44 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_socket_addr_ip() {
         let addr = TransportAddr::from_string("192.168.1.1:2121");
-        let result = resolve_socket_addr(&addr).await.unwrap();
+        let result = resolve_socket_addr_for(&addr, None).await.unwrap();
         assert_eq!(result.to_string(), "192.168.1.1:2121");
     }
 
     #[tokio::test]
     async fn test_resolve_socket_addr_invalid() {
         let invalid = TransportAddr::from_string("nonexistent.invalid.:2121");
-        assert!(resolve_socket_addr(&invalid).await.is_err());
+        assert!(resolve_socket_addr_for(&invalid, None).await.is_err());
 
         let binary = TransportAddr::new(vec![0xff, 0x80]);
-        assert!(resolve_socket_addr(&binary).await.is_err());
+        assert!(resolve_socket_addr_for(&binary, None).await.is_err());
     }
 
     #[tokio::test]
     async fn test_resolve_socket_addr_hostname() {
         let addr = TransportAddr::from_string("localhost:2121");
-        let result = resolve_socket_addr(&addr).await.unwrap();
+        let result = resolve_socket_addr_for(&addr, None).await.unwrap();
         // localhost should resolve to 127.0.0.1 or [::1]
         assert!(result.ip().is_loopback());
         assert_eq!(result.port(), 2121);
+    }
+
+    /// An IPv4-bound transport asked to send to an IPv6 address must fail
+    /// with an error that names the family mismatch, not the kernel's
+    /// "Address family not supported by protocol".
+    #[tokio::test]
+    async fn an_ipv4_socket_sending_to_ipv6_is_a_named_error() {
+        let (tx, _rx) = packet_channel(100);
+        let mut transport = UdpTransport::new(TransportId::new(1), None, make_config(0), tx);
+        transport.start_async().await.unwrap();
+        let err = transport
+            .send_async(&TransportAddr::from_string("[::1]:9"), b"x")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("IPv6") && msg.contains("IPv4"), "{msg}");
+        assert!(!msg.contains("os error"), "{msg}");
+        transport.stop_async().await.unwrap();
     }
 
     #[tokio::test]
