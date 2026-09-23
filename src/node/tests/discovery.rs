@@ -666,12 +666,25 @@ fn register_peers(node: &mut Node, count: usize) -> Vec<crate::NodeAddr> {
         .collect()
 }
 
+/// A node whose dedup entries cannot age out while a flood test runs.
+///
+/// The handler stamps each entry with the wall clock and purges entries older
+/// than `recent_expiry_secs` (10 s by default) on every arrival. The flood
+/// tests below measure capacity, not expiry, and a 4096-request flood on a
+/// loaded host can take longer than the default, so the earliest entries
+/// would be purged before the test reads the cache.
+fn unexpiring_node() -> Node {
+    let mut config = Config::new();
+    config.node.lookup.recent_expiry_secs = 86_400;
+    make_node_with(config)
+}
+
 #[tokio::test]
 async fn test_a_full_dedup_cache_admits_the_new_request_by_evicting_the_oldest() {
     // A full cache used to drop the arriving request, which let one peer
     // spend 4096 fresh request_ids and stop the node forwarding anyone
     // else's lookups until the entries aged out.
-    let mut node = make_node();
+    let mut node = unexpiring_node();
     let from = make_node_addr(0xAA);
 
     flood_requests(&mut node, &from, 1, MAX_RECENT_LOOKUP_REQUESTS as u64).await;
@@ -742,11 +755,16 @@ async fn test_a_node_whose_dedup_cache_is_flooded_still_answers_a_lookup_for_its
     // The availability claim. Filling the cache used to make the node
     // unresolvable, because the cache-full drop sat ahead of the check for
     // whether the request names us.
-    let mut node = make_node();
+    let mut node = unexpiring_node();
     let flooder = make_node_addr(0xAA);
     let other = make_node_addr(0xAB);
 
     flood_requests(&mut node, &flooder, 1, MAX_RECENT_LOOKUP_REQUESTS as u64).await;
+    assert_eq!(
+        node.lookup.recent_requests.len(),
+        MAX_RECENT_LOOKUP_REQUESTS,
+        "precondition: the cache is full, or the lookup below is not tested against a flood"
+    );
 
     let my_addr = *node.node_addr();
     let payload = lookup_request_payload(u64::MAX, &my_addr);
