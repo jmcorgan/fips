@@ -228,16 +228,53 @@ cat > "$STAGE_DIR/lib/apk/packages/${PKG_NAME}.conffiles" <<'EOF'
 EOF
 
 # ---- maintainer scripts ----
-# Map our opkg maintainer scripts onto apk's lifecycle phases:
-#   opkg postinst -> apk post-install   (enable + start the daemon)
-#   opkg prerm    -> apk pre-deinstall  (stop + disable services)
-
 # Both bodies come from packaging/openwrt-ipk/scripts/, the same files the
 # .ipk ships, so the two packagers cannot drift apart and testing/openwrt/
-# exercises what both install. apk runs post-install only on a fresh install,
-# so the postinst's upgrade branch is unreachable here.
+# exercises what both install. apk-tools v3 runs a different script on each
+# path, and only ever the incoming package's:
+#
+#   fresh install  post-install   = postinst as shipped (enable + start fips;
+#                                   the gateway stays off)
+#   upgrade        pre-upgrade    = prerm, told it is an opkg-style upgrade;
+#                                   runs before any file is replaced
+#                  post-upgrade   = postinst with PKG_UPGRADE=1; runs after
+#   removal        pre-deinstall  = prerm as shipped (stop + disable both)
+#
+# On an upgrade apk passes "<new-version> <old-version>" and a PATH-only
+# environment, which is not the contract the bodies were written for: prerm
+# would read the new version as "not an upgrade" and disable the gateway, and
+# postinst would see no PKG_UPGRADE. The upgrade pair therefore gets one header
+# line that restores opkg's contract, "upgrade <new-version>" for prerm and
+# PKG_UPGRADE=1 for postinst (OpenWrt's own package-pack.mk builds its
+# post-upgrade scripts the same way).
+#
+# Registering post-upgrade alone would not restart anything: procd treats a
+# start of a running instance with an unchanged command line as a no-op, so
+# the old binaries would keep running until a reboot. pre-upgrade stops both
+# services first, which also means a failed extraction leaves them stopped,
+# as an opkg upgrade already does.
+
+wrap_script() {
+    # wrap_script <header-line> <src> <dst>
+    # Writes <src> to <dst> with <header-line> inserted after its #! line.
+    local header="$1" src="$2" dst="$3"
+    if [ "$(head -n 1 "$src")" != "#!/bin/sh" ]; then
+        echo "Error: $src does not start with #!/bin/sh; cannot wrap it." >&2
+        exit 1
+    fi
+    {
+        echo "#!/bin/sh"
+        echo "$header"
+        tail -n +2 "$src"
+    } > "$dst"
+    chmod 0755 "$dst"
+}
+
 install -m 0755 "$SCRIPTS_SRC/postinst" "$SCRIPTS_DIR/post-install"
 install -m 0755 "$SCRIPTS_SRC/prerm"    "$SCRIPTS_DIR/pre-deinstall"
+# shellcheck disable=SC2016  # $1 is expanded by the script at run time
+wrap_script 'set -- upgrade "$1"' "$SCRIPTS_SRC/prerm"    "$SCRIPTS_DIR/pre-upgrade"
+wrap_script 'export PKG_UPGRADE=1' "$SCRIPTS_SRC/postinst" "$SCRIPTS_DIR/post-upgrade"
 
 # ---------------------------------------------------------------------------
 # 3. Assemble the .apk via apk mkpkg
@@ -268,6 +305,8 @@ $FAKEROOT "$APK_BIN" mkpkg \
     --info "maintainer:FIPS Network" \
     --info "depends:$DEPENDS" \
     --script "post-install:$SCRIPTS_DIR/post-install" \
+    --script "pre-upgrade:$SCRIPTS_DIR/pre-upgrade" \
+    --script "post-upgrade:$SCRIPTS_DIR/post-upgrade" \
     --script "pre-deinstall:$SCRIPTS_DIR/pre-deinstall" \
     --files "$STAGE_DIR" \
     --output "$DIST_DIR/$PKG_FILENAME"

@@ -2,7 +2,8 @@
 # Maintainer script run after the FIPS package is unpacked.
 #
 # Installed as the .ipk CONTROL/postinst and registered as the .apk
-# post-install script, so one body serves both packagers.
+# post-install script, and as the .apk post-upgrade script with PKG_UPGRADE=1
+# exported ahead of this body, so one body serves both packagers.
 #
 # The fips daemon is enabled and started on every install. The gateway is not:
 # the package ships that service disabled, and the README and the deployment
@@ -19,8 +20,9 @@
 #                   re-enabled, which also re-enables one an operator had
 #                   disabled by hand.
 #
-# Under apk this script runs only on a fresh install, so it takes the first
-# branch and the gateway stays off.
+# Under apk, a fresh install runs this as post-install and the gateway stays
+# off. An upgrade runs it as post-upgrade, after the .apk pre-upgrade script
+# (the prerm body) has stopped the services and left the marker.
 
 UPGRADE_MARKER=/tmp/fips-prerm-upgrade
 

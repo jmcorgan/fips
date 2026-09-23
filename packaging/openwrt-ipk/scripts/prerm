@@ -2,7 +2,8 @@
 # Maintainer script run before the FIPS package is removed or replaced.
 #
 # Installed as the .ipk CONTROL/prerm and registered as the .apk pre-deinstall
-# script, so one body serves both packagers.
+# script, and as the .apk pre-upgrade script with its arguments rewritten to
+# "upgrade <new-version>", so one body serves both packagers.
 #
 # opkg calls this with "upgrade <new-version>" when the package is being
 # replaced. Disabling the services there would erase the operator's choice,

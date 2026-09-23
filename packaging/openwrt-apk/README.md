@@ -94,6 +94,21 @@ key; a single `--allow-untrusted` package install does not. If we ever publish a
 apk feed, add ECDSA (prime256v1) signing via `apk mkpkg --sign` and distribute the
 public key to `/etc/apk/keys/`.
 
+## Upgrading
+
+Upgrade with the same command, pointed at the new package:
+
+```bash
+ssh root@192.168.1.1 apk add --allow-untrusted /tmp/fips_<new-version>_<arch>.apk
+```
+
+The new package's upgrade scripts stop `fips` and `fips-gateway` before the
+files are replaced, then start `fips` again and start `fips-gateway` only if it
+was enabled, so the upgrade keeps the gateway's enabled state. apk runs
+the incoming package's upgrade scripts, not the installed one's, so this holds
+from the first upgrade onto a package that carries them, whatever version is
+installed.
+
 `/etc/fips/fips.yaml` is marked as a config file (via
 `/lib/apk/packages/fips.conffiles`), so apk preserves local edits across upgrades,
 and `/lib/upgrade/keep.d/fips` preserves `/etc/fips/` across `sysupgrade` — the

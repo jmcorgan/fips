@@ -841,6 +841,17 @@ jobs:
             fi
           done
 
+          # Maintainer scripts. adbdump prints each registered script as a
+          # "<phase>:" key under scripts:. An upgrade runs only pre-upgrade and
+          # post-upgrade, so a package missing either restarts nothing.
+          for s in post-install pre-upgrade post-upgrade pre-deinstall; do
+            if grep -qE "^[[:space:]]*${s}:" "$DUMP"; then
+              echo "  PASS script: $s"
+            else
+              echo "  FAIL script: missing $s"; fail=1
+            fi
+          done
+
           if [ "$fail" -ne 0 ]; then
             echo "apk structural verification FAILED"
             exit 1

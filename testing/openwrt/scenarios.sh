@@ -11,6 +11,13 @@
 # POSTINST and PRERM may be pointed at other files. That is the seam used to
 # see a scenario red against the previously released scripts, and to re-break
 # the fixed ones during a break-check.
+#
+# APK_SCRIPTS names a directory holding the four scripts the .apk registers
+# (post-install, pre-upgrade, post-upgrade, pre-deinstall), as captured from
+# the real build-apk.sh by package-test.sh --keep. Scenarios 8 to 10 execute
+# them directly with apk-tools v3's argv and PATH-only environment, so the
+# kernel reads their #! line and ash runs them. A missing directory or script
+# fails those scenarios; it is never a skip.
 
 set -u
 
@@ -19,6 +26,7 @@ POSTINST="${POSTINST:-$REPO/packaging/openwrt-ipk/scripts/postinst}"
 PRERM="${PRERM:-$REPO/packaging/openwrt-ipk/scripts/prerm}"
 RELEASED_PRERM="$REPO/testing/openwrt/fixtures/released-prerm"
 INIT_GATEWAY="$REPO/packaging/openwrt-ipk/files/etc/init.d/fips-gateway"
+APK_SCRIPTS="${APK_SCRIPTS:-}"
 SHIPPED_YAML="$REPO/packaging/openwrt-ipk/files/etc/fips/fips.yaml"
 
 WORK=/tmp/fips-openwrt-scenarios
@@ -143,6 +151,52 @@ assert_absent() {
     else
         ok "$2"
     fi
+    return 0
+}
+
+assert_present() {
+    if [ -e "$1" ]; then
+        ok "$2"
+    else
+        bad "$2 — $1 does not exist"
+    fi
+    return 0
+}
+
+first_call_line() {
+    grep -nxF "$1" "$CALLS" | head -n 1 | cut -d: -f1
+    return 0
+}
+
+assert_order() {
+    # assert_order <first call> <second call> <what it means>
+    first="$(first_call_line "$1")"
+    second="$(first_call_line "$2")"
+    if [ -z "$first" ] || [ -z "$second" ]; then
+        bad "$3 — '$1' and '$2' were not both called: $(calls_oneline)"
+    elif [ "$first" -lt "$second" ]; then
+        ok "$3"
+    else
+        bad "$3 — '$2' came before '$1': $(calls_oneline)"
+    fi
+    return 0
+}
+
+run_apk_script() {
+    # run_apk_script <phase> <args...>
+    # Runs one captured .apk script the way apk-tools v3 does: executed
+    # directly, with only PATH in the environment. The stubs' own state
+    # variables are passed through so they can record the calls.
+    phase="$1"
+    shift
+    script="$APK_SCRIPTS/$phase"
+    if [ -z "$APK_SCRIPTS" ] || [ ! -x "$script" ]; then
+        bad "the .apk $phase script is not available at '$script'"
+        return 1
+    fi
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+        CALLS="$CALLS" GW_STATE="$GW_STATE" FIPS_STATE="$FIPS_STATE" \
+        "$script" "$@" >/dev/null 2>&1
     return 0
 }
 
@@ -321,9 +375,69 @@ YAML
     return 0
 }
 
+# ── 8. apk fresh install ────────────────────────────────────────────────────
+# apk-tools v3 runs only post-install, with the new version as its argument.
+scenario_apk_fresh_install() {
+    note "scenario 8: apk fresh install"
+    reset_state
+
+    run_apk_script post-install 0.6.0-r1 || return 0
+
+    assert_called "fips enable" "an apk install enables the daemon"
+    assert_called "fips start" "an apk install starts the daemon"
+    assert_not_called "fips-gateway enable" "an apk install does not enable the gateway"
+    assert_not_called "fips-gateway start" "an apk install does not start the gateway"
+    assert_file_is "$GW_STATE" "0" "an apk install leaves the gateway disabled"
+    return 0
+}
+
+# ── 9. apk upgrade, gateway enabled ─────────────────────────────────────────
+# apk-tools v3 runs only the new package's pre-upgrade and post-upgrade, with
+# "<new-version> <old-version>"; the old package runs nothing.
+scenario_apk_upgrade_enabled() {
+    note "scenario 9: apk upgrade, gateway enabled"
+    reset_state
+    echo 1 > "$GW_STATE"
+    echo 1 > "$FIPS_STATE"
+
+    run_apk_script pre-upgrade 0.6.0-r1 0.5.2-r1 || return 0
+    assert_called "fips-gateway stop" "pre-upgrade stops the gateway"
+    assert_called "fips stop" "pre-upgrade stops the daemon"
+    assert_not_called "fips-gateway disable" "pre-upgrade does not disable the gateway"
+    assert_not_called "fips disable" "pre-upgrade does not disable the daemon"
+    assert_file_is "$GW_STATE" "1" "the gateway is still enabled after pre-upgrade"
+    assert_present "$UPGRADE_MARKER" "pre-upgrade leaves the upgrade marker"
+
+    run_apk_script post-upgrade 0.6.0-r1 0.5.2-r1 || return 0
+    assert_order "fips stop" "fips start" "the daemon is started again after it was stopped"
+    assert_order "fips-gateway stop" "fips-gateway start" "the gateway is started again after it was stopped"
+    assert_not_called "fips-gateway enable" "an enabled gateway does not need re-enabling"
+    assert_file_is "$GW_STATE" "1" "the gateway stays enabled across the apk upgrade"
+    assert_absent "$UPGRADE_MARKER" "post-upgrade removes the upgrade marker"
+    return 0
+}
+
+# ── 10. apk upgrade, gateway disabled ───────────────────────────────────────
+scenario_apk_upgrade_disabled() {
+    note "scenario 10: apk upgrade, gateway disabled"
+    reset_state
+    echo 1 > "$FIPS_STATE"
+
+    run_apk_script pre-upgrade 0.6.0-r1 0.5.2-r1 || return 0
+    run_apk_script post-upgrade 0.6.0-r1 0.5.2-r1 || return 0
+
+    assert_order "fips stop" "fips start" "the daemon is started again after it was stopped"
+    assert_file_is "$GW_STATE" "0" "a disabled gateway stays disabled across the apk upgrade"
+    assert_not_called "fips-gateway enable" "a disabled gateway is not enabled by the apk upgrade"
+    assert_not_called "fips-gateway start" "a disabled gateway is not started by the apk upgrade"
+    assert_absent "$UPGRADE_MARKER" "post-upgrade removes the upgrade marker"
+    return 0
+}
+
 echo "OpenWrt maintainer-script scenarios (shell: $(readlink -f /proc/$$/exe 2>/dev/null || echo sh))"
 echo "  postinst: $POSTINST"
 echo "  prerm:    $PRERM"
+echo "  apk:      ${APK_SCRIPTS:-(not set)}"
 
 scenario_fresh_install
 scenario_upgrade_from_released
@@ -332,6 +446,9 @@ scenario_upgrade_disabled
 scenario_removal
 scenario_config_reader
 scenario_start_service_guard
+scenario_apk_fresh_install
+scenario_apk_upgrade_enabled
+scenario_apk_upgrade_disabled
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
