@@ -86,9 +86,11 @@ jobs:
             rust_target: aarch64-unknown-linux-musl
             rust_channel: stable
             # MT3000, MT6000, Flint 2, RPi 3/4/5
-          # MIPS disabled: nostr-relay-pool 0.44 uses std::sync::atomic::AtomicU64
-          # directly (fips's own atomics already use portable_atomic). Re-enable
-          # once an upstream portable-atomic patch lands (or via [patch.crates-io]).
+          # MIPS disabled: 32-bit MIPS has no 64-bit atomics, and both
+          # nostr-relay-pool 0.44 and fips itself (outside the transport stats
+          # modules) use std::sync::atomic::AtomicU64. Re-enabling needs both on
+          # portable_atomic, and the nightly entries below also need -Zbuild-std,
+          # which the build step does not pass.
           # - build_arch: mipsel
           #   openwrt_arch: mipsel_24kc
           #   rust_target: mipsel-unknown-linux-musl
