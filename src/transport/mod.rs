@@ -1299,16 +1299,28 @@ impl PartialEq for LiveStats {
 // DNS Resolution
 // ============================================================================
 
-/// Resolve a TransportAddr to a SocketAddr.
+/// Resolve a TransportAddr to the SocketAddr a socket bound to `local` should
+/// send to.
 ///
 /// Fast path: if the address parses as a numeric IP:port, returns
 /// immediately with no DNS lookup. Otherwise, treats the address as
 /// `hostname:port` and performs async DNS resolution via the system
 /// resolver.
-pub(crate) async fn resolve_socket_addr(
+///
+/// Of the resolver's answers, the first in `local`'s address family is
+/// taken; when none is in that family, or `local` is `None`, the first
+/// answer is. The resolver's order is not ours to choose: on a DNS64/NAT64
+/// network, such as an IPv6-only mobile carrier, a name with only an A
+/// record comes back with a synthesized AAAA sorted first, and a socket
+/// bound to `0.0.0.0` cannot send to it (the kernel answers EAFNOSUPPORT).
+/// The fallback to the first answer keeps a dual-stack `[::]` socket able to
+/// reach a name that has only an A record.
+pub(crate) async fn resolve_socket_addr_for(
     addr: &TransportAddr,
+    local: Option<SocketAddr>,
 ) -> Result<SocketAddr, TransportError> {
-    resolve_socket_addrs(addr).await?.next().ok_or_else(|| {
+    let results: Vec<SocketAddr> = resolve_socket_addrs(addr).await?.collect();
+    pick_for_family(&results, local).ok_or_else(|| {
         TransportError::InvalidAddress(format!("DNS resolution returned no addresses for {}", addr))
     })
 }
@@ -1325,6 +1337,24 @@ pub(crate) async fn resolve_socket_addrs(
     tokio::net::lookup_host(s).await.map_err(|e| {
         TransportError::InvalidAddress(format!("DNS resolution failed for {}: {}", s, e))
     })
+}
+
+/// The first of `results` in `local`'s address family, or the first of all
+/// when none is in that family or there is no socket to match.
+fn pick_for_family(results: &[SocketAddr], local: Option<SocketAddr>) -> Option<SocketAddr> {
+    local
+        .and_then(|local| {
+            results
+                .iter()
+                .copied()
+                .find(|r| r.is_ipv4() == local.is_ipv4())
+        })
+        .or_else(|| results.first().copied())
+}
+
+/// "IPv4" / "IPv6", for messages.
+pub(crate) fn family_name(addr: SocketAddr) -> &'static str {
+    if addr.is_ipv4() { "IPv4" } else { "IPv6" }
 }
 
 // ============================================================================
@@ -1374,6 +1404,28 @@ mod tests {
             "finished connect not returned: {outcome:?}"
         );
         assert!(connecting.is_empty());
+    }
+
+    /// The resolver's order is not ours: a DNS64 answer sorts the synthesized
+    /// AAAA first. A bound socket gets an answer of its own family when there
+    /// is one, and the first answer otherwise, as a caller with no socket does.
+    #[test]
+    fn pick_for_family_prefers_the_bound_sockets_family() {
+        let v6: SocketAddr = "[64:ff9b::c000:201]:2121".parse().unwrap();
+        let v4: SocketAddr = "192.0.2.1:2121".parse().unwrap();
+        let dns64_order = [v6, v4];
+        let bound_v4: SocketAddr = "0.0.0.0:37259".parse().unwrap();
+        let bound_v6: SocketAddr = "[::]:37259".parse().unwrap();
+
+        assert_eq!(pick_for_family(&dns64_order, Some(bound_v4)), Some(v4));
+        assert_eq!(pick_for_family(&dns64_order, Some(bound_v6)), Some(v6));
+        assert_eq!(pick_for_family(&dns64_order, None), Some(v6));
+        // No answer in the socket's family: the first one, as before. A
+        // dual-stack `[::]` socket can still send to an A-only name.
+        assert_eq!(pick_for_family(&[v4], Some(bound_v6)), Some(v4));
+        assert_eq!(pick_for_family(&[v6], Some(bound_v4)), Some(v6));
+        assert_eq!(pick_for_family(&[], Some(bound_v4)), None);
+        assert_eq!(pick_for_family(&[], None), None);
     }
 
     #[test]
