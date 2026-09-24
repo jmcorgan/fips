@@ -61,34 +61,9 @@ const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADE
 
 /// FIPS base encapsulation overhead for DataPacket (excluding port payload).
 ///
-/// This is the fixed overhead for a SessionDatagram carrying an FSP DataPacket,
-/// used by the send path's CP-flag guard to check whether piggybacked coords
-/// fit within the transport MTU. For IPv6 effective MTU calculations, use
-/// [`FIPS_IPV6_OVERHEAD`] which accounts for port multiplexing and header
-/// compression.
-///
-/// Breakdown (traced through the actual send path):
-///
-/// ```text
-/// FMP outer header (cleartext AAD)              16
-///   common prefix (4) + receiver_idx (4) + counter (8)
-/// FMP AEAD ciphertext:
-///   timestamp (4) + msg_type (1)                 5   [FMP inner header]
-///   ttl (1) + path_mtu (2) + src (16) + dst (16) 35  [SessionDatagram body]
-///   FSP header (4 prefix + 8 counter)            12   [cleartext AAD]
-///   FSP AEAD ciphertext:
-///     timestamp (4) + msg_type (1) + flags (1)    6   [FSP inner header]
-///     <application data>
-///     Poly1305 tag                               16   [FSP AEAD]
-/// FMP Poly1305 tag                              16   [FMP AEAD]
-///                                              ────
-///                                               106
-/// ```
-///
-/// Note: the FMP inner header msg_type byte IS the SessionDatagram msg_type
-/// byte (shared, not double-counted). The "35 bytes" is the SessionDatagram
-/// body after msg_type is consumed by the dispatch layer.
-pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 6 + 16; // 106 bytes
+/// Re-exported: the value is FMP plus FSP framing and is defined with the
+/// protocol layers, in [`crate::proto::framing::FIPS_OVERHEAD`].
+pub use crate::proto::framing::FIPS_OVERHEAD;
 
 /// FIPS encapsulation overhead for compressed IPv6 shim traffic (port 256).
 ///
@@ -115,18 +90,10 @@ pub use crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU;
 /// Smallest path MTU this node will act on when the claim arrives on the
 /// unauthenticated reactive carrier, `MtuExceeded`.
 ///
-/// Held equal to [`MIN_ACTIONABLE_PATH_MTU`] so no hop legitimately configured
-/// with a small transport MTU loses reactive feedback. It is a separate
-/// constant because the two carriers differ in what they prove: the
-/// authenticated `PathMtuNotification` and the proof-carrying discovery
-/// response come from a party this node has verified, whereas this one comes
-/// from whoever could route a datagram here. What keeps a legal-but-forged
-/// claim from pinning a session is corroboration against what this node has
-/// actually sent, not this floor. Raising it (576 is the value the original
-/// path-MTU floor design proposed, and derives an inner IPv6 MTU of 499)
-/// bounds the outcome of an uncorroborated claim further, at the cost of
-/// ignoring an honest report from any hop configured between the two values.
-pub const MIN_REACTIVE_PATH_MTU: u16 = MIN_ACTIONABLE_PATH_MTU;
+/// Re-exported: a protocol policy decision defined beside
+/// [`crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU`], in
+/// [`crate::proto::mmp::MIN_REACTIVE_PATH_MTU`].
+pub use crate::proto::mmp::MIN_REACTIVE_PATH_MTU;
 
 /// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
 ///

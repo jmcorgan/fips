@@ -10,6 +10,7 @@ pub(crate) mod bloom;
 pub(crate) mod codec;
 pub(crate) mod coord;
 pub(crate) mod fmp;
+pub(crate) mod framing;
 pub(crate) mod fsp;
 pub(crate) mod link;
 pub(crate) mod lookup;

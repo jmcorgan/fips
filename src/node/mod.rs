@@ -19,6 +19,7 @@ mod lifecycle;
 pub(crate) mod metrics;
 pub(crate) mod netmon;
 pub use netmon::NetmonTrigger;
+pub(crate) mod path_mtu;
 mod peer_error_budget;
 mod peering;
 mod rate_limit;
