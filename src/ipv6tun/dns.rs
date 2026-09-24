@@ -164,7 +164,7 @@ fn is_mesh_interface_query(arrival_ifindex: Option<u32>, mesh_ifindex: Option<u3
 /// by the `::` bind: mesh peers can reach the listener over fips0 and
 /// probe `/etc/fips/hosts` aliases via dictionary attack. The check
 /// requires `IPV6_RECVPKTINFO` to be enabled on the socket (done in
-/// `Node::bind_dns_socket`); if it is not, arrival ifindex is unknown
+/// `bind_dns_socket`); if it is not, arrival ifindex is unknown
 /// and no filter is applied.
 pub async fn run_dns_responder(
     socket: tokio::net::UdpSocket,
@@ -216,6 +216,79 @@ pub async fn run_dns_responder(
                 debug!(len, "Failed to parse DNS query, dropping");
             }
         }
+    }
+}
+
+/// Bind a UDP socket for the DNS responder.
+///
+/// For IPv6 binds (including `::`), sets `IPV6_V6ONLY=0` so the socket
+/// also accepts IPv4-mapped addresses. This guarantees dual-stack
+/// delivery regardless of `net.ipv6.bindv6only` sysctl on the host —
+/// v4 clients on 127.0.0.1 and v6 clients on the fips0 address both
+/// land on the same socket.
+///
+/// Also enables `IPV6_RECVPKTINFO` on IPv6 sockets so the responder
+/// can learn the arrival interface per packet. The responder uses that
+/// to drop queries arriving on the mesh TUN, closing the hosts-file
+/// probing side-channel created by the `::` bind.
+pub(crate) fn bind_dns_socket(
+    addr: std::net::SocketAddr,
+) -> Result<tokio::net::UdpSocket, std::io::Error> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if addr.is_ipv6() {
+        sock.set_only_v6(false)?;
+        #[cfg(unix)]
+        set_recv_pktinfo_v6(&sock)?;
+    }
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    tokio::net::UdpSocket::from_std(sock.into())
+}
+
+/// Enable `IPV6_RECVPKTINFO` on an IPv6 UDP socket.
+///
+/// After this setsockopt, each `recvmsg()` call on the socket receives
+/// an `IPV6_PKTINFO` control message containing the arrival interface
+/// index, which the DNS responder uses for its mesh-interface filter.
+#[cfg(unix)]
+fn set_recv_pktinfo_v6(sock: &socket2::Socket) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    let enable: libc::c_int = 1;
+    let ret = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Resolve an interface index by name.
+///
+/// Returns `None` if the interface does not exist.
+pub(crate) fn lookup_mesh_ifindex(name: &str) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        let c_name = std::ffi::CString::new(name).ok()?;
+        let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+        if idx == 0 { None } else { Some(idx) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = name;
+        None
     }
 }
 
@@ -819,7 +892,7 @@ mod tests {
     }
 
     /// Build a socket bound to `[::1]:0` with `IPV6_RECVPKTINFO` enabled,
-    /// mirroring the setup done in `Node::bind_dns_socket`.
+    /// mirroring the setup done in `bind_dns_socket`.
     #[cfg(unix)]
     fn bind_loopback_v6_with_pktinfo() -> tokio::net::UdpSocket {
         use socket2::{Domain, Protocol, Socket, Type};

@@ -1864,7 +1864,7 @@ impl Node {
                     match addr_str.parse::<std::net::IpAddr>() {
                         Ok(ip) => {
                             let bind = std::net::SocketAddr::new(ip, self.config().dns.port());
-                            match Self::bind_dns_socket(bind) {
+                            match crate::ipv6tun::dns::bind_dns_socket(bind) {
                                 Ok(socket) => {
                                     // Read the bound address back off the socket
                                     // rather than reusing `bind`: a port-0 config
@@ -2072,62 +2072,6 @@ impl Node {
         Ok(())
     }
 
-    /// Bind a UDP socket for the DNS responder.
-    ///
-    /// For IPv6 binds (including `::`), sets `IPV6_V6ONLY=0` so the socket
-    /// also accepts IPv4-mapped addresses. This guarantees dual-stack
-    /// delivery regardless of `net.ipv6.bindv6only` sysctl on the host —
-    /// v4 clients on 127.0.0.1 and v6 clients on the fips0 address both
-    /// land on the same socket.
-    ///
-    /// Also enables `IPV6_RECVPKTINFO` on IPv6 sockets so the responder
-    /// can learn the arrival interface per packet. The responder uses that
-    /// to drop queries arriving on the mesh TUN, closing the hosts-file
-    /// probing side-channel created by the `::` bind.
-    fn bind_dns_socket(
-        addr: std::net::SocketAddr,
-    ) -> Result<tokio::net::UdpSocket, std::io::Error> {
-        use socket2::{Domain, Protocol, Socket, Type};
-        let domain = if addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
-        let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-        if addr.is_ipv6() {
-            sock.set_only_v6(false)?;
-            #[cfg(unix)]
-            Self::set_recv_pktinfo_v6(&sock)?;
-        }
-        sock.set_nonblocking(true)?;
-        sock.bind(&addr.into())?;
-        tokio::net::UdpSocket::from_std(sock.into())
-    }
-
-    /// Enable `IPV6_RECVPKTINFO` on an IPv6 UDP socket.
-    ///
-    /// After this setsockopt, each `recvmsg()` call on the socket receives
-    /// an `IPV6_PKTINFO` control message containing the arrival interface
-    /// index, which the DNS responder uses for its mesh-interface filter.
-    #[cfg(unix)]
-    fn set_recv_pktinfo_v6(sock: &socket2::Socket) -> Result<(), std::io::Error> {
-        use std::os::fd::AsRawFd;
-        let enable: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                sock.as_raw_fd(),
-                libc::IPPROTO_IPV6,
-                libc::IPV6_RECVPKTINFO,
-                &enable as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if ret < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
     /// Resolve the index of the mesh TUN device this node actually created.
     ///
     /// Reads the device name recorded when the TUN was brought up, which is
@@ -2137,24 +2081,9 @@ impl Node {
     /// An app-owned TUN also leaves the name unset, so the filter stays off
     /// there even though a mesh interface exists.
     pub(crate) fn mesh_ifindex(&self) -> Option<u32> {
-        self.tun_name.as_deref().and_then(Self::lookup_mesh_ifindex)
-    }
-
-    /// Resolve an interface index by name.
-    ///
-    /// Returns `None` if the interface does not exist.
-    fn lookup_mesh_ifindex(name: &str) -> Option<u32> {
-        #[cfg(unix)]
-        {
-            let c_name = std::ffi::CString::new(name).ok()?;
-            let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-            if idx == 0 { None } else { Some(idx) }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = name;
-            None
-        }
+        self.tun_name
+            .as_deref()
+            .and_then(crate::ipv6tun::dns::lookup_mesh_ifindex)
     }
 
     /// Stop the node.
