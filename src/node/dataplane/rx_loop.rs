@@ -79,7 +79,8 @@ impl Node {
         // Take the TUN outbound receiver, or create a dummy channel that never
         // produces messages (when TUN is disabled). Holding the sender prevents
         // the channel from closing.
-        let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.tun_outbound_rx.take() {
+        let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.ipv6tun.tun_outbound_rx.take()
+        {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -89,7 +90,8 @@ impl Node {
 
         // Take the DNS identity receiver, or create a dummy channel (when DNS
         // is disabled). Same pattern as TUN outbound.
-        let (mut dns_identity_rx, _dns_guard) = match self.supervisor.dns_identity_rx.take() {
+        let (mut dns_identity_rx, _dns_guard) = match self.supervisor.ipv6tun.dns_identity_rx.take()
+        {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);

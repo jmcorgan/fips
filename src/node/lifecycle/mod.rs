@@ -11,6 +11,7 @@ use super::peering::reconcile::{
 use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
+use crate::ipv6tun::lifecycle::{TunThreads, open_tun};
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
@@ -19,11 +20,10 @@ use crate::peer::machine::{HandshakeCrypto, PeerEvent, PeerMachine};
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
-use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
+use crate::upper::tun::TunState;
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -44,7 +44,7 @@ fn socket_addr_families_compatible(local: SocketAddr, remote: SocketAddr) -> boo
 /// A panic would otherwise unwind past the report and leave the node healthy
 /// with the child gone. Aborting the task still reports nothing: the abort
 /// drops this whole future, so a deliberate stop does not read as a death.
-pub(in crate::node) async fn report_exit(
+pub(crate) async fn report_exit(
     child: Child,
     body: impl std::future::Future<Output = ()>,
     tx: Option<tokio::sync::mpsc::Sender<Child>>,
@@ -66,7 +66,7 @@ pub(in crate::node) async fn report_exit(
 
 /// Run a supervised child's thread body, then report the child's exit on `tx`,
 /// whether the body returned or panicked.
-pub(in crate::node) fn report_thread(
+pub(crate) fn report_thread(
     child: Child,
     body: impl FnOnce(),
     tx: Option<&tokio::sync::mpsc::Sender<Child>>,
@@ -1473,7 +1473,7 @@ impl Node {
         // No Tun child when the TUN is app-owned (the embedder pre-set
         // `tun_tx` via `enable_app_owned_tun`) — FIPS does no system-TUN ops;
         // the channels installed before `start` carry both directions.
-        let tun = self.config().tun.enabled && self.supervisor.tun_tx.is_none();
+        let tun = self.config().tun.enabled && self.supervisor.ipv6tun.tun_tx.is_none();
         let dns = self.config().dns.enabled;
 
         // Worker-pool booleans + counts. Unix only — the workers issue
@@ -1706,244 +1706,43 @@ impl Node {
                     // Initialize TUN interface after transports and peers are
                     // ready.
                     let address = *self.identity().address();
-                    match TunDevice::create(&self.config().tun, address).await {
-                        Ok(device) => {
-                            let mtu = device.mtu();
-                            let name = device.name().to_string();
-                            let our_addr = *device.address();
-
-                            info!("TUN device active:");
-                            info!("     name: {}", name);
-                            info!("  address: {}", device.address());
-                            info!("      mtu: {}", mtu);
-
+                    match open_tun(&self.config().tun, address).await {
+                        Some(device) => {
                             // Seed the shared MSS ceiling from whatever is bound
                             // right now. Both TUN threads read it live from here
                             // on, so a transport binding or unbinding later moves
                             // the clamp instead of leaving it at this instant's
                             // value — see `crate::upper::tun::MssCeiling`.
                             self.refresh_tun_mss_ceiling();
-                            let max_mss = self.tun_mss_ceiling.clone();
-                            let effective_mtu = self.effective_ipv6_mtu();
-
-                            info!("effective MTU: {} bytes", effective_mtu);
-                            debug!(
-                                "   max TCP MSS: {} bytes",
-                                max_mss.load(std::sync::atomic::Ordering::Relaxed)
-                            );
-
-                            // On macOS and FreeBSD, create a shutdown pipe. Writing to it
-                            // unblocks the reader thread's select() loop without closing
-                            // the TUN fd (which would cause a double-close when TunDevice
-                            // drops). Linux instead unblocks the reader by deleting the
-                            // interface; on macOS/FreeBSD downing the interface does not
-                            // wake a blocked read.
-                            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-                            let (shutdown_read_fd, shutdown_write_fd) = {
-                                let mut fds = [0i32; 2];
-                                if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-                                    return Err(NodeError::Tun(
-                                        crate::upper::tun::TunError::Configure(
-                                            "failed to create shutdown pipe".into(),
-                                        ),
-                                    ));
-                                }
-                                (fds[0], fds[1])
+                            let threads = TunThreads {
+                                ceiling: self.tun_mss_ceiling.clone(),
+                                effective: self.effective_ipv6_mtu(),
+                                path_mtu: self.path_mtu_lookup.clone(),
+                                channel: self.config().node.buffers.tun_channel,
+                                exit_tx: self.child_exit_tx.clone(),
                             };
-
-                            // Create writer (dups the fd for independent write access).
-                            // Pass path_mtu_lookup so inbound SYN-ACK clamp can read
-                            // per-destination path MTU learned via discovery.
-                            let (writer, tun_tx) = device
-                                .create_writer(max_mss.clone(), self.path_mtu_lookup.clone())?;
-
-                            // Spawn writer thread. On exit, including a panic,
-                            // it self-reports `Child::Tun` (sync context →
-                            // `blocking_send`); TUN is one compound child, so
-                            // both threads reporting is fine (the FSM de-dups
-                            // via `up.remove`).
-                            let writer_child_tx = self.child_exit_tx.clone();
-                            let writer_handle = thread::spawn(move || {
-                                report_thread(
-                                    Child::Tun,
-                                    move || writer.run(),
-                                    writer_child_tx.as_ref(),
-                                );
-                            });
-
-                            // Clone tun_tx for the reader
-                            let reader_tun_tx = tun_tx.clone();
-
-                            // Create outbound channel for TUN reader → Node
-                            let tun_channel_size = self.config().node.buffers.tun_channel;
-                            let (outbound_tx, outbound_rx) =
-                                tokio::sync::mpsc::channel(tun_channel_size);
-
-                            // Spawn reader thread. Like the writer, it
-                            // self-reports `Child::Tun` on exit or panic (sync
-                            // context → `blocking_send`). Exactly one cfg
-                            // variant compiles, so the single clone is moved
-                            // into that closure.
-                            let path_mtu_lookup = self.path_mtu_lookup.clone();
-                            let reader_child_tx = self.child_exit_tx.clone();
-                            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-                            let reader_handle = thread::spawn(move || {
-                                report_thread(
-                                    Child::Tun,
-                                    move || {
-                                        run_tun_reader(
-                                            device,
-                                            mtu,
-                                            our_addr,
-                                            reader_tun_tx,
-                                            outbound_tx,
-                                            max_mss,
-                                            path_mtu_lookup,
-                                            shutdown_read_fd,
-                                        )
-                                    },
-                                    reader_child_tx.as_ref(),
-                                );
-                            });
-                            #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
-                            let reader_handle = thread::spawn(move || {
-                                report_thread(
-                                    Child::Tun,
-                                    move || {
-                                        run_tun_reader(
-                                            device,
-                                            mtu,
-                                            our_addr,
-                                            reader_tun_tx,
-                                            outbound_tx,
-                                            max_mss,
-                                            path_mtu_lookup,
-                                        )
-                                    },
-                                    reader_child_tx.as_ref(),
-                                );
-                            });
-
+                            self.supervisor.ipv6tun.spawn_tun(device, threads)?;
                             self.tun_state = TunState::Active;
-                            self.tun_name = Some(name);
-                            self.supervisor.tun_tx = Some(tun_tx);
-                            self.supervisor.tun_outbound_rx = Some(outbound_rx);
-                            self.supervisor.tun_reader_handle = Some(reader_handle);
-                            self.supervisor.tun_writer_handle = Some(writer_handle);
-                            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-                            {
-                                self.supervisor.tun_shutdown_fd = Some(shutdown_write_fd);
-                            }
                             Event::SubstrateUp { child }
                         }
-                        Err(e) => {
+                        None => {
                             self.tun_state = TunState::Failed;
-                            warn!(error = %e, "Failed to initialize TUN, continuing without it");
                             Event::SubstrateFailed { child }
                         }
                     }
                 }
                 Child::Dns => {
-                    // Initialize DNS responder (independent of TUN).
-                    //
-                    // Default bind_addr is "::1" (IPv6 loopback). The shipped
-                    // fips-dns-setup configures systemd-resolved via a global
-                    // /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
-                    // [::1]:5354, which sidesteps a Linux IPV6_PKTINFO behaviour
-                    // where self-destined traffic to fips0's address is attributed
-                    // to fips0 in PKTINFO and gets silently dropped by the
-                    // mesh-interface filter in src/upper/dns.rs.
-                    //
-                    // For mesh-reachable resolution (rare), set bind_addr: "::"
-                    // in fips.yaml. The mesh-interface filter remains active to
-                    // prevent hosts-file alias enumeration in that mode.
-                    // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
-                    // 127.0.0.1 still reach us regardless of kernel sysctl
-                    // defaults — but only when bind is on a wildcard / IPv6 path.
-                    let addr_str = self.config().dns.bind_addr();
-                    match addr_str.parse::<std::net::IpAddr>() {
-                        Ok(ip) => {
-                            let bind = std::net::SocketAddr::new(ip, self.config().dns.port());
-                            match crate::ipv6tun::dns::bind_dns_socket(bind) {
-                                Ok(socket) => {
-                                    // Read the bound address back off the socket
-                                    // rather than reusing `bind`: a port-0 config
-                                    // resolves to the kernel-assigned port here,
-                                    // and this is the address an embedder that
-                                    // proxies queries to us has to dial.
-                                    let local_addr = socket.local_addr().unwrap_or(bind);
-                                    let dns_channel_size = self.config().node.buffers.dns_channel;
-                                    let (identity_tx, identity_rx) =
-                                        tokio::sync::mpsc::channel(dns_channel_size);
-                                    let dns_ttl = self.config().dns.ttl();
-                                    let base_hosts =
-                                        crate::upper::hosts::HostMap::from_peer_configs(
-                                            self.config().peers(),
-                                        );
-                                    let hosts_path = std::path::PathBuf::from(
-                                        crate::upper::hosts::DEFAULT_HOSTS_PATH,
-                                    );
-                                    let reloader = crate::upper::hosts::HostMapReloader::new(
-                                        base_hosts, hosts_path,
-                                    );
-                                    // Resolve the TUN ifindex so the responder can
-                                    // drop queries arriving on the mesh interface
-                                    // Without this, the `::` bind exposes the
-                                    // hosts file's alias space to any mesh peer.
-                                    // The name comes from the device the TUN
-                                    // path actually created, not the configured
-                                    // one: macOS and FreeBSD assign utunN/tunN
-                                    // of their own choosing and the configured
-                                    // name resolves to nothing there, which left
-                                    // the filter permanently off.
-                                    let mesh_ifindex = self.mesh_ifindex();
-                                    if self.tun_name.is_some() && mesh_ifindex.is_none() {
-                                        warn!(
-                                            device = ?self.tun_name,
-                                            "Mesh interface index unresolved; DNS mesh filter disabled"
-                                        );
-                                    }
-                                    info!(
-                                        bind = %local_addr,
-                                        hosts = reloader.hosts().len(),
-                                        mesh_ifindex = ?mesh_ifindex,
-                                        "DNS responder started for .fips domain (auto-reload enabled)"
-                                    );
-                                    // Self-report on exit so the supervisor FSM
-                                    // routes health when the DNS task dies at
-                                    // runtime. The responder never returns, so
-                                    // in practice that is a panic. On a
-                                    // deliberate stop the task is `.abort()`ed,
-                                    // which drops the report with it; even if
-                                    // one fired, the FSM ignores it outside
-                                    // `Running`.
-                                    let dns_child_tx = self.child_exit_tx.clone();
-                                    let handle = tokio::spawn(report_exit(
-                                        Child::Dns,
-                                        crate::upper::dns::run_dns_responder(
-                                            socket,
-                                            identity_tx,
-                                            dns_ttl,
-                                            reloader,
-                                            mesh_ifindex,
-                                        ),
-                                        dns_child_tx,
-                                    ));
-                                    self.supervisor.dns_identity_rx = Some(identity_rx);
-                                    self.supervisor.dns_task = Some(handle);
-                                    self.supervisor.dns_local_addr = Some(local_addr);
-                                    Event::SubstrateUp { child }
-                                }
-                                Err(e) => {
-                                    warn!(bind = %bind, error = %e, "Failed to start DNS responder");
-                                    Event::SubstrateFailed { child }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(addr = %addr_str, error = %e, "Invalid dns.bind_addr; DNS responder not started");
-                            Event::SubstrateFailed { child }
-                        }
+                    let config = &self.context.config;
+                    let up = self.supervisor.ipv6tun.start_dns(
+                        &config.dns,
+                        config.peers(),
+                        config.node.buffers.dns_channel,
+                        self.child_exit_tx.clone(),
+                    );
+                    if up {
+                        Event::SubstrateUp { child }
+                    } else {
+                        Event::SubstrateFailed { child }
                     }
                 }
             };
@@ -2072,20 +1871,6 @@ impl Node {
         Ok(())
     }
 
-    /// Resolve the index of the mesh TUN device this node actually created.
-    ///
-    /// Reads the device name recorded when the TUN was brought up, which is
-    /// the kernel's name rather than the configured one. Returns `None` when
-    /// no TUN is up, which disables the DNS responder's mesh-interface
-    /// filter: with no mesh interface there is no mesh exposure to defend.
-    /// An app-owned TUN also leaves the name unset, so the filter stays off
-    /// there even though a mesh interface exists.
-    pub(crate) fn mesh_ifindex(&self) -> Option<u32> {
-        self.tun_name
-            .as_deref()
-            .and_then(crate::ipv6tun::dns::lookup_mesh_ifindex)
-    }
-
     /// Stop the node.
     ///
     /// Shuts down TUN interface, stops I/O threads, and transitions to
@@ -2161,15 +1946,7 @@ impl Node {
 
             match child {
                 Child::Dns => {
-                    // Stop DNS responder
-                    if let Some(handle) = self.supervisor.dns_task.take() {
-                        handle.abort();
-                        debug!("DNS responder stopped");
-                    }
-                    // Retract the published address in the same step that kills
-                    // the listener, so an embedder polling `dns_local_addr()`
-                    // never dials a socket that is already gone.
-                    self.supervisor.dns_local_addr.take();
+                    self.supervisor.ipv6tun.stop_dns();
                 }
                 Child::Nostr => {
                     // Stop Nostr overlay discovery background work and withdraw
@@ -2209,38 +1986,7 @@ impl Node {
                 }
                 Child::Tun => {
                     // Shutdown TUN interface
-                    if let Some(name) = self.tun_name.take() {
-                        info!(name = %name, "Shutting down TUN interface");
-
-                        // Drop the tun_tx to signal the writer to stop
-                        self.supervisor.tun_tx.take();
-
-                        // Delete the interface (on Linux, causes reader to get
-                        // EFAULT; on macOS/FreeBSD this downs it — the kernel
-                        // destroys the device once the reader closes the fd).
-                        if let Err(e) = shutdown_tun_interface(&name).await {
-                            warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
-                        }
-
-                        // On macOS and FreeBSD, signal the reader thread to exit by
-                        // writing to the shutdown pipe. The reader's select() will
-                        // wake up and break.
-                        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-                        if let Some(fd) = self.supervisor.tun_shutdown_fd.take() {
-                            unsafe {
-                                libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);
-                                libc::close(fd);
-                            }
-                        }
-
-                        // Wait for threads to finish
-                        if let Some(handle) = self.supervisor.tun_reader_handle.take() {
-                            let _ = handle.join();
-                        }
-                        if let Some(handle) = self.supervisor.tun_writer_handle.take() {
-                            let _ = handle.join();
-                        }
-
+                    if self.supervisor.ipv6tun.stop_tun().await {
                         self.tun_state = TunState::Disabled;
                     }
                 }
@@ -2297,7 +2043,7 @@ impl Node {
     /// `Child::Dns`, which is what reaches this.
     pub(in crate::node) fn retract_child_publications(&mut self, child: Child) {
         if matches!(child, Child::Dns) {
-            self.supervisor.dns_local_addr.take();
+            self.supervisor.ipv6tun.dns_local_addr.take();
         }
     }
 
@@ -2351,7 +2097,7 @@ impl Node {
     /// stops them. Shared by [`Self::stop`] and [`Self::enter_drain`].
     fn reconstruct_supervised_up(&self) -> Vec<Child> {
         let mut up: Vec<Child> = Vec::new();
-        if self.supervisor.dns_task.is_some() {
+        if self.supervisor.ipv6tun.dns_up() {
             up.push(Child::Dns);
         }
         if self.supervisor.nostr_rendezvous.engine().is_some() {
@@ -2363,7 +2109,7 @@ impl Node {
         for id in self.transports.keys() {
             up.push(Child::Transport(*id));
         }
-        if self.tun_name.is_some() {
+        if self.supervisor.ipv6tun.tun_up() {
             up.push(Child::Tun);
         }
         up

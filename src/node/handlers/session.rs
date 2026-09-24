@@ -462,7 +462,7 @@ impl Node {
                                     mark_ipv6_ecn_ce(&mut packet);
                                     self.metrics().congestion.ce_received.inc();
                                 }
-                                if let Some(tun_tx) = &self.supervisor.tun_tx {
+                                if let Some(tun_tx) = &self.supervisor.ipv6tun.tun_tx {
                                     if let Err(e) = tun_tx.send(packet) {
                                         debug!(error = %e, "Failed to deliver decompressed IPv6 packet to TUN");
                                     }
@@ -3131,7 +3131,7 @@ impl Node {
     pub(in crate::node) fn host_icmp(&mut self) -> IcmpContext<'_> {
         let our_ipv6 = crate::FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
         IcmpContext::new(
-            self.supervisor.tun_tx.as_ref(),
+            self.supervisor.ipv6tun.tun_tx.as_ref(),
             our_ipv6,
             &mut self.icmp_rate_limiter,
         )

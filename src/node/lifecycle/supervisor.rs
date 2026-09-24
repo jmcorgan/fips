@@ -103,11 +103,9 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::thread::JoinHandle;
 
 use crate::node::NodeState;
 use crate::transport::{PacketTx, TransportId};
-use crate::upper::tun::{TunOutboundRx, TunTx};
 
 /// A supervised substrate child.
 ///
@@ -395,7 +393,7 @@ impl SupervisorFsm {
     /// A supervisor seeded directly into `Running` with a known up-set.
     ///
     /// The teardown driver (`stop()`) reconstructs the up-set from observed
-    /// runtime presence (`dns_task.is_some()`, transports keys, etc.) rather
+    /// runtime presence (`ipv6tun.dns_up()`, transports keys, etc.) rather
     /// than relying on a live machine persisted across start/stop, so that
     /// teardown ordering is authored here regardless of how the node reached
     /// `Running`. Feeding `Event::Stop` then yields the ordered `StopChild`
@@ -811,29 +809,10 @@ pub(crate) struct Supervisor {
     /// Packet sender for transports.
     pub(in crate::node) packet_tx: Option<PacketTx>,
 
-    /// TUN packet sender channel.
-    pub(in crate::node) tun_tx: Option<TunTx>,
-    /// Receiver for outbound packets from the TUN reader.
-    pub(in crate::node) tun_outbound_rx: Option<TunOutboundRx>,
-    /// TUN reader thread handle.
-    pub(in crate::node) tun_reader_handle: Option<JoinHandle<()>>,
-    /// TUN writer thread handle.
-    pub(in crate::node) tun_writer_handle: Option<JoinHandle<()>>,
-    /// Shutdown pipe: writing to this fd unblocks the TUN reader thread on
-    /// macOS and FreeBSD. On Linux, deleting the interface via netlink
-    /// serves the same purpose.
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    pub(in crate::node) tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
-
-    /// Receiver for resolved identities from the DNS responder.
-    pub(in crate::node) dns_identity_rx: Option<crate::upper::dns::DnsIdentityRx>,
-    /// DNS responder task handle.
-    pub(in crate::node) dns_task: Option<tokio::task::JoinHandle<()>>,
-    /// Address the DNS responder actually bound, read back from the socket
-    /// after `bind` so a port-0 config resolves to the assigned port. `Some`
-    /// only while the responder is up; published to embedders through
-    /// [`Node::dns_local_addr`](crate::Node::dns_local_addr).
-    pub(in crate::node) dns_local_addr: Option<std::net::SocketAddr>,
+    /// TUN and DNS child handles: the TUN device name, channels, reader and
+    /// writer threads and (macOS/FreeBSD) shutdown pipe, and the DNS
+    /// responder task, identity receiver and bound address.
+    pub(in crate::node) ipv6tun: crate::ipv6tun::lifecycle::Handles,
 
     /// Sender for each UDP listen socket the transport spawn binds — its raw
     /// fd and the instance name it was configured under — armed by
@@ -892,15 +871,7 @@ impl Supervisor {
         Self {
             state: NodeState::Created,
             packet_tx: None,
-            tun_tx: None,
-            tun_outbound_rx: None,
-            tun_reader_handle: None,
-            tun_writer_handle: None,
-            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-            tun_shutdown_fd: None,
-            dns_identity_rx: None,
-            dns_task: None,
-            dns_local_addr: None,
+            ipv6tun: Default::default(),
             #[cfg(unix)]
             udp_fd_tx: None,
             nostr_rendezvous: crate::nostr::RendezvousDriver::default(),

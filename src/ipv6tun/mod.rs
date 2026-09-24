@@ -10,6 +10,7 @@ pub mod dns;
 pub mod icmp;
 pub mod icmp_rate_limit;
 pub mod ipv6_shim;
+pub(crate) mod lifecycle;
 pub(crate) mod outbound;
 pub mod tcp_mss;
 pub mod tun;

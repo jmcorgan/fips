@@ -336,9 +336,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ICMPv6 Packet Too Big debug lines ("Sending ICMP Packet Too Big", "Rate
   limiting ICMP Packet Too Big") log as `fips::ipv6tun::icmp` rather than
   `fips::node::handlers::session`, so a `fips::node=debug` filter no longer
-  shows them. An existing `RUST_LOG` filter naming an old target still parses
-  and simply stops matching, so the symptom is missing log lines rather than an
-  error.
+  shows them. The TUN and DNS start and stop lines ("TUN device active",
+  "effective MTU", "max TCP MSS", "Shutting down TUN interface", "DNS responder
+  started", "DNS responder stopped" and their failure warnings) log as
+  `fips::ipv6tun::lifecycle` rather than `fips::node::lifecycle`, so a filter
+  on `fips::node::lifecycle` or `fips::node` no longer selects them. An
+  existing `RUST_LOG` filter naming an old target still parses and simply
+  stops matching, so the symptom is missing log lines rather than an error.
   Update `RUST_LOG` filters, journal-watch recipes and any log-scraping alert
   accordingly. The library path `fips::upper` still resolves.
 

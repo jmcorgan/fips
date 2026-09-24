@@ -3963,6 +3963,7 @@ async fn dns_responder_serves_a_proxying_embedder() {
     let identity = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         node.supervisor
+            .ipv6tun
             .dns_identity_rx
             .as_mut()
             .expect("responder installed the identity receiver")
@@ -4707,8 +4708,8 @@ fn mesh_filter_resolves_the_live_tun_device_rather_than_the_configured_name() {
     config.tun.name = Some("fips-absent-dev".to_string());
     let mut node = Node::new(config).unwrap();
 
-    assert_eq!(node.mesh_ifindex(), None);
+    assert_eq!(node.supervisor.ipv6tun.mesh_ifindex(), None);
 
-    node.tun_name = Some(loopback.to_string());
-    assert_eq!(node.mesh_ifindex(), Some(expected));
+    node.supervisor.ipv6tun.tun_name = Some(loopback.to_string());
+    assert_eq!(node.supervisor.ipv6tun.mesh_ifindex(), Some(expected));
 }

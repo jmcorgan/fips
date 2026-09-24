@@ -8,6 +8,9 @@
 #                                          (where the punch packets flow)
 #   - fips::node::lifecycle             — daemon bootstrap, peer state
 #                                          machine, adoption transitions
+#   - fips::ipv6tun::lifecycle          — TUN and DNS child start/stop
+#                                          (formerly logged under
+#                                          node::lifecycle)
 #   - fips::node::handlers::handshake   — Noise handshake msg1/2/3,
 #                                          cross-init tie-breaker
 #                                          ("Ignoring established NAT
@@ -33,7 +36,7 @@
 # is set and the suite is nat-lan.
 
 x-trace-rust-log: &trace-rust-log
-  RUST_LOG: "info,fips::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::dataplane::forwarding=trace"
+  RUST_LOG: "info,fips::nostr=trace,fips::transport::udp=trace,fips::node::lifecycle=trace,fips::ipv6tun::lifecycle=trace,fips::node::handlers::handshake=trace,fips::node::dataplane::forwarding=trace"
 
 services:
   lan-a:

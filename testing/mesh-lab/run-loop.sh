@@ -433,9 +433,10 @@ run_nat_lan() {
     # nat-test.sh at the nat-specific trace overlay via the
     # FIPS_NAT_EXTRA_COMPOSE env-var hook in nat-test.sh. The overlay
     # bumps RUST_LOG to trace on discovery::nostr, transport::udp,
-    # node::lifecycle, handlers::handshake, dataplane::forwarding —
-    # the modules covering the cross-init / adoption / handshake
-    # path that the NAT-traversal flake exhibits. Path is repo-relative.
+    # node::lifecycle, ipv6tun::lifecycle, handlers::handshake,
+    # dataplane::forwarding — the modules covering the cross-init /
+    # adoption / handshake path that the NAT-traversal flake exhibits.
+    # Path is repo-relative.
     local -a env_args=(FIPS_NAT_SKIP_FINAL_CLEANUP=1)
     if [ -n "${FIPS_MESH_LAB_TRACE:-}" ]; then
         env_args+=(FIPS_NAT_EXTRA_COMPOSE=testing/mesh-lab/compose-trace-nat.yml)

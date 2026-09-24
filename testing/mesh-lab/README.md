@@ -102,7 +102,8 @@ rep does, set them in the invoking shell:
     `handshake`, `forwarding`, `session`, `encrypted`, `mmp`
     (via `compose-trace.yml`).
   - nat-lan — `fips::nostr`, `transport::udp`,
-    `node::lifecycle`, `handlers::handshake`, `dataplane::forwarding`
+    `node::lifecycle`, `ipv6tun::lifecycle`, `handlers::handshake`,
+    `dataplane::forwarding`
     (via `compose-trace-nat.yml`, picked up by
     `testing/nat/scripts/nat-test.sh` through the
     `FIPS_NAT_EXTRA_COMPOSE` env-var hook).

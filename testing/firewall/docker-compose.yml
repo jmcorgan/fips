@@ -36,7 +36,7 @@ x-fips-common: &fips-common
   restart: "no"
   environment:
     - FIPS_TEST_MODE=default
-    - RUST_LOG=info,fips::node=debug,fips::ipv6tun::icmp=debug
+    - RUST_LOG=info,fips::node=debug,fips::ipv6tun::icmp=debug,fips::ipv6tun::lifecycle=debug
 
 services:
   service-a:
