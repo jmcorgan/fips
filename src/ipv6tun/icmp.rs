@@ -4,7 +4,10 @@
 //! Currently supports Destination Unreachable (Type 1) for
 //! packets that cannot be routed.
 
+use super::icmp_rate_limit::IcmpRateLimiter;
+use super::tun::TunTx;
 use std::net::Ipv6Addr;
+use tracing::debug;
 
 /// ICMPv6 message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +371,100 @@ pub fn build_packet_too_big(
     response[icmp_start + 2..icmp_start + 4].copy_from_slice(&checksum.to_be_bytes());
 
     Some(response)
+}
+
+/// Sends ICMPv6 errors back to the host through the TUN writer.
+///
+/// Holds what both replies need: the channel to the TUN writer, this
+/// node's address, and the per-source Packet Too Big limiter. It borrows
+/// all three for the duration of one use, so it never keeps the TUN
+/// channel open past the adapter's teardown. With no TUN channel the
+/// replies are built and dropped.
+pub(crate) struct IcmpContext<'a> {
+    /// Channel to the TUN writer, `None` when no TUN is up.
+    tun_tx: Option<&'a TunTx>,
+    /// This node's address, the source of Destination Unreachable replies.
+    our_addr: Ipv6Addr,
+    /// Per-source limiter, applied to Packet Too Big only.
+    limiter: &'a mut IcmpRateLimiter,
+}
+
+impl<'a> IcmpContext<'a> {
+    /// Borrow the TUN channel and limiter, with our address as `our_addr`.
+    pub(crate) fn new(
+        tun_tx: Option<&'a TunTx>,
+        our_addr: Ipv6Addr,
+        limiter: &'a mut IcmpRateLimiter,
+    ) -> Self {
+        Self {
+            tun_tx,
+            our_addr,
+            limiter,
+        }
+    }
+
+    /// Send ICMPv6 Destination Unreachable back through TUN.
+    ///
+    /// Not rate limited: only Packet Too Big goes through the limiter.
+    pub(crate) fn dest_unreachable(&self, original_packet: &[u8]) {
+        if !should_send_icmp_error(original_packet) {
+            return;
+        }
+
+        if let Some(response) =
+            build_dest_unreachable(original_packet, DestUnreachableCode::NoRoute, self.our_addr)
+            && let Some(tun_tx) = self.tun_tx
+        {
+            let _ = tun_tx.send(response);
+        }
+    }
+
+    /// Answer packets that were queued for a destination found to have no
+    /// route, with one Destination Unreachable each.
+    pub(crate) fn no_route<P: AsRef<[u8]>>(&self, packets: impl IntoIterator<Item = P>) {
+        for packet in packets {
+            self.dest_unreachable(packet.as_ref());
+        }
+    }
+
+    /// Send ICMPv6 Packet Too Big back through TUN.
+    ///
+    /// Rate-limited per source address to prevent ICMP floods from
+    /// misconfigured applications sending repeated oversized packets.
+    pub(crate) fn packet_too_big(&mut self, original_packet: &[u8], mtu: u32) {
+        // Extract source address for rate limiting
+        if original_packet.len() < 40 {
+            return;
+        }
+        let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
+
+        // Rate limit ICMP PTB messages per source
+        if !self.limiter.should_send(src_addr) {
+            debug!(
+                src = %src_addr,
+                "Rate limiting ICMP Packet Too Big"
+            );
+            return;
+        }
+
+        // Use the original packet's *destination* as the ICMP source so the
+        // kernel sees the PTB coming from a remote router, not from itself.
+        // Linux ignores PTBs whose source matches a local address, which
+        // causes a PMTUD blackhole when both src and ICMP-src are local.
+        let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[24..40]).unwrap());
+        if let Some(response) = build_packet_too_big(original_packet, mtu, dest_addr)
+            && let Some(tun_tx) = self.tun_tx
+        {
+            debug!(
+                original_src = %src_addr,
+                original_dst = %dest_addr,
+                packet_size = original_packet.len(),
+                reported_mtu = mtu,
+                "Sending ICMP Packet Too Big"
+            );
+            let _ = tun_tx.send(response);
+        }
+    }
 }
 
 /// Calculate ICMPv6 checksum per RFC 4443.

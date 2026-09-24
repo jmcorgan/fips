@@ -33,7 +33,7 @@ x-fips-common: &fips-common
     # the daemon, which is precisely the workaround this mechanism retires. The
     # daemon must do its own waiting here or the suite proves nothing.
     - FIPS_TEST_MODE=default
-    - RUST_LOG=info,fips::transport::ethernet=debug,fips::node=debug
+    - RUST_LOG=info,fips::transport::ethernet=debug,fips::node=debug,fips::ipv6tun::icmp=debug
   networks:
     - ifb-net
 

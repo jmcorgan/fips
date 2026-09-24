@@ -332,9 +332,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fips::upper::*` to `fips::ipv6tun::*`, because the module they log from is
   now `ipv6tun` (for example `fips::upper::tun` becomes `fips::ipv6tun::tun`).
   The hosts-file loader and reloader log as `fips::hosts` rather than
-  `fips::upper::hosts`, since the hosts file is now a top-level module. An
-  existing `RUST_LOG` filter naming an old target still parses and simply
-  stops matching, so the symptom is missing log lines rather than an error.
+  `fips::upper::hosts`, since the hosts file is now a top-level module. The
+  ICMPv6 Packet Too Big debug lines ("Sending ICMP Packet Too Big", "Rate
+  limiting ICMP Packet Too Big") log as `fips::ipv6tun::icmp` rather than
+  `fips::node::handlers::session`, so a `fips::node=debug` filter no longer
+  shows them. An existing `RUST_LOG` filter naming an old target still parses
+  and simply stops matching, so the symptom is missing log lines rather than an
+  error.
   Update `RUST_LOG` filters, journal-watch recipes and any log-scraping alert
   accordingly. The library path `fips::upper` still resolves.
 

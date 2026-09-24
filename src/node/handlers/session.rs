@@ -6,6 +6,7 @@
 //! encrypted data, and error signals (CoordsRequired, PathBroken).
 
 use crate::NodeAddr;
+use crate::ipv6tun::icmp::IcmpContext;
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{RejectReason, SessionReject};
@@ -3143,24 +3144,20 @@ impl Node {
         self.queue_pending_packet(dest_addr, ipv6_packet);
     }
 
+    /// Borrow the host-facing ICMPv6 sender: the TUN channel, our address
+    /// and the Packet Too Big rate limiter.
+    pub(in crate::node) fn host_icmp(&mut self) -> IcmpContext<'_> {
+        let our_ipv6 = crate::FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
+        IcmpContext::new(
+            self.supervisor.tun_tx.as_ref(),
+            our_ipv6,
+            &mut self.icmp_rate_limiter,
+        )
+    }
+
     /// Send ICMPv6 Destination Unreachable back through TUN.
-    pub(in crate::node) fn send_icmpv6_dest_unreachable(&self, original_packet: &[u8]) {
-        use crate::FipsAddress;
-        use crate::upper::icmp::{
-            DestUnreachableCode, build_dest_unreachable, should_send_icmp_error,
-        };
-
-        if !should_send_icmp_error(original_packet) {
-            return;
-        }
-
-        let our_ipv6 = FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
-        if let Some(response) =
-            build_dest_unreachable(original_packet, DestUnreachableCode::NoRoute, our_ipv6)
-            && let Some(tun_tx) = &self.supervisor.tun_tx
-        {
-            let _ = tun_tx.send(response);
-        }
+    pub(in crate::node) fn send_icmpv6_dest_unreachable(&mut self, original_packet: &[u8]) {
+        self.host_icmp().dest_unreachable(original_packet);
     }
 
     /// Send ICMPv6 Packet Too Big back through TUN.
@@ -3168,41 +3165,7 @@ impl Node {
     /// Rate-limited per source address to prevent ICMP floods from
     /// misconfigured applications sending repeated oversized packets.
     pub(in crate::node) fn send_icmpv6_packet_too_big(&mut self, original_packet: &[u8], mtu: u32) {
-        use crate::upper::icmp::build_packet_too_big;
-        use std::net::Ipv6Addr;
-
-        // Extract source address for rate limiting
-        if original_packet.len() < 40 {
-            return;
-        }
-        let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
-
-        // Rate limit ICMP PTB messages per source
-        if !self.icmp_rate_limiter.should_send(src_addr) {
-            debug!(
-                src = %src_addr,
-                "Rate limiting ICMP Packet Too Big"
-            );
-            return;
-        }
-
-        // Use the original packet's *destination* as the ICMP source so the
-        // kernel sees the PTB coming from a remote router, not from itself.
-        // Linux ignores PTBs whose source matches a local address, which
-        // causes a PMTUD blackhole when both src and ICMP-src are local.
-        let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[24..40]).unwrap());
-        if let Some(response) = build_packet_too_big(original_packet, mtu, dest_addr)
-            && let Some(tun_tx) = &self.supervisor.tun_tx
-        {
-            debug!(
-                original_src = %src_addr,
-                original_dst = %dest_addr,
-                packet_size = original_packet.len(),
-                reported_mtu = mtu,
-                "Sending ICMP Packet Too Big"
-            );
-            let _ = tun_tx.send(response);
-        }
+        self.host_icmp().packet_too_big(original_packet, mtu);
     }
 
     /// Queue a packet while waiting for session establishment.

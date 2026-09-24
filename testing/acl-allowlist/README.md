@@ -157,7 +157,7 @@ Rejected peer by ACL ... context=inbound_handshake decision=denylist match
 ```
 
 Those messages are now emitted at debug level. This harness enables
-`RUST_LOG=info,fips::node=debug` so the ACL rejection details stay visible in
+`fips::node=debug` in `RUST_LOG` so the ACL rejection details stay visible in
 test logs, and operators can temporarily raise log level the same way when
 diagnosing ACL issues locally.
 
