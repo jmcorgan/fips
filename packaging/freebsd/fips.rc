@@ -8,7 +8,8 @@
 #   fips_enable (bool):  Set YES to run the FIPS daemon. Default NO.
 #   fips_config (path):  Config file. Default /usr/local/etc/fips/fips.yaml.
 #   fips_flags (str):    Extra arguments passed to the fips daemon.
-#   fips_logfile (path): Daemon stdout/stderr log. Default /var/log/fips.log.
+#   fips_logfile (path): Daemon stdout/stderr log. Default /var/log/fips.log;
+#                        rotated by newsyslog only at the default path.
 
 . /etc/rc.subr
 
@@ -24,9 +25,12 @@ load_rc_config $name
 
 runtime_dir="/var/run/fips"
 pidfile="${runtime_dir}/fips.pid"
+# daemon(8) records its own pid here (-P) so newsyslog can signal it after
+# rotating the log: with -H the supervisor reopens its output on SIGHUP.
+supervisor_pidfile="${runtime_dir}/daemon.pid"
 procname="/usr/local/bin/fips"
 command="/usr/sbin/daemon"
-command_args="-p ${pidfile} -t fips -o ${fips_logfile} ${procname} --config ${fips_config} ${fips_flags}"
+command_args="-H -p ${pidfile} -P ${supervisor_pidfile} -t fips -o ${fips_logfile} ${procname} --config ${fips_config} ${fips_flags}"
 start_precmd="fips_precmd"
 
 # The daemon resolves its control socket to /var/run/fips when the

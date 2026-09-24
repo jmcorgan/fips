@@ -95,7 +95,8 @@ priority = "optional"
 # ahead of what the binaries need.
 # systemd stays by hand: nothing links it, so nothing can derive it.
 depends = "$auto, libgcc-s1 (>= 4.2), systemd"
-recommends = "bluez"
+# nftables is recommended, not required: only the opt-in fips-firewall.service runs nft.
+recommends = "bluez, nftables"
 extended-description = """\
 FIPS is a distributed, decentralized network routing protocol for mesh \
 nodes connecting over arbitrary transports including UDP, TCP, Ethernet, \

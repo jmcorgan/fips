@@ -5,6 +5,8 @@
 //! primitives, and other cross-cutting concerns.
 
 pub mod index;
+#[cfg(any(windows, test))]
+pub mod logfile;
 pub mod sockbind;
 #[cfg(unix)]
 pub mod sockperm;

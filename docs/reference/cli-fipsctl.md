@@ -90,7 +90,7 @@ daemon.
 
 | Flag | Argument | Default | Description |
 | ---- | -------- | ------- | ----------- |
-| `-d`, `--dir` | `DIR` | `/usr/local/etc/fips` (macOS, FreeBSD), `/etc/fips` (other Unix), `%APPDATA%\fips` (Windows) | Output directory for `fips.key` and `fips.pub`. Matches the directory the platform's packaging installs config into, which is where the daemon derives the key paths from. |
+| `-d`, `--dir` | `DIR` | `/usr/local/etc/fips` (macOS, FreeBSD), `/etc/fips` (other Unix), `C:\ProgramData\fips` (Windows) | Output directory for `fips.key` and `fips.pub`. Matches the directory the platform's packaging installs config into, which is where the daemon derives the key paths from. |
 | `-f`, `--force` | — | off | Overwrite an existing `fips.key`. |
 | `-s`, `--stdout` | — | off | Print `nsec` then `npub` to stdout instead of writing files. |
 

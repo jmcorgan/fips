@@ -42,10 +42,54 @@ rm -rf /usr/lib/fips/
 systemctl daemon-reload
 echo "systemd units and DNS scripts removed."
 
-# Clean up DNS config files that fips-dns-setup may have created
+# --- Remove DNS routing ---
+# fips-dns-setup may have written one of these, and stopping fips-dns.service
+# above runs fips-dns-teardown only when the unit was active. The paths match
+# packaging/common/fips-dns-teardown.
+
+restart_resolved=false
+if [ -f /etc/systemd/dns-delegate.d/fips.dns-delegate ]; then
+    rm -f /etc/systemd/dns-delegate.d/fips.dns-delegate
+    echo "Removed /etc/systemd/dns-delegate.d/fips.dns-delegate."
+    restart_resolved=true
+fi
+if [ -f /etc/systemd/resolved.conf.d/fips.conf ]; then
+    rm -f /etc/systemd/resolved.conf.d/fips.conf
+    echo "Removed /etc/systemd/resolved.conf.d/fips.conf."
+    restart_resolved=true
+fi
+# Only pre-v0.3.0 development builds wrote this path, and systemd never read it.
 rm -f /etc/systemd/dns-delegate/fips.dns-delegate
-rm -f /etc/dnsmasq.d/fips.conf
-rm -f /etc/NetworkManager/dnsmasq.d/fips.conf
+if $restart_resolved && systemctl is-active --quiet systemd-resolved.service 2>/dev/null; then
+    if systemctl restart systemd-resolved; then
+        echo "systemd-resolved restarted."
+    else
+        echo "Warning: could not restart systemd-resolved; restart it to drop the .fips route." >&2
+    fi
+fi
+if [ -f /etc/dnsmasq.d/fips.conf ]; then
+    rm -f /etc/dnsmasq.d/fips.conf
+    echo "Removed /etc/dnsmasq.d/fips.conf."
+    if systemctl is-active --quiet dnsmasq.service 2>/dev/null; then
+        if systemctl reload dnsmasq; then
+            echo "dnsmasq reloaded."
+        else
+            echo "Warning: could not reload dnsmasq; reload it to drop the .fips route." >&2
+        fi
+    fi
+fi
+if [ -f /etc/NetworkManager/dnsmasq.d/fips.conf ]; then
+    rm -f /etc/NetworkManager/dnsmasq.d/fips.conf
+    echo "Removed /etc/NetworkManager/dnsmasq.d/fips.conf."
+    if systemctl is-active --quiet NetworkManager.service 2>/dev/null \
+        && command -v nmcli >/dev/null 2>&1; then
+        if nmcli general reload; then
+            echo "NetworkManager reloaded."
+        else
+            echo "Warning: could not reload NetworkManager; reload it to drop the .fips route." >&2
+        fi
+    fi
+fi
 
 # --- Remove tmpfiles.d entry ---
 

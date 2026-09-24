@@ -61,6 +61,10 @@ install -m 0644 "${PROJECT_ROOT}/packaging/common/hosts" \
 install -m 0755 "${SCRIPT_DIR}/fips.rc" "${STAGE}/usr/local/etc/rc.d/fips"
 install -m 0755 "${SCRIPT_DIR}/fips-dns.rc" "${STAGE}/usr/local/etc/rc.d/fips_dns"
 
+install -d "${STAGE}/usr/local/etc/newsyslog.conf.d"
+install -m 0644 "${SCRIPT_DIR}/fips.newsyslog" \
+                "${STAGE}/usr/local/etc/newsyslog.conf.d/fips.conf"
+
 install -m 0755 "${SCRIPT_DIR}/fips-dns-setup" \
                 "${SCRIPT_DIR}/fips-dns-teardown" \
                 "${STAGE}/usr/local/libexec/fips/"
@@ -116,6 +120,7 @@ bin/fipsctl
 bin/fipstop
 etc/fips/fips.yaml.sample
 etc/fips/hosts.sample
+etc/newsyslog.conf.d/fips.conf
 etc/rc.d/fips
 etc/rc.d/fips_dns
 libexec/fips/fips-dns-setup

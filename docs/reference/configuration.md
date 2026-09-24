@@ -13,21 +13,24 @@ locations, lowest to highest priority:
 
 | Priority | Path | Purpose |
 |----------|------|---------|
-| 1 (lowest) | `/usr/local/etc/fips/fips.yaml` (macOS, FreeBSD), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
-| 2 | `~/.config/fips/fips.yaml` | User preferences |
+| 1 (lowest) | `/usr/local/etc/fips/fips.yaml` (macOS, FreeBSD), `C:\ProgramData\fips\fips.yaml` (Windows), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
+| 2 | `~/.config/fips/fips.yaml` (`%APPDATA%\fips\fips.yaml` on Windows) | User preferences |
 | 3 | `~/.fips.yaml` | Legacy user config |
 | 4 (highest) | `./fips.yaml` | Deployment-specific overrides |
 
 All found files are loaded and merged in priority order. Values from higher
 priority files override those from lower priority files. This allows a system
 administrator to set site-wide defaults in the priority 1 path above,
-`/usr/local/etc/fips/fips.yaml` on macOS and FreeBSD and
+`/usr/local/etc/fips/fips.yaml` on macOS and FreeBSD,
+`C:\ProgramData\fips\fips.yaml` on Windows and
 `/etc/fips/fips.yaml` on other Unix systems, while individual
 deployments override specific values in `./fips.yaml`.
 
 On macOS and FreeBSD both directories are probed: `/etc/fips` first,
 then `/usr/local/etc/fips`, so the packaged file wins over a leftover
-`/etc/fips` copy from an earlier install.
+`/etc/fips` copy from an earlier install. Windows likewise probes
+`\etc\fips` on the current drive, then `C:\ProgramData\fips`, which is
+the only directory the Windows service reads.
 
 ### CLI Option
 

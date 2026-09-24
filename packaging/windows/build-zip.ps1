@@ -100,8 +100,39 @@ Control Socket:
   fipsctl and fipstop connect to this port automatically.
 
 Configuration:
-  Edit fips.yaml before starting. Place it in the same directory
-  as fips.exe, or in %APPDATA%\fips\, or set FIPS_CONFIG.
+  The service reads C:\ProgramData\fips\fips.yaml, where
+  install-service.ps1 puts it, and keeps fips.key, hosts,
+  peers.allow and peers.deny beside it. Edit fips.yaml there
+  before starting the service.
+
+  install-service.ps1 restricts C:\ProgramData\fips to SYSTEM
+  and Administrators before writing into it. Reading or editing
+  files there, fipsctl keygen, fipsctl address with no argument,
+  and a foreground fips.exe run that relies on
+  C:\ProgramData\fips\fips.yaml all need an elevated prompt.
+  Unelevated, a foreground run may skip that file without
+  saying so, or may fail with an access error.
+
+  A foreground run takes -c <file>, or reads
+  C:\ProgramData\fips\fips.yaml and then, as per-user overrides
+  the service does not read, %APPDATA%\fips\fips.yaml,
+  %USERPROFILE%\.fips.yaml and .\fips.yaml. The key file sits
+  beside the last config loaded.
+
+  fipsctl keygen writes to C:\ProgramData\fips by default and
+  needs an elevated prompt. Run install-service.ps1 before it:
+  a directory that keygen creates first carries
+  C:\ProgramData's access until the installer restricts it.
+
+  A file moved into C:\ProgramData\fips keeps its old
+  permissions. That includes a fips.yaml or fips.key moved from
+  %APPDATA%\fips as the daemon's warning suggests, so run
+  install-service.ps1 again after moving files there.
+
+Logs:
+  The service logs to C:\ProgramData\fips\fips.log, rolled at
+  10 MiB with four old files kept. A foreground run logs to the
+  console.
 "@ | Out-File -FilePath "$StagingDir\README.txt" -Encoding UTF8
 
 # Create ZIP

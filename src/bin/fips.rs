@@ -56,11 +56,14 @@ async fn run_daemon(
         match Config::load_file(config_path) {
             Ok(config) => (config, vec![config_path.clone()]),
             Err(e) => {
-                eprintln!(
+                let msg = format!(
                     "Failed to load configuration from {}: {}",
                     config_path.display(),
                     e
                 );
+                #[cfg(windows)]
+                service::startup_error(&msg);
+                eprintln!("{msg}");
                 std::process::exit(1);
             }
         }
@@ -68,7 +71,10 @@ async fn run_daemon(
         match Config::load() {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("Failed to load configuration: {}", e);
+                let msg = format!("Failed to load configuration: {}", e);
+                #[cfg(windows)]
+                service::startup_error(&msg);
+                eprintln!("{msg}");
                 std::process::exit(1);
             }
         }
@@ -108,12 +114,15 @@ async fn run_daemon(
     // stderr fails too — and the shipped supervisor configs point stdout and
     // stderr at the same place, so one full disk satisfies both. A worker
     // thread killed that way takes its share of the peer space with it.
-    fmt()
+    let builder = fmt()
         .with_env_filter(filter)
         .with_target(true)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .log_internal_errors(false)
-        .init();
+        .log_internal_errors(false);
+    // A Windows service has no stdout to log to; it writes a file instead.
+    #[cfg(windows)]
+    let builder = builder.with_writer(service::log_writer());
+    builder.init();
 
     info!("FIPS {} starting", version::short_version());
 
@@ -129,6 +138,12 @@ async fn run_daemon(
     // /usr/local/etc/fips; flag files stranded at the old location.
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     fips::node::warn_on_legacy_config_paths();
+
+    // Windows moved its config, key and ACL files from %APPDATA%\fips and
+    // /etc/fips to C:\ProgramData\fips; flag a config left behind. The peer
+    // ACL reloader reports ACL files left at the old location.
+    #[cfg(windows)]
+    fips::config::warn_legacy(&loaded_paths);
 
     // Identity provisioning: config nsec > key file > generate ephemeral
     let mut resolved = match resolve_identity(&config, &loaded_paths) {
@@ -279,9 +294,12 @@ fn main() {
 
 #[cfg(windows)]
 mod service {
+    use fips::utils::logfile::{ROLL_BYTES, ROLL_KEEP, RollingFile, SharedLog};
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
     use std::time::Duration;
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use windows_service::{
         define_windows_service,
         service::{
@@ -301,6 +319,48 @@ mod service {
 
     define_windows_service!(ffi_service_main, service_main);
 
+    /// The service's log file. Set at the start of `service_main`, and never
+    /// in a foreground run, which logs to the console.
+    static LOG: OnceLock<SharedLog> = OnceLock::new();
+
+    /// Open the service log in the config directory and send panics to it.
+    ///
+    /// A failure leaves the log unset and the daemon runs on without one:
+    /// with no console and logging not yet up, nothing could report it.
+    fn open_log() {
+        let path = Path::new(fips::config::SYSTEM_CONFIG_DIR).join("fips.log");
+        let Ok(file) = RollingFile::open(&path, ROLL_BYTES, ROLL_KEEP) else {
+            return;
+        };
+        let log = SharedLog::new(file);
+        if LOG.set(log.clone()).is_err() {
+            return;
+        }
+        // The default hook writes to stderr, which a service does not have.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            log.try_line(&info.to_string());
+        }));
+    }
+
+    /// Where the daemon's tracing output goes: the service log when one is
+    /// open, otherwise stdout.
+    pub fn log_writer() -> BoxMakeWriter {
+        match LOG.get() {
+            Some(log) => BoxMakeWriter::new(log.clone()),
+            None => BoxMakeWriter::new(std::io::stdout),
+        }
+    }
+
+    /// Record an error raised before logging is set up in the service log.
+    /// Does nothing in a foreground run, where stderr carries it.
+    pub fn startup_error(msg: &str) {
+        if let Some(log) = LOG.get() {
+            log.line(&format!("ERROR {msg}"));
+        }
+    }
+
     /// Start the service dispatcher, which blocks until the service stops.
     pub fn run_as_service() -> Result<(), windows_service::Error> {
         service_dispatcher::start(SERVICE_NAME, ffi_service_main)
@@ -308,8 +368,13 @@ mod service {
 
     /// Entry point called by the Windows service control manager.
     fn service_main(arguments: Vec<OsString>) {
+        open_log();
         if let Err(e) = run_service(arguments) {
-            eprintln!("Service error: {:?}", e);
+            let msg = format!("Service error: {:?}", e);
+            match LOG.get() {
+                Some(log) => log.line(&msg),
+                None => eprintln!("{msg}"),
+            }
         }
     }
 
@@ -414,10 +479,16 @@ mod service {
         println!("Service '{}' installed successfully.", SERVICE_NAME);
         println!("Start it with: sc start {}", SERVICE_NAME);
         println!();
-        println!("Configuration: place fips.yaml in one of:");
-        println!("  - Current directory");
-        println!("  - %APPDATA%\\fips\\fips.yaml");
-        println!("  - Set FIPS_CONFIG environment variable");
+        let dir = std::path::Path::new(fips::config::SYSTEM_CONFIG_DIR);
+        println!(
+            "Configuration: the service reads {}",
+            dir.join("fips.yaml").display()
+        );
+        println!("  keep fips.key, hosts, peers.allow and peers.deny beside it.");
+        println!(
+            "Logs: the service writes {}",
+            dir.join("fips.log").display()
+        );
         Ok(())
     }
 

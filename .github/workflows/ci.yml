@@ -1221,11 +1221,12 @@ jobs:
           - type: deb-install
             scenario: ubuntu26
             arch: amd64
-          # The arm64 package on the oldest supported distribution: a fresh
-          # install and a daemon start. Deliberately GitHub-only (the local host
-          # is x86_64), and deliberately one leg: the upgrade, purge and
-          # conffile paths run under debian12 on amd64 only and stay
-          # unexercised on arm64.
+          # The arm64 package on the oldest supported distribution: the install
+          # scenario, which covers a fresh install, a daemon start and a purge
+          # of the DNS routing. Deliberately GitHub-only (the local host is
+          # x86_64), and deliberately one leg: the upgrade and conffile paths,
+          # including the upgrade scenario's own purge, run under debian12 on
+          # amd64 only and stay unexercised on arm64.
           - type: deb-install
             scenario: ubuntu22
             arch: arm64

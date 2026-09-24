@@ -1068,6 +1068,19 @@ with v0.5.x or earlier peers.
   built. It picked the most recently modified `fips_*.deb` in the output
   directory that sorted last by name, so a package with a higher version left
   there by an earlier run was returned instead.
+- Purging the `.deb`, or running `uninstall.sh` from the tarball, now removes
+  the `.fips` DNS routing when `fips-dns` was not running at the time. The
+  cleanup removed the dns-delegate file from the wrong directory, never removed
+  the systemd-resolved global drop-in, and restarted no resolver, so the host
+  kept sending `.fips` queries to `[::1]:5354`, where nothing listens any more,
+  and `.fips` lookups timed out. Both scripts now remove all four files
+  `fips-dns-setup` can write, and restart systemd-resolved or reload dnsmasq or
+  NetworkManager when they removed that resolver's file and it is running. A
+  failed restart is reported and does not fail the removal.
+- The `.deb` now recommends `nftables`. `fips-firewall.service` runs
+  `/usr/sbin/nft`, so enabling it on a host without nftables failed at start.
+  It is a recommendation rather than a dependency because the firewall unit is
+  opt-in and the daemon itself does not need `nft`.
 
 - The Linux `.deb` and the systemd tarball now install and run on Debian 12 and
   Ubuntu 22.04. Every Linux artifact from v0.3.0 through v0.5.0 was built on the
@@ -1091,6 +1104,44 @@ with v0.5.x or earlier peers.
 
 - The release `PKGBUILD` now lists `dbus` as a runtime dependency. The `fips`
   binary links `libdbus-1`, and the `fips-git` package already declared it.
+- Both `PKGBUILD` files list `nftables` as an optional dependency, for
+  `fips-firewall.service`.
+
+#### Packaging (FreeBSD)
+
+- The daemon's log, `/var/log/fips.log`, is now rotated. The package ships a
+  newsyslog entry that keeps five compressed generations of 1000 KB, and the rc
+  script starts `daemon(8)` with `-H` so it reopens the log after a rotation.
+  The log used to grow without bound.
+
+#### Windows
+
+- Windows now keeps its config, key, hosts and peer ACL files in
+  `C:\ProgramData\fips`, the directory the service installer writes to. The
+  config search, the key directory and the peer ACL defaults disagreed: the
+  service found none of the installed files after a reboot and ran on
+  defaults, `fipsctl keygen` wrote to the per-user `%APPDATA%\fips`, and a
+  `peers.deny` placed beside the hosts file was never read, so the ACL failed
+  open. A key left in `%APPDATA%\fips` is still used when the new directory
+  has none, with a note to move it. For one release, a `peers.allow` or
+  `peers.deny` left at the old `\etc\fips` location is still read when the
+  new directory has no such file, with a warning naming both paths.
+- The Windows service now writes its log to `C:\ProgramData\fips\fips.log`,
+  rolled at 10 MiB with four old files kept. A service has no standard output,
+  so everything the daemon logged in service mode was lost, including
+  config-load failures and panic messages. A foreground run still logs to the
+  console.
+- The Windows service installer now restricts `C:\ProgramData\fips` to
+  SYSTEM and Administrators. The directory inherited `C:\ProgramData`'s
+  default ACL, which lets any local user read the files in it and create new
+  ones, so any local account could read the node's key, or create a missing
+  `fips.key`, `fips.yaml` or `hosts` that the service then used. The installer
+  creates the directory with the restricted ACL, or replaces the ACL of an
+  existing one, resets the files already in it to inherit it, and refuses to
+  continue if the directory or anything in it is a link or a folder, or if the
+  directory is owned by another account. Rerun the installer after moving files
+  into the directory. A foreground run from an unelevated prompt can no longer
+  read the files there.
 
 ### Security
 

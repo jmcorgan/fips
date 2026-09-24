@@ -159,6 +159,63 @@ jobs:
             # post-install must create the control-socket access group.
             pw groupshow fips >/dev/null || { echo "FAIL: fips group missing"; exit 1; }
             test -x /usr/local/libexec/fips/fips-dns-setup
+
+            # The package's newsyslog entry must rotate the daemon log and
+            # make daemon(8) reopen it. The rc script starts daemon(8) with
+            # -H and records the supervisor's pid in daemon.pid, which the
+            # entry signals; without -H the supervisor keeps writing into
+            # the rotated file.
+            LOG=/var/log/fips.log
+            ENTRY=/usr/local/etc/newsyslog.conf.d/fips.conf
+            test -f "$ENTRY" || { echo "FAIL: missing $ENTRY"; exit 1; }
+            # Dry run of the stock configuration: the entry is reached only
+            # through newsyslog.conf's include of newsyslog.conf.d.
+            if ! newsyslog -nv 2>&1 | grep -q "$LOG"; then
+              echo "FAIL: the stock newsyslog configuration does not cover $LOG"
+              newsyslog -nv 2>&1 || true
+              exit 1
+            fi
+            service fips onestart
+            i=0
+            until [ -s /var/run/fips/daemon.pid ] && [ -s "$LOG" ]; do
+              i=$((i + 1))
+              if [ "$i" -gt 30 ]; then
+                echo "FAIL: no daemon.pid or empty $LOG 30s after start"
+                ls -l /var/run/fips "$LOG" 2>&1 || true
+                cat "$LOG" 2>&1 || true
+                exit 1
+              fi
+              sleep 1
+            done
+            sup_pid=$(cat /var/run/fips/daemon.pid)
+            # Inode numbers a process holds open, from fstat's INUM column.
+            open_inodes() { fstat -p "$1" 2>/dev/null | awk 'NR > 1 && $6 ~ /^[0-9]+$/ { print $6 }'; }
+            before=$(stat -f %i "$LOG")
+            # -F rotates regardless of size; -f reads the shipped entry alone.
+            newsyslog -F -f "$ENTRY"
+            after=$(stat -f %i "$LOG")
+            if [ "$after" = "$before" ]; then
+              echo "FAIL: newsyslog -F did not rotate $LOG"; ls -li "$LOG"*; exit 1
+            fi
+            if ! ls "$LOG".0* >/dev/null 2>&1; then
+              echo "FAIL: no rotated generation of $LOG"; ls -l "$LOG"*; exit 1
+            fi
+            i=0
+            until open_inodes "$sup_pid" | grep -qx "$after"; do
+              i=$((i + 1))
+              if [ "$i" -gt 10 ]; then
+                echo "FAIL: daemon(8) pid $sup_pid did not reopen $LOG after rotation"
+                fstat -p "$sup_pid" || true
+                exit 1
+              fi
+              sleep 1
+            done
+            if open_inodes "$sup_pid" | grep -qx "$before"; then
+              echo "FAIL: daemon(8) pid $sup_pid still holds the rotated $LOG open"; exit 1
+            fi
+            service fips onestop
+            echo "==> log rotation PASSED"
+
             pkg info fips
             echo "==> pkg smoke-install PASSED"
 

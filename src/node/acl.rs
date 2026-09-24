@@ -27,21 +27,26 @@ use tracing::{debug, error, info, warn};
 /// On macOS (`packaging/macos/`) and FreeBSD (`packaging/freebsd/`) the
 /// install layout ships config under `/usr/local/etc/fips/` rather than
 /// `/etc/fips/`; the default follows the platform's packaging so the daemon
-/// reads the file the operator was told to edit. Linux and other Unix keep
-/// the historic `/etc/fips/` location.
-#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+/// reads the file the operator was told to edit. Windows uses
+/// `C:\ProgramData\fips\`, beside the config and hosts file the service
+/// installer sets up. Linux and other Unix keep the historic `/etc/fips/`
+/// location.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", windows)))]
 pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/etc/fips/peers.allow";
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub const DEFAULT_PEERS_ALLOW_PATH: &str = "/usr/local/etc/fips/peers.allow";
+#[cfg(windows)]
+pub const DEFAULT_PEERS_ALLOW_PATH: &str = r"C:\ProgramData\fips\peers.allow";
 
 /// Default path for the peer deny list.
 ///
-/// See [`DEFAULT_PEERS_ALLOW_PATH`] for the `/usr/local/etc/fips/`
-/// rationale.
-#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+/// See [`DEFAULT_PEERS_ALLOW_PATH`] for the per-platform rationale.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", windows)))]
 pub const DEFAULT_PEERS_DENY_PATH: &str = "/etc/fips/peers.deny";
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub const DEFAULT_PEERS_DENY_PATH: &str = "/usr/local/etc/fips/peers.deny";
+#[cfg(windows)]
+pub const DEFAULT_PEERS_DENY_PATH: &str = r"C:\ProgramData\fips\peers.deny";
 
 /// Warn about config files stranded at the pre-move default location.
 ///
@@ -68,6 +73,145 @@ pub fn warn_on_legacy_config_paths() {
             );
         }
     }
+}
+
+/// Which of an ACL file's two locations the reloader reads.
+///
+/// Windows read `peers.allow` and `peers.deny` from `\etc\fips` on the current
+/// drive before they moved to `C:\ProgramData\fips`. Ignoring a deny list
+/// left at the old location would fail open, so for one release a file found
+/// only there is still enforced, with a warning to move it. This fallback, with
+/// [`default_legacy_paths`], is meant to be removed in a later release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AclPathChoice {
+    /// Read the current default; nothing is at the legacy location.
+    Current,
+    /// Read the legacy location: the file is there and not at the current
+    /// default.
+    Legacy,
+    /// Read the current default; a file also left at the legacy location is
+    /// ignored.
+    LegacyIgnored,
+}
+
+/// Choose where to read one ACL file from: its current default path, or the
+/// location an earlier release read it from.
+///
+/// `exists` is passed in so the rule can be tested on any platform. The
+/// current path wins whenever it exists; the legacy one is read only when it
+/// is the sole file present.
+fn select_acl_path(current: &Path, legacy: &Path, exists: impl Fn(&Path) -> bool) -> AclPathChoice {
+    match (exists(current), exists(legacy)) {
+        (true, true) => AclPathChoice::LegacyIgnored,
+        (false, true) => AclPathChoice::Legacy,
+        (_, false) => AclPathChoice::Current,
+    }
+}
+
+/// Whether a path exists, counting one that cannot be checked as present.
+///
+/// A current file that is there but inaccessible then stays selected, and
+/// the loader reports it as unreadable, rather than an older legacy file
+/// being enforced in its place without a word.
+fn path_present(path: &Path) -> bool {
+    path.try_exists().unwrap_or(true)
+}
+
+/// Locations an earlier release read the ACL files from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegacyAclPaths {
+    pub(crate) allow: PathBuf,
+    pub(crate) deny: PathBuf,
+}
+
+/// The legacy ACL locations honoured on this platform.
+///
+/// On Windows that is `/etc/fips`, the exact path the `/etc/fips/peers.*`
+/// defaults named before the move to `C:\ProgramData\fips`. It is kept
+/// drive-relative on purpose: Windows resolves it against the current
+/// drive, as it did then, so a run started from another drive still finds
+/// the file an earlier release read there. Other platforms have
+/// none; see [`AclPathChoice`] for why the fallback exists and that it is
+/// meant to be removed in a later release.
+#[cfg(windows)]
+fn default_legacy_paths() -> Option<LegacyAclPaths> {
+    Some(LegacyAclPaths {
+        allow: PathBuf::from("/etc/fips/peers.allow"),
+        deny: PathBuf::from("/etc/fips/peers.deny"),
+    })
+}
+
+/// The legacy ACL locations honoured on this platform: none.
+#[cfg(not(windows))]
+fn default_legacy_paths() -> Option<LegacyAclPaths> {
+    None
+}
+
+/// One ACL file's current default and legacy location, with the choice the
+/// last selection made between them.
+struct AclFallback {
+    current: PathBuf,
+    legacy: PathBuf,
+    /// `None` until the first selection, so the startup choice is logged.
+    choice: Option<AclPathChoice>,
+}
+
+impl AclFallback {
+    /// Pair a current default path with its legacy location.
+    fn new(current: PathBuf, legacy: PathBuf) -> Self {
+        Self {
+            current,
+            legacy,
+            choice: None,
+        }
+    }
+
+    /// Select the location to read, logging the choice when it changes.
+    fn select(&mut self) -> &Path {
+        let choice = select_acl_path(&self.current, &self.legacy, path_present);
+        if self.choice != Some(choice) {
+            match choice {
+                AclPathChoice::Legacy => warn!(
+                    legacy = %self.legacy.display(),
+                    current = %self.current.display(),
+                    "Peer ACL file found only at its legacy path; enforcing it from there \
+                     for now — move it to the current path, the legacy path will stop \
+                     being read in a later release"
+                ),
+                AclPathChoice::LegacyIgnored => warn!(
+                    legacy = %self.legacy.display(),
+                    current = %self.current.display(),
+                    "Peer ACL file found at both its legacy and current paths; the legacy \
+                     file is ignored — remove it"
+                ),
+                AclPathChoice::Current if self.choice.is_some() => info!(
+                    legacy = %self.legacy.display(),
+                    current = %self.current.display(),
+                    "Peer ACL file no longer at its legacy path; reading the current path"
+                ),
+                AclPathChoice::Current => {}
+            }
+            self.choice = Some(choice);
+        }
+        match choice {
+            AclPathChoice::Legacy => &self.legacy,
+            AclPathChoice::Current | AclPathChoice::LegacyIgnored => &self.current,
+        }
+    }
+}
+
+/// Point `path` at the location `fallback` selects, if there is a fallback,
+/// and report whether it moved.
+fn reselect(fallback: &mut Option<AclFallback>, path: &mut PathBuf) -> bool {
+    let Some(fallback) = fallback else {
+        return false;
+    };
+    let selected = fallback.select();
+    if selected == path.as_path() {
+        return false;
+    }
+    *path = selected.to_path_buf();
+    true
 }
 
 /// Result of evaluating a peer against the ACL.
@@ -390,8 +534,14 @@ pub struct PeerAclReloader {
     /// Reader-facing effective ACL snapshot.
     acl: arc_swap::ArcSwap<PeerAcl>,
     hosts: HostMapReloader,
+    /// The allow and deny files read on the last load: the current defaults,
+    /// or a legacy location a fallback below selected instead.
     allow_path: PathBuf,
     deny_path: PathBuf,
+    /// Legacy locations re-checked on every reload, so the choice follows
+    /// the files as the operator moves them. `None` off Windows.
+    allow_fallback: Option<AclFallback>,
+    deny_fallback: Option<AclFallback>,
     last_allow_mtime: Option<SystemTime>,
     last_deny_mtime: Option<SystemTime>,
     /// Set while a reload input is unreadable. Forces the next reload
@@ -407,12 +557,7 @@ impl PeerAclReloader {
     /// Create a reloader using the standard ACL file locations.
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self::with_alias_sources(
-            PathBuf::from(DEFAULT_PEERS_ALLOW_PATH),
-            PathBuf::from(DEFAULT_PEERS_DENY_PATH),
-            HostMap::new(),
-            PathBuf::from(DEFAULT_HOSTS_PATH),
-        )
+        Self::with_default_paths(HostMap::new(), PathBuf::from(DEFAULT_HOSTS_PATH))
     }
 
     /// Create a reloader for explicit ACL file paths.
@@ -426,13 +571,49 @@ impl PeerAclReloader {
         )
     }
 
+    /// Create the node's reloader: the platform's default ACL paths, plus
+    /// the legacy locations still honoured there (Windows only).
+    pub(crate) fn with_default_paths(base_hosts: HostMap, hosts_path: PathBuf) -> Self {
+        Self::with_legacy_sources(
+            PathBuf::from(DEFAULT_PEERS_ALLOW_PATH),
+            PathBuf::from(DEFAULT_PEERS_DENY_PATH),
+            default_legacy_paths(),
+            base_hosts,
+            hosts_path,
+        )
+    }
+
     /// Create a reloader with explicit ACL paths and alias sources.
+    #[cfg(test)]
     pub(crate) fn with_alias_sources(
         allow_path: PathBuf,
         deny_path: PathBuf,
         base_hosts: HostMap,
         hosts_path: PathBuf,
     ) -> Self {
+        Self::with_legacy_sources(allow_path, deny_path, None, base_hosts, hosts_path)
+    }
+
+    /// Create a reloader with explicit ACL paths and alias sources that
+    /// reads each ACL file from its `legacy` location while the file is
+    /// absent from its current one.
+    pub(crate) fn with_legacy_sources(
+        mut allow_path: PathBuf,
+        mut deny_path: PathBuf,
+        legacy: Option<LegacyAclPaths>,
+        base_hosts: HostMap,
+        hosts_path: PathBuf,
+    ) -> Self {
+        let (mut allow_fallback, mut deny_fallback) = match legacy {
+            Some(legacy) => (
+                Some(AclFallback::new(allow_path.clone(), legacy.allow)),
+                Some(AclFallback::new(deny_path.clone(), legacy.deny)),
+            ),
+            None => (None, None),
+        };
+        reselect(&mut allow_fallback, &mut allow_path);
+        reselect(&mut deny_fallback, &mut deny_path);
+
         let last_allow_mtime = file_mtime(&allow_path);
         let last_deny_mtime = file_mtime(&deny_path);
         let hosts = HostMapReloader::new(base_hosts, hosts_path);
@@ -459,6 +640,8 @@ impl PeerAclReloader {
             hosts,
             allow_path,
             deny_path,
+            allow_fallback,
+            deny_fallback,
             last_allow_mtime,
             last_deny_mtime,
             retry_pending,
@@ -512,6 +695,10 @@ impl Reloadable for PeerAclReloader {
     type Snapshot = PeerAcl;
 
     async fn reload(&mut self) -> bool {
+        // A switch between a legacy and a current location forces the load:
+        // a copied file can carry the same mtime as the one it replaces.
+        let allow_moved = reselect(&mut self.allow_fallback, &mut self.allow_path);
+        let deny_moved = reselect(&mut self.deny_fallback, &mut self.deny_path);
         let allow_mtime = file_mtime(&self.allow_path);
         let deny_mtime = file_mtime(&self.deny_path);
         let hosts_changed = match self.hosts.try_check_reload() {
@@ -527,6 +714,8 @@ impl Reloadable for PeerAclReloader {
             && deny_mtime == self.last_deny_mtime
             && !hosts_changed
             && !self.retry_pending
+            && !allow_moved
+            && !deny_moved
         {
             return false;
         }
@@ -705,6 +894,277 @@ mod tests {
     fn test_default_acl_paths_keep_etc_fips_layout() {
         assert_eq!(DEFAULT_PEERS_ALLOW_PATH, "/etc/fips/peers.allow");
         assert_eq!(DEFAULT_PEERS_DENY_PATH, "/etc/fips/peers.deny");
+    }
+
+    // Windows keeps config, hosts and the ACL files in C:\ProgramData\fips,
+    // where the service installer puts them.
+    #[cfg(windows)]
+    #[test]
+    fn test_default_acl_paths_follow_windows_layout() {
+        assert_eq!(DEFAULT_PEERS_ALLOW_PATH, r"C:\ProgramData\fips\peers.allow");
+        assert_eq!(DEFAULT_PEERS_DENY_PATH, r"C:\ProgramData\fips\peers.deny");
+    }
+
+    // The hosts file, both ACL files and the config all belong in one
+    // directory on every platform. A default that sits anywhere else is read
+    // from a directory the operator was never told about, and a missing deny
+    // list fails open.
+    #[test]
+    fn default_hosts_and_acl_paths_sit_in_the_system_config_dir() {
+        let system = Some(Path::new(crate::config::SYSTEM_CONFIG_DIR));
+        for path in [
+            DEFAULT_HOSTS_PATH,
+            DEFAULT_PEERS_ALLOW_PATH,
+            DEFAULT_PEERS_DENY_PATH,
+        ] {
+            assert_eq!(
+                Path::new(path).parent(),
+                system,
+                "{path} is outside the system config directory"
+            );
+        }
+    }
+
+    // Before the move to C:\ProgramData\fips, Windows resolved the
+    // `/etc/fips/peers.*` defaults against the root of the current drive, so
+    // that is where an existing deny list sits after an upgrade. The legacy
+    // path stays drive-relative so a run from another drive finds it too.
+    #[cfg(windows)]
+    #[test]
+    fn windows_honours_acl_files_at_the_old_drive_relative_location() {
+        assert_eq!(
+            default_legacy_paths(),
+            Some(LegacyAclPaths {
+                allow: PathBuf::from("/etc/fips/peers.allow"),
+                deny: PathBuf::from("/etc/fips/peers.deny"),
+            })
+        );
+    }
+
+    // Only Windows moved its ACL files in a way that is still honoured; the
+    // other platforms read exactly the one default path they always did.
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_platforms_have_no_legacy_acl_location() {
+        assert_eq!(default_legacy_paths(), None);
+    }
+
+    /// Existence check over a fixed set of paths, for the selection tests.
+    fn exists_among<'a>(present: &'a [&'a Path]) -> impl Fn(&Path) -> bool + 'a {
+        move |p| present.contains(&p)
+    }
+
+    #[test]
+    fn acl_path_selection_reads_the_legacy_file_when_only_it_exists() {
+        let current = Path::new(r"C:\ProgramData\fips\peers.deny");
+        let legacy = Path::new("/etc/fips/peers.deny");
+        assert_eq!(
+            select_acl_path(current, legacy, exists_among(&[legacy])),
+            AclPathChoice::Legacy
+        );
+    }
+
+    #[test]
+    fn acl_path_selection_prefers_the_current_file_and_flags_the_legacy_one_when_both_exist() {
+        let current = Path::new(r"C:\ProgramData\fips\peers.deny");
+        let legacy = Path::new("/etc/fips/peers.deny");
+        assert_eq!(
+            select_acl_path(current, legacy, exists_among(&[current, legacy])),
+            AclPathChoice::LegacyIgnored
+        );
+    }
+
+    #[test]
+    fn acl_path_selection_reads_the_current_path_when_nothing_is_at_the_legacy_one() {
+        let current = Path::new(r"C:\ProgramData\fips\peers.deny");
+        let legacy = Path::new("/etc/fips/peers.deny");
+        assert_eq!(
+            select_acl_path(current, legacy, exists_among(&[current])),
+            AclPathChoice::Current
+        );
+        // Absent from both: the current path is read, and its absence is the
+        // ordinary "no deny list" it has always been.
+        assert_eq!(
+            select_acl_path(current, legacy, exists_among(&[])),
+            AclPathChoice::Current
+        );
+    }
+
+    /// Current and legacy ACL paths under a temporary root, as
+    /// `(allow, deny, legacy)`, with both directories created.
+    fn legacy_layout(root: &Path) -> (PathBuf, PathBuf, LegacyAclPaths) {
+        let new = root.join("new");
+        let old = root.join("old");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        let legacy = LegacyAclPaths {
+            allow: old.join("peers.allow"),
+            deny: old.join("peers.deny"),
+        };
+        (new.join("peers.allow"), new.join("peers.deny"), legacy)
+    }
+
+    fn legacy_reloader(
+        root: &Path,
+        allow: &Path,
+        deny: &Path,
+        legacy: &LegacyAclPaths,
+    ) -> PeerAclReloader {
+        PeerAclReloader::with_legacy_sources(
+            allow.to_path_buf(),
+            deny.to_path_buf(),
+            Some(legacy.clone()),
+            HostMap::new(),
+            root.join("hosts"),
+        )
+    }
+
+    #[test]
+    fn a_deny_list_left_only_at_the_legacy_location_is_still_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (allow, deny, legacy) = legacy_layout(dir.path());
+        let denied = test_npub();
+        let allowed = test_npub();
+        // The two files are chosen independently: the allow list is at its
+        // current path, the deny list only at the legacy one.
+        write_file(&allow, &format!("{allowed}\n"));
+        write_file(&legacy.deny, &format!("{denied}\n"));
+
+        let reloader = legacy_reloader(dir.path(), &allow, &deny, &legacy);
+
+        assert_eq!(
+            reloader.acl().check(&test_peer(&denied)),
+            PeerAclDecision::DenyList
+        );
+        assert_eq!(
+            reloader.acl().check(&test_peer(&allowed)),
+            PeerAclDecision::AllowList
+        );
+        let status = reloader.status();
+        assert_eq!(status.deny_file, legacy.deny.display().to_string());
+        assert_eq!(status.allow_file, allow.display().to_string());
+    }
+
+    #[test]
+    fn a_current_acl_file_wins_over_one_left_at_the_legacy_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let (allow, deny, legacy) = legacy_layout(dir.path());
+        let old_denied = test_npub();
+        let new_denied = test_npub();
+        write_file(&legacy.deny, &format!("{old_denied}\n"));
+        write_file(&deny, &format!("{new_denied}\n"));
+
+        let reloader = legacy_reloader(dir.path(), &allow, &deny, &legacy);
+
+        assert_eq!(
+            reloader.acl().check(&test_peer(&new_denied)),
+            PeerAclDecision::DenyList
+        );
+        assert_eq!(
+            reloader.acl().check(&test_peer(&old_denied)),
+            PeerAclDecision::DefaultAllow
+        );
+        assert_eq!(reloader.status().deny_file, deny.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn acl_reload_re_evaluates_the_legacy_fallback_as_files_come_and_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let (allow, deny, legacy) = legacy_layout(dir.path());
+        let old_denied = test_npub();
+        let new_denied = test_npub();
+        write_file(&legacy.deny, &format!("{old_denied}\n"));
+
+        let mut reloader = legacy_reloader(dir.path(), &allow, &deny, &legacy);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&old_denied)),
+            PeerAclDecision::DenyList
+        );
+        assert!(!reloader.reload().await, "nothing changed on disk");
+
+        // The operator puts a deny list at the current path: it takes over.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_file(&deny, &format!("{new_denied}\n"));
+        assert!(reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&new_denied)),
+            PeerAclDecision::DenyList
+        );
+        assert_eq!(
+            reloader.acl().check(&test_peer(&old_denied)),
+            PeerAclDecision::DefaultAllow
+        );
+        assert_eq!(reloader.status().deny_file, deny.display().to_string());
+
+        // The current file goes away again: the legacy one is back in force.
+        std::fs::remove_file(&deny).unwrap();
+        assert!(reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&old_denied)),
+            PeerAclDecision::DenyList
+        );
+        assert_eq!(
+            reloader.status().deny_file,
+            legacy.deny.display().to_string()
+        );
+    }
+
+    // A copy keeps its source's modification time on Windows, so a switch
+    // between the two locations can leave the tracked mtime unchanged. The
+    // switch itself must force the reload.
+    #[tokio::test]
+    async fn acl_reload_follows_a_switch_of_location_even_when_the_mtimes_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let (allow, deny, legacy) = legacy_layout(dir.path());
+        let old_denied = test_npub();
+        let new_denied = test_npub();
+        write_file(&legacy.deny, &format!("{old_denied}\n"));
+
+        let mut reloader = legacy_reloader(dir.path(), &allow, &deny, &legacy);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&old_denied)),
+            PeerAclDecision::DenyList
+        );
+
+        write_file(&deny, &format!("{new_denied}\n"));
+        let old_mtime = std::fs::metadata(&legacy.deny).unwrap().modified().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&deny)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
+        assert_eq!(file_mtime(&deny), file_mtime(&legacy.deny));
+
+        assert!(reloader.reload().await);
+        assert_eq!(
+            reloader.acl().check(&test_peer(&new_denied)),
+            PeerAclDecision::DenyList
+        );
+    }
+
+    // A current file whose existence cannot be checked must not hand the
+    // decision to an older legacy file: it stays selected, and the loader
+    // reports it as unreadable. Root bypasses the directory's mode bits, so
+    // the test skips there rather than passing vacuously.
+    #[cfg(unix)]
+    #[test]
+    fn an_acl_path_that_cannot_be_checked_counts_as_present() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sealed = dir.path().join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        let file = sealed.join("peers.deny");
+        write_file(&file, "");
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let checkable = file.try_exists().is_ok();
+        let present = path_present(&file);
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if checkable {
+            eprintln!("skipping: the effective uid can search a mode-000 directory");
+            return;
+        }
+        assert!(present);
     }
 
     #[test]

@@ -52,13 +52,16 @@ pub use transport::{
 const CONFIG_FILENAME: &str = "fips.yaml";
 
 /// System-wide config directory, following the platform's packaging layout
-/// (`/usr/local/etc/fips` on macOS and FreeBSD, `/etc/fips` otherwise). The
-/// daemon derives identity key paths from the config file's location, so
-/// anything that reads or writes config-adjacent files should use this one
-/// constant.
+/// (`/usr/local/etc/fips` on macOS and FreeBSD, `C:\ProgramData\fips` on
+/// Windows, where the service installer puts the config and the hosts file
+/// already lived, `/etc/fips` otherwise). The daemon derives identity key
+/// paths from the config file's location, so anything that reads or writes
+/// config-adjacent files should use this one constant.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub const SYSTEM_CONFIG_DIR: &str = "/usr/local/etc/fips";
-#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+#[cfg(windows)]
+pub const SYSTEM_CONFIG_DIR: &str = r"C:\ProgramData\fips";
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", windows)))]
 pub const SYSTEM_CONFIG_DIR: &str = "/etc/fips";
 
 /// Default key filename, placed alongside the config file.
@@ -100,8 +103,74 @@ pub fn key_file_path(config_path: &Path) -> PathBuf {
 ///
 /// Equal to [`SYSTEM_CONFIG_DIR`] everywhere except where packaging installs
 /// outside `/etc`, which makes [`legacy_key_fallback`] inert on those
-/// platforms without needing a `cfg` of its own.
+/// platforms without needing a `cfg` of its own. On Windows the previous
+/// default was the per-user `%APPDATA%\fips` instead; [`legacy_dir`] gives
+/// the directory that applies on the running platform.
 const LEGACY_SYSTEM_CONFIG_DIR: &str = "/etc/fips";
+
+/// The previous default config directory, with the per-user config directory
+/// passed in rather than looked up, so the Windows rule can be tested on any
+/// platform.
+///
+/// `user` is the per-user config directory (`%APPDATA%` on Windows). Without
+/// one there is nothing per-user to fall back to, and the historic system
+/// directory stands in.
+#[cfg(any(windows, test))]
+fn legacy_from(user: Option<&Path>) -> PathBuf {
+    match user {
+        Some(dir) => dir.join("fips"),
+        None => PathBuf::from(LEGACY_SYSTEM_CONFIG_DIR),
+    }
+}
+
+/// The directory an identity key lived in before the current default.
+///
+/// On Windows that is the per-user `%APPDATA%\fips`, which `fipsctl keygen`
+/// wrote to before the move to [`SYSTEM_CONFIG_DIR`]. Everywhere else it is
+/// the historic `/etc/fips`.
+pub fn legacy_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        legacy_from(dirs::config_dir().as_deref())
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(LEGACY_SYSTEM_CONFIG_DIR)
+    }
+}
+
+/// The per-user config that loaded in place of the system one, if any.
+///
+/// Returns `legacy/fips.yaml` when it is among `loaded` and
+/// `system/fips.yaml` is not: the node is running on a config the Windows
+/// service never reads. When both loaded, the per-user file is an ordinary
+/// override merged over the system one, and nothing is reported.
+#[cfg(any(windows, test))]
+fn stranded_config(loaded: &[PathBuf], system: &Path, legacy: &Path) -> Option<PathBuf> {
+    let old = legacy.join(CONFIG_FILENAME);
+    let new = system.join(CONFIG_FILENAME);
+    (loaded.contains(&old) && !loaded.contains(&new)).then_some(old)
+}
+
+/// Warn about a config loaded from the location Windows used before
+/// [`SYSTEM_CONFIG_DIR`] became `C:\ProgramData\fips`.
+///
+/// `loaded` is the list of config files the daemon loaded, in order. ACL
+/// files left at their old location are reported, and still enforced for
+/// now, by the peer ACL reloader.
+#[cfg(windows)]
+pub fn warn_legacy(loaded: &[PathBuf]) {
+    let system = Path::new(SYSTEM_CONFIG_DIR);
+    if let Some(stranded) = stranded_config(loaded, system, &legacy_dir()) {
+        tracing::warn!(
+            legacy = %stranded.display(),
+            current = %system.join(CONFIG_FILENAME).display(),
+            "Config loaded from %APPDATA%\\fips but not from C:\\ProgramData\\fips; \
+             the service reads only C:\\ProgramData\\fips — move fips.yaml and fips.key \
+             there to run this node as the service"
+        );
+    }
+}
 
 /// Find an identity key stranded at the legacy system config directory.
 ///
@@ -124,7 +193,7 @@ const LEGACY_SYSTEM_CONFIG_DIR: &str = "/etc/fips";
 ///
 /// Returns an error when either location cannot be examined, which the caller
 /// aborts on: a lookup that failed is not evidence that no key is there.
-fn legacy_key_fallback(
+pub fn legacy_key_fallback(
     key_path: &Path,
     system_dir: &Path,
     legacy_dir: &Path,
@@ -473,9 +542,11 @@ fn warn_unmanaged_key_file(path: &Path) {
 /// only) before any key material is written, so an existing file at a looser
 /// mode is corrected rather than inherited.
 ///
-/// Coverage gap: on Windows the file inherits default ACLs from the parent
+/// Coverage gap: on Windows the file takes the ACL inherited from its
 /// directory, and neither the mode enforcement nor the symlink protection
-/// applies. The exclusion is deliberate.
+/// applies. `install-service.ps1` restricts `C:\ProgramData\fips` to SYSTEM
+/// and Administrators, but a key written anywhere else gets whatever that
+/// directory grants.
 pub fn write_key_file(path: &Path, nsec: &str) -> Result<(), ConfigError> {
     use std::io::Write;
 
@@ -598,11 +669,9 @@ pub fn resolve_identity(
         // check whether one is stranded at the legacy system config directory:
         // generating here would silently change the node's npub, routing
         // address and mesh IPv6.
-        if let Some(legacy) = legacy_key_fallback(
-            &key_path,
-            Path::new(SYSTEM_CONFIG_DIR),
-            Path::new(LEGACY_SYSTEM_CONFIG_DIR),
-        )? {
+        if let Some(legacy) =
+            legacy_key_fallback(&key_path, Path::new(SYSTEM_CONFIG_DIR), &legacy_dir())?
+        {
             // Guarded for the same reason as the current-path read above.
             let nsec = Zeroizing::new(read_key_file(&legacy)?);
             let identity = Identity::from_secret_str(&nsec)?;
@@ -968,12 +1037,13 @@ impl Config {
         // keep working after an upgrade.
         paths.push(PathBuf::from("/etc/fips").join(CONFIG_FILENAME));
 
-        // macOS and FreeBSD packaging install config under /usr/local/etc/fips;
-        // probe it after /etc/fips so the packaged file wins over a stale
-        // /etc/fips leftover. Read from SYSTEM_CONFIG_DIR rather than a second
-        // literal, so this path and the directory `fipsctl keygen` writes into
-        // cannot drift apart.
-        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        // macOS and FreeBSD packaging install config under /usr/local/etc/fips,
+        // and the Windows service installer under C:\ProgramData\fips; probe
+        // it after /etc/fips so the packaged file wins over a stale /etc/fips
+        // leftover. Read from SYSTEM_CONFIG_DIR rather than a second literal,
+        // so this path and the directory `fipsctl keygen` writes into cannot
+        // drift apart.
+        #[cfg(any(target_os = "macos", target_os = "freebsd", windows))]
         paths.push(PathBuf::from(SYSTEM_CONFIG_DIR).join(CONFIG_FILENAME));
 
         // User config directory
@@ -1857,6 +1927,77 @@ node:
             Some(legacy_key),
             "a legacy key the daemon cannot stat must be reported present, so the read aborts"
         );
+    }
+
+    // --- the Windows move from %APPDATA%\fips to C:\ProgramData\fips ---
+    //
+    // The helpers take every directory as an argument, so the Windows rules
+    // run here on any platform against synthetic or temporary paths.
+
+    #[test]
+    fn stranded_config_names_a_config_loaded_only_from_the_old_windows_dir() {
+        let system = Path::new("/sys-cfg/fips");
+        let legacy = Path::new("/user-cfg/fips");
+        let old = legacy.join(CONFIG_FILENAME);
+        let new = system.join(CONFIG_FILENAME);
+
+        assert_eq!(
+            stranded_config(std::slice::from_ref(&old), system, legacy),
+            Some(old.clone()),
+            "a config loaded only from the old directory must be reported"
+        );
+        assert_eq!(
+            stranded_config(&[new, old], system, legacy),
+            None,
+            "a per-user config merged over the system one is an override, not stranded"
+        );
+        assert_eq!(stranded_config(&[], system, legacy), None);
+        assert_eq!(
+            stranded_config(&[PathBuf::from("./fips.yaml")], system, legacy),
+            None
+        );
+    }
+
+    #[test]
+    fn windows_key_fallback_finds_a_key_in_the_old_appdata_dir() {
+        let root = TempDir::new().unwrap();
+        let appdata = root.path().join("appdata");
+        let system = root.path().join("system");
+        fs::create_dir_all(appdata.join("fips")).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        let identity = crate::Identity::generate();
+        let nsec = crate::encode_nsec(&identity.keypair().secret_key());
+        let legacy_key = appdata.join("fips").join(KEY_FILENAME);
+        fs::write(&legacy_key, format!("{nsec}\n")).unwrap();
+
+        assert_eq!(
+            legacy_key_fallback(
+                &system.join(KEY_FILENAME),
+                &system,
+                &legacy_from(Some(&appdata))
+            )
+            .unwrap(),
+            Some(legacy_key),
+            "a key left in the per-user directory must be found, not regenerated"
+        );
+        assert_eq!(legacy_from(None), PathBuf::from("/etc/fips"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn search_paths_probe_programdata_before_the_user_config_dir() {
+        let paths = Config::search_paths();
+        let system = PathBuf::from(r"C:\ProgramData\fips").join(CONFIG_FILENAME);
+        let at = |want: &Path| paths.iter().position(|p| p == want);
+        let system_at = at(&system).expect("C:\\ProgramData\\fips\\fips.yaml is probed");
+        if let Some(user) = dirs::config_dir() {
+            let user_at = at(&user.join("fips").join(CONFIG_FILENAME))
+                .expect("the per-user config is probed");
+            assert!(
+                system_at < user_at,
+                "the per-user config overrides the system one"
+            );
+        }
     }
 
     #[test]

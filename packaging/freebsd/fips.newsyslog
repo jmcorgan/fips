@@ -1,0 +1,13 @@
+# newsyslog(8) rotation for the FIPS daemon log. Installed as
+# /usr/local/etc/newsyslog.conf.d/fips.conf, which the stock
+# /etc/newsyslog.conf includes.
+#
+# 5 generations, rotate at 1000 KB, bzip2-compressed (J), created if
+# missing (C), mode 600 as daemon(8) itself creates the log. The pid file
+# is the daemon(8) supervisor's (-P in the rc script), not the fips
+# process's: newsyslog sends it SIGHUP after the rename, and the rc script
+# starts daemon(8) with -H, which reopens the log on that signal. Without
+# -H the daemon keeps writing into the rotated file. Covers the default
+# fips_logfile only.
+# logfilename          [owner:group]  mode count size when  flags [/pid_file]            [sig_num]
+/var/log/fips.log                     600  5     1000 *     JC   /var/run/fips/daemon.pid

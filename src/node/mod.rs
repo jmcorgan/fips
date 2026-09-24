@@ -870,12 +870,7 @@ impl Node {
         let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
         let host_map =
             reloadable::HostMapReloadable::new(base_host_map.clone(), hosts_path.clone());
-        let peer_acl = acl::PeerAclReloader::with_alias_sources(
-            std::path::PathBuf::from(acl::DEFAULT_PEERS_ALLOW_PATH),
-            std::path::PathBuf::from(acl::DEFAULT_PEERS_DENY_PATH),
-            base_host_map,
-            hosts_path,
-        );
+        let peer_acl = acl::PeerAclReloader::with_default_paths(base_host_map, hosts_path);
 
         #[cfg(unix)]
         let (decrypt_fallback_tx, decrypt_fallback_rx) =
@@ -1051,12 +1046,7 @@ impl Node {
         let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
         let host_map =
             reloadable::HostMapReloadable::new(base_host_map.clone(), hosts_path.clone());
-        let peer_acl = acl::PeerAclReloader::with_alias_sources(
-            std::path::PathBuf::from(acl::DEFAULT_PEERS_ALLOW_PATH),
-            std::path::PathBuf::from(acl::DEFAULT_PEERS_DENY_PATH),
-            base_host_map,
-            hosts_path,
-        );
+        let peer_acl = acl::PeerAclReloader::with_default_paths(base_host_map, hosts_path);
 
         #[cfg(unix)]
         let (decrypt_fallback_tx, decrypt_fallback_rx) =

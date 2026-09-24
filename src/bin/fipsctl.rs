@@ -353,16 +353,7 @@ fn print_response(value: &serde_json::Value) {
 /// Must match the platform's config dir, since the daemon derives key
 /// paths from the config file's location.
 fn default_key_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        PathBuf::from(fips::config::SYSTEM_CONFIG_DIR)
-    }
-    #[cfg(windows)]
-    {
-        dirs::config_dir()
-            .map(|d| d.join("fips"))
-            .unwrap_or_else(|| PathBuf::from("C:\\ProgramData\\fips"))
-    }
+    PathBuf::from(fips::config::SYSTEM_CONFIG_DIR)
 }
 
 /// Check if `address` is an IPv6 literal in `fd00::/8` (FIPS mesh ULA range).
@@ -442,7 +433,39 @@ fn mesh_address(identity: Option<&str>, key: Option<&Path>) -> Result<Ipv6Addr, 
     match (identity, key) {
         (Some(peer), _) => address_from_npub(&resolve_peer(peer)),
         (None, Some(path)) => address_from_file(path),
+        #[cfg(windows)]
+        (None, None) => own_address(&default_key_dir()),
+        #[cfg(not(windows))]
         (None, None) => address_from_key_dir(&default_key_dir()),
+    }
+}
+
+/// Derive this node's own mesh address on Windows, where the default key
+/// directory moved from the per-user `%APPDATA%\fips`.
+///
+/// A `fips.key` or `fips.pub` in `dir` always answers first. Only when
+/// neither does is a key left at the previous default used, with a note
+/// saying so, which is the same rule the daemon applies at startup. A lookup
+/// there that could not be made is reported rather than read as an absence.
+#[cfg(windows)]
+fn own_address(dir: &Path) -> Result<Ipv6Addr, String> {
+    let own = match address_from_key_dir(dir) {
+        Ok(addr) => return Ok(addr),
+        Err(e) => e,
+    };
+    match fips::config::legacy_key_fallback(&dir.join("fips.key"), dir, &fips::config::legacy_dir())
+    {
+        Ok(Some(key)) => {
+            eprintln!(
+                "note: no key in {}; using {}, the previous default — move it to {}",
+                dir.display(),
+                key.display(),
+                dir.display()
+            );
+            address_from_file(&key)
+        }
+        Ok(None) => Err(own),
+        Err(e) => Err(format!("{own}\n{e}")),
     }
 }
 
@@ -523,6 +546,23 @@ fn main() {
                 "      is now {}; that key is no longer used by default.",
                 dir.display()
             );
+        }
+
+        // The Windows default key directory moved from %APPDATA%\fips to
+        // C:\ProgramData\fips; point at a key left at the old one.
+        #[cfg(windows)]
+        {
+            let legacy = fips::config::legacy_dir().join("fips.key");
+            if legacy.exists() && !key_path.exists() {
+                eprintln!(
+                    "note: {} exists but the default key directory",
+                    legacy.display()
+                );
+                eprintln!(
+                    "      is now {}; that key is no longer used by default.",
+                    dir.display()
+                );
+            }
         }
 
         // symlink_metadata rather than exists: a dangling symlink at the key
@@ -1650,6 +1690,13 @@ mod tests {
     #[test]
     fn test_default_key_dir_keeps_etc_fips_layout() {
         assert_eq!(default_key_dir(), PathBuf::from("/etc/fips"));
+    }
+
+    // Windows keeps keys beside the service's config in C:\ProgramData\fips.
+    #[cfg(windows)]
+    #[test]
+    fn test_default_key_dir_follows_windows_layout() {
+        assert_eq!(default_key_dir(), PathBuf::from(r"C:\ProgramData\fips"));
     }
 
     /// Build a key file for `identity` in `dir` and return its path.

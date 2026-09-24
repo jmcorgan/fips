@@ -66,25 +66,30 @@ highest-priority value wins.
 
 | Priority | Path | Purpose |
 | -------- | ---- | ------- |
-| 1 | `/usr/local/etc/fips/fips.yaml` (macOS, FreeBSD), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
-| 2 | `~/.config/fips/fips.yaml` | User preferences |
+| 1 | `/usr/local/etc/fips/fips.yaml` (macOS, FreeBSD), `C:\ProgramData\fips\fips.yaml` (Windows), `/etc/fips/fips.yaml` (other Unix) | System-wide defaults |
+| 2 | `~/.config/fips/fips.yaml` (`%APPDATA%\fips\fips.yaml` on Windows) | User preferences |
 | 3 | `~/.fips.yaml` | Legacy user config |
 | 4 | `./fips.yaml` | Deployment-specific overrides |
 
 On macOS and FreeBSD both system directories are probed: `/etc/fips`
 first, then `/usr/local/etc/fips`, so the packaged file wins over a
-leftover `/etc/fips` copy from an earlier install.
+leftover `/etc/fips` copy from an earlier install. Windows likewise
+probes `\etc\fips` on the current drive, then `C:\ProgramData\fips`.
 
 Adjacent to the highest-priority config file the daemon reads (or
 writes, on first start) the identity files:
 
 | File | Mode | Purpose |
 | ---- | ---- | ------- |
-| `fips.key` | `0600` | Bech32 nsec for the persistent identity (Unix only; Windows inherits parent ACLs). |
+| `fips.key` | `0600` | Bech32 nsec for the persistent identity (Unix; on Windows the file takes its directory's ACL, which `install-service.ps1` restricts to SYSTEM and Administrators). |
 | `fips.pub` | `0644` | Bech32 npub corresponding to `fips.key`. |
 
 When `node.identity.persistent` is `false` (the default), a fresh
 keypair is written to these files on every start.
+
+On Windows the service writes its log to `C:\ProgramData\fips\fips.log`,
+rolled at 10 MiB with four old files kept; a foreground run logs to the
+console.
 
 The control socket path is derived per
 [control-socket.md](control-socket.md).

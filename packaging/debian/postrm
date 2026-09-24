@@ -13,10 +13,45 @@ case "$1" in
         # Remove runtime directory
         rm -rf /run/fips/
 
-        # Remove DNS config files that fips-dns-setup may have created
+        # Remove the DNS routing fips-dns-setup may have written, in case
+        # fips-dns-teardown did not run (prerm's stop runs it only when
+        # fips-dns.service was active), and make the resolver drop it. The
+        # paths match packaging/common/fips-dns-teardown, which dpkg has
+        # already removed, so it cannot be called from here.
+        restart_resolved=0
+        if [ -f /etc/systemd/dns-delegate.d/fips.dns-delegate ]; then
+            rm -f /etc/systemd/dns-delegate.d/fips.dns-delegate
+            restart_resolved=1
+        fi
+        if [ -f /etc/systemd/resolved.conf.d/fips.conf ]; then
+            rm -f /etc/systemd/resolved.conf.d/fips.conf
+            restart_resolved=1
+        fi
+        # Only pre-v0.3.0 development builds wrote this path, and systemd
+        # never read it.
         rm -f /etc/systemd/dns-delegate/fips.dns-delegate
-        rm -f /etc/dnsmasq.d/fips.conf
-        rm -f /etc/NetworkManager/dnsmasq.d/fips.conf
+        if [ "$restart_resolved" = 1 ] && [ -d /run/systemd/system ] \
+            && systemctl is-active --quiet systemd-resolved.service; then
+            systemctl restart systemd-resolved \
+                || echo "fips: warning: could not restart systemd-resolved; restart it to drop the .fips route"
+        fi
+        if [ -f /etc/dnsmasq.d/fips.conf ]; then
+            rm -f /etc/dnsmasq.d/fips.conf
+            if [ -d /run/systemd/system ] \
+                && systemctl is-active --quiet dnsmasq.service; then
+                systemctl reload dnsmasq \
+                    || echo "fips: warning: could not reload dnsmasq; reload it to drop the .fips route"
+            fi
+        fi
+        if [ -f /etc/NetworkManager/dnsmasq.d/fips.conf ]; then
+            rm -f /etc/NetworkManager/dnsmasq.d/fips.conf
+            if [ -d /run/systemd/system ] \
+                && systemctl is-active --quiet NetworkManager.service \
+                && command -v nmcli >/dev/null 2>&1; then
+                nmcli general reload \
+                    || echo "fips: warning: could not reload NetworkManager; reload it to drop the .fips route"
+            fi
+        fi
 
         # Remove fips system group
         if getent group fips >/dev/null 2>&1; then

@@ -46,6 +46,14 @@ scripts), so an edited `fips.yaml` survives upgrade/removal.
 `/var/run/fips/fips.pid` and logs to `/var/log/fips.log` (rc.conf
 knobs: `fips_config`, `fips_flags`, `fips_logfile`).
 
+The log is rotated by `/usr/local/etc/newsyslog.conf.d/fips.conf`: five
+bzip2-compressed generations of 1000 KB. daemon(8) runs with `-H` and
+records its own pid in `/var/run/fips/daemon.pid`; newsyslog signals that
+pid after the rename, and daemon(8) reopens the log. The entry covers
+the default `fips_logfile` only, so a log moved elsewhere needs its own
+newsyslog entry. The entry belongs to the package and is replaced on
+upgrade.
+
 The package creates a `fips` group; members can run `fipsctl` and
 `fipstop` without root (`pw groupmod fips -m <user>`, then re-login).
 On `pkg upgrade` the services are stopped before the binaries are

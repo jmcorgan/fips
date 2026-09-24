@@ -25,6 +25,8 @@ pub mod native;
 pub mod node;
 pub mod noise;
 pub mod nostr;
+#[cfg(test)]
+mod packaging_tests;
 pub mod peer;
 pub mod perf_profile;
 pub(crate) mod proto;
