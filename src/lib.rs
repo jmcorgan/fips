@@ -14,6 +14,7 @@ pub mod config;
 pub mod control;
 #[cfg(target_os = "linux")]
 pub mod gateway;
+pub mod hosts;
 pub mod identity;
 // Declared before `node` (and named to sort there) because it carries
 // `#[macro_use]`: the tick instrumentation macro must be in scope for the

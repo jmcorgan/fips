@@ -331,7 +331,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tracing targets of the TUN adapter, DNS responder and ICMPv6 code move from
   `fips::upper::*` to `fips::ipv6tun::*`, because the module they log from is
   now `ipv6tun` (for example `fips::upper::tun` becomes `fips::ipv6tun::tun`).
-  An existing `RUST_LOG` filter naming an old target still parses and simply
+  The hosts-file loader and reloader log as `fips::hosts` rather than
+  `fips::upper::hosts`, since the hosts file is now a top-level module. An
+  existing `RUST_LOG` filter naming an old target still parses and simply
   stops matching, so the symptom is missing log lines rather than an error.
   Update `RUST_LOG` filters, journal-watch recipes and any log-scraping alert
   accordingly. The library path `fips::upper` still resolves.
