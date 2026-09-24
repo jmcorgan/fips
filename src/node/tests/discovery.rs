@@ -1855,7 +1855,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
         "test pins the [1,2,4,8] default; update the test if the default changes"
     );
 
-    // Inject a TUN sender so `send_icmpv6_dest_unreachable` is observable.
+    // Inject a TUN sender so the no-route Destination Unreachable is observable.
     let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
     node.install_tun(tun_tx);
 

@@ -3084,7 +3084,7 @@ impl Node {
     /// for the initiation it starts discovery and still queues. Refuses the
     /// packet, handing it back, when a new session would exceed the session
     /// table.
-    async fn send_tun_packet(
+    async fn send_outbound(
         &mut self,
         dest_addr: NodeAddr,
         dest_pubkey: PublicKey,
@@ -3230,7 +3230,7 @@ impl Mesh for Node {
 
     fn send(&mut self, dest: Self::Dest, packet: Vec<u8>) -> impl Future<Output = Outcome> + Send {
         let (dest_addr, dest_pubkey) = dest;
-        self.send_tun_packet(dest_addr, dest_pubkey, packet)
+        self.send_outbound(dest_addr, dest_pubkey, packet)
     }
 
     fn icmp(&mut self) -> IcmpContext<'_> {

@@ -7,7 +7,7 @@
 //! mesh's business, reached through the [`Mesh`] trait.
 //!
 //! The decisions are the synchronous functions [`admit`] and
-//! [`path_too_big`]; [`forward`] drives them against a [`Mesh`].
+//! [`path_limit`]; [`forward`] drives them against a [`Mesh`].
 
 use super::icmp::{IcmpContext, effective_ipv6_mtu};
 use std::future::Future;
@@ -92,7 +92,7 @@ pub(crate) fn admit(packet: &[u8], ipv6_mtu: u16) -> Admit {
 ///
 /// Applies only when the path is narrower than the node-wide `ipv6_mtu`,
 /// which [`admit`] has already enforced.
-pub(crate) fn path_too_big(len: usize, path_mtu: u16, ipv6_mtu: u16) -> Option<u32> {
+pub(crate) fn path_limit(len: usize, path_mtu: u16, ipv6_mtu: u16) -> Option<u32> {
     let path_ipv6_mtu = effective_ipv6_mtu(path_mtu) as usize;
     if path_ipv6_mtu < ipv6_mtu as usize && len > path_ipv6_mtu {
         Some(path_ipv6_mtu as u32)
@@ -112,7 +112,7 @@ pub(crate) async fn forward<M: Mesh>(mesh: &mut M, packet: Vec<u8>) {
     let prefix = match admit(&packet, ipv6_mtu) {
         Admit::Drop => return,
         Admit::TooBig(mtu) => {
-            mesh.icmp().packet_too_big(&packet, mtu);
+            mesh.icmp().too_big(&packet, mtu);
             return;
         }
         Admit::Forward(prefix) => prefix,
@@ -129,9 +129,9 @@ pub(crate) async fn forward<M: Mesh>(mesh: &mut M, packet: Vec<u8>) {
     // generate ICMPv6 Packet Too Big back to the application.
     if let Some(mtu) = route
         .path_mtu
-        .and_then(|path_mtu| path_too_big(packet.len(), path_mtu, ipv6_mtu))
+        .and_then(|path_mtu| path_limit(packet.len(), path_mtu, ipv6_mtu))
     {
-        mesh.icmp().packet_too_big(&packet, mtu);
+        mesh.icmp().too_big(&packet, mtu);
         return;
     }
 
@@ -254,16 +254,16 @@ mod tests {
     }
 
     #[test]
-    fn path_too_big_applies_only_below_the_node_mtu() {
+    fn path_limit_applies_only_below_the_node_mtu() {
         let node = 1280;
         let narrow = effective_ipv6_mtu(1000);
         assert_eq!(
-            path_too_big(narrow as usize + 1, 1000, node),
+            path_limit(narrow as usize + 1, 1000, node),
             Some(narrow as u32)
         );
-        assert_eq!(path_too_big(narrow as usize, 1000, node), None);
+        assert_eq!(path_limit(narrow as usize, 1000, node), None);
         // A path at least as wide as the node MTU never answers.
-        assert_eq!(path_too_big(1280, 1280 + 77, node), None);
+        assert_eq!(path_limit(1280, 1280 + 77, node), None);
     }
 
     #[tokio::test]

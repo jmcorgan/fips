@@ -431,7 +431,7 @@ impl<'a> IcmpContext<'a> {
     ///
     /// Rate-limited per source address to prevent ICMP floods from
     /// misconfigured applications sending repeated oversized packets.
-    pub(crate) fn packet_too_big(&mut self, original_packet: &[u8], mtu: u32) {
+    pub(crate) fn too_big(&mut self, original_packet: &[u8], mtu: u32) {
         // Extract source address for rate limiting
         if original_packet.len() < 40 {
             return;
@@ -806,7 +806,7 @@ mod tests {
         let remote_addr: Ipv6Addr = "fddf::2".parse().unwrap();
         let original = make_ipv6_packet(local_addr, remote_addr, 6, &[0u8; 1200]); // TCP
 
-        // Pass remote_addr as our_addr — this is what send_icmpv6_packet_too_big
+        // Pass remote_addr as our_addr — this is what IcmpContext::too_big
         // does after the fix (original packet's dst = remote peer).
         let response = build_packet_too_big(&original, 1203, remote_addr);
         assert!(response.is_some());
