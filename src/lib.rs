@@ -20,6 +20,7 @@ pub mod identity;
 // modules that follow.
 #[macro_use]
 pub(crate) mod instr;
+pub mod ipv6tun;
 pub mod mdns;
 pub mod native;
 pub mod node;
@@ -32,9 +33,12 @@ pub(crate) mod proto;
 pub(crate) mod testutil;
 mod time;
 pub mod transport;
-pub mod upper;
 pub mod utils;
 pub mod version;
+
+// `upper` is the former name of `ipv6tun`; the alias keeps `crate::upper::`
+// and `fips::upper::` paths resolving.
+pub use ipv6tun as upper;
 
 // Re-export identity types
 pub use identity::{

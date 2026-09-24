@@ -87,7 +87,7 @@ fully-qualified module paths under the `fips` crate.
 sudo systemctl edit fips
 # Add:
 # [Service]
-# Environment=RUST_LOG=info,fips::upper::tun=trace,fips::node::handlers::mmp=debug
+# Environment=RUST_LOG=info,fips::ipv6tun::tun=trace,fips::node::handlers::mmp=debug
 sudo systemctl restart fips
 sudo journalctl -u fips -f
 ```
