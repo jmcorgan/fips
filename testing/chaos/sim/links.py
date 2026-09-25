@@ -52,6 +52,11 @@ class LinkManager:
         self.link_states: dict[tuple[str, str], LinkState] = {
             edge: LinkState(edge=edge) for edge in topology.edges
         }
+        # Every edge taken down or restored, as (epoch seconds, "down" |
+        # "up", a, b). The switch-latency assertion reads the down edges
+        # against the nodes' own log timestamps, so this is wall-clock time
+        # (the containers share the host clock).
+        self.flap_events: list[tuple[float, str, str, str]] = []
 
     @property
     def down_count(self) -> int:
@@ -68,6 +73,10 @@ class LinkManager:
         up_links = [
             e for e, ls in self.link_states.items()
             if not ls.is_down and e[0] not in down and e[1] not in down
+            and (
+                self.config.only_transport is None
+                or self.topology.transport_for_edge(*e) == self.config.only_transport
+            )
         ]
         if not up_links:
             return
@@ -115,6 +124,7 @@ class LinkManager:
         state.is_down = True
         state.down_since = now
         state.restore_at = now + duration
+        self.flap_events.append((now, "down", a, b))
 
         log.info("Link DOWN: %s -- %s (restore in %.0fs)", a, b, duration)
 
@@ -130,6 +140,7 @@ class LinkManager:
         self._set_held(b, a, False)
 
         down_for = time.time() - state.down_since if state.down_since else 0
+        self.flap_events.append((time.time(), "up", a, b))
         state.is_down = False
         state.down_since = None
         state.restore_at = None
@@ -155,7 +166,7 @@ class LinkManager:
         container = self.topology.container_name(src_node)
         transport = self.topology.transport_for_edge(src_node, dst_node)
 
-        if transport == "ethernet":
+        if self.topology.is_veth_transport(transport):
             iface = veth_interface_name(src_node, dst_node)
             state = self.netem_mgr.veth_states.get(container, {}).get(iface)
             if state is None:

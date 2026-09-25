@@ -35,6 +35,14 @@ use tracing::{debug, info, trace, warn};
 /// bounded this can come down to the tick.
 const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a `Dead` path keeps its history before it is forgotten.
+///
+/// Presence flaps on a cable (dock sleep, autoneg bounce) are what the
+/// binder's churn guard exists for; a path that came back inside this window
+/// is re-probed with its RTT intact rather than measured from nothing. See
+/// `docs/design/fips-multi-path-switchover.md` §6.
+const DEAD_PATH_GRACE_MS: u64 = 5 * 60 * 1000;
+
 /// Decide whether a peer is due a heartbeat, from the two timestamps it keeps.
 ///
 /// Two gates rather than one. `sent` is when a heartbeat last *landed*, and it
@@ -200,6 +208,8 @@ impl Node {
 
         // Get session timestamp before taking mutable borrow on MMP
         let our_timestamp_ms = peer.session_elapsed_ms();
+        // One report closer to releasing a post-switch cost hold.
+        peer.note_receiver_report();
 
         let Some(mmp) = peer.mmp_mut() else {
             return;
@@ -244,7 +254,7 @@ impl Node {
                 .peers
                 .iter()
                 .filter(|(_, p)| p.has_srtt())
-                .map(|(a, p)| (*a, p.link_cost()))
+                .map(|(a, p)| (*a, p.link_cost(now_ms)))
                 .collect();
             // Wall-clock seconds for the escaping declaration timestamp;
             // monotonic ms for the flap-dampening / hold-down timers.
@@ -549,6 +559,11 @@ impl Node {
 
         let actions = self.mmp.plan_heartbeats(&snapshots);
 
+        // Dead-path history expires here, on the same cadence as liveness.
+        for peer in self.peers.values_mut() {
+            peer.prune_dead_paths(now_ms, DEAD_PATH_GRACE_MS);
+        }
+
         // Wall-clock basis for reconnect scheduling, sourced once (as before).
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -601,68 +616,25 @@ impl Node {
         }
     }
 
-    /// Reap every active peer reachable only through `transport_id`.
-    ///
-    /// Called on a transport's detach edge. Until this existed, losing an
-    /// interface withdrew nothing: the peers stayed in the registry, the
-    /// routes through them stayed selectable, and this node kept advertising
-    /// reachability it no longer had — so transit traffic was dropped in
-    /// silence, and other nodes kept routing toward us for those destinations,
-    /// until the liveness reaper noticed up to `link_dead_timeout_secs` later.
-    /// Measured on real hardware that was 27 seconds of routing through a link
-    /// that had already gone, with four alternative peers available the whole
-    /// time.
-    ///
-    /// The detach edge is both earlier and more certain than inactivity, so it
-    /// is the better trigger. This routes through the same
-    /// [`Self::route_link_dead`] the liveness reaper uses rather than
-    /// open-coding a second teardown — every consequence of losing a peer
-    /// (sessions, path MTU, session indices, the link, the control machine,
-    /// tree cleanup and re-announce, bloom withdrawal) already hangs off that
-    /// one path, and a parallel one would drift from it.
-    ///
-    /// Deliberately undamped. A flapping interface cannot drive a reap storm
-    /// through here, because `ChurnGuard` stops publishing presence edges
-    /// after three short-lived bindings and does not resume until one lasts —
-    /// so the edges this reacts to are already rate-limited at the source, and
-    /// a second damper here would only add a way for the two to disagree.
-    ///
-    /// Returns how many peers were reaped.
-    pub(in crate::node) async fn reap_peers_on_transport(
+    /// Reap one peer whose last path went away. `now_ms` is the wall-clock
+    /// reconnect basis, as for the liveness reaper.
+    pub(in crate::node) async fn reap_peer_without_path(
         &mut self,
+        node_addr: NodeAddr,
         transport_id: TransportId,
-    ) -> usize {
-        let doomed: Vec<NodeAddr> = self
-            .peers
-            .iter()
-            .filter(|(_, peer)| peer.transport_id() == Some(transport_id))
-            .map(|(node_addr, _)| *node_addr)
-            .collect();
-
-        if doomed.is_empty() {
-            return 0;
-        }
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let reaped = doomed.len();
-        for node_addr in doomed {
-            debug!(
-                peer = %self.peer_display_name(&node_addr),
-                %transport_id,
-                "Removing peer: its interface went away"
-            );
-            self.route_link_dead(node_addr, now_ms).await;
-        }
-        reaped
+        now_ms: u64,
+    ) {
+        debug!(
+            peer = %self.peer_display_name(&node_addr),
+            %transport_id,
+            "Removing peer: its interface went away"
+        );
+        self.route_link_dead(node_addr, now_ms).await;
     }
 
     /// Route a link-dead reap through the peer machine + executor. Two callers
     /// decide: the tick sweep's `plan_heartbeats` batch emits a `ReapPeer` for a
-    /// peer that has gone quiet, and [`Self::reap_peers_on_transport`] withdraws
+    /// peer that has gone quiet, and [`Self::withdraw_transport`] reaps
     /// a transport's peers when its interface goes away. Mirrors
     /// [`route_rekey_cadence`](Node::route_rekey_cadence): the shell has already
     /// decided by the time this runs, so the machine only CONSUMES the decision

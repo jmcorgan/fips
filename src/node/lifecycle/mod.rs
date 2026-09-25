@@ -506,6 +506,21 @@ impl Node {
             .map(|t| t.transport_type().connection_oriented)
             .unwrap_or(false);
 
+        // A dial to a peer we already hold a session with (a startup that
+        // lists two addresses, a caller that still dials by hand) proves
+        // nothing by itself: the handshake creates no path state, and its
+        // outcome is the cross-connection tie-break as ever. The address
+        // is still a fact worth holding — leave it as a candidate for the
+        // heartbeat tick to probe under the session, on a datagram
+        // transport, so it becomes a path whichever way the dial goes.
+        if !is_connection_oriented && self.peers.contains_key(peer_identity.node_addr()) {
+            self.add_path_candidate(
+                *peer_identity.node_addr(),
+                transport_id,
+                remote_addr.clone(),
+            );
+        }
+
         // Allocate link ID and create link
         let link_id = self.allocate_link_id();
 
@@ -709,8 +724,7 @@ impl Node {
         let first_resend_at_ms = current_time_ms + resend_interval;
 
         // Track in pending_outbound for msg2 dispatch
-        self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+        self.pending_outbound.insert(our_index.as_u32(), link_id);
 
         let machine = self
             .peer_machines
@@ -822,6 +836,9 @@ impl Node {
         // dataplane maps are unmutated, so the core's per-peer cap sees a stable
         // in-flight count — the same guarantee the old collect-then-dial had.
         let mut transport_neighbors: Vec<Candidate> = Vec::new();
+        // Live peers beaconing on a transport we hold no path to them over.
+        // Added after the loop, which borrows the transport table.
+        let mut path_candidates: Vec<(NodeAddr, TransportId, TransportAddr)> = Vec::new();
         for (transport_id, transport) in &self.transports {
             if !transport.is_operational() {
                 continue;
@@ -852,46 +869,38 @@ impl Node {
                 let connected = self.peers.contains_key(&node_addr);
 
                 if connected {
-                    // Active peer: skip every candidate while the link we
-                    // already hold is live — the current path *and* any
-                    // alternate one.
+                    // Active peer: never a dial, whatever the state of the
+                    // link we hold. The address is a path to add or
+                    // re-point, and the heartbeat tick probes it under the
+                    // session we have — one round trip, authenticated, and
+                    // selection moves traffic if the path proves better or
+                    // the current one is not answering.
                     //
-                    // Only the same-path case used to be skipped, which left
-                    // the stated intent ("avoid churning a healthy link")
-                    // covering exactly the case that could not churn anything.
-                    // A peer reachable twice — the ordinary result of two
-                    // machines sharing a LAN and a cable, since each beacons on
-                    // both — was therefore re-dialled on its alternate path
-                    // every discovery tick, forever. Each dial that completed
-                    // promoted and displaced the incumbent, so the peer's link
-                    // migrated back and forth on a fixed cadence, tearing down
-                    // and re-establishing its session each time. Measured on
-                    // real hardware: seventeen dials to one peer in fifteen
-                    // minutes, alternating wifi and cable, displacing a link
-                    // reporting `etx = 1.0` and `loss = 0.0`.
+                    // Dialling an active peer used to be the fallback for one
+                    // that had gone quiet ("liveness is the gate"). Two
+                    // reasons it is not any more. A handshake to a peer that
+                    // already holds a session is read by the far side as a
+                    // rekey, and when both ends do it at once — the ordinary
+                    // case, since both hear the same medium come back — the
+                    // rekey and the cross-connection resolution overlap and
+                    // the two sides part on different session indices, dead
+                    // to each other until the link timeout reaps them. And
+                    // the dial buys nothing the probe does not: a session
+                    // that is truly gone answers no probe either, is reaped
+                    // by the link-dead timeout, and is dialled then; a peer
+                    // that restarted dials us itself with a new epoch and
+                    // wins the promotion outright.
                     //
-                    // When that peer is the parent — which the best path
-                    // usually is — every migration also switched parents,
-                    // invalidating the downstream coordinate cache and
-                    // re-announcing to every peer. The cost of the churn was
-                    // therefore mesh-wide while the benefit was nil: the link
-                    // being replaced was already perfect.
-                    //
-                    // Failover is unaffected. Liveness is the gate, so a peer
-                    // that stops answering goes stale within a heartbeat
-                    // interval and every path, alternate included, is dialled
-                    // again. What is given up is switching away from a link
-                    // that is working, which is not a thing worth doing.
-                    if self.active_peer_link_is_live(&node_addr) {
-                        continue;
-                    }
-                    if self.is_connecting_to_peer_on_path(
-                        &node_addr,
-                        candidate_transport_id,
-                        &remote_addr,
-                    ) {
-                        continue;
-                    }
+                    // (History: only the same-path case used to be skipped,
+                    // so a peer reachable twice — two machines sharing a LAN
+                    // and a cable — was re-dialled on its alternate path
+                    // every discovery tick, each completed dial displacing
+                    // the incumbent: seventeen dials to one peer in fifteen
+                    // minutes, alternating wifi and cable, over a link
+                    // reporting `etx = 1.0`. Liveness gating fixed that and
+                    // left the quiet-peer dial; this removes the last of it.)
+                    path_candidates.push((node_addr, candidate_transport_id, remote_addr));
+                    continue;
                 } else if self.is_connecting_to_peer_on_path(
                     &node_addr,
                     candidate_transport_id,
@@ -909,6 +918,11 @@ impl Node {
                 });
             }
         }
+
+        for (node_addr, transport_id, remote_addr) in path_candidates {
+            self.add_path_candidate(node_addr, transport_id, remote_addr);
+        }
+        self.add_configured_path_candidates();
 
         if transport_neighbors.is_empty() {
             return;
@@ -2598,6 +2612,126 @@ impl Node {
             .collect()
     }
 
+    /// Configured addresses of live peers on transports they have no path
+    /// over become paths. Runs every discovery tick, idempotent and cheap:
+    /// a configured address whose transport was down at dial time (wifi
+    /// joined later, Tor came up) is otherwise never looked at again, since
+    /// a peer that is already active is not re-dialled.
+    fn add_configured_path_candidates(&mut self) {
+        let configs: Vec<PeerConfig> = self.config().auto_connect_peers().cloned().collect();
+        for peer_config in configs {
+            let Ok(identity) = PeerIdentity::from_npub(&peer_config.npub) else {
+                continue;
+            };
+            let node_addr = *identity.node_addr();
+            if !self.peers.contains_key(&node_addr) || !self.active_peer_link_is_live(&node_addr) {
+                continue;
+            }
+            for addr in peer_config.addresses_by_priority() {
+                if addr.transport == "udp" && addr.addr.eq_ignore_ascii_case("nat") {
+                    continue;
+                }
+                let Some((transport_id, remote_addr)) = self.resolve_peer_address(addr) else {
+                    continue;
+                };
+                let has_path = self
+                    .peers
+                    .get(&node_addr)
+                    .is_some_and(|p| p.path_on(transport_id).is_some());
+                if !has_path {
+                    self.add_path_candidate(node_addr, transport_id, remote_addr);
+                }
+            }
+        }
+    }
+
+    /// The transport and address a configured peer address dials to, or
+    /// `None` (logged at debug) if no operational transport can carry it.
+    ///
+    /// The transport field may name a specific instance (`"udp/aware"`):
+    /// the type half picks the resolver, the instance half is handed to
+    /// whichever resolver can honour it, and only the UDP one can. The
+    /// `"nat"` pseudo-address is not resolved here.
+    fn resolve_peer_address(&self, addr: &PeerAddress) -> Option<(TransportId, TransportAddr)> {
+        let spec = addr.spec();
+        if addr.transport == "ethernet" {
+            return match self.resolve_ethernet_addr(&addr.addr) {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        error = %e,
+                        "Failed to resolve Ethernet address"
+                    );
+                    None
+                }
+            };
+        }
+        if addr.transport == "ble" {
+            #[cfg(ble_available)]
+            {
+                return match self.resolve_ble_addr(&addr.addr) {
+                    Ok(result) => Some(result),
+                    Err(e) => {
+                        debug!(
+                            transport = %addr.transport,
+                            addr = %addr.addr,
+                            error = %e,
+                            "Failed to resolve BLE address"
+                        );
+                        None
+                    }
+                };
+            }
+            #[cfg(not(ble_available))]
+            {
+                debug!(transport = %addr.transport, "BLE transport not available on this build");
+                return None;
+            }
+        }
+        let tid = if spec.kind == "udp"
+            && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
+        {
+            match self.find_udp_transport_for_remote_addr(remote_socket_addr, spec.instance) {
+                Some((id, _)) => id,
+                None => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        "No compatible operational UDP transport for address"
+                    );
+                    return None;
+                }
+            }
+        } else if spec.instance.is_some() {
+            // Only the UDP resolver above can honour an instance name.
+            // Matching any instance of the type here would be the silent
+            // wrong-lane substitution this whole mechanism exists to
+            // prevent, so refuse instead.
+            debug!(
+                transport = %addr.transport,
+                addr = %addr.addr,
+                "Instance-qualified address for a transport type that \
+                 does not support instance selection"
+            );
+            return None;
+        } else {
+            match self.find_transport_for_type(spec.kind) {
+                Some(id) => id,
+                None => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        "No operational transport for address type"
+                    );
+                    return None;
+                }
+            }
+        };
+        Some((tid, TransportAddr::from_string(&addr.addr)))
+    }
+
     async fn attempt_peer_address_list(
         &mut self,
         peer_config: &PeerConfig,
@@ -2619,9 +2753,6 @@ impl Node {
             if attempted >= max_attempts {
                 break;
             }
-            // The transport field may name a specific instance
-            // (`"udp/aware"`); everything below dispatches on the type half
-            // and hands the instance half to whichever resolver can honour it.
             let spec = addr.spec();
 
             if spec.kind == "udp" && addr.addr.eq_ignore_ascii_case("nat") {
@@ -2639,82 +2770,8 @@ impl Node {
                 continue;
             }
 
-            let (transport_id, remote_addr) = if addr.transport == "ethernet" {
-                match self.resolve_ethernet_addr(&addr.addr) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        debug!(
-                            transport = %addr.transport,
-                            addr = %addr.addr,
-                            error = %e,
-                            "Failed to resolve Ethernet address"
-                        );
-                        continue;
-                    }
-                }
-            } else if addr.transport == "ble" {
-                #[cfg(ble_available)]
-                {
-                    match self.resolve_ble_addr(&addr.addr) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                error = %e,
-                                "Failed to resolve BLE address"
-                            );
-                            continue;
-                        }
-                    }
-                }
-                #[cfg(not(ble_available))]
-                {
-                    debug!(transport = %addr.transport, "BLE transport not available on this build");
-                    continue;
-                }
-            } else {
-                let tid = if spec.kind == "udp"
-                    && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
-                {
-                    match self.find_udp_transport_for_remote_addr(remote_socket_addr, spec.instance)
-                    {
-                        Some((id, _)) => id,
-                        None => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                "No compatible operational UDP transport for address"
-                            );
-                            continue;
-                        }
-                    }
-                } else if spec.instance.is_some() {
-                    // Only the UDP resolver above can honour an instance name.
-                    // Matching any instance of the type here would be the
-                    // silent wrong-lane substitution this whole mechanism
-                    // exists to prevent, so refuse instead.
-                    debug!(
-                        transport = %addr.transport,
-                        addr = %addr.addr,
-                        "Instance-qualified address for a transport type that \
-                         does not support instance selection"
-                    );
-                    continue;
-                } else {
-                    match self.find_transport_for_type(spec.kind) {
-                        Some(id) => id,
-                        None => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                "No operational transport for address type"
-                            );
-                            continue;
-                        }
-                    }
-                };
-                (tid, TransportAddr::from_string(&addr.addr))
+            let Some((transport_id, remote_addr)) = self.resolve_peer_address(addr) else {
+                continue;
             };
 
             if self.is_connecting_to_peer_on_path(&peer_node_addr, transport_id, &remote_addr) {
@@ -3281,27 +3338,55 @@ impl Node {
             .into_iter()
             .filter(|addr| !(addr.transport == "udp" && addr.addr.eq_ignore_ascii_case("nat")))
             .collect();
-        let has_alternative = concrete
-            .iter()
-            .any(|addr| !self.active_peer_matches_candidate(&peer_node_addr, addr));
-        let attempt_candidates: Vec<_> = if has_alternative {
-            concrete
-                .into_iter()
-                .filter(|addr| !self.active_peer_matches_candidate(&peer_node_addr, addr))
-                .collect()
-        } else if self.active_peer_needs_same_path_refresh(&peer_node_addr) {
-            concrete
-        } else {
-            Vec::new()
-        };
+        // Every address the peer is not already on. (The same-path case —
+        // the one address it is on, gone quiet — was once re-dialled from
+        // here; the path's own heartbeat and the link-dead reap own that
+        // now, see below.)
+        let attempt_candidates: Vec<_> = concrete
+            .into_iter()
+            .filter(|addr| !self.active_peer_matches_candidate(&peer_node_addr, addr))
+            .collect();
 
-        if attempt_candidates.is_empty() {
-            return Ok(false);
+        // A peer we hold a session to gets a *path* at each address, under
+        // that session, never a second handshake: the probe exchange proves
+        // the path and selection moves traffic if it measures better or the
+        // current path stops answering. A handshake to a peer that already
+        // has one is read by the far side as a rekey, and two ends doing it
+        // at once — both hearing the same medium return — leave the rekey
+        // and the cross-connection resolution overlapping and the sides on
+        // different session indices. An address the peer is already
+        // reachable at is nothing to do; one on a transport that already
+        // has a path re-points that path (the peer moved); one on a new
+        // transport adds a path. A peer that has gone quiet is not dialled
+        // either: a dead session answers no probe, is reaped by the
+        // link-dead timeout, and is dialled then. See `poll_discovered_peers`.
+        let mut paths_added = false;
+        for addr in attempt_candidates {
+            let Some((transport_id, remote_addr)) = self.resolve_peer_address(&addr) else {
+                continue;
+            };
+            let Some(peer) = self.peers.get(&peer_node_addr) else {
+                continue;
+            };
+            if peer.is_reachable_at(transport_id, &remote_addr) {
+                continue;
+            }
+            let known_transport = peer.path_on(transport_id).is_some();
+            info!(
+                peer = %self.peer_display_name(&peer_node_addr),
+                %transport_id,
+                addr = %remote_addr,
+                "{}",
+                if known_transport {
+                    "Configured address moved on a known transport: path re-pointed, not dialled"
+                } else {
+                    "Configured address on a new transport: added as a path, not dialled"
+                }
+            );
+            self.add_path_candidate(peer_node_addr, transport_id, remote_addr);
+            paths_added = true;
         }
-
-        self.attempt_peer_address_list(peer_config, peer_identity, false, &attempt_candidates)
-            .await?;
-        Ok(true)
+        Ok(paths_added)
     }
 
     async fn peer_address_candidates(&self, peer_config: &PeerConfig) -> Vec<PeerAddress> {
@@ -3400,14 +3485,17 @@ impl Node {
     /// auto-reconnect). Reuses the same connection path as auto-connect
     /// peers. Returns JSON data on success or an error message.
     ///
-    /// For a peer the node is already connected to, the supplied address is
-    /// tried as an *alternate path* rather than ignored — the same treatment
-    /// [`Node::update_peers`] gives a refreshed runtime peer. The handshake
-    /// runs in parallel with the live link and promotion happens only once it
-    /// authenticates, so an address the caller got wrong cannot displace a
-    /// healthy path. The response's `refreshed` field reports whether such a
-    /// handshake was started; it is `false` when the peer is already on this
-    /// exact path and that path is fresh.
+    /// For a peer the node already holds a session with, the supplied
+    /// address is never dialled: it becomes a path candidate under that
+    /// session (or re-points a path that has stopped answering), the
+    /// heartbeat tick probes it, and selection moves traffic there only
+    /// once the peer has answered — the same treatment
+    /// [`Node::update_peers`] gives a refreshed runtime peer, so an address
+    /// the caller got wrong cannot displace a healthy path. The response's
+    /// `refreshed` field reports whether a path was added or re-pointed;
+    /// it is `false` when the peer is already reachable at that address or
+    /// that transport's path is carrying acknowledged traffic, and for an
+    /// ordinary dial to a peer the node does not yet hold.
     pub(crate) async fn api_connect(
         &mut self,
         npub: &str,
@@ -3484,24 +3572,23 @@ impl Node {
     /// Notifies the peer, removes it locally, closes the transport connection
     /// it was using, and suppresses auto-reconnect.
     pub(crate) async fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
-        let peer_identity =
-            PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
-        let node_addr = *peer_identity.node_addr();
-
+        let node_addr = self.resolve_peer_npub(npub)?;
         let Some(peer) = self.peers.get(&node_addr) else {
             return Err(format!("peer not found: {npub}"));
         };
 
-        // Read the transport path the peer is actually sending over BEFORE the
-        // teardown below drops the peer and its link — afterwards there is
-        // nothing left to derive it from. `current_addr` rather than the
-        // link's remote address, because roaming updates the former and it is
-        // the address the pool entry (and its inbound-slot accounting) is
-        // keyed by.
-        let transport_path = match (peer.transport_id(), peer.current_addr()) {
-            (Some(transport_id), Some(addr)) => Some((transport_id, addr.clone())),
-            _ => None,
-        };
+        // Read every path the peer holds BEFORE the teardown below drops
+        // the peer and its link — afterwards there is nothing left to
+        // derive them from. The path's address rather than the link's
+        // remote address, because roaming updates the former and it is the
+        // address the pool entry (and its inbound-slot accounting) is keyed
+        // by. Every path, not the active one alone: a standby on a
+        // connection-oriented transport holds a pool entry of its own.
+        let transport_paths: Vec<(TransportId, TransportAddr)> = peer
+            .paths()
+            .iter()
+            .map(|path| (path.transport_id(), path.addr().clone()))
+            .collect();
 
         // Notify the peer before we tear down the link, so it drops its own
         // session and re-handshakes symmetrically rather than holding a stale
@@ -3524,10 +3611,10 @@ impl Node {
         // verbatim: closing twice is harmless, because every
         // `close_connection` implementation is `if let Some(conn) =
         // pool.remove(addr)` and the connectionless default is a no-op.
-        if let Some((transport_id, addr)) = transport_path
-            && let Some(transport) = self.transports.get(&transport_id)
-        {
-            transport.close_connection(&addr).await;
+        for (transport_id, addr) in transport_paths {
+            if let Some(transport) = self.transports.get(&transport_id) {
+                transport.close_connection(&addr).await;
+            }
         }
 
         // Suppress any pending auto-reconnect

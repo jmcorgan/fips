@@ -294,6 +294,8 @@ pub fn show_peers(node: &Node) -> Value {
                 }
             }
 
+            peer_json["paths"] = render_peer_paths(&node.project_peer_paths(peer));
+
             // Add tree depth if available
             if let Some(coords) = peer.coords() {
                 peer_json["tree_depth"] = json!(coords.depth());
@@ -306,7 +308,7 @@ pub fn show_peers(node: &Node) -> Value {
                 if any_peer_has_srtt && !peer.has_srtt() {
                     None
                 } else {
-                    Some(coords.depth() as f64 + peer.link_cost())
+                    Some(coords.depth() as f64 + peer.link_cost(crate::time::mono_ms()))
                 }
             });
             peer_json["effective_depth"] = match effective_depth {
@@ -393,10 +395,8 @@ pub fn show_peers(node: &Node) -> Value {
                 if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                     mmp_json["smoothed_etx"] = json!(smoothed_etx);
                 }
-                if let Some(srtt) = mmp.metrics.srtt_ms()
-                    && let Some(setx) = mmp.metrics.smoothed_etx()
-                {
-                    mmp_json["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+                if let Some(qi) = mmp.metrics.quality_index() {
+                    mmp_json["lqi"] = json!(qi);
                 }
                 peer_json["mmp"] = mmp_json;
             }
@@ -406,6 +406,34 @@ pub fn show_peers(node: &Node) -> Value {
         .collect();
 
     json!({ "peers": peers })
+}
+
+/// Render a peer's path rows as the `paths` array of `show_peers`. Also the
+/// base of `path_show`'s rows, which add the now-relative fields on top.
+pub(crate) fn render_peer_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
+    Value::Array(
+        paths
+            .iter()
+            .map(|p| {
+                json!({
+                    "transport_id": p.transport_id,
+                    "transport": p.transport,
+                    "transport_type": p.transport_type,
+                    "addr": p.addr,
+                    "state": p.state,
+                    "active": p.active,
+                    "remote_active": p.remote_active,
+                    "role": p.role,
+                    "pinned": p.pinned,
+                    "last_rtt_ms": p.last_rtt_ms,
+                    "min_rtt_ms": p.min_rtt_ms,
+                    "rtt_samples": p.rtt_samples,
+                    "etx": p.etx,
+                    "score": p.score,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Render a snapshot [`EntityMmp`](super::snapshot::EntityMmp) into the inline
@@ -505,6 +533,8 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
                     peer_json["transport_type"] = json!(tt);
                 }
             }
+
+            peer_json["paths"] = render_peer_paths(&peer.paths);
 
             if let Some(depth) = peer.tree_depth {
                 peer_json["tree_depth"] = json!(depth);
@@ -813,10 +843,8 @@ pub fn show_sessions(node: &Node) -> Value {
                 if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                     mmp_json["smoothed_etx"] = json!(smoothed_etx);
                 }
-                if let Some(srtt) = mmp.metrics.srtt_ms()
-                    && let Some(setx) = mmp.metrics.smoothed_etx()
-                {
-                    mmp_json["sqi"] = json!(setx * (1.0 + srtt / 100.0));
+                if let Some(qi) = mmp.metrics.quality_index() {
+                    mmp_json["sqi"] = json!(qi);
                 }
                 session_json["mmp"] = mmp_json;
             }
@@ -1013,9 +1041,9 @@ pub fn show_mmp(node: &Node) -> Value {
         }
         if let Some(srtt) = metrics.srtt_ms() {
             link_layer["srtt_ms"] = json!(srtt);
-            if let Some(setx) = metrics.smoothed_etx() {
-                link_layer["lqi"] = json!(setx * (1.0 + srtt / 100.0));
-            }
+        }
+        if let Some(qi) = metrics.quality_index() {
+            link_layer["lqi"] = json!(qi);
         }
 
         // Trend indicators
@@ -1065,9 +1093,9 @@ pub fn show_mmp(node: &Node) -> Value {
             }
             if let Some(srtt) = metrics.srtt_ms() {
                 session_layer["srtt_ms"] = json!(srtt);
-                if let Some(setx) = metrics.smoothed_etx() {
-                    session_layer["sqi"] = json!(setx * (1.0 + srtt / 100.0));
-                }
+            }
+            if let Some(qi) = metrics.quality_index() {
+                session_layer["sqi"] = json!(qi);
             }
 
             // Session-layer trend indicators (srtt / loss / etx), mirroring the
@@ -2750,6 +2778,7 @@ mod tests {
         // An interface no host has, so presence is deterministically absent
         // and carrier deterministically false on every machine this runs on.
         let config = EthernetConfig {
+            role: None,
             interface: "fips-absent-x0".to_string(),
             ethertype: None,
             mtu: None,

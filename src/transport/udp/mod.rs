@@ -141,6 +141,13 @@ impl UdpTransport {
         self.socket.as_ref().map(|socket| socket.as_raw_fd())
     }
 
+    /// The interface this instance is bound to (`udp.interface`), if any.
+    /// Per-peer `ConnectedPeerSocket`s bind to it too, or their traffic
+    /// would route by the kernel's table and not by the path.
+    pub fn interface(&self) -> Option<&str> {
+        self.config.interface.as_deref()
+    }
+
     /// Configured recv buffer size — used when opening per-peer
     /// `ConnectedPeerSocket`s so they get the same buffer ceiling as
     /// the wildcard listen socket.
@@ -256,10 +263,11 @@ impl UdpTransport {
             .map_err(|e| TransportError::StartFailed(format!("invalid bind address: {}", e)))?;
 
         // Create, bind, and configure UDP socket
-        let raw_socket = UdpRawSocket::open(
+        let raw_socket = UdpRawSocket::open_on_interface(
             bind_addr,
             self.config.recv_buf_size(),
             self.config.send_buf_size(),
+            self.config.interface.as_deref(),
         )?;
 
         let actual_recv = raw_socket.recv_buffer_size()?;
@@ -429,6 +437,10 @@ impl UdpTransport {
 }
 
 impl Transport for UdpTransport {
+    fn role(&self) -> crate::config::TransportRole {
+        self.config.role()
+    }
+
     fn transport_id(&self) -> TransportId {
         self.transport_id
     }

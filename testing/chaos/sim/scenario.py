@@ -28,7 +28,10 @@ class Range:
             raise ValueError(f"{name}: min ({self.min}) must be >= 0")
 
 
-VALID_TRANSPORTS = ("udp", "ethernet", "tcp")
+VALID_TRANSPORTS = ("udp", "ethernet", "tcp", "udp-veth")
+# Dual edges: a veth half and a UDP-over-the-bridge half between the same
+# two nodes (see topology.py).
+DUAL_TRANSPORTS = ("ethernet+udp", "udp-veth+udp")
 
 
 @dataclass
@@ -100,6 +103,10 @@ class NetemConfig:
     default_policy: NetemPolicy = field(default_factory=NetemPolicy)
     link_policies: list[LinkPolicyOverride] = field(default_factory=list)
     mutation: NetemMutationConfig = field(default_factory=NetemMutationConfig)
+    # Policy for the UDP half of ``ethernet+udp`` dual edges. The Ethernet
+    # half takes the edge's ordinary policy. ``None`` means the UDP half
+    # gets the default policy too.
+    dual_udp_policy: NetemPolicy | None = None
 
 
 @dataclass
@@ -109,6 +116,9 @@ class LinkFlapsConfig:
     max_down_links: int = 2
     down_duration_secs: Range = field(default_factory=lambda: Range(10, 30))
     protect_connectivity: bool = True
+    # Only flap edges of this transport type (``ethernet``, ``udp``, ...).
+    # ``None`` flaps any edge.
+    only_transport: str | None = None
 
 
 @dataclass
@@ -224,6 +234,62 @@ class MinParentSwitchesAssertion:
     """
 
     min_total: int = 1
+
+
+@dataclass
+class PathSwitchesAssertion:
+    """Band on path switches: a peer's traffic moving to another
+    transport under the same session. ``min_total`` proves the flaps moved
+    something; ``max_total`` is the stability ceiling on a pair that should
+    switch only when a link goes and comes back.
+    """
+
+    min_total: int | None = None
+    max_total: int | None = None
+
+
+@dataclass
+class MaxPromotionsAssertion:
+    """Per-node ceiling on "Peer promoted to active".
+
+    A promotion is a handshake completing: the first one per peer is how a
+    pair meets, every later one is a re-peering — the session was lost and
+    rebuilt, which is the failure a switchover scenario exists to catch.
+    Counted per node, because a pair re-peering shows up on both sides and
+    a mesh-wide total would hide which one started it.
+    """
+
+    per_node: int = 1
+
+
+@dataclass
+class SwitchLatencyAssertion:
+    """Ceiling on the time from a link going down to the first path switch.
+
+    Read from the runner's own record of when each edge was taken down
+    against the timestamp of the first "Path switched" line on either of
+    its endpoints after that moment. This is the number the design puts a
+    target on ("under one second"); without it a scenario could switch
+    thirty seconds after the flap and still pass ``path_switches``.
+    ``max_ms`` bounds the worst flap; a flap with no switch at all within
+    ``max_ms`` fails outright.
+    """
+
+    max_ms: int = 1000
+
+
+@dataclass
+class MaxStallAssertion:
+    """Ceiling on the longest run of iperf3 intervals that moved no bytes.
+
+    ``min_traffic`` passes on any session that moved any data, and a
+    switchover that blackholes traffic for ten seconds still leaves plenty
+    of bytes on either side of the hole. iperf3 reports per-interval
+    totals (one second by default); this reads the longest run of zeros
+    inside any session, in seconds, and fails if it exceeds ``max_secs``.
+    """
+
+    max_secs: float = 2.0
 
 
 @dataclass
@@ -351,6 +417,10 @@ class AssertionsConfig:
     bloom_send_rate: BloomSendRateAssertion | None = None
     min_parent_switches: MinParentSwitchesAssertion | None = None
     max_parent_switches: MaxParentSwitchesAssertion | None = None
+    path_switches: PathSwitchesAssertion | None = None
+    max_promotions: MaxPromotionsAssertion | None = None
+    switch_latency: SwitchLatencyAssertion | None = None
+    max_stall: MaxStallAssertion | None = None
     max_errors: MaxErrorsAssertion | None = None
     congestion_signals: CongestionSignalsAssertion | None = None
     tree_parents: TreeParentsAssertion | None = None
@@ -413,12 +483,12 @@ _SECTION_KEYS = {
         "num_nodes", "algorithm", "params", "ensure_connected", "subnet",
         "ip_start", "default_transport", "transport_mix", "pin_root",
     },
-    "netem": {"enabled", "default_policy", "link_policies", "mutation"},
+    "netem": {"enabled", "default_policy", "link_policies", "mutation", "dual_udp_policy"},
     "netem.link_policies[]": {"edges", "policy", "policy_name"},
     "netem.mutation": {"interval_secs", "fraction", "policies", "exclude_edges"},
     "link_flaps": {
         "enabled", "interval_secs", "max_down_links", "down_duration_secs",
-        "protect_connectivity",
+        "protect_connectivity", "only_transport",
     },
     "traffic": {
         "enabled", "max_concurrent", "interval_secs", "duration_secs",
@@ -435,8 +505,9 @@ _SECTION_KEYS = {
     "link_swap.edges[]": {"edge", "policy"},
     "assertions": {
         "bloom_send_rate", "min_parent_switches", "max_parent_switches",
-        "max_errors", "congestion_signals", "tree_parents", "baseline",
-        "min_traffic",
+        "path_switches", "max_promotions", "switch_latency", "max_stall",
+        "max_errors", "congestion_signals", "tree_parents",
+        "baseline", "min_traffic",
     },
     "logging": {"rust_log", "output_dir"},
 }
@@ -444,6 +515,10 @@ _ASSERTION_KEYS = {
     "bloom_send_rate": {"window_secs", "max_per_node"},
     "min_parent_switches": {"min_total"},
     "max_parent_switches": {"max_total", "node"},
+    "path_switches": {"min_total", "max_total"},
+    "max_promotions": {"per_node"},
+    "switch_latency": {"max_ms"},
+    "max_stall": {"max_secs"},
     "max_errors": {"max_total"},
     "min_traffic": {"min_sessions_ok", "min_bytes_total"},
     "congestion_signals": {
@@ -556,6 +631,10 @@ def load_scenario(path: str) -> Scenario:
         s.netem.default_policy = _parse_netem_policy(
             nc["default_policy"], "netem.default_policy"
         )
+    if "dual_udp_policy" in nc:
+        s.netem.dual_udp_policy = _parse_netem_policy(
+            nc["dual_udp_policy"], "netem.dual_udp_policy"
+        )
     if "link_policies" in nc:
         for lp_data in nc["link_policies"]:
             _reject_unknown(
@@ -597,6 +676,8 @@ def load_scenario(path: str) -> Scenario:
             lf["down_duration_secs"], "link_flaps.down_duration_secs"
         )
     s.link_flaps.protect_connectivity = lf.get("protect_connectivity", True)
+    only = lf.get("only_transport")
+    s.link_flaps.only_transport = str(only) if only is not None else None
 
     # Traffic section
     tf = raw.get("traffic", {})
@@ -696,6 +777,54 @@ def load_scenario(path: str) -> Scenario:
         s.assertions.min_parent_switches = MinParentSwitchesAssertion(
             min_total=int(mps.get("min_total", 1)),
         )
+    if "path_switches" in asrt:
+        ps = asrt["path_switches"]
+        _reject_unknown(ps, _ASSERTION_KEYS["path_switches"], "assertions.path_switches")
+        if "min_total" not in ps and "max_total" not in ps:
+            raise ValueError(
+                "assertions.path_switches: give min_total, max_total or both "
+                "(an empty band asserts nothing)"
+            )
+        for key in ("min_total", "max_total"):
+            if key in ps and (isinstance(ps[key], bool) or not isinstance(ps[key], int) or ps[key] < 0):
+                raise ValueError(
+                    f"assertions.path_switches: {key} must be a non-negative "
+                    f"integer, got {ps[key]!r}"
+                )
+        s.assertions.path_switches = PathSwitchesAssertion(
+            min_total=ps.get("min_total"),
+            max_total=ps.get("max_total"),
+        )
+    if "max_promotions" in asrt:
+        mp = asrt["max_promotions"]
+        _reject_unknown(mp, _ASSERTION_KEYS["max_promotions"], "assertions.max_promotions")
+        per_node = mp.get("per_node", 1)
+        if isinstance(per_node, bool) or not isinstance(per_node, int) or per_node < 1:
+            raise ValueError(
+                "assertions.max_promotions: per_node must be a positive integer, "
+                f"got {per_node!r} — a pair has to meet once"
+            )
+        s.assertions.max_promotions = MaxPromotionsAssertion(per_node=per_node)
+    if "switch_latency" in asrt:
+        sl = asrt["switch_latency"]
+        _reject_unknown(sl, _ASSERTION_KEYS["switch_latency"], "assertions.switch_latency")
+        max_ms = sl.get("max_ms", 1000)
+        if isinstance(max_ms, bool) or not isinstance(max_ms, int) or max_ms < 1:
+            raise ValueError(
+                "assertions.switch_latency: max_ms must be a positive integer, "
+                f"got {max_ms!r}"
+            )
+        s.assertions.switch_latency = SwitchLatencyAssertion(max_ms=max_ms)
+    if "max_stall" in asrt:
+        ms = asrt["max_stall"]
+        _reject_unknown(ms, _ASSERTION_KEYS["max_stall"], "assertions.max_stall")
+        max_secs = ms.get("max_secs", 2.0)
+        if isinstance(max_secs, bool) or not isinstance(max_secs, (int, float)) or max_secs <= 0:
+            raise ValueError(
+                "assertions.max_stall: max_secs must be a positive number, "
+                f"got {max_secs!r}"
+            )
+        s.assertions.max_stall = MaxStallAssertion(max_secs=float(max_secs))
     if "max_parent_switches" in asrt:
         xps = asrt["max_parent_switches"]
         _reject_unknown(
@@ -1012,10 +1141,10 @@ def _validate(s: Scenario):
             node_ids.update(str(p) for p in entry[:2])
             if len(entry) == 3:
                 transport = str(entry[2])
-                if transport not in VALID_TRANSPORTS:
+                if transport not in VALID_TRANSPORTS and transport not in DUAL_TRANSPORTS:
                     raise ValueError(
                         f"explicit adjacency[{i}]: transport '{transport}' "
-                        f"not in {VALID_TRANSPORTS}"
+                        f"not in {VALID_TRANSPORTS} or {DUAL_TRANSPORTS}"
                     )
         if len(node_ids) != s.topology.num_nodes:
             raise ValueError(

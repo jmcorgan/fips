@@ -21,6 +21,8 @@
 //!
 //! Follows the pattern established by `transport/ethernet/socket.rs`.
 
+#[cfg(unix)]
+mod bind_device;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

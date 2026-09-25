@@ -345,8 +345,9 @@ impl Node {
                                         "executor CrossConnectionLost is unreachable on \
                                          driven net-new establish paths"
                                     );
-                                    // Close this (losing) connection, drop its link,
-                                    // and restore `addr_to_link` to the winner.
+                                    // Close this connection, drop its link, and
+                                    // point `addr_to_link` for the new address at the
+                                    // winner, so a msg1 from it is recognised.
                                     if let Some(transport) =
                                         self.transports.get(&ambient.transport_id)
                                     {
@@ -445,10 +446,9 @@ impl Node {
                             debug_assert!(
                                 peer.transport_id().is_some()
                                     && peer.our_index().is_some()
-                                    && self.peers_by_index.contains_key(&(
-                                        peer.transport_id().unwrap(),
-                                        peer.our_index().unwrap().as_u32()
-                                    )),
+                                    && self
+                                        .peers_by_index
+                                        .contains_key(&peer.our_index().unwrap().as_u32()),
                                 "peers_by_index should contain pre-registered new index after cutover"
                             );
                             debug!(
@@ -469,7 +469,7 @@ impl Node {
                         false
                     };
                     // Re-register the new session with the decrypt worker — the
-                    // cache_key (transport_id, our_index) just changed, so the
+                    // cache_key (our_index) just changed, so the
                     // old worker entry is stale and every packet on the new
                     // session would miss the worker's HashMap lookup.
                     #[cfg(unix)]
@@ -485,19 +485,18 @@ impl Node {
                     // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the
                     // inline body survives only as `drain_peer_inline`, a
                     // debug-assert release fallback. Extract the real previous
-                    // index + transport_id under the peer borrow, drop the
-                    // borrow, then run the cache_key cleanup (which takes
-                    // &mut self for unregister_decrypt_worker_session).
-                    let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
-                        peer.complete_drain().map(|idx| (idx, peer.transport_id()))
-                    });
-                    if let Some((old_our_index, transport_id)) = drained {
-                        if let Some(tid) = transport_id {
-                            let cache_key = (tid, old_our_index.as_u32());
-                            self.peers_by_index.remove(&cache_key);
-                            #[cfg(unix)]
-                            self.unregister_decrypt_worker_session(cache_key);
-                        }
+                    // index under the peer borrow, drop the borrow, then run
+                    // the cache_key cleanup (which takes &mut self for
+                    // unregister_decrypt_worker_session).
+                    let drained = self
+                        .peers
+                        .get_mut(&node_addr)
+                        .and_then(|peer| peer.complete_drain());
+                    if let Some(old_our_index) = drained {
+                        let cache_key = old_our_index.as_u32();
+                        self.peers_by_index.remove(&cache_key);
+                        #[cfg(unix)]
+                        self.unregister_decrypt_worker_session(cache_key);
                         let _ = self.index_allocator.free(old_our_index);
                         trace!(
                             // Pin to the pre-refactor module (see the cutover log
@@ -532,10 +531,10 @@ impl Node {
                     // machine's `index` payload.
                 }
                 PeerAction::UnregisterDecryptSession { index } => {
-                    // Executor supplies `transport_id` from ambient; keyed by
-                    // (tid, index) like `remove_active_peer` / the rekey drain path.
+                    // Keyed by index alone, like `remove_active_peer` and the rekey
+                    // drain path.
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((ambient.transport_id, index.as_u32()));
+                    self.unregister_decrypt_worker_session(index.as_u32());
                     #[cfg(not(unix))]
                     let _ = index;
                 }

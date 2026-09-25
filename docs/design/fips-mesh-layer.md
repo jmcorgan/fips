@@ -446,6 +446,16 @@ message type). Any successfully decrypted frame — data, gossip, MMP report,
 or heartbeat — resets the peer's last-receive timestamp tracked by the MMP
 receiver.
 
+### Path probes
+
+A peer reachable over more than one transport holds a path per transport
+under the one session; each path is heartbeated on its own with a
+PathProbe (0x52) answered by a PathAck (0x53) on the same path, and a
+path that is going is announced with a PathClose (0x54) on a surviving
+one. Layouts in `wire-formats.md`; the mechanism in
+`docs/design/fips-multi-path-switchover.md`. A peer with one path is not
+path-probed: the bare Heartbeat above keeps its liveness.
+
 ### Dead Timeout
 
 When no traffic (of any kind) is received from a peer for the
@@ -483,6 +493,9 @@ established-frame envelope. They group naturally by purpose:
 - **Liveness and lifecycle**: Heartbeat is a minimal frame sent
   peer-to-peer to keep the link alive; Disconnect carries an orderly
   teardown reason code peer-to-peer.
+- **Paths**: PathProbe, PathAck and PathClose (0x52–0x54) prove, measure
+  and withdraw the individual transports a multi-path peer is reachable
+  over, peer-to-peer under the one session.
 
 Handshake messages (phase 0x1 msg1, phase 0x2 msg2) travel before
 encryption is established and are identified by the FMP common-prefix
@@ -559,6 +572,7 @@ an attacker sends invalid packets to elicit responses.
 | Rate limiting (token bucket) | **Implemented** |
 | Disconnect with reason codes | **Implemented** |
 | Heartbeat liveness detection | **Implemented** |
+| Multi-path (per-path probes, switchover without a handshake) | **Implemented** (`feat/multi-path-switchover`) |
 | Reconnection handling | **Implemented** |
 | Auto-reconnect after link-dead removal | **Implemented** |
 | Handshake message retry (link + session layer) | **Implemented** |

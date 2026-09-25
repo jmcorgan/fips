@@ -603,6 +603,34 @@ pub(crate) struct EntityMmp {
     pub path_mtu: Option<u16>,
 }
 
+/// One path to a peer in `show_peers`: the transport binding it runs over
+/// and the selection state that decides whether it carries traffic. The
+/// per-peer `fipsctl path show` emits the same fields plus the
+/// now-relative liveness ages, which a tick-published snapshot cannot carry.
+#[derive(Clone, PartialEq)]
+pub(crate) struct PeerPathRow {
+    pub transport_id: u32,
+    /// Transport instance name (`cable`, `main`), when it has one.
+    pub transport: Option<String>,
+    /// Transport type name, present only when the transport handle is found.
+    pub transport_type: Option<String>,
+    pub addr: String,
+    /// `probing` / `live` / `suspect` / `dead`.
+    pub state: String,
+    /// Whether this is the path we currently send on.
+    pub active: bool,
+    /// Whether the peer last said it sends on this path.
+    pub remote_active: bool,
+    /// `normal` / `backup`.
+    pub role: String,
+    pub pinned: bool,
+    pub last_rtt_ms: Option<u64>,
+    pub min_rtt_ms: Option<u64>,
+    pub rtt_samples: u32,
+    pub etx: f64,
+    pub score: Option<f64>,
+}
+
 /// Link-layer stat counters for a peer in `show_peers`.
 #[derive(Clone, PartialEq)]
 pub(crate) struct PeerLinkStats {
@@ -668,6 +696,9 @@ pub(crate) struct PeerRow {
     /// the kernel chooses on both sides.
     pub probe_bind: Option<IpAddr>,
     pub link_info: Option<PeerLinkInfo>,
+    /// Every path to the peer, in the peer's own order (the active path
+    /// first is not guaranteed; `active` marks it).
+    pub paths: Vec<PeerPathRow>,
     pub tree_depth: Option<usize>,
     /// `effective_depth = tree_depth + link_cost` — the same quantity
     /// `evaluate_parent` ranks parent candidates on. `None` when the peer is

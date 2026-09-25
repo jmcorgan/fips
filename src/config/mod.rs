@@ -39,13 +39,13 @@ pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward,
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
     NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy,
-    RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig,
-    TreeConfig,
+    PathConfig, RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig,
+    SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
     BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, TcpConfig, TorConfig,
-    TransportInstances, TransportsConfig, UdpConfig,
+    TransportInstances, TransportRole, TransportsConfig, UdpConfig,
 };
 
 /// Default config filename.
@@ -1309,6 +1309,18 @@ impl Config {
                     self.node.link_dead_timeout_secs,
                 )));
             }
+        }
+
+        // Path selection. The margin is the whole fail-back policy: a
+        // standby must beat the active path's score by this factor before
+        // traffic moves. Below 1.0 (or NaN, which compares false both ways)
+        // two paths of equal score would swap after every dwell, each swap
+        // re-seeding the path MTU and holding the tree-visible link cost.
+        let margin = self.node.path.switch_margin;
+        if !margin.is_finite() || margin < 1.0 {
+            return Err(ConfigError::Validation(format!(
+                "`node.path.switch_margin` = {margin} must be a finite number of at least 1.0:                  it is the factor a standby's score must beat the active path's by, and                  anything less makes two equal paths swap after every dwell"
+            )));
         }
 
         let native = &self.node.native_api;
@@ -2696,6 +2708,20 @@ node:
         assert_eq!(config.node.lookup.attempt_timeouts_secs, vec![1, 2, 4, 8]);
         // The compat block is consumed by normalize.
         assert!(config.node.discovery.is_none());
+    }
+
+    #[test]
+    fn a_switch_margin_below_one_is_refused() {
+        // Two paths of equal score would swap after every dwell.
+        for bad in [0.9, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut config = Config::default();
+            config.node.path.switch_margin = bad;
+            let err = config.validate().expect_err("validation should fail");
+            assert!(err.to_string().contains("switch_margin"), "{bad}: {err}");
+        }
+        let mut config = Config::default();
+        config.node.path.switch_margin = 1.0;
+        config.validate().expect("1.0 means any better path wins");
     }
 
     #[test]

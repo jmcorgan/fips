@@ -347,11 +347,12 @@ impl Node {
         // Re-evaluate parent selection with current link costs.
         // Exclude peers without MMP RTT data — they are not yet eligible
         // as parent candidates (prevents oscillation from optimistic defaults).
+        let now_ms = crate::time::mono_ms();
         let peer_costs: BTreeMap<NodeAddr, f64> = self
             .peers
             .iter()
             .filter(|(_, peer)| peer.has_srtt())
-            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .map(|(addr, peer)| (*addr, peer.link_cost(now_ms)))
             .collect();
         // No peers are excluded from parent candidacy on this branch; the
         // non-full/leaf skip is a next-only shell refinement.
@@ -618,11 +619,12 @@ impl Node {
 
         self.last_parent_reeval = Some(now);
 
+        let now_ms = crate::time::mono_ms();
         let peer_costs: BTreeMap<NodeAddr, f64> = self
             .peers
             .iter()
             .filter(|(_, peer)| peer.has_srtt())
-            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .map(|(addr, peer)| (*addr, peer.link_cost(now_ms)))
             .collect();
         // No peers are excluded from parent candidacy on this branch; the
         // non-full/leaf skip is a next-only shell refinement.
@@ -770,11 +772,12 @@ impl Node {
         // before the recovery mutation — exactly as before.
         self.metrics().tree.parent_losses.inc();
 
+        let now_ms = crate::time::mono_ms();
         let peer_costs: BTreeMap<NodeAddr, f64> = self
             .peers
             .iter()
             .filter(|(_, peer)| peer.has_srtt())
-            .map(|(addr, peer)| (*addr, peer.link_cost()))
+            .map(|(addr, peer)| (*addr, peer.link_cost(now_ms)))
             .collect();
 
         // Wall-clock seconds stamped onto the new declaration; monotonic ms for

@@ -2,17 +2,24 @@
 
 use crate::NodeAddr;
 use crate::node::Node;
+use crate::transport::{TransportAddr, TransportId};
 use tracing::{debug, info, trace};
 
 impl Node {
     /// Dispatch a decrypted link message to the appropriate handler.
     ///
     /// Link messages are protocol messages exchanged between authenticated peers.
+    ///
+    /// `arrival` is the transport and address the frame came in on. Most
+    /// handlers do not care: the frame was authenticated by the session,
+    /// which is per peer, not per path. The path probe exchange does: it
+    /// answers on the path the probe used, and that is the whole point.
     pub(in crate::node) async fn dispatch_link_message(
         &mut self,
         from: &NodeAddr,
         plaintext: &[u8],
         ce_flag: bool,
+        arrival: (TransportId, &TransportAddr),
     ) {
         if plaintext.is_empty() {
             return;
@@ -57,6 +64,18 @@ impl Node {
             0x51 => {
                 // Heartbeat — no-op, last_recv_time already updated by record_recv()
                 trace!(peer = %self.peer_display_name(from), "Received heartbeat");
+            }
+            0x52 => {
+                // PathProbe
+                self.handle_path_probe(from, payload, arrival).await;
+            }
+            0x53 => {
+                // PathAck
+                self.handle_path_ack(from, payload, arrival);
+            }
+            0x54 => {
+                // PathClose
+                self.handle_path_close(from, payload).await;
             }
             _ => {
                 debug!(msg_type = msg_type, "Unknown link message type");
@@ -162,37 +181,37 @@ impl Node {
         let link_id = peer.link_id();
         let transport_id = peer.transport_id();
 
-        // Free session indices (current, rekey, pending, previous)
-        if let Some(tid) = transport_id {
-            if let Some(idx) = peer.our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-            if let Some(idx) = peer.rekey_our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.pending_outbound.remove(&cache_key);
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-            if let Some(idx) = peer.pending_our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-            if let Some(idx) = peer.previous_our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
+        // Free session indices (current, rekey, pending, previous). Keyed by
+        // index alone: a session index is unique across transports
+        // (`IndexAllocator` is global), so the transport plays no part.
+        if let Some(idx) = peer.our_index() {
+            let cache_key = idx.as_u32();
+            self.peers_by_index.remove(&cache_key);
+            #[cfg(unix)]
+            self.unregister_decrypt_worker_session(cache_key);
+            let _ = self.index_allocator.free(idx);
+        }
+        if let Some(idx) = peer.rekey_our_index() {
+            let cache_key = idx.as_u32();
+            self.pending_outbound.remove(&cache_key);
+            self.peers_by_index.remove(&cache_key);
+            #[cfg(unix)]
+            self.unregister_decrypt_worker_session(cache_key);
+            let _ = self.index_allocator.free(idx);
+        }
+        if let Some(idx) = peer.pending_our_index() {
+            let cache_key = idx.as_u32();
+            self.peers_by_index.remove(&cache_key);
+            #[cfg(unix)]
+            self.unregister_decrypt_worker_session(cache_key);
+            let _ = self.index_allocator.free(idx);
+        }
+        if let Some(idx) = peer.previous_our_index() {
+            let cache_key = idx.as_u32();
+            self.peers_by_index.remove(&cache_key);
+            #[cfg(unix)]
+            self.unregister_decrypt_worker_session(cache_key);
+            let _ = self.index_allocator.free(idx);
         }
 
         // Remove link and address mapping

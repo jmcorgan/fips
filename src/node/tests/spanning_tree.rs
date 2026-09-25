@@ -19,13 +19,13 @@ static LARGE_NETWORK_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 /// address. Each node gets a unique synthetic address (`loopback:{n}`) from
 /// `LOOPBACK_ADDR_COUNTER`, so addresses never collide across concurrently
 /// running tests and stale entries from finished tests are harmless.
-static LOOPBACK_REGISTRY: std::sync::LazyLock<LoopbackRegistry> =
+pub(super) static LOOPBACK_REGISTRY: std::sync::LazyLock<LoopbackRegistry> =
     std::sync::LazyLock::new(new_registry);
 
 static LOOPBACK_ADDR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Allocate the next globally-unique loopback address.
-fn next_loopback_addr() -> TransportAddr {
+pub(super) fn next_loopback_addr() -> TransportAddr {
     let n = LOOPBACK_ADDR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     TransportAddr::from_string(&format!("loopback:{}", n))
 }
@@ -187,7 +187,7 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
     initiator
         .node
         .pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+        .insert(our_index.as_u32(), link_id);
 
     let transport = initiator.node.transports.get(&transport_id).unwrap();
     transport

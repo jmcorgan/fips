@@ -157,8 +157,7 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
     );
     let our_index = peer.our_index().expect("promoted peer has our_index");
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.contains_key(&our_index.as_u32()),
         "fresh session index registered in peers_by_index"
     );
     assert_eq!(node.peer_count(), 1, "old peer removed, new peer added");
@@ -356,8 +355,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     node.links.insert(out_link, out_l);
     node.addr_to_link
         .insert((transport_id, out_addr.clone()), out_link);
-    node.pending_outbound
-        .insert((transport_id, out_index.as_u32()), out_link);
+    node.pending_outbound.insert(out_index.as_u32(), out_link);
     assert_eq!(node.peer_count(), 0);
 
     // Inbound msg1 from the same identity, different source addr.
@@ -380,8 +378,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
         "pending outbound to the same identity must be preserved (deferred cleanup)"
     );
     assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, out_index.as_u32())),
+        node.pending_outbound.contains_key(&out_index.as_u32()),
         "the outbound pending_outbound entry is preserved for msg2 index-learning"
     );
 }
@@ -427,8 +424,7 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, 1000)
         .unwrap();
-    node.pending_outbound
-        .insert((transport_id, out_index.as_u32()), out_link);
+    node.pending_outbound.insert(out_index.as_u32(), out_link);
 
     let data = craft_msg1_wire(&node, &sender, [4u8; 8], SessionIndex::new(0x44), 2000);
     let packet = ReceivedPacket {
@@ -547,7 +543,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .insert((transport_id_a, remote_addr_b.clone()), link_a_out);
     node_a
         .pending_outbound
-        .insert((transport_id_a, out_index_a.as_u32()), link_a_out);
+        .insert(out_index_a.as_u32(), link_a_out);
 
     // B initiates to A.
     let link_b_out = node_b.allocate_link_id();
@@ -584,7 +580,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .insert((transport_id_b, remote_addr_a.clone()), link_b_out);
     node_b
         .pending_outbound
-        .insert((transport_id_b, out_index_b.as_u32()), link_b_out);
+        .insert(out_index_b.as_u32(), link_b_out);
 
     // Both put msg1 on the wire.
     node_a
@@ -724,17 +720,12 @@ fn sender_with_addr_relation(node: &Node, want_greater: bool) -> Identity {
 /// Arm a local in-flight (initiator) rekey on `node`'s peer for `sender`, with a
 /// real allocated index registered in `peers_by_index`/`pending_outbound` (as a
 /// genuine in-flight rekey would be). Returns the armed rekey index.
-fn arm_local_rekey(
-    node: &mut Node,
-    sender: &Identity,
-    sender_addr: &NodeAddr,
-    transport_id: TransportId,
-) -> SessionIndex {
+fn arm_local_rekey(node: &mut Node, sender: &Identity, sender_addr: &NodeAddr) -> SessionIndex {
     let rekey_index = node.index_allocator.allocate().unwrap();
     node.peers_by_index
-        .insert((transport_id, rekey_index.as_u32()), *sender_addr);
+        .insert(rekey_index.as_u32(), *sender_addr);
     node.pending_outbound
-        .insert((transport_id, rekey_index.as_u32()), LinkId::new(0xF00D));
+        .insert(rekey_index.as_u32(), LinkId::new(0xF00D));
     let local = Identity::generate();
     let hs = HandshakeState::new_initiator(local.keypair(), sender.pubkey_full());
     node.get_peer_mut(sender_addr)
@@ -780,10 +771,7 @@ async fn chartest_msg1_rekey_responder_stores_pending_session() {
         assert!(p.pending_new_session().is_none());
         p.our_index().unwrap()
     };
-    assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, old_index.as_u32()))
-    );
+    assert!(node.peers_by_index.contains_key(&old_index.as_u32()));
     let index_count_before = node.index_allocator.count();
 
     // Age the live session past the 30s rekey gate (test-only seam).
@@ -832,13 +820,11 @@ async fn chartest_msg1_rekey_responder_stores_pending_session() {
     assert!(p.has_session(), "current session remains live");
 
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, old_index.as_u32())),
+        node.peers_by_index.contains_key(&old_index.as_u32()),
         "current index still registered"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, new_index.as_u32())),
+        node.peers_by_index.contains_key(&new_index.as_u32()),
         "new pending index registered"
     );
     assert_eq!(
@@ -890,7 +876,7 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
     node.get_peer_mut(&sender_addr)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id);
+    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr);
     assert!(node.get_peer(&sender_addr).unwrap().rekey_in_progress());
     let index_count_before = node.index_allocator.count();
 
@@ -919,13 +905,11 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
         "our rekey index retained"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "our rekey index still registered in peers_by_index"
     );
     assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        node.pending_outbound.contains_key(&rekey_index.as_u32()),
         "our rekey pending_outbound entry retained"
     );
     assert_eq!(
@@ -978,7 +962,7 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
     node.get_peer_mut(&sender_addr)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id);
+    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr);
     assert!(node.get_peer(&sender_addr).unwrap().rekey_in_progress());
 
     // Their simultaneous rekey msg1 arrives.
@@ -1011,14 +995,11 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
         .expect("responder allocated a pending index");
 
     assert!(
-        !node
-            .pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        !node.pending_outbound.contains_key(&rekey_index.as_u32()),
         "abandoned rekey pending_outbound entry removed"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, new_index.as_u32())),
+        node.peers_by_index.contains_key(&new_index.as_u32()),
         "new pending index registered"
     );
 
@@ -1068,7 +1049,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         .expect("peer established")
         .our_index()
         .expect("the established peer holds a session index");
-    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id);
+    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr);
     let allocated_before = node.index_allocator.count();
 
     // Controls: without these the assertions after the abandon could pass
@@ -1078,13 +1059,11 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         "control: the armed rekey holds an index"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "control: the rekey index is registered for dispatch"
     );
     assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        node.pending_outbound.contains_key(&rekey_index.as_u32()),
         "control: the rekey index is registered for msg2 dispatch"
     );
 
@@ -1108,15 +1087,11 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         "and must free exactly one"
     );
     assert!(
-        !node
-            .peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        !node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "the abandoned cycle must clear its dispatch registration"
     );
     assert!(
-        !node
-            .pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        !node.pending_outbound.contains_key(&rekey_index.as_u32()),
         "the abandoned cycle must clear its msg2 dispatch entry"
     );
 
@@ -1128,8 +1103,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         "the established session's own index must not be freed"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, session_index.as_u32())),
+        node.peers_by_index.contains_key(&session_index.as_u32()),
         "the established session stays registered for dispatch"
     );
 }

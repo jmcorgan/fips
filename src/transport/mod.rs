@@ -248,6 +248,20 @@ pub enum TransportError {
 }
 
 impl TransportError {
+    /// Whether the kernel refused the send for want of a route: the
+    /// interface is up but nothing is reachable through it. A hard signal
+    /// that the path is gone (`ENETUNREACH`, `EHOSTUNREACH`), distinct from
+    /// `is_transient`: the binder is not going to fix this.
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::HostUnreachable
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether this failure is expected to clear on its own.
     ///
     /// The distinction callers need is not *what* went wrong but whether
@@ -565,6 +579,15 @@ impl Link {
         link
     }
 
+    /// Point the link at another transport and address.
+    ///
+    /// A peer whose active path switched keeps its link (the control machine
+    /// is keyed on it); the record follows the traffic.
+    pub fn rebind(&mut self, transport_id: TransportId, remote_addr: TransportAddr) {
+        self.transport_id = transport_id;
+        self.remote_addr = remote_addr;
+    }
+
     /// Get the link ID.
     pub fn link_id(&self) -> LinkId {
         self.link_id
@@ -746,6 +769,12 @@ pub trait Transport {
     /// Default: true (preserves UDP's current implicit behavior).
     fn accept_connections(&self) -> bool {
         true
+    }
+
+    /// The transport's path-selection role. Default: normal. Concrete
+    /// transports read from their own config.
+    fn role(&self) -> crate::config::TransportRole {
+        crate::config::TransportRole::Normal
     }
 
     /// Close a specific connection (connection-oriented transports only).
@@ -1026,6 +1055,15 @@ impl TransportHandle {
                     failed_attempts: state.attempts(),
                 })
             }
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.carrier().map(|carrier| InterfacePresence {
+                presence: "present",
+                carrier,
+                policy: "optional",
+                since_secs: 0,
+                binds: 1,
+                failed_attempts: 0,
+            }),
             _ => None,
         }
     }
@@ -1104,6 +1142,22 @@ impl TransportHandle {
             TransportHandle::Ble(t) => t.discover(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.discover(),
+        }
+    }
+
+    /// The transport's path-selection role.
+    pub fn role(&self) -> crate::config::TransportRole {
+        match self {
+            TransportHandle::Udp(t) => t.role(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(t) => t.role(),
+            TransportHandle::Tcp(t) => t.role(),
+            TransportHandle::Tor(t) => t.role(),
+            TransportHandle::Nym(t) => t.role(),
+            #[cfg(ble_available)]
+            TransportHandle::Ble(t) => t.role(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.role(),
         }
     }
 
@@ -1196,7 +1250,7 @@ impl TransportHandle {
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
-            TransportHandle::Loopback(_) => {} // connectionless no-op
+            TransportHandle::Loopback(t) => t.record_close(addr), // connectionless; recorded for tests
         }
     }
 

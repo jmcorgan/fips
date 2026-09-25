@@ -463,7 +463,7 @@ mod tests {
         // don't conflict with anything else on the test host.
         let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let owned =
-            crate::transport::udp::open_connected_fd(local_addr, peer_addr, 1 << 20, 1 << 20)
+            crate::transport::udp::open_connected_fd(local_addr, peer_addr, 1 << 20, 1 << 20, None)
                 .expect("open_connected_fd");
         let socket = Arc::new(ConnectedPeerSocket::from_fd(owned, peer_addr, local_addr));
 

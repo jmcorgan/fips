@@ -31,7 +31,7 @@
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-ethernet-churn, chaos-tcp-mesh,
-#   chaos-congestion-stress,
+#   chaos-congestion-stress, dual-path-flap, dual-udp-flap,
 #   sidecar, dns-resolver, deb-install, medium-change
 #
 # Opt-in (require --with-tor; depend on live Tor network):
@@ -166,6 +166,8 @@ CHAOS_SUITES=(
     "ethernet-mesh ethernet-mesh"
     "ethernet-only ethernet-only"
     "ethernet-churn ethernet-churn"
+    "dual-path-flap dual-path-flap"
+    "dual-udp-flap dual-udp-flap"
     "tcp-mesh tcp-mesh"
     "congestion-stress congestion-stress"
 )

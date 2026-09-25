@@ -50,6 +50,18 @@ pub struct LoopbackTransport {
     mtu: u16,
     /// Shared address-to-receiver registry.
     registry: LoopbackRegistry,
+    /// Beacons a test has queued for the next `discover()` drain, standing
+    /// in for the transport-neighbor beacons a real transport hears.
+    discovered: Mutex<Vec<DiscoveredPeer>>,
+    /// Carrier a test has set, standing in for an interface-bound
+    /// transport's `IFF_RUNNING`. `None`: not interface-bound, no presence
+    /// reported, which is the default.
+    carrier: Mutex<Option<bool>>,
+    /// Every `close_connection` the node asked for, in order. Loopback is
+    /// connectionless so the close itself does nothing; the record lets a
+    /// test say whether a socket a connection-oriented transport would own
+    /// was kept or closed.
+    closed: Mutex<Vec<TransportAddr>>,
 }
 
 impl LoopbackTransport {
@@ -75,7 +87,39 @@ impl LoopbackTransport {
             my_addr,
             mtu,
             registry,
+            discovered: Mutex::new(Vec::new()),
+            carrier: Mutex::new(None),
+            closed: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Record a `close_connection` call.
+    pub fn record_close(&self, addr: &TransportAddr) {
+        self.closed.lock().unwrap().push(addr.clone());
+    }
+
+    /// The addresses the node has asked to close on this transport.
+    pub fn closed(&self) -> Vec<TransportAddr> {
+        self.closed.lock().unwrap().clone()
+    }
+
+    /// Pretend this transport is bound to an interface with (or without)
+    /// carrier; `None` returns it to reporting no presence at all.
+    pub fn set_carrier(&self, carrier: Option<bool>) {
+        *self.carrier.lock().unwrap() = carrier;
+    }
+
+    /// The carrier a test set, if any.
+    pub fn carrier(&self) -> Option<bool> {
+        *self.carrier.lock().unwrap()
+    }
+
+    /// Queue a beacon for the next `discover()` drain, as if this transport
+    /// had heard `addr` announce `pubkey_hint`.
+    pub fn inject_discovered(&self, addr: TransportAddr, pubkey_hint: secp256k1::XOnlyPublicKey) {
+        let mut peer = DiscoveredPeer::new(self.transport_id, addr);
+        peer.pubkey_hint = Some(pubkey_hint);
+        self.discovered.lock().unwrap().push(peer);
     }
 
     /// This transport's synthetic loopback address.
@@ -169,6 +213,11 @@ impl Transport for LoopbackTransport {
     }
 
     fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> {
-        Ok(Vec::new())
+        Ok(std::mem::take(&mut *self.discovered.lock().unwrap()))
+    }
+
+    /// Beacons a test injects are meant to be acted on.
+    fn auto_connect(&self) -> bool {
+        true
     }
 }

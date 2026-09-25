@@ -20,6 +20,10 @@ from .assertions import (
     evaluate_max_errors,
     evaluate_max_parent_switches,
     evaluate_min_parent_switches,
+    evaluate_path_switches,
+    evaluate_max_promotions,
+    evaluate_switch_latency,
+    evaluate_max_stall,
     evaluate_min_traffic,
     evaluate_tree_parents,
 )
@@ -318,9 +322,9 @@ class SimRunner:
         # The entrypoint script waits for configured Ethernet interfaces
         # to appear before starting FIPS, so we just need to create the
         # veth pairs promptly after containers are running.
-        if self.topology.has_ethernet():
+        if self.topology.has_veth():
             self.veth_mgr = VethManager(self.topology)
-            log.info("Setting up Ethernet veth pairs...")
+            log.info("Setting up veth pairs...")
             self.veth_mgr.setup_all()
 
         # 7. Initialize managers
@@ -763,6 +767,45 @@ class SimRunner:
                 outcome = self._evaluate_max_parent_switches(
                     xps_cfg, result.parent_switches
                 )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            ps_cfg = self.scenario.assertions.path_switches
+            if ps_cfg is not None:
+                outcome = evaluate_path_switches(ps_cfg, len(result.path_switches))
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            mp_cfg = self.scenario.assertions.max_promotions
+            if mp_cfg is not None:
+                outcome = evaluate_max_promotions(mp_cfg, result.peers_promoted)
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            sl_cfg = self.scenario.assertions.switch_latency
+            if sl_cfg is not None:
+                flap_events = self.link_mgr.flap_events if self.link_mgr else []
+                outcome = evaluate_switch_latency(
+                    sl_cfg, flap_events, result.path_switches
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            stall_cfg = self.scenario.assertions.max_stall
+            if stall_cfg is not None:
+                outcome = evaluate_max_stall(stall_cfg, iperf_results)
                 self.assertion_outcomes.append(outcome)
                 if outcome.passed:
                     log.info("%s", outcome.detail)
