@@ -285,6 +285,26 @@ with v0.5.x or earlier peers.
 
 #### Packaging
 
+- An RPM package for Fedora and RHEL (`packaging/rpm/`,
+  `make -C packaging rpm`), built from the same binaries the `.deb` and the
+  systemd tarball carry and attached to each release beside them. The package
+  is named `fips-mesh`, not `fips`: Fedora's namespace already has a `fips` —
+  an unrelated OpenGL FITS image viewer at 3.4.0 — which owns `/usr/bin/fips`,
+  so a `fips` at 0.6.0 is an older release of that one to every RPM tool, and
+  an ordinary `dnf upgrade` replaces a running mesh node with an image viewer.
+  The spec declares `Conflicts: fips`, since both ship `/usr/bin/fips`.
+  `make rpm` compiles nothing on the host: it builds in the pinned image by way
+  of `build-deb-container.sh`, which has already run the glibc floor and
+  Depends checks, and packages what that produced; `rpmbuild` itself runs in
+  `FIPS_RPM_BUILD_IMAGE` (AlmaLinux 9, pinned by digest), which supplies the
+  `systemd-rpm-macros` a build host may lack and writes packages every newer
+  rpm can read. `make rpm-host` remains for iteration, as `deb-host` does.
+  `testing/check-rpm-floor.sh` reads the glibc requirement rpm derived out of
+  the finished package — the table `dnf` enforces at install time — and fails a
+  build above the declared floor. Erase keeps `/etc/fips`: rpm has no purge, so
+  the code that removes a node's identity keys on a dpkg purge would run on an
+  ordinary erase, including the one a distribution upgrade performs.
+
 - A pfSense package (`packaging/pfsense/`, `gmake pfsense`). pfSense is
   FreeBSD underneath, but the FreeBSD package fails there in three
   silent ways: pfSense runs only `/usr/local/etc/rc.d/*.sh` at boot and
@@ -484,6 +504,17 @@ with v0.5.x or earlier peers.
   the dial-time identity in its own field and compares it against the
   identity msg2 carried, dropping the leg on a mismatch. Two situations that
   used to end in a connection no longer do, both of them intended.
+
+#### Packaging
+
+- The glibc floor is 2.34, one step below the 2.35 Ubuntu 22.04 sets. Both
+  families ship the same binaries, so the project-wide floor is the lowest
+  supported member of either, and that is RHEL 9 and its rebuilds.
+  `packaging/build-floor.env` now records the RPM family alongside the Debian
+  one, and records RHEL 8 as a deliberate exclusion: its glibc is 2.28, and
+  reaching it means a second build image and a second floor. `FIPS_BUILD_IMAGE`
+  is still the oldest Debian-family distribution, which is no longer the oldest
+  distribution outright.
 
 #### Packaging (Debian)
 

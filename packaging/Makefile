@@ -6,6 +6,8 @@
 # Usage:
 #   make deb        Build a Debian/Ubuntu .deb package in the pinned container
 #   make deb-host   Build a .deb with the host toolchain (see below)
+#   make rpm        Build an .rpm in the pinned container
+#   make rpm-host   Build an .rpm with the host toolchain (see below)
 #   make tarball    Build a systemd install tarball
 #   make ipk        Build an OpenWrt .ipk package (opkg, OpenWrt 24.x and earlier)
 #   make apk        Build an OpenWrt .apk package (apk-tools, mandatory on OpenWrt 25+)
@@ -21,7 +23,7 @@ SHELL := /bin/bash
 PACKAGING_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT  := $(abspath $(PACKAGING_DIR)/..)
 
-.PHONY: all deb deb-host tarball ipk apk aur pkg freebsd pfsense zip clean
+.PHONY: all deb deb-host rpm rpm-host tarball ipk apk aur pkg freebsd pfsense zip clean
 
 all: deb tarball
 
@@ -39,6 +41,25 @@ deb:
 # attached to the artifact that ships.
 deb-host:
 	@bash $(PACKAGING_DIR)/debian/build-deb.sh
+
+# `rpm` compiles nothing on the host either: it builds the binaries in the same
+# pinned container the .deb uses, packages those, and then checks the glibc
+# requirement rpm derived for the finished package against the declared floor.
+# So the RPM carries the same objects as the .deb and the tarball, and a
+# package built above the floor fails here rather than at a user's `dnf
+# install` -- which is what `deb` gets from its container and its Depends
+# check.
+rpm:
+	@bash $(PACKAGING_DIR)/rpm/build-rpm-container.sh
+
+# `rpm-host` packages whatever the host toolchain built, and like `deb-host` it
+# is for local iteration and NOT for anything anyone else installs. Nothing
+# checks its floor, deliberately, so the check stays attached to the artifact
+# that ships. Its failure is at least loud: rpm derives the requirement from
+# the binaries, so a package built on a host above the floor is refused by dnf
+# on an older system rather than installed and unable to start.
+rpm-host:
+	@bash $(PACKAGING_DIR)/rpm/build-rpm.sh
 
 tarball:
 	@bash $(PACKAGING_DIR)/systemd/build-tarball.sh
