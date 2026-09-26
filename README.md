@@ -132,6 +132,24 @@ default `/etc/fips/fips.yaml` you can edit before starting. The package
 enables `fips` and `fips-dns` but starts neither, which is why the
 second command is there.
 
+On Fedora or RHEL, download `fips-mesh-<version>-<release>.x86_64.rpm` (or
+`.aarch64.rpm`) and install it:
+
+```bash
+sudo dnf install ./fips-mesh-<version>-<release>.x86_64.rpm
+sudo systemctl start fips fips-dns
+```
+
+The package is `fips-mesh` because Fedora's `fips` is an unrelated FITS image
+viewer that owns `/usr/bin/fips`; the two conflict and dnf will say so.
+
+It carries the same binaries as the `.deb` — built in the same pinned
+container, checked against the same glibc floor — and leaves the same
+post-install state. No install-test suite covers it, and it does not
+delete `/etc/fips` when removed, because rpm has no purge;
+[packaging/README.md](packaging/README.md) has the full list of what it
+does and does not share with the `.deb`.
+
 For macOS, Windows, FreeBSD (including a pfSense build under
 `packaging/pfsense/`), OpenWrt, the systemd tarball or a Nix
 flake, see [docs/getting-started.md](docs/getting-started.md)
@@ -200,7 +218,10 @@ and Android. Linux is not one target. Debian, Ubuntu, Arch and NixOS
 are the same glibc build, and what
 differs is the packaging: Debian and Ubuntu take the same `.deb`, Arch
 takes `fips` from the AUR, and NixOS uses the Nix flake described
-below. **Only the `.deb` is exercised by an install test**, by the
+below, and Fedora and RHEL take the `.rpm` built from the same binaries by
+`packaging/rpm/`. RPM-based distributions have no column of
+their own for the same reason pfSense does not: the build is the glibc
+one and only the packaging differs. **Only the `.deb` is exercised by an install test**, by the
 `deb-install` suite across debian12, debian13, ubuntu22, ubuntu24 and
 ubuntu26; neither the AUR package nor the flake is. That suite runs on
 every push and pull request, on x86_64, against a `.deb` built by the same

@@ -8,6 +8,7 @@ and `make apk` write to `dist/` instead.
 
 ```sh
 make deb        # Debian/Ubuntu .deb (built in the pinned container)
+make rpm        # Fedora/RHEL .rpm, named fips-mesh (built in the pinned container)
 make tarball    # systemd install tarball
 make ipk        # OpenWrt .ipk (opkg, OpenWrt 24.x and earlier)
 make apk        # OpenWrt .apk (apk-tools, mandatory on OpenWrt 25+)
@@ -22,9 +23,11 @@ make all        # deb + tarball (default)
 ## The two Debian build paths
 
 `make deb` builds in a container pinned to the oldest supported
-distribution, named with the glibc floor in
+Debian-family distribution, named with the glibc floor in
 [build-floor.env](build-floor.env), and checks the package it produced
-against that floor before handing it back. Its only host prerequisite is
+against that floor before handing it back. The floor itself is lower than that
+image's glibc: RHEL 9 is the lowest supported distribution project-wide, and
+both families ship these same binaries. Its only host prerequisite is
 docker: the toolchain and the build dependencies live in the image. This
 is the path the release workflow, the integration suite and the internal
 builder all take, so a package that passes locally is built the way the
@@ -74,6 +77,8 @@ packaging/
   common/         Shared assets (default config, hosts file) and pkg-lib.sh,
                   the helpers the FreeBSD and pfSense builders share
   debian/         Debian/Ubuntu .deb packaging via cargo-deb
+  rpm/            Fedora/RHEL .rpm packaging via rpmbuild, over the binaries
+                  the Debian container build produces
   freebsd/        FreeBSD .pkg packaging via pkg-create(8)
   pfsense/        pfSense .pkg packaging (FreeBSD-based, but not the same)
   macos/          macOS .pkg installer via pkgbuild
@@ -117,6 +122,124 @@ sudo dpkg -r fips
 # Purge (removes config and identity keys)
 sudo dpkg -P fips
 ```
+
+### RPM (`.rpm`)
+
+Built with `rpmbuild` from [rpm/fips.spec](rpm/fips.spec). The same files land
+in the same places as the `.deb`, the same `fips` system group is created, the
+same `/etc/fips/fips.yaml` seeding happens, and the same two units are enabled;
+`fips-firewall` and `fips-gateway` stay opt-in.
+
+**The package is named `fips-mesh`, not `fips`.** Fedora's namespace already
+has a `fips` — an unrelated OpenGL FITS image viewer, currently 3.4.0 — which
+owns `/usr/bin/fips`. Ours at 0.6.0 would be an *older* `fips` to every RPM
+tool, so a routine `dnf upgrade` replaces a running mesh node with an image
+viewer and takes the units with it; that is not hypothetical, it happened
+within the hour on a test machine. The two cannot coexist either, since both
+ship `/usr/bin/fips`, so the spec declares `Conflicts: fips` and dnf refuses
+with both names on screen instead of a bare path.
+
+Like the Debian package, it has two build paths, and for the same reason.
+
+`make rpm` compiles nothing on the host: it builds the binaries in the image
+declared in [build-floor.env](build-floor.env), packages those, and checks the
+glibc requirement of the finished package against the declared floor. So the
+RPM carries the same objects as the `.deb` and the tarball, and a package built
+above the floor fails there rather than at a user's `dnf install`. rpmbuild
+runs in `FIPS_RPM_BUILD_IMAGE` (AlmaLinux 9, pinned by digest), which supplies
+two things a build host may lack: rpmbuild itself, and systemd-rpm-macros,
+without which the spec's `%systemd_post` would not expand and the package would
+ship scriptlets that quietly do nothing. Docker is the only host prerequisite.
+
+`make rpm-host` packages whatever the host toolchain built. Like `deb-host` it
+is for local iteration and not for anything anyone else installs; nothing
+checks its floor.
+
+The release workflow calls the same container script both matrix legs, with
+`--no-build`, over the binaries it has already recovered from the `.deb` — one
+build, three artifacts — and attaches the result to the GitHub Release next to
+the `.deb` and the tarball.
+
+```sh
+# Build (requires docker)
+make rpm
+
+# Install
+sudo dnf install ./deploy/fips-mesh-<version>-<release>.<arch>.rpm
+
+# Remove (keeps /etc/fips, including identity keys)
+sudo dnf remove fips-mesh
+```
+
+Two firewalls, on the distributions where firewalld owns nftables. They do not
+conflict — firewalld manages its own tables and `fips-firewall.service` adds
+`table inet fips`, which returns immediately for anything not arriving on
+`fips0` — but firewalld is filtering the node whether or not that unit ever
+runs, and in two places worth knowing:
+
+- **Inbound peers arrive on your ordinary interface**, on the transport ports
+  (`2121/udp` and `8443/tcp` in the shipped config), and those are in whatever
+  zone that interface belongs to. Fedora Workstation's default zone opens
+  `1025-65535` for both protocols, so it works there untouched; RHEL, CentOS
+  Stream and Fedora Server default to `public`, which allows `ssh`,
+  `dhcpv6-client` and `mdns` and nothing else, so a node there accepts no
+  inbound peers until the ports are opened:
+
+  ```sh
+  sudo firewall-cmd --permanent --add-port=2121/udp --add-port=8443/tcp
+  sudo firewall-cmd --reload
+  ```
+
+- **`fips0` itself lands in the default zone**, since nothing assigns it one —
+  `firewall-cmd --get-zone-of-interface=fips0` says `no zone`, which means the
+  default. Mesh traffic to local services is then subject to that zone as well
+  as to the fips baseline. Giving the interface its own zone keeps the two
+  decisions apart, and `trusted` leaves the filtering to `/etc/fips/fips.nft`
+  and its drop-ins, which is where it is meant to be:
+
+  ```sh
+  sudo firewall-cmd --permanent --zone=trusted --change-interface=fips0
+  sudo firewall-cmd --reload
+  ```
+
+Either way the fips table stays invisible to firewalld: `firewall-cmd
+--list-all` will not show it, and opening a port with `firewall-cmd` does not
+open it in the fips table. That is what `/etc/fips/fips.d/` is for.
+
+Note also that a default RHEL, CentOS Stream or AlmaLinux install has no
+resolver backend `fips-dns-setup` can use: systemd is older than the
+`dns-delegate` drop-in, systemd-resolved is installed but not enabled, and
+dnsmasq is not installed. The script falls through to its last branch and
+prints manual instructions, so `.fips` names do not resolve until a backend is
+in place. Fedora, which enables systemd-resolved, is configured automatically.
+
+Three things differ from the Debian package, because the package managers do:
+
+- **The floor is checked on the package, not against it.** `cargo-deb` writes a
+  dependency floor that can disagree with the binaries, so
+  `testing/check-deb-depends.sh` compares the two. rpm derives the requirement
+  from the ELF files and cannot disagree with them, which moves the risk one
+  step back — to binaries built above the floor in the first place.
+  `testing/check-rpm-floor.sh` reads `libc.so.6(GLIBC_x.y)` out of the finished
+  package, the same table `dnf` enforces at install time, and fails the build
+  above the floor.
+- **No purge.** dpkg distinguishes remove from purge, and `postrm purge`
+  deletes `/etc/fips` and the `fips` group. rpm has no such distinction, so the
+  equivalent would run on an ordinary erase — and during a distribution upgrade
+  that erases and reinstalls — taking the node's identity keys with it.
+  Configuration and keys therefore survive `dnf remove`; delete `/etc/fips`
+  yourself if you mean it.
+- **Version vs Release.** A dev build is `0.6.0-0.dev.git<date>.<sha>` rather
+  than the `.deb`'s `0.6.0~dev+git<date>.<sha>-1`. rpm has understood `~` since
+  4.10, so this is a choice rather than a limitation: a Release beginning with
+  `0.` is the convention for pre-release packages in this ecosystem, and it
+  sorts below the `1` a tagged release carries. The Release carries no `%{dist}` tag
+  either: there is one build, the glibc one, and a dist tag would name whichever
+  image happened to run rpmbuild in an artifact that installs on all of them.
+
+No install-test suite covers the RPM. The `deb-install` suite exercises the
+`.deb` across five distributions on every push; the RPM is built on every push
+and installed by nobody but you.
 
 ### systemd Tarball
 

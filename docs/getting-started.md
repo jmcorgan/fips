@@ -59,6 +59,8 @@ The most direct path. The release distribution carries a
 per-platform installer:
 
 - Debian/Ubuntu: `.deb` package
+- Fedora/RHEL: `.rpm` package, named `fips-mesh` (Fedora's `fips` is an
+  unrelated FITS image viewer)
 - Arch Linux: `fips` AUR package
 - OpenWrt: `.ipk` and `.apk` packages
 - macOS: `.pkg` installer
@@ -66,13 +68,16 @@ per-platform installer:
 - Windows: `.zip` with service-install scripts
 - Generic systemd Linux: `.tar.gz` with an `install.sh` script
 
-The `.deb` and the systemd tarball support every version of a glibc
-distribution that its vendor still supports for free: currently Ubuntu
-22.04, Debian 12, Ubuntu 24.04, Debian 13 and Ubuntu 26.04. Those binaries
-are built in a container pinned to the oldest of them, so they run on all
-five, and the glibc floor that follows is declared in
-`packaging/build-floor.env` and checked by `testing/check-glibc-floor.sh` on
-what the release workflow produces. Arch and NixOS build from source on your
+The `.deb`, the `.rpm` and the systemd tarball carry the same binaries and
+support every version of a glibc distribution that its vendor still supports
+for free: currently Ubuntu 22.04, Debian 12, Ubuntu 24.04, Debian 13 and
+Ubuntu 26.04 on the Debian side, and RHEL 9 and later on the RPM side. Those
+binaries are built in a container pinned to the oldest Debian-family member,
+and the floor they are held to is the lowest of either family — RHEL 9's glibc
+2.34 — declared in `packaging/build-floor.env` and checked by
+`testing/check-glibc-floor.sh` on what the release workflow produces. The
+`.rpm` also records that floor as an ordinary dependency, so a package built
+above it is refused rather than installed. Arch and NixOS build from source on your
 own machine, and OpenWrt is a musl target rather than glibc, so none of them
 depends on that floor.
 
