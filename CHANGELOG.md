@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet. Everything previously staged here is folded into
-`[0.5.2]` below.
+### Fixed
+
+- TCP connections try the remaining addresses for a hostname after a
+  connection fails, within the existing overall connection timeout.
 
 ## [0.5.2] - 2026-09-28
 

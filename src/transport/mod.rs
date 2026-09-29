@@ -1082,28 +1082,23 @@ impl TransportHandle {
 pub(crate) async fn resolve_socket_addr(
     addr: &TransportAddr,
 ) -> Result<SocketAddr, TransportError> {
+    resolve_socket_addrs(addr).await?.next().ok_or_else(|| {
+        TransportError::InvalidAddress(format!("DNS resolution returned no addresses for {}", addr))
+    })
+}
+
+/// Resolve every socket address in resolver order, bypassing DNS for numeric IPs.
+pub(crate) async fn resolve_socket_addrs(
+    addr: &TransportAddr,
+) -> Result<impl Iterator<Item = SocketAddr>, TransportError> {
     let s = addr
         .as_str()
         .ok_or_else(|| TransportError::InvalidAddress("not valid UTF-8".into()))?;
 
-    // Fast path: numeric IP address — no DNS lookup
-    if let Ok(sock_addr) = s.parse::<SocketAddr>() {
-        return Ok(sock_addr);
-    }
-
-    // Slow path: DNS resolution
-    tokio::net::lookup_host(s)
-        .await
-        .map_err(|e| {
-            TransportError::InvalidAddress(format!("DNS resolution failed for {}: {}", s, e))
-        })?
-        .next()
-        .ok_or_else(|| {
-            TransportError::InvalidAddress(format!(
-                "DNS resolution returned no addresses for {}",
-                s
-            ))
-        })
+    // lookup_host handles numeric addresses without allocating or querying DNS.
+    tokio::net::lookup_host(s).await.map_err(|e| {
+        TransportError::InvalidAddress(format!("DNS resolution failed for {}: {}", s, e))
+    })
 }
 
 // ============================================================================
