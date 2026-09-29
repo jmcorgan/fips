@@ -1,7 +1,7 @@
 //! AF_PACKET socket creation, binding, and ioctl helpers (Linux).
 
 use crate::transport::TransportError;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
 /// Wrapper around an AF_PACKET SOCK_DGRAM file descriptor.
 ///
@@ -39,6 +39,9 @@ impl PacketSocket {
                 err
             )));
         }
+        // SAFETY: socket returned a new descriptor, owned only by this guard
+        // until construction succeeds. Every setup error closes it on drop.
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         // Look up interface index
         let if_index = get_if_index(fd, interface)?;
@@ -58,7 +61,6 @@ impl PacketSocket {
         };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
-            unsafe { libc::close(fd) };
             return Err(TransportError::StartFailed(format!(
                 "bind(AF_PACKET, {}) failed: {}",
                 interface, err
@@ -69,7 +71,6 @@ impl PacketSocket {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 {
             let err = std::io::Error::last_os_error();
-            unsafe { libc::close(fd) };
             return Err(TransportError::StartFailed(format!(
                 "fcntl(F_GETFL) failed: {}",
                 err
@@ -78,7 +79,6 @@ impl PacketSocket {
         let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
-            unsafe { libc::close(fd) };
             return Err(TransportError::StartFailed(format!(
                 "fcntl(F_SETFL, O_NONBLOCK) failed: {}",
                 err
@@ -86,7 +86,7 @@ impl PacketSocket {
         }
 
         Ok(Self {
-            fd,
+            fd: owned_fd.into_raw_fd(),
             if_index,
             ethertype,
         })
@@ -345,4 +345,51 @@ fn get_if_mtu(fd: RawFd, if_index: i32) -> Result<u16, TransportError> {
 
     let mtu = unsafe { ifr.ifr_ifru.ifru_mtu } as u16;
     Ok(mtu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW"]
+    fn invalid_interface_does_not_leak_socket() {
+        const CHILD: &str = "FIPS_TEST_PACKET_SOCKET_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Count descriptors in a separate process so concurrently running
+            // tests cannot affect the result.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "transport::ethernet::io::platform::tests::invalid_interface_does_not_leak_socket",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let open_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let before = open_fds();
+        for interface in ["fips-missing-interface", "invalid\0interface"] {
+            for _ in 0..8 {
+                let result = PacketSocket::open(interface, 0x88b5);
+                assert!(matches!(
+                    result,
+                    Err(TransportError::StartFailed(ref message))
+                        if message.starts_with("interface not found:")
+                            || message.starts_with("invalid interface name:")
+                ));
+            }
+        }
+        assert_eq!(open_fds(), before, "failed setup leaked a socket");
+    }
 }

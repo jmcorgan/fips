@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet. Everything previously staged here is folded into
-`[0.5.2]` below.
+### Fixed
+
+- Ethernet startup no longer leaks a socket when the configured interface is
+  missing or invalid on Linux.
 
 ## [0.5.2] - 2026-09-28
 
