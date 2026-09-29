@@ -215,6 +215,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Transport address clones share immutable bytes instead of allocating a copy.
+  Socket addresses are formatted on the stack so construction still needs only
+  one allocation, including scoped IPv6 addresses.
+
 - `Degraded` is now a level rather than a latch. The supervisor's reason set
   was monotonic, which was correct while no child could recover; with recovery
   it would have meant "something broke at some point since boot" rather than
