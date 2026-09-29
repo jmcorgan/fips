@@ -545,8 +545,17 @@ async fn main() {
     info!("fips-gateway running");
 
     let mut exit_code = 0;
+    let mut nat_retry = tokio::time::interval(std::time::Duration::from_secs(10));
+    nat_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = nat_retry.tick() => {
+                match nat_mgr.retry_pending() {
+                    Ok(true) => info!("Applied pending NAT rules"),
+                    Ok(false) => {},
+                    Err(e) => warn!(error = %e, "Failed to retry pending NAT rules"),
+                }
+            }
             Some(event) = event_rx.recv() => {
                 match event {
                     pool::PoolEvent::MappingCreated { virtual_ip, mesh_addr } => {

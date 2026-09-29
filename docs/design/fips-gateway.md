@@ -458,8 +458,10 @@ sequence is:
    batch, and a batch too large for any send buffer is refused
    before it is sent. A batch the kernel refuses leaves the previous
    table in place; the failure is logged, and the gateway keeps its
-   record of the change, so the next rebuild that succeeds applies
-   it.
+   record of the change. Pending changes are retried every ten seconds,
+   even when no new mapping event arrives. Each retry rebuilds the latest
+   desired state, so a newer change supersedes an earlier failed one.
+   Successful rebuilds clear the pending flag; clean tables are not retried.
 
 The rustables crate does not expose rule-handle tracking, so
 incremental update of individual rules is not available. Atomic

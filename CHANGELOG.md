@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet. Everything previously staged here is folded into
-`[0.5.2]` below.
+### Fixed
+
+- The gateway retries failed firewall rebuilds every ten seconds without
+  waiting for another mapping change. Retries apply the latest desired
+  mappings and port forwards, preserving changes across transient failures.
 
 ## [0.5.2] - 2026-09-28
 

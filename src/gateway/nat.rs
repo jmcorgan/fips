@@ -174,6 +174,8 @@ pub struct NatManager {
     mappings: HashMap<Ipv6Addr, NatMapping>,
     /// Inbound port-forward rules.
     port_forwards: Vec<PortForward>,
+    /// Desired state has not yet been acknowledged by the kernel.
+    rebuild_pending: bool,
 }
 
 impl NatManager {
@@ -199,6 +201,7 @@ impl NatManager {
             lan_interface,
             mappings: HashMap::new(),
             port_forwards: Vec::new(),
+            rebuild_pending: false,
         }
     }
 
@@ -222,7 +225,7 @@ impl NatManager {
     /// the nftables table atomically. Pass an empty slice to clear.
     pub fn set_port_forwards(&mut self, forwards: &[PortForward]) -> Result<(), NatError> {
         self.port_forwards = forwards.to_vec();
-        self.rebuild()?;
+        self.rebuild_desired()?;
         info!(
             count = self.port_forwards.len(),
             "Applied inbound port forwards"
@@ -305,6 +308,18 @@ impl NatManager {
     /// Number of active NAT mappings.
     pub fn mapping_count(&self) -> usize {
         self.mappings.len()
+    }
+
+    /// Retry a failed rebuild using the latest desired state.
+    ///
+    /// Returns whether a pending rebuild was applied. A clean manager does
+    /// not open a socket or rebuild the table.
+    pub fn retry_pending(&mut self) -> Result<bool, NatError> {
+        if !self.rebuild_pending {
+            return Ok(false);
+        }
+        self.rebuild_desired()?;
+        Ok(true)
     }
 
     /// The objects a rebuild sends, grouped into the batches that carry them.
@@ -497,11 +512,18 @@ impl NatManager {
 
     /// Rebuild, returning the outcome with the time the rebuild took in
     /// microseconds, so a mapping change can log its cost on either path.
-    fn timed_rebuild(&self) -> (Result<(), NatError>, u64) {
+    fn timed_rebuild(&mut self) -> (Result<(), NatError>, u64) {
         let started = Instant::now();
-        let result = self.rebuild();
+        let result = self.rebuild_desired();
         let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         (result, elapsed_us)
+    }
+
+    fn rebuild_desired(&mut self) -> Result<(), NatError> {
+        self.rebuild_pending = true;
+        self.rebuild()?;
+        self.rebuild_pending = false;
+        Ok(())
     }
 }
 
@@ -881,6 +903,117 @@ mod tests {
             );
         }
         mgr
+    }
+
+    #[test]
+    fn failed_rebuild_retains_latest_desired_state_for_retry() {
+        let mut mgr = manager_with_mappings(2);
+        // Make encoding fail before opening a socket.
+        mgr.pre_chain = Chain::new(&mgr.table);
+        assert!(!mgr.retry_pending().unwrap(), "clean retry must not encode");
+
+        assert!(mgr.add_mapping(vip(3), mesh(3)).is_err());
+        assert!(mgr.rebuild_pending);
+        assert!(mgr.retry_pending().is_err());
+        assert!(mgr.rebuild_pending);
+        assert!(mgr.remove_mapping(vip(3)).is_err());
+        assert!(!mgr.mappings.contains_key(&vip(3)));
+        assert!(mgr.add_mapping(vip(2), mesh(99)).is_err());
+        assert_eq!(mgr.mappings[&vip(2)].mesh_addr, mesh(99));
+        assert!(mgr.remove_mapping(vip(4)).is_err());
+        assert!(
+            mgr.rebuild_pending,
+            "an absent mapping must not clear pending work"
+        );
+    }
+
+    #[test]
+    fn failed_port_forward_rebuild_remains_pending() {
+        let mut mgr = manager_with_mappings(1);
+        mgr.pre_chain = Chain::new(&mgr.table);
+        let forward = PortForward {
+            proto: Proto::Tcp,
+            listen_port: 8080,
+            target: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 80, 0, 0),
+        };
+        assert!(mgr.set_port_forwards(&[forward]).is_err());
+        assert_eq!(mgr.port_forwards.len(), 1);
+        assert!(mgr.rebuild_pending);
+        assert!(mgr.set_port_forwards(&[]).is_err());
+        assert!(mgr.port_forwards.is_empty());
+        assert!(mgr.rebuild_pending);
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN and nft in an isolated network namespace"]
+    fn kernel_rejection_retries_latest_state_without_another_mapping_event() {
+        let mut mgr = manager_with_mappings(2);
+        let table_name = format!("{TABLE_NAME}_retry_test_{}", std::process::id());
+        mgr.table = Table::new(ProtocolFamily::Inet).with_name(&table_name);
+        mgr.pre_chain = Chain::new(&mgr.table)
+            .with_name(PREROUTING_CHAIN)
+            .with_type(ChainType::Nat)
+            .with_hook(Hook::new(HookClass::PreRouting, DSTNAT_PRIORITY));
+        mgr.post_chain = Chain::new(&mgr.table)
+            .with_name(POSTROUTING_CHAIN)
+            .with_type(ChainType::Nat)
+            .with_hook(Hook::new(HookClass::PostRouting, SRCNAT_PRIORITY));
+        mgr.rebuild().unwrap();
+        let listing = || {
+            let output = std::process::Command::new("nft")
+                .args(["-j", "list", "table", "inet", &table_name])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            output.stdout
+        };
+        let before = listing();
+        // Encoding succeeds, but the kernel rejects an overlong chain name.
+        let invalid = Chain::new(&mgr.table).with_name("x".repeat(300));
+        let original = std::mem::replace(&mut mgr.pre_chain, invalid);
+        assert!(matches!(
+            mgr.add_mapping(vip(3), mesh(3)),
+            Err(NatError::Kernel { .. })
+        ));
+        assert!(mgr.remove_mapping(vip(1)).is_err());
+        assert!(mgr.remove_mapping(vip(3)).is_err());
+        assert!(mgr.add_mapping(vip(2), mesh(99)).is_err());
+        assert!(mgr.retry_pending().is_err());
+        assert_eq!(
+            listing(),
+            before,
+            "rejection leaves the old kernel table intact"
+        );
+
+        mgr.pre_chain = original;
+        assert!(mgr.retry_pending().unwrap());
+        assert!(!mgr.retry_pending().unwrap());
+        assert_eq!(mgr.mapping_count(), 1);
+        assert_eq!(mgr.mappings[&vip(2)].mesh_addr, mesh(99));
+        let after = listing();
+        assert_ne!(after, before);
+        let table: serde_json::Value = serde_json::from_slice(&after).unwrap();
+        assert_eq!(
+            table["nftables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.get("rule").is_some())
+                .count(),
+            3
+        );
+        assert!(String::from_utf8(after).unwrap().contains("fd02::63"));
+
+        // A successful normal update also clears earlier pending work.
+        mgr.pre_chain = Chain::new(&mgr.table);
+        assert!(mgr.add_mapping(vip(4), mesh(4)).is_err());
+        mgr.pre_chain = Chain::new(&mgr.table)
+            .with_name(PREROUTING_CHAIN)
+            .with_type(ChainType::Nat)
+            .with_hook(Hook::new(HookClass::PreRouting, DSTNAT_PRIORITY));
+        mgr.remove_mapping(vip(4)).unwrap();
+        assert!(!mgr.retry_pending().unwrap());
+        mgr.cleanup().unwrap();
     }
 
     #[test]
