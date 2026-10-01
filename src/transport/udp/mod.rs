@@ -512,6 +512,32 @@ impl Drop for UdpTransport {
     }
 }
 
+/// Let isolated errors retry promptly, but bound persistent-error retries.
+/// Windows can report an ICMP port-unreachable as a single receive error.
+#[derive(Default)]
+struct ReceiveErrorBackoff {
+    next_delay: Option<Duration>,
+}
+
+impl ReceiveErrorBackoff {
+    fn reset(&mut self) {
+        self.next_delay = None;
+    }
+
+    async fn wait_after_error(&mut self) {
+        match self.next_delay {
+            Some(delay) => {
+                self.next_delay = Some((delay * 2).min(RECV_ERROR_BACKOFF_MAX));
+                tokio::time::sleep(delay).await;
+            }
+            None => {
+                self.next_delay = Some(RECV_ERROR_BACKOFF_MIN);
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+}
+
 /// UDP receive loop - runs as a spawned task.
 ///
 /// Drains the kernel UDP queue in 32-packet bursts via `recvmmsg` (Linux) or
@@ -526,7 +552,7 @@ async fn udp_receive_loop(
     stats: Arc<UdpStats>,
 ) {
     debug!(transport_id = %transport_id, "UDP receive loop starting");
-    let mut error_backoff = RECV_ERROR_BACKOFF_MIN;
+    let mut error_backoff = ReceiveErrorBackoff::default();
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -550,7 +576,7 @@ async fn udp_receive_loop(
 
             match socket.recv_batch(&mut bufs, &mut addrs, &mut lens).await {
                 Ok((count, kernel_drops)) => {
-                    error_backoff = RECV_ERROR_BACKOFF_MIN;
+                    error_backoff.reset();
                     stats.set_kernel_drops(kernel_drops as u64);
                     for i in 0..count {
                         let len = lens[i];
@@ -606,8 +632,7 @@ async fn udp_receive_loop(
                         error = %e,
                         "UDP receive error"
                     );
-                    tokio::time::sleep(error_backoff).await;
-                    error_backoff = (error_backoff * 2).min(RECV_ERROR_BACKOFF_MAX);
+                    error_backoff.wait_after_error().await;
                 }
             }
         }
@@ -620,7 +645,7 @@ async fn udp_receive_loop(
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, remote_addr, kernel_drops)) => {
-                    error_backoff = RECV_ERROR_BACKOFF_MIN;
+                    error_backoff.reset();
                     stats.record_recv(len);
                     stats.set_kernel_drops(kernel_drops as u64);
 
@@ -660,8 +685,7 @@ async fn udp_receive_loop(
                         error = %e,
                         "UDP receive error"
                     );
-                    tokio::time::sleep(error_backoff).await;
-                    error_backoff = (error_backoff * 2).min(RECV_ERROR_BACKOFF_MAX);
+                    error_backoff.wait_after_error().await;
                 }
             }
         }
@@ -728,6 +752,33 @@ mod tests {
     use crate::transport::packet_channel;
     use tokio::time::{Duration, timeout};
 
+    #[tokio::test(start_paused = true)]
+    async fn receive_error_backoff_yields_then_sleeps_and_resets() {
+        let mut backoff = ReceiveErrorBackoff::default();
+
+        // Check both a new receive loop and one reset by a received datagram.
+        for _ in 0..2 {
+            let start = tokio::time::Instant::now();
+            {
+                let mut retry = Box::pin(backoff.wait_after_error());
+                assert!(futures::poll!(retry.as_mut()).is_pending());
+                assert!(futures::poll!(retry.as_mut()).is_ready());
+            }
+            assert_eq!(tokio::time::Instant::now(), start);
+
+            for delay_ms in [100, 200, 400, 800, 1000, 1000] {
+                let mut retry = Box::pin(backoff.wait_after_error());
+                assert!(futures::poll!(retry.as_mut()).is_pending());
+                tokio::time::advance(Duration::from_millis(delay_ms - 1)).await;
+                assert!(futures::poll!(retry.as_mut()).is_pending());
+                tokio::time::advance(Duration::from_millis(1)).await;
+                assert!(futures::poll!(retry.as_mut()).is_ready());
+            }
+
+            backoff.reset();
+        }
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test(start_paused = true)]
     async fn receive_loop_backs_off_persistent_errors_and_remains_cancellable() {
@@ -766,6 +817,11 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "child did not run the receive-loop regression: {}",
+                String::from_utf8_lossy(&output.stdout),
+            );
             return;
         }
 
@@ -789,19 +845,22 @@ mod tests {
         ));
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        while stats.snapshot().recv_errors == 0 {
-            assert!(Instant::now() < deadline, "socket did not produce an error");
+        while stats.snapshot().recv_errors < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "first receive error did not retry without sleeping",
+            );
             tokio::task::yield_now().await;
         }
-        assert_eq!(stats.snapshot().recv_errors, 1);
+        assert_eq!(stats.snapshot().recv_errors, 2);
 
         for (index, delay_ms) in [100, 200, 400, 800, 1000, 1000].into_iter().enumerate() {
             tokio::time::advance(Duration::from_millis(delay_ms - 1)).await;
             tokio::task::yield_now().await;
-            assert_eq!(stats.snapshot().recv_errors, index as u64 + 1);
+            assert_eq!(stats.snapshot().recv_errors, index as u64 + 2);
             tokio::time::advance(Duration::from_millis(1)).await;
             tokio::task::yield_now().await;
-            assert_eq!(stats.snapshot().recv_errors, index as u64 + 2);
+            assert_eq!(stats.snapshot().recv_errors, index as u64 + 3);
         }
 
         task.abort();
@@ -828,7 +887,7 @@ mod tests {
             .unwrap();
         let stats = Arc::new(UdpStats::new());
         let (tx, mut rx) = packet_channel(2);
-        let task = tokio::spawn(udp_receive_loop(
+        let mut receive_loop = Box::pin(udp_receive_loop(
             socket,
             TransportId::new(1),
             tx,
@@ -837,7 +896,11 @@ mod tests {
         ));
         drop(peer);
 
-        async fn wait_for_errors(stats: &UdpStats, count: u64) {
+        async fn poll_until_errors(
+            mut receive_loop: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+            stats: &UdpStats,
+            count: u64,
+        ) {
             let deadline = Instant::now() + Duration::from_secs(1);
             while stats.snapshot().recv_errors < count {
                 assert!(
@@ -845,46 +908,41 @@ mod tests {
                     "missing ICMP receive error {count} (received {})",
                     stats.snapshot().recv_errors,
                 );
+                assert!(futures::poll!(receive_loop.as_mut()).is_pending());
                 tokio::task::yield_now().await;
             }
+            assert_eq!(stats.snapshot().recv_errors, count);
         }
 
         probe.send(b"probe").unwrap();
         let peer = UdpSocket::bind(peer_addr).unwrap();
         peer.send_to(b"recovered", receiver_addr).unwrap();
         drop(peer);
-        wait_for_errors(&stats, 1).await;
-        // Inject another error while the first backoff still holds the
-        // datagram in the receive queue, then let the second retry recover.
+        poll_until_errors(receive_loop.as_mut(), &stats, 1).await;
+        // Poll explicitly so the first error's yield cannot drain the queued
+        // datagram before a second error has been injected.
         probe.send(b"probe").unwrap();
-        tokio::time::advance(Duration::from_millis(100)).await;
-        wait_for_errors(&stats, 2).await;
-        tokio::time::advance(Duration::from_millis(200)).await;
-        let packet = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("receive loop did not recover")
-            .unwrap();
+        poll_until_errors(receive_loop.as_mut(), &stats, 2).await;
+        tokio::time::advance(Duration::from_millis(99)).await;
+        assert!(futures::poll!(receive_loop.as_mut()).is_pending());
+        assert!(rx.try_recv().is_err());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(futures::poll!(receive_loop.as_mut()).is_pending());
+        let packet = rx.try_recv().expect("receive loop did not recover");
         assert_eq!(packet.data, b"recovered");
 
+        let start = tokio::time::Instant::now();
         probe.send(b"probe").unwrap();
         let peer = UdpSocket::bind(peer_addr).unwrap();
         peer.send_to(b"after reset", receiver_addr).unwrap();
-        wait_for_errors(&stats, 3).await;
-        tokio::time::advance(Duration::from_millis(99)).await;
-        tokio::task::yield_now().await;
+        poll_until_errors(receive_loop.as_mut(), &stats, 3).await;
         assert!(rx.try_recv().is_err());
-        tokio::time::advance(Duration::from_millis(1)).await;
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let packet = loop {
-            if let Ok(packet) = rx.try_recv() {
-                break packet;
-            }
-            assert!(Instant::now() < deadline, "backoff did not reset to 100ms");
-            tokio::task::yield_now().await;
-        };
+        assert!(futures::poll!(receive_loop.as_mut()).is_pending());
+        let packet = rx
+            .try_recv()
+            .expect("first error after reset did not yield");
         assert_eq!(packet.data, b"after reset");
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(tokio::time::Instant::now(), start);
     }
 
     /// A distinct hostname key, so each store is a fresh entry.
