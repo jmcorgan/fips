@@ -32,7 +32,7 @@
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-ethernet-churn, chaos-tcp-mesh,
 #   chaos-congestion-stress,
-#   sidecar, dns-resolver, deb-install, medium-change
+#   sidecar, dns-resolver, deb-install, rpm-install, medium-change
 #
 # Opt-in (require --with-tor; depend on live Tor network):
 #   tor-socks5, tor-directory
@@ -221,6 +221,7 @@ DNS_RESOLVER_SUITES=(dns-resolver)
 NATIVE_API_SUITES=(native-api)
 MEDIUM_CHANGE_SUITES=(medium-change)
 DEB_INSTALL_SUITES=(deb-install)
+RPM_INSTALL_SUITES=(rpm-install)
 TOR_SUITES=(tor-socks5 tor-directory)
 
 # ── Colors ─────────────────────────────────────────────────────────────────
@@ -291,6 +292,9 @@ list_suites() {
     echo ""
     echo "  Deb-install:"
     for s in "${DEB_INSTALL_SUITES[@]}"; do echo "    $s"; done
+    echo ""
+    echo "  Rpm-install:"
+    for s in "${RPM_INSTALL_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Tor (opt-in via --with-tor):"
     for s in "${TOR_SUITES[@]}"; do echo "    $s"; done
@@ -1356,6 +1360,28 @@ run_deb_install() {
     record "deb-install" "$rc"
 }
 
+# Run rpm-install harness (RPM-family install, upgrade and erase)
+#
+# Packages the binaries from the same .deb build_ci_deb builds for deb-install
+# and dns-resolver, with build-rpm-container.sh --no-build -- the path only the
+# release workflow takes, and the one a defect once shipped on because nothing
+# else reached it. Bounded for the same reason deb-install is.
+RPM_INSTALL_TIMEOUT=${RPM_INSTALL_TIMEOUT:-1800}
+run_rpm_install() {
+    if ! build_ci_deb rpm-install; then
+        record "rpm-install" "$CI_DEB_RC"
+        return
+    fi
+    local deb="$CI_DEB_PATH" rc=0
+    info "[rpm-install] Running RPM install test over the binaries in $deb"
+    timeout "$RPM_INSTALL_TIMEOUT" bash testing/rpm-install/test.sh --deb "$deb" 2>&1 || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        echo "  ERROR: rpm-install exceeded ${RPM_INSTALL_TIMEOUT}s and was killed;" >&2
+        echo "         no verdict was reached, so this is not an assertion failure." >&2
+    fi
+    record "rpm-install" "$rc"
+}
+
 # Run Tor SOCKS5 outbound test (live Tor network)
 run_tor_socks5() {
     export COMPOSE_PROJECT_NAME="$(ci_project tor-socks5)"
@@ -1558,6 +1584,9 @@ run_integration() {
     # Deb-install multi-distro suite (heavy — builds .deb + per-distro install)
     run_deb_install
 
+    # Rpm-install suite (reuses that .deb's binaries through the release path)
+    run_rpm_install
+
     # Tor (opt-in via --with-tor; depends on live Tor network)
     if [[ "$WITH_TOR" == true ]]; then
         run_tor_socks5
@@ -1618,6 +1647,8 @@ run_suite() {
             run_medium_change ;;
         deb-install)
             run_deb_install ;;
+        rpm-install)
+            run_rpm_install ;;
         tor-socks5)
             run_tor_socks5 ;;
         tor-directory)

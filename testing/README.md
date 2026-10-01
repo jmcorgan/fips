@@ -153,6 +153,25 @@ end-to-end `.fips` resolution as a user would meet it. GitHub CI also
 installs the arm64 package on ubuntu22 on an arm64 runner, a leg the
 local run cannot have and the parity check reports as GitHub-only.
 
+### [rpm-install/](rpm-install/) -- RPM Package Install
+
+Installs the `fips-mesh` package in systemd containers and checks what an
+operator meets on AlmaLinux 9 and Fedora: unit state after install (enabled,
+not started), file placement and ownership, end-to-end `.fips` resolution, and
+an erase that removes the units and the DNS drop-ins while keeping
+`/etc/fips`. A `no-resolver` scenario pins what a stock EL9 host gets, where no
+resolver backend applies: `fips-dns.service` reports active having configured
+nothing, the saved backend is `none`, and the node itself works. An `upgrade`
+scenario upgrades a running daemon in place and requires that the transaction
+does not wait on the restart, that the daemon comes back on the new package,
+and that a host which never enabled the gateway does not acquire it.
+
+The package under test is built the way the release builds it: binaries
+recovered from the container-built `.deb` and packaged with
+`build-rpm-container.sh --no-build`, the path nothing else exercises. `--deb
+PATH` supplies that `.deb`, as `ci-local.sh` and the GitHub job do; `--rpm
+PATH` tests a package as given.
+
 ### [boringtun/](boringtun/) -- WireGuard Throughput Baseline
 
 Two userspace WireGuard peers running Cloudflare BoringTun, measured
@@ -172,7 +191,8 @@ scenarios) — mirroring the GitHub `ci.yml` integration matrices. Run
 `./ci-local.sh --help` for the full option list and `--list` for the
 available suites. Every run starts with a parity check that verifies the
 local suite set covers the same work as the GitHub matrix, per scenario for
-chaos and per distro for deb-install, across every job that carries a
+chaos, per distro for deb-install and per scenario for rpm-install, across
+every job that carries a
 matrix; a divergence fails the run. GitHub
 runs the same check as its own `ci-parity` job. `--check-parity` runs it
 alone (see [check-ci-parity.sh](check-ci-parity.sh)).
