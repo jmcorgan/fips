@@ -33,10 +33,6 @@ pub struct BleStats {
     pub connect_errors: AtomicU64,
     /// Connections dropped because the pre-handshake pubkey exchange failed.
     pub pubkey_exchange_failures: AtomicU64,
-    /// Outbound connections stood down by the cross-probe tie-breaker.
-    pub tiebreaker_yields: AtomicU64,
-    /// Inbound connections stood down by the cross-probe tie-breaker.
-    pub tiebreaker_drops: AtomicU64,
     pub pool_evictions: AtomicU64,
     pub advertisements_sent: AtomicU64,
     pub scan_results: AtomicU64,
@@ -63,8 +59,6 @@ impl BleStats {
             connect_timeouts: AtomicU64::new(0),
             connect_errors: AtomicU64::new(0),
             pubkey_exchange_failures: AtomicU64::new(0),
-            tiebreaker_yields: AtomicU64::new(0),
-            tiebreaker_drops: AtomicU64::new(0),
             pool_evictions: AtomicU64::new(0),
             advertisements_sent: AtomicU64::new(0),
             scan_results: AtomicU64::new(0),
@@ -137,22 +131,6 @@ impl BleStats {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record an outbound connection stood down by the cross-probe
-    /// tie-breaker.
-    ///
-    /// Read together with [`Self::record_tiebreaker_drop`] across a pair of
-    /// nodes: one yield and one drop is the two sides agreeing; two yields or
-    /// two drops is the disagreement that leaves no other evidence.
-    pub fn record_tiebreaker_yield(&self) {
-        self.tiebreaker_yields.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record an inbound connection stood down by the cross-probe
-    /// tie-breaker. See [`Self::record_tiebreaker_yield`].
-    pub fn record_tiebreaker_drop(&self) {
-        self.tiebreaker_drops.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Record a pool eviction (non-static peer displaced).
     pub fn record_pool_eviction(&self) {
         self.pool_evictions.fetch_add(1, Ordering::Relaxed);
@@ -200,8 +178,6 @@ impl BleStats {
             connect_timeouts: self.connect_timeouts.load(Ordering::Relaxed),
             connect_errors: self.connect_errors.load(Ordering::Relaxed),
             pubkey_exchange_failures: self.pubkey_exchange_failures.load(Ordering::Relaxed),
-            tiebreaker_yields: self.tiebreaker_yields.load(Ordering::Relaxed),
-            tiebreaker_drops: self.tiebreaker_drops.load(Ordering::Relaxed),
             pool_evictions: self.pool_evictions.load(Ordering::Relaxed),
             advertisements_sent: self.advertisements_sent.load(Ordering::Relaxed),
             scan_results: self.scan_results.load(Ordering::Relaxed),
@@ -233,8 +209,6 @@ pub struct BleStatsSnapshot {
     pub connect_timeouts: u64,
     pub connect_errors: u64,
     pub pubkey_exchange_failures: u64,
-    pub tiebreaker_yields: u64,
-    pub tiebreaker_drops: u64,
     pub pool_evictions: u64,
     pub advertisements_sent: u64,
     pub scan_results: u64,
