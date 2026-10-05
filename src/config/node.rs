@@ -1409,6 +1409,32 @@ pub struct NodeConfig {
     /// Valid values: trace, debug, info, warn, error. Default: info.
     #[serde(default)]
     pub log_level: Option<String>,
+
+    /// Log file (`node.log_file`). Unset by default, which keeps logging on
+    /// stdout for a supervisor to capture — the right arrangement wherever
+    /// the platform already rotates that stream (journald, syslog).
+    ///
+    /// Set it only where nothing else rotates. Naming a file makes the daemon
+    /// own it and roll it by size: the live file keeps this name, and rolled
+    /// files are `<name>.1` (newest) to `<name>.<log_max_files>`. The
+    /// `--log-file` flag takes precedence, which is how the macOS package
+    /// turns this on without editing an existing config.
+    ///
+    /// This and the two limits below skip serializing when unset, for the
+    /// reason `drain_timeout_secs` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_file: Option<String>,
+
+    /// Size in MiB at which the log file is rolled (`node.log_max_size_mb`).
+    /// Default: 10. Only consulted when the daemon owns a log file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_max_size_mb: Option<u64>,
+
+    /// How many rolled log files to keep beside the live one
+    /// (`node.log_max_files`). Default: 4, at most 100. Only consulted when
+    /// the daemon owns a log file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_max_files: Option<u32>,
 }
 
 impl Default for NodeConfig {
@@ -1440,6 +1466,9 @@ impl Default for NodeConfig {
             rekey: RekeyConfig::default(),
             netmon: NetmonConfig::default(),
             log_level: None,
+            log_file: None,
+            log_max_size_mb: None,
+            log_max_files: None,
         }
     }
 }
@@ -1459,6 +1488,28 @@ impl NodeConfig {
             Some("error") => tracing::Level::ERROR,
             _ => tracing::Level::INFO,
         }
+    }
+
+    /// Size in bytes at which an owned log file is rolled. Default: 10 MiB.
+    ///
+    /// Zero is raised to 1 MiB: a cap of zero would roll on every line.
+    pub fn log_max_bytes(&self) -> u64 {
+        match self.log_max_size_mb {
+            Some(mb) => mb.max(1).saturating_mul(1024 * 1024),
+            None => crate::utils::logfile::ROLL_BYTES,
+        }
+    }
+
+    /// How many rolled log files to keep beside the live one. Default: 4.
+    ///
+    /// The live file is never deleted, so zero keeps one rolled file, the
+    /// least a roll needs. More than 100 is lowered to 100: a roll renames
+    /// every kept file with the log locked, which stalls the daemon for as
+    /// long as that takes.
+    pub fn log_max_files(&self) -> u32 {
+        self.log_max_files
+            .unwrap_or(crate::utils::logfile::ROLL_KEEP)
+            .clamp(1, 100)
     }
 
     fn default_tick_interval_secs() -> u64 {
@@ -1590,6 +1641,39 @@ owd_window_size: 48
         let c: NostrRendezvousConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(c.startup_sweep_delay_secs, 30);
         assert_eq!(c.startup_sweep_max_age_secs, 3_600);
+    }
+
+    #[test]
+    fn test_log_limits() {
+        let node = |mb: Option<u64>, files: Option<u32>| NodeConfig {
+            log_max_size_mb: mb,
+            log_max_files: files,
+            ..NodeConfig::default()
+        };
+        let default = node(None, None);
+        assert_eq!(default.log_max_bytes(), 10 * 1024 * 1024);
+        assert_eq!(default.log_max_files(), 4);
+        assert_eq!(node(Some(0), Some(0)).log_max_bytes(), 1024 * 1024);
+        assert_eq!(node(Some(0), Some(0)).log_max_files(), 1);
+        assert_eq!(node(Some(25), Some(9)).log_max_bytes(), 25 * 1024 * 1024);
+        assert_eq!(node(Some(25), Some(9)).log_max_files(), 9);
+        assert_eq!(node(None, Some(u32::MAX)).log_max_files(), 100);
+    }
+
+    #[test]
+    fn test_unset_log_keys_are_not_serialized() {
+        let yaml = serde_yaml::to_string(&NodeConfig::default()).unwrap();
+        for key in ["log_file", "log_max_size_mb", "log_max_files"] {
+            assert!(!yaml.contains(key), "{key} written:\n{yaml}");
+        }
+    }
+
+    #[test]
+    fn test_logging_defaults_to_stdout() {
+        // Unset log_file is what keeps every platform whose supervisor
+        // already rotates (journald, syslog) on stdout. Regressing this to a
+        // file default would double-log there.
+        assert!(NodeConfig::default().log_file.is_none());
     }
 
     #[test]

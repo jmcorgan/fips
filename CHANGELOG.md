@@ -213,7 +213,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build-it-yourself because rustup ships no toolchain for it. See
   `packaging/pfsense/README.md`.
 
+- The daemon can own and roll its log file, for supervisors that cannot rotate
+  its output. `node.log_file`, or the `--log-file` flag that overrides it,
+  sends the log to a file instead of stdout. The file is rolled by size at
+  `node.log_max_size_mb` (default 10) and keeps `node.log_max_files` rolled
+  files (default 4, at most 100) as `<name>.1` to `<name>.N`; the live file
+  keeps its name, so `tail -F` follows it. Unset, logging stays on stdout,
+  which journald and syslog already rotate.
+
 ### Changed
+
+- The Windows service log is rolled at `node.log_max_size_mb` and keeps
+  `node.log_max_files` old files. The defaults are the 10 MiB and four files it
+  used before.
 
 - Transport address clones share immutable bytes instead of allocating a copy.
   Socket addresses are formatted on the stack so construction still needs only
@@ -625,6 +637,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution stayed down and the gateway stayed stopped until started by hand.
 
 #### macOS
+
+- The macOS daemon's log, `/usr/local/var/log/fips/fips.log`, no longer grows
+  without bound (717 MB on a node at debug level). launchd appends stdout to a
+  file forever and gives the daemon no way to reopen one rotated away, so the
+  launchd plist now passes `--log-file` and the daemon rolls the log itself;
+  an upgrade needs no config edit. The existing file rolls to `fips.log.1` on
+  the first write and ages out with the rest. stderr goes to
+  `fips.stderr.log` and carries only what fails before the log opens. The
+  package makes the log directory root-owned, and the daemon refuses to open
+  the log through a symlink.
 
 - If an encrypt worker thread exits, the daemon no longer stops once that
   worker's send queue fills. Packets for that worker are now dropped instead

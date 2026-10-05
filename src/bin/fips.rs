@@ -5,10 +5,14 @@
 
 use clap::Parser;
 use fips::config::{IdentitySource, resolve_identity};
+use fips::utils::logfile::{ROLL_BYTES, ROLL_KEEP, RollingFile, SharedLog};
 use fips::version;
 use fips::{Config, Node};
-use std::path::PathBuf;
-use tracing::{debug, error, info};
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{EnvFilter, fmt};
 use zeroize::Zeroize;
 
@@ -24,6 +28,12 @@ struct Args {
     /// Path to configuration file (overrides default search paths)
     #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
+
+    /// Log to this file, rolled by size, instead of stdout. Overrides
+    /// `node.log_file`, and is opened before the configuration loads so that
+    /// a configuration error is logged to it too.
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<PathBuf>,
 
     /// Run as a Windows service (internal use by service control manager)
     #[cfg(windows)]
@@ -41,6 +51,76 @@ struct Args {
     uninstall_service: bool,
 }
 
+/// The log file the daemon owns, when it owns one: opened from `--log-file`
+/// before the configuration loads, from `node.log_file` after it, or by the
+/// Windows service. Unset, the log goes to stdout.
+///
+/// Writes to it are synchronous and unbuffered, so the line logged before a
+/// `process::exit` is on disk when the process ends.
+static LOG: OnceLock<SharedLog> = OnceLock::new();
+
+/// Open `path` as the daemon's log, with the default limits until the
+/// configuration supplies its own, and send panics to it.
+fn open_log(path: &Path) -> std::io::Result<()> {
+    let log = SharedLog::new(RollingFile::open(path, ROLL_BYTES, ROLL_KEEP)?);
+    if LOG.set(log.clone()).is_err() {
+        return Ok(());
+    }
+    // The default hook writes to stderr, which a supervisor that cannot
+    // rotate is likely to discard or never look at, and which launchd appends
+    // to a file nothing rolls. It still runs where stderr is a terminal.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if echo_to_stderr(true, std::io::stderr().is_terminal()) {
+            previous(info);
+        }
+        log.try_line(&info.to_string());
+    }));
+    Ok(())
+}
+
+/// Whether an error or panic that goes to the log file should also go to
+/// stderr: always when no log is open, and otherwise only when stderr is a
+/// terminal someone is watching.
+///
+/// Not under a supervisor: launchd restarts a daemon that exits on a bad
+/// config or panics every ten seconds, and the stderr file it appends to is
+/// never rolled.
+fn echo_to_stderr(log_open: bool, stderr_is_terminal: bool) -> bool {
+    !log_open || stderr_is_terminal
+}
+
+/// Report an error raised before logging is set up: to the log file when one
+/// is open, and to stderr as [`echo_to_stderr`] decides.
+fn startup_error(msg: &str) {
+    if let Some(log) = LOG.get() {
+        log.line(&format!("ERROR {msg}"));
+    }
+    if echo_to_stderr(LOG.get().is_some(), std::io::stderr().is_terminal()) {
+        eprintln!("{msg}");
+    }
+}
+
+/// What to do with `node.log_file`, given whether `--log-file` or the
+/// Windows service already opened a log, which take precedence.
+#[derive(Debug, PartialEq)]
+enum ConfiguredLog<'a> {
+    /// Unset: log to the file already open, or to stdout.
+    Unset,
+    /// Open it.
+    Open(&'a str),
+    /// Set, but a log is already open; worth a warning.
+    Ignored(&'a str),
+}
+
+fn configured_log(configured: Option<&str>, already_open: bool) -> ConfiguredLog<'_> {
+    match (configured, already_open) {
+        (None, _) => ConfiguredLog::Unset,
+        (Some(path), false) => ConfiguredLog::Open(path),
+        (Some(path), true) => ConfiguredLog::Ignored(path),
+    }
+}
+
 /// Run the FIPS daemon (shared between foreground and service modes).
 ///
 /// `config_path` overrides the default config search. `shutdown_signal`
@@ -48,8 +128,19 @@ struct Args {
 /// Ctrl+C / SIGTERM, in service mode it's the service stop event.
 async fn run_daemon(
     config_path: Option<PathBuf>,
+    log_file: Option<PathBuf>,
     shutdown_signal: impl std::future::Future<Output = ()>,
 ) {
+    // Fatal on failure, as an unusable config is: a daemon that silently ran
+    // without the log it was told to keep would present as exactly the
+    // missing-logs problem the file exists to solve.
+    if let Some(path) = &log_file
+        && let Err(e) = open_log(path)
+    {
+        eprintln!("Cannot open log file {}: {e}", path.display());
+        std::process::exit(1);
+    }
+
     // Load configuration before initializing logging so we can use
     // the config's log_level as the tracing filter default.
     let (config, loaded_paths) = if let Some(config_path) = &config_path {
@@ -61,9 +152,7 @@ async fn run_daemon(
                     config_path.display(),
                     e
                 );
-                #[cfg(windows)]
-                service::startup_error(&msg);
-                eprintln!("{msg}");
+                startup_error(&msg);
                 std::process::exit(1);
             }
         }
@@ -72,9 +161,7 @@ async fn run_daemon(
             Ok(result) => result,
             Err(e) => {
                 let msg = format!("Failed to load configuration: {}", e);
-                #[cfg(windows)]
-                service::startup_error(&msg);
-                eprintln!("{msg}");
+                startup_error(&msg);
                 std::process::exit(1);
             }
         }
@@ -106,23 +193,63 @@ async fn run_daemon(
         _ => filter,
     };
 
+    // Where the log goes. With no log file the stream stays on stdout for a
+    // supervisor to capture, which is what journald and syslog want and
+    // rotate. `node.log_file` is opened here unless `--log-file` or the
+    // Windows service already opened one, which take precedence.
+    let ignored_log_file =
+        match configured_log(config.node.log_file.as_deref(), LOG.get().is_some()) {
+            ConfiguredLog::Open(path) => {
+                if let Err(e) = open_log(Path::new(path)) {
+                    startup_error(&format!("Cannot open log file {path}: {e}"));
+                    std::process::exit(1);
+                }
+                None
+            }
+            ConfiguredLog::Ignored(path) => Some(path),
+            ConfiguredLog::Unset => None,
+        };
+    let writer = match LOG.get() {
+        Some(log) => {
+            log.set_limits(config.node.log_max_bytes(), config.node.log_max_files());
+            BoxMakeWriter::new(log.clone())
+        }
+        None => BoxMakeWriter::new(std::io::stdout),
+    };
+
     // ANSI color only when stdout is a terminal — under a supervisor
-    // (daemon(8), systemd) escape codes would litter the log file.
+    // (daemon(8), systemd) escape codes would litter the log file. A log file
+    // we own is never a terminal.
     //
     // Never let a failed log write panic the thread that logged. The default
     // is to report a write failure with `eprintln!`, which itself panics when
     // stderr fails too — and the shipped supervisor configs point stdout and
     // stderr at the same place, so one full disk satisfies both. A worker
     // thread killed that way takes its share of the peer space with it.
-    let builder = fmt()
+    fmt()
         .with_env_filter(filter)
         .with_target(true)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .log_internal_errors(false);
-    // A Windows service has no stdout to log to; it writes a file instead.
-    #[cfg(windows)]
-    let builder = builder.with_writer(service::log_writer());
-    builder.init();
+        .with_ansi(LOG.get().is_none() && std::io::stdout().is_terminal())
+        .with_writer(writer)
+        .log_internal_errors(false)
+        .init();
+
+    // Logged first: an operator looking for output that is no longer on
+    // stdout needs the path and the limits that govern it.
+    if let Some(log) = LOG.get() {
+        info!(
+            path = %log.path().display(),
+            max_bytes = config.node.log_max_bytes(),
+            max_files = config.node.log_max_files(),
+            "Logging to file"
+        );
+    }
+    if let Some(path) = ignored_log_file {
+        warn!(
+            configured = path,
+            "node.log_file ignored: the log is already open"
+        );
+    }
 
     info!("FIPS {} starting", version::short_version());
 
@@ -256,7 +383,7 @@ async fn foreground_shutdown_signal() {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();
-    run_daemon(args.config, foreground_shutdown_signal()).await;
+    run_daemon(args.config, args.log_file, foreground_shutdown_signal()).await;
 }
 
 // ============================================================================
@@ -299,17 +426,18 @@ fn main() {
         .build()
         .expect("Failed to create tokio runtime");
 
-    rt.block_on(run_daemon(args.config, foreground_shutdown_signal()));
+    rt.block_on(run_daemon(
+        args.config,
+        args.log_file,
+        foreground_shutdown_signal(),
+    ));
 }
 
 #[cfg(windows)]
 mod service {
-    use fips::utils::logfile::{ROLL_BYTES, ROLL_KEEP, RollingFile, SharedLog};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
-    use std::sync::OnceLock;
     use std::time::Duration;
-    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use windows_service::{
         define_windows_service,
         service::{
@@ -329,46 +457,14 @@ mod service {
 
     define_windows_service!(ffi_service_main, service_main);
 
-    /// The service's log file. Set at the start of `service_main`, and never
-    /// in a foreground run, which logs to the console.
-    static LOG: OnceLock<SharedLog> = OnceLock::new();
-
-    /// Open the service log in the config directory and send panics to it.
+    /// Open the service log in the config directory, before anything can go
+    /// wrong: a service has no console, so without it nothing is recorded.
     ///
     /// A failure leaves the log unset and the daemon runs on without one:
     /// with no console and logging not yet up, nothing could report it.
     fn open_log() {
         let path = Path::new(fips::config::SYSTEM_CONFIG_DIR).join("fips.log");
-        let Ok(file) = RollingFile::open(&path, ROLL_BYTES, ROLL_KEEP) else {
-            return;
-        };
-        let log = SharedLog::new(file);
-        if LOG.set(log.clone()).is_err() {
-            return;
-        }
-        // The default hook writes to stderr, which a service does not have.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            previous(info);
-            log.try_line(&info.to_string());
-        }));
-    }
-
-    /// Where the daemon's tracing output goes: the service log when one is
-    /// open, otherwise stdout.
-    pub fn log_writer() -> BoxMakeWriter {
-        match LOG.get() {
-            Some(log) => BoxMakeWriter::new(log.clone()),
-            None => BoxMakeWriter::new(std::io::stdout),
-        }
-    }
-
-    /// Record an error raised before logging is set up in the service log.
-    /// Does nothing in a foreground run, where stderr carries it.
-    pub fn startup_error(msg: &str) {
-        if let Some(log) = LOG.get() {
-            log.line(&format!("ERROR {msg}"));
-        }
+        let _ = super::open_log(&path);
     }
 
     /// Start the service dispatcher, which blocks until the service stops.
@@ -381,7 +477,7 @@ mod service {
         open_log();
         if let Err(e) = run_service(arguments) {
             let msg = format!("Service error: {:?}", e);
-            match LOG.get() {
+            match super::LOG.get() {
                 Some(log) => log.line(&msg),
                 None => eprintln!("{msg}"),
             }
@@ -429,7 +525,7 @@ mod service {
         // Look for config file path from FIPS_CONFIG env var
         let config_path: Option<PathBuf> = std::env::var("FIPS_CONFIG").ok().map(PathBuf::from);
 
-        rt.block_on(super::run_daemon(config_path, async {
+        rt.block_on(super::run_daemon(config_path, None, async {
             let _ = shutdown_rx.await;
         }));
 
@@ -525,5 +621,33 @@ mod service {
         service.delete()?;
         println!("Service '{}' uninstalled.", SERVICE_NAME);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_file_flag_takes_precedence_over_config() {
+        assert_eq!(configured_log(None, false), ConfiguredLog::Unset);
+        assert_eq!(configured_log(None, true), ConfiguredLog::Unset);
+        assert_eq!(
+            configured_log(Some("a.log"), false),
+            ConfiguredLog::Open("a.log")
+        );
+        assert_eq!(
+            configured_log(Some("a.log"), true),
+            ConfiguredLog::Ignored("a.log")
+        );
+    }
+
+    #[test]
+    fn errors_reach_stderr_only_without_a_log_or_with_a_terminal() {
+        assert!(echo_to_stderr(false, false));
+        assert!(echo_to_stderr(false, true));
+        assert!(echo_to_stderr(true, true));
+        // Under launchd: the log has it, and stderr is a file nothing rolls.
+        assert!(!echo_to_stderr(true, false));
     }
 }

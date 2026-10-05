@@ -10,6 +10,8 @@
 		<string>/usr/local/bin/fips</string>
 		<string>--config</string>
 		<string>/usr/local/etc/fips/fips.yaml</string>
+		<string>--log-file</string>
+		<string>/usr/local/var/log/fips/fips.log</string>
 	</array>
 
 	<key>RunAtLoad</key>
@@ -21,11 +23,21 @@
 		<false/>
 	</dict>
 
+	<!-- The daemon owns and rolls its own log (the log-file argument
+	     above), because launchd holds this descriptor and never truncates
+	     or rotates it, and gives the daemon no way to reopen one rotated
+	     out from under it. Passed as a flag rather than set in fips.yaml so that an
+	     upgrade, which keeps the existing config, turns it on too.
+
+	     stdout carries nothing once the log file is open. stderr keeps
+	     only what is written before it opens, chiefly a failure to open
+	     it; errors and panics after that go to the log file alone, so a
+	     restart loop cannot grow this unrolled file. -->
 	<key>StandardOutPath</key>
-	<string>/usr/local/var/log/fips/fips.log</string>
+	<string>/dev/null</string>
 
 	<key>StandardErrorPath</key>
-	<string>/usr/local/var/log/fips/fips.log</string>
+	<string>/usr/local/var/log/fips/fips.stderr.log</string>
 
 	<key>WorkingDirectory</key>
 	<string>/usr/local/etc/fips</string>

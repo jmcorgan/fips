@@ -149,6 +149,15 @@ if [ ! -f "$CONFDIR/hosts" ]; then
     cp "$CONFDIR/hosts.default" "$CONFDIR/hosts"
 fi
 
+# The daemon writes its log here as root. A directory that predates the
+# package keeps its owner, and one another user can write to would let them
+# swap the log for a link elsewhere; the daemon refuses to follow one, but a
+# root-owned directory keeps the log from being tampered with at all.
+LOGDIR="/usr/local/var/log/fips"
+mkdir -p "$LOGDIR"
+chown root:wheel "$LOGDIR"
+chmod 755 "$LOGDIR"
+
 # Flush DNS cache so macOS picks up the new /etc/resolver/fips file
 dscacheutil -flushcache
 killall -HUP mDNSResponder 2>/dev/null || true

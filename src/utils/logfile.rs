@@ -1,10 +1,14 @@
-//! A size-rolling log file for the Windows service.
+//! A size-rolling log file, for supervisors that cannot rotate the daemon's
+//! output.
 //!
-//! A process started by the service control manager has no standard handles,
-//! and writes to its absent stdout report success, so the daemon's log is lost
-//! unless it goes to a file. The file is rolled by size, which bounds the disk
-//! it can take: `ROLL_KEEP` old files of about `ROLL_BYTES` each, plus the
-//! current one.
+//! A process started by the Windows service control manager has no standard
+//! handles, and writes to its absent stdout report success, so the daemon's
+//! log is lost unless it goes to a file. launchd redirects stdout to a plain
+//! file it holds open and never truncates, and gives the daemon no way to
+//! reopen one rotated out from under it. Both need the daemon to own the file.
+//! It is rolled by size, which bounds the disk it can take: `keep` old files of
+//! about `max` bytes each, plus the current one. The live file keeps its name,
+//! so `tail -F` follows it across a roll.
 //!
 //! Nothing here may emit a tracing event. The writer runs inside the
 //! subscriber with the `SharedLog` lock held, so an event raised from here
@@ -17,10 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use tracing_subscriber::fmt::MakeWriter;
 
-/// Size at which the service log is rolled.
+/// Default size at which the log is rolled.
 pub const ROLL_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Number of rolled service log files kept beside the current one.
+/// Default number of rolled log files kept beside the current one.
 pub const ROLL_KEEP: u32 = 4;
 
 /// An append-only file that is renamed aside once it would pass `max` bytes.
@@ -37,8 +41,17 @@ pub struct RollingFile {
 }
 
 /// Open `path` for appending, creating it if absent.
+///
+/// On Unix a symlink at `path` is refused rather than followed. The daemon
+/// writes its log as root, and every roll creates the file again, so a
+/// directory another user can write to would otherwise let them point the
+/// next one at any file on the system.
 fn append(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    options.open(path)
 }
 
 impl RollingFile {
@@ -60,6 +73,20 @@ impl RollingFile {
             len,
             limit: max,
         })
+    }
+
+    /// The path of the live file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Change the cap and the number of old files kept, for limits that are
+    /// only known once the config has loaded. A file already past the new cap
+    /// rolls on the next write.
+    pub fn set_limits(&mut self, max: u64, keep: u32) {
+        self.max = max;
+        self.keep = keep.max(1);
+        self.limit = max;
     }
 
     /// The path of the `n`th rolled file.
@@ -84,7 +111,8 @@ impl RollingFile {
     }
 
     /// Rename the current file aside and shift the older ones down, dropping
-    /// the oldest. The next write reopens `path` as a new, empty file.
+    /// the oldest, and any numbered past `keep` that a larger limit left
+    /// behind. The next write reopens `path` as a new, empty file.
     ///
     /// The handle is dropped first so that a failed roll reopens cleanly and
     /// nothing is left pointing at `path.1`. Renaming a file this process
@@ -93,6 +121,11 @@ impl RollingFile {
     /// blocks, such as a viewer holding the file without delete sharing.
     fn roll(&mut self) -> io::Result<()> {
         self.file = None;
+        // Stops at the first gap: rolls only ever leave a contiguous run.
+        let mut n = self.keep + 1;
+        while fs::remove_file(self.numbered(n)).is_ok() {
+            n += 1;
+        }
         for n in (1..self.keep).rev() {
             match fs::rename(self.numbered(n), self.numbered(n + 1)) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
@@ -171,6 +204,20 @@ impl SharedLog {
     /// Share `file`.
     pub fn new(file: RollingFile) -> Self {
         Self(Arc::new(Mutex::new(file)))
+    }
+
+    /// The path of the live file.
+    pub fn path(&self) -> PathBuf {
+        let file = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        file.path().to_path_buf()
+    }
+
+    /// See [`RollingFile::set_limits`].
+    pub fn set_limits(&self, max: u64, keep: u32) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_limits(max, keep);
     }
 
     /// Write `text` as one line, waiting for the lock.
@@ -355,6 +402,67 @@ mod tests {
         assert!(blocker.is_file());
         assert_eq!(read(&blocker), "aaaaaaaaaabbbbbbbbbbcccccccccc");
         assert_eq!(read(&path), "dddddddddd");
+    }
+
+    #[test]
+    fn lowering_the_limits_rolls_on_the_next_write() {
+        let (dir, path) = setup();
+        let log = shared(&path);
+        log.line("aaaaaaaaaa");
+        log.set_limits(8, 1);
+        log.line("bb");
+        assert_eq!(names(&dir), ["fips.log", "fips.log.1"]);
+        assert_eq!(read(&rolled(&path, 1)), "aaaaaaaaaa\n");
+        assert_eq!(read(&path), "bb\n");
+    }
+
+    #[test]
+    fn lowering_the_kept_count_removes_the_excess_on_the_next_roll() {
+        let (dir, path) = setup();
+        let log = SharedLog::new(RollingFile::open(&path, 4, 3).unwrap());
+        for line in ["aaaa", "bbbb", "cccc", "dddd"] {
+            log.line(line);
+        }
+        assert_eq!(
+            names(&dir),
+            ["fips.log", "fips.log.1", "fips.log.2", "fips.log.3"]
+        );
+        log.set_limits(4, 1);
+        log.line("eeee");
+        assert_eq!(names(&dir), ["fips.log", "fips.log.1"]);
+        assert_eq!(read(&rolled(&path, 1)), "dddd\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_place_of_the_log_is_refused() {
+        let (dir, path) = setup();
+        let target = dir.path().join("target");
+        fs::write(&target, "untouched").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(RollingFile::open(&path, 16, 1).is_err());
+        assert_eq!(read(&target), "untouched");
+    }
+
+    #[test]
+    fn opening_never_deletes_and_rolling_touches_only_numbered_files() {
+        let (dir, path) = setup();
+        fs::write(&path, "earlier run\n").unwrap();
+        fs::write(dir.path().join("fips-incident.log"), "keep me").unwrap();
+        fs::write(dir.path().join("fips.2026-08-31.log"), "keep me").unwrap();
+        let mut file = RollingFile::open(&path, 16, 1).unwrap();
+        assert_eq!(read(&path), "earlier run\n");
+        file.write_all(b"aaaaaaaaaa").unwrap();
+        assert_eq!(
+            names(&dir),
+            [
+                "fips-incident.log",
+                "fips.2026-08-31.log",
+                "fips.log",
+                "fips.log.1"
+            ]
+        );
+        assert_eq!(read(&rolled(&path, 1)), "earlier run\n");
     }
 
     #[test]
