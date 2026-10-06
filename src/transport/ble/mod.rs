@@ -18,9 +18,10 @@
 //!
 //! Transport logic (pool, neighbor, lifecycle) is separated from any one
 //! Bluetooth stack via the `BleIo` trait. `BluerIo` drives BlueZ (behind
-//! `cfg(bluer_available)`), [`io_android::AndroidIo`] drives a radio the
-//! embedder supplies, and `MockBleIo` is an in-memory double for tests
-//! without hardware. Which one `DefaultBleTransport` resolves to is decided
+//! `cfg(bluer_available)`), [`io_radio::RadioIo`] drives a radio operated
+//! through commands and callbacks — the Android embedder's — and `MockBleIo`
+//! is an in-memory double for tests without hardware. Which one
+//! `DefaultBleTransport` resolves to is decided
 //! by the cascade below, and the whole module is compiled only on platforms
 //! that have one of them — see `ble_available` in `build.rs`.
 //!
@@ -32,8 +33,13 @@
 
 pub mod addr;
 pub mod io;
-/// A backend whose radio is supplied by the embedder rather than opened in
-/// process.
+/// The Android names for [`io_radio`], kept for the embedder API.
+#[cfg(any(target_os = "android", test))]
+pub mod io_android;
+#[cfg(bluer_available)]
+pub mod io_linux;
+/// A backend over a radio driven through commands and callbacks rather than
+/// opened in process: the Android embedder's.
 ///
 /// Compiled under `cfg(test)` on every host as well as on the platform that
 /// will select it, so its channel machinery, slot semantics and connect
@@ -41,9 +47,7 @@ pub mod io;
 /// platform build of it is linted but executed nowhere, which is exactly why
 /// the logic must not be behind a platform-only gate.
 #[cfg(any(target_os = "android", test))]
-pub mod io_android;
-#[cfg(bluer_available)]
-pub mod io_linux;
+pub mod io_radio;
 pub mod neighbor;
 pub mod pool;
 pub mod psm;
@@ -99,7 +103,7 @@ pub const DEFAULT_PSM: u16 = 0x0085;
 pub type DefaultBleTransport = BleTransport<io_linux::BluerIo>;
 
 #[cfg(all(target_os = "android", not(bluer_available), not(test)))]
-pub type DefaultBleTransport = BleTransport<io_android::AndroidIo>;
+pub type DefaultBleTransport = BleTransport<io_radio::RadioIo>;
 
 #[cfg(test)]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
