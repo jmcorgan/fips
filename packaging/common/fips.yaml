@@ -105,8 +105,10 @@ transports:
 
   # Bluetooth Low Energy transport. On Linux (glibc builds) it needs BlueZ
   # (bluetoothd) running. On macOS it uses CoreBluetooth: `adapter` is
-  # ignored and only one `ble` instance is allowed. Not available on
-  # FreeBSD, Windows or OpenWrt.
+  # ignored, only one `ble` instance is allowed, and the packaged daemon
+  # gets the radio from the fips-ble-agent LaunchAgent, so BLE works while a
+  # user in the `fips` group is logged in. Not available on FreeBSD, Windows
+  # or OpenWrt.
   # ble:
   #   adapter: "hci0"
   #   mtu: 2048

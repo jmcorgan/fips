@@ -108,11 +108,22 @@ impl MacRadio {
     /// no adapter, switched off — in which case the slot stays empty and the
     /// transport idles exactly as it would on Android with no radio armed.
     pub fn start(slot: Arc<BleRadioSlot>, mtu: u16) -> Arc<Self> {
+        Self::start_with(slot, mtu, None)
+    }
+
+    /// As [`Self::start`], calling `on_denied` once if CoreBluetooth refuses
+    /// this process — which it always does to a root launchd daemon.
+    pub fn start_with(
+        slot: Arc<BleRadioSlot>,
+        mtu: u16,
+        on_denied: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Arc<Self> {
         let shared = Arc::new(Shared {
             queue: DispatchQueue::new("com.fips.ble", DispatchQueueAttr::SERIAL),
             slot,
             mtu,
             psm: AtomicU16::new(0),
+            on_denied: Mutex::new(on_denied),
             state: Mutex::new(QueueState::default()),
         });
         let weak = Arc::downgrade(&shared);
@@ -121,6 +132,13 @@ impl MacRadio {
             unsafe { st.init(weak) };
         });
         Arc::new(Self { shared })
+    }
+}
+
+impl MacRadio {
+    /// The PSM the L2CAP listener was published on, or 0 if it has none.
+    pub fn listener_psm(&self) -> u16 {
+        self.shared.psm.load(Ordering::Relaxed)
     }
 }
 
@@ -148,6 +166,60 @@ impl Drop for MacRadio {
     }
 }
 
+/// The macOS BLE radio for the daemon: CoreBluetooth in process, or, when
+/// CoreBluetooth refuses the process, the fips BLE agent over
+/// `agent_socket`. Both feed the same `slot`; only one ever does.
+///
+/// The returned owner keeps whichever is running alive; hand it to
+/// `RadioIo::with_owner`. Must be called inside a tokio runtime, which the
+/// agent listener binds through.
+pub fn start_daemon_radio(
+    slot: Arc<BleRadioSlot>,
+    mtu: u16,
+    agent_socket: std::path::PathBuf,
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    let agent: Arc<std::sync::OnceLock<Arc<super::agent_server::AgentServer>>> = Arc::default();
+    let handle = tokio::runtime::Handle::current();
+    let fallback = {
+        let slot = Arc::clone(&slot);
+        let agent = Arc::clone(&agent);
+        Box::new(move || {
+            let _runtime = handle.enter();
+            match super::agent_server::AgentServer::start(slot, &agent_socket) {
+                Ok(server) => {
+                    let _ = agent.set(server);
+                }
+                Err(e) => warn!(
+                    path = %agent_socket.display(),
+                    error = %e,
+                    "BLE: could not listen for the fips BLE agent"
+                ),
+            }
+        })
+    };
+    let radio = MacRadio::start_with(slot, mtu, Some(fallback));
+    Arc::new((radio, agent))
+}
+
+/// Run the BLE agent: CoreBluetooth in this login session, lent to the
+/// daemon listening at `socket`, or at the default agent socket path —
+/// resolved afresh on every attempt — when it is `None`. Runs until the
+/// process is killed.
+pub async fn run_agent(socket: Option<std::path::PathBuf>) -> io::Result<()> {
+    let slot = Arc::new(BleRadioSlot::new());
+    let radio = MacRadio::start(Arc::clone(&slot), crate::config::BleConfig::default().mtu());
+    // Up is a bridge in the slot, which `MacRadio` installs only once the
+    // listener's publish has completed, so its PSM is then final.
+    let radio_psm = {
+        let slot = Arc::clone(&slot);
+        let radio = Arc::clone(&radio);
+        move || slot.is_installed().then(|| radio.listener_psm())
+    };
+    let io = Arc::new(super::super::io_radio::RadioIo::with_owner(slot, radio));
+    let socket = move || socket.clone().unwrap_or_else(super::agent_socket_path);
+    super::agent::run(io, socket, super::super::DEFAULT_PSM, radio_psm).await
+}
+
 // ============================================================================
 // Shared state
 // ============================================================================
@@ -160,6 +232,8 @@ struct Shared {
     /// because [`BleRadio::listen`] is synchronous and is called from the
     /// transport, not from the queue.
     psm: AtomicU16,
+    /// Called once, the first time CoreBluetooth reports `Unauthorized`.
+    on_denied: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     state: Mutex<QueueState>,
 }
 
@@ -175,6 +249,18 @@ impl Shared {
 
     fn lock(&self) -> MutexGuard<'_, QueueState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// CoreBluetooth refused this process; run the fallback, once.
+    fn denied(&self) {
+        let hook = self
+            .on_denied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// The bridge for session `generation`, if that is still the live one.
@@ -614,7 +700,8 @@ fn report_state(manager: &str, state: CBManagerState) {
         CBManagerState::Unauthorized => warn!(
             manager,
             "BLE: CoreBluetooth access denied to this process. A launchd daemon \
-             never gets it; run fips from a terminal with Bluetooth permission"
+             never gets it; the radio must come from the fips BLE agent in a \
+             login session (or run fips from a terminal with Bluetooth permission)"
         ),
         CBManagerState::PoweredOff => info!(manager, "BLE: Bluetooth is off"),
         CBManagerState::Unsupported => warn!(manager, "BLE: Bluetooth LE unsupported on this Mac"),
@@ -1088,6 +1175,9 @@ define_class!(
                 let state = unsafe { central.state() };
                 st.central_on = state == CBManagerState::PoweredOn;
                 report_state("central", state);
+                if state == CBManagerState::Unauthorized {
+                    shared.denied();
+                }
                 shared.power_changed(st, &weak);
             });
         }
@@ -1152,6 +1242,9 @@ define_class!(
                 let state = unsafe { manager.state() };
                 st.manager_on = state == CBManagerState::PoweredOn;
                 report_state("peripheral manager", state);
+                if state == CBManagerState::Unauthorized {
+                    shared.denied();
+                }
                 shared.power_changed(st, &weak);
             });
         }

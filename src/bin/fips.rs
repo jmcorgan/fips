@@ -43,6 +43,19 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     log_file: Option<PathBuf>,
 
+    /// Run as the macOS BLE agent rather than the daemon: own the Bluetooth
+    /// radio in this login session and lend it to the daemon, which macOS
+    /// does not let use Bluetooth itself. Started by the per-user
+    /// LaunchAgent `com.fips.ble-agent`.
+    #[cfg(target_os = "macos")]
+    #[arg(long)]
+    ble_agent: bool,
+
+    /// The daemon's BLE agent socket (default: beside the control socket).
+    #[cfg(target_os = "macos")]
+    #[arg(long, value_name = "PATH", requires = "ble_agent")]
+    ble_agent_socket: Option<PathBuf>,
+
     /// Run as a Windows service (internal use by service control manager)
     #[cfg(windows)]
     #[arg(long, hide = true)]
@@ -428,7 +441,68 @@ async fn main() {
     // the daemon instead of taking the default action.
     let shutdown = foreground_shutdown_signal();
     let args = Args::parse();
+    #[cfg(target_os = "macos")]
+    if args.ble_agent {
+        run_ble_agent(args.ble_agent_socket, args.log_file, shutdown).await;
+        return;
+    }
     run_daemon(args.config, args.log_file, shutdown).await;
+}
+
+/// Run the macOS BLE agent until killed.
+///
+/// Logs to `--log-file` when given, to stdout when that is a terminal, and
+/// otherwise — under its LaunchAgent — to `~/Library/Logs/fips/ble-agent.log`,
+/// rolled like the daemon's log. The agent runs once per logged-in user, so
+/// each keeps its log in a directory of its own rather than in a shared one
+/// another account could plant a file or symlink in.
+#[cfg(target_os = "macos")]
+async fn run_ble_agent(
+    socket: Option<PathBuf>,
+    log_file: Option<PathBuf>,
+    shutdown: impl std::future::Future<Output = ()>,
+) {
+    let log_file = log_file.or_else(|| {
+        if std::io::stdout().is_terminal() {
+            return None;
+        }
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library/Logs/fips/ble-agent.log"))
+    });
+    if let Some(path) = &log_file
+        && let Err(e) = open_log(path)
+    {
+        eprintln!("Cannot open log file {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    let writer = match LOG.get() {
+        Some(log) => BoxMakeWriter::new(log.clone()),
+        None => BoxMakeWriter::new(std::io::stdout),
+    };
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_ansi(LOG.get().is_none() && std::io::stdout().is_terminal())
+        .with_writer(writer)
+        .log_internal_errors(false)
+        .init();
+    let shown = socket
+        .clone()
+        .unwrap_or_else(fips::transport::ble::io_macos::agent_socket_path);
+    info!(version = version::short_version(), socket = %shown.display(), "FIPS BLE agent starting");
+    // The stop signal is already held for the process (see `main`), so the
+    // agent must end on it itself, or launchd's bootout on upgrade and
+    // uninstall would wait out its timeout and kill it.
+    tokio::select! {
+        result = fips::transport::ble::io_macos::corebluetooth::run_agent(socket) => {
+            if let Err(e) = result {
+                error!(error = %e, "FIPS BLE agent failed");
+                std::process::exit(1);
+            }
+        }
+        () = shutdown => info!("FIPS BLE agent stopping"),
+    }
 }
 
 // ============================================================================

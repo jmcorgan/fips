@@ -106,6 +106,7 @@ mkdir -p "${STAGING_DIR}/usr/local/bin"
 mkdir -p "${STAGING_DIR}/usr/local/etc/fips"
 mkdir -p "${STAGING_DIR}/usr/local/var/log/fips"
 mkdir -p "${STAGING_DIR}/Library/LaunchDaemons"
+mkdir -p "${STAGING_DIR}/Library/LaunchAgents"
 mkdir -p "${STAGING_DIR}/etc/resolver"
 
 # Binaries
@@ -113,6 +114,10 @@ for bin in fips fipsctl fipstop; do
     cp "${BINARY_DIR}/${bin}" "${STAGING_DIR}/usr/local/bin/"
     strip "${STAGING_DIR}/usr/local/bin/${bin}"
 done
+# The BLE agent runs the daemon binary under its own name, so Activity
+# Monitor tells the two processes apart. A hard link, not a symlink: macOS
+# names a process after the file it executed, and a symlink resolves to fips.
+ln "${STAGING_DIR}/usr/local/bin/fips" "${STAGING_DIR}/usr/local/bin/fips-ble-agent"
 
 # Config (marked as conf file via postinstall logic — won't overwrite on upgrade)
 cp "${PACKAGING_DIR}/common/fips.yaml" "${STAGING_DIR}/usr/local/etc/fips/fips.yaml.default"
@@ -120,6 +125,9 @@ cp "${PACKAGING_DIR}/common/hosts" "${STAGING_DIR}/usr/local/etc/fips/hosts.defa
 
 # LaunchDaemon plist
 cp "${SCRIPT_DIR}/com.fips.daemon.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
+
+# BLE agent: the Bluetooth radio, run in the user's login session
+cp "${SCRIPT_DIR}/com.fips.ble-agent.plist" "${STAGING_DIR}/Library/LaunchAgents/"
 
 # DNS resolver. Must match the daemon's dns.bind_addr (defaults to ::1).
 cat > "${STAGING_DIR}/etc/resolver/fips" <<EOF
@@ -188,6 +196,20 @@ launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/nul
 launchctl bootstrap system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
 log "launchd service loaded"
 
+# (Re)start the BLE agent in every GUI session, so none keeps running the
+# binary this install replaced: the console user's, and those of users
+# logged in through fast user switching, who all appear as "console" in
+# who(1). Users who log in later get it from launchd. A user added to the
+# fips group above may only gain the group in a new login session, so the
+# agent may not reach the daemon's socket until they log out and back in.
+for AGENT_USER in $(who | awk '$2 == "console" { print $1 }' | sort -u); do
+    [ "$AGENT_USER" = "root" ] && continue
+    AGENT_UID="$(id -u "$AGENT_USER" 2>/dev/null)" || continue
+    launchctl bootout "gui/$AGENT_UID/com.fips.ble-agent" 2>/dev/null || true
+    launchctl bootstrap "gui/$AGENT_UID" /Library/LaunchAgents/com.fips.ble-agent.plist 2>/dev/null || true
+    log "BLE agent loaded for $AGENT_USER"
+done
+
 log "postinstall complete"
 exit 0
 POSTINSTALL
@@ -198,6 +220,12 @@ cat > "${SCRIPTS_DIR}/preinstall" <<'PREINSTALL'
 #!/bin/sh
 # Stop service before upgrade
 launchctl bootout system /Library/LaunchDaemons/com.fips.daemon.plist 2>/dev/null || true
+# Stop the BLE agent in every GUI session; postinstall starts the new one.
+for AGENT_USER in $(who | awk '$2 == "console" { print $1 }' | sort -u); do
+    [ "$AGENT_USER" = "root" ] && continue
+    AGENT_UID="$(id -u "$AGENT_USER" 2>/dev/null)" || continue
+    launchctl bootout "gui/$AGENT_UID/com.fips.ble-agent" 2>/dev/null || true
+done
 exit 0
 PREINSTALL
 chmod +x "${SCRIPTS_DIR}/preinstall"

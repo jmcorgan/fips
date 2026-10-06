@@ -1361,9 +1361,10 @@ impl Node {
             for (name, ble_config) in ble_instances {
                 let transport_id = self.allocate_transport_id();
                 let slot = Arc::new(crate::transport::ble::io_radio::BleRadioSlot::new());
-                let radio = crate::transport::ble::io_macos::corebluetooth::MacRadio::start(
+                let radio = crate::transport::ble::io_macos::corebluetooth::start_daemon_radio(
                     Arc::clone(&slot),
                     ble_config.mtu(),
+                    crate::transport::ble::io_macos::agent_socket_path(),
                 );
                 let mut ble = crate::transport::ble::BleTransport::new(
                     transport_id,

@@ -40,6 +40,9 @@
 //!   so both are tolerated. A configured static peer (`hci0/AA:…`) cannot be
 //!   dialled from a Mac — only a scan-discovered one.
 
+pub mod agent;
+pub mod agent_proto;
+pub mod agent_server;
 #[cfg(target_os = "macos")]
 pub mod corebluetooth;
 
@@ -51,6 +54,12 @@ use std::time::{Duration, Instant};
 use super::addr::BleAddr;
 use super::io_radio::{BleRadioBridge, RADIO_ADAPTER};
 use super::psm;
+
+/// Where the daemon listens for the BLE agent, and where the agent looks for
+/// it: beside the control socket.
+pub fn agent_socket_path() -> std::path::PathBuf {
+    crate::config::resolve_default_socket("ble-agent.sock").into()
+}
 
 /// The FIPS service UUID, in the string form CoreBluetooth parses.
 ///

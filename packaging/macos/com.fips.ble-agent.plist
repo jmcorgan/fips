@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.fips.ble-agent</string>
+	<!-- macOS never lets a root launchd daemon use Bluetooth: CoreBluetooth
+	     answers it Unauthorized whatever the privacy settings say. This agent
+	     runs the same binary in the user's login session, where Bluetooth
+	     permission can be granted, and lends the radio to the daemon over
+	     /var/run/fips/ble-agent.sock. It needs the user in the `fips` group.
+	     fips-ble-agent is a hard link to fips, so Activity Monitor shows the
+	     agent under its own name. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/fips-ble-agent</string>
+		<string>--ble-agent</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<!-- The agent logs to ~/Library/Logs/fips/ble-agent.log itself, rolled
+	     like the daemon's log: launchd cannot expand ~ here, and a shared
+	     path such as /tmp would let one account plant a file or symlink the
+	     next account's agent appends to. stdout and stderr default to
+	     /dev/null. -->
+</dict>
+</plist>
