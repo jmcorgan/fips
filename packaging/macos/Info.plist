@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.fips.daemon</string>
+	<key>CFBundleName</key>
+	<string>fips</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>FIPS uses Bluetooth Low Energy to discover and connect to nearby mesh peers.</string>
+</dict>
+</plist>

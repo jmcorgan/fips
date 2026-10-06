@@ -1345,6 +1345,37 @@ impl Node {
                 transports.push(TransportHandle::Ble(ble));
             }
         }
+        // Create BLE transport instances over CoreBluetooth. Like the Android
+        // arm, built whether or not Bluetooth is up yet: the radio installs a
+        // bridge into the slot each time it comes up, and the transport
+        // adopts it in place.
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            let ble_instances: Vec<_> = self
+                .config()
+                .transports
+                .ble
+                .iter()
+                .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+                .collect();
+            for (name, ble_config) in ble_instances {
+                let transport_id = self.allocate_transport_id();
+                let slot = Arc::new(crate::transport::ble::io_radio::BleRadioSlot::new());
+                let radio = crate::transport::ble::io_macos::corebluetooth::MacRadio::start(
+                    Arc::clone(&slot),
+                    ble_config.mtu(),
+                );
+                let mut ble = crate::transport::ble::BleTransport::new(
+                    transport_id,
+                    name,
+                    ble_config,
+                    crate::transport::ble::io_radio::RadioIo::with_owner(slot, radio),
+                    packet_tx.clone(),
+                );
+                ble.set_local_pubkey(self.identity().pubkey().serialize());
+                transports.push(TransportHandle::Ble(ble));
+            }
+        }
         // `BleConfig` always parses, so on a build that cannot construct a
         // BLE transport a configured `ble:` block would otherwise be dropped
         // silently and the node would report healthy without it.
@@ -1364,7 +1395,7 @@ impl Node {
     /// Why this build cannot construct a configured BLE instance, or `None`
     /// when it can.
     ///
-    /// The three arms are disjoint and together cover every build, so a
+    /// The arms are disjoint and together cover every build, so a
     /// target matching none or two of them fails to compile rather than
     /// guessing.
     #[cfg(all(bluer_available, not(test)))]
@@ -1384,12 +1415,21 @@ impl Node {
         }
     }
 
+    /// Why this build cannot construct a configured BLE instance, or `None`
+    /// when it can. CoreBluetooth is always constructible; whether Bluetooth
+    /// is on, or permitted, is the radio's business at runtime.
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn ble_blocker(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Why this build cannot construct a configured BLE instance: it has no
     /// backend at all. A test build lands here too, since its BLE transport
     /// is the in-memory double and is never built from config.
     #[cfg(not(any(
         all(bluer_available, not(test)),
-        all(target_os = "android", not(bluer_available), not(test))
+        all(target_os = "android", not(bluer_available), not(test)),
+        all(target_os = "macos", not(test))
     )))]
     fn ble_blocker(&self) -> Option<&'static str> {
         Some("this build has no BLE backend")

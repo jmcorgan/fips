@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A CoreBluetooth backend for the BLE transport, so macOS peers over BLE with
+  Linux, Android and other Macs. It reuses the radio-bridge machinery the
+  Android backend introduced, now platform-neutral in `ble/io_radio.rs` (the
+  `io_android` names remain as aliases, so the embedder API is unchanged):
+  `MacRadio` drives CoreBluetooth from a private dispatch queue and installs a
+  fresh bridge each time Bluetooth comes up, so toggling Bluetooth needs no
+  restart, and nothing claims the main thread's run loop. macOS assigns the
+  listener PSM and cannot advertise it, so a Mac serves its PSM over GATT
+  (Apple's L2CAP PSM characteristic, specified in `ble/psm.rs`) and reads a
+  peer's there when its advert carried none — the path Mac ↔ Mac needs. Linux
+  and Android cannot dial a Mac; the Mac's own dial forms the link. The `fips`
+  binary embeds an `Info.plist` with a Bluetooth usage description, which
+  CoreBluetooth requires; the daemon needs Bluetooth permission. Configured
+  `hci0/AA:…` peers are not dialable from a Mac, only scan-discovered ones,
+  because CoreBluetooth hides link addresses. macOS has one radio, so more
+  than one `ble` instance is a config error there.
+
 - Dynamic interface binding for the Ethernet transport. An interface-bound
   transport is now a long-lived object that is *sometimes bound*: the interface
   it names need not exist when the daemon starts, may appear minutes later, and

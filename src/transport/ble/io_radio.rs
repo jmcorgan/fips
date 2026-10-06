@@ -6,11 +6,15 @@
 //! — scanning, advertising, L2CAP listen and connect, and the socket I/O
 //! itself — is a Java API held under a permission and foreground-service
 //! model that only the application can satisfy, so there is no
-//! Rust-reachable radio to open.
+//! Rust-reachable radio to open. On macOS CoreBluetooth is reachable, but it
+//! is delegate-driven: every outcome arrives later as a callback on a
+//! dispatch queue, and a channel's bytes move through Foundation streams.
 //!
 //! So this backend does not drive a radio itself; it drives one that
 //! somebody else operates — the *embedder*, below. On Android that is the
-//! embedding application, across its foreign-function layer.
+//! embedding application, across its foreign-function layer. On macOS it is
+//! `io_macos`'s in-process CoreBluetooth radio, which plays the same part
+//! from inside the crate.
 //!
 //! # Shape
 //!
@@ -91,7 +95,7 @@ use super::io::{BleAcceptor, BleIo, BleScanner, BleStream, ScanAdvert};
 /// BlueZ-style adapter name, so there is nothing to report but a stable
 /// placeholder. Nothing keys off it: peers are identified by node address,
 /// never by adapter or MAC.
-const RADIO_ADAPTER: &str = "ble0";
+pub const RADIO_ADAPTER: &str = "ble0";
 
 /// Bound on the inbound byte queue and on the accept and scan fan-ins.
 ///
@@ -549,6 +553,26 @@ impl BleRadioBridge {
         }
     }
 
+    /// Deliver bytes read from channel `ch_id`, waiting for room rather than
+    /// dropping them.
+    ///
+    /// For an embedder that reads each channel on a dedicated thread of its
+    /// own. Where the platform hands over a channel as a byte stream, a
+    /// dropped chunk is not a lost packet the layers above retransmit, it is
+    /// a hole that desynchronises the FMP framing for the rest of the link;
+    /// waiting instead stalls this one reader, which stops draining the
+    /// platform stream and lets L2CAP flow control push back on the peer.
+    ///
+    /// Returns `false` when the channel is unknown or gone. Must not be called
+    /// from inside an async runtime: the wait blocks the calling thread.
+    pub fn deliver_recv_blocking(&self, ch_id: i64, data: &[u8]) -> bool {
+        let tx = self.lock_channels().get(&ch_id).map(|c| c.recv_tx.clone());
+        match tx {
+            Some(tx) => tx.blocking_send(data.to_vec()).is_ok(),
+            None => false,
+        }
+    }
+
     /// Pull the next outbound packet for channel `ch_id`, blocking up to
     /// `timeout`.
     ///
@@ -645,6 +669,9 @@ pub struct RadioIo {
     /// Shared with the acceptor and the scanner, so a radio installed later
     /// gets told everything the transport asked for at startup.
     intent: Arc<RadioIntent>,
+    /// Whatever feeds `slot`, when this backend rather than an embedder owns
+    /// it. Never read: holding it is the point. See [`Self::with_owner`].
+    _owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl RadioIo {
@@ -653,6 +680,24 @@ impl RadioIo {
         Self {
             slot,
             intent: Arc::new(RadioIntent::default()),
+            _owner: None,
+        }
+    }
+
+    /// Drive `slot`, keeping `owner` alive for as long as this backend lives.
+    ///
+    /// For a radio that lives in process rather than in an embedder. Such a
+    /// radio installs a fresh bridge into the slot each time Bluetooth comes
+    /// up and clears it when it goes down, so nothing installed in the slot
+    /// can be what keeps the radio alive: a power-off would drop it, and with
+    /// it the only thing that could ever install the next bridge.
+    pub fn with_owner(
+        slot: Arc<BleRadioSlot>,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            _owner: Some(owner),
+            ..Self::new(slot)
         }
     }
 
