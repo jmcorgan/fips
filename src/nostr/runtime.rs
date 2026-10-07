@@ -52,6 +52,15 @@ fn short_npub(npub: &str) -> String {
         .unwrap_or_else(|| npub.to_string())
 }
 
+/// An offer we sent and are still waiting on, with what is needed to send it
+/// again. `resent` caps the re-send at once per offer.
+struct InflightOffer {
+    offer: TraversalOffer,
+    relays: Vec<String>,
+    receiver: PublicKey,
+    resent: bool,
+}
+
 /// Whether an inbound-offer rejection belongs to a class that cannot be
 /// explained by ordinary relay delivery lag, and therefore warrants a warning
 /// on a node running at the default log level. A stale offer is benign and is
@@ -210,6 +219,9 @@ pub struct NostrRendezvous {
     advert: AdvertMachine,
     traversal: TraversalMachine,
     pending_answers: Mutex<HashMap<String, oneshot::Sender<SignalEnvelope<TraversalAnswer>>>>,
+    /// Our outbound offer per peer npub while we wait for its answer, kept so
+    /// a dual-init election that suppresses the peer's offer can re-send ours.
+    inflight_offers: Mutex<HashMap<String, InflightOffer>>,
     admission: OfferAdmission,
     signal_gate: SignalGate,
     /// Inbound traversal signals shed before decryption, since process start.
@@ -352,6 +364,7 @@ impl NostrRendezvous {
             advert,
             traversal,
             pending_answers: Mutex::new(HashMap::new()),
+            inflight_offers: Mutex::new(HashMap::new()),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
             shed_signals: AtomicU64::new(0),
@@ -1196,13 +1209,20 @@ impl NostrRendezvous {
             event = %short_id(&offer_event.id.to_string()),
             "traversal: offer sent"
         );
+        self.inflight_offers.lock().await.insert(
+            peer_config.npub.clone(),
+            InflightOffer {
+                offer: offer.clone(),
+                relays: relays.clone(),
+                receiver: target_pubkey,
+                resent: false,
+            },
+        );
 
-        let answer = match tokio::time::timeout(
-            Duration::from_secs(self.config.signal_ttl_secs),
-            rx,
-        )
-        .await
-        {
+        let answer =
+            tokio::time::timeout(Duration::from_secs(self.config.signal_ttl_secs), rx).await;
+        self.inflight_offers.lock().await.remove(&peer_config.npub);
+        let answer = match answer {
             Ok(Ok(answer)) => answer,
             Ok(Err(_)) => {
                 let _ = self.pending_answers.lock().await.remove(&offer.nonce);
@@ -1310,6 +1330,40 @@ impl NostrRendezvous {
         )
     }
 
+    /// Send our in-flight offer to `peer_npub` once more.
+    ///
+    /// Called when the dual-init election suppresses the peer's offer. If the
+    /// peer received our offer, it answers that one and this copy is dropped by
+    /// its replay check. If our offer was lost, or published before the peer
+    /// was listening, the suppression leaves neither side answering, and the
+    /// connect would stall for `signal_ttl_secs`; this copy lets the peer answer
+    /// now. At most once per offer.
+    async fn resend_inflight_offer(&self, peer_npub: &str) {
+        let (offer, relays, receiver) = {
+            let mut inflight = self.inflight_offers.lock().await;
+            let Some(entry) = inflight.get_mut(peer_npub).filter(|e| !e.resent) else {
+                return;
+            };
+            entry.resent = true;
+            (entry.offer.clone(), entry.relays.clone(), entry.receiver)
+        };
+        let peer_short = short_npub(peer_npub);
+        match self.send_signal(&relays, receiver, &offer).await {
+            Ok(event) => debug!(
+                peer = %peer_short,
+                session = %short_id(&offer.session_id),
+                event = %short_id(&event.id.to_string()),
+                "traversal: offer re-sent after suppressing the peer's"
+            ),
+            Err(err) => debug!(
+                peer = %peer_short,
+                session = %short_id(&offer.session_id),
+                error = %err,
+                "traversal: offer re-send failed"
+            ),
+        }
+    }
+
     async fn handle_incoming_offer(
         self: Arc<Self>,
         offer: TraversalOffer,
@@ -1375,6 +1429,7 @@ impl NostrRendezvous {
                             session = %short_id(&offer.session_id),
                             "traversal: responder session suppressed, our outbound initiator wins (smaller addr)"
                         );
+                        self.resend_inflight_offer(&sender_npub).await;
                         return Ok(());
                     }
                     OfferDisposition::Proceed => {}
@@ -1938,6 +1993,7 @@ impl NostrRendezvous {
             advert,
             traversal,
             pending_answers: Mutex::new(HashMap::new()),
+            inflight_offers: Mutex::new(HashMap::new()),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
             shed_signals: AtomicU64::new(0),
@@ -1953,6 +2009,51 @@ impl NostrRendezvous {
             public_udp_addr_cache: RwLock::new(HashMap::new()),
             outbound_admission: AtomicBool::new(true),
         }
+    }
+
+    /// Register `offer` as our in-flight offer to `peer_npub`, with an active
+    /// initiator, as `connect_peer` would after publishing it.
+    pub(crate) async fn insert_inflight_offer_for_test(
+        &self,
+        peer_npub: &str,
+        offer: TraversalOffer,
+        receiver: PublicKey,
+    ) {
+        self.traversal.begin_initiator(peer_npub);
+        self.inflight_offers.lock().await.insert(
+            peer_npub.to_string(),
+            InflightOffer {
+                offer,
+                relays: Vec::new(),
+                receiver,
+                resent: false,
+            },
+        );
+    }
+
+    /// Whether our in-flight offer to `peer_npub` has been re-sent, or `None`
+    /// when there is none.
+    pub(crate) async fn inflight_offer_resent_for_test(&self, peer_npub: &str) -> Option<bool> {
+        self.inflight_offers
+            .lock()
+            .await
+            .get(peer_npub)
+            .map(|e| e.resent)
+    }
+
+    /// This runtime's own npub.
+    pub(crate) fn npub_for_test(&self) -> &str {
+        &self.npub
+    }
+
+    /// Run the incoming-offer handler.
+    pub(crate) async fn handle_incoming_offer_for_test(
+        self: Arc<Self>,
+        offer: TraversalOffer,
+        sender: PublicKey,
+        sender_npub: String,
+    ) -> Result<(), BootstrapError> {
+        self.handle_incoming_offer(offer, sender, sender_npub).await
     }
 
     /// Install the five background-task handles that `start` would install, so

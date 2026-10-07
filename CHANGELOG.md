@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Nostr traversal connect no longer stalls for `signal_ttl_secs` (120 s by
+  default) when both peers dial each other and one offer is lost. The node
+  with the smaller address drops the peer's offer and waits for an answer to
+  its own; if its own offer never reached the peer, neither side answered
+  until the wait ran out. Dropping the peer's offer now re-sends ours once, so
+  the peer can answer it straight away. A peer that already has it ignores
+  the copy through its replay check.
+
 #### FreeBSD
 
 - With pkg dnsmasq, the DNS setup and teardown scripts now restart dnsmasq
