@@ -2028,10 +2028,25 @@ impl Node {
 
             // Clean up outbound connection state
             self.pending_outbound.remove(&key);
-            // Close the losing leg's connection: a separate socket on TCP, a
-            // no-op when connectionless, and left open when it is the very
-            // connection the promoted peer runs on (BLE).
-            self.close_handshake_link_connection(link_id).await;
+
+            // The handshake ran over some (transport, address). Whichever
+            // session won, that is where the peer answered just now — but a
+            // handshake creates no path state: the probe exchange, which is
+            // authenticated and replay-checked under the surviving session,
+            // is the one way a path is proven. Leave the address as a
+            // candidate for the heartbeat tick. The link record goes (the
+            // peer's link is the one its session rides), but the transport
+            // connection stays: on TCP, Tor or Nym that socket is what the
+            // probe will go out on, and closing it would only have the
+            // first probe dial it again — or, on the responder, find that
+            // our ephemeral port cannot be dialled at all. `api_disconnect`
+            // closes every path's connection. A connectionless close was a
+            // no-op either way.
+            if let Some(link) = self.links.get(&link_id) {
+                let tid = link.transport_id();
+                let addr = link.remote_addr().clone();
+                self.add_path_candidate(peer_node_addr, tid, addr);
+            }
             self.remove_link(&link_id);
 
             // Send TreeAnnounce now that sessions are aligned

@@ -57,6 +57,11 @@ pub struct LoopbackTransport {
     /// transport's `IFF_RUNNING`. `None`: not interface-bound, no presence
     /// reported, which is the default.
     carrier: Mutex<Option<bool>>,
+    /// Every `close_connection` the node asked for, in order. Loopback is
+    /// connectionless so the close itself does nothing; the record lets a
+    /// test say whether a socket a connection-oriented transport would own
+    /// was kept or closed.
+    closed: Mutex<Vec<TransportAddr>>,
 }
 
 impl LoopbackTransport {
@@ -84,7 +89,18 @@ impl LoopbackTransport {
             registry,
             discovered: Mutex::new(Vec::new()),
             carrier: Mutex::new(None),
+            closed: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Record a `close_connection` call.
+    pub fn record_close(&self, addr: &TransportAddr) {
+        self.closed.lock().unwrap().push(addr.clone());
+    }
+
+    /// The addresses the node has asked to close on this transport.
+    pub fn closed(&self) -> Vec<TransportAddr> {
+        self.closed.lock().unwrap().clone()
     }
 
     /// Pretend this transport is bound to an interface with (or without)

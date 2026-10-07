@@ -2829,10 +2829,10 @@ impl Node {
                     transport: handle.and_then(|t| t.name().map(str::to_string)),
                     transport_type: handle.map(|t| t.transport_type().name.to_string()),
                     addr: path.addr().to_string(),
-                    state: format!("{:?}", path.state()).to_lowercase(),
+                    state: path.state().as_str().to_string(),
                     active: Some(path.transport_id()) == active,
                     remote_active: path.remote_active(),
-                    role: format!("{:?}", path.role()).to_lowercase(),
+                    role: path.role().as_str().to_string(),
                     pinned: path.pinned(),
                     last_rtt_ms: path.last_rtt_ms(),
                     min_rtt_ms: path.min_rtt_ms(),
@@ -2940,8 +2940,8 @@ impl Node {
         }
     }
 
-    /// Whether an active peer on a link other than `link_id` sends over
-    /// `(transport_id, addr)`.
+    /// Whether an active peer on a link other than `link_id` has a path over
+    /// `(transport_id, addr)` — its active path or any other it holds.
     pub(in crate::node) fn addr_carries_other_peer(
         &self,
         transport_id: TransportId,
@@ -2950,8 +2950,10 @@ impl Node {
     ) -> bool {
         self.peers.values().any(|peer| {
             peer.link_id() != link_id
-                && peer.transport_id() == Some(transport_id)
-                && peer.current_addr() == Some(addr)
+                && peer
+                    .paths()
+                    .iter()
+                    .any(|path| path.transport_id() == transport_id && path.addr() == addr)
         })
     }
 

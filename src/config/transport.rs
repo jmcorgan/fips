@@ -58,6 +58,18 @@ pub enum TransportRole {
     Backup,
 }
 
+impl TransportRole {
+    /// The config and control-socket spelling: `normal`, `backup`. Same
+    /// strings serde reads and writes, fixed here so a variant rename cannot
+    /// silently change what `show_peers` and `path_show` emit.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Backup => "backup",
+        }
+    }
+}
+
 /// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

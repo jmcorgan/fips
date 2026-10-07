@@ -408,13 +408,9 @@ pub fn show_peers(node: &Node) -> Value {
     json!({ "peers": peers })
 }
 
-/// Render a snapshot [`EntityMmp`](super::snapshot::EntityMmp) into the inline
-/// MMP JSON block, with the quality-index key named `quality_key` (`lqi` for
-/// peers, `sqi` for sessions). Reproduces the on-loop key insertion order
-/// exactly. `path_mtu` is emitted (inside the leading literal) only when
-/// present (session-layer); for peers it is `None` and omitted.
-/// Render a peer's path rows as the `paths` array of `show_peers`.
-fn render_peer_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
+/// Render a peer's path rows as the `paths` array of `show_peers`. Also the
+/// base of `path_show`'s rows, which add the now-relative fields on top.
+pub(crate) fn render_peer_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
     Value::Array(
         paths
             .iter()
@@ -440,6 +436,11 @@ fn render_peer_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
     )
 }
 
+/// Render a snapshot [`EntityMmp`](super::snapshot::EntityMmp) into the inline
+/// MMP JSON block, with the quality-index key named `quality_key` (`lqi` for
+/// peers, `sqi` for sessions). Reproduces the on-loop key insertion order
+/// exactly. `path_mtu` is emitted (inside the leading literal) only when
+/// present (session-layer); for peers it is `None` and omitted.
 fn render_entity_mmp(mmp: &super::snapshot::EntityMmp, quality_key: &str) -> Value {
     // The on-loop `show_sessions` block places loss_rate/etx/goodput_bps/
     // delivery ratios/path_mtu in the leading json! literal, while `show_peers`

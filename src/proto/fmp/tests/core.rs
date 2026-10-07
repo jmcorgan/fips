@@ -898,3 +898,34 @@ fn retirements_are_grouped_after_drains_and_before_rekey_initiations() {
         matches!(actions[4], ConnAction::InitiateRekey { peer } if peer == make_node_addr(0x03))
     );
 }
+
+#[test]
+fn a_live_peer_s_msg1_on_its_link_is_a_rekey_and_a_restart_is_a_restart_anywhere() {
+    // Same epoch, session old enough to rekey, msg1 on the peer's link: the
+    // rekey it looks like. A msg1 off a working link is refused instead
+    // (see `offlink`), which multi-path makes rare: a peer with a session is
+    // given paths, never dialled.
+    let mut snap = establish_snapshot();
+    snap.has_existing_peer = true;
+    snap.existing_peer_epoch = Some([1u8; 8]);
+    snap.has_session = true;
+    snap.existing_session_age_secs = 31;
+    snap.existing_link_age_secs = 31;
+    snap.msg1_on_link = true;
+    snap.link_reachable = true;
+    let wire = wire_outcome(Some([1u8; 8]));
+    assert!(matches!(
+        Fmp::new().establish_inbound(&snap, &wire),
+        InboundDecision::RekeyRespond { .. }
+    ));
+
+    // A restart is a restart, on the link or off it.
+    let restarted = wire_outcome(Some([2u8; 8]));
+    for msg1_on_link in [true, false] {
+        snap.msg1_on_link = msg1_on_link;
+        assert!(matches!(
+            Fmp::new().establish_inbound(&snap, &restarted),
+            InboundDecision::RestartThenPromote { .. }
+        ));
+    }
+}

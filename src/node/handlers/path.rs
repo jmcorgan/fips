@@ -121,39 +121,24 @@ impl Node {
     }
 
     /// `fipsctl path show <peer>`: every path to the peer, per direction.
+    ///
+    /// The per-path object is the `show_peers` one (`project_peer_paths`,
+    /// rendered by `render_peer_paths`) plus the three fields only a
+    /// now-relative read can give: the liveness ages and `acked_once`.
+    /// Built from the same projection so the two field lists cannot drift.
     pub(crate) fn api_path_show(&self, npub: &str) -> Result<serde_json::Value, String> {
         let node_addr = self.resolve_peer_npub(npub)?;
         let peer = &self.peers[&node_addr];
         let now_ms = crate::time::mono_ms();
-        let active = peer.transport_id();
-        let paths: Vec<serde_json::Value> = peer
-            .paths()
-            .iter()
-            .map(|path| {
-                let ago = |at: Option<u64>| at.map(|t| now_ms.saturating_sub(t));
-                serde_json::json!({
-                    "transport_id": path.transport_id().as_u32(),
-                    "transport": self
-                        .transports
-                        .get(&path.transport_id())
-                        .and_then(|t| t.name().map(str::to_string)),
-                    "addr": path.addr().to_string(),
-                    "state": format!("{:?}", path.state()).to_lowercase(),
-                    "active": Some(path.transport_id()) == active,
-                    "remote_active": path.remote_active(),
-                    "role": format!("{:?}", path.role()).to_lowercase(),
-                    "pinned": path.pinned(),
-                    "rx_live_ms_ago": ago(path.rx_live_at_ms()),
-                    "tx_live_ms_ago": ago(path.tx_live_at_ms()),
-                    "acked_once": path.acked_once(),
-                    "last_rtt_ms": path.last_rtt_ms(),
-                    "min_rtt_ms": path.min_rtt_ms(),
-                    "rtt_samples": path.rtt_samples(),
-                    "etx": path.etx(),
-                    "score": path.score(),
-                })
-            })
-            .collect();
+        let ago = |at: Option<u64>| at.map(|t| now_ms.saturating_sub(t));
+        let mut paths = crate::control::queries::render_peer_paths(&self.project_peer_paths(peer));
+        if let Some(rows) = paths.as_array_mut() {
+            for (row, path) in rows.iter_mut().zip(peer.paths()) {
+                row["rx_live_ms_ago"] = serde_json::json!(ago(path.rx_live_at_ms()));
+                row["tx_live_ms_ago"] = serde_json::json!(ago(path.tx_live_at_ms()));
+                row["acked_once"] = serde_json::json!(path.acked_once());
+            }
+        }
         Ok(serde_json::json!({
             "peer": npub,
             "link_cost": peer.link_cost(now_ms),
@@ -204,13 +189,28 @@ impl Node {
         let Some(peer) = self.peers.get_mut(&node_addr) else {
             return;
         };
-        if peer.transport_id() == Some(transport_id) {
-            // The active path: the handshake proved it.
+        if peer.transport_id() == Some(transport_id)
+            && peer.path_on(transport_id).is_some_and(|p| p.is_eligible())
+        {
+            // The active path, and it is answering: nothing to add, and an
+            // address that has proven nothing does not displace it. An
+            // active path that has stopped answering falls through to the
+            // re-pointing below like any other.
             return;
         }
         let was_new = peer.path_on(transport_id).is_none();
         peer.add_path(transport_id, remote_addr.clone())
             .set_role(role);
+        // A known transport at a new address: the peer moved there (an
+        // Aware data path that re-formed, a DHCP lease that changed) and
+        // the old address answers nothing. Re-point the path; the heartbeat
+        // tick probes it from here. Only while the path is not eligible: an
+        // address that is carrying acknowledged traffic is not displaced by
+        // one that has proven nothing — a probe from the new address
+        // (`note_path_probe`) is what moves a working path.
+        let moved = !was_new
+            && peer.path_on(transport_id).is_some_and(|p| !p.is_eligible())
+            && peer.refresh_path_addr(transport_id, remote_addr.clone());
         if was_new {
             debug!(
                 peer = %self.peer_display_name(&node_addr),
@@ -218,47 +218,13 @@ impl Node {
                 remote_addr = %remote_addr,
                 "Peer beaconed on a new transport; path added, probing"
             );
-        }
-    }
-
-    /// Tests: add the path and probe it at once, as one heartbeat tick
-    /// would, without the tick's other sends. Uses the test-only
-    /// `take_probe`, which honours the per-path backoff.
-    #[cfg(test)]
-    pub(in crate::node) async fn maybe_probe_path(
-        &mut self,
-        node_addr: NodeAddr,
-        transport_id: TransportId,
-        remote_addr: TransportAddr,
-    ) {
-        self.add_path_candidate(node_addr, transport_id, remote_addr.clone());
-        let now_ms = crate::time::mono_ms();
-        let timing = self.heartbeat_timing();
-        let Some(peer) = self.peers.get_mut(&node_addr) else {
-            return;
-        };
-        if peer.transport_id() == Some(transport_id) {
-            return;
-        }
-        let Some((probe_id, remote_active, path_id)) = peer.take_probe(
-            transport_id,
-            now_ms,
-            timing.fast_ms,
-            timing.discovery_cap_ms,
-        ) else {
-            return;
-        };
-        let probe = PathMessage {
-            probe_id,
-            remote_active,
-            path_id,
-        };
-        let wire = self.pad_to_link_mtu(probe.encode_probe().to_vec(), transport_id, &remote_addr);
-        if let Err(e) = self
-            .send_encrypted_link_message_on_path(&node_addr, &wire, transport_id, remote_addr)
-            .await
-        {
-            debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Path probe send failed");
+        } else if moved {
+            debug!(
+                peer = %self.peer_display_name(&node_addr),
+                transport_id = %transport_id,
+                remote_addr = %remote_addr,
+                "Peer beaconed at a new address on a known transport; path re-addressed, probing"
+            );
         }
     }
 
@@ -766,10 +732,21 @@ impl Node {
     }
 
     /// A transport's presence came back: clear the probe backoff on every
-    /// path over it so the next discovery tick may probe at once.
+    /// path over it so the next heartbeat tick may probe at once, and
+    /// revive every path that went `Dead` with it — a replugged NIC, a
+    /// wifi interface that cycled — as `Probing`, history kept. Without
+    /// this nothing on our side ever probed a `Dead` path again: traffic
+    /// stayed on the standby until the grace pruned the path and a fresh
+    /// beacon found it with no history.
     pub(in crate::node) fn reset_probe_backoff_on_transport(&mut self, transport_id: TransportId) {
-        for peer in self.peers.values_mut() {
-            peer.reset_probe_backoff_on(transport_id);
+        for (node_addr, peer) in self.peers.iter_mut() {
+            if peer.reset_probe_backoff_on(transport_id) {
+                debug!(
+                    peer = %node_addr,
+                    %transport_id,
+                    "Transport returned: dead path probing again"
+                );
+            }
         }
     }
 }
