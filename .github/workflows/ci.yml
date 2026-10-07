@@ -28,7 +28,7 @@ env:
 # CI parity invariant
 #
 # This workflow's integration matrices — the `integration:` job, the
-# `dns-resolver:` job and the `deb-install:` job — and the local default suite
+# `dns-resolver:` job, the `deb-install:` job and the `rpm-install:` job — and the local default suite
 # set (testing/ci-local.sh) MUST run the same integration suites, EXCEPT for
 # the deliberate local-only entries below. Adding a suite to one runner
 # without the other means "local green" and "GitHub green" stop being
@@ -1406,5 +1406,63 @@ jobs:
         if: always()
         run: |
           docker ps -a --filter "name=fips-deb-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done
+
+  # The RPM counterpart of deb-install. It takes the same .deb the deb-package
+  # job built, recovers its binaries and packages them with
+  # build-rpm-container.sh --no-build: the path the release workflow takes, and
+  # the only one that exercises it. amd64 only; the aarch64 RPM is built by the
+  # release matrix but, like the arm64 upgrade path on the Debian side, is not
+  # installed here.
+  rpm-install:
+    name: RPM install (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    needs: [deb-package]
+    if: ${{ !inputs.skip_integration }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - type: rpm-install
+            scenario: almalinux9
+          - type: rpm-install
+            scenario: fedora
+          - type: rpm-install
+            scenario: no-resolver
+          - type: rpm-install
+            scenario: upgrade
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download the .deb
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: fips-deb-amd64
+          path: _deb
+
+      - name: Run rpm-install scenario
+        timeout-minutes: 25
+        run: |
+          deb=$(find _deb -maxdepth 1 -type f -name 'fips_*.deb' | sort | head -1)
+          [ -n "$deb" ] || { echo "no .deb in the downloaded artifact" >&2; exit 1; }
+          bash testing/rpm-install/test.sh --deb "$deb" ${{ matrix.scenario }}
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          docker ps -a --filter "name=fips-rpm-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
+            echo "--- ${c} fips.service ---"
+            docker exec "$c" journalctl -u fips.service --no-pager 2>&1 | tail -100 || true
+            echo "--- ${c} fips-dns.service ---"
+            docker exec "$c" journalctl -u fips-dns.service --no-pager 2>&1 | tail -100 || true
+          done
+
+      - name: Stop containers
+        if: always()
+        run: |
+          docker ps -a --filter "name=fips-rpm-test-${{ matrix.scenario }}" --format '{{.Names}}' | while read -r c; do
             docker rm -f "$c" >/dev/null 2>&1 || true
           done

@@ -11,6 +11,11 @@
 //! sessions its index names and what key state the peer held, and a
 //! per-packet line with no peer to suppress on shares one node-wide budget.
 //!
+//! A handshake outcome that repeats on a peer's handshakes is logged the first
+//! three times in a session, then once as a notice, then only counted. The
+//! count is logged with the first such line after a session change, or when
+//! the peer is removed.
+//!
 //! Lines about filters carry an 8-byte digest of the filter bits, which the
 //! sender and the receiver of one announce compute alike, and a peer's place
 //! in the spanning tree as `tree_role`.
@@ -291,6 +296,126 @@ impl LogBudget {
     }
 }
 
+/// Lines of one kind a peer logs before the rest are suppressed.
+pub(crate) const REPEAT_SHOWN: u32 = 3;
+
+/// A handshake outcome whose line repeats for as long as a peer sends handshakes
+/// faster than its state changes. Each kind is counted apart, so repeats of
+/// one outcome never hide the first line of a different one, and a failed
+/// answer is a different outcome from a sent one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HsLine {
+    /// The stored msg2 was resent for a duplicate handshake.
+    Resend,
+    /// That resend failed.
+    ResendFailed,
+    /// A new-epoch msg3 was dropped by the restart gate.
+    Restart,
+    /// A msg3 was refused by the silent-session back-off. Counted on the
+    /// identity's silent-session record, never on a peer entry.
+    Refused,
+}
+
+impl HsLine {
+    /// Number of kinds.
+    const COUNT: usize = 4;
+}
+
+impl fmt::Display for HsLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Resend => "resend",
+            Self::ResendFailed => "resend_failed",
+            Self::Restart => "restart",
+            Self::Refused => "refused",
+        })
+    }
+}
+
+/// What to log for the `count`th line of one kind: the line itself up to
+/// [`REPEAT_SHOWN`], one notice in place of the next, then nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shown {
+    Line,
+    Notice,
+    Nothing,
+}
+
+impl Shown {
+    /// The verdict for the `count`th occurrence, counting from 1.
+    pub(crate) fn of(count: u32) -> Self {
+        if count <= REPEAT_SHOWN {
+            Self::Line
+        } else if count == REPEAT_SHOWN + 1 {
+            Self::Notice
+        } else {
+            Self::Nothing
+        }
+    }
+}
+
+/// Lines not logged out of `count` occurrences of one kind.
+pub(crate) fn withheld(count: u32) -> u32 {
+    count.saturating_sub(REPEAT_SHOWN)
+}
+
+/// Suppressed line counts by kind, for a summary line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Withheld([u32; HsLine::COUNT]);
+
+impl Withheld {
+    /// Lines of `kind` not logged.
+    pub(crate) fn of(&self, kind: HsLine) -> u32 {
+        self.0[kind as usize]
+    }
+
+    /// `self`, or `None` when no line of any kind was withheld.
+    fn nonzero(self) -> Option<Self> {
+        self.0.iter().any(|&n| n > 0).then_some(self)
+    }
+}
+
+/// One peer's repeated handshake line counts. The current session's counts
+/// restart at each session change; what they withheld moves into a carried
+/// total that the next counted line, or the peer's removal, reports.
+#[derive(Debug, Default)]
+pub(crate) struct HsLineCounts {
+    current: [u32; HsLine::COUNT],
+    carried: Withheld,
+}
+
+impl HsLineCounts {
+    /// Count one more line of `kind` this session, returning the new count.
+    pub(crate) fn count(&mut self, kind: HsLine) -> u32 {
+        let n = &mut self.current[kind as usize];
+        *n = n.saturating_add(1);
+        *n
+    }
+
+    /// The session changed: carry what this session withheld and start its
+    /// counts again.
+    pub(crate) fn roll(&mut self) {
+        for (carried, current) in self.carried.0.iter_mut().zip(&mut self.current) {
+            *carried = carried.saturating_add(withheld(std::mem::take(current)));
+        }
+    }
+
+    /// Take what earlier sessions withheld, if anything.
+    pub(crate) fn take_carried(&mut self) -> Option<Withheld> {
+        std::mem::take(&mut self.carried).nonzero()
+    }
+
+    /// Everything withheld and not yet reported: earlier sessions' carried
+    /// total plus this session's, if anything.
+    pub(crate) fn unreported(&self) -> Option<Withheld> {
+        let mut total = self.carried;
+        for (t, &current) in total.0.iter_mut().zip(&self.current) {
+            *t = t.saturating_add(withheld(current));
+        }
+        total.nonzero()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +474,68 @@ mod tests {
         assert_eq!(budget.admit(t1), None, "and only one line is admitted");
         let t2 = t1 + std::time::Duration::from_secs(1);
         assert_eq!(budget.admit(t2), Some(1), "the count was reset");
+    }
+
+    #[test]
+    fn a_repeated_line_is_logged_three_times_then_replaced_by_one_notice_then_dropped() {
+        let shown: Vec<Shown> = (1..=6).map(Shown::of).collect();
+        assert_eq!(
+            shown,
+            [
+                Shown::Line,
+                Shown::Line,
+                Shown::Line,
+                Shown::Notice,
+                Shown::Nothing,
+                Shown::Nothing
+            ]
+        );
+        assert_eq!(withheld(3), 0);
+        assert_eq!(withheld(4), 1);
+        assert_eq!(withheld(u32::MAX), u32::MAX - REPEAT_SHOWN);
+    }
+
+    #[test]
+    fn line_counts_are_kept_per_kind_and_carry_only_the_withheld_part_across_sessions() {
+        let mut counts = HsLineCounts::default();
+        for _ in 0..5 {
+            counts.count(HsLine::Resend);
+        }
+        assert_eq!(
+            counts.count(HsLine::Restart),
+            1,
+            "another kind counts apart"
+        );
+        assert_eq!(counts.unreported().map(|w| w.of(HsLine::Resend)), Some(2));
+
+        // Two sessions of four lines each withheld one apiece.
+        let mut counts = HsLineCounts::default();
+        for _ in 0..2 {
+            for _ in 0..4 {
+                counts.count(HsLine::Restart);
+            }
+            counts.roll();
+        }
+        assert_eq!(counts.unreported().map(|w| w.of(HsLine::Restart)), Some(2));
+        let carried = counts.take_carried().expect("lines were withheld");
+        assert_eq!(carried.of(HsLine::Restart), 2);
+        assert_eq!(carried.of(HsLine::Resend), 0);
+        assert_eq!(counts.take_carried(), None, "taken once");
+        assert_eq!(counts.count(HsLine::Restart), 1, "the count restarted");
+    }
+
+    #[test]
+    fn a_count_saturates_instead_of_wrapping() {
+        let mut counts = HsLineCounts::default();
+        counts.current[HsLine::Restart as usize] = u32::MAX;
+        assert_eq!(counts.count(HsLine::Restart), u32::MAX);
+        counts.roll();
+        counts.current[HsLine::Restart as usize] = u32::MAX;
+        counts.roll();
+        assert_eq!(
+            counts.unreported().map(|w| w.of(HsLine::Restart)),
+            Some(u32::MAX)
+        );
     }
 
     #[test]

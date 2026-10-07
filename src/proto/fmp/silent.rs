@@ -60,6 +60,16 @@ pub(crate) struct ActiveBackoff {
     pub remaining_ms: u64,
 }
 
+/// A refusal started or extended by a silent session's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefusalStart {
+    /// The refusal now in force.
+    pub backoff: ActiveBackoff,
+    /// Msg1s refused while the record's previous refusal was in force, or
+    /// since then; the count starts again with this refusal.
+    pub prior_refused: u32,
+}
+
 /// What is remembered about one identity's recent silent sessions.
 #[derive(Debug)]
 struct SilentRecord {
@@ -68,6 +78,9 @@ struct SilentRecord {
     last_end_ms: u64,
     until_ms: Option<u64>,
     counted: VecDeque<Msg1Digest>,
+    /// Msg1s refused since the current refusal started, for the log line
+    /// that reports them.
+    refused: u32,
 }
 
 impl SilentRecord {
@@ -78,6 +91,7 @@ impl SilentRecord {
             last_end_ms: 0,
             until_ms: None,
             counted: VecDeque::new(),
+            refused: 0,
         }
     }
 
@@ -122,14 +136,15 @@ impl SilentSessions {
     /// node dialled). A session promoted from a msg1 already counted is not
     /// counted again: a captured msg1 replays as the same digest. A session
     /// at a different epoch from the record's starts the count again. Returns
-    /// the refusal this end starts or extends, if any.
+    /// the refusal this end starts or extends, if any, with the number of
+    /// msg1s refused before it; the refused count starts again at zero.
     pub(crate) fn ended(
         &mut self,
         peer: NodeAddr,
         epoch: Option<[u8; 8]>,
         setup: Option<Msg1Digest>,
         now_ms: u64,
-    ) -> Option<ActiveBackoff> {
+    ) -> Option<RefusalStart> {
         self.records.retain(|_, r| !r.expired(now_ms));
         let record = self
             .records
@@ -158,16 +173,29 @@ impl SilentSessions {
             SILENT_BACKOFF_CAP_MS,
         );
         record.until_ms = Some(now_ms.saturating_add(length));
-        Some(ActiveBackoff {
-            epoch: record.epoch,
-            silent: record.silent,
-            remaining_ms: length,
+        Some(RefusalStart {
+            backoff: ActiveBackoff {
+                epoch: record.epoch,
+                silent: record.silent,
+                remaining_ms: length,
+            },
+            prior_refused: std::mem::take(&mut record.refused),
         })
     }
 
     /// An authenticated frame arrived from `peer`: forget its silent sessions.
-    pub(crate) fn heard(&mut self, peer: &NodeAddr) {
-        self.records.remove(peer);
+    /// Returns how many msg1s the record had refused since its last refusal
+    /// started, 0 with no record.
+    pub(crate) fn heard(&mut self, peer: &NodeAddr) -> u32 {
+        self.records.remove(peer).map_or(0, |r| r.refused)
+    }
+
+    /// Count one msg1 of `peer` refused, returning how many its record has
+    /// refused since its refusal started, or `None` with no record.
+    pub(crate) fn note_refused(&mut self, peer: &NodeAddr) -> Option<u32> {
+        let record = self.records.get_mut(peer)?;
+        record.refused = record.refused.saturating_add(1);
+        Some(record.refused)
     }
 
     /// The refusal in force for `peer` at `now_ms`, if one is.

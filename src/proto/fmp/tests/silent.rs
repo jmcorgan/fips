@@ -37,7 +37,7 @@ fn end_silent(
         let n = first + i;
         last = record.ended(peer, Some(epoch), setup(n), start_ms + u64::from(i) * 1000);
     }
-    last
+    last.map(|start| start.backoff)
 }
 
 #[test]
@@ -46,7 +46,9 @@ fn two_silent_sessions_refuse_nothing_and_the_third_refuses_for_the_base() {
     let mut record = SilentSessions::new();
     assert_eq!(end_silent(&mut record, EPOCH, 0, 2, 0), None);
     assert_eq!(record.refusing(&peer, 2_000), None);
-    let third = record.ended(peer, Some(EPOCH), setup(2), 2_000);
+    let third = record
+        .ended(peer, Some(EPOCH), setup(2), 2_000)
+        .map(|start| start.backoff);
     assert_eq!(
         third,
         Some(ActiveBackoff {
@@ -70,7 +72,7 @@ fn each_further_silent_session_doubles_the_refusal_up_to_the_ten_minute_cap() {
         let refusal = record
             .ended(peer, Some(EPOCH), setup(n), now)
             .expect("past the limit every silent session refuses");
-        lengths.push(refusal.remaining_ms / 1000);
+        lengths.push(refusal.backoff.remaining_ms / 1000);
     }
     assert_eq!(lengths, vec![60, 120, 240, 480, 600, 600, 600]);
     assert_eq!(SILENT_BACKOFF_CAP_MS, 600_000);
@@ -117,8 +119,8 @@ fn a_record_without_an_epoch_adopts_the_first_epoch_it_sees() {
     record.ended(peer, None, setup(0), 0);
     record.ended(peer, Some(EPOCH), setup(1), 1_000);
     let refusal = record.ended(peer, None, setup(2), 2_000).unwrap();
-    assert_eq!(refusal.epoch, Some(EPOCH));
-    assert_eq!(refusal.silent, 3);
+    assert_eq!(refusal.backoff.epoch, Some(EPOCH));
+    assert_eq!(refusal.backoff.silent, 3);
 }
 
 #[test]
@@ -141,6 +143,48 @@ fn sessions_this_node_dialled_count_without_a_setup_digest() {
     record.ended(peer, Some(EPOCH), None, 0);
     record.ended(peer, Some(EPOCH), None, 1_000);
     assert!(record.ended(peer, Some(EPOCH), None, 2_000).is_some());
+}
+
+#[test]
+fn a_new_refusal_reports_how_many_msg1s_the_previous_refusal_refused() {
+    let peer = make_node_addr(1);
+    let mut record = SilentSessions::new();
+    end_silent(&mut record, EPOCH, 0, 2, 0);
+    let first = record
+        .ended(peer, Some(EPOCH), setup(2), 2_000)
+        .expect("the third silent session starts a refusal");
+    assert_eq!(first.prior_refused, 0);
+    for n in 1..=8 {
+        assert_eq!(record.note_refused(&peer), Some(n));
+    }
+
+    let ends_at = 2_000 + SILENT_BACKOFF_BASE_MS;
+    let second = record
+        .ended(peer, Some(EPOCH), setup(3), ends_at + 1_000)
+        .expect("a fourth silent session starts a longer refusal");
+    assert_eq!(second.prior_refused, 8);
+    assert_eq!(
+        record.note_refused(&peer),
+        Some(1),
+        "the new refusal's count starts again"
+    );
+}
+
+#[test]
+fn clearing_a_record_returns_its_refused_count() {
+    let peer = make_node_addr(1);
+    let mut record = SilentSessions::new();
+    assert_eq!(
+        record.note_refused(&peer),
+        None,
+        "no record, nothing counted"
+    );
+    end_silent(&mut record, EPOCH, 0, 3, 0);
+    for _ in 0..5 {
+        record.note_refused(&peer);
+    }
+    assert_eq!(record.heard(&peer), 5);
+    assert_eq!(record.heard(&peer), 0, "the record is gone");
 }
 
 #[test]

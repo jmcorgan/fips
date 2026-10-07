@@ -56,11 +56,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CI_LOCAL="$SCRIPT_DIR/ci-local.sh"
 CI_YML="$PROJECT_ROOT/.github/workflows/ci.yml"
 DEB_TEST="$SCRIPT_DIR/deb-install/test.sh"
+RPM_TEST="$SCRIPT_DIR/rpm-install/test.sh"
 
 # Deliberate local-only allowlist (suites intentionally absent from GitHub).
 ALLOWLIST="tor-socks5 tor-directory"
 
-for f in "$CI_LOCAL" "$CI_YML" "$DEB_TEST"; do
+for f in "$CI_LOCAL" "$CI_YML" "$DEB_TEST" "$RPM_TEST"; do
     if [[ ! -f "$f" ]]; then
         echo "check-ci-parity: missing file: $f" >&2
         exit 2
@@ -77,19 +78,21 @@ if ! python3 -c "import yaml" >/dev/null 2>&1; then
     exit 2
 fi
 
-python3 - "$CI_LOCAL" "$CI_YML" "$DEB_TEST" "$ALLOWLIST" <<'PY'
+python3 - "$CI_LOCAL" "$CI_YML" "$DEB_TEST" "$RPM_TEST" "$ALLOWLIST" <<'PY'
 import re
 import sys
 
 import yaml
 
-ci_local_path, ci_yml_path, deb_test_path, allowlist_raw = sys.argv[1:5]
+ci_local_path, ci_yml_path, deb_test_path, rpm_test_path, allowlist_raw = sys.argv[1:6]
 allowlist = set(allowlist_raw.split())
 
 with open(ci_local_path, encoding="utf-8") as fh:
     local_src = fh.read()
 with open(deb_test_path, encoding="utf-8") as fh:
     deb_src = fh.read()
+with open(rpm_test_path, encoding="utf-8") as fh:
+    rpm_src = fh.read()
 
 
 def bash_array_entries(var):
@@ -130,11 +133,14 @@ for entry in arrays.get("CHAOS_SUITES", []):
 # deb-install: one local suite that runs the distro set enumerated in its script.
 m = re.search(r'^ALL_SCENARIOS="([^"]*)"', deb_src, re.MULTILINE)
 local_deb = set(m.group(1).split()) if m else set()
+# rpm-install: likewise, per scenario, enumerated by ALL_SCENARIOS in its script.
+m = re.search(r'^ALL_SCENARIOS="([^"]*)"', rpm_src, re.MULTILINE)
+local_rpm = set(m.group(1).split()) if m else set()
 
 # Everything else: suite names, with NAT stored bare and prefixed at use.
 local = set()
 for name, entries in arrays.items():
-    if name in ("CHAOS_SUITES", "DEB_INSTALL_SUITES"):
+    if name in ("CHAOS_SUITES", "DEB_INSTALL_SUITES", "RPM_INSTALL_SUITES"):
         continue
     names = [e.split()[0] for e in entries]
     if name == "NAT_SUITES":
@@ -161,7 +167,7 @@ if not include:
     print("check-ci-parity: no matrix include: found in any job of "
           f"{ci_yml_path}; cannot verify CI parity", file=sys.stderr)
     sys.exit(2)
-github_chaos, github_deb, github = {}, set(), set()
+github_chaos, github_deb, github_rpm, github = {}, set(), set(), set()
 # Deliberate GitHub-only install legs on another architecture, by distro. Kept
 # out of github_deb: were they in it, deleting the amd64 leg of a distro that
 # also has an arm64 leg would leave the distro in the set and pass.
@@ -171,6 +177,13 @@ for leg in include:
     if "suite" not in leg and "scenario" not in leg:
         continue
     kind = str(leg.get("type", ""))
+    if kind == "rpm-install":
+        if "scenario" not in leg:
+            malformed.append(f"{leg.get('suite', '(unnamed leg)')} has type "
+                             "rpm-install but no scenario:")
+            continue
+        github_rpm.add(str(leg["scenario"]))
+        continue
     if kind in ("chaos", "deb-install"):
         # scenario: is the identity for these; suite: is cosmetic.
         if "scenario" not in leg:
@@ -224,8 +237,9 @@ if odd_arms:
           f"indent, so the dispatch check cannot be trusted: {', '.join(odd_arms)}",
           file=sys.stderr)
     sys.exit(2)
-known = (set(local) | set(local_chaos) | local_deb
-         | {e.split()[0] for e in arrays.get("DEB_INSTALL_SUITES", [])})
+known = (set(local) | set(local_chaos) | local_deb | local_rpm
+         | {e.split()[0] for e in arrays.get("DEB_INSTALL_SUITES", [])}
+         | {e.split()[0] for e in arrays.get("RPM_INSTALL_SUITES", [])})
 for m in arm_re.finditer(body.group(0)):
     if m.group(1) != indent:
         continue
@@ -260,8 +274,12 @@ deb_github_only += sorted(
     for d in distros - local_deb
 )
 
+rpm_local_only = sorted(local_rpm - github_rpm)
+rpm_github_only = sorted(github_rpm - local_rpm)
+
 problems = (local_only or github_only or chaos_local_only or chaos_github_only
             or chaos_flag_drift or deb_local_only or deb_github_only
+            or rpm_local_only or rpm_github_only
             or dispatch_uncovered or malformed)
 
 if problems:
@@ -295,6 +313,14 @@ if problems:
         print("  deb-install distros GitHub-only:")
         for n in deb_github_only:
             print(f"    - {n}")
+    if rpm_local_only:
+        print("  rpm-install scenarios local-only:")
+        for n in rpm_local_only:
+            print(f"    - {n}")
+    if rpm_github_only:
+        print("  rpm-install scenarios GitHub-only:")
+        for n in rpm_github_only:
+            print(f"    - {n}")
     if malformed:
         print("  Matrix legs this guard cannot identify:")
         for n in malformed:
@@ -310,11 +336,12 @@ if problems:
           "stated reason.")
     sys.exit(1)
 
-total = len(github) + len(github_chaos) + len(github_deb)
+total = len(github) + len(github_chaos) + len(github_deb) + len(github_rpm)
 print("CI parity OK: both runners cover the same work "
       "(allowlist: " + ", ".join(sorted(allowlist)) + ").")
 print(f"  {len(github)} suites, {len(github_chaos)} chaos scenarios "
-      f"(flags compared), {len(github_deb)} deb-install distros "
+      f"(flags compared), {len(github_deb)} deb-install distros, "
+      f"{len(github_rpm)} rpm-install scenarios "
       f"— {total} legs on each side.")
 for arch, distros in sorted(github_deb_extra.items()):
     legs = "leg" if len(distros) == 1 else "legs"

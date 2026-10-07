@@ -60,12 +60,25 @@ impl LogCapture {
     /// prefix of, so the text must be followed by the end of the line or by
     /// another `name=` field.
     pub(crate) fn line(&self, message: &str) -> Option<String> {
-        let needle = format!(" message={message}");
-        self.lines().into_iter().find(|line| {
-            line.match_indices(&needle)
-                .any(|(at, _)| ends_value(&line[at + needle.len()..]))
-        })
+        self.lines()
+            .into_iter()
+            .find(|line| has_message(line, message))
     }
+
+    /// Every captured line whose message is exactly `message`, in order.
+    pub(crate) fn lines_with(&self, message: &str) -> Vec<String> {
+        self.lines()
+            .into_iter()
+            .filter(|line| has_message(line, message))
+            .collect()
+    }
+}
+
+/// Whether the captured `line`'s message is exactly `message`.
+fn has_message(line: &str, message: &str) -> bool {
+    let needle = format!(" message={message}");
+    line.match_indices(&needle)
+        .any(|(at, _)| ends_value(&line[at + needle.len()..]))
 }
 
 /// Whether `rest`, the text after a field value, starts where that value

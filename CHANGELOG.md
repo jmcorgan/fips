@@ -358,6 +358,20 @@ with v0.5.x or earlier peers.
   same digest and hash, so their logs can be joined on these fields. Message
   texts and levels are unchanged.
 
+- A peer that keeps completing handshakes with one outcome no longer draws
+  one debug line per handshake. Each such outcome at msg3 (a resend of the
+  stored msg2 for a duplicate handshake, an epoch change dropped by the
+  restart interval, and a handshake refused during the silent-session
+  back-off) is logged three times per peer and session, then once as
+  "Suppressing repeated handshake lines for this peer" with its `kind`, and
+  after that only counted. "Suppressed repeated handshake lines" reports by
+  kind how many lines were not logged, with the first repeated line after a
+  session change and when the peer is removed, and for back-off refusals
+  when a frame from the peer first authenticates. The line that starts a
+  back-off refusal now carries the number of handshakes the previous refusal
+  refused (`prior_refused`). Nothing sent, decided or counted in the
+  handshake statistics changes.
+
 - Decryption-failure lines now say which of the peer's sessions a failing frame
   named and what key state each end held. "Decryption failed" and "Worker FMP
   AEAD decryption failed" carry the frame's receiver index (`receiver_idx`), the

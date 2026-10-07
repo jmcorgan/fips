@@ -9,7 +9,7 @@ use crate::NodeAddr;
 use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
-use crate::node::diag::{self, OrNone};
+use crate::node::diag::{self, HsLine, OrNone, Shown, Withheld};
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
@@ -43,6 +43,65 @@ impl Node {
                 peer_addr,
                 true,
             ),
+        }
+    }
+
+    /// Count a line of `kind` for `peer` and say whether to log it. On the
+    /// first counted line after a session change, logs what earlier sessions
+    /// withheld. A handshake with no peer entry is always logged.
+    fn shown(&mut self, peer: &NodeAddr, kind: HsLine) -> bool {
+        let Some(entry) = self.peers.get_mut(peer) else {
+            return true;
+        };
+        let counts = entry.hs_lines_mut();
+        let carried = counts.take_carried();
+        let count = counts.count(kind);
+        if let Some(withheld) = carried {
+            self.log_withheld(peer, &withheld);
+        }
+        self.show(peer, kind, count)
+    }
+
+    /// Whether to log the `count`th line of `kind` for `peer`, logging the
+    /// notice that replaces the first one suppressed.
+    fn show(&self, peer: &NodeAddr, kind: HsLine, count: u32) -> bool {
+        match Shown::of(count) {
+            Shown::Line => true,
+            Shown::Notice => {
+                debug!(
+                    peer = %self.peer_display_name(peer),
+                    kind = %kind,
+                    "Suppressing repeated handshake lines for this peer"
+                );
+                false
+            }
+            Shown::Nothing => false,
+        }
+    }
+
+    /// Log how many of `peer`'s repeated handshake lines were not logged,
+    /// by kind.
+    pub(in crate::node) fn log_withheld(&self, peer: &NodeAddr, withheld: &Withheld) {
+        debug!(
+            peer = %self.peer_display_name(peer),
+            resend = withheld.of(HsLine::Resend),
+            resend_failed = withheld.of(HsLine::ResendFailed),
+            restart = withheld.of(HsLine::Restart),
+            "Suppressed repeated handshake lines"
+        );
+    }
+
+    /// A session of `peer` carried its first authenticated frame: drop the
+    /// identity's silent-session record, and log how many of its refusal
+    /// lines were not logged.
+    pub(in crate::node) fn note_peer_heard(&mut self, peer: &NodeAddr) {
+        let refused = diag::withheld(self.silent_sessions.heard(peer));
+        if refused > 0 {
+            debug!(
+                peer = %self.peer_display_name(peer),
+                refused,
+                "Suppressed repeated handshake lines"
+            );
         }
     }
 
@@ -1897,10 +1956,12 @@ impl Node {
                 // change inside the dampening interval. No msg2 goes back: the
                 // stored msg2 is bound to the original msg1's ephemeral, and
                 // answering an address the sender chose is free amplification.
-                debug!(
-                    peer = %self.peer_display_name(&peer_node_addr),
-                    "Epoch mismatch dampened, dropping msg1"
-                );
+                if self.shown(&peer_node_addr, HsLine::Restart) {
+                    debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        "Epoch mismatch dampened, dropping msg1"
+                    );
+                }
                 self.execute_peer_actions(link_id, &ambient, actions).await;
                 self.remove_link(&link_id);
                 self.remove_peer_machine(link_id);
@@ -1915,14 +1976,22 @@ impl Node {
                 // known here, after our msg2 has gone, so the refusal is to
                 // promote: no msg2 resend, no peer entry, no TreeAnnounce. The
                 // machine's `FreeIndex` returns the msg1-allocated index.
-                debug!(
-                    peer = %self.peer_display_name(&peer_node_addr),
-                    transport_id = %packet.transport_id,
-                    remote_addr = %packet.remote_addr,
-                    silent = %OrNone(silent_backoff.map(|b| b.silent)),
-                    remaining_s = %OrNone(silent_backoff.map(|b| b.remaining_ms.div_ceil(1000))),
-                    "Msg3 from a peer whose recent sessions carried no frame, refusing during its back-off"
-                );
+                // Counted on the identity's record, since a refused handshake
+                // has no peer entry to count on.
+                let shown = self
+                    .silent_sessions
+                    .note_refused(&peer_node_addr)
+                    .is_none_or(|n| self.show(&peer_node_addr, HsLine::Refused, n));
+                if shown {
+                    debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        silent = %OrNone(silent_backoff.map(|b| b.silent)),
+                        remaining_s = %OrNone(silent_backoff.map(|b| b.remaining_ms.div_ceil(1000))),
+                        "Msg3 from a peer whose recent sessions carried no frame, refusing during its back-off"
+                    );
+                }
                 self.execute_peer_actions(link_id, &ambient, actions).await;
                 debug_assert!(
                     !self.index_allocator.is_allocated(our_index),
@@ -1967,16 +2036,20 @@ impl Node {
                 if let Some(msg2) = msg2
                     && let Some(transport) = self.transports.get(&packet.transport_id)
                 {
-                    match transport.send_existing(&packet.remote_addr, &msg2).await {
-                        Ok(_) => debug!(
+                    let sent = transport.send_existing(&packet.remote_addr, &msg2).await;
+                    // Each guard counts the line its arm logs; a suppressed
+                    // line falls through to the empty arm.
+                    match sent {
+                        Ok(_) if self.shown(&peer_node_addr, HsLine::Resend) => debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
                             "Resent msg2 for duplicate handshake (same epoch)"
                         ),
-                        Err(e) => debug!(
+                        Err(e) if self.shown(&peer_node_addr, HsLine::ResendFailed) => debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
                             error = %e,
                             "Failed to resend msg2"
                         ),
+                        _ => {}
                     }
                 }
                 // The active peer is untouched. The machine's returned `FreeIndex`

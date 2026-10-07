@@ -14,6 +14,7 @@ use super::*;
 use crate::config::Config;
 use crate::proto::fmp::NegotiationPayload;
 use crate::proto::fmp::wire::{Msg2Header, build_msg1, build_msg3};
+use crate::testutil::{capture_logs_scoped, log_field};
 use crate::transport::ReceivedPacket;
 use tokio::time::timeout;
 
@@ -21,7 +22,7 @@ use tokio::time::timeout;
 const NEW_EPOCH: [u8; 8] = [8u8; 8];
 
 /// Two loopback nodes, node 1's reaper armed.
-async fn pair() -> Vec<TestNode> {
+pub(super) async fn pair() -> Vec<TestNode> {
     let mut nodes = vec![
         spanning_tree::make_test_node_with_config(Config::new(), 1280).await,
         spanning_tree::make_test_node_with_config(Config::new(), 1280).await,
@@ -31,12 +32,12 @@ async fn pair() -> Vec<TestNode> {
 }
 
 /// Discard everything queued at `tn` without processing it.
-fn discard(tn: &mut TestNode) {
+pub(super) fn discard(tn: &mut TestNode) {
     while tn.packet_rx.try_recv().is_ok() {}
 }
 
 /// Node 0's next packet of handshake `phase`, skipping anything else.
-async fn next_phase(tn: &mut TestNode, phase: u8) -> Option<ReceivedPacket> {
+pub(super) async fn next_phase(tn: &mut TestNode, phase: u8) -> Option<ReceivedPacket> {
     loop {
         let pkt = timeout(Duration::from_millis(500), tn.packet_rx.recv())
             .await
@@ -48,7 +49,7 @@ async fn next_phase(tn: &mut TestNode, phase: u8) -> Option<ReceivedPacket> {
 }
 
 /// Wrap `data` as a packet from node 0 arriving at node 1.
-fn from_node0(nodes: &[TestNode], data: Vec<u8>) -> ReceivedPacket {
+pub(super) fn from_node0(nodes: &[TestNode], data: Vec<u8>) -> ReceivedPacket {
     ReceivedPacket {
         transport_id: nodes[1].transport_id,
         remote_addr: nodes[0].addr.clone(),
@@ -59,7 +60,11 @@ fn from_node0(nodes: &[TestNode], data: Vec<u8>) -> ReceivedPacket {
 
 /// A fresh XX initiator leg for node 0's identity at `epoch`, dialling node
 /// 1, and the framed msg1 it sends under `index`.
-fn node0_initiator(nodes: &[TestNode], epoch: [u8; 8], index: u32) -> (PeerMachine, Vec<u8>) {
+pub(super) fn node0_initiator(
+    nodes: &[TestNode],
+    epoch: [u8; 8],
+    index: u32,
+) -> (PeerMachine, Vec<u8>) {
     let target = PeerIdentity::from_pubkey_full(nodes[1].node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
@@ -231,6 +236,64 @@ async fn one_authenticated_frame_clears_the_count_so_three_more_silent_sessions_
         silent_session(&mut nodes, epoch, 7).await,
         "the count went on from before the authenticated frame"
     );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The line each refused msg3 logs.
+const REFUSAL: &str =
+    "Msg3 from a peer whose recent sessions carried no frame, refusing during its back-off";
+
+#[tokio::test]
+async fn refused_msg3s_during_a_back_off_log_three_lines_then_one_suppression_notice() {
+    let mut nodes = pair().await;
+    let a = *nodes[0].node.node_addr();
+    three_reaped(&mut nodes).await;
+    let (refused, _) = handshake_counts(&nodes[1]);
+    let epoch = nodes[0].node.startup_epoch();
+
+    let (logs, guard) = capture_logs_scoped();
+    for index in 4..=11 {
+        assert!(!silent_session(&mut nodes, epoch, index).await);
+    }
+    drop(guard);
+
+    assert_eq!(logs.lines_with(REFUSAL).len(), 3, "{:#?}", logs.lines());
+    let notices = logs.lines_with("Suppressing repeated handshake lines for this peer");
+    assert_eq!(notices.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(log_field(&notices[0], "kind"), Some("refused"));
+    assert_eq!(
+        handshake_counts(&nodes[1]).0,
+        refused + 8,
+        "every refusal is counted"
+    );
+    assert!(nodes[1].node.get_peer(&a).is_none(), "nothing was promoted");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn the_first_frame_after_a_back_off_reports_how_many_refusal_lines_were_suppressed() {
+    let mut nodes = pair().await;
+    let a = *nodes[0].node.node_addr();
+    let epoch = nodes[0].node.startup_epoch();
+    three_reaped(&mut nodes).await;
+    for index in 4..=8 {
+        assert!(!silent_session(&mut nodes, epoch, index).await);
+    }
+
+    // Node 1's own dial completes, and node 0's first frame on it clears
+    // the record that refused five handshakes.
+    discard(&mut nodes[0]);
+    let (logs, guard) = capture_logs_scoped();
+    initiate_handshake(&mut nodes, 1, 0).await;
+    drain_all_packets(&mut nodes, false).await;
+    drop(guard);
+    assert!(nodes[1].node.get_peer(&a).is_some_and(|p| p.heard()));
+
+    let summaries = logs.lines_with("Suppressed repeated handshake lines");
+    assert_eq!(summaries.len(), 1, "{:#?}", logs.lines());
+    assert_eq!(log_field(&summaries[0], "refused"), Some("2"));
 
     cleanup_nodes(&mut nodes).await;
 }

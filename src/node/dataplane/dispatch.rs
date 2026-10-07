@@ -110,7 +110,8 @@ impl Node {
 
     /// Count `peer`'s session, removed without having carried one
     /// authenticated frame, toward its identity's silent-session back-off,
-    /// and log the refusal this starts or extends.
+    /// and log the refusal this starts or extends, with how many handshakes the
+    /// identity's previous refusal refused.
     fn note_silent_session(&mut self, node_addr: &NodeAddr, peer: &ActivePeer) {
         let epoch = peer.remote_epoch();
         // No setup digest: on XX a session is promoted only on a msg3 bound
@@ -123,8 +124,9 @@ impl Node {
             debug!(
                 peer = %self.peer_display_name(node_addr),
                 startup_epoch = %OrNone(epoch.map(hex::encode)),
-                silent = refusal.silent,
-                refuse_s = refusal.remaining_ms / 1000,
+                silent = refusal.backoff.silent,
+                refuse_s = refusal.backoff.remaining_ms / 1000,
+                prior_refused = refusal.prior_refused,
                 "Session ended without a frame, refusing the peer's handshakes at this epoch"
             );
         }
@@ -159,6 +161,9 @@ impl Node {
                 count = suppressed,
                 "Suppressed replay detections during link transition"
             );
+        }
+        if let Some(withheld) = peer.hs_lines().unreported() {
+            self.log_withheld(node_addr, &withheld);
         }
 
         // MMP teardown log (before we drop the peer)

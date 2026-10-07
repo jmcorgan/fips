@@ -366,7 +366,7 @@ impl Node {
             }
         }
         if first_frame {
-            self.silent_sessions.heard(&node_addr);
+            self.note_peer_heard(&node_addr);
         }
 
         // Address rotation invalidates the per-peer connect()-ed UDP socket,
@@ -539,7 +539,7 @@ impl Node {
         // silent-session record: one identity has one peer entry, and a
         // record grows only when an unheard session ends.
         if first_frame {
-            self.silent_sessions.heard(node_addr);
+            self.note_peer_heard(node_addr);
         }
         // Address rotation invalidates the per-peer connect()-ed UDP
         // socket. Drop the connected socket + drain so the wildcard
