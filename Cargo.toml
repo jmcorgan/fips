@@ -18,6 +18,11 @@ default = []
 # default build's neutrality a property of the generated code rather than of a
 # runtime check. Build with `--features profiling` for a measurement run.
 profiling = []
+# USB host role for the USB transport (`transports.usb.host`): switch phones
+# into Android Open Accessory mode and link with them, over `nusb`. Off by
+# default; a build that only ever is the accessory (an app on a phone that is
+# never USB host) does not need it.
+usb-host = ["dep:nusb"]
 
 [dependencies]
 ratatui = "0.30"
@@ -45,6 +50,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process", "io-util"] }
 futures = "0.3"
+nusb = { version = "0.2", optional = true, features = ["tokio"] }
 simple-dns = "0.11.2"
 # 0.20 picks up socket-pktinfo 0.4.1, the first release that builds on
 # FreeBSD (IP_RECVDSTADDR/IP_RECVIF instead of Linux-style IP_PKTINFO).
