@@ -68,6 +68,7 @@ mod tun_warning;
 mod udp_dns;
 mod unit;
 mod update_peers;
+mod usb;
 
 /// Msg1 refusals as `bad_state` counted them before each refusal the msg1
 /// classification decides was given a counter of its own: `bad_state` plus
