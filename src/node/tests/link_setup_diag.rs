@@ -654,7 +654,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         .insert((tid, to.addr.clone()), link_id);
     from.node
         .pending_outbound
-        .insert((tid, our_index.as_u32()), link_id);
+        .insert(our_index.as_u32(), link_id);
     from.node
         .transports
         .get(&tid)

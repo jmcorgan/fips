@@ -85,7 +85,7 @@ impl Node {
         };
 
         // O(1) session lookup by our receiver index
-        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        let key = header.receiver_idx.as_u32();
         let node_addr = match self.peers_by_index.get(&key) {
             Some(id) => *id,
             None => {
@@ -130,7 +130,7 @@ impl Node {
         // so a frame naming one is opened by the link's rekey machine below.
         #[cfg(unix)]
         {
-            let cache_key = (packet.transport_id, header.receiver_idx.as_u32());
+            let cache_key = header.receiver_idx.as_u32();
             if let Some(workers) = self.supervisor.decrypt_workers.as_ref().cloned()
                 && self.decrypt_registered_sessions.contains(&cache_key)
             {
@@ -209,7 +209,7 @@ impl Node {
                 &packet.remote_addr,
                 trial,
             );
-            self.handle_decrypt_failure(&node_addr);
+            self.charge_decrypt_failure(&node_addr, packet.transport_id);
             return;
         };
         if let Some(peer) = self.peers.get_mut(&node_addr) {
@@ -586,7 +586,7 @@ impl Node {
             peer.record_failed(idx);
         }
         if self.past_threshold(&report.source_node_addr) {
-            self.handle_decrypt_failure(&report.source_node_addr);
+            self.charge_decrypt_failure(&report.source_node_addr, report.transport_id);
             return;
         }
         let keys = KeyView::of(self.peers.get(&report.source_node_addr), Some(idx));
@@ -605,7 +605,7 @@ impl Node {
             pending_epoch = %keys.pending_epoch,
             "Worker FMP AEAD decryption failed"
         );
-        self.handle_decrypt_failure(&report.source_node_addr);
+        self.charge_decrypt_failure(&report.source_node_addr, report.transport_id);
     }
 
     /// Dispatch a decrypt-worker event (plaintext bounce or failure
@@ -639,10 +639,7 @@ impl Node {
     /// Node's `decrypt_registered_sessions` set would grow monotonically
     /// per rekey on long-lived peers.
     #[cfg(unix)]
-    pub(in crate::node) fn unregister_decrypt_worker_session(
-        &mut self,
-        cache_key: (crate::transport::TransportId, u32),
-    ) {
+    pub(in crate::node) fn unregister_decrypt_worker_session(&mut self, cache_key: u32) {
         if let Some(workers) = self.supervisor.decrypt_workers.as_ref() {
             workers.unregister_session(cache_key);
         }
@@ -658,6 +655,38 @@ impl Node {
         self.peers
             .get(node_addr)
             .is_some_and(|p| p.consecutive_decrypt_failures() >= DECRYPT_FAILURE_THRESHOLD)
+    }
+
+    /// Count a decryption failure against the peer, but only if it arrived on
+    /// a transport the peer is actually on.
+    ///
+    /// The demux is by index alone, so a frame naming a known `receiver_idx`
+    /// reaches this peer's session from *any* bound transport. Counting
+    /// those would let garbage frames carrying a sniffed index, from any
+    /// transport, run up the failure count `fipsctl` reports and trip the
+    /// warning. The same rule covers a stale in-flight frame landing on an
+    /// index the allocator has already handed to a new owner: index reuse is
+    /// immediate, with no quarantine.
+    ///
+    /// A peer with no transport bound yet is counted unconditionally.
+    pub(in crate::node) fn charge_decrypt_failure(
+        &mut self,
+        node_addr: &crate::NodeAddr,
+        transport_id: crate::transport::TransportId,
+    ) {
+        let on_path = self.peers.get(node_addr).is_some_and(|peer| {
+            peer.transport_id()
+                .is_none_or(|bound| bound == transport_id)
+        });
+        if !on_path {
+            trace!(
+                peer = %self.peer_display_name(node_addr),
+                transport_id = %transport_id,
+                "Decrypt failure on a transport the peer is not on, not counted"
+            );
+            return;
+        }
+        self.handle_decrypt_failure(node_addr);
     }
 
     /// Count a decryption failure and warn once when the count reaches the

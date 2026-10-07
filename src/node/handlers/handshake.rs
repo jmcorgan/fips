@@ -1825,7 +1825,7 @@ impl Node {
         // `pending_outbound`, whose control machine still carries the
         // handshake; a link rekey's attempt index is bound to its peer in
         // `peers_by_index`, and its peer's link machine reads the msg2.
-        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        let key = header.receiver_idx.as_u32();
         let setup = self.pending_outbound.get(&key).copied();
         let link_id = match setup {
             Some(id)

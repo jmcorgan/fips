@@ -142,9 +142,7 @@ impl Node {
         // Free session index and pending_outbound if allocated
         if let Some(lease) = our_index {
             let idx = lease.release();
-            if let Some(tid) = transport_id {
-                self.pending_outbound.remove(&(tid, idx));
-            }
+            self.pending_outbound.remove(&idx);
             let _ = self
                 .index_allocator
                 .free(crate::utils::index::SessionIndex::new(idx));

@@ -245,7 +245,7 @@ async fn a_second_path_msg1_does_not_make_us_abandon_our_own_rekey() {
         p.rekey_in_progress(),
         "our own rekey must survive a second-path msg1"
     );
-    let key = (link_transport, rekey_index.as_u32());
+    let key = rekey_index.as_u32();
     assert!(
         s.node.peers_by_index.contains_key(&key),
         "our rekey's index must stay registered"

@@ -167,7 +167,7 @@ async fn dial_unanswered() -> (Vec<TestNode>, LinkId, Vec<u8>, SessionIndex) {
     let link = *nodes[0]
         .node
         .pending_outbound
-        .get(&(tid, observed.as_u32()))
+        .get(&observed.as_u32())
         .expect("the dial is registered under its msg1 index");
     (nodes, link, msg1.data, observed)
 }
