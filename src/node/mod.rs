@@ -622,6 +622,13 @@ pub struct Node {
     #[cfg(all(ble_available, any(target_os = "android", test)))]
     ble_radio: Option<Arc<crate::transport::ble::io_android::BleRadioSlot>>,
 
+    /// Where USB links wait for the USB transport: attached by the embedder
+    /// through [`Self::enable_app_owned_usb`], or by a host backend. Exists
+    /// whether or not a USB transport is configured, so a link attached
+    /// before `start()` — an accessory attach is what launches the app on a
+    /// phone — is waiting when the transport comes up.
+    usb_links: Arc<crate::transport::usb::UsbLinkQueue>,
+
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
@@ -940,6 +947,7 @@ impl Node {
             tun_state,
             #[cfg(all(ble_available, any(target_os = "android", test)))]
             ble_radio: None,
+            usb_links: Arc::new(crate::transport::usb::UsbLinkQueue::new()),
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             index_budget: diag::LogBudget::new(std::time::Instant::now()),
@@ -1115,6 +1123,7 @@ impl Node {
             tun_state,
             #[cfg(all(ble_available, any(target_os = "android", test)))]
             ble_radio: None,
+            usb_links: Arc::new(crate::transport::usb::UsbLinkQueue::new()),
             index_allocator: IndexAllocator::new(),
             peers_by_index: HashMap::new(),
             index_budget: diag::LogBudget::new(std::time::Instant::now()),
@@ -1384,6 +1393,28 @@ impl Node {
                 transports.push(TransportHandle::Ble(ble));
             }
         }
+        // Create USB transport instances. Every instance takes links from
+        // the node's one queue; a cable is one link, not one per instance.
+        let usb_instances: Vec<_> = self
+            .config()
+            .transports
+            .usb
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+        for (name, usb_config) in usb_instances {
+            let transport_id = self.allocate_transport_id();
+            let mut usb = crate::transport::usb::UsbTransport::new(
+                transport_id,
+                name,
+                usb_config,
+                Arc::clone(&self.usb_links),
+                packet_tx.clone(),
+            );
+            usb.set_local_pubkey(self.identity().pubkey().serialize());
+            transports.push(TransportHandle::Usb(usb));
+        }
+
         // `BleConfig` always parses, so on a build that cannot construct a
         // BLE transport a configured `ble:` block would otherwise be dropped
         // silently and the node would report healthy without it.
@@ -3893,6 +3924,29 @@ impl Node {
         Arc::clone(self.ble_radio.get_or_insert_with(|| {
             Arc::new(crate::transport::ble::io_android::BleRadioSlot::new())
         }))
+    }
+
+    /// Get the handle an embedder gives **USB links** to the node through:
+    /// on a phone, the Android Open Accessory device the app opened when a
+    /// USB host attached it.
+    ///
+    /// Valid before and after [`Self::start`], from any thread; links handed
+    /// over before the USB transport is running wait for it. Every call
+    /// returns a handle to the same queue.
+    ///
+    /// ```no_run
+    /// # fn f(node: &mut fips::Node, fd: std::os::fd::OwnedFd) {
+    /// let usb = node.enable_app_owned_usb();
+    /// // ...when the accessory is attached and opened:
+    /// usb.accessory(fd, "accessory");
+    /// # }
+    /// ```
+    ///
+    /// Only links reach a node this way. Whether a USB transport takes them
+    /// is configuration: without a `transports.usb` instance they wait
+    /// unused.
+    pub fn enable_app_owned_usb(&mut self) -> crate::transport::usb::UsbAttach {
+        crate::transport::usb::UsbAttach::new(Arc::clone(&self.usb_links))
     }
 
     /// Address the built-in `.fips` DNS responder is listening on, or `None`

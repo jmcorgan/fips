@@ -45,6 +45,7 @@ mod traffic_diag;
 mod udp_dns;
 mod unit;
 mod update_peers;
+mod usb;
 
 pub(super) fn make_node() -> Node {
     make_node_with(Config::new())
