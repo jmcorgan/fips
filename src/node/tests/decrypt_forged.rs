@@ -97,7 +97,7 @@ async fn twenty_five_forged_frames_on_a_live_peers_index_from_another_address_le
     let addr0 = *nodes[0].node.node_addr();
     let addr1 = *nodes[1].node.node_addr();
     let index = index_at_1(&nodes);
-    let key = (nodes[1].transport_id, index.as_u32());
+    let key = index.as_u32();
     // Windows has no decrypt worker pool, so it always decrypts inline.
     #[cfg(unix)]
     assert!(
@@ -178,7 +178,7 @@ async fn twenty_five_forged_frames_failing_in_the_decrypt_worker_leave_the_peer_
         nodes[1]
             .node
             .decrypt_registered_sessions
-            .contains(&(nodes[1].transport_id, index.as_u32())),
+            .contains(&index.as_u32()),
         "precondition: node 0's session is registered with the worker"
     );
     let mut events = nodes[1]

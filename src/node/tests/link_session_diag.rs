@@ -455,15 +455,13 @@ async fn a_worker_decrypt_failure_logs_the_frames_index_and_path() {
         Duration::from_secs(1),
     )
     .await;
-    let tid0 = nodes[0].transport_id;
     let n0 = &mut nodes[0].node;
     n0.supervisor.decrypt_workers = Some(DecryptWorkerPool::for_test(vec![TestWorker::Run]));
     n0.register_decrypt_worker_session(&node1_addr);
     let mut events = n0.decrypt_fallback_rx.take().expect("the event receiver");
     let idx = n0.get_peer(&node1_addr).unwrap().our_index().unwrap();
     assert!(
-        n0.decrypt_registered_sessions
-            .contains(&(tid0, idx.as_u32())),
+        n0.decrypt_registered_sessions.contains(&idx.as_u32()),
         "the current session must be registered with the worker"
     );
 
