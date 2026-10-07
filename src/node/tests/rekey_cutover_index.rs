@@ -22,10 +22,9 @@ enum SecondCutover {
     PeerFrame,
 }
 
-/// Whether `tn` maps `index` on its link to `peer` to a peer.
-fn registered(tn: &TestNode, peer: &NodeAddr, index: SessionIndex) -> bool {
-    let tid = tn.node.get_peer(peer).unwrap().transport_id().unwrap();
-    tn.node.peers_by_index.contains_key(&(tid, index.as_u32()))
+/// Whether `tn` maps `index` to a peer.
+fn registered(tn: &TestNode, _peer: &NodeAddr, index: SessionIndex) -> bool {
+    tn.node.peers_by_index.contains_key(&index.as_u32())
 }
 
 /// Node 0 cuts over a first rekey, then a second while the first session

@@ -838,13 +838,9 @@ async fn a_cross_connection_move_abandons_our_rekey_ends_the_drain_and_keeps_the
     );
     assert!(!peer.rekey_in_progress(), "the move abandons S's own rekey");
     assert_eq!(peer.previous_our_index(), None, "the move ends S's drain");
-    let transport = peer.transport_id().unwrap();
     for (what, index) in [("drained", drained), ("rekey attempt", attempt)] {
         assert!(
-            !nodes[s]
-                .node
-                .peers_by_index
-                .contains_key(&(transport, index.as_u32())),
+            !nodes[s].node.peers_by_index.contains_key(&index.as_u32()),
             "the {what} index is unbound at the move"
         );
     }

@@ -33,7 +33,7 @@ fn threshold_warnings(logs: &crate::testutil::LogCapture) -> usize {
 
 /// Assert the peer and its index entry are still held, and return its
 /// consecutive failure count.
-fn held_count(node: &Node, node_addr: &NodeAddr, key: &(TransportId, u32), when: &str) -> u32 {
+fn held_count(node: &Node, node_addr: &NodeAddr, key: &u32, when: &str) -> u32 {
     let count = node
         .get_peer(node_addr)
         .unwrap_or_else(|| panic!("peer present {when}"))
@@ -68,7 +68,7 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("promoted peer must have our_index");
-    let key = (transport_id, our_index.as_u32());
+    let key = our_index.as_u32();
     assert_eq!(
         held_count(&node, &node_addr, &key, "after promote"),
         0,
@@ -178,11 +178,11 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("promoted peer must have our_index");
-    let key = (transport_id, our_index.as_u32());
+    let key = our_index.as_u32();
     assert_eq!(dataplane_drops(&node), (Some(0), Some(0)));
 
     let unknown = our_index.as_u32().wrapping_add(1);
-    assert!(!node.peers_by_index.contains_key(&(transport_id, unknown)));
+    assert!(!node.peers_by_index.contains_key(&unknown));
     node.handle_encrypted_frame(frame_naming(transport_id, unknown))
         .await;
     assert_eq!(
@@ -193,7 +193,7 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
 
     let orphaned = our_index.as_u32().wrapping_add(2);
     let gone = NodeAddr::from_bytes([0x77; 16]);
-    node.peers_by_index.insert((transport_id, orphaned), gone);
+    node.peers_by_index.insert(orphaned, gone);
     node.handle_encrypted_frame(frame_naming(transport_id, orphaned))
         .await;
     assert_eq!(
@@ -202,7 +202,7 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
         "a frame naming an index left on a removed peer must be counted as orphaned"
     );
     assert!(
-        !node.peers_by_index.contains_key(&(transport_id, orphaned)),
+        !node.peers_by_index.contains_key(&orphaned),
         "the orphaned entry is removed with the drop"
     );
 
