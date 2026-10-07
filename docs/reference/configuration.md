@@ -943,15 +943,20 @@ be configured with named sub-keys for different SOCKS5 proxy endpoints.
 ### BLE (`transports.ble.*`)
 
 Bluetooth Low Energy transport using L2CAP Connection-Oriented Channels.
-Compiled on glibc Linux and on Android. At build time, `build.rs` sets
+Compiled on glibc Linux, Android and macOS. At build time, `build.rs` sets
 `bluer_available` from the target triple (Linux and not musl) and sets
-`ble_available` for that or Android; the BLE runtime is gated behind
+`ble_available` for that, Android or macOS; the BLE runtime is gated behind
 `#[cfg(ble_available)]`, with `bluer_available` gating only the BlueZ
 backend inside it. There is no Cargo feature flag to toggle. On musl
 Linux or any other platform, BLE config still parses but the transport
 runtime is absent and config entries become no-ops. On glibc Linux the
 transport communicates with BlueZ via D-Bus through the `bluer` crate;
-on Android the radio is supplied by the embedding application.
+on Android the radio is supplied by the embedding application. On macOS
+it uses CoreBluetooth: `adapter` is ignored, more than one `ble` instance
+is a config error, and the packaged daemon, which macOS does not let use
+Bluetooth, gets the radio from the `fips-ble-agent` LaunchAgent running in
+a logged-in session of a `fips` group member (see the BLE section of
+[the transport layer design](../design/fips-transport-layer.md)).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

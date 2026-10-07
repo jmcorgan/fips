@@ -75,6 +75,13 @@ netlink-sys = "0.8"
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
 
+# CoreBluetooth BLE backend (src/transport/ble/io_macos).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSStream", "NSString", "NSUUID", "NSValue"] }
+objc2-core-bluetooth = "0.3"
+dispatch2 = "0.3"
+
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"
 windows-service = "0.8.1"

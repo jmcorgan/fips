@@ -738,12 +738,14 @@ connecting, advertising, scanning and the stream I/O itself; the
 connection pool, the PSM wire format, the stream framer and the
 scan/probe loop are shared by every backend.
 
-The backends live one per file and are selected by a three-way cascade
-in `ble/mod.rs`: `BluerIo` (`io_linux.rs`) talks to BlueZ over D-Bus,
-`AndroidIo` (`io_android.rs`) drives a radio the embedding application
-installs, and `MockBleIo` (`io.rs`) is an in-memory double compiled only
-under `cfg(test)`. A build that matches none of the three fails with a
-`compile_error!` rather than silently selecting the mock.
+The backends live one per file and are selected by a cascade in
+`ble/mod.rs`: `BluerIo` (`io_linux.rs`) talks to BlueZ over D-Bus;
+`RadioIo` (`io_radio.rs`) drives a radio operated through commands and
+callbacks — on Android the embedding application's, on macOS the
+in-process CoreBluetooth radio in `io_macos/`; and `MockBleIo` (`io.rs`)
+is an in-memory double compiled only under `cfg(test)`. A build that
+matches none of the arms fails with a `compile_error!` rather than
+silently selecting the mock.
 
 That failure is deliberate. An earlier arrangement wrote the mock arm as
 "anything that is not BlueZ", which meant a new platform got a transport
@@ -752,13 +754,13 @@ error anywhere to find it.
 
 ### Backend Availability
 
-`build.rs` sets `ble_available` for glibc Linux or Android, which is the
+`build.rs` sets `ble_available` for glibc Linux, Android or macOS, which is the
 set of platforms with a concrete backend rather than the set that could
 plausibly have Bluetooth. `bluer_available`, the BlueZ sub-condition, is
 glibc Linux alone: musl cannot satisfy `libdbus-sys`'s pkg-config
 cross-compile requirement, and musl router targets do not run BlueZ by
-default. macOS, FreeBSD and Windows have no backend and so have no BLE
-transport at all.
+default. FreeBSD and Windows have no backend and so have no BLE transport
+at all.
 
 On glibc Linux the build needs `libdbus-1-dev` and `pkg-config`; the
 BlueZ daemon itself is a runtime dependency. On Android the radio is
@@ -767,6 +769,31 @@ connect all sit behind Java APIs held under a permission and
 foreground-service model that only the app can satisfy, so the embedder
 implements `AndroidRadio` and installs it into a per-node slot which the
 backend resolves per operation.
+
+On macOS the radio is CoreBluetooth, reached through `objc2`. It is
+delegate-driven and moves channel bytes through Foundation streams,
+which is the same command-out, callback-in shape as the Android
+embedder's radio, so the macOS backend reuses that machinery rather than
+implementing `BleIo` itself: `MacRadio` (`io_macos/corebluetooth.rs`)
+implements the radio trait and installs a fresh bridge into its slot
+each time Bluetooth comes up. Both CoreBluetooth managers deliver their
+callbacks on a private serial dispatch queue, and each channel's streams
+are pumped by two threads doing blocking I/O, so nothing needs the main
+thread's run loop. CoreBluetooth is privacy-gated: the `fips` binary
+embeds an `Info.plist` carrying `NSBluetoothAlwaysUsageDescription`, and
+the process needs Bluetooth permission — which macOS never grants a root
+launchd daemon. So when CoreBluetooth refuses the daemon, it listens on
+`ble-agent.sock` beside the control socket instead, and a per-user
+LaunchAgent runs `fips-ble-agent --ble-agent` (a hard link to `fips`) in
+the login session: the agent owns
+the radio and proxies it to the daemon (`io_macos/agent*.rs`), carrying
+the radio commands, the bridge callbacks and the channel bytes as
+length-prefixed frames. The daemon installs each agent connection into
+its slot as one more radio, so the transport above is unchanged; an
+agent that disconnects is a radio switched off. CoreBluetooth also hides link
+addresses; a peer's per-host identifier is hashed into the six bytes of
+a `BleAddr`, so a Mac can dial only scan-discovered peers, not a
+configured `hci0/AA:…` address.
 
 ### Framing
 
@@ -798,6 +825,18 @@ it, and before a connection exists there is no channel on which to be
 told. So `BleIo::listen` reports the PSM it actually bound,
 `start_advertising` takes that PSM, and the scanner yields it alongside
 the address.
+
+macOS cannot advertise it: `CBPeripheralManager` advertises a local name
+and service UUIDs and nothing else. A Mac therefore also serves its PSM
+over GATT, as Apple's L2CAP PSM characteristic in a primary service
+carrying the FIPS service UUID, and a Mac dialling a peer whose advert
+carried no PSM reads that characteristic on the connection the channel
+needs anyway, falling back to the requested PSM when the peer serves
+none. The characteristic is specified in `ble/psm.rs` beside the
+service-data layout. Only macOS serves or reads it today, so Linux and
+Android cannot dial a Mac; with node-ordered link arbitration admitting a
+lone link whichever side dialled it, the Mac's own dial is enough for
+every pairing, Mac ↔ Mac included.
 
 The wire layout is fixed by a byte budget and specified in `ble/psm.rs`.
 A legacy advertising PDU carries 31 bytes of AD payload. Flags take 3
@@ -1345,7 +1384,7 @@ while the daemon is running.
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
 | Nym | **Implemented** | Outbound-only SOCKS5 through nym-socks5-client, mixnet anonymity, IP/hostname addressing |
-| BLE | **Implemented** (glibc Linux and Android; experimental) | L2CAP CoC, per-connection MTU (2048 default), per-link MTU; musl, macOS, FreeBSD and Windows have no backend |
+| BLE | **Implemented** (glibc Linux, Android and macOS; experimental) | L2CAP CoC, per-connection MTU (2048 default), per-link MTU; musl, FreeBSD and Windows have no backend |
 | Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |
 

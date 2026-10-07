@@ -1697,7 +1697,28 @@ impl Config {
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_ethernet_interfaces()?;
+        // Matched to the macOS BLE arm in `Node::create_transports`, which a
+        // test build does not compile either.
+        self.validate_ble_instances(cfg!(all(target_os = "macos", not(test))))?;
         self.validate_rendezvous()
+    }
+
+    /// Reject more than one BLE instance where the platform has one radio
+    /// for the whole host.
+    ///
+    /// On macOS every instance would drive the same CoreBluetooth radio and
+    /// listen for the BLE agent on the same socket, so a second one can only
+    /// collide with the first. `single_radio` is a parameter so the rule is
+    /// tested on every host.
+    fn validate_ble_instances(&self, single_radio: bool) -> Result<(), ConfigError> {
+        if single_radio && self.transports.ble.len() > 1 {
+            return Err(ConfigError::Validation(format!(
+                "{} BLE transports are configured; this platform has a single \
+                 Bluetooth radio, so configure one",
+                self.transports.ble.len()
+            )));
+        }
+        Ok(())
     }
 
     /// Reject interface names no kernel could ever hand back.
@@ -4709,5 +4730,28 @@ node:
             !path.starts_with(bogus),
             "stale/invalid XDG_RUNTIME_DIR leaked into resolver: {path}"
         );
+    }
+
+    /// One radio per host: a second BLE instance is a config error there,
+    /// and fine where each instance can own an adapter.
+    #[test]
+    fn a_second_ble_instance_is_rejected_on_a_single_radio_platform() {
+        let yaml = r#"
+transports:
+  ble:
+    left:
+      adapter: hci0
+    right:
+      adapter: hci1
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate_ble_instances(true),
+            Err(ConfigError::Validation(_))
+        ));
+        assert!(config.validate_ble_instances(false).is_ok());
+
+        let one: Config = serde_yaml::from_str("transports:\n  ble:\n    adapter: hci0\n").unwrap();
+        assert!(one.validate_ble_instances(true).is_ok());
     }
 }

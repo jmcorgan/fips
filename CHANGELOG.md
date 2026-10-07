@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A CoreBluetooth backend for the BLE transport, so macOS peers over BLE with
+  Linux, Android and other Macs. It reuses the radio-bridge machinery the
+  Android backend introduced, now platform-neutral in `ble/io_radio.rs` (the
+  `io_android` names remain as aliases, so the embedder API is unchanged):
+  `MacRadio` drives CoreBluetooth from a private dispatch queue and installs a
+  fresh bridge each time Bluetooth comes up, so toggling Bluetooth needs no
+  restart, and nothing claims the main thread's run loop. macOS assigns the
+  listener PSM and cannot advertise it, so a Mac serves its PSM over GATT
+  (Apple's L2CAP PSM characteristic, specified in `ble/psm.rs`) and reads a
+  peer's there when its advert carried none — the path Mac ↔ Mac needs. Linux
+  and Android cannot dial a Mac; the Mac's own dial forms the link. The `fips`
+  binary embeds an `Info.plist` with a Bluetooth usage description, which
+  CoreBluetooth requires; the daemon needs Bluetooth permission. Configured
+  `hci0/AA:…` peers are not dialable from a Mac, only scan-discovered ones,
+  because CoreBluetooth hides link addresses.
+  macOS never grants Bluetooth to a root launchd daemon — CoreBluetooth answers
+  `Unauthorized` whatever the privacy settings say — so the package also
+  installs a per-user LaunchAgent, `com.fips.ble-agent`, that runs
+  `fips-ble-agent --ble-agent` (a hard link to `fips`, so the two processes
+  are told apart in Activity Monitor) in the login session and lends the
+  radio to the daemon over `/var/run/fips/ble-agent.sock` (group `fips`).
+  The daemon uses CoreBluetooth directly when it is allowed to (run from a
+  terminal), and falls back to waiting for the agent when it is refused. BLE
+  works while someone in the `fips` group is logged in; each user's agent
+  logs to `~/Library/Logs/fips/ble-agent.log`, rolled like the daemon's log.
+  macOS has one radio, so more than one `ble` instance is a config error
+  there.
+
 - Dynamic interface binding for the Ethernet transport. An interface-bound
   transport is now a long-lived object that is *sometimes bound*: the interface
   it names need not exist when the daemon starts, may appear minutes later, and

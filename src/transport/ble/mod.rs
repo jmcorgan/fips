@@ -18,9 +18,10 @@
 //!
 //! Transport logic (pool, neighbor, lifecycle) is separated from any one
 //! Bluetooth stack via the `BleIo` trait. `BluerIo` drives BlueZ (behind
-//! `cfg(bluer_available)`), [`io_android::AndroidIo`] drives a radio the
-//! embedder supplies, and `MockBleIo` is an in-memory double for tests
-//! without hardware. Which one `DefaultBleTransport` resolves to is decided
+//! `cfg(bluer_available)`), [`io_radio::RadioIo`] drives a radio operated
+//! through commands and callbacks — the Android embedder's, or macOS's
+//! CoreBluetooth via [`io_macos`] — and `MockBleIo` is an in-memory double
+//! for tests without hardware. Which one `DefaultBleTransport` resolves to is decided
 //! by the cascade below, and the whole module is compiled only on platforms
 //! that have one of them — see `ble_available` in `build.rs`.
 //!
@@ -32,18 +33,29 @@
 
 pub mod addr;
 pub mod io;
-/// A backend whose radio is supplied by the embedder rather than opened in
-/// process.
-///
-/// Compiled under `cfg(test)` on every host as well as on the platform that
-/// will select it, so its channel machinery, slot semantics and connect
-/// routing are exercised by an ordinary test run on an ordinary runner. The
-/// platform build of it is linted but executed nowhere, which is exactly why
-/// the logic must not be behind a platform-only gate.
+/// The Android names for [`io_radio`], kept for the embedder API.
 #[cfg(any(target_os = "android", test))]
 pub mod io_android;
 #[cfg(bluer_available)]
 pub mod io_linux;
+/// The CoreBluetooth backend.
+///
+/// Compiled under `cfg(test)` on every host, like [`io_radio`]: everything in
+/// it that is not a CoreBluetooth call — the dial PSM decision, address
+/// mapping, the stream pumps — is platform-neutral and tested anywhere. Only
+/// its `corebluetooth` submodule is macOS-only.
+#[cfg(any(target_os = "macos", test))]
+pub mod io_macos;
+/// A backend over a radio driven through commands and callbacks rather than
+/// opened in process: the Android embedder's, or macOS's CoreBluetooth.
+///
+/// Compiled under `cfg(test)` on every host as well as on the platforms that
+/// select it, so its channel machinery, slot semantics and connect routing
+/// are exercised by an ordinary test run on an ordinary runner. The Android
+/// build of it is linted but executed nowhere, which is exactly why the logic
+/// must not be behind a platform-only gate.
+#[cfg(any(target_os = "android", target_os = "macos", test))]
+pub mod io_radio;
 pub mod neighbor;
 pub mod pool;
 pub mod psm;
@@ -85,9 +97,10 @@ pub const DEFAULT_PSM: u16 = 0x0085;
 
 /// Concrete BLE transport type for use in `TransportHandle`.
 ///
-/// Three arms, in priority order: an in-process BlueZ stack where one exists,
-/// otherwise a radio the embedder supplies, otherwise — and *only* in a test
-/// build — the in-memory double.
+/// Arms in priority order: an in-process BlueZ stack where one exists,
+/// otherwise a radio driven through [`io_radio`] — supplied by the embedder
+/// on Android, by [`io_macos`] on macOS — otherwise, and *only* in a test
+/// build, the in-memory double.
 ///
 /// The mock arm is deliberately not written as "anything that is not BlueZ".
 /// That phrasing is what makes widening the module gate dangerous: a platform
@@ -99,7 +112,10 @@ pub const DEFAULT_PSM: u16 = 0x0085;
 pub type DefaultBleTransport = BleTransport<io_linux::BluerIo>;
 
 #[cfg(all(target_os = "android", not(bluer_available), not(test)))]
-pub type DefaultBleTransport = BleTransport<io_android::AndroidIo>;
+pub type DefaultBleTransport = BleTransport<io_radio::RadioIo>;
+
+#[cfg(all(target_os = "macos", not(test)))]
+pub type DefaultBleTransport = BleTransport<io_radio::RadioIo>;
 
 #[cfg(test)]
 pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
@@ -109,7 +125,12 @@ pub type DefaultBleTransport = BleTransport<io::MockBleIo>;
 // backend to provide it. It cannot fire today; it exists for whoever next
 // widens `ble_available`, and it fails the build rather than shipping a
 // transport that quietly never connects.
-#[cfg(all(not(test), not(bluer_available), not(target_os = "android")))]
+#[cfg(all(
+    not(test),
+    not(bluer_available),
+    not(target_os = "android"),
+    not(target_os = "macos")
+))]
 compile_error!(
     "this target is `ble_available` but has no concrete `BleIo` backend. \
      Add its backend and an arm to the `DefaultBleTransport` cascade in \
@@ -2143,7 +2164,8 @@ mod tests {
     /// developer will actually see it.
     #[test]
     fn a_target_that_compiles_this_module_has_a_real_backend() {
-        let has_concrete_backend = cfg!(bluer_available) || cfg!(target_os = "android");
+        let has_concrete_backend =
+            cfg!(bluer_available) || cfg!(target_os = "android") || cfg!(target_os = "macos");
         assert!(
             has_concrete_backend,
             "target {} is `ble_available` but has no concrete `BleIo` backend, \

@@ -58,7 +58,22 @@ fn main() {
     // backend; `transport::ble` carries a compile-time tripwire that refuses
     // a build where the two disagree.
     println!("cargo:rustc-check-cfg=cfg(ble_available)");
-    if bluer_available || target_os == "android" {
+    if bluer_available || target_os == "android" || target_os == "macos" {
         println!("cargo:rustc-cfg=ble_available");
+    }
+
+    // CoreBluetooth is privacy-gated (TCC). A process that touches it without
+    // an `NSBluetoothAlwaysUsageDescription` in its Info.plist is killed on
+    // the spot, and a bare executable has no bundle to carry one — so embed
+    // the plist in the binary's `__TEXT,__info_plist` section, where the OS
+    // looks for an unbundled tool's.
+    if target_os == "macos" {
+        let plist = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("packaging/macos/Info.plist");
+        println!("cargo:rerun-if-changed={}", plist.display());
+        println!(
+            "cargo:rustc-link-arg-bin=fips=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+            plist.display()
+        );
     }
 }
