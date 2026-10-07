@@ -123,7 +123,7 @@ pub(crate) fn kind_of(ty: &TransportType, set: Option<PathKind>) -> Option<Kind>
         });
     }
     match ty.name {
-        "ethernet" | "wifi" | "ble" | "serial" => Some(Kind::Local),
+        "ethernet" | "wifi" | "ble" | "serial" | "usb" => Some(Kind::Local),
         "tor" | "nym" => Some(Kind::Internet),
         _ => None,
     }

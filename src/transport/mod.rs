@@ -11,6 +11,7 @@ pub mod socks5;
 pub mod tcp;
 pub mod tor;
 pub mod udp;
+pub mod usb;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod ethernet;
@@ -73,6 +74,7 @@ use thiserror::Error;
 use tor::TorTransport;
 use tor::control::TorMonitoringInfo;
 use udp::UdpTransport;
+use usb::UsbTransport;
 
 pub(crate) mod framing;
 pub(crate) mod stream;
@@ -436,6 +438,13 @@ impl TransportType {
         name: "ble",
         connection_oriented: true,
         reliable: true, // L2CAP SeqPacket guarantees delivery
+    };
+
+    /// USB transport: an Android Open Accessory bulk pipe between two nodes.
+    pub const USB: TransportType = TransportType {
+        name: "usb",
+        connection_oriented: true,
+        reliable: true, // USB bulk transfers are acknowledged and retried
     };
 
     /// In-process loopback transport (test harness only).
@@ -946,6 +955,8 @@ pub enum TransportHandle {
     /// BLE L2CAP transport.
     #[cfg(ble_available)]
     Ble(DefaultBleTransport),
+    /// USB (Android Open Accessory) transport.
+    Usb(UsbTransport),
     /// In-process loopback transport (test harness only).
     #[cfg(test)]
     Loopback(LoopbackTransport),
@@ -963,6 +974,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.start_async().await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.start_async().await,
+            TransportHandle::Usb(t) => t.start_async().await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.start_async().await,
         }
@@ -979,6 +991,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.stop_async().await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.stop_async().await,
+            TransportHandle::Usb(t) => t.stop_async().await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.stop_async().await,
         }
@@ -995,6 +1008,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.send_async(addr, data).await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.send_async(addr, data).await,
+            TransportHandle::Usb(t) => t.send_async(addr, data).await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.send_async(addr, data).await,
         }
@@ -1036,6 +1050,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.send_lane(lane, addr, data).await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.send_lane(lane, addr, data).await,
+            TransportHandle::Usb(t) => t.send_async(addr, data).await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.send_async(addr, data).await,
         }
@@ -1062,6 +1077,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.has_connection(addr).await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.has_connection(addr).await,
+            TransportHandle::Usb(t) => t.has_connection(addr).await,
             #[cfg(test)]
             TransportHandle::Loopback(_) => true,
         }
@@ -1078,6 +1094,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.transport_id(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.transport_id(),
+            TransportHandle::Usb(t) => t.transport_id(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.transport_id(),
         }
@@ -1094,6 +1111,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.name(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.name(),
+            TransportHandle::Usb(t) => t.name(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.name(),
         }
@@ -1112,6 +1130,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.role(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.role(),
+            TransportHandle::Usb(t) => t.role(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.role(),
         }
@@ -1128,6 +1147,7 @@ impl TransportHandle {
             TransportHandle::Tor(_) | TransportHandle::Nym(_) => None,
             #[cfg(ble_available)]
             TransportHandle::Ble(_) => None,
+            TransportHandle::Usb(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
         }
@@ -1135,8 +1155,8 @@ impl TransportHandle {
 
     /// The medium this transport runs over, as a link's path machine ranks
     /// paths by it: what an interface-bound transport read from its
-    /// interface when it last bound it, `Ble` for a BLE binding, and
-    /// `Unknown` for UDP, TCP, Tor and Nym, whose paths may leave by any
+    /// interface when it last bound it, `Ble` for a BLE binding, `Wired`
+    /// for a USB accessory link, and `Unknown` for UDP, TCP, Tor and Nym, whose paths may leave by any
     /// interface. Read from stored state, never from the operating system.
     pub fn medium(&self) -> fips_core::proto::path::Medium {
         use fips_core::proto::path::Medium;
@@ -1145,6 +1165,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.medium(),
             #[cfg(ble_available)]
             TransportHandle::Ble(_) => Medium::Ble,
+            TransportHandle::Usb(_) => Medium::Wired,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.medium(),
             TransportHandle::Udp(_)
@@ -1165,6 +1186,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.transport_type(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.transport_type(),
+            TransportHandle::Usb(t) => t.transport_type(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.transport_type(),
         }
@@ -1181,6 +1203,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.state(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.state(),
+            TransportHandle::Usb(t) => t.state(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.state(),
         }
@@ -1197,6 +1220,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.mtu(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.mtu(),
+            TransportHandle::Usb(t) => t.mtu(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.mtu(),
         }
@@ -1216,6 +1240,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.link_mtu(addr),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.link_mtu(addr),
+            TransportHandle::Usb(t) => t.mtu(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.link_mtu(addr),
         }
@@ -1232,6 +1257,7 @@ impl TransportHandle {
             TransportHandle::Nym(_) => None,
             #[cfg(ble_available)]
             TransportHandle::Ble(_) => None,
+            TransportHandle::Usb(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
         }
@@ -1252,6 +1278,7 @@ impl TransportHandle {
             TransportHandle::Nym(_) => None,
             #[cfg(ble_available)]
             TransportHandle::Ble(_) => None,
+            TransportHandle::Usb(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
         }
@@ -1325,6 +1352,7 @@ impl TransportHandle {
             TransportHandle::Nym(_) => None,
             #[cfg(ble_available)]
             TransportHandle::Ble(_) => None,
+            TransportHandle::Usb(_) => None,
             #[cfg(test)]
             TransportHandle::Loopback(_) => None,
         }
@@ -1365,6 +1393,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.discover(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.discover(),
+            TransportHandle::Usb(t) => t.discover(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.discover(),
         }
@@ -1381,6 +1410,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.auto_connect(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.auto_connect(),
+            TransportHandle::Usb(t) => t.auto_connect(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.auto_connect(),
         }
@@ -1397,6 +1427,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.accept_connections(),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.accept_connections(),
+            TransportHandle::Usb(t) => t.accept_connections(),
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.accept_connections(),
         }
@@ -1419,6 +1450,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.connect_async(addr).await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.connect_async(addr).await,
+            TransportHandle::Usb(t) => t.connect_async(addr).await,
             #[cfg(test)]
             TransportHandle::Loopback(_) => Ok(()), // connectionless
         }
@@ -1439,6 +1471,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.connection_state_sync(addr),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.connection_state_sync(addr),
+            TransportHandle::Usb(t) => t.connection_state_sync(addr),
             #[cfg(test)]
             TransportHandle::Loopback(_) => ConnectionState::Connected,
         }
@@ -1458,6 +1491,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => t.close_connection_async(addr).await,
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
+            TransportHandle::Usb(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
             TransportHandle::Loopback(t) => t.record_close(addr),
         }
@@ -1475,7 +1509,8 @@ impl TransportHandle {
             TransportHandle::Udp(_)
             | TransportHandle::Tcp(_)
             | TransportHandle::Tor(_)
-            | TransportHandle::Nym(_) => {}
+            | TransportHandle::Nym(_)
+            | TransportHandle::Usb(_) => {}
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             TransportHandle::Ethernet(_) => {}
             #[cfg(ble_available)]
@@ -1495,7 +1530,8 @@ impl TransportHandle {
             TransportHandle::Udp(_)
             | TransportHandle::Tcp(_)
             | TransportHandle::Tor(_)
-            | TransportHandle::Nym(_) => {}
+            | TransportHandle::Nym(_)
+            | TransportHandle::Usb(_) => {}
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             TransportHandle::Ethernet(_) => {}
             #[cfg(ble_available)]
@@ -1513,7 +1549,8 @@ impl TransportHandle {
             TransportHandle::Udp(_)
             | TransportHandle::Tcp(_)
             | TransportHandle::Tor(_)
-            | TransportHandle::Nym(_) => false,
+            | TransportHandle::Nym(_)
+            | TransportHandle::Usb(_) => false,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             TransportHandle::Ethernet(_) => false,
             #[cfg(ble_available)]
@@ -1543,6 +1580,7 @@ impl TransportHandle {
             TransportHandle::Nym(_) => TransportCongestion::default(),
             #[cfg(ble_available)]
             TransportHandle::Ble(_) => TransportCongestion::default(),
+            TransportHandle::Usb(_) => TransportCongestion::default(),
             #[cfg(test)]
             TransportHandle::Loopback(_) => TransportCongestion::default(),
         }
@@ -1570,6 +1608,7 @@ impl TransportHandle {
             TransportHandle::Nym(t) => LiveStats::Nym(t.stats().clone()),
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => LiveStats::Ble(t.stats().clone()),
+            TransportHandle::Usb(t) => LiveStats::Usb(t.stats().clone()),
             #[cfg(test)]
             TransportHandle::Loopback(_) => LiveStats::Empty,
         }
@@ -1597,6 +1636,8 @@ pub(crate) enum LiveStats {
     /// BLE transport counters.
     #[cfg(ble_available)]
     Ble(std::sync::Arc<ble::stats::BleStats>),
+    /// USB transport counters.
+    Usb(std::sync::Arc<usb::stats::UsbStats>),
     /// No counters (the test loopback transport).
     #[cfg(test)]
     Empty,
@@ -1615,6 +1656,7 @@ impl LiveStats {
             LiveStats::Nym(s) => serde_json::to_value(s.snapshot()).unwrap_or_default(),
             #[cfg(ble_available)]
             LiveStats::Ble(s) => serde_json::to_value(s.snapshot()).unwrap_or_default(),
+            LiveStats::Usb(s) => serde_json::to_value(s.snapshot()).unwrap_or_default(),
             #[cfg(test)]
             LiveStats::Empty => serde_json::json!({}),
         }
@@ -1635,6 +1677,7 @@ impl PartialEq for LiveStats {
             (LiveStats::Nym(a), LiveStats::Nym(b)) => Arc::ptr_eq(a, b),
             #[cfg(ble_available)]
             (LiveStats::Ble(a), LiveStats::Ble(b)) => Arc::ptr_eq(a, b),
+            (LiveStats::Usb(a), LiveStats::Usb(b)) => Arc::ptr_eq(a, b),
             #[cfg(test)]
             (LiveStats::Empty, LiveStats::Empty) => true,
             _ => false,

@@ -970,6 +970,43 @@ impl BleConfig {
 }
 
 // ============================================================================
+// USB Transport Configuration
+// ============================================================================
+
+/// Default USB MTU. Matches BLE: the node's TUN MTU is the smallest over the
+/// bound transports, so a larger value buys nothing while another transport
+/// is up; a link's throughput comes from coalescing packets into transfers.
+const DEFAULT_USB_MTU: u16 = 2048;
+
+/// USB transport instance configuration.
+///
+/// A USB link is handed to the transport when a cable is attached (see
+/// [`crate::transport::usb`]); there is nothing to listen on or dial, so the
+/// configuration is small.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbConfig {
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
+
+    /// MTU for USB links. Default: 2048. Capped at one USB transfer (16384).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+}
+
+impl UsbConfig {
+    /// MTU for USB links. Default: 2048, never more than one USB transfer.
+    pub fn mtu(&self) -> u16 {
+        self.mtu
+            .unwrap_or(DEFAULT_USB_MTU)
+            .min(crate::transport::usb::USB_TRANSFER_MAX as u16)
+    }
+}
+
+// ============================================================================
 // Nym Transport Configuration
 // ============================================================================
 
@@ -1079,6 +1116,10 @@ pub struct TransportsConfig {
     /// BLE transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub ble: TransportInstances<BleConfig>,
+
+    /// USB transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub usb: TransportInstances<UsbConfig>,
 }
 
 /// Helper for skip_serializing_if on TransportInstances.
@@ -1095,6 +1136,7 @@ impl TransportsConfig {
             && self.tor.is_empty()
             && self.nym.is_empty()
             && self.ble.is_empty()
+            && self.usb.is_empty()
     }
 
     /// Merge another TransportsConfig into this one.
@@ -1118,6 +1160,9 @@ impl TransportsConfig {
         }
         if !other.ble.is_empty() {
             self.ble = other.ble;
+        }
+        if !other.usb.is_empty() {
+            self.usb = other.usb;
         }
     }
 }

@@ -121,6 +121,14 @@ fn listing(handle: &TransportHandle) -> Kind {
                  a frame above it, so a frame the sender admits is within the receiver's bound",
             ),
         }),
+        // TODO(usb): no conformance instance yet; these are placeholders,
+        // not checked exemptions.
+        TransportHandle::Usb(_) => Kind::Oriented(Rules {
+            close: Cover::Exempt("not yet covered: no USB instance of the close rule"),
+            stop: Cover::Exempt("not yet covered: no USB instance of the stop rule"),
+            idle: Cover::Exempt("not yet covered: no USB instance of the idle rule"),
+            bound: Cover::Exempt("not yet covered: no USB instance of the receive-bound rule"),
+        }),
         #[cfg(test)]
         TransportHandle::Loopback(_) => Kind::TestDouble(
             "an in-process test double, not a transport the rules govern, whatever type a test \

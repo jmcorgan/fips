@@ -55,7 +55,7 @@ pub use node::{
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
     BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, PathKind, TcpConfig, TorConfig,
-    TransportInstances, TransportRole, TransportsConfig, UdpConfig,
+    TransportInstances, TransportRole, TransportsConfig, UdpConfig, UsbConfig,
 };
 
 /// Default config filename.
