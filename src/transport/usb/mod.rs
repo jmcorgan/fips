@@ -34,6 +34,12 @@
 //! [`USB_TRANSFER_MAX`]; the reader recovers packet boundaries from the FMP
 //! length prefix, so how the bytes were split on the wire does not matter.
 
+/// The USB host role, over `nusb`.
+#[cfg(all(
+    feature = "usb-host",
+    any(target_os = "linux", target_os = "macos", target_os = "android")
+))]
+pub mod host;
 pub mod link;
 pub mod stats;
 
@@ -112,6 +118,8 @@ pub struct UsbTransport {
     pool: Pool,
     packet_tx: PacketTx,
     accept_task: Option<JoinHandle<()>>,
+    /// The host role's bus watcher, when `host` is configured.
+    host_task: Option<JoinHandle<()>>,
     /// Peers whose hello completed, drained by `discover()`.
     neighbors: Arc<std::sync::Mutex<Vec<DiscoveredPeer>>>,
     stats: Arc<UsbStats>,
@@ -138,6 +146,7 @@ impl UsbTransport {
             pool: Arc::new(Mutex::new(HashMap::new())),
             packet_tx,
             accept_task: None,
+            host_task: None,
             neighbors: Arc::new(std::sync::Mutex::new(Vec::new())),
             stats: Arc::new(UsbStats::new()),
             local_pubkey: None,
@@ -189,9 +198,39 @@ impl UsbTransport {
             Arc::clone(&self.links),
         )));
 
+        if self.config.host() {
+            self.start_host();
+        }
+
         self.state = TransportState::Up;
-        info!(name = ?self.name, mtu = self.config.mtu(), "USB transport started");
+        info!(name = ?self.name, mtu = self.config.mtu(), host = self.config.host(), "USB transport started");
         Ok(())
+    }
+
+    /// Start watching the bus as USB host, feeding accessories it opens into
+    /// this transport's own link queue.
+    #[cfg(all(
+        feature = "usb-host",
+        any(target_os = "linux", target_os = "macos", target_os = "android")
+    ))]
+    fn start_host(&mut self) {
+        self.host_task = Some(tokio::spawn(host::run(
+            Arc::clone(&self.links),
+            self.config.uri().to_string(),
+        )));
+    }
+
+    /// `host` is configured on a build that cannot be USB host.
+    #[cfg(not(all(
+        feature = "usb-host",
+        any(target_os = "linux", target_os = "macos", target_os = "android")
+    )))]
+    fn start_host(&mut self) {
+        warn!(
+            name = ?self.name,
+            "USB host role configured, but this build has no USB host support \
+             (needs the `usb-host` feature on Linux, macOS or Android); ignoring"
+        );
     }
 
     /// Stop the transport and drop every link.
@@ -202,6 +241,9 @@ impl UsbTransport {
     pub async fn stop_async(&mut self) -> Result<(), TransportError> {
         // Aborting the accept loop drops its in-flight hellos with it.
         if let Some(task) = self.accept_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.host_task.take() {
             task.abort();
         }
         self.pool.lock().await.clear();
