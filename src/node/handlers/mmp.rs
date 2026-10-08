@@ -676,7 +676,7 @@ impl Node {
     /// `now_ms` is the caller's hoisted wall-clock ms; it flows to the peer
     /// machine's ambient context. The reconnect schedule itself is on the
     /// peering clock, which `note_link_dead`'s callers read.
-    async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    pub(in crate::node) async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
             None => return,
