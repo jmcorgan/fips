@@ -1074,6 +1074,129 @@ async fn test_tun_outbound_established_session() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// A—B—C with an established A→C session, then the route to C lost the way
+/// a link change loses it: A's coordinates for C are flushed while both ends
+/// keep the session. With `evict_identity`, A's identity entry for C goes
+/// too, as a bounded cache can drop it on a long-lived session; a lookup's
+/// answer is verified against it, so the relookup has to restore it from the
+/// session. Returns the nodes and C's address.
+async fn session_with_its_route_lost(evict_identity: bool) -> (Vec<TestNode>, NodeAddr) {
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test(3, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node2_addr = *nodes[2].node.node_addr();
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0]
+        .node
+        .initiate_session(node2_addr, node2_pubkey)
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .is_some_and(|s| s.state().is_established()),
+        "session established before the route is lost"
+    );
+
+    nodes[0].node.coord_cache.remove(&node2_addr);
+    if evict_identity {
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&node2_addr.as_bytes()[0..15]);
+        nodes[0].node.identity_cache.remove(&prefix);
+        assert!(!nodes[0].node.has_cached_identity(&node2_addr));
+    }
+    assert!(
+        nodes[0].node.find_next_hop(&node2_addr).is_none(),
+        "no route to C without its coordinates"
+    );
+    (nodes, node2_addr)
+}
+
+/// A TUN packet on a session that lost its route starts a lookup instead of
+/// failing until the session idles out, and the session carries the next
+/// packet once the route is back.
+#[tokio::test]
+async fn a_tun_send_on_a_session_that_lost_its_route_looks_the_route_up_again() {
+    // The TUN path maps the packet's address to C through the identity
+    // cache before it reaches the session, so the entry stays.
+    let (mut nodes, node2_addr) = session_with_its_route_lost(false).await;
+    let node0_addr = *nodes[0].node.node_addr();
+    let (_tun_outbound, tun_rx) = nodes[2].node.enable_app_owned_tun();
+    let src = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst = crate::FipsAddress::from_node_addr(&node2_addr);
+
+    // This packet finds no route and is lost, but it starts the lookup.
+    nodes[0]
+        .node
+        .handle_tun_outbound(build_ipv6_packet(&src, &dst, b"lost"))
+        .await;
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0].node.find_next_hop(&node2_addr).is_some(),
+        "the lookup restored a route to C"
+    );
+
+    let packet = build_ipv6_packet(&src, &dst, b"after the route returned");
+    nodes[0].node.handle_tun_outbound(packet.clone()).await;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert!(
+        delivered.contains(&packet),
+        "the packet after the lookup reaches C on the existing session"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The native datagram API's send on a session that lost its route starts a
+/// lookup the same way, and restores C's evicted identity from the session so
+/// the lookup's answer can be verified.
+#[tokio::test]
+async fn a_native_send_on_a_session_that_lost_its_route_looks_the_route_up_again() {
+    let (mut nodes, node2_addr) = session_with_its_route_lost(true).await;
+    let key = crate::native::registry::FlowKey {
+        peer: node2_addr,
+        remote: 7000,
+        local: 7001,
+    };
+    let node2_xonly = nodes[2].node.identity().pubkey();
+
+    nodes[0]
+        .node
+        .handle_native_outbound(key, node2_xonly, b"lost".to_vec())
+        .await;
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0].node.find_next_hop(&node2_addr).is_some(),
+        "the lookup restored a route to C"
+    );
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .is_some_and(|s| s.state().is_established()),
+        "the existing session is still the one in place"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 /// A completed rekey cutover must not break the data plane: an encrypted
 /// datagram sent after the K-bit cutover decodes on the new session, and the
 /// peer is not spuriously torn down.

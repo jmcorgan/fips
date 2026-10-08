@@ -2089,6 +2089,29 @@ impl Node {
         }
     }
 
+    /// Look `dest` up again after a send on its established session found no
+    /// next hop.
+    ///
+    /// An end-to-end session outlives its route. A link change anywhere on
+    /// the way (a wifi roam, a BLE drop, a re-plugged cable, the tree
+    /// re-parenting) flushes the coordinates this node routes `dest` by,
+    /// while both ends keep the session established. Lookups are otherwise
+    /// started only for destinations without a session, so every send on it
+    /// failed with "no route" until the idle timeout removed the session.
+    ///
+    /// The lookup is deduplicated, so a stream of failing sends starts one,
+    /// and its answer restores the coordinates for the session already in
+    /// place. The identity is cached from the session first: the answer is
+    /// verified against it, and on a long-lived session it may have been
+    /// evicted.
+    pub(in crate::node) async fn relookup_lost_route(&mut self, dest: &NodeAddr) {
+        if self.find_next_hop(dest).is_some() {
+            return;
+        }
+        self.cache_session_identity(dest);
+        self.maybe_initiate_lookup(dest).await;
+    }
+
     /// Count, without acting on, the two ways an admitted PathBroken can
     /// disagree with this node's own view of the path.
     ///
@@ -3258,6 +3281,7 @@ impl Node {
                 }
                 if let Err(e) = self.send_ipv6_packet(&dest_addr, &ipv6_packet).await {
                     debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
+                    self.relookup_lost_route(&dest_addr).await;
                 }
                 return;
             }
