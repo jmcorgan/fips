@@ -3277,6 +3277,17 @@ impl Node {
             if entry.is_established() {
                 if let Err(e) = self.send_ipv6_packet(&dest_addr, &ipv6_packet).await {
                     debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
+                    // The session outlived its route: a link under it went
+                    // away and took the coordinates it routed by with it,
+                    // while both ends kept the session. Look the destination
+                    // up again. Without this every packet failed here until
+                    // the session idled out (90 s), and only the fresh session
+                    // after that ran the lookup that finds it in milliseconds.
+                    // The lookup is deduplicated, so a stream of failing
+                    // packets starts one, not one each.
+                    if self.find_next_hop(&dest_addr).is_none() {
+                        self.maybe_initiate_lookup(&dest_addr).await;
+                    }
                 }
                 return Outcome::Sent;
             }

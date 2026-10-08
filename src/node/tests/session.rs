@@ -9135,3 +9135,81 @@ mod dead_encrypt_worker {
         cleanup_nodes(&mut nodes).await;
     }
 }
+
+/// A session that outlives its route looks the route up again instead of
+/// dropping every packet until it idles out.
+///
+/// A—B—C with an established A→C session. A link flap at A (a USB cable
+/// re-plugged, a Wi-Fi roam) flushes the coordinates A routed C by, while the
+/// end-to-end session stays established at both ends. Each packet A sends on
+/// it then fails with "no route"; before this, nothing looked C up again and
+/// the session stayed dark until the idle timeout removed it, 90 s later.
+#[tokio::test]
+async fn a_session_that_lost_its_route_looks_the_route_up_again() {
+    let edges = vec![(0, 1), (1, 2)];
+    let mut nodes = run_tree_test(3, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node2_addr = *nodes[2].node.node_addr();
+    let node2_pubkey = nodes[2].node.identity().pubkey_full();
+
+    nodes[0]
+        .node
+        .initiate_session(node2_addr, node2_pubkey)
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node2_addr)
+            .is_some_and(|s| s.state().is_established()),
+        "session established before the route is lost"
+    );
+
+    // The route goes; the session does not.
+    nodes[0].node.coord_cache.remove(&node2_addr);
+    assert!(
+        nodes[0].node.find_next_hop(&node2_addr).is_none(),
+        "no route to C without its coordinates"
+    );
+
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[2].node.install_tun(tun_tx);
+    let src = crate::FipsAddress::from_node_addr(&node0_addr);
+    let dst = crate::FipsAddress::from_node_addr(&node2_addr);
+
+    // The first packet finds no route. It is lost, but it must start a lookup.
+    nodes[0]
+        .node
+        .handle_tun_outbound(build_ipv6_packet(&src, &dst, b"lost"))
+        .await;
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        nodes[0].node.find_next_hop(&node2_addr).is_some(),
+        "the lookup restored a route to C"
+    );
+
+    // The same session carries the next packet.
+    let packet = build_ipv6_packet(&src, &dst, b"after the flap");
+    nodes[0].node.handle_tun_outbound(packet.clone()).await;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx.try_recv().ok()).collect();
+    assert!(
+        delivered.contains(&packet),
+        "the packet after the lookup reaches C on the existing session"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
