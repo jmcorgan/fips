@@ -29,9 +29,12 @@
 >   binder, the fast path tick (`active_heartbeat_ms`) reads
 >   `interface_presence().carrier` per interface-bound transport and marks
 >   paths `Suspect` on the falling edge. Same latency bound, no new watcher.
-> - **Unreachable-on-send** is classified (`TransportError::is_unreachable`,
->   `ENETUNREACH`/`EHOSTUNREACH`) but only the inline send path sees
->   errors; the UDP encrypt-worker path sends off-task and reports none.
+> - **Unreachable-on-send** is classified (`TransportError::is_unreachable`:
+>   `ENETUNREACH`/`EHOSTUNREACH`, and `NotConnected` from a
+>   connection-oriented transport whose link dropped — BLE, TCP and the
+>   like have no route errors, only a missing connection) but only the
+>   inline send path sees errors; the UDP encrypt-worker path sends
+>   off-task and reports none.
 > - **The bare `0x51` heartbeat is still sent** on the active path at the
 >   slow interval for old nodes, alongside the per-path probes.
 > - **Selection runs from the fast tick only**, right after heartbeats, so

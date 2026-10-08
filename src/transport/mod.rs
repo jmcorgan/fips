@@ -256,16 +256,24 @@ pub enum TransportError {
 }
 
 impl TransportError {
-    /// Whether the kernel refused the send for want of a route: the
-    /// interface is up but nothing is reachable through it. A hard signal
-    /// that the path is gone (`ENETUNREACH`, `EHOSTUNREACH`), distinct from
-    /// `is_transient`: the binder is not going to fix this.
+    /// Whether the send failed because the path to the peer is gone: a hard
+    /// signal, distinct from `is_transient`, that the binder is not going to
+    /// fix. Two shapes:
+    ///
+    /// - The kernel refused the send for want of a route (`ENETUNREACH`,
+    ///   `EHOSTUNREACH`): the interface is up but nothing is reachable
+    ///   through it.
+    /// - A connection-oriented transport holds no connection for the address
+    ///   ([`Self::NotConnected`]): the link the path ran over has dropped.
+    ///   A background redial may follow, and the path's own probes bring it
+    ///   back once it answers.
     pub fn is_unreachable(&self) -> bool {
         match self {
             Self::Io(e) => matches!(
                 e.kind(),
                 std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::HostUnreachable
             ),
+            Self::NotConnected => true,
             _ => false,
         }
     }
