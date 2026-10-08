@@ -174,8 +174,22 @@ pub(crate) fn gather(
 /// starts, and as they arrive after that.
 #[derive(Default)]
 pub struct UsbLinkQueue {
-    links: Mutex<VecDeque<UsbLink>>,
+    items: Mutex<VecDeque<Attached>>,
     arrived: Notify,
+}
+
+/// Something handed to the USB transport.
+pub(crate) enum Attached {
+    /// A ready link.
+    Link(UsbLink),
+    /// A USB device this node is host of, opened by the embedder (on Android,
+    /// the descriptor of a `UsbDeviceConnection`). The transport switches it
+    /// into accessory mode, or links with it if it already is an accessory.
+    #[cfg(unix)]
+    HostDevice {
+        fd: std::os::fd::OwnedFd,
+        label: String,
+    },
 }
 
 impl UsbLinkQueue {
@@ -186,28 +200,42 @@ impl UsbLinkQueue {
 
     /// Queue a link for the transport.
     pub fn push(&self, link: UsbLink) {
-        self.links
+        self.push_attached(Attached::Link(link));
+    }
+
+    fn push_attached(&self, item: Attached) {
+        self.items
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(link);
+            .push_back(item);
         self.arrived.notify_one();
     }
 
-    /// Take the next link, waiting until one is queued.
-    pub(crate) async fn next(&self) -> UsbLink {
+    /// Take the next attachment, waiting until one is queued.
+    pub(crate) async fn next(&self) -> Attached {
         loop {
             // Register interest before looking, so a push between the look
             // and the wait is not missed.
             let arrived = self.arrived.notified();
-            if let Some(link) = self
-                .links
+            if let Some(item) = self
+                .items
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .pop_front()
             {
-                return link;
+                return item;
             }
             arrived.await;
+        }
+    }
+
+    /// Take the next ready link, discarding anything else. For tests.
+    #[cfg(test)]
+    pub(crate) async fn next_link(&self) -> UsbLink {
+        loop {
+            if let Attached::Link(link) = self.next().await {
+                return link;
+            }
         }
     }
 }
@@ -237,6 +265,21 @@ impl UsbAttach {
     #[cfg(unix)]
     pub fn accessory(&self, fd: std::os::fd::OwnedFd, label: impl Into<String>) {
         self.queue.push(UsbLink::from_fd(fd, label));
+    }
+
+    /// Hand over a USB device this node is host of, opened by the embedder —
+    /// on Android, a dup of `UsbDeviceConnection.getFileDescriptor()`. The
+    /// node switches it into Android Open Accessory mode, or links with it if
+    /// it already is an accessory; a device that switches comes back as a new
+    /// device, which the embedder hands over again. The node owns the
+    /// descriptor from here. Needs the `usb-host` feature on Linux or
+    /// Android; elsewhere the device is dropped with a warning.
+    #[cfg(unix)]
+    pub fn host_device(&self, fd: std::os::fd::OwnedFd, label: impl Into<String>) {
+        self.queue.push_attached(Attached::HostDevice {
+            fd,
+            label: label.into(),
+        });
     }
 }
 
@@ -325,11 +368,11 @@ mod tests {
         let queue = Arc::new(UsbLinkQueue::new());
         let (a, _b) = UsbLink::pair("a", "b");
         queue.push(a);
-        assert_eq!(queue.next().await.label, "a");
+        assert_eq!(queue.next_link().await.label, "a");
 
         let waiter = tokio::spawn({
             let queue = Arc::clone(&queue);
-            async move { queue.next().await.label }
+            async move { queue.next_link().await.label }
         });
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished());
