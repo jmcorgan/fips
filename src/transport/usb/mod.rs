@@ -198,6 +198,7 @@ impl UsbTransport {
                 packet_tx: self.packet_tx.clone(),
                 neighbors: Arc::clone(&self.neighbors),
                 stats: Arc::clone(&self.stats),
+                uri: self.config.uri().to_string(),
             },
             Arc::clone(&self.links),
         )));
@@ -213,10 +214,7 @@ impl UsbTransport {
 
     /// Start watching the bus as USB host, feeding accessories it opens into
     /// this transport's own link queue.
-    #[cfg(all(
-        feature = "usb-host",
-        any(target_os = "linux", target_os = "macos", target_os = "android")
-    ))]
+    #[cfg(all(feature = "usb-host", any(target_os = "linux", target_os = "macos")))]
     fn start_host(&mut self) {
         self.host_task = Some(tokio::spawn(host::run(
             Arc::clone(&self.links),
@@ -224,16 +222,15 @@ impl UsbTransport {
         )));
     }
 
-    /// `host` is configured on a build that cannot be USB host.
-    #[cfg(not(all(
-        feature = "usb-host",
-        any(target_os = "linux", target_os = "macos", target_os = "android")
-    )))]
+    /// `host` is configured on a build that cannot watch the bus. On Android
+    /// an app cannot enumerate USB devices at all: the host role there is the
+    /// embedder's, handing each device over with [`UsbAttach::host_device`].
+    #[cfg(not(all(feature = "usb-host", any(target_os = "linux", target_os = "macos"))))]
     fn start_host(&mut self) {
         warn!(
             name = ?self.name,
-            "USB host role configured, but this build has no USB host support \
-             (needs the `usb-host` feature on Linux, macOS or Android); ignoring"
+            "USB host role configured, but this build cannot watch the bus \
+             (needs the `usb-host` feature on Linux or macOS); ignoring"
         );
     }
 
@@ -399,6 +396,8 @@ struct LinkContext {
     packet_tx: PacketTx,
     neighbors: Arc<std::sync::Mutex<Vec<DiscoveredPeer>>>,
     stats: Arc<UsbStats>,
+    /// Announced to devices this node switches into accessory mode.
+    uri: String,
 }
 
 /// Take attached links as they arrive and admit each on its own task, so a
@@ -410,14 +409,55 @@ async fn accept_loop(ctx: LinkContext, links: Arc<UsbLinkQueue>) {
     let mut admitting = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
-            link = links.next() => {
-                ctx.stats.record_link_attached();
-                debug!(link = %link.label, "USB link attached");
-                admitting.spawn(admit(ctx.clone(), link));
-            }
+            item = links.next() => match item {
+                link::Attached::Link(link) => {
+                    ctx.stats.record_link_attached();
+                    debug!(link = %link.label, "USB link attached");
+                    admitting.spawn(admit(ctx.clone(), link));
+                }
+                #[cfg(unix)]
+                link::Attached::HostDevice { fd, label } => {
+                    adopt_host_device(&mut admitting, fd, label, &links, &ctx.uri);
+                }
+            },
             Some(_) = admitting.join_next(), if !admitting.is_empty() => {}
         }
     }
+}
+
+/// A device the embedder opened as USB host: switch it into accessory mode,
+/// or open it as a link if it already is one. The resulting link, if any,
+/// comes back through the queue like any other.
+#[cfg(all(feature = "usb-host", any(target_os = "linux", target_os = "android")))]
+fn adopt_host_device(
+    tasks: &mut tokio::task::JoinSet<()>,
+    fd: std::os::fd::OwnedFd,
+    label: String,
+    links: &Arc<UsbLinkQueue>,
+    uri: &str,
+) {
+    debug!(device = %label, "USB host device handed over");
+    tasks.spawn(host::adopt(fd, label, Arc::clone(links), uri.to_string()));
+}
+
+/// Without host support a handed-over device cannot be used; it is dropped,
+/// which closes it.
+#[cfg(all(
+    unix,
+    not(all(feature = "usb-host", any(target_os = "linux", target_os = "android")))
+))]
+fn adopt_host_device(
+    _tasks: &mut tokio::task::JoinSet<()>,
+    _fd: std::os::fd::OwnedFd,
+    label: String,
+    _links: &Arc<UsbLinkQueue>,
+    _uri: &str,
+) {
+    warn!(
+        device = %label,
+        "USB host device handed over, but this build cannot be USB host \
+         (needs the `usb-host` feature on Linux or Android); dropping it"
+    );
 }
 
 /// Run a link's hello and, if it completes, pool the link and publish the
