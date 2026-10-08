@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handshake, further ones proven by a `PathProbe`/`PathAck` exchange under
   the existing session. Every path is heartbeated on its own once a peer
   has more than one — fast on a path either side sends on, slow on a
-  standby — and a lost carrier, a route gone on send, an interface gone, or
+  standby — and a lost carrier, a route or connection gone on send (the
+  kernel's unreachable, or a connection-oriented transport's link dropped),
+  an interface gone, or
   two unanswered heartbeats on a path the peer is also silent on moves
   traffic to the best proven standby inside a second; only a peer with no
   path left is dropped. Selection is measured, not configured: per-path

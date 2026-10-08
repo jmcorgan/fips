@@ -465,7 +465,7 @@ impl<I: BleIo> BleTransport<I> {
             None => {
                 // Fire-and-forget: connect_async spawns a background task
                 let _ = self.connect_async(addr).await;
-                return Err(TransportError::SendFailed("not connected".into()));
+                return Err(TransportError::NotConnected);
             }
         };
 

@@ -62,6 +62,9 @@ pub struct LoopbackTransport {
     /// test say whether a socket a connection-oriented transport would own
     /// was kept or closed.
     closed: Mutex<Vec<TransportAddr>>,
+    /// While set, every send fails with [`TransportError::NotConnected`], as
+    /// a connection-oriented transport's does once the link has dropped.
+    not_connected: std::sync::atomic::AtomicBool,
 }
 
 impl LoopbackTransport {
@@ -90,7 +93,15 @@ impl LoopbackTransport {
             discovered: Mutex::new(Vec::new()),
             carrier: Mutex::new(None),
             closed: Mutex::new(Vec::new()),
+            not_connected: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Make every send fail with [`TransportError::NotConnected`] (or stop
+    /// doing so), to stand in for a connection-oriented link that dropped.
+    pub fn set_not_connected(&self, not_connected: bool) {
+        self.not_connected
+            .store(not_connected, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record a `close_connection` call.
@@ -139,6 +150,12 @@ impl LoopbackTransport {
         dest_addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        if self
+            .not_connected
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(TransportError::NotConnected);
+        }
         if data.len() > self.mtu as usize {
             return Err(TransportError::MtuExceeded {
                 packet_size: data.len(),

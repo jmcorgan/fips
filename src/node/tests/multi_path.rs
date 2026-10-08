@@ -733,6 +733,54 @@ async fn losing_the_active_transport_moves_traffic_to_the_live_standby() {
     );
 }
 
+/// A connection-oriented link that drops under the active path fails the
+/// next send with `NotConnected`. That is a hard signal like an unreachable
+/// route: the path goes `Suspect` at once and the next fast tick moves
+/// traffic to the live standby, instead of the dead path carrying traffic
+/// until the discretionary switch, about a minute later.
+#[tokio::test]
+async fn a_send_that_finds_the_active_link_gone_moves_traffic_to_the_live_standby() {
+    let (mut nodes, wifi_0, _wifi_1) = pair_with_wifi_live().await;
+    let addr_0 = *nodes[0].node.node_addr();
+    let cable = nodes[1].transport_id;
+    assert_eq!(
+        nodes[1].node.get_peer(&addr_0).unwrap().transport_id(),
+        Some(cable),
+        "precondition: traffic on the cable"
+    );
+
+    match nodes[1].node.transports.get(&cable) {
+        Some(TransportHandle::Loopback(t)) => t.set_not_connected(true),
+        _ => unreachable!("tests run over loopback"),
+    }
+    let sent = nodes[1]
+        .node
+        .send_encrypted_link_message(&addr_0, &[0x51])
+        .await;
+    assert!(sent.is_err(), "the cable's link is gone");
+    assert_eq!(
+        nodes[1]
+            .node
+            .get_peer(&addr_0)
+            .unwrap()
+            .path_on(cable)
+            .unwrap()
+            .state(),
+        PathState::Suspect,
+        "a send with no connection behind it is a hard signal"
+    );
+
+    nodes[1].node.run_path_heartbeats().await;
+    let peer = nodes[1].node.get_peer(&addr_0).expect("peer kept");
+    assert_eq!(peer.transport_id(), Some(wifi()), "traffic moved");
+    assert_eq!(peer.current_addr(), Some(&wifi_0));
+    nodes[1]
+        .node
+        .send_encrypted_link_message(&addr_0, &[0x51])
+        .await
+        .expect("send over the standby");
+}
+
 #[tokio::test]
 async fn losing_the_active_transport_with_only_a_probing_standby_reaps() {
     let (mut nodes, wifi_0, _wifi_1) = dual_homed_pair().await;
@@ -1605,6 +1653,9 @@ fn unreachable_send_errors_are_classified() {
     let e = TransportError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
     assert!(!e.is_unreachable());
     assert!(!TransportError::Timeout.is_unreachable());
+    // A connection-oriented transport whose link dropped.
+    assert!(TransportError::NotConnected.is_unreachable());
+    assert!(!TransportError::SendFailed("outbound queue full".into()).is_unreachable());
 }
 
 #[tokio::test]
