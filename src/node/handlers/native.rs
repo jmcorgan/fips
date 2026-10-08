@@ -137,6 +137,7 @@ impl Node {
                         error = %error,
                         "Failed to send a native datagram"
                     );
+                    self.relookup_lost_route(&key.peer).await;
                 } else {
                     self.metrics.native.record_sent(bytes);
                 }
