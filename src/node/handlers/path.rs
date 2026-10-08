@@ -267,6 +267,10 @@ pub(in crate::node) struct PathDriver {
     pub(in crate::node) reports: Option<mpsc::Receiver<SendReport>>,
     /// What the node's sources list for each linked peer, as candidates.
     pub(in crate::node) listings: crate::node::handlers::path_intake::Listings,
+    /// Poked by a transport when one of its links ends on its own (a USB
+    /// cable pulled), so the event loop reads the closed links at once
+    /// rather than waiting out the link-dead timeout.
+    pub(in crate::node) link_closed: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl PathDriver {
@@ -1060,6 +1064,60 @@ impl Node {
         for key in keys {
             if let Some(reading) = self.paths.carrier.remove(&key) {
                 self.paths.carrier.insert((to, key.1), reading);
+            }
+        }
+    }
+
+    /// Act on the links transports report ended on their own (a USB cable
+    /// pulled) since the last read. A link holding more than one path is
+    /// told its path there is unreachable (draft Section 5.6), so its
+    /// machine moves traffic off it; a link whose one path it was is removed
+    /// at once, as the link-dead timeout would remove it later.
+    pub(in crate::node) async fn read_closed_links(&mut self) {
+        let closed: Vec<(TransportId, TransportAddr)> = self
+            .transports
+            .iter()
+            .flat_map(|(id, t)| t.take_closed_links().into_iter().map(move |a| (*id, a)))
+            .collect();
+        for (transport, addr) in closed {
+            let held: Vec<(NodeAddr, bool)> = self
+                .peers
+                .iter()
+                .filter_map(|(node_addr, p)| {
+                    if let Some(b) = p.bundle().filter(|b| b.paths().len() > 1) {
+                        return b
+                            .paths()
+                            .find(transport, &addr)
+                            .is_some()
+                            .then_some((*node_addr, true));
+                    }
+                    (p.transport_id() == Some(transport) && p.current_addr() == Some(&addr))
+                        .then_some((*node_addr, false))
+                })
+                .collect();
+            for (node_addr, several) in held {
+                if several {
+                    info!(
+                        peer = %self.peer_display_name(&node_addr),
+                        transport_id = %transport,
+                        remote_addr = %addr,
+                        "Link closed: telling the path machine"
+                    );
+                    let to = PathRef {
+                        transport,
+                        addr: addr.clone(),
+                    };
+                    self.send_unreachable(&node_addr, to).await;
+                } else {
+                    info!(
+                        peer = %self.peer_display_name(&node_addr),
+                        transport_id = %transport,
+                        remote_addr = %addr,
+                        "Removing peer: its link closed"
+                    );
+                    let why = crate::proto::settle::output::Why::Dead;
+                    self.route_link_dead(node_addr, Self::now_ms(), why).await;
+                }
             }
         }
     }

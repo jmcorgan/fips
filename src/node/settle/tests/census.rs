@@ -159,6 +159,7 @@ const PATH_DRIVER: &[(&str, Held)] = &[
     ("polls", Exempt(TEST)),
     ("carrier", Facets(&[Facet::PathCarrier])),
     ("reports", Exempt(CHANNEL)),
+    ("link_closed", Exempt(CHANNEL)),
     ("listings", Facets(&[Facet::PathListings])),
 ];
 

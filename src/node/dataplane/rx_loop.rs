@@ -160,6 +160,8 @@ impl Node {
         // The encrypt workers' reports of unreachable sends, or a dummy
         // channel when no pool was started: the same pattern, for the same
         // reason, as the child-liveness receiver above.
+        // Transports that can tell a link ended on their own poke this.
+        let link_closed = std::sync::Arc::clone(&self.paths.link_closed);
         let (mut report_rx, _report_guard) = match self.paths.reports.take() {
             Some(rx) => (rx, None),
             None => {
@@ -584,6 +586,9 @@ impl Node {
                 }
                 Some(report) = report_rx.recv() => {
                     self.path_unreachable(report.transport, report.dest).await;
+                }
+                _ = link_closed.notified() => {
+                    self.read_closed_links().await;
                 }
                 deadline = tick.tick() => {
                     // Tick-body instrumentation. The gate is read ONCE per tick

@@ -1654,6 +1654,7 @@ impl Node {
                 packet_tx.clone(),
             );
             usb.set_local_pubkey(self.identity().pubkey().serialize());
+            usb.set_closed_notify(Arc::clone(&self.paths.link_closed));
             transports.push(TransportHandle::Usb(usb));
         }
 

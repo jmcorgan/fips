@@ -126,6 +126,10 @@ pub struct UsbTransport {
     host_task: Option<JoinHandle<()>>,
     /// Peers whose hello completed, drained by `discover()`.
     neighbors: Arc<std::sync::Mutex<Vec<DiscoveredPeer>>>,
+    /// Links that ended on their own, drained by `take_closed_links()`.
+    closed: Arc<std::sync::Mutex<Vec<TransportAddr>>>,
+    /// Poked when a link is added to `closed`, so the node reads it at once.
+    closed_notify: Arc<tokio::sync::Notify>,
     stats: Arc<UsbStats>,
     /// Our public key, sent in every hello. A transport without one cannot
     /// identify itself and refuses links.
@@ -152,6 +156,8 @@ impl UsbTransport {
             accept_task: None,
             host_task: None,
             neighbors: Arc::new(std::sync::Mutex::new(Vec::new())),
+            closed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            closed_notify: Arc::new(tokio::sync::Notify::new()),
             stats: Arc::new(UsbStats::new()),
             local_pubkey: None,
         }
@@ -197,6 +203,8 @@ impl UsbTransport {
                 pool: Arc::clone(&self.pool),
                 packet_tx: self.packet_tx.clone(),
                 neighbors: Arc::clone(&self.neighbors),
+                closed: Arc::clone(&self.closed),
+                closed_notify: Arc::clone(&self.closed_notify),
                 stats: Arc::clone(&self.stats),
                 uri: self.config.uri().to_string(),
             },
@@ -317,6 +325,20 @@ impl UsbTransport {
         }
     }
 
+    /// Set what to poke when a link ends on its own: the node's, so its event
+    /// loop reads `take_closed_links()` at once. Call before `start`.
+    pub fn set_closed_notify(&mut self, notify: Arc<tokio::sync::Notify>) {
+        self.closed_notify = notify;
+    }
+
+    /// Links that have ended on their own since the last call — the cable
+    /// pulled, the far end gone — so the node can act on the loss at once
+    /// instead of waiting out its link-dead timeout. A link the node closed,
+    /// or one a replug replaced, is not reported.
+    pub fn take_closed_links(&self) -> Vec<TransportAddr> {
+        std::mem::take(&mut *self.closed.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     /// Drop the link at `addr`.
     pub async fn close_connection_async(&self, addr: &TransportAddr) {
         if self.pool.lock().await.remove(addr).is_some() {
@@ -398,6 +420,8 @@ struct LinkContext {
     pool: Pool,
     packet_tx: PacketTx,
     neighbors: Arc<std::sync::Mutex<Vec<DiscoveredPeer>>>,
+    closed: Arc<std::sync::Mutex<Vec<TransportAddr>>>,
+    closed_notify: Arc<tokio::sync::Notify>,
     stats: Arc<UsbStats>,
     /// Announced to devices this node switches into accessory mode.
     uri: String,
@@ -505,14 +529,7 @@ async fn admit(ctx: LinkContext, link: UsbLink) {
         }
 
         let (send_tx, send_rx) = mpsc::channel(SEND_QUEUE_DEPTH);
-        let send_task = tokio::spawn(send_loop(
-            tx,
-            send_rx,
-            ta.clone(),
-            id,
-            Arc::clone(&ctx.pool),
-            Arc::clone(&ctx.stats),
-        ));
+        let send_task = tokio::spawn(send_loop(tx, send_rx, ta.clone(), id, ctx.clone()));
         let recv_task = tokio::spawn(receive_loop(reader, ta.clone(), id, ctx.clone()));
         pool.insert(
             ta.clone(),
@@ -578,8 +595,7 @@ async fn send_loop(
     mut frames: mpsc::Receiver<Vec<u8>>,
     addr: TransportAddr,
     id: ConnId,
-    pool: Pool,
-    stats: Arc<UsbStats>,
+    ctx: LinkContext,
 ) {
     let mut carried: Option<Vec<u8>> = None;
     loop {
@@ -602,12 +618,12 @@ async fn send_loop(
 
         let bytes = batch.len();
         if link_tx.send(batch).await.is_err() {
-            stats.record_send_error();
+            ctx.stats.record_send_error();
             debug!(addr = %addr, "USB link writer gone, removing link");
-            remove_own(&mut *pool.lock().await, &addr, id);
+            link_ended(&ctx, &addr, id).await;
             return;
         }
-        stats.record_send(packets, bytes);
+        ctx.stats.record_send(packets, bytes);
     }
 }
 
@@ -636,7 +652,20 @@ async fn receive_loop(mut reader: LinkRead, addr: TransportAddr, id: ConnId, ctx
             }
         }
     }
-    remove_own(&mut *ctx.pool.lock().await, &addr, id);
+    link_ended(&ctx, &addr, id).await;
+}
+
+/// A link's own reader or writer found it gone: take it out of the pool and,
+/// if it was still the pooled link at that address, report it closed. A link
+/// already replaced or closed by the node is neither.
+async fn link_ended(ctx: &LinkContext, addr: &TransportAddr, id: ConnId) {
+    if remove_own(&mut *ctx.pool.lock().await, addr, id).is_some() {
+        ctx.closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(addr.clone());
+        ctx.closed_notify.notify_one();
+    }
 }
 
 #[cfg(test)]
