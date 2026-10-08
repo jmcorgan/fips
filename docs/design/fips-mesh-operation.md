@@ -174,6 +174,9 @@ target — producing single-path forwarding through the spanning tree.
 - First contact with a destination (no cached coordinates)
 - After receiving CoordsRequired (transit node lost coordinates)
 - After receiving PathBroken (coordinates may be stale)
+- After a send on an established session finds no next hop (this node lost
+  the coordinates itself, e.g. a link under the path changed while the
+  session survived)
 
 ### LookupRequest
 

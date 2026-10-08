@@ -275,6 +275,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Sessions and rekey
 
+- A session that loses its route now looks the destination up again instead
+  of going dark until it idles out. A link change anywhere on the way (a wifi
+  roam, a BLE drop, a re-plugged cable, the tree re-parenting) flushes the
+  coordinates a node routes a destination by while both ends keep the session
+  established, and every packet sent on it then failed with "no route to
+  destination" and was dropped: lookups were only started for destinations
+  without a session. The session stayed dark until the idle timeout removed it
+  90 s later, and the fresh session after that found the destination in
+  milliseconds. A send on an established session that finds no next hop, from
+  the TUN or the native datagram API, now starts a lookup (deduplicated, so a
+  stream of failing sends starts one), re-caching the destination's identity
+  from the session first so the answer can be verified, and the existing
+  session carries on once the coordinates return.
+
 - A link rekey whose msg2 is lost now completes on the initiator's next msg1
   resend. The responder refused every resend while it held the session it had
   answered with, so the initiator abandoned its cycles and the link went
