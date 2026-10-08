@@ -27,18 +27,23 @@
 //! buffer, and a zero-length packet after it would surface on the phone as an
 //! empty read.
 
+#[cfg(not(target_os = "android"))]
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(target_os = "android"))]
 use futures::StreamExt;
 use nusb::descriptors::TransferType;
+#[cfg(not(target_os = "android"))]
 use nusb::hotplug::HotplugEvent;
 use nusb::transfer::{
     Buffer, Bulk, ControlIn, ControlOut, ControlType, Direction, In, Out, Recipient,
 };
+#[cfg(not(target_os = "android"))]
 use nusb::{DeviceId, DeviceInfo};
 use tokio::sync::mpsc;
+#[cfg(not(target_os = "android"))]
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
@@ -78,6 +83,7 @@ const OUT_IN_FLIGHT: usize = 2;
 /// Link queue depth between the pumps and the transport.
 const PUMP_QUEUE_DEPTH: usize = 8;
 
+#[cfg(not(target_os = "android"))]
 /// Watch the bus for phones and accessories until the task is aborted,
 /// queueing a link for every accessory that comes up.
 ///
@@ -123,6 +129,7 @@ pub(crate) async fn run(links: Arc<UsbLinkQueue>, uri: String) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 /// Act on a device: open it as a link if it is an accessory, ask it to
 /// become one if it looks like a phone, otherwise nothing.
 fn consider(
@@ -164,10 +171,12 @@ fn consider(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn is_accessory(device: &DeviceInfo) -> bool {
     device.vendor_id() == AOA_VID && AOA_PIDS.contains(&device.product_id())
 }
 
+#[cfg(not(target_os = "android"))]
 /// Whether `device` exposes an interface only a phone-like device has: MTP
 /// or PTP (still-image class, or Android's vendor-class MTP interface) or
 /// adb. A vendor-class interface with protocol `ff` — a serial adapter's,
@@ -181,15 +190,60 @@ fn looks_like_phone(device: &DeviceInfo) -> bool {
     })
 }
 
+#[cfg(not(target_os = "android"))]
 /// A stable name for the device's position on the bus: bus id and port path.
 fn label_of(device: &DeviceInfo) -> String {
     let ports: Vec<String> = device.port_chain().iter().map(|p| p.to_string()).collect();
     format!("host/{}-{}", device.bus_id(), ports.join("."))
 }
 
+#[cfg(not(target_os = "android"))]
 /// Run the AOA handshake. `Ok(false)` when the device does not support AOA.
 async fn switch_to_accessory(device: &DeviceInfo, uri: &str) -> Result<bool, String> {
     let dev = device.open().await.map_err(|e| format!("open: {e}"))?;
+    switch_device(&dev, uri).await
+}
+
+/// Take a device the embedder opened as USB host — on Android, through
+/// `UsbDeviceConnection` — and link with it: open it if it is already an
+/// accessory, otherwise ask it to become one. A device that switches leaves
+/// the bus and comes back as an accessory, which the embedder hands over
+/// again.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) async fn adopt(
+    fd: std::os::fd::OwnedFd,
+    label: String,
+    links: Arc<UsbLinkQueue>,
+    uri: String,
+) {
+    let dev = match nusb::Device::from_fd(fd).await {
+        Ok(dev) => dev,
+        Err(e) => {
+            warn!(device = %label, error = %e, "USB host: cannot use handed-over device");
+            return;
+        }
+    };
+    let desc = dev.device_descriptor();
+    if desc.vendor_id() == AOA_VID && AOA_PIDS.contains(&desc.product_id()) {
+        match open_link(dev, &label).await {
+            Ok(link) => {
+                info!(link = %label, "USB host: accessory opened");
+                links.push(link);
+            }
+            Err(e) => warn!(link = %label, error = %e, "USB host: cannot open accessory"),
+        }
+    } else {
+        match switch_device(&dev, &uri).await {
+            Ok(true) => info!(device = %label, "USB host: asked device to become an accessory"),
+            Ok(false) => debug!(device = %label, "USB host: device does not speak AOA"),
+            Err(e) => debug!(device = %label, error = %e, "USB host: AOA switch failed"),
+        }
+    }
+}
+
+/// Run the AOA handshake on an opened device. `Ok(false)` when it does not
+/// support AOA.
+async fn switch_device(dev: &nusb::Device, uri: &str) -> Result<bool, String> {
     let version = dev
         .control_in(
             ControlIn {
@@ -253,6 +307,7 @@ async fn switch_to_accessory(device: &DeviceInfo, uri: &str) -> Result<bool, Str
     Ok(true)
 }
 
+#[cfg(not(target_os = "android"))]
 /// Open an accessory-mode device and wrap its bulk pipe as a link.
 async fn open_accessory(device: &DeviceInfo, label: &str) -> Result<UsbLink, String> {
     let dev = device.open().await.map_err(|e| format!("open: {e}"))?;
@@ -418,7 +473,7 @@ mod tests {
     async fn aoa_echo_against_a_phone() {
         let links = Arc::new(UsbLinkQueue::new());
         let host = tokio::spawn(run(Arc::clone(&links), "https://example.invalid".into()));
-        let mut link = tokio::time::timeout(Duration::from_secs(15), links.next())
+        let mut link = tokio::time::timeout(Duration::from_secs(15), links.next_link())
             .await
             .expect("no accessory came up within 15 s");
         println!("linked: {}", link.label);
