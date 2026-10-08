@@ -60,6 +60,35 @@
 //! breaking older peers, and an advert with no service data at all decodes to
 //! `None` — which is what every legacy UUID-only advertiser produces, and
 //! what makes them keep working against the configured PSM.
+//!
+//! # GATT PSM characteristic
+//!
+//! macOS cannot put the PSM in its advertisement: `CBPeripheralManager`
+//! advertises a local name and service UUIDs and nothing else, so a Mac's
+//! advert is the legacy UUID-only form. A Mac listener therefore also serves
+//! its PSM over GATT, and a dialer that saw no PSM in the advert can read it
+//! there.
+//!
+//! - **Service:** a primary service with the FIPS service UUID — the same
+//!   UUID the advert carries, so finding the advertiser finds the service.
+//! - **Characteristic:** Apple's L2CAP PSM characteristic,
+//!   [`L2CAP_PSM_CHARACTERISTIC_UUID`]. Read-only, readable without
+//!   encryption.
+//! - **Value:** the PSM as two bytes little-endian, the same encoding as the
+//!   service data above ([`encode_psm`]). A reader ignores trailing bytes.
+//!
+//! The read happens at dial time, on the connection the L2CAP channel needs
+//! anyway, and only when the advert carried no PSM. It is never cached: a
+//! restarted listener is assigned a new PSM. A peer that serves no such
+//! characteristic — every non-Mac backend today — is dialled at the PSM the
+//! transport asked for, exactly as before.
+//!
+//! This is an additive discovery channel. Only macOS serves it, and only
+//! macOS reads it; other backends may adopt the read later.
+
+/// Apple's L2CAP PSM characteristic UUID, under which a macOS listener serves
+/// its PSM over GATT (CoreBluetooth's `CBUUIDL2CAPPSMCharacteristicString`).
+pub const L2CAP_PSM_CHARACTERISTIC_UUID: &str = "ABDD3056-28FA-441D-A470-55A75A52553A";
 
 /// Service-data key for the advertised L2CAP PSM.
 ///
@@ -107,6 +136,15 @@ pub fn decode_psm(data: &[u8]) -> Option<u16> {
         return None;
     }
     Some(u16::from_le_bytes([data[0], data[1]]))
+}
+
+/// Decode a PSM read from the GATT PSM characteristic.
+///
+/// The same layout as [`decode_psm`], except that zero is rejected: it is
+/// not a valid PSM, and dialling it would fail where falling back to the
+/// requested PSM might not.
+pub fn decode_gatt_psm(value: &[u8]) -> Option<u16> {
+    decode_psm(value).filter(|&psm| psm != 0)
 }
 
 // ============================================================================
@@ -162,6 +200,19 @@ mod tests {
         // A 128-bit service-data key would need 20 bytes, not 6 — the layout
         // this module exists to reject.
         assert_eq!(FLAGS_AD_BYTES + UUID128_LIST_AD_BYTES + 20, 41);
+    }
+
+    #[test]
+    fn test_gatt_psm_shares_the_service_data_layout() {
+        assert_eq!(decode_gatt_psm(&encode_psm(0x00C1)), Some(0x00C1));
+        assert_eq!(decode_gatt_psm(&[0xC1, 0x00, 0xFF]), Some(0x00C1));
+        assert_eq!(decode_gatt_psm(&[0xC1]), None);
+        assert_eq!(decode_gatt_psm(&[]), None);
+    }
+
+    #[test]
+    fn test_gatt_psm_rejects_zero() {
+        assert_eq!(decode_gatt_psm(&[0x00, 0x00]), None);
     }
 
     #[test]

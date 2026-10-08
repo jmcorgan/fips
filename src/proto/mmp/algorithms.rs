@@ -270,6 +270,18 @@ pub fn compute_etx(d_forward: f64, d_reverse: f64) -> f64 {
     (1.0 / product).clamp(1.0, 100.0)
 }
 
+/// The quality index of a link, path or session: `etx × (1 + rtt_ms / 100)`,
+/// lower is better, `1.0` ideal.
+///
+/// The one place the RTT weighting lives. Path selection scores a path by
+/// it, the tree costs a link by it, and the control socket reports it as
+/// `lqi`/`sqi`; if they computed it apart they could disagree about which
+/// of two links is better, and a path switch would then move traffic onto
+/// a link the tree calls worse.
+pub fn quality_index(etx: f64, rtt_ms: f64) -> f64 {
+    etx * (1.0 + rtt_ms / 100.0)
+}
+
 // ============================================================================
 // Spin Bit
 // ============================================================================

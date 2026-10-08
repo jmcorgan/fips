@@ -270,7 +270,7 @@ async fn a_peer_on_a_connection_oriented_transport_is_left_to_the_periodic_heart
         .peers
         .get_mut(&addr_1)
         .expect("peer 1 is established")
-        .set_current_addr(tcp_id, TransportAddr::from_string("10.0.0.2:2121"));
+        .rebind_transport(tcp_id, TransportAddr::from_string("10.0.0.2:2121"));
 
     let before = nodes[0]
         .node
@@ -533,7 +533,7 @@ async fn a_heartbeat_that_failed_is_not_counted_and_does_not_suppress_the_next()
         .peers
         .get_mut(&addr_1)
         .expect("peer 1 is established")
-        .set_current_addr(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
+        .rebind_transport(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
 
     let before = nodes[0]
         .node
@@ -618,7 +618,7 @@ async fn a_transports_bind_address_reaches_the_probe_target() {
         .peers
         .get_mut(&addr_1)
         .expect("peer 1 is established")
-        .set_current_addr(bound_id, TransportAddr::from_string("10.0.0.2:2121"));
+        .rebind_transport(bound_id, TransportAddr::from_string("10.0.0.2:2121"));
 
     // The snapshot is published from the tick, which is its only writer.
     nodes[0].node.record_stats_history();

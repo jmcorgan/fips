@@ -30,9 +30,8 @@ Scope is src/, minus files under a `tests/` directory and files named
 needs a Rust parser, and holding test code in those files to the same rule
 costs nothing today (no such module uses the std types).
 
-One file is exempt by name, with its reason: src/transport/ble/io_android.rs
-is compiled only for Android, and every Android target Rust supports has
-64-bit atomics.
+No file is exempt by name. `EXEMPT` holds any that must be, each with its
+reason.
 
 Known gaps, recorded rather than discovered: a std 64-bit atomic reached
 through a re-export from another crate, or through a type alias defined
@@ -52,9 +51,7 @@ import re
 import subprocess
 import sys
 
-EXEMPT = {
-    "src/transport/ble/io_android.rs": "Android targets all have 64-bit atomics",
-}
+EXEMPT: dict[str, str] = {}
 
 WIDE = ("AtomicU64", "AtomicI64")
 

@@ -229,8 +229,8 @@ async fn a_second_path_msg1_does_not_make_us_abandon_our_own_rekey() {
         *s.node.node_addr() > s.sender_addr,
         "precondition: the sender wins the tie-break"
     );
-    let (sender_addr, link_transport) = (s.sender_addr, s.link_transport);
-    let rekey_index = arm_local_rekey(&mut s.node, &s.sender, &sender_addr, link_transport);
+    let sender_addr = s.sender_addr;
+    let rekey_index = arm_local_rekey(&mut s.node, &s.sender, &sender_addr);
     assert!(
         s.node.get_peer(&sender_addr).unwrap().rekey_in_progress(),
         "precondition: our rekey is in flight"
@@ -245,7 +245,7 @@ async fn a_second_path_msg1_does_not_make_us_abandon_our_own_rekey() {
         p.rekey_in_progress(),
         "our own rekey must survive a second-path msg1"
     );
-    let key = (link_transport, rekey_index.as_u32());
+    let key = rekey_index.as_u32();
     assert!(
         s.node.peers_by_index.contains_key(&key) && s.node.pending_outbound.contains_key(&key),
         "our rekey's index must stay registered"

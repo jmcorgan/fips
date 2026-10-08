@@ -45,13 +45,13 @@ pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward,
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
     NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy,
-    RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig,
-    TreeConfig,
+    PathConfig, RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig,
+    SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
     BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, TcpConfig, TorConfig,
-    TransportInstances, TransportsConfig, UdpConfig,
+    TransportInstances, TransportRole, TransportsConfig, UdpConfig,
 };
 
 /// Default config filename.
@@ -1697,7 +1697,28 @@ impl Config {
     /// Validate cross-field configuration invariants.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_ethernet_interfaces()?;
+        // Matched to the macOS BLE arm in `Node::create_transports`, which a
+        // test build does not compile either.
+        self.validate_ble_instances(cfg!(all(target_os = "macos", not(test))))?;
         self.validate_rendezvous()
+    }
+
+    /// Reject more than one BLE instance where the platform has one radio
+    /// for the whole host.
+    ///
+    /// On macOS every instance would drive the same CoreBluetooth radio and
+    /// listen for the BLE agent on the same socket, so a second one can only
+    /// collide with the first. `single_radio` is a parameter so the rule is
+    /// tested on every host.
+    fn validate_ble_instances(&self, single_radio: bool) -> Result<(), ConfigError> {
+        if single_radio && self.transports.ble.len() > 1 {
+            return Err(ConfigError::Validation(format!(
+                "{} BLE transports are configured; this platform has a single \
+                 Bluetooth radio, so configure one",
+                self.transports.ble.len()
+            )));
+        }
+        Ok(())
     }
 
     /// Reject interface names no kernel could ever hand back.
@@ -1852,6 +1873,18 @@ impl Config {
                     self.node.link_dead_timeout_secs,
                 )));
             }
+        }
+
+        // Path selection. The margin is the whole fail-back policy: a
+        // standby must beat the active path's score by this factor before
+        // traffic moves. Below 1.0 (or NaN, which compares false both ways)
+        // two paths of equal score would swap after every dwell, each swap
+        // re-seeding the path MTU and holding the tree-visible link cost.
+        let margin = self.node.path.switch_margin;
+        if !margin.is_finite() || margin < 1.0 {
+            return Err(ConfigError::Validation(format!(
+                "`node.path.switch_margin` = {margin} must be a finite number of at least 1.0:                  it is the factor a standby's score must beat the active path's by, and                  anything less makes two equal paths swap after every dwell"
+            )));
         }
 
         let native = &self.node.native_api;
@@ -3879,6 +3912,20 @@ node:
     }
 
     #[test]
+    fn a_switch_margin_below_one_is_refused() {
+        // Two paths of equal score would swap after every dwell.
+        for bad in [0.9, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut config = Config::default();
+            config.node.path.switch_margin = bad;
+            let err = config.validate().expect_err("validation should fail");
+            assert!(err.to_string().contains("switch_margin"), "{bad}: {err}");
+        }
+        let mut config = Config::default();
+        config.node.path.switch_margin = 1.0;
+        config.validate().expect("1.0 means any better path wins");
+    }
+
+    #[test]
     fn test_a_zero_netmon_poll_interval_is_refused() {
         // It was silently clamped to 1s, so a typo produced a node that polled
         // twenty times more often than asked and said nothing about it.
@@ -4709,5 +4756,28 @@ node:
             !path.starts_with(bogus),
             "stale/invalid XDG_RUNTIME_DIR leaked into resolver: {path}"
         );
+    }
+
+    /// One radio per host: a second BLE instance is a config error there,
+    /// and fine where each instance can own an adapter.
+    #[test]
+    fn a_second_ble_instance_is_rejected_on_a_single_radio_platform() {
+        let yaml = r#"
+transports:
+  ble:
+    left:
+      adapter: hci0
+    right:
+      adapter: hci1
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate_ble_instances(true),
+            Err(ConfigError::Validation(_))
+        ));
+        assert!(config.validate_ble_instances(false).is_ok());
+
+        let one: Config = serde_yaml::from_str("transports:\n  ble:\n    adapter: hci0\n").unwrap();
+        assert!(one.validate_ble_instances(true).is_ok());
     }
 }

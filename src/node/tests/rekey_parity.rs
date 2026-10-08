@@ -583,8 +583,9 @@ async fn a_k_flipped_frame_on_the_current_index_that_fails_the_trial_still_decry
 /// promote the larger node's pending session, leave the two K-bits equal,
 /// and count no decryption failure.
 ///
-/// The smaller node sees the larger as quiet, since a peer whose link is
-/// live is not dialled; the larger node still hears the smaller one.
+/// A node never dials a peer it holds a session with, but such a dial still
+/// arrives from an older node or a caller that dials by hand, so the dial is
+/// started directly here.
 #[tokio::test]
 async fn an_alternate_path_dial_on_an_aged_session_leaves_both_ends_able_to_authenticate() {
     let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
@@ -596,17 +597,17 @@ async fn an_alternate_path_dial_on_an_aged_session_leaves_both_ends_able_to_auth
     let s_addr = *nodes[s].node.node_addr();
     let l_addr = *nodes[l].node.node_addr();
     age_link(&mut nodes, s, l, Duration::from_secs(31));
-    super::control::quieten(&mut nodes[s], &l_addr);
     let s_index_before = nodes[s].node.get_peer(&l_addr).unwrap().our_index();
 
     // The smaller node dials the larger one on a second address.
     let alias = add_loopback_alias(&nodes[l].addr);
-    let l_npub = nodes[l].node.npub();
+    let l_identity = PeerIdentity::from_pubkey_full(nodes[l].node.identity().pubkey_full());
+    let s_transport = nodes[s].transport_id;
     nodes[s]
         .node
-        .api_connect(&l_npub, &alias.to_string(), "loopback")
+        .initiate_connection(s_transport, alias, l_identity)
         .await
-        .expect("precondition: api_connect on an alternate path succeeds");
+        .expect("precondition: the dial on the alternate address starts");
 
     // Deliver the msg1 to the larger node only: it answers as a rekey.
     assert_eq!(

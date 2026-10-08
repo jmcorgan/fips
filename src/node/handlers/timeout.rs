@@ -144,9 +144,7 @@ impl Node {
 
         // Free session index and pending_outbound if allocated
         if let Some(idx) = our_index {
-            if let Some(tid) = transport_id {
-                self.pending_outbound.remove(&(tid, idx.as_u32()));
-            }
+            self.pending_outbound.remove(&idx.as_u32());
             let _ = self.index_allocator.free(idx);
         }
 

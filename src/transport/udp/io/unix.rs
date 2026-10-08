@@ -41,10 +41,25 @@ impl UdpRawSocket {
     ///
     /// Enables `SO_RXQ_OVFL` for kernel drop counting (non-fatal if
     /// unsupported). Sets non-blocking mode for async integration.
+    #[cfg(test)]
     pub fn open(
         bind_addr: SocketAddr,
         recv_buf_size: usize,
         send_buf_size: usize,
+    ) -> Result<Self, TransportError> {
+        Self::open_on_interface(bind_addr, recv_buf_size, send_buf_size, None)
+    }
+
+    /// [`open`](Self::open), bound to `interface` if one is named.
+    ///
+    /// Linux: `SO_BINDTODEVICE`, both directions. macOS: `IP_BOUND_IF` /
+    /// `IPV6_BOUND_IF`, egress only. Elsewhere naming an interface is an
+    /// error rather than a silent no-op.
+    pub fn open_on_interface(
+        bind_addr: SocketAddr,
+        recv_buf_size: usize,
+        send_buf_size: usize,
+        interface: Option<&str>,
     ) -> Result<Self, TransportError> {
         let domain = if bind_addr.is_ipv4() {
             Domain::IPV4
@@ -56,6 +71,17 @@ impl UdpRawSocket {
 
         sock.set_nonblocking(true)
             .map_err(|e| TransportError::StartFailed(format!("set nonblocking failed: {}", e)))?;
+
+        if let Some(name) = interface {
+            super::bind_device::bind_to_interface(sock.as_raw_fd(), name, bind_addr.is_ipv4())
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::Unsupported {
+                        TransportError::NotSupported(e.to_string())
+                    } else {
+                        TransportError::StartFailed(e.to_string())
+                    }
+                })?;
+        }
 
         sock.bind(&bind_addr.into())
             .map_err(|e| TransportError::StartFailed(format!("bind failed: {}", e)))?;

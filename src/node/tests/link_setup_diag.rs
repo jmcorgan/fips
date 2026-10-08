@@ -344,7 +344,7 @@ async fn a_rekey_msg1_that_loses_the_dual_initiation_tie_break_logs_its_path() {
     node.get_peer_mut(&peer)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    arm_local_rekey(&mut node, &sender, &peer, tid);
+    arm_local_rekey(&mut node, &sender, &peer);
 
     let theirs = craft_msg1_wire(&node, &sender, EPOCH, SessionIndex::new(0xAAAA), 2000);
     let logs = msg1_logged(&mut node, packet(tid, &addr, theirs.clone(), 2000)).await;
@@ -581,7 +581,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         .insert((tid, to.addr.clone()), link_id);
     from.node
         .pending_outbound
-        .insert((tid, our_index.as_u32()), link_id);
+        .insert(our_index.as_u32(), link_id);
     from.node
         .transports
         .get(&tid)

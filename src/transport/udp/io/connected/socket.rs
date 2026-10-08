@@ -122,8 +122,9 @@ mod tests {
         recv_buf: usize,
         send_buf: usize,
     ) -> std::io::Result<ConnectedPeerSocket> {
-        let fd =
-            crate::transport::udp::open_connected_fd(local_addr, peer_addr, recv_buf, send_buf)?;
+        let fd = crate::transport::udp::open_connected_fd(
+            local_addr, peer_addr, recv_buf, send_buf, None,
+        )?;
         Ok(ConnectedPeerSocket::from_fd(fd, peer_addr, local_addr))
     }
 

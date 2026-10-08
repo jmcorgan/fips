@@ -103,8 +103,12 @@ transports:
   #   auto_connect: true
   #   accept_connections: true
 
-  # Bluetooth Low Energy transport: Linux (glibc) builds only, with BlueZ
-  # (bluetoothd) running. Not available on macOS, FreeBSD, Windows or OpenWrt.
+  # Bluetooth Low Energy transport. On Linux (glibc builds) it needs BlueZ
+  # (bluetoothd) running. On macOS it uses CoreBluetooth: `adapter` is
+  # ignored, only one `ble` instance is allowed, and the packaged daemon
+  # gets the radio from the fips-ble-agent LaunchAgent, so BLE works while a
+  # user in the `fips` group is logged in. Not available on FreeBSD, Windows
+  # or OpenWrt.
   # ble:
   #   adapter: "hci0"
   #   mtu: 2048

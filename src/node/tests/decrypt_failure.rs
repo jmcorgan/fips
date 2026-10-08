@@ -28,7 +28,7 @@ fn threshold_warnings(logs: &crate::testutil::LogCapture) -> usize {
 
 /// Assert the peer and its index entry are still held, and return its
 /// consecutive failure count.
-fn held_count(node: &Node, node_addr: &NodeAddr, key: &(TransportId, u32), when: &str) -> u32 {
+fn held_count(node: &Node, node_addr: &NodeAddr, key: &u32, when: &str) -> u32 {
     let count = node
         .get_peer(node_addr)
         .unwrap_or_else(|| panic!("peer present {when}"))
@@ -63,7 +63,7 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("promoted peer must have our_index");
-    let key = (transport_id, our_index.as_u32());
+    let key = our_index.as_u32();
     assert_eq!(
         held_count(&node, &node_addr, &key, "after promote"),
         0,

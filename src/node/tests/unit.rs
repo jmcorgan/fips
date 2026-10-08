@@ -593,7 +593,7 @@ fn test_node_promote_connection() {
     // Verify peers_by_index is populated
     let our_index = peer.our_index().unwrap();
     assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.get(&our_index.as_u32()),
         Some(&node_addr)
     );
 }
@@ -620,10 +620,7 @@ fn test_node_cross_connection_resolution() {
     // Verify first promotion populated peers_by_index
     let peer = node.get_peer(&node_addr).unwrap();
     let our_idx = peer.our_index().unwrap();
-    assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_idx.as_u32())),
-        Some(&node_addr)
-    );
+    assert_eq!(node.peers_by_index.get(&our_idx.as_u32()), Some(&node_addr));
 
     // Still only one peer
     assert_eq!(node.peer_count(), 1);
@@ -729,23 +726,20 @@ fn test_node_index_allocator_initialized() {
 #[test]
 fn test_node_pending_outbound_tracking() {
     let mut node = make_node();
-    let transport_id = TransportId::new(1);
     let link_id = LinkId::new(1);
 
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in pending_outbound
-    node.pending_outbound
-        .insert((transport_id, index.as_u32()), link_id);
+    node.pending_outbound.insert(index.as_u32(), link_id);
 
     // Verify we can look it up
-    let found = node.pending_outbound.get(&(transport_id, index.as_u32()));
+    let found = node.pending_outbound.get(&index.as_u32());
     assert_eq!(found, Some(&link_id));
 
     // Clean up
-    node.pending_outbound
-        .remove(&(transport_id, index.as_u32()));
+    node.pending_outbound.remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert_eq!(node.index_allocator.count(), 0);
@@ -755,22 +749,20 @@ fn test_node_pending_outbound_tracking() {
 #[test]
 fn test_node_peers_by_index_tracking() {
     let mut node = make_node();
-    let transport_id = TransportId::new(1);
     let node_addr = make_node_addr(42);
 
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in peers_by_index
-    node.peers_by_index
-        .insert((transport_id, index.as_u32()), node_addr);
+    node.peers_by_index.insert(index.as_u32(), node_addr);
 
     // Verify lookup
-    let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
+    let found = node.peers_by_index.get(&index.as_u32());
     assert_eq!(found, Some(&node_addr));
 
     // Clean up
-    node.peers_by_index.remove(&(transport_id, index.as_u32()));
+    node.peers_by_index.remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert!(node.peers_by_index.is_empty());
@@ -878,7 +870,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     node.addr_to_link
         .insert((transport_id, pending_addr.clone()), pending_link_id);
     node.pending_outbound
-        .insert((transport_id, pending_index.as_u32()), pending_link_id);
+        .insert(pending_index.as_u32(), pending_link_id);
 
     // Verify pending state
     assert_eq!(node.connection_count(), 1);
@@ -945,8 +937,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     );
     assert_eq!(node.peer_count(), 1, "Promoted peer should exist");
     assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, pending_index.as_u32())),
+        node.pending_outbound.contains_key(&pending_index.as_u32()),
         "pending_outbound entry should still exist (awaiting msg2)"
     );
     assert_eq!(
@@ -1448,7 +1439,6 @@ struct HeldPeerUpdate {
     node: Node,
     new_peer: crate::config::PeerConfig,
     peer_node_addr: NodeAddr,
-    current_addr: TransportAddr,
     new_addr: TransportAddr,
     link_id: LinkId,
 }
@@ -1518,7 +1508,6 @@ async fn held_peer_with_new_address(last_seen_ms: u64) -> HeldPeerUpdate {
         node,
         new_peer,
         peer_node_addr,
-        current_addr,
         new_addr,
         link_id,
     }
@@ -1530,7 +1519,7 @@ async fn update_peers_does_not_dial_a_new_address_for_a_live_peer() {
         mut node,
         new_peer,
         peer_node_addr,
-        current_addr,
+        new_addr,
         link_id,
         ..
     } = held_peer_with_new_address(Node::now_ms()).await;
@@ -1546,7 +1535,11 @@ async fn update_peers_does_not_dial_a_new_address_for_a_live_peer() {
     );
     let active = node.get_peer(&peer_node_addr).unwrap();
     assert_eq!(active.link_id(), link_id);
-    assert_eq!(active.current_addr(), Some(&current_addr));
+    // The path on this transport was never acknowledged (bound by
+    // `set_current_addr`, no ack), so it is not eligible and the new address
+    // re-points it; the heartbeat tick probes it there. An eligible path
+    // would have kept its address.
+    assert_eq!(active.current_addr(), Some(&new_addr));
 
     for transport in node.transports.values_mut() {
         transport.stop().await.ok();
@@ -1554,7 +1547,7 @@ async fn update_peers_does_not_dial_a_new_address_for_a_live_peer() {
 }
 
 #[tokio::test]
-async fn update_peers_races_new_alternative_for_a_quiet_peer_without_dropping_it() {
+async fn update_peers_takes_a_new_alternative_as_a_path_for_a_quiet_peer_without_dropping_it() {
     // Quiet past the heartbeat interval of the config the helper builds.
     let stale_at = Node::now_ms().saturating_sub(
         Config::new()
@@ -1567,25 +1560,24 @@ async fn update_peers_races_new_alternative_for_a_quiet_peer_without_dropping_it
         mut node,
         new_peer,
         peer_node_addr,
-        current_addr,
         new_addr,
         link_id,
+        ..
     } = held_peer_with_new_address(stale_at).await;
 
     let outcome = node.update_peers(vec![new_peer]).await.unwrap();
 
     assert_eq!(outcome.updated, 1);
     assert_eq!(node.peer_count(), 1, "existing link must stay live");
-    assert_eq!(node.connection_count(), 1);
     assert_eq!(
-        node.connections()
-            .next()
-            .and_then(|(_, machine)| machine.conn_source_addr()),
-        Some(&new_addr)
+        node.connection_count(),
+        0,
+        "a peer with a session is not dialled on a new address, quiet or not: \
+         the address is a path, and a dead session is reaped and dialled then"
     );
     let active = node.get_peer(&peer_node_addr).unwrap();
     assert_eq!(active.link_id(), link_id);
-    assert_eq!(active.current_addr(), Some(&current_addr));
+    assert_eq!(active.current_addr(), Some(&new_addr));
 
     for transport in node.transports.values_mut() {
         transport.stop().await.ok();

@@ -1,0 +1,121 @@
+# One peer, two UDP paths: switchover between two interface-bound UDP instances
+#
+# The all-IP twin of dual-path-flap. Two nodes joined twice, both by UDP: a
+# dedicated veth carrying IP (`10.222.0.0/24`), on which each node runs a
+# UDP instance bound to that interface (`transports.udp.<veth>.interface`),
+# and the Docker bridge on the ordinary wildcard instance. Both are static
+# peer addresses on the dial owner (`udp/main` first, `udp/<veth>` second),
+# so both handshakes run at startup; the first to complete makes the
+# session, the second settles as a cross-connection and creates no path
+# state — the dialled address is a candidate, and the probe exchange under
+# the session proves it as a path at both ends.
+#
+# What this exercises that dual-path-flap cannot: two UDP instances as two
+# paths, `udp.interface` binding on the listen socket *and* on the per-peer
+# connected sockets (Linux `SO_BINDTODEVICE`), and a configured address on a
+# new transport becoming a path. The flap and fail-back mechanics are the
+# same: `link_flaps` sets 100% loss on the veth, the interface stays up, and
+# the heartbeat echo timeout is the detector.
+#
+# What to read from a run: as dual-path-flap. "Path live: the peer answers
+# on this transport" in both node logs is the second instance being proven
+# as a path; `fipsctl path show` on either node should list both instances
+# live before the first flap, and "Peer promoted to active" appears once
+# per node (`max_promotions` fails the run otherwise).
+#
+#   n01 ===udp/veth=== n02      (flapped)
+#   n01 ----udp/main--- n02      (never touched)
+
+scenario:
+  name: "dual-udp-flap"
+  seed: 42
+  duration_secs: 180
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, udp-veth+udp]
+
+# The veth is mild; the bridge half carries 40 ms each way. Score is
+# etx × (1 + min_rtt/100): about 1.0 on the veth against about 1.8 over the
+# bridge, well past the 1.3 margin, so the pair moves onto the veth soon
+# after the runner adds it and returns to it after each flap once it is
+# proven again. Every flap therefore hits the *active* path, and the
+# fail-back is exercised too.
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.2]
+  dual_udp_policy:
+    delay_ms: [40, 40]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.2]
+
+# The mechanism. Only the veth flaps; the bridge path is the standby that
+# has to be warm when it does. `protect_connectivity` is off because the
+# harness counts the dual edge once and would refuse to flap the "only"
+# link; the bridge half keeps the pair connected throughout.
+link_flaps:
+  enabled: true
+  only_transport: udp-veth
+  interval_secs: {min: 35, max: 45}
+  max_down_links: 1
+  down_duration_secs: {min: 12, max: 18}
+  protect_connectivity: false
+
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 5, max: 10}
+  duration_secs: {min: 20, max: 30}
+  parallel_streams: 2
+
+node_churn:
+  enabled: false
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  # Traffic crossed the pair while the cable was being taken away.
+  min_traffic:
+    min_sessions_ok: 2
+
+  # Three to four flaps in 180 s at the interval above. Each flap moves both
+  # nodes off the veth (2) and its return moves them back (2): four per
+  # flap, plus the initial move onto the veth (2). Floor: the first flap
+  # moved something. Ceiling: four flaps, both directions, both nodes, the
+  # initial move, and nothing else.
+  path_switches:
+    min_total: 4
+    max_total: 18
+
+  # The detectors that can fail on a switchover that did not carry. A
+  # promotion past the first is a re-peering: the session was lost to the
+  # link-dead reaper and rebuilt, which standby probes alone cannot show.
+  # The switch must land inside a second of the runner taking the link
+  # down. And no iperf3 session may sit at zero bytes for longer than two
+  # of its one-second intervals: min_traffic passes on bytes either side
+  # of a hole, this fails on the hole.
+  max_promotions:
+    per_node: 1
+  switch_latency:
+    max_ms: 1000
+  max_stall:
+    max_secs: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  # The path handler at debug: "Path suspect" and "Sent path probe" are what
+  # the switch latency is read from.
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::lifecycle=debug"
+  output_dir: "./sim-results"

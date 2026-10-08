@@ -11,6 +11,41 @@ from .keys import derive_full
 from .naming import name_suffix, veth_token
 from .scenario import TopologyConfig
 
+# An edge carried by UDP over a dedicated veth pair, each end an
+# interface-bound UDP instance (``transports.udp.<iface>.interface``). The
+# harness's stand-in for "wifi and cable, both IP": two UDP instances on
+# two interfaces, so a peer reachable over both holds two paths.
+UDP_VETH = "udp-veth"
+
+# Port of the interface-bound UDP instances. Not 2121: the bridge instance
+# binds the wildcard on that port, and a second wildcard bind on the same
+# port would conflict.
+UDP_VETH_PORT = 2122
+
+# Second octet of the /24s the veth pairs carry. Clear of docker's default
+# pool (172.17-31), the sim's claimed 10.30.x ranges and sidecar's 10.40.x.
+_UDP_VETH_NET = "10.222"
+
+
+@dataclass(frozen=True)
+class UdpVethLink:
+    """One end of a ``udp-veth`` edge, as a node sees it."""
+
+    peer_id: str
+    # The veth interface in this node's container, and the UDP instance
+    # name bound to it.
+    iface: str
+    local_ip: str
+    peer_ip: str
+
+    @property
+    def instance(self) -> str:
+        return self.iface
+
+    @property
+    def peer_addr(self) -> str:
+        return f"{self.peer_ip}:{UDP_VETH_PORT}"
+
 
 @dataclass
 class SimNode:
@@ -29,6 +64,11 @@ class SimTopology:
     edges: set[tuple[str, str]] = field(default_factory=set)
     # Per-edge transport type; edges not in this dict default to "udp"
     edge_transport: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Edges declared ``ethernet+udp``: an Ethernet veth (found by beacon)
+    # *and* a UDP static-peer entry over the bridge, so the pair holds two
+    # paths under one session. ``edge_transport`` says ``ethernet`` for
+    # these, which is what netem and link flaps act on.
+    dual_udp_edges: set[tuple[str, str]] = field(default_factory=set)
     # Suffix scoping globally-visible names to this run and scenario; empty
     # outside the CI harness, which keeps a bare run's names unchanged.
     name_suffix: str = ""
@@ -41,6 +81,60 @@ class SimTopology:
         host names are scoped differently from its container names.
         """
         return veth_token(self.name_suffix)
+
+    def is_dual_udp_edge(self, a: str, b: str) -> bool:
+        """Whether the edge also carries a UDP static-peer link."""
+        return _make_edge(a, b) in self.dual_udp_edges
+
+    def is_veth_transport(self, transport: str) -> bool:
+        """Whether edges of this transport run over a dedicated veth pair."""
+        return transport in ("ethernet", UDP_VETH)
+
+    def veth_edges(self) -> list[tuple[str, str]]:
+        """Every edge that needs a veth pair: Ethernet and ``udp-veth``."""
+        return sorted(
+            e for e, t in self.edge_transport.items() if self.is_veth_transport(t)
+        )
+
+    def has_veth(self) -> bool:
+        return bool(self.veth_edges())
+
+    def udp_veth_edges(self) -> list[tuple[str, str]]:
+        """Edges carried by UDP over a veth, in canonical order. The index
+        of an edge here is what its /24 is numbered by."""
+        return sorted(e for e, t in self.edge_transport.items() if t == UDP_VETH)
+
+    def udp_veth_links(self, node_id: str) -> list[UdpVethLink]:
+        """This node's ends of its ``udp-veth`` edges, with addressing.
+
+        Edge ``k`` (in ``udp_veth_edges`` order) is ``10.222.k.0/24``: the
+        lower node id is ``.1``, the higher ``.2``.
+        """
+        links = []
+        for k, (a, b) in enumerate(self.udp_veth_edges()):
+            if node_id not in (a, b):
+                continue
+            if k > 255:
+                raise ValueError("more than 256 udp-veth edges are not addressable")
+            local, peer = (a, b) if node_id == a else (b, a)
+            local_ip = f"{_UDP_VETH_NET}.{k}.{1 if node_id == a else 2}"
+            peer_ip = f"{_UDP_VETH_NET}.{k}.{2 if node_id == a else 1}"
+            links.append(
+                UdpVethLink(
+                    peer_id=peer,
+                    iface=veth_interface_name(local, peer),
+                    local_ip=local_ip,
+                    peer_ip=peer_ip,
+                )
+            )
+        return links
+
+    def udp_veth_ip(self, node_id: str, peer_id: str) -> str | None:
+        """The veth IP ``node_id`` has on its ``udp-veth`` edge to ``peer_id``."""
+        for link in self.udp_veth_links(node_id):
+            if link.peer_id == peer_id:
+                return link.local_ip
+        return None
 
     def transport_for_edge(self, a: str, b: str) -> str:
         """Get the transport type for an edge (defaults to 'udp')."""
@@ -161,6 +255,7 @@ class SimTopology:
         static_edges = {
             e for e in self.edges
             if self.edge_transport.get(e, "udp") != "ethernet"
+            or e in self.dual_udp_edges
         }
 
         outbound: dict[str, list[str]] = {nid: [] for nid in self.nodes}
@@ -249,7 +344,7 @@ def generate_topology(
         adjacency = config.params.get("adjacency")
         if not adjacency:
             raise ValueError("explicit topology requires params.adjacency")
-        edges, edge_transport = _generate_explicit(
+        edges, edge_transport, dual_udp_edges = _generate_explicit(
             adjacency, config.default_transport
         )
         # Validate all referenced nodes exist
@@ -264,6 +359,7 @@ def generate_topology(
     # Assign transport types to edges
     if config.algorithm != "explicit":
         edge_transport = _assign_edge_transports(edges, config, rng)
+        dual_udp_edges = set()
 
     # Build peer lists from edges
     for a, b in edges:
@@ -276,6 +372,7 @@ def generate_topology(
         nodes=nodes,
         edges=edges,
         edge_transport=edge_transport,
+        dual_udp_edges=dual_udp_edges,
         name_suffix=name_suffix(),
     )
 
@@ -354,17 +451,24 @@ def _generate_erdos_renyi(
 
 def _generate_explicit(
     adjacency: list, default_transport: str = "udp"
-) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str], set[tuple[str, str]]]:
     """Build edges from an explicit adjacency list.
 
     Each entry is a 2-element list ``[nodeA, nodeB]`` (uses default
-    transport) or a 3-element list ``[nodeA, nodeB, transport]``.
+    transport) or a 3-element list ``[nodeA, nodeB, transport]``. The
+    transport ``ethernet+udp`` declares a dual edge: an Ethernet veth and
+    a UDP static-peer link between the same two nodes, so the pair holds
+    two paths under one session. ``udp-veth+udp`` is the all-IP dual edge:
+    UDP over a dedicated veth (an interface-bound UDP instance at each
+    end) and UDP over the bridge.
 
-    Returns ``(edges, edge_transport)`` where ``edge_transport`` maps
-    each edge to its transport type.
+    Returns ``(edges, edge_transport, dual_udp_edges)`` where
+    ``edge_transport`` maps each edge to its transport type (``ethernet``
+    for a dual edge) and ``dual_udp_edges`` is the set of dual edges.
     """
     edges = set()
     edge_transport: dict[tuple[str, str], str] = {}
+    dual_udp_edges: set[tuple[str, str]] = set()
     for i, entry in enumerate(adjacency):
         if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
             raise ValueError(
@@ -374,8 +478,11 @@ def _generate_explicit(
         edge = _make_edge(str(entry[0]), str(entry[1]))
         edges.add(edge)
         transport = str(entry[2]) if len(entry) == 3 else default_transport
+        if transport in ("ethernet+udp", f"{UDP_VETH}+udp"):
+            transport = transport[: -len("+udp")]
+            dual_udp_edges.add(edge)
         edge_transport[edge] = transport
-    return edges, edge_transport
+    return edges, edge_transport, dual_udp_edges
 
 
 def _assign_edge_transports(

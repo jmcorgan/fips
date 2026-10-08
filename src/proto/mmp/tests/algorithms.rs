@@ -2,6 +2,7 @@
 
 use crate::proto::mmp::algorithms::{
     DualEwma, JitterEstimator, OwdTrendDetector, SpinBitState, SrttEstimator, compute_etx,
+    quality_index,
 };
 
 #[test]
@@ -172,4 +173,20 @@ fn test_spin_bit_responder_counter_guard() {
     // Reordered packet with counter=3 and spin=false should be ignored
     responder.rx_observe(false, 3, 0);
     assert!(responder.tx_bit()); // unchanged
+}
+
+#[test]
+fn quality_index_weights_etx_by_rtt() {
+    assert!(
+        (quality_index(1.0, 0.0) - 1.0).abs() < f64::EPSILON,
+        "ideal link"
+    );
+    assert!(
+        (quality_index(1.0, 100.0) - 2.0).abs() < f64::EPSILON,
+        "100 ms doubles it"
+    );
+    assert!((quality_index(2.0, 50.0) - 3.0).abs() < f64::EPSILON);
+    // Lower is better, and both inputs move it the same way.
+    assert!(quality_index(1.0, 10.0) < quality_index(1.0, 20.0));
+    assert!(quality_index(1.0, 10.0) < quality_index(1.5, 10.0));
 }

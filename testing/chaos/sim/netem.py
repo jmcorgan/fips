@@ -210,8 +210,12 @@ class NetemManager:
             eth_peers = []
             for peer_id in sorted(node.peers):
                 transport = self.topology.transport_for_edge(node_id, peer_id)
-                if transport == "ethernet":
+                if self.topology.is_veth_transport(transport):
                     eth_peers.append(peer_id)
+                    # A dual edge also has a UDP half over the bridge, which
+                    # gets its own HTB class like any IP peer.
+                    if self.topology.is_dual_udp_edge(node_id, peer_id):
+                        ip_peers[peer_id] = self.topology.nodes[peer_id].docker_ip
                 else:
                     ip_peers[peer_id] = self.topology.nodes[peer_id].docker_ip
 
@@ -232,6 +236,11 @@ class NetemManager:
                     netem_handle = f"{idx + 10}:"
 
                     policy = self._policy_for_edge(node_id, peer_id)
+                    if (
+                        self.topology.is_dual_udp_edge(node_id, peer_id)
+                        and self.config.dual_udp_policy is not None
+                    ):
+                        policy = self.config.dual_udp_policy
                     params = self._sample_policy(policy)
 
                     rate = self._htb_rate(node_id, peer_id)
@@ -399,7 +408,9 @@ class NetemManager:
         for peer_id in sorted(self.topology.nodes[node_id].peers):
             if peer_id in self.down_nodes:
                 continue
-            if self.topology.transport_for_edge(node_id, peer_id) != "ethernet":
+            if not self.topology.is_veth_transport(
+                self.topology.transport_for_edge(node_id, peer_id)
+            ):
                 continue
             peer_container = self.topology.container_name(peer_id)
             state = self.veth_states.get(peer_container, {}).get(
@@ -477,8 +488,9 @@ class NetemManager:
                 self.down_nodes.add(src)
                 continue
 
-            if transport == "ethernet":
-                # Ethernet: simple netem replace on veth
+            if self.topology.is_veth_transport(transport):
+                # Ethernet, or a UDP instance bound to a veth: simple netem
+                # replace on the veth
                 iface = veth_interface_name(src, dst)
                 veth_states = self.veth_states.get(container, {})
                 state = veth_states.get(iface)

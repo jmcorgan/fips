@@ -625,9 +625,11 @@ pub struct Node {
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
-    /// O(1) lookup: (transport_id, our_index) → NodeAddr.
+    /// O(1) lookup: our_index → NodeAddr. Keyed by index alone: indices come
+    /// from one global allocator, so a frame carrying a known `receiver_idx`
+    /// resolves to its peer no matter which transport delivered it.
     /// This maps our session index to the peer that uses it.
-    peers_by_index: HashMap<(TransportId, u32), NodeAddr>,
+    peers_by_index: HashMap<u32, NodeAddr>,
     /// Budget for the line logged for a frame naming an index that is not in
     /// `peers_by_index`; its sender is not authenticated.
     index_budget: diag::LogBudget,
@@ -642,7 +644,7 @@ pub struct Node {
     msgtype_budget: diag::LogBudget,
     /// Pending outbound handshakes by our sender_idx.
     /// Tracks which LinkId corresponds to which session index.
-    pending_outbound: HashMap<(TransportId, u32), LinkId>,
+    pending_outbound: HashMap<u32, LinkId>,
     /// When each peer identity's last ACCEPTED epoch change tore down its
     /// peering. Keyed on identity rather than address, and held here rather
     /// than on `ActivePeer`, because the teardown being dampened destroys
@@ -654,6 +656,9 @@ pub struct Node {
     /// on `ActivePeer`, for the same reason as `restart_dampener`: the
     /// removal it counts destroys the peer entry.
     silent_sessions: SilentSessions,
+    /// Last carrier reading per interface-bound transport, for the carrier
+    /// edge the fast path tick detects. Absent until first read.
+    carrier_seen: HashMap<TransportId, bool>,
 
     // === Rate Limiting ===
     /// Rate limiter for msg1 processing (DoS protection).
@@ -748,7 +753,7 @@ pub struct Node {
     /// fall through to the legacy synchronous decrypt (test mode +
     /// not-yet-registered first packets).
     #[cfg(unix)]
-    pub(crate) decrypt_registered_sessions: std::collections::HashSet<(TransportId, u32)>,
+    pub(crate) decrypt_registered_sessions: std::collections::HashSet<u32>,
 
     /// Decrypt worker fallback channel: workers bounce
     /// authenticated-FMP-plaintext back here for the rx_loop to
@@ -944,6 +949,7 @@ impl Node {
             pending_outbound: HashMap::new(),
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
+            carrier_seen: HashMap::new(),
             msg1_rate_limiter,
             setup_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
@@ -1118,6 +1124,7 @@ impl Node {
             pending_outbound: HashMap::new(),
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
+            carrier_seen: HashMap::new(),
             msg1_rate_limiter,
             setup_rate_limiter,
             icmp_rate_limiter: IcmpRateLimiter::new(),
@@ -1345,6 +1352,38 @@ impl Node {
                 transports.push(TransportHandle::Ble(ble));
             }
         }
+        // Create BLE transport instances over CoreBluetooth. Like the Android
+        // arm, built whether or not Bluetooth is up yet: the radio installs a
+        // bridge into the slot each time it comes up, and the transport
+        // adopts it in place.
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            let ble_instances: Vec<_> = self
+                .config()
+                .transports
+                .ble
+                .iter()
+                .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+                .collect();
+            for (name, ble_config) in ble_instances {
+                let transport_id = self.allocate_transport_id();
+                let slot = Arc::new(crate::transport::ble::io_radio::BleRadioSlot::new());
+                let radio = crate::transport::ble::io_macos::corebluetooth::start_daemon_radio(
+                    Arc::clone(&slot),
+                    ble_config.mtu(),
+                    crate::transport::ble::io_macos::agent_socket_path(),
+                );
+                let mut ble = crate::transport::ble::BleTransport::new(
+                    transport_id,
+                    name,
+                    ble_config,
+                    crate::transport::ble::io_radio::RadioIo::with_owner(slot, radio),
+                    packet_tx.clone(),
+                );
+                ble.set_local_pubkey(self.identity().pubkey().serialize());
+                transports.push(TransportHandle::Ble(ble));
+            }
+        }
         // `BleConfig` always parses, so on a build that cannot construct a
         // BLE transport a configured `ble:` block would otherwise be dropped
         // silently and the node would report healthy without it.
@@ -1364,7 +1403,7 @@ impl Node {
     /// Why this build cannot construct a configured BLE instance, or `None`
     /// when it can.
     ///
-    /// The three arms are disjoint and together cover every build, so a
+    /// The arms are disjoint and together cover every build, so a
     /// target matching none or two of them fails to compile rather than
     /// guessing.
     #[cfg(all(bluer_available, not(test)))]
@@ -1384,12 +1423,21 @@ impl Node {
         }
     }
 
+    /// Why this build cannot construct a configured BLE instance, or `None`
+    /// when it can. CoreBluetooth is always constructible; whether Bluetooth
+    /// is on, or permitted, is the radio's business at runtime.
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn ble_blocker(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Why this build cannot construct a configured BLE instance: it has no
     /// backend at all. A test build lands here too, since its BLE transport
     /// is the in-memory double and is never built from config.
     #[cfg(not(any(
         all(bluer_available, not(test)),
-        all(target_os = "android", not(bluer_available), not(test))
+        all(target_os = "android", not(bluer_available), not(test)),
+        all(target_os = "macos", not(test))
     )))]
     fn ble_blocker(&self) -> Option<&'static str> {
         Some("this build has no BLE backend")
@@ -2368,7 +2416,6 @@ impl Node {
         // (their effective_depth is `None`); during cold start (no peer has
         // SRTT) every peer falls back to the default link cost of 1.0.
         let any_peer_has_srtt = self.peers().any(|p| p.has_srtt());
-
         let now_ms = Self::now_ms();
         let peer_rows: Vec<snap::PeerRow> = self
             .peers()
@@ -2413,7 +2460,7 @@ impl Node {
                     if any_peer_has_srtt && !peer.has_srtt() {
                         None
                     } else {
-                        Some(coords.depth() as f64 + peer.link_cost())
+                        Some(coords.depth() as f64 + peer.link_cost(now_ms))
                     }
                 });
 
@@ -2450,6 +2497,7 @@ impl Node {
                         .map(|sa| sa.ip())
                         .filter(|ip| !ip.is_unspecified()),
                     link_info,
+                    paths: self.project_peer_paths(peer),
                     tree_depth: peer.coords().map(|c| c.depth()),
                     effective_depth,
                     stats: snap::PeerLinkStats {
@@ -2614,10 +2662,7 @@ impl Node {
                 let metrics = &mmp.metrics;
                 let srtt_ms = metrics.srtt_ms();
                 let smoothed_etx = metrics.smoothed_etx();
-                let lqi = match (srtt_ms, smoothed_etx) {
-                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-                    _ => None,
-                };
+                let lqi = metrics.quality_index();
                 let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
@@ -2655,10 +2700,7 @@ impl Node {
                 let metrics = &mmp.metrics;
                 let srtt_ms = metrics.srtt_ms();
                 let smoothed_etx = metrics.smoothed_etx();
-                let sqi = match (srtt_ms, smoothed_etx) {
-                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-                    _ => None,
-                };
+                let sqi = metrics.quality_index();
                 let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
@@ -2771,6 +2813,37 @@ impl Node {
         id
     }
 
+    /// Project every path to `peer` into the `show_peers` rows shared by the
+    /// on-loop query and the tick-published snapshot.
+    pub(crate) fn project_peer_paths(
+        &self,
+        peer: &ActivePeer,
+    ) -> Vec<crate::control::snapshot::PeerPathRow> {
+        let active = peer.transport_id();
+        peer.paths()
+            .iter()
+            .map(|path| {
+                let handle = self.transports.get(&path.transport_id());
+                crate::control::snapshot::PeerPathRow {
+                    transport_id: path.transport_id().as_u32(),
+                    transport: handle.and_then(|t| t.name().map(str::to_string)),
+                    transport_type: handle.map(|t| t.transport_type().name.to_string()),
+                    addr: path.addr().to_string(),
+                    state: path.state().as_str().to_string(),
+                    active: Some(path.transport_id()) == active,
+                    remote_active: path.remote_active(),
+                    role: path.role().as_str().to_string(),
+                    pinned: path.pinned(),
+                    last_rtt_ms: path.last_rtt_ms(),
+                    min_rtt_ms: path.min_rtt_ms(),
+                    rtt_samples: path.rtt_samples(),
+                    etx: path.etx(),
+                    score: path.score(),
+                }
+            })
+            .collect()
+    }
+
     /// Get a transport by ID.
     pub fn get_transport(&self, id: &TransportId) -> Option<&TransportHandle> {
         self.transports.get(id)
@@ -2867,8 +2940,8 @@ impl Node {
         }
     }
 
-    /// Whether an active peer on a link other than `link_id` sends over
-    /// `(transport_id, addr)`.
+    /// Whether an active peer on a link other than `link_id` has a path over
+    /// `(transport_id, addr)` — its active path or any other it holds.
     pub(in crate::node) fn addr_carries_other_peer(
         &self,
         transport_id: TransportId,
@@ -2877,8 +2950,10 @@ impl Node {
     ) -> bool {
         self.peers.values().any(|peer| {
             peer.link_id() != link_id
-                && peer.transport_id() == Some(transport_id)
-                && peer.current_addr() == Some(addr)
+                && peer
+                    .paths()
+                    .iter()
+                    .any(|path| path.transport_id() == transport_id && path.addr() == addr)
         })
     }
 
@@ -3920,6 +3995,41 @@ impl Node {
         plaintext: &[u8],
         ce_flag: bool,
     ) -> Result<(), NodeError> {
+        self.send_encrypted_link_message_via(node_addr, plaintext, ce_flag, None)
+            .await
+    }
+
+    /// Like `send_encrypted_link_message` but on a chosen path rather than
+    /// the peer's active one.
+    ///
+    /// The path probe exchange uses this to reach a peer over a transport it
+    /// is not (yet) sending on. Same session, same counter, same key: only
+    /// the transport and address differ.
+    pub(super) async fn send_encrypted_link_message_on_path(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        transport_id: TransportId,
+        remote_addr: TransportAddr,
+    ) -> Result<(), NodeError> {
+        self.send_encrypted_link_message_via(
+            node_addr,
+            plaintext,
+            false,
+            Some((transport_id, remote_addr)),
+        )
+        .await
+    }
+
+    /// The one send path for encrypted link messages. `via` picks the
+    /// transport and address; `None` means the peer's active path.
+    async fn send_encrypted_link_message_via(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        ce_flag: bool,
+        via: Option<(TransportId, TransportAddr)>,
+    ) -> Result<(), NodeError> {
         let peer = self
             .peers
             .get_mut(node_addr)
@@ -3929,18 +4039,25 @@ impl Node {
             node_addr: *node_addr,
             reason: "no their_index".into(),
         })?;
-        let transport_id = peer.transport_id().ok_or_else(|| NodeError::SendFailed {
-            node_addr: *node_addr,
-            reason: "no transport_id".into(),
-        })?;
-        let remote_addr = peer
-            .current_addr()
-            .cloned()
-            .ok_or_else(|| NodeError::SendFailed {
-                node_addr: *node_addr,
-                reason: "no current_addr".into(),
-            })?;
         let link_id = peer.link_id();
+        let on_active_path = via.is_none();
+        let (transport_id, remote_addr) = match via {
+            Some(target) => target,
+            None => {
+                let transport_id = peer.transport_id().ok_or_else(|| NodeError::SendFailed {
+                    node_addr: *node_addr,
+                    reason: "no transport_id".into(),
+                })?;
+                let remote_addr =
+                    peer.current_addr()
+                        .cloned()
+                        .ok_or_else(|| NodeError::SendFailed {
+                            node_addr: *node_addr,
+                            reason: "no current_addr".into(),
+                        })?;
+                (transport_id, remote_addr)
+            }
+        };
 
         // Prepend 4-byte session-relative timestamp (inner header)
         let timestamp_ms = peer.session_elapsed_ms();
@@ -3958,8 +4075,16 @@ impl Node {
         // Snapshot the per-peer connect()-ed UDP socket BEFORE the
         // session borrow so the encrypt-worker dispatch can refcount-
         // clone the Arc without re-borrowing self.peers later.
+        // The connected socket is pinned to the active path's 5-tuple, so a
+        // send on any other path must go through the listen socket.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let connected_socket = peer.connected_udp();
+        let connected_socket = if on_active_path {
+            peer.connected_udp()
+        } else {
+            None
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = on_active_path;
 
         let session = peer
             .noise_session_mut()
@@ -4099,10 +4224,13 @@ impl Node {
         // head-of-line blocking. With no connection the send fails fast,
         // after starting a background connect if the address is one this
         // node dialed; a later send uses the connection once it is up.
-        let bytes_sent = self
+        let sent = self
             .send_nowait(transport, link_id, &remote_addr, &wire_packet)
-            .await
-            .map_err(|e| link_send_error(*node_addr, e))?;
+            .await;
+        if sent.as_ref().is_err_and(|e| e.is_unreachable()) {
+            self.note_path_unreachable(node_addr, transport_id);
+        }
+        let bytes_sent = sent.map_err(|e| link_send_error(*node_addr, e))?;
 
         // Update send statistics
         if let Some(peer) = self.peers.get_mut(node_addr) {
@@ -4246,7 +4374,7 @@ impl routing::RoutingView for NodeRoutingView<'_> {
     }
 
     fn peer_link_cost<'a>(&'a self, peer: Self::Peer<'a>) -> f64 {
-        peer.1.link_cost()
+        peer.1.link_cost(crate::time::mono_ms())
     }
 
     fn peer_coords<'a>(&'a self, peer: Self::Peer<'a>) -> Option<&'a TreeCoordinate> {
@@ -4267,10 +4395,7 @@ fn project_entity_mmp(
 ) -> crate::control::snapshot::EntityMmp {
     let srtt_ms = metrics.srtt_ms();
     let smoothed_etx = metrics.smoothed_etx();
-    let quality_index = match (srtt_ms, smoothed_etx) {
-        (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-        _ => None,
-    };
+    let quality_index = metrics.quality_index();
     crate::control::snapshot::EntityMmp {
         mode,
         srtt_ms,
