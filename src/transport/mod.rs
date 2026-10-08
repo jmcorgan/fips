@@ -1395,6 +1395,17 @@ impl TransportHandle {
         }
     }
 
+    /// Links that ended on their own since the last call (the far end gone,
+    /// a cable pulled), for transports that can tell. Drained by the node's
+    /// fast path tick, which acts on the loss at once instead of waiting
+    /// out the link-dead timeout. Empty for every other transport.
+    pub fn take_closed_links(&self) -> Vec<TransportAddr> {
+        match self {
+            TransportHandle::Usb(t) => t.take_closed_links(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Check if transport is operational.
     pub fn is_operational(&self) -> bool {
         self.state().is_operational()

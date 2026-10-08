@@ -681,7 +681,7 @@ impl Node {
     /// reap fed `note_link_dead`); it flows to the executor `ReportLost` arm via
     /// `ambient.now_ms`. Both callers hoist it once per batch, so every peer
     /// removed in one pass carries the same instant.
-    async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    pub(in crate::node) async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
             None => return,
