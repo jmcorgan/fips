@@ -115,7 +115,9 @@ impl UsbLink {
         let spawned = std::thread::Builder::new()
             .name(format!("fips-usb-wr-{label}"))
             .spawn(move || {
-                while let Some(chunk) = out_rx.blocking_recv() {
+                let mut carried = None;
+                while let Some(first) = carried.take().or_else(|| out_rx.blocking_recv()) {
+                    let chunk = gather(first, &mut out_rx, &mut carried);
                     if let Err(e) = (&*writer).write_all(&chunk) {
                         tracing::debug!(link = %writer_label, error = %e, "USB link write ended");
                         break;
@@ -132,6 +134,36 @@ impl UsbLink {
             tx: out_tx,
         }
     }
+}
+
+/// Join `first` with whatever is already queued behind it, up to one
+/// [`USB_TRANSFER_MAX`] transfer.
+///
+/// Called by a link's device writer right before each write, so a transfer
+/// carries everything that queued up while the previous one was on the wire.
+/// A USB transfer costs about the same whatever its size, so this, not the
+/// packet size, is what sets a link's throughput. A chunk that would overflow
+/// the transfer is left in `carried` to start the next one. Chunk boundaries
+/// carry no meaning on a link — it is a byte stream — so joining is safe.
+pub(crate) fn gather(
+    first: Vec<u8>,
+    queue: &mut mpsc::Receiver<Vec<u8>>,
+    carried: &mut Option<Vec<u8>>,
+) -> Vec<u8> {
+    let mut transfer = first;
+    while transfer.len() < USB_TRANSFER_MAX {
+        match queue.try_recv() {
+            Ok(next) if transfer.len() + next.len() <= USB_TRANSFER_MAX => {
+                transfer.extend_from_slice(&next)
+            }
+            Ok(next) => {
+                *carried = Some(next);
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    transfer
 }
 
 /// Where attached links wait for the transport to take them.
@@ -271,6 +303,21 @@ mod tests {
         let mut rest = Vec::new();
         reader.read_to_end(&mut rest).await.unwrap();
         assert_eq!(rest, [4, 5]);
+    }
+
+    #[tokio::test]
+    async fn gather_fills_a_transfer_and_carries_the_overflow() {
+        let (tx, mut rx) = mpsc::channel(8);
+        for len in [6000, 6000, 6000, 100] {
+            tx.send(vec![0u8; len]).await.unwrap();
+        }
+        let mut carried = None;
+        let first = rx.recv().await.unwrap();
+        // 6000 + 6000 fit; the third 6000 would pass 16 KiB and is carried.
+        assert_eq!(gather(first, &mut rx, &mut carried).len(), 12000);
+        let next = carried.take().unwrap();
+        assert_eq!(gather(next, &mut rx, &mut carried).len(), 6100);
+        assert!(carried.is_none());
     }
 
     #[tokio::test]

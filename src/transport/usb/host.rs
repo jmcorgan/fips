@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
-use super::link::{USB_TRANSFER_MAX, UsbLink, UsbLinkQueue};
+use super::link::{USB_TRANSFER_MAX, UsbLink, UsbLinkQueue, gather};
 
 /// Google's vendor id, which every device in accessory mode presents.
 const AOA_VID: u16 = 0x18d1;
@@ -344,15 +344,25 @@ async fn pump_in(mut ep: nusb::Endpoint<Bulk, In>, to_link: mpsc::Sender<Vec<u8>
     ep.cancel_all();
 }
 
-/// Write each transfer the link asks for to the bulk OUT endpoint, with a
-/// zero-length packet where the phone's read would otherwise not complete.
+/// Write what the link queues to the bulk OUT endpoint, joined into transfers
+/// of up to 16 KiB, with a zero-length packet where the phone's read would
+/// otherwise not complete.
 async fn pump_out(
     mut ep: nusb::Endpoint<Bulk, Out>,
     mut from_link: mpsc::Receiver<Vec<u8>>,
     label: String,
 ) {
     let packet = ep.max_packet_size();
-    while let Some(transfer) = from_link.recv().await {
+    let mut carried = None;
+    loop {
+        let first = match carried.take() {
+            Some(chunk) => chunk,
+            None => match from_link.recv().await {
+                Some(chunk) => chunk,
+                None => break,
+            },
+        };
+        let transfer = gather(first, &mut from_link, &mut carried);
         let len = transfer.len();
         ep.submit(Buffer::from(transfer));
         if needs_zlp(len, packet) {

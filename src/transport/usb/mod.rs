@@ -79,7 +79,11 @@ const HELLO_SIZE: usize = HELLO_MAGIC.len() + 1 + 32;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Packets a link's writer may have queued before sends fail fast.
-const SEND_QUEUE_DEPTH: usize = 64;
+///
+/// Deeper than BLE's: a full queue drops packets, and a dropped packet costs
+/// TCP far more than the wait. At USB speed 256 packets of ~1 KB drain in a
+/// few milliseconds, so the queue cannot hold traffic back for long.
+const SEND_QUEUE_DEPTH: usize = 256;
 
 /// One established link in the pool.
 struct UsbConnection {
