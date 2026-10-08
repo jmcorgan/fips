@@ -18,7 +18,7 @@
 
 use crate::NodeAddr;
 use crate::node::Node;
-use crate::peer::{HeartbeatTiming, PathPolicy, PathSwitch, PathWithdrawal};
+use crate::peer::{HeartbeatTiming, PathPolicy, PathState, PathSwitch, PathWithdrawal};
 use crate::proto::link::{PathClose, PathCloseReason, PathMessage};
 use crate::transport::{TransportAddr, TransportId};
 use tracing::{debug, info, trace};
@@ -492,6 +492,24 @@ impl Node {
     /// warm.
     pub(in crate::node) async fn run_path_heartbeats(&mut self) {
         let carrier_closes = self.poll_carrier_edges();
+        let (link_closes, links_gone) = self.poll_closed_links();
+
+        // A peer whose only usable path was a link that just ended is gone:
+        // remove it now, as the link-dead timeout would later, so nothing
+        // waits out the timeout on a link known to be gone.
+        if !links_gone.is_empty() {
+            let wall_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            for node_addr in links_gone {
+                info!(
+                    peer = %self.peer_display_name(&node_addr),
+                    "Removing peer: its link closed"
+                );
+                self.route_link_dead(node_addr, wall_ms).await;
+            }
+        }
 
         let now_ms = crate::time::mono_ms();
         let timing = self.heartbeat_timing();
@@ -543,10 +561,53 @@ impl Node {
         // After selection: a close for the path we were sending on can only
         // go out once traffic has moved off it, and `send_path_close` sends
         // nothing for the path that is still active.
-        for (node_addr, transport_id) in carrier_closes {
+        for (node_addr, transport_id) in carrier_closes.into_iter().chain(link_closes) {
             self.send_path_close(&node_addr, transport_id, PathCloseReason::CarrierLost)
                 .await;
         }
+    }
+
+    /// Act on links transports report ended on their own (a USB cable
+    /// pulled): the per-link counterpart of [`Self::poll_carrier_edges`].
+    ///
+    /// A peer that still has a live path elsewhere gets its path over the
+    /// closed link marked `Suspect`, so selection moves traffic off it this
+    /// tick; those `(peer, transport)` pairs are returned first, for a
+    /// `PathClose`. A peer with no other live path has lost its link, and is
+    /// returned second, to be removed.
+    fn poll_closed_links(&mut self) -> (Vec<(NodeAddr, TransportId)>, Vec<NodeAddr>) {
+        let closed: Vec<(TransportId, TransportAddr)> = self
+            .transports
+            .iter()
+            .flat_map(|(id, t)| t.take_closed_links().into_iter().map(move |a| (*id, a)))
+            .collect();
+        let mut closes = Vec::new();
+        let mut gone = Vec::new();
+        for (transport_id, addr) in closed {
+            for (node_addr, peer) in self.peers.iter_mut() {
+                let on_link = peer
+                    .path_on(transport_id)
+                    .is_some_and(|p| *p.addr() == addr)
+                    || (peer.transport_id() == Some(transport_id)
+                        && peer.current_addr() == Some(&addr));
+                if !on_link {
+                    continue;
+                }
+                let elsewhere = peer
+                    .paths()
+                    .iter()
+                    .any(|p| p.transport_id() != transport_id && p.state() == PathState::Live);
+                if elsewhere {
+                    if peer.mark_path_suspect(transport_id) {
+                        info!(peer = %node_addr, %transport_id, %addr, "Link closed: path suspect");
+                        closes.push((*node_addr, transport_id));
+                    }
+                } else {
+                    gone.push(*node_addr);
+                }
+            }
+        }
+        (closes, gone)
     }
 
     /// The heartbeat intervals from `node.path.*` and `node.heartbeat_interval_secs`.
