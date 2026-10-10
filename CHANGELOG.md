@@ -29,6 +29,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opkg sorts them below the final release and the release upgrades a router
   that ran the candidate. The package file name keeps the tag's `-rcN`.
 
+- `fips0` now has its own default-deny firewall zone, `fips`, instead of
+  joining `lan`. Router services such as LuCI, SSH and DNS are no longer
+  reachable from FIPS peers unless a rule opens them. If you manage the router
+  over FIPS, add a `src fips` rule for SSH before upgrading (see the OpenWrt
+  package README). Upgrades move `fips0` out of `lan`, remove the old firewall
+  include and reload the firewall. If the reload fails or cannot be checked,
+  or the firewall configuration cannot be saved, new connections from FIPS
+  peers to the router and gateway port forwards are blocked until the firewall
+  next reloads, and the upgrade says why and how to clear it. If the firewall
+  was not loaded at all, the upgrade says so. Sessions opened over FIPS before
+  the upgrade can stay open until they close.
+- With `fips0` in the `fips` zone, the gateway's LAN traffic and its port
+  forwards are admitted, and port forwards can now be restricted with
+  `src fips` rules. If fips-gateway serves a network in a firewall zone other
+  than `lan`, add a forwarding from that zone to `fips` (see the OpenWrt
+  package README); otherwise its clients lose the mesh after the upgrade. If
+  `fips0` is in a firewall zone of your own rather than `fips`, gateway port
+  forwards and the gateway's LAN path need rules for that zone, and the
+  upgrade says so. On fw3 builds, which the package does not support, port
+  forwards are no longer admitted.
+- ICMPv6 from the WAN side is no longer forwarded into the mesh; OpenWrt's
+  stock Allow-ICMPv6-Forward rule had let it through. Conntrack helpers are no
+  longer assigned to traffic from FIPS peers.
+- If a full overlay cuts the firewall configuration short when the upgrade
+  saves it, the upgrade now notices, blocks new connections from FIPS peers,
+  and says how to restore the configuration from `/tmp/fips-firewall.uci`.
+
 #### Windows
 
 - `install-service.ps1` stops when `\etc\fips\fips.key` exists on the system
@@ -348,6 +375,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+#### DNS
+
+- The `.fips` responder and the gateway's DNS forwarder no longer answer DNS
+  responses or other datagrams that are not queries, which let one forged
+  datagram start an endless exchange with another responder or service. They
+  no longer copy records or extra questions from a query into the reply, which
+  made the responder a reflector with up to about seven times amplification
+  when bound to a non-loopback address. Both now answer unknown record types
+  with NODATA or NXDOMAIN, other opcodes with NOTIMP, malformed queries with
+  FORMERR and other classes with REFUSED, and copy the RD and CD flags into
+  the reply. A query whose class carries the mDNS unicast-response bit is now
+  refused, where it was answered as class IN, and `.fips` queries larger than
+  512 bytes, such as EDNS-padded ones, are now answered.
+- The gateway's relayed NXDOMAIN now carries an SOA, so resolvers cache it for
+  up to `gateway.dns.ttl` (60 seconds by default). A name that becomes
+  resolvable while the daemon runs, such as an alias added to the hosts file
+  or the peer list, can stay NXDOMAIN to LAN clients that long after a failed
+  lookup.
+- A configured `dns.ttl` or `gateway.dns.ttl` above 2147483647 is used as
+  2147483647, the largest TTL resolvers honour. For the gateway the clamped
+  value is also the TTL its address pool uses.
+- The configuration reference now says which platforms keep mesh peers away
+  from a wildcard `dns.bind_addr` (Linux, macOS and FreeBSD with the daemon's
+  own TUN, unless the daemon logs at start that the mesh interface index is
+  unresolved and the DNS mesh filter disabled) and which do not (Windows, or
+  an application-supplied TUN), and that such a bind answers every host on the
+  node's other networks. The macOS WireGuard container example now publishes
+  the DNS port on `127.0.0.1` only.
+
+#### Gateway
+
+- The gateway translates only traffic that arrives on its configured
+  `gateway.lan_interface`. Traffic from its other interfaces into the mesh is
+  dropped unless it is a reply, and so is traffic to its virtual addresses
+  from other interfaces; hosts on other interfaces of a multi-homed gateway
+  could use its mappings and its mesh identity. This includes VPN interfaces
+  and containers or virtual machines on the gateway host, which could reach
+  the mesh through the gateway before. A `gateway.lan_interface` that is a
+  VLAN device on a bridge stops working when bridge netfilter is active with
+  `net.bridge.bridge-nf-pass-vlan-input-dev` at its default of 0.
+- After the gateway process restarts it no longer gives an address the
+  previous run handed out to a different name while clients may still have the
+  old answer cached; those cached answers stop working until they expire. A
+  clean stop or restart holds only the addresses that were in use, for the DNS
+  TTL plus the pool grace period. After a crash or a kill, a gateway whose
+  pool has fewer than 512 free addresses (a /119 or narrower, or a /118 with
+  more than about 500 addresses in use) refuses every new name for the DNS TTL
+  plus the pool grace period, 2 minutes at the defaults. Where `/var/run` is
+  not on tmpfs, as in most containers, the gateway warns at each start that it
+  cannot keep its pool state, and after a restart only a random starting
+  address protects cached answers. Addresses are no longer handed out from the
+  start of the pool upward.
+- A LAN host can no longer hold the mapping limit with names it never uses. A
+  name that has never carried traffic expires after its TTL and grace period
+  however often it is queried, at the limit a new name replaces the oldest
+  such mapping, and only a reply from the named node counts as traffic, so a
+  forged reply from the LAN or a reply from the gateway itself does not. A
+  host sending more than 10 new names a second can still delay other clients'
+  new names while it does so. On a host where the gateway cannot read
+  connection tracking (it already warns at start that session pinning is off),
+  no name counts as having carried traffic until reads succeed, so re-queries
+  do not extend those names and they can be replaced at the limit. The gateway
+  warns at start when its pool is smaller than 1000 + 10 x (TTL + grace)
+  addresses, 2,200 at the defaults, which one LAN host naming new names can
+  exhaust.
+- NAT table updates no longer pause `.fips` answering.
+- Ceiling and exhaustion refusals log one warning per episode instead of one
+  per query, and repeated NAT and proxy NDP failures log once per change
+  instead of once per name. `show_gateway` reports `pool_evicted`,
+  `pool_releasing` and `pool_refused`, and each `show_mappings` entry reports
+  `used`; after a restart `pool_free` is lower by the addresses held from the
+  previous run.
+- A `gateway.pool` of `/128` now stops the gateway at start with
+  `Failed to create virtual IP pool`; before, it started with no addresses,
+  answered every `.fips` name `SERVFAIL` and still ran port forwards. A
+  `gateway.pool` with host bits set, such as `fd01::1/112`, is now used as its
+  prefix, `fd01::/112`, with a warning at start, so the addresses issued
+  change and all of them lie inside the routed prefix. A `.fips` name whose
+  mesh address lies inside the pool prefix now gets `SERVFAIL`, since the
+  gateway routes the whole prefix to itself and could never reach it.
+
 #### Links and transports
 
 - An inbound TCP or Tor onion connection is now dropped when it goes longer
@@ -357,6 +465,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indefinitely. The bound follows `node.heartbeat_interval_secs`,
   `node.link_dead_timeout_secs`, `node.tick_interval_secs` and the handshake
   resend settings.
+
+- A BLE device that claims another node's key no longer stops that node's own
+  BLE link from being admitted, and links carrying an established FIPS session
+  are no longer displaced by new BLE connections. When the BLE pool is full,
+  new links are refused instead; a link that is not carrying a FIPS session
+  can still be displaced, when the pool is full, once it has had 10 s (or
+  `connect_timeout_ms`, if longer) to start one. Extra links to the same
+  neighbour, for example after it changes its BLE address, can stay open until
+  the pool needs the slot. With BLE `auto_connect` enabled, a device that
+  keeps several handshakes claiming a peer in flight can still delay automatic
+  connection to that peer.
 
 #### Routing and discovery
 
@@ -373,6 +492,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error-signal counters `broken_below_quorum`, `broken_demoted`,
   `broken_link_mismatch` and `broken_reporter_mismatch` appear in
   `show_routing`; the last two only count and never refuse a signal.
+
+- A flood of Nostr adverts under new keys can no longer push the adverts of
+  configured or linked peers, or adverts cached before the flood, out of the
+  cache. When the cache is full, new unconfigured authors wait for room
+  instead of evicting entries, and open discovery draws its candidates at
+  random from the cache, so adverts that were cached before a flood are still
+  tried while their authors keep republishing them. A peer configured with its
+  npub in upper case now finds its Nostr advert.
+- LAN (mDNS) discovery dials an advertised address only when it lies on the
+  link the advert's address record arrived on, ignores an advert whose service
+  host is not the advertised node's own, and stays within the discovery
+  budget, with configured peers dialled first and at most two handshakes in
+  flight to any one address.
+- A LAN host advertising a malformed npub can no longer crash the node's
+  mDNS discovery while debug logging is on.
+- A datagram from another address can no longer stop a Nostr-discovered peer
+  from being retried for a day.
+- A traversal offer can make the node probe a private IPv4 address only when
+  one of the node's own interface prefixes holds both that address and one of
+  the node's own addresses. Deployments that punched across private subnets
+  with a STUN server inside the network no longer do so, nor do hosts on /32
+  or point-to-point interfaces, while peers on one LAN whose prefix is wider
+  than /24 now reach each other directly.
+- The lookup failure table no longer grows without bound.
 
 #### Sessions and rekey
 
@@ -410,6 +553,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-connection, or reaped as stale. After a promotion, the memory it left
   held the session's two traffic keys for as long as the peer stayed
   connected. The security reference is updated to match.
+
+- Packets to a destination the mesh cannot reach now get an ICMPv6 Destination
+  Unreachable at once instead of being held indefinitely, which let a gateway
+  LAN host fill the table of held destinations. While the node has no peers,
+  and for 30 seconds after it gains one, such packets are still held briefly
+  while routing information arrives. Held packets are answered after the
+  lookup schedule plus the handshake timeout, 50 seconds by default.
 
 ## [0.5.2] - 2026-09-28
 
