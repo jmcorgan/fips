@@ -1972,3 +1972,36 @@ fn short_id_truncates_a_multibyte_session_id_on_a_character_boundary_without_pan
     assert_eq!(short_id("abc"), "abc");
     assert_eq!(short_id(""), "");
 }
+
+/// The advert cache holds adverts under the canonical lower-case npub, and
+/// a configured npub may be written in upper case. Resolving that peer's
+/// advert finds the cached entry instead of missing it and going to the
+/// relays.
+#[tokio::test]
+async fn an_upper_case_configured_npub_resolves_its_cached_advert() {
+    let runtime = NostrRendezvous::new_for_test();
+    let npub = crate::encode_npub(&crate::Identity::generate().pubkey());
+    let endpoint = OverlayEndpointAdvert {
+        transport: OverlayTransportKind::Udp,
+        addr: "203.0.113.7:2121".to_string(),
+    };
+    let now_secs = now_ms() / 1_000;
+    let advert = NostrRendezvous::cached_advert_for_test(npub.clone(), endpoint.clone(), now_secs);
+    runtime.insert_advert_for_test(npub.clone(), advert).await;
+
+    // Control: the canonical form resolves from the cache.
+    let endpoints = runtime
+        .advert_endpoints_for_peer(&npub)
+        .await
+        .expect("canonical npub resolved");
+    assert_eq!(endpoints, vec![endpoint.clone()]);
+
+    let endpoints = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        runtime.advert_endpoints_for_peer(&npub.to_uppercase()),
+    )
+    .await
+    .expect("resolution finished")
+    .expect("cached advert resolved");
+    assert_eq!(endpoints, vec![endpoint]);
+}

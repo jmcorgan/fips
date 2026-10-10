@@ -679,7 +679,7 @@ impl NostrRendezvous {
                 npub: peer_npub.to_string(),
                 reason: e.to_string(),
             })?;
-        let advert = self.fetch_advert(peer_npub, target_pubkey).await?;
+        let advert = self.fetch_advert(target_pubkey).await?;
         Ok(advert.endpoints)
     }
 
@@ -1147,7 +1147,7 @@ impl NostrRendezvous {
                 npub: peer_config.npub.clone(),
                 reason: e.to_string(),
             })?;
-        let advert = self.fetch_advert(&peer_config.npub, target_pubkey).await?;
+        let advert = self.fetch_advert(target_pubkey).await?;
         if !advert.has_udp_nat_endpoint() {
             return Err(BootstrapError::MissingNatEndpoint(peer_config.npub.clone()));
         }
@@ -1530,11 +1530,18 @@ impl NostrRendezvous {
         Ok(())
     }
 
+    /// Resolve `target_pubkey`'s advert from the cache, or else from the
+    /// advert relays, caching what the relays return when there is room.
+    ///
+    /// The cache is keyed by the canonical npub, so it is derived here from
+    /// `target_pubkey` rather than taken from the configured text, which may
+    /// be in upper case.
     async fn fetch_advert(
         &self,
-        peer_npub: &str,
         target_pubkey: PublicKey,
     ) -> Result<OverlayAdvert, BootstrapError> {
+        let canonical = target_pubkey.to_bech32().expect("infallible");
+        let peer_npub = canonical.as_str();
         self.prune_advert_cache();
         if let Some(advert) = self.advert.cached_advert(peer_npub) {
             debug!(
