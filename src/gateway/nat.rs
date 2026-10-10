@@ -14,10 +14,14 @@ use tracing::{debug, error, info, warn};
 
 use rustables::expr::{
     Bitwise, Cmp, CmpOp, ConnTrackState, Conntrack, ConntrackKey, Counter, HighLevelPayload,
-    IPv6HeaderField, Immediate, Masquerade, Meta, MetaType, Nat, NatType, NetworkHeaderField,
-    Register, TCPHeaderField, TransportHeaderField, UDPHeaderField, VerdictKind,
+    IPv6HeaderField, Immediate, Lookup, Masquerade, Meta, MetaType, Nat, NatType,
+    NetworkHeaderField, Register, TCPHeaderField, TransportHeaderField, UDPHeaderField,
+    VerdictKind,
 };
-use rustables::{Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Table};
+use rustables::set::{SetBuilder, SetElementList};
+use rustables::{
+    Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Set, Table,
+};
 
 use crate::config::{PortForward, Proto};
 
@@ -26,6 +30,13 @@ const PREROUTING_CHAIN: &str = "prerouting";
 const POSTROUTING_CHAIN: &str = "postrouting";
 const FORWARD_CHAIN: &str = "forward";
 const RAW_CHAIN: &str = "raw_prerouting";
+
+/// The set of mapped mesh addresses, which only `fips0` may send from.
+const MESH_SOURCE_SET: &str = "fips_mesh_sources";
+
+/// The set's id within a batch, so the rule that looks it up resolves it in
+/// the same transaction that creates it.
+const MESH_SOURCE_SET_ID: u32 = 1;
 
 /// The mesh TUN interface, as the kernel compares interface names: the name
 /// and its terminating NUL. Every interface match on the TUN is built from
@@ -176,6 +187,13 @@ enum NatOp {
     /// Drop traffic into `fips0` from any interface but the LAN unless it
     /// belongs to an established or related flow.
     NonLanForwardDrop,
+    /// The set of mapped mesh addresses.
+    MeshSourceSet,
+    /// Its elements, sent only when at least one mapping exists.
+    MeshSourceElements,
+    /// Drop, before connection tracking, packets from a mapped mesh address
+    /// that arrive on neither `fips0` nor loopback.
+    ForgedSourceDrop,
     /// Masquerade for LAN traffic leaving through `fips0`.
     FipsMasquerade,
     /// DNAT for the mapping with this virtual IP.
@@ -193,9 +211,10 @@ enum NatOp {
 /// Rebuilds the entire nftables table atomically on every change to
 /// avoid relying on kernel rule handle tracking (which rustables
 /// doesn't expose). The table is small, so this is cheap: the masquerade
-/// of LAN traffic into `fips0`, the forward and pool drops in their filter
-/// chains, two rules per mapping (at most 1000), one rule per inbound
-/// forward, and one more masquerade when any forward is present.
+/// of LAN traffic into `fips0`, the forward, pool and forged-source drops
+/// in their filter chains with the mesh-source set, two rules per mapping
+/// (at most 1000), one rule per inbound forward, and one more masquerade
+/// when any forward is present.
 pub struct NatManager {
     table: Table,
     pre_chain: Chain,
@@ -409,10 +428,17 @@ impl NatManager {
             NatOp::PostChain,
             NatOp::ForwardChain,
             NatOp::RawChain,
+            NatOp::MeshSourceSet,
+        ];
+        if !self.mappings.is_empty() {
+            ops.push(NatOp::MeshSourceElements);
+        }
+        ops.extend([
             NatOp::NonLanPoolDrop,
+            NatOp::ForgedSourceDrop,
             NatOp::NonLanForwardDrop,
             NatOp::FipsMasquerade,
-        ];
+        ]);
 
         // When any port forwards are configured, one LAN-side masquerade in
         // postrouting gives the LAN target the gateway's LAN address as the
@@ -451,6 +477,8 @@ impl NatManager {
         for op in ops {
             match *op {
                 NatOp::Table(msg_type) => batch.add(&self.table, msg_type),
+                NatOp::MeshSourceSet => batch.add(&self.mesh_sources()?.0, MsgType::Add),
+                NatOp::MeshSourceElements => batch.add(&self.mesh_sources()?.1, MsgType::Add),
                 _ => {
                     if let Some(chain) = self.chain_for(*op) {
                         batch.add(chain, MsgType::Add);
@@ -483,7 +511,33 @@ impl NatManager {
             | NatOp::PreChain
             | NatOp::PostChain
             | NatOp::ForwardChain
-            | NatOp::RawChain => Ok(None),
+            | NatOp::RawChain
+            | NatOp::MeshSourceSet
+            | NatOp::MeshSourceElements => Ok(None),
+            NatOp::ForgedSourceDrop => {
+                // A host on the LAN or any other interface could otherwise
+                // forge a reply from a mapped node and have conntrack count
+                // it as that node's. Only fips0 carries the mesh's traffic.
+                // Loopback is exempt: a LAN client may name the gateway's
+                // own node, which puts the gateway's own mesh address in the
+                // set, and its local connections re-enter on lo.
+                let (set, _) = self.mesh_sources()?;
+                let rule = Rule::new(&self.raw_chain)?
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Neq, TUN_IFACE.to_vec()))
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Neq, LOOPBACK_IFACE.to_vec()))
+                    .with_expr(
+                        HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Saddr))
+                            .build(),
+                    )
+                    .with_expr(Lookup::new(&set)?)
+                    .with_expr(Counter::default())
+                    .with_expr(Immediate::new_verdict(VerdictKind::Drop));
+                Ok(Some(rule))
+            }
             NatOp::NonLanPoolDrop => {
                 // Before conntrack the packet still carries the virtual IP as
                 // its destination. Dropping it here keeps a host on another
@@ -642,6 +696,25 @@ impl NatManager {
                 Ok(Some(rule))
             }
         }
+    }
+
+    /// The set of mapped mesh addresses and its element list, each address
+    /// once although several virtual IPs may map to it.
+    ///
+    /// rustables leaves a new set's family unspecified while giving its
+    /// element list the table's, and a batch sends each object's own family,
+    /// so the set's family is set here or the kernel finds no table for it.
+    fn mesh_sources(&self) -> Result<(Set, SetElementList), NatError> {
+        let mut builder = SetBuilder::<Ipv6Addr>::new(MESH_SOURCE_SET, &self.table)?;
+        let sources: std::collections::BTreeSet<Ipv6Addr> =
+            self.mappings.values().map(|m| m.mesh_addr).collect();
+        for source in &sources {
+            builder.add(source);
+        }
+        let (mut set, list) = builder.finish();
+        set.family = ProtocolFamily::Inet;
+        set.set_id(MESH_SOURCE_SET_ID);
+        Ok((set, list))
     }
 
     /// The LAN interface name as the kernel compares it, with its NUL.
@@ -1944,6 +2017,126 @@ mod tests {
             }),
             "no raw_prerouting rule drops traffic to the pool from other interfaces"
         );
+    }
+
+    #[test]
+    fn forged_mesh_sources_are_dropped_unless_they_arrive_on_fips0_or_loopback() {
+        let mgr = manager_with_mappings(2);
+        let (set, _) = mgr.mesh_sources().unwrap();
+        let [iif, tun_cmp] = meta_cmp(MetaType::IifName, CmpOp::Neq, TUN_IFACE);
+        let [_, lo_cmp] = meta_cmp(MetaType::IifName, CmpOp::Neq, b"lo\0");
+        let expected = [
+            iif.clone(),
+            tun_cmp,
+            iif,
+            lo_cmp,
+            ExpressionVariant::from(
+                HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Saddr)).build(),
+            ),
+            ExpressionVariant::from(Lookup::new(&set).unwrap()),
+            drop_verdict(),
+        ];
+        let rules = emitted_rules(&mgr);
+        let drops: Vec<&Rule> = rules
+            .iter()
+            .filter(|rule| {
+                rule.get_chain().map(String::as_str) == Some("raw_prerouting")
+                    && has_in_order(rule, &expected)
+            })
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "no raw_prerouting rule drops a mapped mesh source arriving on another interface"
+        );
+        let lookup = expressions(drops[0]).into_iter().find_map(|e| match e {
+            ExpressionVariant::Lookup(lookup) => Some(lookup),
+            _ => None,
+        });
+        let lookup = lookup.expect("the drop looks the source up");
+        assert_eq!(
+            lookup.get_set().map(String::as_str),
+            Some("fips_mesh_sources")
+        );
+        assert_eq!(lookup.get_set_id(), Some(&MESH_SOURCE_SET_ID));
+    }
+
+    /// The mesh addresses in an element list, in order.
+    fn elements(list: &SetElementList) -> Vec<Ipv6Addr> {
+        list.get_elements()
+            .map(|elements| {
+                elements
+                    .iter()
+                    .filter_map(|e| e.get_key().and_then(|k| k.get_value()))
+                    .map(|bytes| {
+                        let octets: [u8; 16] = bytes.as_slice().try_into().expect("16 bytes");
+                        Ipv6Addr::from(octets)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_mesh_source_set_holds_every_mapped_mesh_address() {
+        let mut mgr = manager_with_mappings(3);
+        let (set, list) = mgr.mesh_sources().unwrap();
+        assert_eq!(
+            set.family,
+            ProtocolFamily::Inet,
+            "a set left at the unspecified family is rejected with the table not found"
+        );
+        assert_eq!(set.get_id(), Some(&MESH_SOURCE_SET_ID));
+        assert_eq!(elements(&list), vec![mesh(1), mesh(2), mesh(3)]);
+
+        // A reissued address can be mapped to the same node as another
+        // while a removal is queued; the node's address is listed once.
+        mgr.mappings.insert(
+            vip(9),
+            NatMapping {
+                virtual_ip: vip(9),
+                mesh_addr: mesh(2),
+            },
+        );
+        let (_, list) = mgr.mesh_sources().unwrap();
+        assert_eq!(elements(&list), vec![mesh(1), mesh(2), mesh(3)]);
+    }
+
+    #[test]
+    fn no_element_list_is_sent_without_mappings() {
+        let ops = manager_with_mappings(0).rebuild_batches().remove(0);
+        assert!(ops.contains(&NatOp::MeshSourceSet));
+        assert!(!ops.contains(&NatOp::MeshSourceElements));
+        let ops = manager_with_mappings(1).rebuild_batches().remove(0);
+        let set = ops.iter().position(|op| *op == NatOp::MeshSourceSet);
+        let elements = ops.iter().position(|op| *op == NatOp::MeshSourceElements);
+        let lookup = ops.iter().position(|op| *op == NatOp::ForgedSourceDrop);
+        assert!(set < elements && elements < lookup, "{ops:?}");
+        manager_with_mappings(0)
+            .encode_batch(&manager_with_mappings(0).rebuild_batches().remove(0))
+            .expect("a rebuild with no mappings encodes");
+    }
+
+    #[test]
+    fn a_removal_is_reported_only_once_the_rebuild_succeeded() {
+        let mut mgr = manager_with_mappings(2);
+        // Make encoding, and so the rebuild, fail.
+        mgr.pre_chain = Chain::new(&mgr.table);
+        let applied = mgr.apply(&[NatCommand::Remove {
+            virtual_ip: vip(1),
+            mesh_addr: mesh(1),
+        }]);
+        assert!(
+            applied.outcomes[0].1.is_err(),
+            "control: the rebuild failed"
+        );
+        assert!(
+            applied.removed.is_empty(),
+            "a removal was reported while the kernel may still hold its rules"
+        );
+
+        mgr.track_rebuild(|_| Ok(())).unwrap();
+        assert_eq!(mgr.removed, vec![(vip(1), mesh(1))]);
     }
 
     /// The encoded rebuild of a manager holding `count` mappings.

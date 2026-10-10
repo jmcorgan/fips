@@ -146,8 +146,9 @@ async fn save_pool_state(request: pool::PoolState) -> std::io::Result<()> {
 ///
 /// Without this, an operator on a kernel with no readable source learns that
 /// session pinning is off only from a warning at the first failed tick.
+/// Returns whether a source was found.
 #[cfg(target_os = "linux")]
-async fn report_conntrack_source() {
+async fn report_conntrack_source() -> bool {
     let probe =
         tokio::task::spawn_blocking(|| pool::probe_conntrack(&pool::SystemConntrack::default()))
             .await
@@ -159,22 +160,31 @@ async fn report_conntrack_source() {
             });
     match probe {
         pool::ConntrackProbe::Found(pool::ConntrackSource::Proc) => {
-            info!("Conntrack source: proc; session pinning is on")
+            info!("Conntrack source: proc; session pinning is on");
+            true
         }
         pool::ConntrackProbe::Found(pool::ConntrackSource::Netlink) => {
-            info!("Conntrack source: netlink; session pinning is on")
+            info!("Conntrack source: netlink; session pinning is on");
+            true
         }
-        pool::ConntrackProbe::Missing(e) => match e.netlink {
-            Some(netlink) => warn!(
-                proc_error = %e.proc,
-                netlink_error = %netlink,
-                "No conntrack source is readable; session pinning is off"
-            ),
-            None => warn!(
-                proc_error = %e.proc,
-                "No conntrack source is readable; session pinning is off"
-            ),
-        },
+        pool::ConntrackProbe::Missing(e) => {
+            // Without conntrack no mapping can be seen to carry traffic, so
+            // re-queries extend no name and any mapping can be replaced at
+            // the ceiling. The tick keeps reading; once enough reads succeed,
+            // mappings created after that count traffic again.
+            match e.netlink {
+                Some(netlink) => warn!(
+                    proc_error = %e.proc,
+                    netlink_error = %netlink,
+                    "No conntrack source is readable; session pinning is off, and no mapping counts as carrying traffic until reads succeed"
+                ),
+                None => warn!(
+                    proc_error = %e.proc,
+                    "No conntrack source is readable; session pinning is off, and no mapping counts as carrying traffic until reads succeed"
+                ),
+            }
+            false
+        }
     }
 }
 
@@ -484,6 +494,15 @@ async fn main() {
         }
     };
     let pool_network = ip_pool.network();
+    let small_pool =
+        pool::small_pool_threshold(gw_config.dns.ttl() as u64, gw_config.grace_period());
+    if (pool_total as usize) < small_pool {
+        warn!(
+            addresses = pool_total,
+            threshold = small_pool,
+            "The pool is small enough for one LAN host naming new names to exhaust it"
+        );
+    }
 
     let ip_pool = Arc::new(Mutex::new(ip_pool));
 
@@ -516,7 +535,20 @@ async fn main() {
 
     // The NAT table exists by now, so a kernel that provides the proc file
     // has loaded nf_conntrack and the probe sees what the first tick will.
-    report_conntrack_source().await;
+    let mut conntrack_log = pool::ConntrackReadLog::default();
+    if report_conntrack_source().await {
+        // The pool's quota of reads before any name is answered, so the
+        // previous run's conntrack bindings are known before the first
+        // address is issued, and one read that missed an entry is not the
+        // only one. Mappings made before the quota is met never count
+        // traffic.
+        for _ in 0..pool::MAX_ABSENT_READS {
+            let snapshot = read_conntrack(&mut conntrack_log).await;
+            ip_pool.lock().await.tick(Instant::now(), &snapshot);
+        }
+    } else {
+        ip_pool.lock().await.set_evidence(false);
+    }
 
     // Write the state that covers the first addresses before any is issued.
     // This is the first write with a stretch, made after the last step that
@@ -534,8 +566,8 @@ async fn main() {
         }
     }
 
-    // Nothing reads the reports yet, so they are dropped here.
-    let (mut nat_driver, _) = nat::NatDriver::start(Box::new(nat_mgr));
+    let (mut nat_driver, nat_reports) = nat::NatDriver::start(Box::new(nat_mgr));
+    let nat_removed = nat_reports.removed;
 
     // --- Channels ---
 
@@ -588,7 +620,6 @@ async fn main() {
     let tick_event_tx = event_tx;
     let tick_nat_count = Arc::clone(&nat_count);
     let mut tick_shutdown = shutdown_rx.clone();
-    let mut conntrack_log = pool::ConntrackReadLog::default();
     let snap_config = control::SnapshotConfig {
         pool_cidr: gw_config.pool.clone(),
         lan_interface: gw_config.lan_interface.clone(),
@@ -604,6 +635,10 @@ async fn main() {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    // Removals the NAT table has applied, taken before the
+                    // conntrack read, so the read follows every removal it
+                    // is counted against.
+                    let removed: Vec<_> = nat_removed.try_iter().flatten().collect();
                     let now = Instant::now();
                     // Read conntrack once, off the runtime thread and before
                     // the pool lock: the runtime is current-thread, so a
@@ -613,6 +648,9 @@ async fn main() {
                     let conntrack = read_conntrack(&mut conntrack_log).await;
                     let read_us = elapsed_us(read_started);
                     let mut pool_guard = tick_pool.lock().await;
+                    for (virtual_ip, mesh_addr) in removed {
+                        pool_guard.nat_removed(virtual_ip, mesh_addr);
+                    }
                     let tick_started = Instant::now();
                     let events = pool_guard.tick(now, &conntrack);
                     let tick_us = elapsed_us(tick_started);
@@ -721,6 +759,11 @@ async fn main() {
     // --- Shutdown ---
 
     info!("fips-gateway shutting down");
+
+    // Close the event channel first. Nothing receives from it any more, and
+    // a resolver or tick blocked sending into a full channel cannot see the
+    // shutdown signal; closing it makes that send fail at once.
+    drop(event_rx);
 
     // Signal all tasks to stop
     let _ = shutdown_tx.send(true);

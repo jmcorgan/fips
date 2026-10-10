@@ -229,8 +229,8 @@ set. Dispatch lives in `src/gateway/control.rs`.
 
 | Command | Params | `data` shape |
 | ------- | ------ | ------------ |
-| `show_gateway` | — | `pool_total`, `pool_allocated`, `pool_active`, `pool_draining`, `pool_free`, `nat_mappings`, `dns_listen`, `uptime_secs`, `pool_cidr`, `lan_interface`, `dns_upstream`, `dns_ttl`, `pool_grace_period`. |
-| `show_mappings` | — | `mappings[]` — `virtual_ip`, `mesh_addr`, `node_addr`, `dns_name`, `state` (`Allocated`, `Active`, `Draining`), `sessions`, `age_secs`, `last_ref_secs`. |
+| `show_gateway` | — | `pool_total`, `pool_allocated`, `pool_active`, `pool_draining`, `pool_free`, `pool_evicted` (mappings replaced at the ceiling since start), `pool_releasing` (addresses removed and waiting until no answer or conntrack entry can name them, including addresses held after a restart), `pool_refused` (new names refused at the ceiling, by exhaustion or while a pool state write is pending, since start), `nat_mappings`, `dns_listen`, `uptime_secs`, `pool_cidr`, `lan_interface`, `dns_upstream`, `dns_ttl`, `pool_grace_period`. |
+| `show_mappings` | — | `mappings[]` — `virtual_ip`, `mesh_addr`, `node_addr`, `dns_name`, `state` (`Allocated`, `Active`, `Draining`), `sessions`, `age_secs`, `last_ref_secs`, `used` (whether a reply from the mesh address has been seen). |
 
 Until the first snapshot has been published (very early in startup),
 both commands return `gateway not yet initialized`.

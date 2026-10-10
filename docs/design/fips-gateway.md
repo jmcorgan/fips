@@ -86,7 +86,7 @@ probe at startup.
 ### nftables Table Layout
 
 All gateway rules live in a single nftables table, `inet
-fips_gateway`, with four chains:
+fips_gateway`, with four chains and one set:
 
 - `prerouting` — `type nat hook prerouting priority dstnat (-100)`,
   for both LAN→mesh DNAT (per virtual-IP mapping, matching
@@ -101,7 +101,10 @@ fips_gateway`, with four chains:
 - `raw_prerouting` — `type filter hook prerouting priority raw
   (-300)`, which runs before connection tracking and drops traffic
   addressed to the pool that arrives on neither the LAN interface
-  nor loopback.
+  nor loopback, and traffic from a mapped mesh address that arrives
+  on neither `fips0` nor loopback.
+
+The set, `fips_mesh_sources`, holds every mapped mesh address.
 
 The table is rebuilt atomically on every change, in one netlink
 batch that the kernel applies as a single transaction: add the
@@ -112,10 +115,10 @@ delete a target when no table exists yet, and a batch the kernel
 refuses leaves the previous table in place. Rebuilding the whole
 table avoids reliance on kernel rule-handle tracking, which the
 rustables crate does not expose. The table holds the masquerade of
-LAN traffic into `fips0`, the forward drop, the pool drop, two rules
-per live outbound mapping (at most 1000 mappings), one rule per
-inbound forward, and one extra masquerade when any forward is
-present.
+LAN traffic into `fips0`, the forward drop, the pool drop, the
+forged-source drop and its set, two rules per live outbound mapping
+(at most 1000 mappings), one rule per inbound forward, and one extra
+masquerade when any forward is present.
 
 ### Control Socket
 
@@ -224,14 +227,18 @@ involving the DNS proxy or the pool.
    back to a `NodeAddr` for forwarding.
 6. If the client asked for AAAA or ANY, the gateway allocates a
    virtual IP from the pool for that mesh address (idempotent: an
-   existing mapping is reused and its TTL refreshed). Any other
-   query type refreshes an existing mapping's TTL, creates nothing,
-   and is answered with NODATA.
+   existing mapping is reused, and its TTL refreshed only if it has
+   carried traffic). Any other query type refreshes an existing
+   mapping that has carried traffic, creates nothing, and is answered
+   with NODATA. At the ceiling of 1000 live mappings, a new name
+   replaces the oldest mapping that has never carried traffic.
 7. If a new mapping was created, the pool emits `MappingCreated`,
    which the main loop turns into `add_mapping` calls on the NAT
    manager and `add_proxy_ndp` on the network setup.
 8. The gateway returns an `AAAA` response containing the virtual IP,
-   with the configured TTL (default 60 s).
+   with the configured TTL (default 60 s) for a mapping that has
+   carried traffic, and otherwise with at most the time left until
+   TTL after the mapping's creation.
 
 ### Virtual IP Pool
 
@@ -274,10 +281,10 @@ Transitions:
   does not drain.
 - **Draining → Active**: conntrack reports a session again before
   the grace period ends. The next drain starts a fresh grace period.
-- **Draining → Allocated**: a DNS query for the name, with or
-  without an address in the answer. The client may now hold a fresh
-  TTL, so reclamation is cancelled: the mapping gets the full TTL
-  and, if it stays idle, a fresh grace period.
+- **Draining → Allocated**: a DNS query for a name that has carried
+  traffic, with or without an address in the answer. The client may
+  now hold a fresh TTL, so reclamation is cancelled: the mapping gets
+  the full TTL and, if it stays idle, a fresh grace period.
 - **Draining → Free**: the grace period has elapsed since draining
   began with no session seen.
 
@@ -285,8 +292,8 @@ Timing:
 
 - **TTL** (`gateway.dns.ttl`, default 60 s) is both the DNS TTL
   returned to the client and the mapping's idle lifetime. A DNS
-  query for a mapped name refreshes the mapping's idle clock, and
-  so do conntrack sessions at each tick.
+  query for a mapped name that has carried traffic refreshes the
+  mapping's idle clock, and so do conntrack sessions at each tick.
 - **Grace period** (`gateway.pool_grace_period`, default 60 s) is
   the dwell time after the last session ends before the address is
   recycled. It prevents immediate reuse from confusing hosts with
@@ -336,13 +343,62 @@ way an entry counts once toward each distinct IPv6 destination among
 its original and reply tuples, so an entry counts as a session of a
 virtual IP whose address is its original destination.
 
-A new mapping is refused, and the query answered `SERVFAIL`, when
-the pool is exhausted, when it already holds 1000 live mappings, or
-when the new-mapping rate limit is spent (a bucket of 50 that
-refills at 10 per second). A name that already has a mapping keeps
-resolving while new names are refused. Existing mappings are never
-evicted prematurely — the correctness of in-flight sessions takes
-precedence over fresh allocations.
+**Evidence of use.** A mapping counts as having carried traffic once
+a conntrack entry for a flow to its virtual IP has seen a reply whose
+source is the mapped mesh address. A reply from anywhere else does not
+count: not from the virtual IP itself (an unmapped pool address is a
+local address of the gateway, so it answers), not from an earlier
+holder of the address, and not from a host forging the mesh address,
+since the `raw_prerouting` chain drops packets from any mapped mesh
+address (the `fips_mesh_sources` set) unless they arrive on `fips0`
+or loopback. An ICMPv6 error is not a reply. The gateway routes its
+whole pool prefix to itself, so a name whose mesh address lies inside
+that prefix is refused with `SERVFAIL`: its traffic could never reach
+the mesh, and the gateway's own replies from the address would read as
+the mapping's traffic. Only a mapping that has
+carried traffic is refreshed by re-queries and answered with the full
+TTL; a name nobody has used expires TTL plus grace after it was
+created however often it is queried, and its answers never outlive
+TTL after creation (TTL 0 if unreplied traffic keeps it mapped past
+that). The flag is never cleared.
+
+When the gateway cannot read conntrack at start (it warns that session
+pinning is off), or reads fail for three ticks in a row (it warns
+then), it stops trusting conntrack until three reads in a row succeed.
+Mappings created in between can never count as having carried traffic:
+re-queries do not extend them and they can be replaced at the ceiling.
+Mappings that already counted keep their protection. At start the
+gateway takes three reads before it answers any name, so that the
+conntrack entries the previous run left are known before an address is
+reissued; a mapping created before three reads have succeeded never
+counts as having carried traffic.
+
+**Limits.** A new mapping is refused, and the query answered
+`SERVFAIL`, when the pool is exhausted, when the new-mapping rate limit
+is spent (a bucket of 50 that refills at 10 per second), or when it
+already holds 1000 live mappings that have all carried traffic. At
+the ceiling a new name otherwise replaces the oldest mapping that has
+never carried traffic; a client still holding an answer for the
+replaced address then reaches the gateway host itself, as for any
+unmapped pool address, until that answer expires. A name that already
+has a mapping keeps resolving while new names are refused. The first
+refusal at a bound logs one warning; later ones are counted and
+reported when the pool has refused nothing for 60 s. A pool smaller
+than 1000 + 10 x (TTL + grace) addresses (2,200 at the defaults) can
+be exhausted by one LAN host naming new names; the gateway warns at
+start when it is. A host that can draw real replies from many mesh
+destinations, such as nodes of its own, keeps that many mappings for
+as long as it re-queries them, and with 1000 of them refuses new names
+for everyone.
+
+**Release.** A removed or replaced address returns to the free set
+only once no answer naming it can still be cached (its creation plus
+TTL plus grace, or its last answer plus grace, whichever is later),
+the NAT table has reported its rules gone, and three conntrack reads
+have followed. It is never handed back to the same node while a
+conntrack entry from its old mapping survives, since nothing deletes
+such entries and a forged reply on one would read as the new
+mapping's traffic.
 
 ### NAT Pipeline (Outbound)
 

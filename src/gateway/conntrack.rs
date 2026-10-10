@@ -9,14 +9,16 @@ use super::pool::{ConntrackQuerier, ConntrackSnapshot};
 use netlink_packet_core::{
     NLM_F_DUMP, NLM_F_REQUEST, NetlinkHeader, NetlinkMessage, NetlinkPayload,
 };
-use netlink_packet_netfilter::conntrack::{ConntrackAttribute, ConntrackMessage, IPTuple, Tuple};
+use netlink_packet_netfilter::conntrack::{
+    ConntrackAttribute, ConntrackMessage, IPTuple, Status, Tuple,
+};
 use netlink_packet_netfilter::{
     NetfilterHeader, NetfilterMessage, NetfilterMessageInner, NetfilterProtoFamily,
 };
 use netlink_sys::{Socket, SocketAddr, protocols::NETLINK_NETFILTER};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -55,15 +57,15 @@ impl ConntrackQuerier for NetlinkConntrack {
         let seq = NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
         socket.send(&dump_request(seq), 0)?;
 
-        let mut counts = HashMap::new();
+        let mut snapshot = ConntrackSnapshot::empty_read();
         loop {
             // Sized by peeking first, so a large batch is not truncated.
             let (buf, _) = socket.recv_from_full()?;
-            if count_dump(&buf, seq, &mut counts)? == DumpState::Done {
+            if count_dump(&buf, seq, &mut snapshot)? == DumpState::Done {
                 break;
             }
         }
-        Ok(ConntrackSnapshot::from_counts(counts))
+        Ok(snapshot)
     }
 }
 
@@ -88,10 +90,11 @@ fn dump_request(seq: u32) -> Vec<u8> {
     buf
 }
 
-/// Count the conntrack entries in one received buffer by destination.
+/// Add the conntrack entries in one received buffer to `snapshot`.
 ///
 /// An entry counts once for each distinct IPv6 destination among its original
-/// and reply tuples, the same rule the proc-file parser applies to a line.
+/// and reply tuples, the same rule the proc-file parser applies to a line,
+/// and records its binding from original destination to reply source.
 /// A message carrying another sequence number is skipped. A dump the kernel
 /// flags as interrupted is counted as received: reading the proc file is not
 /// atomic across the table either, and failing the read would zero every
@@ -99,7 +102,7 @@ fn dump_request(seq: u32) -> Vec<u8> {
 pub fn count_dump(
     buf: &[u8],
     seq: u32,
-    counts: &mut HashMap<Ipv6Addr, u32>,
+    snapshot: &mut ConntrackSnapshot,
 ) -> Result<DumpState, io::Error> {
     let mut offset = 0;
     while offset < buf.len() {
@@ -118,33 +121,55 @@ pub fn count_dump(
             NetlinkPayload::InnerMessage(NetfilterMessage {
                 inner: NetfilterMessageInner::Conntrack(ConntrackMessage::New(attrs)),
                 ..
-            }) => count_entry(&attrs, counts),
+            }) => count_entry(&attrs, snapshot),
             _ => {}
         }
     }
     Ok(DumpState::More)
 }
 
-/// Add one conntrack entry to the counts, once per distinct IPv6 destination
-/// among its original and reply tuples.
-fn count_entry(attrs: &[ConntrackAttribute], counts: &mut HashMap<Ipv6Addr, u32>) {
+/// Add one conntrack entry to `snapshot`: once per distinct IPv6
+/// destination among its original and reply tuples, and its binding from
+/// the original destination to the reply source, replied when the kernel has
+/// seen a reply.
+fn count_entry(attrs: &[ConntrackAttribute], snapshot: &mut ConntrackSnapshot) {
     let mut seen = HashSet::new();
+    let mut orig_dst = None;
+    let mut reply_src = None;
+    let mut replied = false;
     for attr in attrs {
-        let tuples = match attr {
-            ConntrackAttribute::CtaTupleOrig(t) | ConntrackAttribute::CtaTupleReply(t) => t,
+        let (tuples, original) = match attr {
+            ConntrackAttribute::CtaTupleOrig(t) => (t, true),
+            ConntrackAttribute::CtaTupleReply(t) => (t, false),
+            ConntrackAttribute::CtaStatus(status) => {
+                replied = status.contains(Status::SeenReply);
+                continue;
+            }
             _ => continue,
         };
         for tuple in tuples {
             let Tuple::Ip(ip) = tuple else { continue };
             for field in ip {
-                if let IPTuple::DestinationAddress(IpAddr::V6(dst)) = field {
-                    seen.insert(*dst);
+                match field {
+                    IPTuple::DestinationAddress(IpAddr::V6(dst)) => {
+                        seen.insert(*dst);
+                        if original {
+                            orig_dst = Some(*dst);
+                        }
+                    }
+                    IPTuple::SourceAddress(IpAddr::V6(src)) if !original => {
+                        reply_src = Some(*src);
+                    }
+                    _ => {}
                 }
             }
         }
     }
     for dst in seen {
-        *counts.entry(dst).or_insert(0) += 1;
+        snapshot.add_session(dst);
+    }
+    if let (Some(orig_dst), Some(reply_src)) = (orig_dst, reply_src) {
+        snapshot.record_binding(orig_dst, reply_src, replied);
     }
 }
 
@@ -152,6 +177,7 @@ fn count_entry(attrs: &[ConntrackAttribute], counts: &mut HashMap<Ipv6Addr, u32>
 mod tests {
     use super::*;
     use netlink_packet_core::{DoneMessage, ErrorMessage};
+    use std::net::Ipv6Addr;
     use std::num::NonZeroI32;
 
     const SEQ: u32 = 7;
@@ -205,10 +231,23 @@ mod tests {
         )
     }
 
-    fn count(buf: &[u8]) -> (Result<DumpState, io::Error>, HashMap<Ipv6Addr, u32>) {
-        let mut counts = HashMap::new();
-        let state = count_dump(buf, SEQ, &mut counts);
-        (state, counts)
+    /// Session counts by address, as the tests read them.
+    struct Counts(ConntrackSnapshot);
+
+    impl Counts {
+        fn get(&self, addr: &Ipv6Addr) -> Option<u32> {
+            Some(self.0.sessions_for(*addr)).filter(|n| *n > 0)
+        }
+
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    fn count(buf: &[u8]) -> (Result<DumpState, io::Error>, Counts) {
+        let mut snapshot = ConntrackSnapshot::empty_read();
+        let state = count_dump(buf, SEQ, &mut snapshot);
+        (state, Counts(snapshot))
     }
 
     #[test]
@@ -219,10 +258,10 @@ mod tests {
         let (state, counts) = count(&buf);
 
         assert_eq!(state.unwrap(), DumpState::More);
-        assert_eq!(counts.get(&virtual_ip).copied(), Some(1));
+        assert_eq!(counts.get(&virtual_ip), Some(1));
         // The reply tuple's destination is counted too, as the proc parser
         // counts every dst= on the line.
-        assert_eq!(counts.get(&v6("fd9a::2")).copied(), Some(1));
+        assert_eq!(counts.get(&v6("fd9a::2")), Some(1));
     }
 
     #[test]
@@ -233,7 +272,7 @@ mod tests {
 
         let (_, counts) = count(&buf);
 
-        assert_eq!(counts.get(&addr).copied(), Some(1));
+        assert_eq!(counts.get(&addr), Some(1));
     }
 
     #[test]
@@ -247,8 +286,8 @@ mod tests {
         let (state, counts) = count(&buf);
 
         assert_eq!(state.unwrap(), DumpState::More);
-        assert_eq!(counts.get(&virtual_ip).copied(), Some(2));
-        assert_eq!(counts.get(&other).copied(), Some(1));
+        assert_eq!(counts.get(&virtual_ip), Some(2));
+        assert_eq!(counts.get(&other), Some(1));
     }
 
     #[test]
@@ -281,7 +320,7 @@ mod tests {
         let (state, counts) = count(&buf);
 
         assert_eq!(state.unwrap(), DumpState::Done);
-        assert_eq!(counts.get(&virtual_ip).copied(), Some(1));
+        assert_eq!(counts.get(&virtual_ip), Some(1));
     }
 
     #[test]
@@ -312,7 +351,69 @@ mod tests {
             DumpState::More,
             "another request's end of dump does not end this one"
         );
-        assert_eq!(counts.get(&virtual_ip).copied(), Some(1));
+        assert_eq!(counts.get(&virtual_ip), Some(1));
+    }
+
+    /// A DNAT'd entry: the LAN client to `virtual_ip`, and back from
+    /// `mesh` to the gateway's fips0 address, with the given status.
+    fn dnat_entry(
+        virtual_ip: Ipv6Addr,
+        mesh: Ipv6Addr,
+        status: Option<Status>,
+    ) -> NetfilterMessage {
+        let mut attrs = vec![
+            ConntrackAttribute::CtaTupleOrig(tuple(v6("fd02::20"), virtual_ip)),
+            ConntrackAttribute::CtaTupleReply(tuple(mesh, v6("fd9a::1"))),
+        ];
+        if let Some(status) = status {
+            attrs.push(ConntrackAttribute::CtaStatus(status));
+        }
+        NetfilterMessage::new(
+            NetfilterHeader::new(NetfilterProtoFamily::IPv6, 0, 0),
+            ConntrackMessage::New(attrs),
+        )
+    }
+
+    #[test]
+    fn netlink_dump_records_the_reply_source_only_with_seen_reply() {
+        let (replied_vip, replied_mesh) = (v6("fd01::5"), v6("fd9a::2"));
+        let (quiet_vip, quiet_mesh) = (v6("fd01::6"), v6("fd9a::3"));
+        let mut buf = frame(
+            NetlinkPayload::from(dnat_entry(
+                replied_vip,
+                replied_mesh,
+                Some(Status::SeenReply | Status::Confirmed),
+            )),
+            SEQ,
+        );
+        buf.extend(frame(
+            NetlinkPayload::from(dnat_entry(quiet_vip, quiet_mesh, Some(Status::Confirmed))),
+            SEQ,
+        ));
+
+        let mut snapshot = ConntrackSnapshot::empty_read();
+        count_dump(&buf, SEQ, &mut snapshot).unwrap();
+
+        assert!(snapshot.bound_to(replied_vip, replied_mesh));
+        assert!(snapshot.replied_from(replied_vip, replied_mesh));
+        assert!(
+            !snapshot.bound_to(replied_vip, replied_vip),
+            "the original destination is not its own reply source"
+        );
+        assert!(
+            snapshot.bound_to(quiet_vip, quiet_mesh),
+            "the binding is recorded"
+        );
+        assert!(
+            !snapshot.replied_from(quiet_vip, quiet_mesh),
+            "an entry without seen-reply is not a reply"
+        );
+        assert_eq!(
+            snapshot.sessions_for(replied_vip),
+            1,
+            "pinning is unchanged"
+        );
+        assert_eq!(snapshot.sessions_for(quiet_vip), 1, "pinning is unchanged");
     }
 
     #[test]

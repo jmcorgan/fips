@@ -376,9 +376,10 @@ services:
     # rules.
     privileged: true
     environment:
-      # Debug for the NAT rebuild and pool tick timing lines only; the
+      # Debug for the NAT rebuild and pool tick timing lines, the pool's
+      # per-mapping lines and the resolver's per-query refusals; the
       # gateway's --log-level is ignored while RUST_LOG is set.
-      - RUST_LOG=info,fips::gateway::nat=debug,fips_gateway=debug
+      - RUST_LOG=info,fips::gateway::nat=debug,fips::gateway::pool=debug,fips::gateway::dns=debug,fips_gateway=debug
       - FIPS_TEST_MODE=gateway
       # The entrypoint names the interface holding this address as the
       # gateway's LAN interface; it must match ipv6_address below.

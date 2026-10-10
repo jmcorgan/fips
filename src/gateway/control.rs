@@ -189,6 +189,9 @@ fn build_show_gateway(snapshot: &GatewaySnapshot) -> Response {
         "pool_active": snapshot.pool.active,
         "pool_draining": snapshot.pool.draining,
         "pool_free": snapshot.pool.free,
+        "pool_evicted": snapshot.pool.evicted,
+        "pool_releasing": snapshot.pool.releasing,
+        "pool_refused": snapshot.pool.refused,
         "nat_mappings": snapshot.nat_mappings,
         "dns_listen": snapshot.dns_listen,
         "uptime_secs": snapshot.uptime_secs,
@@ -215,6 +218,7 @@ fn build_show_mappings(snapshot: &GatewaySnapshot) -> Response {
                 "sessions": m.session_count,
                 "age_secs": m.age_secs,
                 "last_ref_secs": m.last_ref_secs,
+                "used": m.used,
             })
         })
         .collect();
@@ -278,6 +282,9 @@ mod tests {
                 active: 0,
                 draining: 0,
                 free: 65534,
+                evicted: 4,
+                releasing: 2,
+                refused: 7,
             },
             mappings: vec![MappingInfo {
                 virtual_ip: "fd01::1".parse().unwrap(),
@@ -288,6 +295,7 @@ mod tests {
                 session_count: 3,
                 age_secs: 120,
                 last_ref_secs: 5,
+                used: true,
             }],
             nat_mappings: 1,
             dns_listen: "[fd02::10]:53".to_string(),
@@ -308,6 +316,9 @@ mod tests {
         let data = resp.data.unwrap();
         assert_eq!(data["pool_total"], 65535);
         assert_eq!(data["pool_free"], 65534);
+        assert_eq!(data["pool_evicted"], 4);
+        assert_eq!(data["pool_releasing"], 2);
+        assert_eq!(data["pool_refused"], 7);
         assert_eq!(data["nat_mappings"], 1);
         assert_eq!(data["dns_listen"], "[fd02::10]:53");
         assert_eq!(data["uptime_secs"], 3600);
@@ -324,6 +335,7 @@ mod tests {
         assert_eq!(mappings[0]["state"], "Active");
         assert_eq!(mappings[0]["sessions"], 3);
         assert_eq!(mappings[0]["virtual_ip"], "fd01::1");
+        assert_eq!(mappings[0]["used"], true);
     }
 
     #[test]
@@ -360,6 +372,9 @@ mod tests {
                 active: 0,
                 draining: 0,
                 free: 255,
+                evicted: 0,
+                releasing: 0,
+                refused: 0,
             },
             mappings: vec![],
             nat_mappings: 0,

@@ -453,10 +453,11 @@ async fn handle_query(
 
     if !matches!(client_qtype, QTYPE::TYPE(TYPE::AAAA) | QTYPE::ANY) {
         // The client is still using the name, so an existing mapping's TTL
-        // clock is refreshed. A client that re-queries a mapped name with both
-        // A and AAAA should not lose half of its refresh, and with no
-        // conntrack sessions a DNS reference is all that keeps a mapping
-        // alive. Nothing is created.
+        // clock is refreshed if the mapping has carried traffic: a client
+        // that re-queries a mapped name with both A and AAAA should not lose
+        // half of its refresh. A name nobody has used expires TTL plus grace
+        // after it was created however often it is queried. Nothing is
+        // created.
         let refreshed = pool.lock().await.refresh_if_present(node_addr);
         debug!(
             name = %fips_name,
@@ -472,13 +473,27 @@ async fn handle_query(
     let allocation = match pool_guard.allocate(node_addr, mesh_addr, &fips_name) {
         Ok(allocation) => allocation,
         Err(e) => {
-            warn!(error = %e, "Pool allocation failed");
+            // Per query and driven by LAN hosts, so not a warning: the pool
+            // warns once when it starts refusing at a bound.
+            debug!(reason = e.reason(), error = %e, name = %fips_name, "Pool allocation failed");
             return build_servfail(&query);
         }
     };
     drop(pool_guard);
     let virtual_ip = allocation.virtual_ip;
     let is_new = allocation.is_new;
+
+    // A mapping replaced at the ceiling loses its rules before the new one
+    // gains its own.
+    if let Some(evicted) = allocation.evicted {
+        let event = PoolEvent::MappingRemoved {
+            virtual_ip: evicted.virtual_ip,
+            mesh_addr: evicted.mesh_addr,
+        };
+        if let Err(e) = event_tx.send(event).await {
+            warn!(error = %e, "Failed to send pool event");
+        }
+    }
 
     // Notify NAT module of new mapping
     if is_new {
@@ -496,6 +511,7 @@ async fn handle_query(
         virtual_ip = %virtual_ip,
         mesh_addr = %mesh_addr,
         is_new,
+        ttl = allocation.ttl,
         "Resolved .fips query"
     );
 
@@ -506,6 +522,7 @@ async fn handle_query(
 mod tests {
     use super::*;
 
+    use crate::gateway::pool::ConntrackSnapshot;
     use simple_dns::{Name, Question};
     use tokio::sync::mpsc;
 
@@ -786,62 +803,93 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_a_query_refreshes_an_existing_mapping_without_creating_one() {
-        let pool = test_pool();
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-
-        // An AAAA query mints the mapping.
+    /// Ask `pool` through the gateway resolver for `qname` with `qtype`,
+    /// the daemon answering `mesh`.
+    async fn ask(
+        pool: &std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
+        event_tx: &mpsc::Sender<PoolEvent>,
+        id: u16,
+        qname: &str,
+        mesh: &'static str,
+        qtype: QTYPE,
+    ) -> Vec<u8> {
         let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
         let upstream = upstream_socket.local_addr().unwrap();
-        let handle = spawn_upstream(upstream_socket, |id| {
-            vec![build_answer(id, "test.fips", "fd00::1")]
+        let name = qname.to_string();
+        let handle = spawn_upstream(upstream_socket, move |id| {
+            vec![build_answer(id, &name, mesh)]
         });
         let response = handle_query(
-            &build_query(0x1234, "test.fips"),
+            &build_query_of_type(id, qname, qtype),
             upstream,
             TEST_TTL,
-            &pool,
-            &event_tx,
+            pool,
+            event_tx,
         )
         .await
         .unwrap();
         handle.await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn an_a_query_does_not_refresh_a_never_used_mapping() {
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let aaaa = QTYPE::TYPE(TYPE::AAAA);
+        let response = ask(&pool, &event_tx, 0x1234, "test.fips", "fd00::1", aaaa).await;
         let virtual_ip = assert_pool_answer(&response);
         assert!(matches!(
             event_rx.try_recv().unwrap(),
             PoolEvent::MappingCreated { .. }
         ));
+        let before = pool
+            .lock()
+            .await
+            .lookup_virtual_ip(&virtual_ip)
+            .unwrap()
+            .last_referenced;
 
+        let a = QTYPE::TYPE(TYPE::A);
+        assert_nodata(&ask(&pool, &event_tx, 0x1235, "test.fips", "fd00::1", a).await);
+
+        let guard = pool.lock().await;
+        let mapping = guard
+            .lookup_virtual_ip(&virtual_ip)
+            .expect("the A query removed or replaced the mapping");
+        assert_eq!(
+            mapping.last_referenced, before,
+            "an A query extended a mapping that has never carried traffic"
+        );
+        drop(guard);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_a_query_refreshes_a_mapping_that_has_carried_traffic() {
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let aaaa = QTYPE::TYPE(TYPE::AAAA);
+        let response = ask(&pool, &event_tx, 0x1234, "test.fips", "fd00::1", aaaa).await;
+        let virtual_ip = assert_pool_answer(&response);
+        let _ = event_rx.try_recv();
+
+        // A reply from the node, read on a tick, marks the mapping used.
+        let mut replies = ConntrackSnapshot::empty_read();
+        replies.record_binding(virtual_ip, "fd00::1".parse().unwrap(), true);
         let before = {
-            let guard = pool.lock().await;
-            guard
-                .lookup_virtual_ip(&virtual_ip)
-                .unwrap()
-                .last_referenced
+            let mut guard = pool.lock().await;
+            guard.tick(std::time::Instant::now(), &replies);
+            let mapping = guard.lookup_virtual_ip(&virtual_ip).unwrap();
+            assert!(mapping.used, "control: the mapping carried traffic");
+            mapping.last_referenced
         };
 
-        // An A query for the same name refreshes it and creates nothing. A
-        // client that re-queries a mapped name with both types must not lose
-        // half of its refresh: with no conntrack sessions, the DNS reference
-        // is the only thing keeping the mapping alive.
-        let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
-        let upstream = upstream_socket.local_addr().unwrap();
-        let handle = spawn_upstream(upstream_socket, |id| {
-            vec![build_answer(id, "test.fips", "fd00::1")]
-        });
-        let response = handle_query(
-            &build_query_of_type(0x1235, "test.fips", QTYPE::TYPE(TYPE::A)),
-            upstream,
-            TEST_TTL,
-            &pool,
-            &event_tx,
-        )
-        .await
-        .unwrap();
-        handle.await.unwrap();
-
-        assert_nodata(&response);
+        let a = QTYPE::TYPE(TYPE::A);
+        assert_nodata(&ask(&pool, &event_tx, 0x1235, "test.fips", "fd00::1", a).await);
 
         let guard = pool.lock().await;
         let mapping = guard
@@ -849,14 +897,42 @@ mod tests {
             .expect("the A query removed or replaced the mapping");
         assert!(
             mapping.last_referenced > before,
-            "the A query did not refresh the mapping's TTL clock"
+            "the A query did not refresh a mapping that carries traffic"
         );
         drop(guard);
-
         assert!(
             matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
             "the A query sent a second MappingCreated"
         );
+    }
+
+    #[tokio::test]
+    async fn an_eviction_sends_the_removal_before_the_creation() {
+        let pool = std::sync::Arc::new(tokio::sync::Mutex::new(
+            VirtualIpPool::with_limits("fd01::/112", TEST_TTL as u64, 30, 1, 10, 10).unwrap(),
+        ));
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let aaaa = QTYPE::TYPE(TYPE::AAAA);
+        let first =
+            assert_pool_answer(&ask(&pool, &event_tx, 0x1234, "one.fips", "fd00::1", aaaa).await);
+        let _ = event_rx.try_recv();
+
+        let second =
+            assert_pool_answer(&ask(&pool, &event_tx, 0x1235, "two.fips", "fd00::2", aaaa).await);
+        match event_rx.try_recv().unwrap() {
+            PoolEvent::MappingRemoved {
+                virtual_ip,
+                mesh_addr,
+            } => {
+                assert_eq!(virtual_ip, first);
+                assert_eq!(mesh_addr, "fd00::1".parse::<Ipv6Addr>().unwrap());
+            }
+            other => panic!("expected the evicted mapping's removal first, got {other:?}"),
+        }
+        match event_rx.try_recv().unwrap() {
+            PoolEvent::MappingCreated { virtual_ip, .. } => assert_eq!(virtual_ip, second),
+            other => panic!("expected the new mapping's creation, got {other:?}"),
+        }
     }
 
     #[tokio::test]
