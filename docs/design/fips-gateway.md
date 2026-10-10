@@ -86,15 +86,22 @@ probe at startup.
 ### nftables Table Layout
 
 All gateway rules live in a single nftables table, `inet
-fips_gateway`, with two chains:
+fips_gateway`, with four chains:
 
 - `prerouting` — `type nat hook prerouting priority dstnat (-100)`,
-  for both LAN→mesh DNAT (per virtual-IP mapping) and mesh→LAN DNAT
-  (per port-forward).
+  for both LAN→mesh DNAT (per virtual-IP mapping, matching
+  `iifname <lan_interface>`) and mesh→LAN DNAT (per port-forward).
 - `postrouting` — `type nat hook postrouting priority srcnat (100)`,
-  for both the always-on `oifname fips0` masquerade, the per-mapping
+  for the `oifname fips0` masquerade of LAN traffic, the per-mapping
   return-path SNAT, and (when any port-forward is configured) the
   LAN-side masquerade for inbound traffic.
+- `forward` — `type filter hook forward priority filter (0)`, which
+  drops traffic into `fips0` from any interface other than the LAN
+  interface unless it belongs to an established or related flow.
+- `raw_prerouting` — `type filter hook prerouting priority raw
+  (-300)`, which runs before connection tracking and drops traffic
+  addressed to the pool that arrives on neither the LAN interface
+  nor loopback.
 
 The table is rebuilt atomically on every change, in one netlink
 batch that the kernel applies as a single transaction: add the
@@ -104,10 +111,11 @@ table never leaves the packet path; the leading add gives the
 delete a target when no table exists yet, and a batch the kernel
 refuses leaves the previous table in place. Rebuilding the whole
 table avoids reliance on kernel rule-handle tracking, which the
-rustables crate does not expose. The table holds one always-on
-masquerade, two rules per live outbound mapping (at most 1000
-mappings), one rule per inbound forward, and one extra masquerade
-when any forward is present.
+rustables crate does not expose. The table holds the masquerade of
+LAN traffic into `fips0`, the forward drop, the pool drop, two rules
+per live outbound mapping (at most 1000 mappings), one rule per
+inbound forward, and one extra masquerade when any forward is
+present.
 
 ### Control Socket
 
@@ -301,13 +309,14 @@ precedence over fresh allocations.
 ### NAT Pipeline (Outbound)
 
 Three rule classes in `inet fips_gateway` together implement the
-LAN→mesh path:
+LAN→mesh path, and two filter rules keep every other interface off
+it:
 
-**Prerouting DNAT (per mapping)** rewrites the destination from the
-virtual IP to the corresponding mesh address:
+**Prerouting DNAT (per mapping)** rewrites the destination of LAN
+traffic from the virtual IP to the corresponding mesh address:
 
 ```text
-match:  nfproto ipv6 && ip6 daddr == <virtual_ip>
+match:  iifname == <lan_interface> && nfproto ipv6 && ip6 daddr == <virtual_ip>
 action: dnat to <mesh_addr>
 ```
 
@@ -315,19 +324,48 @@ After DNAT, the kernel routes the packet through `fips0` via the
 standard routing table.
 
 **Postrouting masquerade (`oifname fips0`)** rewrites the source of
-all traffic exiting via `fips0` to the gateway's own `fips0` address:
+LAN traffic exiting via `fips0` to the gateway's own `fips0` address:
 
 ```text
-match:  oifname == "fips0"
+match:  iifname == <lan_interface> && oifname == "fips0"
 action: masquerade
 ```
 
 This rule is critical. Without it, LAN client source addresses (for
-example `fd02::20` from the LAN's RA-advertised prefix, or virtual
-addresses from another forwarding domain) would appear as the source
-on the mesh. Those addresses are meaningless to mesh nodes, so
-return traffic would be black-holed. Masquerade ensures all mesh
-traffic appears to originate from the gateway's own FIPS identity.
+example `fd02::20` from the LAN's RA-advertised prefix) would appear
+as the source on the mesh. Those addresses are meaningless to mesh
+nodes, so return traffic would be black-holed. Masquerade ensures
+LAN traffic appears on the mesh under the gateway's own FIPS
+identity.
+
+**Forward drop** keeps hosts on the gateway's other interfaces from
+sending into the mesh:
+
+```text
+chain:  forward
+match:  nfproto ipv6 && oifname == "fips0" && iifname != <lan_interface>
+        && ct state not in { established, related }
+action: drop
+```
+
+Packets of established or related flows still pass, such as replies
+to flows a mesh peer opened and flows established before the rule was
+installed; new, invalid and untracked packets do not.
+
+**Pool drop** keeps them off the virtual IPs:
+
+```text
+chain:  raw_prerouting (before connection tracking)
+match:  nfproto ipv6 && iifname != <lan_interface> && iifname != "lo"
+        && ip6 daddr in <pool>
+action: drop
+```
+
+It runs before conntrack because conntrack matches a packet to an
+existing flow whatever interface it arrives on: a host that knows a
+LAN flow's addresses and ports could otherwise send in that flow's
+original direction and have it translated and forwarded. Loopback is
+exempt so the gateway host's own connections to pool addresses work.
 
 **Postrouting SNAT (per mapping)** rewrites the source of return
 traffic from the mesh address back to the virtual IP:
@@ -509,12 +547,38 @@ half is not in play.
 
 ### Outbound
 
-- **LAN trust boundary.** The DNS listener and the virtual-IP pool
-  are reachable by every host on the LAN. Any LAN host that can
-  resolve `.fips` and route to the pool CIDR can reach mesh
-  destinations. There is no per-client authentication; access
-  restriction is a network-level concern, enforced with firewall
-  rules on the LAN interface or on the gateway host itself.
+- **LAN trust boundary.** The DNS listener and the virtual-IP pool are
+  reachable by every host on the LAN. Any LAN host that can resolve
+  `.fips` and route to the pool CIDR can reach mesh destinations.
+  There is no per-client authentication; access restriction is a
+  network-level concern, enforced with firewall rules on the LAN
+  interface or on the gateway host itself. Only traffic arriving on
+  `lan_interface` is translated onto the mesh. Traffic into `fips0`
+  from any other interface (a WAN port, a VPN interface, a container
+  or VM bridge on the gateway host) is dropped unless it is a reply,
+  and traffic to the pool from any other interface is dropped before
+  connection tracking. The rules assume the TUN interface is named
+  `fips0`. Three forms remain open, as they were before these rules. A
+  host on another interface that knows the addresses and ports of a
+  LAN flow sent straight to a mesh address (with no virtual IP) can
+  inject packets in that flow's original direction, and can forge its
+  replies, which the gateway then forwards to the LAN client. It can
+  also forge the replies of an inbound port-forward flow, sent from
+  the forward's target to the gateway's LAN address and the flow's
+  masqueraded port (usually the mesh peer's own source port):
+  connection tracking matches them as established, and the gateway
+  forwards them to the mesh peer as if from the forwarded service.
+  Dropping those would also break port forwards whose target is not on
+  the LAN interface. Flows from other interfaces that were established
+  before an upgrade to these rules continue until connection tracking
+  expires them (`conntrack -F` or a reboot cuts them at once). A
+  `lan_interface` that is a VLAN device on a bridge (for example
+  `br-lan.1` under bridge VLAN filtering) does not work when bridge
+  netfilter is active (`br_netfilter` loaded) and
+  `net.bridge.bridge-nf-pass-vlan-input-dev` is 0, its default:
+  prerouting then sees the parent bridge as the input interface while
+  forwarding sees the VLAN device, so LAN clients' DNAT never matches
+  and the pool drop discards their traffic to the pool.
 - **Identity masking.** All outbound LAN traffic appears on the
   mesh under the gateway's own FIPS identity. Mesh nodes cannot
   determine which LAN host originated a connection. This provides

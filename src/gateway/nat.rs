@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use rustables::expr::{
-    Cmp, CmpOp, HighLevelPayload, IPv6HeaderField, Immediate, Masquerade, Meta, MetaType, Nat,
-    NatType, NetworkHeaderField, Register, TCPHeaderField, TransportHeaderField, UDPHeaderField,
+    Bitwise, Cmp, CmpOp, ConnTrackState, Conntrack, ConntrackKey, Counter, HighLevelPayload,
+    IPv6HeaderField, Immediate, Masquerade, Meta, MetaType, Nat, NatType, NetworkHeaderField,
+    Register, TCPHeaderField, TransportHeaderField, UDPHeaderField, VerdictKind,
 };
 use rustables::{Batch, Chain, ChainType, Hook, HookClass, MsgType, ProtocolFamily, Rule, Table};
 
@@ -23,15 +24,27 @@ use crate::config::{PortForward, Proto};
 const TABLE_NAME: &str = "fips_gateway";
 const PREROUTING_CHAIN: &str = "prerouting";
 const POSTROUTING_CHAIN: &str = "postrouting";
+const FORWARD_CHAIN: &str = "forward";
+const RAW_CHAIN: &str = "raw_prerouting";
 
 /// The mesh TUN interface, as the kernel compares interface names: the name
 /// and its terminating NUL. Every interface match on the TUN is built from
 /// this one constant.
 const TUN_IFACE: &[u8] = b"fips0\0";
 
+/// The loopback interface, as the kernel compares interface names.
+const LOOPBACK_IFACE: &[u8] = b"lo\0";
+
 /// NAT priority constants (matching nftables standard priorities).
 const DSTNAT_PRIORITY: i32 = -100;
 const SRCNAT_PRIORITY: i32 = 100;
+
+/// The standard filter priority, for the forward chain.
+const FILTER_PRIORITY: i32 = 0;
+
+/// The raw priority, which runs before connection tracking (-200), so a
+/// packet dropped there never reaches a conntrack entry.
+const RAW_PRIORITY: i32 = -300;
 
 /// Largest value the kernel accepts for `SO_SNDBUFFORCE`.
 ///
@@ -155,7 +168,15 @@ enum NatOp {
     Table(MsgType),
     PreChain,
     PostChain,
-    /// Masquerade for traffic leaving through `fips0`.
+    ForwardChain,
+    RawChain,
+    /// Drop, before connection tracking, traffic to the pool that arrives on
+    /// neither the LAN interface nor loopback.
+    NonLanPoolDrop,
+    /// Drop traffic into `fips0` from any interface but the LAN unless it
+    /// belongs to an established or related flow.
+    NonLanForwardDrop,
+    /// Masquerade for LAN traffic leaving through `fips0`.
     FipsMasquerade,
     /// DNAT for the mapping with this virtual IP.
     Dnat(Ipv6Addr),
@@ -171,15 +192,21 @@ enum NatOp {
 ///
 /// Rebuilds the entire nftables table atomically on every change to
 /// avoid relying on kernel rule handle tracking (which rustables
-/// doesn't expose). The table is small (one masquerade + two rules
-/// per mapping) so this is cheap.
+/// doesn't expose). The table is small, so this is cheap: the masquerade
+/// of LAN traffic into `fips0`, the forward and pool drops in their filter
+/// chains, two rules per mapping (at most 1000), one rule per inbound
+/// forward, and one more masquerade when any forward is present.
 pub struct NatManager {
     table: Table,
     pre_chain: Chain,
     post_chain: Chain,
-    /// LAN interface name, used to gate the port-forward LAN-side
-    /// masquerade rule (distinct from the fips0 egress masquerade).
+    forward_chain: Chain,
+    raw_chain: Chain,
+    /// LAN interface name. Only traffic arriving on it is translated onto
+    /// the mesh, and it gates the port-forward LAN-side masquerade.
     lan_interface: String,
+    /// The virtual IP range, as its network address and prefix length.
+    pool: (Ipv6Addr, u8),
     /// Active mappings keyed by virtual IP.
     mappings: HashMap<Ipv6Addr, NatMapping>,
     /// Inbound port-forward rules.
@@ -204,7 +231,7 @@ impl NatManager {
     }
 
     /// `with_state` with the table, and every object in it, under `table_name`.
-    fn with_state_in(table_name: &str, lan_interface: String, _pool: (Ipv6Addr, u8)) -> Self {
+    fn with_state_in(table_name: &str, lan_interface: String, pool: (Ipv6Addr, u8)) -> Self {
         let table = Table::new(ProtocolFamily::Inet).with_name(table_name);
         let pre_chain = Chain::new(&table)
             .with_name(PREROUTING_CHAIN)
@@ -214,12 +241,23 @@ impl NatManager {
             .with_name(POSTROUTING_CHAIN)
             .with_type(ChainType::Nat)
             .with_hook(Hook::new(HookClass::PostRouting, SRCNAT_PRIORITY));
+        let forward_chain = Chain::new(&table)
+            .with_name(FORWARD_CHAIN)
+            .with_type(ChainType::Filter)
+            .with_hook(Hook::new(HookClass::Forward, FILTER_PRIORITY));
+        let raw_chain = Chain::new(&table)
+            .with_name(RAW_CHAIN)
+            .with_type(ChainType::Filter)
+            .with_hook(Hook::new(HookClass::PreRouting, RAW_PRIORITY));
 
         Self {
             table,
             pre_chain,
             post_chain,
+            forward_chain,
+            raw_chain,
             lan_interface,
+            pool,
             mappings: HashMap::new(),
             port_forwards: Vec::new(),
             rebuild_pending: false,
@@ -228,20 +266,23 @@ impl NatManager {
         }
     }
 
-    /// Create the nftables table and NAT chains.
+    /// Create the nftables table, its NAT chains and its filter chains.
     ///
-    /// Installs a masquerade rule for traffic exiting via `fips0` so that
-    /// LAN client source addresses are rewritten to the gateway's mesh
+    /// Installs a masquerade rule for LAN traffic exiting via `fips0` so
+    /// that LAN client source addresses are rewritten to the gateway's mesh
     /// address, allowing return traffic to route back through the mesh.
+    /// Traffic from any other interface is not translated: the forward chain
+    /// drops it on its way into `fips0` unless it is a reply, and the raw
+    /// chain drops it before connection tracking when it is addressed to the
+    /// pool.
     ///
-    /// `lan_interface` is the gateway's LAN-facing interface name,
-    /// needed by the port-forward LAN-side masquerade rule. `pool` is the
-    /// virtual IP range as its network address and prefix length.
+    /// `lan_interface` is the gateway's LAN-facing interface name. `pool` is
+    /// the virtual IP range as its network address and prefix length.
     pub fn new(lan_interface: String, pool: (Ipv6Addr, u8)) -> Result<Self, NatError> {
         let mgr = Self::with_state(lan_interface, pool);
         mgr.rebuild()?;
 
-        info!("Created nftables table '{TABLE_NAME}' with NAT chains and fips0 masquerade");
+        info!("Created nftables table '{TABLE_NAME}'");
         Ok(mgr)
     }
 
@@ -366,6 +407,10 @@ impl NatManager {
             NatOp::Table(MsgType::Add),
             NatOp::PreChain,
             NatOp::PostChain,
+            NatOp::ForwardChain,
+            NatOp::RawChain,
+            NatOp::NonLanPoolDrop,
+            NatOp::NonLanForwardDrop,
             NatOp::FipsMasquerade,
         ];
 
@@ -425,6 +470,8 @@ impl NatManager {
         match op {
             NatOp::PreChain => Some(&self.pre_chain),
             NatOp::PostChain => Some(&self.post_chain),
+            NatOp::ForwardChain => Some(&self.forward_chain),
+            NatOp::RawChain => Some(&self.raw_chain),
             _ => None,
         }
     }
@@ -432,13 +479,66 @@ impl NatManager {
     /// The rule an op adds, or `None` for an op that adds no rule.
     fn rule_for(&self, op: NatOp) -> Result<Option<Rule>, NatError> {
         match op {
-            NatOp::Table(_) | NatOp::PreChain | NatOp::PostChain => Ok(None),
+            NatOp::Table(_)
+            | NatOp::PreChain
+            | NatOp::PostChain
+            | NatOp::ForwardChain
+            | NatOp::RawChain => Ok(None),
+            NatOp::NonLanPoolDrop => {
+                // Before conntrack the packet still carries the virtual IP as
+                // its destination. Dropping it here keeps a host on another
+                // interface from joining a LAN flow by sending in its original
+                // direction, which conntrack would translate and forward
+                // whatever interface it arrived on. Loopback is exempt, so the
+                // gateway's own connections to a pool address still work.
+                let (network, prefix) = self.pool;
+                let mask = u128::MAX << (128 - u32::from(prefix.min(128)));
+                let network = Ipv6Addr::from(u128::from(network) & mask);
+                let mask = mask.to_be_bytes();
+                let rule = Rule::new(&self.raw_chain)?
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Neq, self.lan_iface_bytes()))
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Neq, LOOPBACK_IFACE.to_vec()))
+                    .with_expr(
+                        HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Daddr))
+                            .build(),
+                    )
+                    .with_expr(Bitwise::new(mask, [0u8; 16])?)
+                    .with_expr(Cmp::new(CmpOp::Eq, network.octets()))
+                    .with_expr(Counter::default())
+                    .with_expr(Immediate::new_verdict(VerdictKind::Drop));
+                Ok(Some(rule))
+            }
+            NatOp::NonLanForwardDrop => {
+                // "Drop unless established or related": new, invalid and
+                // untracked packets from other interfaces never reach the
+                // mesh under the gateway's identity.
+                let allowed = (ConnTrackState::ESTABLISHED | ConnTrackState::RELATED).bits();
+                let rule = Rule::new(&self.forward_chain)?
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(Meta::new(MetaType::OifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Neq, self.lan_iface_bytes()))
+                    .with_expr(Conntrack::new(ConntrackKey::State))
+                    .with_expr(Bitwise::new(allowed.to_ne_bytes(), [0u8; 4])?)
+                    .with_expr(Cmp::new(CmpOp::Eq, [0u8; 4]))
+                    .with_expr(Counter::default())
+                    .with_expr(Immediate::new_verdict(VerdictKind::Drop));
+                Ok(Some(rule))
+            }
             NatOp::FipsMasquerade => {
-                // Rewrite the source address of traffic leaving fips0.
+                // Rewrite the source address of LAN traffic leaving fips0.
                 // Without this, LAN clients' source addresses (e.g.
                 // fd02::20) are not routable on the mesh, so return
                 // traffic would be black-holed.
                 let rule = Rule::new(&self.post_chain)?
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.lan_iface_bytes()))
                     .with_expr(Meta::new(MetaType::OifName))
                     .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
                     .with_expr(Masquerade::default());
@@ -447,6 +547,8 @@ impl NatManager {
             NatOp::Dnat(virtual_ip) => {
                 let mapping = self.mapping(virtual_ip)?;
                 let rule = Rule::new(&self.pre_chain)?
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.lan_iface_bytes()))
                     .with_expr(Meta::new(MetaType::NfProto))
                     .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                     .with_expr(
@@ -528,8 +630,7 @@ impl NatManager {
                 Ok(Some(rule))
             }
             NatOp::LanMasquerade => {
-                let mut lan_iface = self.lan_interface.clone().into_bytes();
-                lan_iface.push(0);
+                let lan_iface = self.lan_iface_bytes();
                 let rule = Rule::new(&self.post_chain)?
                     .with_expr(Meta::new(MetaType::IifName))
                     .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
@@ -541,6 +642,13 @@ impl NatManager {
                 Ok(Some(rule))
             }
         }
+    }
+
+    /// The LAN interface name as the kernel compares it, with its NUL.
+    fn lan_iface_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.lan_interface.clone().into_bytes();
+        bytes.push(0);
+        bytes
     }
 
     /// The mapping an op names, or the error a caller can report.
@@ -1357,6 +1465,30 @@ mod tests {
     }
 
     #[test]
+    fn the_pool_drop_matches_a_pool_configured_with_host_bits_set() {
+        let pool = crate::gateway::pool::VirtualIpPool::with_limits("fd01::1/112", 60, 60, 1, 1, 1)
+            .expect("the pool accepts the CIDR");
+        for network in [pool.network(), ("fd01::1".parse().unwrap(), 112)] {
+            let mgr = NatManager::with_state("br-lan".to_string(), network);
+            let rule = mgr
+                .rule_for(NatOp::NonLanPoolDrop)
+                .unwrap()
+                .expect("the pool drop is emitted");
+            let prefix = Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, 0);
+            assert!(
+                has_in_order(
+                    &rule,
+                    &[ExpressionVariant::from(Cmp::new(
+                        CmpOp::Eq,
+                        prefix.octets()
+                    ))]
+                ),
+                "the pool drop given {network:?} does not compare the masked destination with fd01::"
+            );
+        }
+    }
+
+    #[test]
     fn failed_port_forward_rebuild_remains_pending() {
         let mut mgr = manager_with_mappings(1);
         mgr.pre_chain = Chain::new(&mgr.table);
@@ -1673,6 +1805,144 @@ mod tests {
                 &[from_tun[0].clone(), from_tun[1].clone(), to_lan[0].clone()]
             ),
             "the LAN masquerade matches iifname fips0 and oifname br-lan"
+        );
+    }
+
+    /// The `ip6 daddr` load.
+    fn daddr() -> ExpressionVariant {
+        ExpressionVariant::from(
+            HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Daddr)).build(),
+        )
+    }
+
+    /// A verdict that drops the packet.
+    fn drop_verdict() -> ExpressionVariant {
+        ExpressionVariant::from(Immediate::new_verdict(rustables::expr::VerdictKind::Drop))
+    }
+
+    /// Whether `rule` is a mapping DNAT, matching a virtual IP of
+    /// `manager_with_mappings(count)` as its destination.
+    fn is_mapping_dnat(rule: &Rule, count: u16) -> bool {
+        let dnat = expressions(rule).iter().any(|e| {
+            matches!(e, ExpressionVariant::Nat(nat)
+                if nat.get_nat_type() == Some(&NatType::DNat) && nat.get_port_register().is_none())
+        });
+        dnat && (1..=count).any(|i| {
+            has_sequence(
+                rule,
+                &[
+                    daddr(),
+                    ExpressionVariant::from(Cmp::new(CmpOp::Eq, vip(i).octets())),
+                ],
+            )
+        })
+    }
+
+    #[test]
+    fn every_mapping_dnat_matches_only_the_lan_interface() {
+        let mgr = manager_with_mappings(2);
+        let rules = emitted_rules(&mgr);
+        let dnats: Vec<&Rule> = rules.iter().filter(|r| is_mapping_dnat(r, 2)).collect();
+        assert_eq!(dnats.len(), 2, "one DNAT per mapping must be found first");
+
+        let from_lan = meta_cmp(MetaType::IifName, CmpOp::Eq, b"br-lan\0");
+        for rule in dnats {
+            assert!(
+                has_sequence(rule, &from_lan),
+                "a mapping DNAT does not match iifname br-lan, so a host on any \
+                 interface of the gateway can use the mapping: {:?}",
+                expressions(rule)
+            );
+        }
+    }
+
+    #[test]
+    fn the_fips0_masquerade_matches_only_the_lan_interface() {
+        let mgr = manager_with_mappings(2);
+        let to_tun = meta_cmp(MetaType::OifName, CmpOp::Eq, TUN_IFACE);
+        let rules = emitted_rules(&mgr);
+        let masquerades: Vec<&Rule> = rules
+            .iter()
+            .filter(|rule| {
+                has_sequence(rule, &to_tun)
+                    && expressions(rule)
+                        .iter()
+                        .any(|e| matches!(e, ExpressionVariant::Masquerade(_)))
+            })
+            .collect();
+        assert_eq!(masquerades.len(), 1, "one fips0 masquerade");
+        assert!(
+            has_sequence(
+                masquerades[0],
+                &meta_cmp(MetaType::IifName, CmpOp::Eq, b"br-lan\0")
+            ),
+            "the fips0 masquerade does not match iifname br-lan, so traffic from \
+             any interface leaves on the mesh under the gateway's identity: {:?}",
+            expressions(masquerades[0])
+        );
+    }
+
+    #[test]
+    fn new_flows_into_fips0_from_other_interfaces_are_dropped() {
+        let mgr = manager_with_mappings(2);
+        let mask = (ConnTrackState::ESTABLISHED | ConnTrackState::RELATED)
+            .bits()
+            .to_ne_bytes();
+        let [oif, oif_cmp] = meta_cmp(MetaType::OifName, CmpOp::Eq, TUN_IFACE);
+        let [iif, iif_cmp] = meta_cmp(MetaType::IifName, CmpOp::Neq, b"br-lan\0");
+        let expected = [
+            oif,
+            oif_cmp,
+            iif,
+            iif_cmp,
+            ExpressionVariant::from(Conntrack::new(ConntrackKey::State)),
+            ExpressionVariant::from(Bitwise::new(mask, [0u8; 4]).expect("equal lengths")),
+            ExpressionVariant::from(Cmp::new(CmpOp::Eq, [0u8; 4])),
+            drop_verdict(),
+        ];
+        let rules = emitted_rules(&mgr);
+        assert!(
+            rules.iter().any(|rule| has_in_order(rule, &expected)),
+            "no rule drops traffic into fips0 from another interface unless it is \
+             established or related"
+        );
+    }
+
+    #[test]
+    fn traffic_to_the_pool_from_other_interfaces_is_dropped_before_conntrack() {
+        let mgr = manager_with_mappings(2);
+        let chains = emitted_chains(&mgr);
+        let raw = chains
+            .iter()
+            .find(|c| c.get_name().map(String::as_str) == Some("raw_prerouting"))
+            .expect("a raw_prerouting chain is emitted");
+        assert_eq!(
+            raw.get_hook().cloned(),
+            Some(Hook::new(HookClass::PreRouting, -300)),
+            "the pool drop must run before conntrack, at raw priority"
+        );
+
+        let (network, prefix) = TEST_POOL;
+        let mask = (u128::MAX << (128 - u32::from(prefix))).to_be_bytes();
+        let [iif, lan_cmp] = meta_cmp(MetaType::IifName, CmpOp::Neq, b"br-lan\0");
+        let [_, lo_cmp] = meta_cmp(MetaType::IifName, CmpOp::Neq, b"lo\0");
+        let expected = [
+            iif.clone(),
+            lan_cmp,
+            iif,
+            lo_cmp,
+            daddr(),
+            ExpressionVariant::from(Bitwise::new(mask, [0u8; 16]).expect("equal lengths")),
+            ExpressionVariant::from(Cmp::new(CmpOp::Eq, network.octets())),
+            drop_verdict(),
+        ];
+        let rules = emitted_rules(&mgr);
+        assert!(
+            rules.iter().any(|rule| {
+                rule.get_chain().map(String::as_str) == Some("raw_prerouting")
+                    && has_in_order(rule, &expected)
+            }),
+            "no raw_prerouting rule drops traffic to the pool from other interfaces"
         );
     }
 
