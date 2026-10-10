@@ -34,9 +34,11 @@ nsec_b="$(echo "$keys_b" | awk -F= '/^nsec=/{print $2}')"
 npub_b="$(echo "$keys_b" | awk -F= '/^npub=/{print $2}')"
 
 # The two lab bridges. ci-local.sh claims a free /24 for each per run and
-# exports these; unset renders the addresses the lab has always used, so a
-# bare invocation and the GitHub matrix are unaffected.
-wan="${NAT_WAN_PREFIX:-172.31.254}"
+# exports these; unset renders the base compose file's default addresses, so
+# a bare invocation and the GitHub matrix need no claim. The wan default is in
+# 198.18.0.0/15, not a private range, because it stands in for the public
+# internet.
+wan="${NAT_WAN_PREFIX:-198.18.254}"
 lan="${NAT_LAN_PREFIX:-172.31.10}"
 
 relay_addr="ws://${wan}.30:7777"

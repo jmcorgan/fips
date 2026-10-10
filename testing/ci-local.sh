@@ -889,17 +889,25 @@ run_firewall() {
 
 # ── NAT lab: per-run network claim ─────────────────────────────────────────
 #
-# The lab's two bridges pinned 172.31.254.0/24 (wan) and 172.31.10.0/24
-# (shared-lan), so two concurrent runs asked the daemon for the same address
-# space and the second died with `Pool overlaps`. Claim a free /24 for each
-# instead and let docker's own create be the atomic arbiter, exactly as
-# claim_gateway_lan6 and sidecar's alloc_network do. The run-id-derived offset
-# this task considered earlier stays rejected: it makes a collision unlikely
-# rather than impossible, and a collision is the failure being removed.
+# The lab's two bridges used to pin one fixed /24 each (wan and shared-lan),
+# so two concurrent runs asked the daemon for the same address space and the
+# second died with `Pool overlaps`. Claim a free /24 for each instead and let
+# docker's own create be the atomic arbiter, exactly as claim_gateway_lan6 and
+# sidecar's alloc_network do. The run-id-derived offset this task considered
+# earlier stays rejected: it makes a collision unlikely rather than
+# impossible, and a collision is the failure being removed.
 #
 # 10.41.0.0/16 is unclaimed in-tree, sits below this host's docker pool
 # (10.128.0.0/9, per /etc/docker/daemon.json), and is also outside docker's
 # stock 172.17-31 / 192.168 default, so the choice holds either way.
+#
+# The wan network stands in for the public internet, so it is claimed from
+# 198.18.0.0/15 (the RFC 2544 benchmarking range) instead: the daemon treats
+# an RFC 1918 address reported by STUN as a private one and punches it only
+# when one of its own interface prefixes also holds it, which a node behind
+# the lab's NAT never has. A reflexive address in 198.18.0.0/15 is public to
+# that check, as an internet address is. The shared-lan network stays in
+# 10.41.0.0/16, because the lan scenario needs a private shared LAN.
 #
 # The claim lives here rather than in the suite scripts because
 # .github/workflows/ci.yml invokes nat-test.sh, nostr-relay-test.sh and
@@ -911,6 +919,7 @@ run_firewall() {
 # labels are stamped so ci-cleanup.sh's label sweep can recover the networks
 # when a run is SIGKILLed, which no inline removal can cover.
 CI_NAT_NET_BASE="10.41"
+CI_NAT_WAN_NET_BASE="198.18"
 CI_NAT_NET_CANDIDATES=256
 CI_NAT_CLAIMED_PREFIX=""
 
@@ -918,14 +927,14 @@ CI_NAT_CLAIMED_PREFIX=""
 # advancing on. Any other failure is real, and burning through 256 candidates
 # would bury the reason.
 ci_claim_nat_net() {
-    local net="$1" i err
+    local net="$1" base="$2" i err
     CI_NAT_CLAIMED_PREFIX=""
     for (( i = 0; i < CI_NAT_NET_CANDIDATES; i++ )); do
         if err=$(docker network create \
-                --subnet "${CI_NAT_NET_BASE}.${i}.0/24" \
+                --subnet "${base}.${i}.0/24" \
                 --label "$CI_LABEL" --label "$CI_LABEL_RUN" \
                 "$net" 2>&1); then
-            CI_NAT_CLAIMED_PREFIX="${CI_NAT_NET_BASE}.${i}"
+            CI_NAT_CLAIMED_PREFIX="${base}.${i}"
             info "[nat] Claimed $net on ${CI_NAT_CLAIMED_PREFIX}.0/24"
             return 0
         fi
@@ -934,7 +943,7 @@ ci_claim_nat_net() {
             *) fail "[nat] docker network create: $err"; return 1 ;;
         esac
     done
-    fail "[nat] no free /24 in ${CI_NAT_NET_BASE}.0.0/16 after ${CI_NAT_NET_CANDIDATES} attempts"
+    fail "[nat] no free /24 in ${base}.0.0/16 after ${CI_NAT_NET_CANDIDATES} attempts"
     return 1
 }
 
@@ -946,9 +955,9 @@ ci_claim_nat_networks() {
     export FIPS_NAT_WAN_NET="fips-nat-wan${FIPS_CI_NAME_SUFFIX:-}"
     export FIPS_NAT_LAN_NET="fips-nat-shared-lan${FIPS_CI_NAME_SUFFIX:-}"
 
-    ci_claim_nat_net "$FIPS_NAT_WAN_NET" || return 1
+    ci_claim_nat_net "$FIPS_NAT_WAN_NET" "$CI_NAT_WAN_NET_BASE" || return 1
     local wan="$CI_NAT_CLAIMED_PREFIX"
-    if ! ci_claim_nat_net "$FIPS_NAT_LAN_NET"; then
+    if ! ci_claim_nat_net "$FIPS_NAT_LAN_NET" "$CI_NAT_NET_BASE"; then
         docker network rm "$FIPS_NAT_WAN_NET" >/dev/null 2>&1 || true
         return 1
     fi

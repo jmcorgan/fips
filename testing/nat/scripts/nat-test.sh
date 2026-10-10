@@ -17,12 +17,15 @@ IMAGE_LIB="$ROOT_DIR/testing/lib/image-build.sh"
 CONFIG_DIR="$NAT_DIR/generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 
 # The two lab bridges. ci-local.sh claims a free /24 for each per run and
-# exports these; unset renders the addresses the lab has always used, so the
-# GitHub matrix, mesh-lab/run-loop.sh and a bare run are unaffected. The
+# exports these; unset renders the base compose file's default addresses, so
+# the GitHub matrix, mesh-lab/run-loop.sh and a bare run need no claim. The
+# wan default is in 198.18.0.0/15, not a private range, because it stands in
+# for the public internet and the daemon refuses to punch a private reflexive
+# address that none of its own interface prefixes holds. The
 # router-side LANs (172.31.1.x / 172.31.2.x) are deliberately NOT parameterized:
 # they live inside per-container network namespaces, never become docker
 # networks, and so cannot collide across runs.
-NAT_WAN="${NAT_WAN_PREFIX:-172.31.254}"
+NAT_WAN="${NAT_WAN_PREFIX:-198.18.254}"
 NAT_LAN="${NAT_LAN_PREFIX:-172.31.10}"
 
 SCENARIO="${1:-all}"

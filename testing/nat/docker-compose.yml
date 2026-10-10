@@ -5,7 +5,7 @@ networks:
       - "com.corganlabs.fips-ci=1"
     ipam:
       config:
-        - subnet: ${NAT_WAN_PREFIX:-172.31.254}.0/24
+        - subnet: ${NAT_WAN_PREFIX:-198.18.254}.0/24
   shared-lan:
     driver: bridge
     labels:
@@ -62,7 +62,7 @@ services:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
     networks:
       wan:
-        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.30
+        ipv4_address: ${NAT_WAN_PREFIX:-198.18.254}.30
       shared-lan:
         ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.30
 
@@ -73,7 +73,7 @@ services:
     restart: "no"
     networks:
       wan:
-        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.40
+        ipv4_address: ${NAT_WAN_PREFIX:-198.18.254}.40
       shared-lan:
         ipv4_address: ${NAT_LAN_PREFIX:-172.31.10}.40
 
@@ -94,11 +94,11 @@ services:
       - WAN_IF=eth0
       - LAN_HOST=172.31.1.10
       - LAN_SUBNET=172.31.1.0/24
-      - WAN_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
-      - WAN_GATEWAY=${NAT_WAN_PREFIX:-172.31.254}.1
+      - WAN_SUBNET=${NAT_WAN_PREFIX:-198.18.254}.0/24
+      - WAN_GATEWAY=${NAT_WAN_PREFIX:-198.18.254}.1
     networks:
       wan:
-        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.10
+        ipv4_address: ${NAT_WAN_PREFIX:-198.18.254}.10
 
   nat-b:
     build:
@@ -117,11 +117,11 @@ services:
       - WAN_IF=eth0
       - LAN_HOST=172.31.2.10
       - LAN_SUBNET=172.31.2.0/24
-      - WAN_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
-      - WAN_GATEWAY=${NAT_WAN_PREFIX:-172.31.254}.1
+      - WAN_SUBNET=${NAT_WAN_PREFIX:-198.18.254}.0/24
+      - WAN_GATEWAY=${NAT_WAN_PREFIX:-198.18.254}.1
     networks:
       wan:
-        ipv4_address: ${NAT_WAN_PREFIX:-172.31.254}.11
+        ipv4_address: ${NAT_WAN_PREFIX:-198.18.254}.11
 
   cone-a:
     <<: *fips-common
@@ -137,11 +137,11 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-198.18.254}.0/24
       - ROUTE_VIA=172.31.1.254
-      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-198.18.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-198.18.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -163,11 +163,11 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-198.18.254}.0/24
       - ROUTE_VIA=172.31.2.254
-      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-198.18.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-198.18.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -189,11 +189,11 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-198.18.254}.0/24
       - ROUTE_VIA=172.31.1.254
-      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-198.18.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-198.18.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
@@ -215,11 +215,11 @@ services:
     environment:
       - RUST_LOG=info,fips::nostr=debug,fips::node::lifecycle=debug
       - DATA_IF=eth0
-      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-172.31.254}.0/24
+      - ROUTE_SUBNET=${NAT_WAN_PREFIX:-198.18.254}.0/24
       - ROUTE_VIA=172.31.2.254
-      - RELAY_HOST=${NAT_WAN_PREFIX:-172.31.254}.30
+      - RELAY_HOST=${NAT_WAN_PREFIX:-198.18.254}.30
       - RELAY_PORT=7777
-      - STUN_HOST=${NAT_WAN_PREFIX:-172.31.254}.40
+      - STUN_HOST=${NAT_WAN_PREFIX:-198.18.254}.40
       - STUN_PORT=3478
     volumes:
       - ../docker/resolv.conf:/etc/resolv.conf:ro
