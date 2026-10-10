@@ -11,12 +11,23 @@
 //! address, so a caller that gates candidates with it refuses every one.
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tracing::{debug, warn};
 
 /// The interface prefixes of this node, as `(address, prefix length)` pairs.
 #[derive(Clone, Debug, Default)]
 pub struct OnLinkPrefixes {
     entries: Vec<(IpAddr, u8)>,
+    /// Pairs `from_pairs` dropped for a zero prefix length.
+    discarded: usize,
 }
+
+/// Set once the first failed interface read has been logged at warn level.
+static READ_FAILED_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Set once the first unusable interface read has been logged at warn level.
+static READ_SUSPECT_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Map an IPv4-mapped IPv6 address to its IPv4 form, so one host is never
 /// judged twice under two spellings.
@@ -48,15 +59,87 @@ impl OnLinkPrefixes {
     /// is what a platform netmask the reader could not decode turns into.
     /// Lengths beyond the family's width are clamped to it.
     pub fn from_pairs(pairs: impl IntoIterator<Item = (IpAddr, u8)>) -> Self {
+        let mut discarded = 0;
         let entries = pairs
             .into_iter()
             .filter_map(|(ip, len)| {
                 let ip = canonical(ip);
                 let width = if ip.is_ipv4() { 32 } else { 128 };
-                (len != 0).then_some((ip, len.min(width)))
+                if len == 0 {
+                    discarded += 1;
+                    return None;
+                }
+                Some((ip, len.min(width)))
             })
             .collect();
-        Self { entries }
+        Self { entries, discarded }
+    }
+
+    /// Read this node's interface prefixes from the system.
+    ///
+    /// Loopback interfaces are skipped, and so are interfaces the platform
+    /// reports as down (`Down`, `NotPresent` and `LowerLayerDown`, which only
+    /// Windows reports); any other status counts, since the POSIX platforms
+    /// report only `Up` or `Unknown`. A failed read returns an empty set,
+    /// which refuses every candidate gated with it.
+    ///
+    /// Read at each use and never cached, because interfaces change under
+    /// DHCP and VPNs. The cost is one `getifaddrs` call, a netlink dump on
+    /// Linux.
+    pub fn read_system() -> Self {
+        let interfaces = match if_addrs::get_if_addrs() {
+            Ok(interfaces) => interfaces,
+            Err(err) => {
+                if !READ_FAILED_WARNED.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        error = %err,
+                        "interface read failed; private traversal candidates and off-link mDNS targets will be refused"
+                    );
+                } else {
+                    debug!(error = %err, "interface read failed");
+                }
+                return Self::default();
+            }
+        };
+        let pairs: Vec<(IpAddr, u8)> = interfaces
+            .iter()
+            .filter(|iface| !iface.is_loopback())
+            .filter(|iface| {
+                !matches!(
+                    iface.oper_status,
+                    if_addrs::IfOperStatus::Down
+                        | if_addrs::IfOperStatus::NotPresent
+                        | if_addrs::IfOperStatus::LowerLayerDown
+                )
+            })
+            .map(|iface| match &iface.addr {
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+            })
+            .collect();
+        let considered = pairs.len();
+        let set = Self::from_pairs(pairs);
+        if read_suspect(considered, &set) {
+            if !READ_SUSPECT_WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    considered,
+                    discarded = set.discarded,
+                    "interface prefixes unreadable; private traversal candidates and off-link mDNS targets will be refused"
+                );
+            } else {
+                debug!(
+                    considered,
+                    discarded = set.discarded,
+                    "interface prefixes unreadable"
+                );
+            }
+        }
+        set
+    }
+
+    /// How many pairs were dropped for a zero prefix length.
+    pub fn discarded(&self) -> usize {
+        self.discarded
     }
 
     /// Whether `ip` lies inside any prefix of the set.
@@ -79,6 +162,13 @@ impl OnLinkPrefixes {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Whether an interface read produced a set that cannot be trusted: some
+/// entry was discarded for a zero prefix length, or `considered` interface
+/// addresses passed the filters and none of them survived.
+pub fn read_suspect(considered: usize, set: &OnLinkPrefixes) -> bool {
+    set.discarded > 0 || (considered > 0 && set.is_empty())
 }
 
 #[cfg(test)]
@@ -152,5 +242,55 @@ mod tests {
         assert!(!s.share_link(ip("192.168.1.5"), ip("192.168.2.5")));
         assert!(OnLinkPrefixes::default().is_empty());
         assert!(!OnLinkPrefixes::default().share_link(ip("10.0.0.1"), ip("10.0.0.2")));
+    }
+
+    #[test]
+    fn a_discarded_zero_length_prefix_or_an_empty_read_is_reported() {
+        let partly = set(&[("192.168.1.1", 0), ("10.0.0.1", 8)]);
+        assert_eq!(partly.discarded(), 1);
+        assert!(read_suspect(2, &partly));
+        assert!(read_suspect(2, &OnLinkPrefixes::default()));
+        assert!(!read_suspect(0, &OnLinkPrefixes::default()));
+        let healthy = set(&[("10.0.0.1", 8)]);
+        assert!(!read_suspect(1, &healthy));
+    }
+
+    #[test]
+    fn the_system_read_holds_every_up_non_loopback_ipv4_interface_prefix() {
+        let interfaces = if_addrs::get_if_addrs().expect("getifaddrs failed");
+        let up_v4: Vec<(std::net::Ipv4Addr, u8)> = interfaces
+            .iter()
+            .filter(|iface| !iface.is_loopback())
+            .filter(|iface| {
+                !matches!(
+                    iface.oper_status,
+                    if_addrs::IfOperStatus::Down
+                        | if_addrs::IfOperStatus::NotPresent
+                        | if_addrs::IfOperStatus::LowerLayerDown
+                )
+            })
+            .filter_map(|iface| match &iface.addr {
+                if_addrs::IfAddr::V4(v4) => Some((v4.ip, v4.prefixlen)),
+                if_addrs::IfAddr::V6(_) => None,
+            })
+            .collect();
+        let read = OnLinkPrefixes::read_system();
+        assert!(!read.contains(ip("127.0.0.1")));
+        if up_v4.is_empty() {
+            // A loopback-only host has nothing to compare.
+            return;
+        }
+        assert!(
+            up_v4.iter().all(|(_, len)| *len > 0),
+            "an interface reported prefix length 0: {up_v4:?}"
+        );
+        assert!(!read.is_empty());
+        assert_eq!(read.discarded(), 0);
+        for (addr, _) in &up_v4 {
+            assert!(
+                read.contains(IpAddr::V4(*addr)),
+                "{addr} missing from the read"
+            );
+        }
     }
 }

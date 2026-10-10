@@ -29,9 +29,10 @@ pub(super) enum PunchStrategy {
 /// The candidate generator (`local_addresses_from_port`) tops out near eight
 /// entries on a dual-stack host with four interfaces and is typically three or
 /// four, and an honest peer contributes one reflexive address plus the few
-/// candidates that share a /24 with us. Eight therefore covers every pairing a
-/// real session needs while bounding one accepted signal to 8 x 50 rounds =
-/// 400 packets, about 21 KB on the wire at 52 bytes each for IPv4.
+/// candidates that share an interface prefix with us. Eight therefore covers
+/// every pairing a real session needs while bounding one accepted signal to
+/// 8 x 50 rounds = 400 packets, about 21 KB on the wire at 52 bytes each for
+/// IPv4.
 const MAX_PUNCH_TARGETS: usize = 8;
 
 /// Upper bound on how many candidates one peer's signal may have vetted.
@@ -101,16 +102,14 @@ pub(super) struct PlannedPunchTarget {
     pub(super) remote_ip: IpAddr,
 }
 
-/// Whether a candidate's address text parses as a private or unique-local
-/// address.
-fn is_private_address(candidate: &TraversalAddress) -> bool {
-    candidate.ip.parse::<IpAddr>().is_ok_and(is_private_ip)
-}
-
-fn same_subnet_24(left: &TraversalAddress, right: &TraversalAddress) -> bool {
-    let left_parts = left.ip.split('.').collect::<Vec<_>>();
-    let right_parts = right.ip.split('.').collect::<Vec<_>>();
-    left_parts.len() == 4 && right_parts.len() == 4 && left_parts[..3] == right_parts[..3]
+/// One of our own traversal addresses, parsed and with the IPv4-mapped form
+/// taken as IPv4, or `None` when the text does not parse.
+fn own_ip(address: &TraversalAddress) -> Option<IpAddr> {
+    address
+        .ip
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| ip.to_canonical())
 }
 
 /// Addresses that are never a plausible destination for a punch packet, for
@@ -177,7 +176,9 @@ pub(super) enum RejectClass {
     /// The address is in a range we never punch (loopback, link-local,
     /// unspecified, multicast, broadcast or CGNAT).
     NeverRoutable,
-    /// A private address that shares no /24 with any of our own addresses.
+    /// A private address outside every interface prefix that also holds one
+    /// of our own addresses, or any unique-local address, which the IPv4
+    /// traversal socket cannot reach.
     OffSubnet,
 }
 
@@ -210,7 +211,8 @@ pub(super) struct PunchTargetTally {
     pub(super) zeroport: usize,
     /// Candidates in a never-routable range.
     pub(super) unroutable: usize,
-    /// Private candidates sharing no /24 with us.
+    /// Private candidates refused as off-subnet: outside every interface
+    /// prefix that holds one of our own addresses, or unique-local.
     pub(super) offsubnet: usize,
     /// Planned targets discarded by the target cap.
     pub(super) capped: usize,
@@ -236,20 +238,40 @@ impl PunchTargetTally {
     /// refusal is the ordinary dual-homed shape and is not suspicious.
     ///
     /// A refused reflexive address counts unless the class is `OffSubnet`.
-    /// The /24 gate now applies to a peer's reflexive address whenever our own
-    /// reflexive address is public, so an off-subnet refusal of it is what an
-    /// honest peer behind a LAN STUN server produces against a node with a
-    /// public one. The other three classes still have no honest producer.
+    /// The private-address gate applies to a peer's reflexive address too, so
+    /// an off-subnet refusal of it is what an honest peer behind a STUN
+    /// server inside its own LAN produces against a node on another network.
+    /// The other three classes still have no honest producer.
+    ///
+    /// For the same reason an offer whose every candidate, the reflexive
+    /// address included, was refused as off-subnet is not counted as entirely
+    /// refused: two such peers on different private networks produce it on
+    /// every attempt.
     ///
     /// A candidate list longer than `MAX_OFFERED_CANDIDATES` counts too: the
     /// generator tops out near eight, so nothing honest reaches the bound.
     pub(super) fn suspicious(&self) -> bool {
         self.unroutable + self.zeroport + self.unparsable + self.capped > 0
             || self.over_offered > 0
-            || (self.offered > 0 && self.admitted == 0)
+            || (self.offered > 0 && self.admitted == 0 && !self.refused_only_off_subnet())
             || self
                 .reflexive
                 .is_some_and(|label| label != RejectClass::OffSubnet.label())
+    }
+
+    /// Whether this planning call refused anything worth a record: fewer
+    /// targets planned than candidates offered, or targets lost to the cap,
+    /// or candidates past the offer limit. `admitted` counts planned
+    /// pairings, not candidates, so a refusal can hide behind them.
+    pub(super) fn has_refusals(&self) -> bool {
+        self.offered > self.admitted || self.capped > 0 || self.over_offered > 0
+    }
+
+    /// Whether every candidate the peer offered, its reflexive address
+    /// included, was refused as off-subnet.
+    fn refused_only_off_subnet(&self) -> bool {
+        self.offsubnet + usize::from(self.reflexive == Some(RejectClass::OffSubnet.label()))
+            == self.offered
     }
 
     /// Record one refused candidate against its class, keeping the first
@@ -282,21 +304,69 @@ impl PunchTargetTally {
     }
 }
 
+/// The minimum spacing of the suspicious-offer warning.
+const REFUSAL_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Limits the suspicious-offer warning to one a minute.
+///
+/// The offer semaphore bounds how many offers run at once, not how often
+/// they arrive, so a stranger sending refused offers would otherwise get a
+/// warning per offer. The limit is per process; every refused offer is still
+/// logged at debug level.
+#[derive(Debug, Default)]
+pub(super) struct RefusalWarnGate {
+    last_warn: Option<Instant>,
+    suppressed: u64,
+}
+
+impl RefusalWarnGate {
+    /// Whether a suspicious offer seen at `now` should be the warning.
+    ///
+    /// Returns `Some(suppressed)`, the number of suspicious offers logged at
+    /// debug level since the last warning, when none has been given in the
+    /// last minute; otherwise counts this one and returns `None`. `now` is
+    /// monotonic, so a wall-clock step neither silences nor repeats the line.
+    pub(super) fn admit(&mut self, now: Instant) -> Option<u64> {
+        let due = self
+            .last_warn
+            .is_none_or(|last| now.saturating_duration_since(last) >= REFUSAL_WARN_INTERVAL);
+        if !due {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.last_warn = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+
+    /// The warning decision for one planning call's tally.
+    ///
+    /// Only a tally that is both logged and suspicious is put to the gate,
+    /// so an offer that logs nothing cannot spend the minute's warning.
+    pub(super) fn decide(&mut self, tally: &PunchTargetTally, now: Instant) -> Option<u64> {
+        if tally.has_refusals() && tally.suspicious() {
+            self.admit(now)
+        } else {
+            None
+        }
+    }
+}
+
 /// Parse and vet one peer-supplied traversal candidate.
 ///
 /// Returns the parsed address, or the class of the check that refused it.
-/// `lan_refs` are our own addresses that a private candidate must share a /24
-/// with. `apply_private_gate` is conditionally false for the peer's reflexive
-/// address: a STUN server inside the private network legitimately reports a
-/// private reflexive address, and dropping it would remove the only branch
-/// that works across arbitrary NATs. That exemption applies only when our own
-/// reflexive address is itself private, or absent; a node whose own STUN
-/// result is public has no LAN in common with a private reflexive address and
-/// would only be punching an address of the peer's choosing.
+/// A private IPv4 address is admitted only when one of this node's interface
+/// prefixes (`on_link`) holds both it and one of `refs`, our own addresses
+/// (the local candidates we share, and our reflexive address when that is
+/// private). An interface prefix alone is not enough: at the default
+/// settings we share no local candidate, and admitting anything inside our
+/// prefixes would let any peer aim our probes at hosts on our LAN. A
+/// unique-local IPv6 address is always refused, because the traversal socket
+/// is IPv4 and could not reach it. The peer's reflexive address gets the
+/// same treatment as its other candidates.
 fn admit_remote(
     candidate: &TraversalAddress,
-    lan_refs: &[TraversalAddress],
-    apply_private_gate: bool,
+    refs: &[IpAddr],
+    on_link: &OnLinkPrefixes,
 ) -> Result<IpAddr, RejectClass> {
     // Canonicalize the IPv4-mapped form so `::ffff:10.0.0.1` cannot present
     // itself as a public v6 address and slip past the checks below.
@@ -317,9 +387,7 @@ fn admit_remote(
     if is_never_punchable_ip(ip) {
         return Err(RejectClass::NeverRoutable);
     }
-    if apply_private_gate
-        && is_private_ip(ip)
-        && !lan_refs.iter().any(|our| same_subnet_24(our, candidate))
+    if is_private_ip(ip) && !(ip.is_ipv4() && refs.iter().any(|ours| on_link.share_link(*ours, ip)))
     {
         return Err(RejectClass::OffSubnet);
     }
@@ -331,7 +399,7 @@ pub(super) fn plan_punch_targets(
     local_reflexive_address: Option<&TraversalAddress>,
     remote_addresses: &[TraversalAddress],
     remote_reflexive_address: Option<&TraversalAddress>,
-    _on_link: &OnLinkPrefixes,
+    on_link: &OnLinkPrefixes,
 ) -> (Vec<PlannedPunchTarget>, PunchTargetTally) {
     let mut planned = Vec::new();
     let mut tally = PunchTargetTally {
@@ -339,22 +407,16 @@ pub(super) fn plan_punch_targets(
         ..PunchTargetTally::default()
     };
 
-    // Whether our own vantage point is a LAN one: either STUN reported a
-    // private address for us, or it reported nothing at all. The second case
-    // is deliberately treated as a LAN vantage point rather than a public one,
-    // so a node whose STUN probe failed, or that runs without STUN, keeps
-    // admitting a same-LAN peer's private reflexive address as it always has.
-    let local_reflexive_on_lan = local_reflexive_address.is_none_or(is_private_address);
-
-    // Our own addresses a peer's private candidate has to share a /24 with.
-    // The local reflexive address joins the set when it is itself private,
-    // which is what keeps a LAN-STUN deployment able to match while the
-    // shipped `share_local_candidates=false` leaves the local list empty.
-    let mut lan_refs = local_addresses.to_vec();
-    if let Some(reflexive) = local_reflexive_address
-        && is_private_address(reflexive)
+    // Our own addresses a peer's private candidate has to share an interface
+    // prefix with. The local reflexive address joins the set when it is
+    // itself private, which is what keeps a deployment whose STUN server sits
+    // inside the LAN able to match while the shipped
+    // `share_local_candidates=false` leaves the local list empty.
+    let mut refs: Vec<IpAddr> = local_addresses.iter().filter_map(own_ip).collect();
+    if let Some(reflexive) = local_reflexive_address.and_then(own_ip)
+        && is_private_ip(reflexive)
     {
-        lan_refs.push(reflexive.clone());
+        refs.push(reflexive);
     }
 
     // A peer names its own candidate list, so bound it before anything walks
@@ -365,18 +427,17 @@ pub(super) fn plan_punch_targets(
 
     // Everything on the remote side is peer-supplied, so it is vetted once
     // here and the branches below only ever see admitted candidates.
-    let remote_reflexive = remote_reflexive_address.and_then(|remote| {
-        match admit_remote(remote, &lan_refs, !local_reflexive_on_lan) {
+    let remote_reflexive =
+        remote_reflexive_address.and_then(|remote| match admit_remote(remote, &refs, on_link) {
             Ok(ip) => Some((remote, ip)),
             Err(class) => {
                 tally.refuse_reflexive(class, remote);
                 None
             }
-        }
-    });
+        });
     let remote_candidates = considered
         .iter()
-        .filter_map(|remote| match admit_remote(remote, &lan_refs, true) {
+        .filter_map(|remote| match admit_remote(remote, &refs, on_link) {
             Ok(ip) => Some((remote, ip)),
             Err(class) => {
                 tally.refuse(class, remote);
@@ -406,12 +467,16 @@ pub(super) fn plan_punch_targets(
         });
     }
 
-    // Same-LAN paths (matching /24 between local and remote host candidates).
-    // Only fires when both sides exposed local candidates AND they share a
-    // /24 prefix.
+    // Same-LAN paths: one of our interface prefixes holds both a local
+    // candidate of ours and the peer's candidate. Only fires when both sides
+    // exposed local candidates. IPv4 only, the traversal socket's family.
     for local in local_addresses {
+        let Some(local_ip) = own_ip(local) else {
+            continue;
+        };
         for (remote, remote_ip) in &remote_candidates {
-            if same_subnet_24(local, remote) {
+            if local_ip.is_ipv4() && remote_ip.is_ipv4() && on_link.share_link(local_ip, *remote_ip)
+            {
                 push_unique(PlannedPunchTarget {
                     strategy: PunchStrategy::Lan,
                     local_source: AddressSource::Local,
@@ -781,5 +846,16 @@ mod tests {
             classify_punch_packet(&packet, session_hash(SESSION)),
             PunchAction::Matched
         );
+    }
+
+    #[test]
+    fn a_stranger_sending_refused_offers_gets_one_warning_a_minute() {
+        let mut gate = RefusalWarnGate::default();
+        let t = Instant::now();
+        assert_eq!(gate.admit(t), Some(0));
+        assert_eq!(gate.admit(t + Duration::from_millis(1)), None);
+        assert_eq!(gate.admit(t + Duration::from_millis(59_999)), None);
+        assert_eq!(gate.admit(t + Duration::from_millis(60_000)), Some(2));
+        assert_eq!(gate.admit(t + Duration::from_millis(60_001)), None);
     }
 }

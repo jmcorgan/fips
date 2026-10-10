@@ -30,8 +30,8 @@ use super::signal::{
 use super::signal_gate::SignalGate;
 use super::stun::observe_traversal_addresses;
 use super::traversal::{
-    PunchTargetTally, is_doc_ip, is_never_punchable_ip, is_private_ip, nonce, now_ms,
-    planned_remote_endpoints, run_punch_attempt,
+    PunchTargetTally, RefusalWarnGate, is_doc_ip, is_never_punchable_ip, is_private_ip, nonce,
+    now_ms, planned_remote_endpoints, run_punch_attempt,
 };
 use super::traversal_machine::{OfferDisposition, SeenDecision, TraversalMachine};
 use super::types::{
@@ -86,15 +86,20 @@ pub(super) fn short_id(id: &str) -> String {
 /// the shapes no honest peer produces, because `info` is the level a shipped
 /// node collects by default and those refusals are the ones an operator needs
 /// to see; the routine off-subnet case stays at `debug`.
-fn log_refusals(tally: &PunchTargetTally, peer: &str, session: &str) {
-    if tally.offered <= tally.admitted && tally.capped == 0 && tally.over_offered == 0 {
+///
+/// `warn` is the refusal-warning gate's decision for a suspicious record:
+/// `Some(suppressed)` when this record is the one warning allowed in the
+/// last minute, `None` otherwise, in which case it is logged at `debug`.
+fn log_refusals(tally: &PunchTargetTally, peer: &str, session: &str, warn: Option<u64>) {
+    if !tally.has_refusals() {
         return;
     }
     let sample = tally.sample.as_deref().unwrap_or("-");
     let reflexive = tally.reflexive.unwrap_or("-");
-    if tally.suspicious() {
+    if let Some(suppressed) = warn.filter(|_| tally.suspicious()) {
         warn!(
             peer = %peer,
+            suppressed,
             session = %session,
             offered = tally.offered,
             admitted = tally.admitted,
@@ -213,6 +218,8 @@ pub struct NostrRendezvous {
     pending_answers: Mutex<HashMap<String, oneshot::Sender<SignalEnvelope<TraversalAnswer>>>>,
     admission: OfferAdmission,
     signal_gate: SignalGate,
+    /// Limits the suspicious-offer warning to one a minute.
+    refusal_warn: std::sync::Mutex<RefusalWarnGate>,
     /// Inbound traversal signals shed before decryption, since process start.
     shed_signals: AtomicU64,
     event_tx: mpsc::UnboundedSender<BootstrapEvent>,
@@ -355,6 +362,7 @@ impl NostrRendezvous {
             pending_answers: Mutex::new(HashMap::new()),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
+            refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
             event_rx: Mutex::new(event_rx),
@@ -1341,9 +1349,9 @@ impl NostrRendezvous {
             offer.reflexive_address.as_ref(),
             &answer.payload.local_addresses,
             answer.payload.reflexive_address.as_ref(),
-            &OnLinkPrefixes::default(),
+            &OnLinkPrefixes::read_system(),
         )?;
-        log_refusals(&tally, &peer_short, &short_id(&session_id));
+        self.log_punch_refusals(&tally, &peer_short, &short_id(&session_id));
 
         let remote_addr = run_punch_attempt(
             &base_socket,
@@ -1535,9 +1543,9 @@ impl NostrRendezvous {
             answer.reflexive_address.as_ref(),
             &offer.local_addresses,
             offer.reflexive_address.as_ref(),
-            &OnLinkPrefixes::default(),
+            &OnLinkPrefixes::read_system(),
         )?;
-        log_refusals(&tally, &peer_short, &short_id(&offer.session_id));
+        self.log_punch_refusals(&tally, &peer_short, &short_id(&offer.session_id));
 
         let punch = run_punch_attempt(
             &base_socket,
@@ -1806,6 +1814,17 @@ impl NostrRendezvous {
         Ok(advert)
     }
 
+    /// Log one planning call's refused punch candidates, giving at most one
+    /// warning a minute for suspicious offers.
+    fn log_punch_refusals(&self, tally: &PunchTargetTally, peer: &str, session: &str) {
+        let warn = self
+            .refusal_warn
+            .lock()
+            .expect("refusal-warn mutex poisoned")
+            .decide(tally, Instant::now());
+        log_refusals(tally, peer, session, warn);
+    }
+
     fn prune_advert_cache(&self) {
         let report = self.advert.prune(now_ms());
         if report.evicted > 0 {
@@ -2019,6 +2038,7 @@ impl NostrRendezvous {
             pending_answers: Mutex::new(HashMap::new()),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
+            refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
             shed_signals: AtomicU64::new(0),
             event_tx,
             event_rx: Mutex::new(event_rx),

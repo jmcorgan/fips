@@ -260,10 +260,16 @@ builds a candidate-pair plan that tries, in priority order:
    route, or overlapping private address space) will succeed at the
    socket layer in the punch but fail in the FMP handshake when the
    return path doesn't match.
-2. **LAN ↔ LAN.** If both sides share a /24 prefix, same-subnet private
-   addresses are likely reachable directly. Only fires when both peers
-   shared local host candidates (which requires `share_local_candidates`
-   to be enabled — off by default).
+2. **LAN ↔ LAN.** When one of this node's interface prefixes holds
+   both a local candidate of ours and the peer's private IPv4
+   candidate, the two are on one link and likely reachable directly.
+   Only fires when both peers shared local host candidates (which
+   requires `share_local_candidates` to be enabled — off by default).
+   More generally, a peer's private IPv4 candidate, its reflexive
+   address included, is punched only when one of our interface
+   prefixes holds both it and one of our own addresses (a shared local
+   candidate, or our reflexive address when that is private); other
+   private and unique-local candidates are refused.
 3. **Mixed.** Reflexive on one side, local on the other — catches
    hairpin and one-side-public scenarios.
 

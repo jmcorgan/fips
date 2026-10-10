@@ -49,6 +49,10 @@ simple-dns = "0.11.2"
 # 0.20 picks up socket-pktinfo 0.4.1, the first release that builds on
 # FreeBSD (IP_RECVDSTADDR/IP_RECVIF instead of Linux-style IP_PKTINFO).
 mdns-sd = "0.20"
+# Interface addresses with their prefix lengths, on Linux, macOS, FreeBSD and
+# Windows. `link-local` keeps 169.254.0.0/16 and fe80::/10 addresses in the
+# read; without it a link-local LAN peer would be judged off-link.
+if-addrs = { version = "0.15", features = ["link-local"] }
 socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 portable-atomic = { version = "1", features = ["std"] }
