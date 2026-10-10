@@ -1,0 +1,6 @@
+# OpenWrt's stock Allow-ICMPv6-Forward rule accepts ICMPv6 from wan into every
+# zone, the fips zone included, so a host on the WAN side could send echo
+# requests and unsolicited ICMPv6 errors into the mesh from this router. This
+# refuses them ahead of that rule. ICMPv6 that belongs to a tracked flow is
+# accepted before this chain is reached.
+oifname "fips0" meta l4proto ipv6-icmp counter reject comment "fips: no ICMPv6 from wan into the mesh"

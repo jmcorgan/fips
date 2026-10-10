@@ -192,7 +192,6 @@ install -m 0755 "$FILES_DIR/etc/init.d/fips-gateway" "$STAGE_DIR/etc/init.d/fips
 
 install -d "$STAGE_DIR/etc/fips"
 install -m 0600 "$FILES_DIR/etc/fips/fips.yaml"   "$STAGE_DIR/etc/fips/fips.yaml"
-install -m 0755 "$FILES_DIR/etc/fips/firewall.sh" "$STAGE_DIR/etc/fips/firewall.sh"
 
 # The shared fips.yaml ships ethernet.wan.interface: "eth0", the OpenWrt 24
 # default. This .apk package targets OpenWrt 25+ (DSA), where the WAN port is
@@ -205,8 +204,18 @@ install -d "$STAGE_DIR/etc/sysctl.d"
 install -m 0644 "$FILES_DIR/etc/sysctl.d/fips-bridge.conf"  "$STAGE_DIR/etc/sysctl.d/fips-bridge.conf"
 install -m 0644 "$FILES_DIR/etc/sysctl.d/fips-gateway.conf" "$STAGE_DIR/etc/sysctl.d/fips-gateway.conf"
 
-install -d "$STAGE_DIR/etc/hotplug.d/net"
-install -m 0755 "$FILES_DIR/etc/hotplug.d/net/99-fips" "$STAGE_DIR/etc/hotplug.d/net/99-fips"
+# fw4 include: lets fips-gateway's port forwards through the fips zone. One
+# source, installed for the zone's input and forward chains.
+for chain in input_fips forward_fips; do
+    install -d "$STAGE_DIR/usr/share/nftables.d/chain-post/$chain"
+    install -m 0644 "$FILES_DIR/usr/share/nftables.d/10-fips-port-forwards.nft" \
+        "$STAGE_DIR/usr/share/nftables.d/chain-post/$chain/10-fips-port-forwards.nft"
+done
+# fw4 include: refuses ICMPv6 from wan into the mesh, ahead of the stock rule
+# that accepts it into every zone.
+install -d "$STAGE_DIR/usr/share/nftables.d/chain-pre/forward_wan"
+install -m 0644 "$FILES_DIR/usr/share/nftables.d/10-fips-wan-icmpv6.nft" \
+    "$STAGE_DIR/usr/share/nftables.d/chain-pre/forward_wan/10-fips-wan-icmpv6.nft"
 
 install -d "$STAGE_DIR/etc/uci-defaults"
 install -m 0755 "$FILES_DIR/etc/uci-defaults/90-fips-setup" "$STAGE_DIR/etc/uci-defaults/90-fips-setup"

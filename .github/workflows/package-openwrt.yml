@@ -466,11 +466,12 @@ jobs:
             ./etc/init.d/fips
             ./etc/init.d/fips-gateway
             ./etc/fips/fips.yaml
-            ./etc/fips/firewall.sh
             ./etc/sysctl.d/fips-gateway.conf
             ./etc/sysctl.d/fips-bridge.conf
-            ./etc/hotplug.d/net/99-fips
             ./etc/uci-defaults/90-fips-setup
+            ./usr/share/nftables.d/chain-post/input_fips/10-fips-port-forwards.nft
+            ./usr/share/nftables.d/chain-post/forward_fips/10-fips-port-forwards.nft
+            ./usr/share/nftables.d/chain-pre/forward_wan/10-fips-wan-icmpv6.nft
             ./lib/upgrade/keep.d/fips
           )
           for path in "${REQUIRED[@]}"; do
@@ -810,9 +811,12 @@ jobs:
             usr/bin/fips usr/bin/fipsctl usr/bin/fipstop usr/bin/fips-gateway \
             usr/bin/fips-mesh-setup usr/bin/fips-ap-setup \
             etc/init.d/fips etc/init.d/fips-gateway \
-            etc/fips/fips.yaml etc/fips/firewall.sh \
+            etc/fips/fips.yaml \
             etc/sysctl.d/fips-gateway.conf etc/sysctl.d/fips-bridge.conf \
-            etc/hotplug.d/net/99-fips etc/uci-defaults/90-fips-setup \
+            etc/uci-defaults/90-fips-setup \
+            usr/share/nftables.d/chain-post/input_fips/10-fips-port-forwards.nft \
+            usr/share/nftables.d/chain-post/forward_fips/10-fips-port-forwards.nft \
+            usr/share/nftables.d/chain-pre/forward_wan/10-fips-wan-icmpv6.nft \
             lib/upgrade/keep.d/fips; do
             if printf '%s\n' "$RECON" | grep -qxF "$path"; then
               echo "  PASS path: $path"

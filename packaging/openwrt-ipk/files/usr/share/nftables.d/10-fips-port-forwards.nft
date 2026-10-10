@@ -1,0 +1,5 @@
+# fips-gateway's port forwards are DNAT rules in its own nftables table, not
+# fw4 redirects, so fw4 does not accept them for this zone by itself. This is
+# the rule fw4 emits for a zone that has redirects, at the same position:
+# after the zone's own rules, so a rule with src fips can still restrict them.
+ct status dnat accept comment "fips: accept fips-gateway port forwards"

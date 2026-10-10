@@ -1,14 +1,17 @@
 #!/bin/sh
 # FIPS first-boot setup — runs once after package installation.
-# Configures the firewall and kernel modules for FIPS operation.
-# The UCI defaults mechanism runs it once and deletes it when it ends with
-# status 0.
+# Loads the kernel modules, creates the fips firewall zone for fips0 and
+# registers the .fips forwarding with dnsmasq. The UCI defaults mechanism runs
+# it once and deletes it when it ends with status 0.
 #
 # It is executed by the package's postinst, but sourced, not executed, by
 # OpenWrt's default_postinst for a package built from the SDK feed and by the
 # first-boot uci-defaults run after a sysupgrade. Nothing here may exit early,
-# change directory or set shell options, and it must end with status 0: a
-# non-zero status leaves the script in place to run again on every boot.
+# change directory or set shell options. It ends with status 0, except when
+# the firewall configuration could not be saved: it then ends with status 1,
+# so that it is kept and runs again at the next boot. A package built from the
+# SDK feed runs it twice in one install, so a run may find the previous run's
+# firewall changes staged but not saved.
 
 # ---------------------------------------------------------------------------
 # 1. Kernel modules
@@ -30,40 +33,360 @@ echo "br_netfilter" > /etc/modules.d/br-netfilter
 sysctl -p /etc/sysctl.d/fips-bridge.conf 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 2. Firewall — add fips0 to the lan zone (fw4 / UCI)
+# 2. Firewall: the fips zone (fw4 / UCI)
 # ---------------------------------------------------------------------------
-# fw4 (nftables) matches zones by device name, so adding fips0 as a 'device'
-# to the lan zone makes all traffic on the TUN interface accepted without
-# needing raw nft rules in the base chains.
+# fips0 gets a firewall zone of its own, fips, which rejects all but replies,
+# ping and gateway port forwards from FIPS peers. The port forwards are let
+# through by the fw4 include the package installs under
+# /usr/share/nftables.d/chain-post/. Packages up to 0.5.2 put fips0 in the lan
+# zone and accepted everything on it through /etc/fips/firewall.sh; an upgrade
+# takes fips0 out of lan, removes that include and reloads the firewall.
+#
+# The zone is created only while no zone holds fips0, and is the operator's
+# from then on: nothing here rewrites it.
+#
+# The reload's exit status is 0 even when fw4 fails to load the new ruleset,
+# so the loaded ruleset is checked instead. A rule appended to the input chain
+# before the reload is gone after any successful load, which replaces the whole
+# table, and still there after a failed one. When the load failed, or cannot be
+# checked, fips0 is closed to new connections in the loaded ruleset until the
+# firewall next reloads.
 
-z=0
-while uci -q get "firewall.@zone[$z]" >/dev/null 2>&1; do
-	if [ "$(uci -q get "firewall.@zone[$z].name" 2>/dev/null)" = "lan" ]; then
-		uci -q del_list "firewall.@zone[$z].device=fips0" 2>/dev/null || true
-		uci add_list "firewall.@zone[$z].device=fips0"
-		break
+# Whether firewall section $1 (a name, or @zone[N]) is an enabled zone that
+# matches $tundev by device, device wildcard or network interface.
+fwzone_holds() {
+	local d n
+	case "$(uci -q get "firewall.$1.enabled")" in
+	0 | off | false | no) return 1 ;;
+	esac
+	for d in $(uci -q get "firewall.$1.device"); do
+		case "$d" in
+		"$tundev") return 0 ;;
+		+) ;;
+		*+) case "$tundev" in "${d%+}"*) return 0 ;; esac ;;
+		esac
+	done
+	for n in $(uci -q get "firewall.$1.network"); do
+		[ "$(uci -q get "network.$n.device")" = "$tundev" ] && return 0
+		[ "$(uci -q get "network.$n.ifname")" = "$tundev" ] && return 0
+	done
+	return 1
+}
+
+# Print a warning for opkg or apk to show, and log it.
+fwzone_say() {
+	logger -t fips -p daemon.warn "$1" 2>/dev/null
+	echo "fips: $1"
+}
+
+# The input policy that applies to firewall section $1, upper-cased. fw4
+# ignores case and also takes any leading part of a policy's name, so accept,
+# acc and a all read as ACCEPT.
+fwzone_input() {
+	local p
+	p="$(uci -q get "firewall.$1.input")"
+	[ -n "$p" ] || p="$(uci -q get "firewall.@defaults[0].input")"
+	# Ranges, not [:lower:]: busybox tr has no character classes.
+	# shellcheck disable=SC2018,SC2019
+	p="$(echo "${p:-DROP}" | tr a-z A-Z)"
+	case "$p" in
+	A | AC | ACC | ACCE | ACCEP) p=ACCEPT ;;
+	esac
+	echo "$p"
+}
+
+# Whether an enabled forwarding takes the lan zone into the zone named fips.
+fwzone_lanfwd() {
+	local f=0
+	while uci -q get "firewall.@forwarding[$f]" >/dev/null; do
+		if [ "$(uci -q get "firewall.@forwarding[$f].src")" = lan ] &&
+			[ "$(uci -q get "firewall.@forwarding[$f].dest")" = fips ]; then
+			case "$(uci -q get "firewall.@forwarding[$f].enabled")" in
+			0 | off | false | no) ;;
+			*) return 0 ;;
+			esac
+		fi
+		f=$((f + 1))
+	done
+	return 1
+}
+
+# Say when fips0 is still exposed to router services, or sits in a zone of
+# the operator's own that the old include's accepts used to open. $1 is the
+# section of the first zone holding fips0, empty for none; $2 is 1 when an
+# old include was removed in this run; $3 is 1 when this run created the fips
+# zone, which has already said what became of its forwarding from lan.
+fwzone_posture() {
+	local name see="see the Firewall section of the fips OpenWrt package README"
+	if [ -n "$1" ]; then
+		name="$(uci -q get "firewall.$1.name")"
+		if [ "$(fwzone_input "$1")" = ACCEPT ]; then
+			fwzone_say "$tundev is in firewall zone $name, whose input policy is ACCEPT, so router services are reachable from FIPS peers; $see"
+		elif [ "$name" = lan ]; then
+			fwzone_say "$tundev is in the lan firewall zone, so FIPS peers have the access of LAN hosts; $see"
+		fi
+		# A zone named fips gets the packaged port-forward include, which
+		# fw4 places by chain name, so it lacks only the LAN forwarding.
+		if [ "$2" = 1 ] && [ "$name" != lan ]; then
+			if [ "$name" != fips ]; then
+				fwzone_say "$tundev is in firewall zone $name, not in the fips zone; fips-gateway port forwards into it and the gateway's LAN path into the mesh now need rules for that zone; $see"
+			elif [ "$3" != 1 ] && ! fwzone_lanfwd; then
+				fwzone_say "$tundev is in a firewall zone named fips that has no forwarding from lan, so the gateway's LAN path into the mesh needs one; $see"
+			fi
+		fi
+	elif [ "$(fwzone_input "@defaults[0]")" = ACCEPT ]; then
+		fwzone_say "$tundev is in no firewall zone and the default input policy is ACCEPT, so router services are reachable from FIPS peers; $see"
 	fi
-	z=$((z + 1))
-done
+	return 0
+}
 
-# Install a firewall include so /etc/fips/firewall.sh is re-applied on every
-# firewall reload (belt-and-suspenders for iptables-based OpenWrt builds).
-FOUND=0
-j=0
-while uci -q get "firewall.@include[$j]" >/dev/null 2>&1; do
-	if [ "$(uci -q get "firewall.@include[$j].path" 2>/dev/null)" = "/etc/fips/firewall.sh" ]; then
-		FOUND=1
-		break
+# Close $tundev to new connections in the loaded fw4 ruleset: an
+# established/related accept and a drop at the head of input and forward, and
+# no accept left from the old include. A chain already holding both is left
+# alone. One holding only half of the pair, left by an earlier run whose second
+# insert failed, has that half removed and the pair inserted again. Returns 1
+# when a rule could not be inserted.
+fwzone_failsafe() {
+	local c h l ok=0
+	for c in input forward; do
+		l="$(nft -a list chain inet fw4 "$c" 2>/dev/null)"
+		printf '%s\n' "$l" | grep -qF "iifname \"$tundev\" drop comment \"fips-reload-failed\"" &&
+			printf '%s\n' "$l" | grep -qF "iifname \"$tundev\" ct state established,related accept comment \"fips-reload-failed\"" &&
+			continue
+		for h in $(printf '%s\n' "$l" | sed -n 's/.* comment "fips-reload-failed" # handle \([0-9][0-9]*\)$/\1/p'); do
+			nft delete rule inet fw4 "$c" handle "$h" >/dev/null 2>&1
+		done
+		if ! nft insert rule inet fw4 "$c" iifname "$tundev" drop comment '"fips-reload-failed"' >/dev/null 2>&1 ||
+			! nft insert rule inet fw4 "$c" iifname "$tundev" ct state established,related accept comment '"fips-reload-failed"' >/dev/null 2>&1; then
+			ok=1
+		fi
+	done
+	for c in input output forward; do
+		for h in $(nft -a list chain inet fw4 "$c" 2>/dev/null |
+			sed -n 's/.* comment "fips\(-reload-probe\)\{0,1\}" # handle \([0-9][0-9]*\)$/\2/p'); do
+			nft delete rule inet fw4 "$c" handle "$h" >/dev/null 2>&1
+		done
+	done
+	return "$ok"
+}
+
+# Reload the firewall and check that the new configuration loaded. $1 is the
+# name of the fips zone when it holds $tundev, so the loaded input chain must
+# jump to that zone's chain, and empty otherwise.
+fwzone_reload() {
+	local state=0 had=0 probe=0 out rc verdict=unknown
+	local closed="new connections from FIPS peers to this router and all fips-gateway port forwards are blocked"
+	local open="and $tundev could not be closed; router services may be reachable from FIPS peers until the firewall reloads cleanly"
+	if command -v nft >/dev/null 2>&1 &&
+		{ [ -e /var/run/fw4.state ] || nft list table inet fw4 >/dev/null 2>&1; }; then
+		[ -e /var/run/fw4.state ] && state=1
+		if nft list table inet fw4 >/dev/null 2>&1; then
+			had=1
+			nft add rule inet fw4 input counter comment '"fips-reload-probe"' >/dev/null 2>&1 && probe=1
+		fi
+		/etc/init.d/firewall reload >/dev/null 2>&1
+		if ! nft list table inet fw4 >/dev/null 2>&1; then
+			fwzone_say "the fw4 firewall is not loaded, so its zones do not filter traffic from FIPS peers or any other network until it loads; run 'fw4 check' to see why"
+			return 0
+		fi
+		out="$(nft list chain inet fw4 input 2>/dev/null)"
+		rc=$?
+		if [ "$rc" = 0 ]; then
+			if [ "$probe" = 1 ] && printf '%s\n' "$out" | grep -qF 'comment "fips-reload-probe"'; then
+				verdict=failed
+			elif [ "$had" = 0 ] || [ "$probe" = 1 ]; then
+				if [ -z "$1" ] || printf '%s\n' "$out" | grep -qE "jump input_$1( |\$)"; then
+					verdict=loaded
+				fi
+			fi
+		fi
+		case "$verdict" in
+		loaded) ;;
+		failed)
+			if [ "$state" = 0 ]; then
+				if fwzone_failsafe; then
+					fwzone_say "the firewall reload failed because fw4's state file is missing, so $closed until the firewall reloads cleanly; run '/etc/init.d/firewall restart'"
+				else
+					fwzone_say "the firewall reload failed because fw4's state file is missing, $open; run '/etc/init.d/firewall restart'"
+				fi
+			elif fwzone_failsafe; then
+				fwzone_say "the firewall reload failed, so $closed until the firewall reloads cleanly; run 'fw4 check' to see why"
+			else
+				fwzone_say "the firewall reload failed $open; run 'fw4 check' to see why"
+			fi
+			;;
+		*)
+			if [ "$state" = 0 ]; then
+				if fwzone_failsafe; then
+					fwzone_say "the firewall reload could not be checked and fw4's state file is missing, so $closed until the firewall reloads cleanly; run '/etc/init.d/firewall restart'"
+				else
+					fwzone_say "the firewall reload could not be checked and fw4's state file is missing, $open; run '/etc/init.d/firewall restart'"
+				fi
+			elif fwzone_failsafe; then
+				fwzone_say "the firewall reload could not be checked, so $closed until the firewall next reloads; if 'fw4 check' reports no error, run '/etc/init.d/firewall reload' to clear the block"
+			else
+				fwzone_say "the firewall reload could not be checked $open; run 'fw4 check' to see why"
+			fi
+			;;
+		esac
+	elif [ -e /var/run/fw4.state ]; then
+		/etc/init.d/firewall reload >/dev/null 2>&1
+		fwzone_say "the firewall was reloaded, but nft was not found, so the new configuration cannot have loaded and $tundev could not be closed; router services may be reachable from FIPS peers; run 'fw4 check'"
+	elif [ -e /var/run/fw3.state ]; then
+		/etc/init.d/firewall reload >/dev/null 2>&1 ||
+			fwzone_say "the firewall reload failed; router services may be reachable from FIPS peers until the firewall reloads cleanly"
 	fi
-	j=$((j + 1))
-done
-if [ "$FOUND" = "0" ]; then
-	uci add firewall include
-	uci set "firewall.@include[-1].path=/etc/fips/firewall.sh"
-	uci set "firewall.@include[-1].reload=1"
-fi
+	return 0
+}
 
-uci commit firewall
+# Save the staged firewall configuration and check that the file now holds it.
+# On a full overlay uci commit can exit 0 after writing a truncated or empty
+# file and dropping the staged changes. The staged configuration is first
+# exported to $fwcopy, unless an earlier run in this boot left a copy there,
+# and is removed once saved. Returns 0 when saved, 1 when it could not be
+# saved and is still staged, and 2 when the file no longer holds it.
+fwzone_commit() {
+	local staged="$fwcopy.staged" now="$fwcopy.now"
+	uci -q export firewall > "$staged" 2>/dev/null || return 1
+	[ -e "$fwcopy" ] || cp "$staged" "$fwcopy" 2>/dev/null
+	uci commit firewall || return 1
+	if uci -q export firewall > "$now" 2>/dev/null && cmp -s "$staged" "$now"; then
+		rm -f "$staged" "$now" "$fwcopy"
+		return 0
+	fi
+	rm -f "$staged" "$now"
+	return 2
+}
+
+# Returns 1 only when the firewall configuration could not be saved.
+fwzone_setup() {
+	local tundev=fips0
+	local PATH="$PATH:/usr/sbin:/usr/bin:/sbin:/bin"
+	local changed=0 old=0 mig=0 j=0 z=0 lan="" named="" holder="" made=0 name d
+	local want="" saved why fix fwcopy=/tmp/fips-firewall.uci
+
+	# The include older packages installed; uci renumbers anonymous sections
+	# after a delete, so the index only advances past one that stays.
+	while uci -q get "firewall.@include[$j]" >/dev/null; do
+		if [ "$(uci -q get "firewall.@include[$j].path")" = /etc/fips/firewall.sh ] &&
+			uci -q delete "firewall.@include[$j]"; then
+			changed=1
+			old=1
+		else
+			j=$((j + 1))
+		fi
+	done
+
+	[ "$(uci -q get firewall.fips)" = zone ] || mig=1
+	if [ "$mig" = 1 ] || [ "$old" = 1 ]; then
+		while uci -q get "firewall.@zone[$z]" >/dev/null; do
+			name="$(uci -q get "firewall.@zone[$z].name")"
+			if [ "$name" = lan ] && [ -z "$lan" ]; then
+				lan=$z
+				for d in $(uci -q get "firewall.@zone[$z].device"); do
+					if [ "$d" = "$tundev" ]; then
+						uci -q del_list "firewall.@zone[$z].device=$tundev"
+						changed=1
+						break
+					fi
+				done
+			fi
+			[ "$name" = fips ] && [ -z "$named" ] && named="@zone[$z]"
+			[ -z "$holder" ] && fwzone_holds "@zone[$z]" && holder="@zone[$z]"
+			z=$((z + 1))
+		done
+
+		if [ "$mig" = 1 ] && [ -z "$holder" ]; then
+			if [ -n "$named" ]; then
+				fwzone_say "a firewall zone named fips already exists (firewall.$named) and does not hold $tundev; not creating the fips zone"
+			elif [ -n "$(uci -q get firewall.fips)" ]; then
+				fwzone_say "firewall section fips exists and is not a zone; not creating the fips zone"
+			else
+				uci set firewall.fips=zone
+				uci set firewall.fips.name=fips
+				uci add_list "firewall.fips.device=$tundev"
+				uci set firewall.fips.input=REJECT
+				uci set firewall.fips.output=ACCEPT
+				uci set firewall.fips.forward=REJECT
+				uci set firewall.fips.auto_helper=0
+				changed=1
+				made=1
+				if [ -z "$lan" ]; then
+					fwzone_say "no lan firewall zone; add a forwarding to the fips zone from the zone of the gateway's LAN interface"
+				elif [ -n "$(uci -q get firewall.fips_lan)" ]; then
+					fwzone_say "firewall section fips_lan exists; leaving it as it is"
+				else
+					uci set firewall.fips_lan=forwarding
+					uci set firewall.fips_lan.src=lan
+					uci set firewall.fips_lan.dest=fips
+				fi
+				if [ -n "$(uci -q get firewall.fips_ping)" ]; then
+					fwzone_say "firewall section fips_ping exists; leaving it as it is"
+				else
+					uci set firewall.fips_ping=rule
+					uci set firewall.fips_ping.name=Allow-FIPS-Ping
+					uci set firewall.fips_ping.src=fips
+					uci set firewall.fips_ping.proto=icmp
+					uci add_list firewall.fips_ping.icmp_type=echo-request
+					uci set firewall.fips_ping.family=ipv6
+					uci set firewall.fips_ping.target=ACCEPT
+				fi
+			fi
+		fi
+		[ "$made" = 1 ] && holder=fips
+		fwzone_posture "$holder" "$old" "$made"
+	fi
+
+	# Accepts the old include inserted on iptables builds.
+	if command -v iptables >/dev/null 2>&1; then
+		j=0
+		while [ "$j" -lt 8 ] && iptables -D INPUT -i "$tundev" -j ACCEPT 2>/dev/null; do j=$((j + 1)); done
+		j=0
+		while [ "$j" -lt 8 ] && iptables -D OUTPUT -o "$tundev" -j ACCEPT 2>/dev/null; do j=$((j + 1)); done
+		j=0
+		while [ "$j" -lt 8 ] && iptables -D FORWARD -i "$tundev" -j ACCEPT 2>/dev/null; do j=$((j + 1)); done
+	fi
+
+	# An upgrade normally removed these already. They survive a sysupgrade,
+	# which keeps /etc/fips/, and the hotplug hook would re-run the script.
+	rm -f /etc/fips/firewall.sh
+	if grep -qs /etc/fips/firewall.sh /etc/hotplug.d/net/99-fips; then
+		rm -f /etc/hotplug.d/net/99-fips
+	fi
+
+	# Changes staged by an earlier run of this install whose save failed.
+	[ -n "$(uci -q changes firewall)" ] && changed=1
+	[ "$changed" = 1 ] || return 0
+
+	# What this run means to load, read before the save can lose it.
+	if [ "$(uci -q get firewall.fips)" = zone ] && fwzone_holds fips; then
+		want="$(uci -q get firewall.fips.name)"
+	fi
+
+	fwzone_commit
+	saved=$?
+	if [ "$saved" != 0 ]; then
+		if [ "$saved" = 2 ]; then
+			why="the firewall configuration could not be saved and /etc/config/firewall was left damaged, which the next firewall reload or reboot loads"
+			fix="free space on the overlay, then, before the router reboots, run 'uci import firewall < $fwcopy' and '/etc/init.d/firewall reload'"
+		else
+			why="the firewall configuration could not be saved, so $tundev may still be in the lan zone"
+			fix="free space on the overlay, then run 'uci commit firewall' and '/etc/init.d/firewall reload', or reboot, which runs this setup again"
+		fi
+		if command -v nft >/dev/null 2>&1 && nft list table inet fw4 >/dev/null 2>&1 && fwzone_failsafe; then
+			fwzone_say "$why; new connections from FIPS peers to this router and all fips-gateway port forwards are blocked until the firewall next reloads, which may reopen them; $fix"
+		else
+			fwzone_say "$why, and router services may be reachable from FIPS peers; $fix"
+		fi
+		return 1
+	fi
+
+	fwzone_reload "$want"
+	return 0
+}
+
+fwzone_setup
+fwstatus=$?
 
 # ---------------------------------------------------------------------------
 # 3. dnsmasq UCI registration
@@ -135,4 +458,4 @@ fips_migrate_gateway_dns_listen() {
 }
 fips_migrate_gateway_dns_listen
 
-exit 0
+exit "$fwstatus"

@@ -115,9 +115,6 @@ define Package/fips/install
 	$(INSTALL_DIR) $(1)/etc/fips
 	$(INSTALL_CONF) $(CURDIR)/files/etc/fips/fips.yaml $(1)/etc/fips/fips.yaml
 
-	# Firewall helper script (called by UCI include and hotplug)
-	$(INSTALL_BIN) $(CURDIR)/files/etc/fips/firewall.sh $(1)/etc/fips/firewall.sh
-
 	# sysctl: turn off br_netfilter's call hooks (fips-bridge.conf). br_netfilter
 	# does not make bridge member ports usable for the Ethernet transport; the
 	# shipped config binds the LAN bridge instead. See fips-bridge.conf.
@@ -125,11 +122,18 @@ define Package/fips/install
 	$(INSTALL_DATA) $(CURDIR)/files/etc/sysctl.d/fips-bridge.conf $(1)/etc/sysctl.d/fips-bridge.conf
 	$(INSTALL_DATA) $(CURDIR)/files/etc/sysctl.d/fips-gateway.conf $(1)/etc/sysctl.d/fips-gateway.conf
 
-	# Hotplug: apply firewall rules when the FIPS TUN interface comes up
-	$(INSTALL_DIR) $(1)/etc/hotplug.d/net
-	$(INSTALL_BIN) $(CURDIR)/files/etc/hotplug.d/net/99-fips $(1)/etc/hotplug.d/net/99-fips
+	# fw4 include: lets fips-gateway's port forwards through the fips zone.
+	# One source, installed for the zone's input and forward chains.
+	$(INSTALL_DIR) $(1)/usr/share/nftables.d/chain-post/input_fips
+	$(INSTALL_DATA) $(CURDIR)/files/usr/share/nftables.d/10-fips-port-forwards.nft $(1)/usr/share/nftables.d/chain-post/input_fips/10-fips-port-forwards.nft
+	$(INSTALL_DIR) $(1)/usr/share/nftables.d/chain-post/forward_fips
+	$(INSTALL_DATA) $(CURDIR)/files/usr/share/nftables.d/10-fips-port-forwards.nft $(1)/usr/share/nftables.d/chain-post/forward_fips/10-fips-port-forwards.nft
+	# fw4 include: refuses ICMPv6 from wan into the mesh, ahead of the stock
+	# rule that accepts it into every zone.
+	$(INSTALL_DIR) $(1)/usr/share/nftables.d/chain-pre/forward_wan
+	$(INSTALL_DATA) $(CURDIR)/files/usr/share/nftables.d/10-fips-wan-icmpv6.nft $(1)/usr/share/nftables.d/chain-pre/forward_wan/10-fips-wan-icmpv6.nft
 
-	# UCI defaults: one-time first-boot firewall and module setup
+	# UCI defaults: one-time firewall zone and module setup
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(CURDIR)/files/etc/uci-defaults/90-fips-setup $(1)/etc/uci-defaults/90-fips-setup
 

@@ -15,7 +15,8 @@
 # Usage: package-test.sh [--keep <dir>]
 #   --keep <dir>  copy the captured apk scripts into <dir> as post-install,
 #                 pre-upgrade, post-upgrade and pre-deinstall, so
-#                 scenarios.sh can run them under ash.
+#                 scenarios.sh can run them under ash, and extract the .ipk's
+#                 payload into <dir>/ipk-root for firewall-scenarios.sh.
 #
 # Exit 0 = every check passed. Exit 1 = at least one failed. Exit 2 = the
 # harness could not run; never treated as a pass.
@@ -367,13 +368,147 @@ else
     bad "P5 the SDK Makefile does not list /etc/fips/fips.yaml as a conffile"
 fi
 
-# ── Hand the scripts to the ash scenarios ───────────────────────────────────
+# ── P6. The firewall files the packages carry ──────────────────────────────
+# fips0 has a firewall zone of its own, so the old accept-everything script and
+# its hotplug hook are gone, the fw4 include that lets fips-gateway's port
+# forwards through the zone is installed for both of its chains, and the one
+# that refuses ICMPv6 from wan into the mesh heads the wan zone's forward
+# chain. The includes' sources sit outside their install paths, so neither
+# package may carry those paths.
+SNIPPET=10-fips-port-forwards.nft
+SNIPPET_PATHS="./usr/share/nftables.d/chain-post/input_fips/$SNIPPET ./usr/share/nftables.d/chain-post/forward_fips/$SNIPPET"
+WANSNIP=10-fips-wan-icmpv6.nft
+WANSNIP_PATH="./usr/share/nftables.d/chain-pre/forward_wan/$WANSNIP"
+for pair in "apk:$CAPTURE/payload" "ipk:$TMP/ipk-data"; do
+    kind="${pair%%:*}"
+    listing="${pair#*:}"
+    for path in ./etc/fips/firewall.sh ./etc/hotplug.d/net/99-fips "./usr/share/nftables.d/$SNIPPET" "./usr/share/nftables.d/$WANSNIP"; do
+        if grep -qxF "$path" "$listing"; then
+            bad "P6 the .$kind still installs $path"
+        else
+            ok "P6 the .$kind does not install $path"
+        fi
+    done
+    for path in $SNIPPET_PATHS $WANSNIP_PATH; do
+        if grep -qxF "$path" "$listing"; then
+            ok "P6 the .$kind installs $path"
+        else
+            bad "P6 the .$kind does not install $path"
+        fi
+    done
+done
+# The include is spliced into both chains of the fips zone, so any rule beside
+# the port-forward accept would apply to every FIPS peer. Its one rule is that
+# accept, and the .ipk installs it unchanged for both chains. A missing source
+# file is a packaging defect, so it fails its checks rather than the harness.
+SNIPPET_SRC="$PROJECT_ROOT/packaging/openwrt-ipk/files/usr/share/nftables.d/$SNIPPET"
+SNIPPET_RULE='ct status dnat accept comment "fips: accept fips-gateway port forwards"'
+WANSNIP_SRC="$PROJECT_ROOT/packaging/openwrt-ipk/files/usr/share/nftables.d/$WANSNIP"
+WANSNIP_RULE='oifname "fips0" meta l4proto ipv6-icmp counter reject comment "fips: no ICMPv6 from wan into the mesh"'
+# The wan include runs for every packet forwarded from wan, so it holds its
+# one reject and nothing else.
+for spec in "port-forward|one accept|$SNIPPET_SRC|$SNIPPET_RULE" \
+    "wan|one ICMPv6 reject|$WANSNIP_SRC|$WANSNIP_RULE"; do
+    IFS='|' read -r name what src want <<< "$spec"
+    if [[ ! -e "$src" ]]; then
+        bad "P6 the $name include's source $src is missing"
+        continue
+    fi
+    [[ -r "$src" ]] || harness_fail "cannot read $src"
+    rules="$(grep -vE '^[[:space:]]*(#|$)' "$src")"
+    if [[ "$rules" == "$want" ]]; then
+        ok "P6 the $name include holds the $what and no other rule"
+    else
+        bad "P6 the $name include holds other rules than the $what: $(printf '%s' "$rules" | tr '\n' '|')"
+    fi
+done
+for path in $SNIPPET_PATHS $WANSNIP_PATH; do
+    src="$SNIPPET_SRC"
+    [[ "$path" == "$WANSNIP_PATH" ]] && src="$WANSNIP_SRC"
+    # Each of these already failed above.
+    if [[ ! -e "$src" ]] || ! grep -qxF "$path" "$TMP/ipk-data"; then
+        bad "P6 the .ipk's $path cannot be compared with the packaged include"
+        continue
+    fi
+    tar -xzf "$IPK" -O ./data.tar.gz | tar -xzOf - "$path" > "$TMP/snippet" \
+        || harness_fail "cannot extract $path from $IPK"
+    if cmp -s "$TMP/snippet" "$src"; then
+        ok "P6 the .ipk's $path is the packaged include"
+    else
+        bad "P6 the .ipk's $path differs from the packaged include"
+    fi
+done
+# grep exits 1 when nothing matches and 2 when it could not read a path; only
+# the first is a pass. 90-fips-setup and the READMEs name the old installed
+# paths on purpose, so they are not searched.
+(cd "$PROJECT_ROOT" || exit 2; grep -lE 'etc/fips/firewall\.sh|etc/hotplug\.d/net/99-fips' \
+    packaging/openwrt-ipk/build-ipk.sh packaging/openwrt-apk/build-apk.sh \
+    packaging/openwrt-ipk/Makefile .github/workflows/package-openwrt.yml \
+    testing/check-shellcheck.sh) > "$TMP/fwrefs"
+rc=$?
+[[ $rc -le 1 ]] || harness_fail "the old firewall file search failed (grep exit $rc)"
+refs="$(tr '\n' ' ' < "$TMP/fwrefs")"
+if [[ -z "$refs" ]]; then
+    ok "P6 no builder, workflow or shellcheck list names the old firewall files"
+else
+    bad "P6 the old firewall files are still named in: $refs"
+fi
+WORKFLOW="$PROJECT_ROOT/.github/workflows/package-openwrt.yml"
+[[ -r "$WORKFLOW" ]] || harness_fail "cannot read $WORKFLOW"
+for path in $SNIPPET_PATHS $WANSNIP_PATH; do
+    if grep -qE "^[[:space:]]*${path//./\\.}\$" "$WORKFLOW"; then
+        ok "P6 the workflow's .ipk list names $path"
+    else
+        bad "P6 the workflow's .ipk list does not name $path"
+    fi
+    bare="${path#./}"
+    if grep -qE "(^|[[:space:]])${bare//./\\.}([[:space:]]|\$)" "$WORKFLOW"; then
+        ok "P6 the workflow's .apk list names $bare"
+    else
+        bad "P6 the workflow's .apk list does not name $bare"
+    fi
+done
+
+# ── P7. The SDK feed Makefile installs the same firewall files ──────────────
+# Read, not built, like P5.
+for chain in input_fips forward_fips; do
+    want="\$(INSTALL_DATA) \$(CURDIR)/files/usr/share/nftables.d/$SNIPPET \$(1)/usr/share/nftables.d/chain-post/$chain/$SNIPPET"
+    if awk -v want="$want" '
+        $0 == "define Package/fips/install" { inside = 1; next }
+        inside && $0 == "endef" { inside = 0 }
+        inside { sub(/^[[:space:]]+/, ""); if ($0 == want) found = 1 }
+        END { exit !found }' "$MAKEFILE"; then
+        ok "P7 the SDK Makefile installs the port-forward include for $chain"
+    else
+        bad "P7 the SDK Makefile does not install the port-forward include for $chain"
+    fi
+done
+want="\$(INSTALL_DATA) \$(CURDIR)/files/usr/share/nftables.d/$WANSNIP \$(1)/usr/share/nftables.d/chain-pre/forward_wan/$WANSNIP"
+if awk -v want="$want" '
+    $0 == "define Package/fips/install" { inside = 1; next }
+    inside && $0 == "endef" { inside = 0 }
+    inside { sub(/^[[:space:]]+/, ""); if ($0 == want) found = 1 }
+    END { exit !found }' "$MAKEFILE"; then
+    ok "P7 the SDK Makefile installs the wan include for forward_wan"
+else
+    bad "P7 the SDK Makefile does not install the wan include for forward_wan"
+fi
+if grep -qE 'etc/fips/firewall\.sh|hotplug\.d/net/99-fips' "$MAKEFILE"; then
+    bad "P7 the SDK Makefile still names firewall.sh or 99-fips"
+else
+    ok "P7 the SDK Makefile names neither firewall.sh nor 99-fips"
+fi
+
+# ── Hand the scripts and the payload to the ash scenarios ───────────────────
 if [[ -n "$KEEP" ]]; then
     for phase in $WANT_PHASES; do
         [[ -f "$CAPTURE/script.$phase" ]] || continue
         install -m 0755 "$CAPTURE/script.$phase" "$KEEP/$phase" \
             || harness_fail "cannot copy $phase into $KEEP"
     done
+    mkdir -p "$KEEP/ipk-root" || harness_fail "cannot create $KEEP/ipk-root"
+    tar -xzf "$IPK" -O ./data.tar.gz | tar -xzf - -C "$KEEP/ipk-root" \
+        || harness_fail "cannot extract the .ipk payload into $KEEP/ipk-root"
 fi
 
 echo ""

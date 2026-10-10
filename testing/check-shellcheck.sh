@@ -28,9 +28,6 @@
 #   SC2034  the init scripts' USE_PROCD, START, STOP, EXTRA_COMMANDS and
 #           EXTRA_HELP, which rc.common reads rather than the script.
 #   SC3043  `local`, which POSIX leaves undefined and ash supports.
-#   SC2086, SC2089, SC2090  firewall.sh builds an nft match, quotes included,
-#           in one variable and relies on word splitting to pass it as
-#           separate arguments; nft parses the quotes itself.
 #
 # Every sh-family script in those two directories must be on the list below. A
 # new one that is not fails the guard, so a script added to the package is not
@@ -47,13 +44,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT" || { echo "check-shellcheck: cannot cd to $PROJECT_ROOT" >&2; exit 2; }
 
 IPK=packaging/openwrt-ipk
-SH_EXCLUDE=SC1008,SC2317,SC2034,SC3043,SC2086,SC2089,SC2090
+SH_EXCLUDE=SC1008,SC2317,SC2034,SC3043
 
 SH_TARGETS=(
     "$IPK/files/etc/init.d/fips"
     "$IPK/files/etc/init.d/fips-gateway"
-    "$IPK/files/etc/fips/firewall.sh"
-    "$IPK/files/etc/hotplug.d/net/99-fips"
     "$IPK/files/etc/uci-defaults/90-fips-setup"
     "$IPK/files/usr/bin/fips-mesh-setup"
     "$IPK/files/usr/bin/fips-ap-setup"

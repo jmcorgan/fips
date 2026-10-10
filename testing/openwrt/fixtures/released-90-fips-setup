@@ -1,0 +1,135 @@
+#!/bin/sh
+# FIPS first-boot setup — runs once after package installation.
+# Configures the firewall and kernel modules for FIPS operation.
+# The UCI defaults mechanism runs it once and deletes it when it ends with
+# status 0.
+#
+# It is executed by the package's postinst, but sourced, not executed, by
+# OpenWrt's default_postinst for a package built from the SDK feed and by the
+# first-boot uci-defaults run after a sysupgrade. Nothing here may exit early,
+# change directory or set shell options, and it must end with status 0: a
+# non-zero status leaves the script in place to run again on every boot.
+
+# ---------------------------------------------------------------------------
+# 1. Kernel modules
+# ---------------------------------------------------------------------------
+
+# kmod-tun is listed as a package dependency, but ensure the module is loaded.
+modprobe tun 2>/dev/null || true
+echo "tun" > /etc/modules.d/tun
+
+# kmod-br-netfilter makes AF_PACKET visible on bridge member ports.
+modprobe br_netfilter 2>/dev/null || true
+echo "br_netfilter" > /etc/modules.d/br-netfilter
+
+# Apply the sysctl settings shipped in /etc/sysctl.d/fips-bridge.conf now
+# (the file will be applied automatically on subsequent boots).
+sysctl -p /etc/sysctl.d/fips-bridge.conf 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 2. Firewall — add fips0 to the lan zone (fw4 / UCI)
+# ---------------------------------------------------------------------------
+# fw4 (nftables) matches zones by device name, so adding fips0 as a 'device'
+# to the lan zone makes all traffic on the TUN interface accepted without
+# needing raw nft rules in the base chains.
+
+z=0
+while uci -q get "firewall.@zone[$z]" >/dev/null 2>&1; do
+	if [ "$(uci -q get "firewall.@zone[$z].name" 2>/dev/null)" = "lan" ]; then
+		uci -q del_list "firewall.@zone[$z].device=fips0" 2>/dev/null || true
+		uci add_list "firewall.@zone[$z].device=fips0"
+		break
+	fi
+	z=$((z + 1))
+done
+
+# Install a firewall include so /etc/fips/firewall.sh is re-applied on every
+# firewall reload (belt-and-suspenders for iptables-based OpenWrt builds).
+FOUND=0
+j=0
+while uci -q get "firewall.@include[$j]" >/dev/null 2>&1; do
+	if [ "$(uci -q get "firewall.@include[$j].path" 2>/dev/null)" = "/etc/fips/firewall.sh" ]; then
+		FOUND=1
+		break
+	fi
+	j=$((j + 1))
+done
+if [ "$FOUND" = "0" ]; then
+	uci add firewall include
+	uci set "firewall.@include[-1].path=/etc/fips/firewall.sh"
+	uci set "firewall.@include[-1].reload=1"
+fi
+
+uci commit firewall
+
+# ---------------------------------------------------------------------------
+# 3. dnsmasq UCI registration
+# ---------------------------------------------------------------------------
+# This UCI entry is what forwards .fips queries to the daemon: OpenWrt's
+# dnsmasq init script builds its config from UCI and loads no directory under
+# /etc. The daemon's DNS responder binds ::1. The 127.0.0.1 del_list removes
+# the entry older packages added. While fips-gateway runs, its init script
+# points this entry at the gateway's DNS port instead. The two del_lists after
+# the first remove the gateway's entry for its old default port, left behind
+# by a gateway that stopped without its init script's stop running.
+
+uci -q del_list dhcp.@dnsmasq[0].server="/fips/127.0.0.1#5354" 2>/dev/null || true
+uci -q del_list dhcp.@dnsmasq[0].server="/fips/::1#5353" 2>/dev/null || true
+uci -q del_list dhcp.@dnsmasq[0].server="/fips/127.0.0.1#5353" 2>/dev/null || true
+uci -q del_list dhcp.@dnsmasq[0].server="/fips/::1#5354" 2>/dev/null || true
+uci add_list dhcp.@dnsmasq[0].server="/fips/::1#5354"
+uci -q del_list dhcp.@dnsmasq[0].rebind_domain="fips" 2>/dev/null || true
+uci add_list dhcp.@dnsmasq[0].rebind_domain="fips"
+uci commit dhcp
+
+# ---------------------------------------------------------------------------
+# 4. Gateway prerequisites
+# ---------------------------------------------------------------------------
+# Load conntrack module (needed for /proc/net/nf_conntrack session counting).
+modprobe nf_conntrack 2>/dev/null || true
+grep -qxF 'nf_conntrack' /etc/modules.d/nf-conntrack 2>/dev/null || \
+	echo "nf_conntrack" > /etc/modules.d/nf-conntrack
+
+# Apply gateway sysctls (proxy_ndp + IPv6 forwarding).
+# These are harmless even if the gateway is not enabled — forwarding is
+# typically already on for a router, and proxy_ndp has no effect until
+# proxy NDP entries are actually added.
+sysctl -p /etc/sysctl.d/fips-gateway.conf 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 5. Gateway DNS listen port
+# ---------------------------------------------------------------------------
+# Every release up to 0.5.1 shipped the gateway's DNS listener on 5353, the
+# mDNS port, which the daemon's LAN rendezvous can hold. fips.yaml is a
+# conffile and fips-ap-setup edits it, so an upgrade keeps the old line.
+# Rewrite exactly that shipped line, four-space indent and nothing after the
+# closing quote, inside the top-level gateway block, to the line a fresh
+# install ships. Any other value is left as configured; the gateway warns at
+# startup when it is still on the mDNS port.
+#
+# Runs last, and cannot fail the script: see the note at the top.
+fips_migrate_gateway_dns_listen() {
+	local cfg=/etc/fips/fips.yaml
+	local old='    listen: "[::1]:5353"'
+	local new='    # listen: "[::1]:5365"   # the default; the init script points dnsmasq at this port'
+	local msg='fips: moved gateway.dns.listen off the mDNS port 5353 to the default [::1]:5365'
+
+	if [ -f "$cfg" ] && grep -qxF "$old" "$cfg" 2>/dev/null; then
+		if awk -v old="$old" -v new="$new" '
+			/^[A-Za-z_]/ { top = $1 }
+			top == "gateway:" && $0 == old { print new; changed = 1; next }
+			{ print }
+			END { exit changed ? 0 : 1 }
+		' "$cfg" > "$cfg.tmp" 2>/dev/null &&
+			chmod 600 "$cfg.tmp" 2>/dev/null &&
+			mv -f "$cfg.tmp" "$cfg" 2>/dev/null; then
+			logger -t fips "$msg" 2>/dev/null || true
+			echo "$msg"
+		else
+			rm -f "$cfg.tmp" 2>/dev/null || true
+		fi
+	fi
+}
+fips_migrate_gateway_dns_listen
+
+exit 0
