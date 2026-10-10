@@ -20,6 +20,7 @@ use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{Disconnect, DisconnectReason};
 use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId, packet_channel};
 use crate::upper::tun::{TunDevice, TunState, run_tun_reader, shutdown_tun_interface};
+use crate::utils::onlink::OnLinkPrefixes;
 use crate::{NodeAddr, PeerIdentity};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -1194,7 +1195,16 @@ impl Node {
         if events.is_empty() {
             return;
         }
+        self.handle_lan_events(events, &OnLinkPrefixes::default())
+            .await;
+    }
 
+    /// Turn one batch of mDNS discoveries into dials.
+    pub(in crate::node) async fn handle_lan_events(
+        &mut self,
+        events: Vec<crate::mdns::LanEvent>,
+        _on_link: &OnLinkPrefixes,
+    ) {
         // Resolve each mDNS beacon to a dialable candidate (the driver I/O: pick a
         // socket-family-compatible UDP transport, parse the npub). The
         // connected / connecting skip is the core's decision — LAN growth has no
@@ -3546,9 +3556,12 @@ impl Node {
             transport_id,
             crate::transport::TransportHandle::Udp(transport),
         );
-        self.supervisor
-            .nostr_rendezvous
-            .insert_bootstrap_transport(transport_id, traversal.peer_npub.clone());
+        self.supervisor.nostr_rendezvous.insert_bootstrap_transport(
+            transport_id,
+            traversal.peer_npub.clone(),
+            peer_node_addr,
+            traversal.remote_addr,
+        );
 
         let remote_addr = TransportAddr::from_string(&traversal.remote_addr.to_string());
         if let Err(err) = self

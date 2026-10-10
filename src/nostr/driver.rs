@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
+use crate::NodeAddr;
 use crate::config::{NostrRendezvousConfig, NostrRendezvousPolicy, PeerAddress, PeerConfig};
 use crate::transport::TransportId;
 
@@ -48,6 +49,18 @@ pub enum AdvertTransportSnapshot {
     },
 }
 
+/// The peer a bootstrap transport was adopted for: who it is and the address
+/// the traversal reached it at.
+#[derive(Debug, Clone)]
+pub struct BootstrapPeer {
+    /// The peer's npub (bech32).
+    pub npub: String,
+    /// The peer's node address, derived from `npub`.
+    pub node_addr: NodeAddr,
+    /// The remote address the traversal punched through to.
+    pub remote_addr: SocketAddr,
+}
+
 /// Node-side rendezvous-subsystem state and bootstrap-transport bookkeeping.
 #[derive(Default)]
 pub struct RendezvousDriver {
@@ -64,13 +77,13 @@ pub struct RendezvousDriver {
     startup_sweep_done: bool,
     /// Per-peer UDP transports adopted from NAT traversal handoff.
     bootstrap_transports: HashSet<TransportId>,
-    /// Originating peer npub (bech32) for each adopted bootstrap
-    /// transport, captured at `adopt_established_traversal` time.
-    /// Populated alongside `bootstrap_transports`; cleared in
+    /// The originating peer of each adopted bootstrap transport, captured
+    /// at `adopt_established_traversal` time. Populated alongside
+    /// `bootstrap_transports`; cleared in
     /// `cleanup_bootstrap_transport_if_unused`. Used by the rx loop to
     /// route fatal-protocol-mismatch observations back to the
     /// Nostr-discovery `failure_state` for long cooldown application.
-    bootstrap_transport_npubs: HashMap<TransportId, String>,
+    bootstrap_peers: HashMap<TransportId, BootstrapPeer>,
 }
 
 impl RendezvousDriver {
@@ -121,19 +134,40 @@ impl RendezvousDriver {
 
     /// Originating peer npub for an adopted bootstrap transport, if any.
     pub fn bootstrap_transport_npub(&self, transport_id: &TransportId) -> Option<&String> {
-        self.bootstrap_transport_npubs.get(transport_id)
+        self.bootstrap_peers
+            .get(transport_id)
+            .map(|peer| &peer.npub)
     }
 
-    /// Register an adopted bootstrap transport and its originating npub.
-    pub fn insert_bootstrap_transport(&mut self, transport_id: TransportId, npub: String) {
+    /// The originating peer of an adopted bootstrap transport, if any.
+    pub fn bootstrap_peer(&self, transport_id: &TransportId) -> Option<&BootstrapPeer> {
+        self.bootstrap_peers.get(transport_id)
+    }
+
+    /// Register an adopted bootstrap transport, its originating peer and the
+    /// address the traversal reached that peer at.
+    pub fn insert_bootstrap_transport(
+        &mut self,
+        transport_id: TransportId,
+        npub: String,
+        node_addr: NodeAddr,
+        remote_addr: SocketAddr,
+    ) {
         self.bootstrap_transports.insert(transport_id);
-        self.bootstrap_transport_npubs.insert(transport_id, npub);
+        self.bootstrap_peers.insert(
+            transport_id,
+            BootstrapPeer {
+                npub,
+                node_addr,
+                remote_addr,
+            },
+        );
     }
 
     /// Drop an adopted bootstrap transport from both bookkeeping maps.
     pub fn remove_bootstrap_transport(&mut self, transport_id: &TransportId) {
         self.bootstrap_transports.remove(transport_id);
-        self.bootstrap_transport_npubs.remove(transport_id);
+        self.bootstrap_peers.remove(transport_id);
     }
 
     /// Convert an advertised overlay endpoint into a `PeerAddress` candidate.

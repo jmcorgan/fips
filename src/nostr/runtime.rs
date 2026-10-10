@@ -42,6 +42,7 @@ use super::types::{
 };
 use crate::PeerIdentity;
 use crate::config::{NostrRendezvousConfig, PeerConfig};
+use crate::utils::onlink::OnLinkPrefixes;
 
 const ADVERT_CACHE_STALE_GRACE_MULTIPLIER: u64 = 2;
 
@@ -643,7 +644,7 @@ impl NostrRendezvous {
                     created_at: relay_created_at,
                     valid_until_ms,
                 };
-                self.advert.insert_fetched(peer_npub, updated);
+                self.advert.insert_fetched(peer_npub, updated, now_ms());
                 self.failure_state.reset_streak_after_refresh(peer_npub);
                 NostrRefetchOutcome::Refreshed
             }
@@ -682,12 +683,19 @@ impl NostrRendezvous {
         Ok(advert.endpoints)
     }
 
+    /// Replace the set of authors whose cached adverts survive a full cache:
+    /// the configured peers and the authors with an established link.
+    pub fn set_advert_protection(&self, npubs: HashSet<String>) {
+        self.advert.set_protected(npubs);
+    }
+
     pub async fn cached_open_discovery_candidates(
         &self,
         max: usize,
     ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
         self.prune_advert_cache();
-        self.advert.open_discovery_candidates(max, now_ms())
+        self.advert
+            .open_discovery_candidates(max, now_ms(), &HashSet::new(), &mut rand::rng())
     }
 
     pub async fn shutdown(&self) -> Result<(), BootstrapError> {
@@ -771,6 +779,7 @@ impl NostrRendezvous {
                                 advert,
                                 created_at,
                                 valid_until_ms,
+                                now_ms(),
                             ) {
                                 debug!(
                                     peer = %short_npub(&author_npub),
@@ -1282,6 +1291,7 @@ impl NostrRendezvous {
             offer.reflexive_address.as_ref(),
             &answer.payload.local_addresses,
             answer.payload.reflexive_address.as_ref(),
+            &OnLinkPrefixes::default(),
         )?;
         log_refusals(&tally, &peer_short, &short_id(&session_id));
 
@@ -1475,6 +1485,7 @@ impl NostrRendezvous {
             answer.reflexive_address.as_ref(),
             &offer.local_addresses,
             offer.reflexive_address.as_ref(),
+            &OnLinkPrefixes::default(),
         )?;
         log_refusals(&tally, &peer_short, &short_id(&offer.session_id));
 
@@ -1582,7 +1593,8 @@ impl NostrRendezvous {
             endpoints = %endpoint_summary(&cached.advert.endpoints),
             "advert: resolved"
         );
-        self.advert.insert_fetched(peer_npub, cached.clone());
+        self.advert
+            .insert_fetched(peer_npub, cached.clone(), now_ms());
         self.prune_advert_cache();
         Ok(cached.advert)
     }
@@ -2009,7 +2021,7 @@ impl NostrRendezvous {
     /// Insert a cached advert directly into the in-memory cache. Used by
     /// unit tests to set up consumer-side state without needing live relays.
     pub(crate) async fn insert_advert_for_test(&self, npub: String, advert: CachedOverlayAdvert) {
-        self.advert.insert_fetched(&npub, advert);
+        self.advert.insert_fetched(&npub, advert, now_ms());
     }
 
     /// The cached `created_at` for `npub`, or `None` when nothing is cached.

@@ -29,6 +29,7 @@ use super::{
     OverlayTransportKind, PunchHint, PunchPacketKind, TraversalAddress,
 };
 use crate::NodeAddr;
+use crate::utils::onlink::OnLinkPrefixes;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NatType {
@@ -511,6 +512,7 @@ fn plans_reflexive_targets_before_lan() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("192.168.1.20", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert_eq!(planned[0].strategy, PunchStrategy::Reflexive);
@@ -524,6 +526,7 @@ fn simulated_lan_scenario_includes_lan_target_and_succeeds() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("192.168.1.20", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert!(
@@ -541,6 +544,7 @@ fn simulated_symmetric_nat_scenario_requires_fallback() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("10.0.1.10", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert!(
@@ -558,6 +562,7 @@ fn planned_remote_endpoints_include_private_and_reflexive_paths() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("192.168.1.20", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -583,6 +588,7 @@ fn planned_remote_endpoints_reject_never_punchable_remote_candidates() {
             addr("8.8.8.8", 0),
         ],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -599,6 +605,7 @@ fn planned_remote_endpoints_drop_private_candidate_outside_our_subnet() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("10.9.9.9", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -613,6 +620,7 @@ fn planned_remote_endpoints_reject_ipv4_mapped_private_candidate() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("::ffff:10.0.0.1", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -637,6 +645,7 @@ fn planned_remote_endpoints_cap_targets_from_an_oversized_candidate_list() {
         Some(&addr("203.0.113.10", 62000)),
         &remotes,
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -671,6 +680,7 @@ fn planned_remote_endpoints_reject_never_punchable_ipv6_candidates() {
             addr("fd00::1", 63000),
         ],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -698,6 +708,7 @@ fn planned_remote_endpoints_bound_an_oversized_list_of_unroutable_candidates() {
         Some(&addr("203.0.113.10", 62000)),
         &remotes,
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -729,6 +740,7 @@ fn planned_remote_endpoints_keep_private_reflexive_when_stun_is_on_the_lan() {
         Some(&addr("192.168.1.10", 62000)),
         &[],
         Some(&addr("192.168.1.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -746,6 +758,7 @@ fn a_peers_private_reflexive_address_is_refused_when_our_own_stun_result_is_publ
         Some(&addr("203.0.113.10", 62000)),
         &[],
         Some(&addr("192.168.1.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -763,6 +776,7 @@ fn a_peers_private_reflexive_address_is_kept_when_we_have_no_stun_result_at_all(
         None,
         &[],
         Some(&addr("192.168.1.20", 63000)),
+        &OnLinkPrefixes::default(),
     )
     .expect("endpoint planning should succeed");
 
@@ -780,6 +794,7 @@ fn an_off_subnet_reflexive_refusal_alone_is_not_suspicious() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("203.0.113.5", 63000)],
         Some(&addr("192.168.1.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert_eq!(tally.reflexive, Some("off-subnet"));
@@ -809,6 +824,7 @@ fn an_oversized_candidate_list_is_bounded_before_vetting() {
         Some(&addr("203.0.113.10", 62000)),
         &remotes,
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert_eq!(tally.offered, 1001);
@@ -832,6 +848,7 @@ fn refused_punch_candidates_are_counted_by_class_and_sampled() {
             addr("not-an-ip", 63000),
         ],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert_eq!(tally.offered, 5);
@@ -852,6 +869,7 @@ fn a_clean_plan_and_an_off_subnet_only_plan_are_not_suspicious() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("192.168.1.20", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
     assert_eq!(clean.offsubnet, 0);
     assert!(!clean.suspicious());
@@ -861,6 +879,7 @@ fn a_clean_plan_and_an_off_subnet_only_plan_are_not_suspicious() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("10.9.9.9", 63000)],
         Some(&addr("198.51.100.20", 63000)),
+        &OnLinkPrefixes::default(),
     );
     assert_eq!(off_subnet.offsubnet, 1);
     assert!(off_subnet.admitted > 0);
@@ -874,6 +893,7 @@ fn an_offer_whose_every_candidate_is_refused_is_suspicious() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("127.0.0.1", 63000), addr("224.0.0.1", 63000)],
         None,
+        &OnLinkPrefixes::default(),
     );
 
     assert!(planned.is_empty());
@@ -892,6 +912,7 @@ fn a_refused_reflexive_address_is_recorded_apart_from_the_candidates() {
         Some(&addr("203.0.113.10", 62000)),
         &[addr("192.168.1.20", 63000)],
         Some(&addr("127.0.0.1", 63000)),
+        &OnLinkPrefixes::default(),
     );
 
     assert_eq!(tally.reflexive, Some("never-routable"));

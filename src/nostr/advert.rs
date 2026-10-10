@@ -15,7 +15,7 @@
 //! `fetch_events_from`, gift-wrap crypto), event signing, NIP-09 deletes,
 //! and `Notify` wakeups described by the returned decisions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use nostr::prelude::{Event, EventId};
@@ -56,6 +56,10 @@ pub(super) struct AdvertMachine {
     advert_max_age_ms: u64,
     /// Size cap for the peer advert cache.
     cache_max_entries: usize,
+    /// Authors whose adverts the cache keeps when it is full: the configured
+    /// peers and the authors with a currently established link, as the node
+    /// last pushed them.
+    protected: Mutex<HashSet<String>>,
     /// Peer advert cache keyed by author npub.
     cache: Mutex<HashMap<String, CachedOverlayAdvert>>,
     /// The advert body we currently want to publish, if any.
@@ -77,10 +81,19 @@ impl AdvertMachine {
             advertise,
             advert_max_age_ms,
             cache_max_entries,
+            protected: Mutex::new(HashSet::new()),
             cache: Mutex::new(HashMap::new()),
             local_advert: Mutex::new(None),
             current_event_id: Mutex::new(None),
         }
+    }
+
+    /// Replace the set of authors whose adverts the cache protects.
+    pub(super) fn set_protected(&self, npubs: HashSet<String>) {
+        *self
+            .protected
+            .lock()
+            .expect("advert-machine protected mutex poisoned") = npubs;
     }
 
     // --- validity (time-injected) --------------------------------------
@@ -130,6 +143,7 @@ impl AdvertMachine {
         advert: OverlayAdvert,
         created_at: u64,
         valid_until_ms: u64,
+        _now_ms: u64,
     ) -> bool {
         let mut cache = self.lock_cache();
         let should_replace = cache
@@ -170,7 +184,12 @@ impl AdvertMachine {
 
     /// Insert a freshly-fetched advert into the cache (fetch-miss path and
     /// stale-check refresh).
-    pub(super) fn insert_fetched(&self, peer_npub: &str, cached: CachedOverlayAdvert) {
+    pub(super) fn insert_fetched(
+        &self,
+        peer_npub: &str,
+        cached: CachedOverlayAdvert,
+        _now_ms: u64,
+    ) {
         self.lock_cache().insert(peer_npub.to_string(), cached);
     }
 
@@ -186,6 +205,8 @@ impl AdvertMachine {
         &self,
         max: usize,
         now_ms: u64,
+        _skip: &HashSet<String>,
+        _rng: &mut impl rand::Rng,
     ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
         let cache = self.lock_cache();
         cache
@@ -317,6 +338,8 @@ impl AdvertMachine {
 mod tests {
     use super::*;
     use crate::nostr::types::OverlayTransportKind;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn ep(addr: &str) -> OverlayEndpointAdvert {
         OverlayEndpointAdvert {
@@ -353,12 +376,12 @@ mod tests {
     fn observe_advert_replaces_only_when_newer_and_flags_peer() {
         let m = machine();
         // Fresh peer advert -> cached, log flagged (peer).
-        assert!(m.observe_advert("npub1peer", advert(vec![ep("1.2.3.4:9000")]), 100, 5000));
+        assert!(m.observe_advert("npub1peer", advert(vec![ep("1.2.3.4:9000")]), 100, 5000, 0));
         // Older created_at -> not replaced, no log.
-        assert!(!m.observe_advert("npub1peer", advert(vec![ep("1.2.3.4:9001")]), 50, 5000));
+        assert!(!m.observe_advert("npub1peer", advert(vec![ep("1.2.3.4:9001")]), 50, 5000, 0));
         assert_eq!(m.cached_created_at("npub1peer"), Some(100));
         // Newer created_at -> replaced, log flagged.
-        assert!(m.observe_advert("npub1peer", advert(vec![ep("1.2.3.4:9002")]), 200, 5000));
+        assert!(m.observe_advert("npub1peer", advert(vec![ep("1.2.3.4:9002")]), 200, 5000, 0));
         assert_eq!(m.cached_created_at("npub1peer"), Some(200));
     }
 
@@ -367,15 +390,15 @@ mod tests {
         let m = machine();
         // Own advert is still cached (should_replace true) but must NOT be
         // flagged as a peer-cached log line.
-        assert!(!m.observe_advert("npub1self", advert(vec![ep("1.2.3.4:9000")]), 100, 5000));
+        assert!(!m.observe_advert("npub1self", advert(vec![ep("1.2.3.4:9000")]), 100, 5000, 0));
         assert_eq!(m.cached_created_at("npub1self"), Some(100));
     }
 
     #[test]
     fn prune_drops_expired_and_reports_no_eviction_under_cap() {
         let m = machine();
-        m.insert_fetched("npub1a", cached("npub1a", 1, 1000));
-        m.insert_fetched("npub1b", cached("npub1b", 1, 3000));
+        m.insert_fetched("npub1a", cached("npub1a", 1, 1000), 0);
+        m.insert_fetched("npub1b", cached("npub1b", 1, 3000), 0);
         // now=2000 -> npub1a expired, npub1b retained, under cap -> None.
         assert_eq!(m.prune(2000), None);
         assert_eq!(m.cached_created_at("npub1a"), None);
@@ -386,10 +409,10 @@ mod tests {
     fn prune_size_cap_evicts_oldest_by_valid_until() {
         let m = machine(); // cap = 3
         // Four still-valid entries; oldest valid_until must be evicted.
-        m.insert_fetched("npub1a", cached("npub1a", 1, 1000));
-        m.insert_fetched("npub1b", cached("npub1b", 1, 2000));
-        m.insert_fetched("npub1c", cached("npub1c", 1, 3000));
-        m.insert_fetched("npub1d", cached("npub1d", 1, 4000));
+        m.insert_fetched("npub1a", cached("npub1a", 1, 1000), 0);
+        m.insert_fetched("npub1b", cached("npub1b", 1, 2000), 0);
+        m.insert_fetched("npub1c", cached("npub1c", 1, 3000), 0);
+        m.insert_fetched("npub1d", cached("npub1d", 1, 4000), 0);
         let evicted = m.prune(500);
         assert_eq!(evicted, Some((1, 3)));
         // Oldest validity (npub1a) evicted; newest kept.
@@ -400,10 +423,11 @@ mod tests {
     #[test]
     fn open_discovery_candidates_filters_self_and_expired() {
         let m = machine();
-        m.insert_fetched("npub1self", cached("npub1self", 1, 9000));
-        m.insert_fetched("npub1peer", cached("npub1peer", 1, 9000));
-        m.insert_fetched("npub1stale", cached("npub1stale", 1, 1000));
-        let out = m.open_discovery_candidates(10, 2000);
+        m.insert_fetched("npub1self", cached("npub1self", 1, 9000), 0);
+        m.insert_fetched("npub1peer", cached("npub1peer", 1, 9000), 0);
+        m.insert_fetched("npub1stale", cached("npub1stale", 1, 1000), 0);
+        let out =
+            m.open_discovery_candidates(10, 2000, &HashSet::new(), &mut StdRng::seed_from_u64(1));
         assert_eq!(out.len(), 1, "only the valid non-self peer survives");
         assert_eq!(out[0].0, "npub1peer");
     }
@@ -413,9 +437,13 @@ mod tests {
         let m = machine();
         for i in 0..5 {
             let npub = format!("npub1p{i}");
-            m.insert_fetched(&npub, cached(&npub, 1, 9000));
+            m.insert_fetched(&npub, cached(&npub, 1, 9000), 0);
         }
-        assert_eq!(m.open_discovery_candidates(2, 1000).len(), 2);
+        assert_eq!(
+            m.open_discovery_candidates(2, 1000, &HashSet::new(), &mut StdRng::seed_from_u64(1))
+                .len(),
+            2
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use super::types::{
     BootstrapError, PUNCH_ACK_MAGIC, PUNCH_MAGIC, PunchHint, PunchPacket, PunchPacketKind,
     TraversalAddress,
 };
+use crate::utils::onlink::OnLinkPrefixes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AddressSource {
@@ -330,6 +331,7 @@ pub(super) fn plan_punch_targets(
     local_reflexive_address: Option<&TraversalAddress>,
     remote_addresses: &[TraversalAddress],
     remote_reflexive_address: Option<&TraversalAddress>,
+    _on_link: &OnLinkPrefixes,
 ) -> (Vec<PlannedPunchTarget>, PunchTargetTally) {
     let mut planned = Vec::new();
     let mut tally = PunchTargetTally {
@@ -466,6 +468,7 @@ pub(super) fn planned_remote_endpoints(
     local_reflexive_address: Option<&TraversalAddress>,
     remote_addresses: &[TraversalAddress],
     remote_reflexive_address: Option<&TraversalAddress>,
+    on_link: &OnLinkPrefixes,
 ) -> Result<(Vec<SocketAddr>, PunchTargetTally), BootstrapError> {
     let mut remotes = Vec::new();
     let (planned, tally) = plan_punch_targets(
@@ -473,6 +476,7 @@ pub(super) fn planned_remote_endpoints(
         local_reflexive_address,
         remote_addresses,
         remote_reflexive_address,
+        on_link,
     );
     for target in planned {
         let remote = SocketAddr::new(target.remote_ip, target.remote.port);
