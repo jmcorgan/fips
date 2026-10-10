@@ -288,6 +288,11 @@ pub enum SessionReject {
     /// handshake flood can deny an established peer. Tracked via
     /// [`SessionStats::half_open_full`](crate::node::stats::SessionStats).
     HalfOpenFull,
+    /// A TUN packet to a new destination was dropped because
+    /// `node.session.pending_max_destinations` destinations already have
+    /// packets held. Tracked via
+    /// [`SessionStats::pending_destinations_full`](crate::node::stats::SessionStats).
+    PendingDestinationsFull,
 }
 
 /// MMP rejection reasons.

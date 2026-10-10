@@ -27,9 +27,8 @@ struct NodeRoutingView<'a> {
     node: &'a Node,
 }
 
-/// What [`Node::maybe_initiate_lookup`] did, for callers that report on the
-/// lookup rather than merely triggering it. The three existing data-path call
-/// sites are statement-position and discard it unchanged.
+/// What [`Node::maybe_initiate_lookup`] did, for callers that act on the
+/// lookup rather than merely triggering it.
 pub(in crate::node) struct LookupInitiateOutcome {
     kind: LookupOutcomeKind,
     /// Peers the LookupRequest actually reached; `None` when the gate declined

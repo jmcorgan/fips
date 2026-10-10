@@ -579,6 +579,16 @@ pub struct Node {
     /// Packets queued while waiting for session establishment.
     /// Keyed by destination NodeAddr, bounded per-dest and total.
     pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
+    /// When each destination in `pending_tun_packets` was first held or last
+    /// had a lookup or session started for it; read only by the held-packet
+    /// backstop. Monotonic, so a clock step neither underflows the age nor
+    /// releases every held destination at once.
+    pending_tun_since: HashMap<NodeAddr, handlers::session::HeldStamp>,
+    /// Whether routing information may still be arriving, which keeps
+    /// packets to destinations no filter reaches held rather than answered.
+    routing_hold: handlers::session::RoutingHold,
+    /// Log latch for `pending_tun_packets` at its destination bound.
+    pending_tun_bound_log: BoundLog,
 
     /// Native API registry: which local ports are held, and where an inbound
     /// datagram goes. Reached only from the `rx_loop`, so it takes no lock.
@@ -939,6 +949,9 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
+            pending_tun_since: HashMap::new(),
+            routing_hold: handlers::session::RoutingHold::default(),
+            pending_tun_bound_log: BoundLog::default(),
             pending_native: HashMap::new(),
             native: crate::native::registry::Registry::new(crate::native::registry::Limits {
                 per_flow: config.node.native_api.pending_per_flow,
@@ -1101,6 +1114,9 @@ impl Node {
             sessions: HashMap::new(),
             identity_cache: HashMap::new(),
             pending_tun_packets: HashMap::new(),
+            pending_tun_since: HashMap::new(),
+            routing_hold: handlers::session::RoutingHold::default(),
+            pending_tun_bound_log: BoundLog::default(),
             pending_native: HashMap::new(),
             native: crate::native::registry::Registry::new(crate::native::registry::Limits {
                 per_flow: config.node.native_api.pending_per_flow,
@@ -3394,6 +3410,31 @@ impl Node {
             .entry(dest)
             .or_default()
             .push_back(packet);
+    }
+
+    /// Move the start of the routing hold back by `by`, after noting the
+    /// current peer table, so a test can stand outside the hold without
+    /// waiting. A node whose peers were inserted directly is armed here.
+    #[cfg(test)]
+    pub(in crate::node) fn backdate_hold_for_test(&mut self, by: std::time::Duration) {
+        self.routing_hold
+            .observe(!self.peers.is_empty(), std::time::Instant::now());
+        self.routing_hold.backdate(by);
+    }
+
+    /// Move `dest`'s held-packet stamp back by `by`.
+    #[cfg(test)]
+    pub(in crate::node) fn backdate_held_for_test(
+        &mut self,
+        dest: &NodeAddr,
+        by: std::time::Duration,
+    ) {
+        if let Some(stamp) = self.pending_tun_since.get_mut(dest) {
+            stamp.since = stamp
+                .since
+                .checked_sub(by)
+                .expect("host uptime exceeds the backdate");
+        }
     }
 
     /// Total TUN packets queued across all destinations.

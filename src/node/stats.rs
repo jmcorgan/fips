@@ -99,6 +99,11 @@ pub struct SessionStats {
     /// A session would have been created but unauthenticated half-open
     /// entries already hold their share of the table.
     pub half_open_full: u64,
+    /// A TUN packet to a new destination was dropped because
+    /// `node.session.pending_max_destinations` destinations already have
+    /// packets held. A sustained rate means something is holding the table
+    /// full, and first packets to new destinations are being lost.
+    pub pending_destinations_full: u64,
 }
 
 impl SessionStats {
@@ -120,6 +125,7 @@ impl SessionStats {
             setup_rate_limited: self.setup_rate_limited,
             table_full: self.table_full,
             half_open_full: self.half_open_full,
+            pending_destinations_full: self.pending_destinations_full,
         }
     }
 
@@ -137,6 +143,7 @@ impl SessionStats {
             SessionReject::SetupRateLimited => self.setup_rate_limited += 1,
             SessionReject::TableFull => self.table_full += 1,
             SessionReject::HalfOpenFull => self.half_open_full += 1,
+            SessionReject::PendingDestinationsFull => self.pending_destinations_full += 1,
         }
     }
 }
@@ -428,6 +435,7 @@ pub struct SessionStatsSnapshot {
     pub setup_rate_limited: u64,
     pub table_full: u64,
     pub half_open_full: u64,
+    pub pending_destinations_full: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -147,7 +147,25 @@ re-establishment — similar to IKEv2's INITIAL_CONTACT notification for
 peer restart detection (RFC 7296 §2.4).
 
 Packets that trigger session establishment are queued (with bounded buffer)
-and transmitted after the session is established.
+while a session or a coordinate lookup is in progress for the destination,
+and transmitted after the session is established. When neither is in
+progress, a TUN packet is answered at once with ICMPv6 Destination
+Unreachable instead, and held packets are answered the same way once
+nothing is working to deliver them. They are also answered once their
+destination has been held longer than the lookup schedule plus the
+handshake timeout (50 seconds by default). That age counts from when the
+destination was first held or, if later, from the latest lookup or session
+this node started for it, or from the first packet that rode a lookup
+already pending for it; later packets riding the same lookup do not restart
+it. A packet held before a lookup and then a session started for its
+destination can therefore wait longer than 50 seconds, since each start is
+new work that ends by its own timeout. A destination with no lookup
+running (no peer's bloom filter reaches it, only a non-tree peer's does, or
+its backoff window is open) is still held while the node has no peers and
+for 30 seconds after it gains one, while routing information arrives.
+Outside that window, a packet to a destination that is a direct peer or has
+a next hop, whose session setup failed on the link, is dropped unanswered
+rather than answered, so a retransmit retries the session.
 
 ### Self-Bootstrapping
 

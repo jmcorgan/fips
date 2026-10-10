@@ -39,6 +39,7 @@ use crate::proto::mmp::{
     SessionReceiverReport, SessionReportKind, SessionReportSnapshot, SessionSenderReport,
 };
 use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
+use crate::proto::probe::LookupOutcomeKind;
 use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken, RoutingSignalType};
 use crate::proto::stp::{coords_wire_size, encode_coords};
 #[cfg(unix)]
@@ -89,6 +90,278 @@ fn link_wire_len(encoded_len: usize) -> usize {
 /// crowd out peers that complete; raising it refuses legitimate initiators
 /// sooner in a storm.
 const HALF_OPEN_SHARE_DIVISOR: usize = 2;
+
+/// How long after the node goes from no peers to at least one that a TUN
+/// packet to a destination no lookup is running for (no tree peer's filter
+/// reaches it, or its backoff window is open; see `held_fate`) is still held
+/// rather than answered with ICMPv6 no-route.
+///
+/// A node's filters reach it only once its links complete their handshakes
+/// (resends at 1, 2, 4, 8 and 16 s within the 30 s `handshake_timeout_secs`),
+/// and each hop then forwards a changed filter after a 500 ms debounce
+/// (`node.bloom.update_debounce_ms`), so 30 s after the first link comes up
+/// covers the rest of the first links and a few hops of propagation behind
+/// them. The value has no measured basis. The cost: inside the hold a sender
+/// behind a gateway can fill the held-destination table, which the age bound
+/// then releases.
+const BLOOM_CONVERGENCE_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether routing information may still be arriving: the node has no peers,
+/// or gained its first one less than [`BLOOM_CONVERGENCE_HOLD`] ago.
+///
+/// Sans-IO: the caller reports the peer table and the time.
+#[derive(Default)]
+pub(in crate::node) struct RoutingHold {
+    /// When the node was first seen with peers after having none.
+    peers_since: Option<std::time::Instant>,
+}
+
+impl RoutingHold {
+    /// Note whether the node has peers at `now`. Going from none to some
+    /// starts the hold; having none clears the start, so the next peer
+    /// re-arms it.
+    pub(in crate::node) fn observe(&mut self, has_peers: bool, now: std::time::Instant) {
+        if !has_peers {
+            self.peers_since = None;
+        } else if self.peers_since.is_none() {
+            self.peers_since = Some(now);
+        }
+    }
+
+    /// Whether the hold applies at `now`.
+    pub(in crate::node) fn active(&self, now: std::time::Instant) -> bool {
+        match self.peers_since {
+            None => true,
+            Some(since) => now.saturating_duration_since(since) < BLOOM_CONVERGENCE_HOLD,
+        }
+    }
+
+    /// Move the start of the hold back by `by`, so a test can stand outside
+    /// it without waiting.
+    #[cfg(test)]
+    pub(in crate::node) fn backdate(&mut self, by: std::time::Duration) {
+        if let Some(since) = self.peers_since.as_mut() {
+            *since = since
+                .checked_sub(by)
+                .expect("host uptime exceeds the backdate");
+        }
+    }
+}
+
+/// What to do with a TUN packet whose destination has no session, given what
+/// the lookup gate decided.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum HeldFate {
+    /// Hold it: a lookup is pending, or routing may still be converging.
+    Hold,
+    /// Answer it with ICMPv6 no-route: nothing is working to reach it.
+    Answer,
+    /// Drop it unanswered: the destination is a direct peer or has a next
+    /// hop, so the session setup failed on the link rather than for want of
+    /// a route, and a retransmit retries it.
+    Discard,
+}
+
+/// Decide a held packet's fate from the lookup outcome.
+///
+/// `Sent` and `Deduplicated` mean a lookup is pending and its timeout
+/// releases the packets. The others mean no lookup is running: they are held
+/// only while the routing hold applies, since the filter or tree that would
+/// reach the target may still be arriving. `Suppressed` is held inside the
+/// hold because, with backoff enabled, the first packet's bloom miss records
+/// a failure and its retransmit is then suppressed.
+///
+/// `routed` says the destination is a direct peer or has a next hop, so the
+/// session setup failed on its send, not for want of a route. A tree-only
+/// lookup cannot vouch for a non-tree neighbour or a destination reached by
+/// tree coordinates, so outside the hold such a packet is dropped rather
+/// than answered: the failure may pass, and the next retransmit retries.
+fn held_fate(kind: LookupOutcomeKind, in_hold: bool, routed: bool) -> HeldFate {
+    match kind {
+        LookupOutcomeKind::Sent | LookupOutcomeKind::Deduplicated => HeldFate::Hold,
+        LookupOutcomeKind::BloomMiss
+        | LookupOutcomeKind::ZeroFanout
+        | LookupOutcomeKind::Suppressed => {
+            if in_hold {
+                HeldFate::Hold
+            } else if routed {
+                HeldFate::Discard
+            } else {
+                HeldFate::Answer
+            }
+        }
+    }
+}
+
+/// When a held destination's age started, read by the held-packet backstop.
+#[derive(Copy, Clone, Debug)]
+pub(in crate::node) struct HeldStamp {
+    /// When the destination was first held, or when the latest lookup or
+    /// session that can settle it started.
+    pub(in crate::node) since: std::time::Instant,
+    /// Whether a lookup has already restarted the age since the destination
+    /// was first held. A packet riding a pending lookup restarts it only when
+    /// this is unset, so a stream of such packets cannot keep the destination
+    /// young while that lookup is stalled.
+    pub(in crate::node) lookup_stamped: bool,
+}
+
+impl HeldStamp {
+    /// A stamp for a destination first held at `now`.
+    pub(in crate::node) fn new(now: std::time::Instant) -> Self {
+        Self {
+            since: now,
+            lookup_stamped: false,
+        }
+    }
+
+    /// Restart the age at `now` because `cause` started work that can settle
+    /// the destination.
+    ///
+    /// Riding a pending lookup restarts it only once per held destination:
+    /// the lookup started before the packet, so a later packet riding it adds
+    /// no new work, and restarting on each one would let a stream of packets
+    /// hold the destination for as long as the lookup is stalled.
+    fn restart(&mut self, cause: Restamp, now: std::time::Instant) {
+        match cause {
+            Restamp::LookupRidden if self.lookup_stamped => {}
+            Restamp::LookupSent | Restamp::LookupRidden => {
+                self.since = now;
+                self.lookup_stamped = true;
+            }
+            Restamp::SessionStarted => self.since = now,
+        }
+    }
+}
+
+/// What started the work that restarts a held destination's age.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Restamp {
+    /// This node sent a lookup for the destination.
+    LookupSent,
+    /// The packet rode a lookup already pending for the destination.
+    LookupRidden,
+    /// A session to the destination was started.
+    SessionStarted,
+}
+
+/// Whether [`Node::queue_pending_packet`] held the packet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[must_use = "a refused packet was dropped; a caller that leaves it dropped says why"]
+pub(in crate::node) enum Held {
+    /// Queued behind the destination's other packets.
+    Queued,
+    /// Dropped: the held-destination table is full and the destination is new.
+    Refused,
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::{BLOOM_CONVERGENCE_HOLD, HeldFate, HeldStamp, Restamp, RoutingHold, held_fate};
+    use crate::proto::probe::LookupOutcomeKind;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn held_fate_holds_only_while_a_lookup_is_pending_or_inside_the_hold_for_unconverged_routing() {
+        use HeldFate::{Answer, Discard, Hold};
+        use LookupOutcomeKind::*;
+        let table = [
+            (Sent, true, false, Hold),
+            (Sent, false, false, Hold),
+            (Sent, false, true, Hold),
+            (Deduplicated, true, false, Hold),
+            (Deduplicated, false, false, Hold),
+            (Deduplicated, false, true, Hold),
+            (BloomMiss, true, false, Hold),
+            (BloomMiss, true, true, Hold),
+            (BloomMiss, false, false, Answer),
+            (BloomMiss, false, true, Discard),
+            (ZeroFanout, true, false, Hold),
+            (ZeroFanout, true, true, Hold),
+            (ZeroFanout, false, false, Answer),
+            (ZeroFanout, false, true, Discard),
+            (Suppressed, true, false, Hold),
+            (Suppressed, true, true, Hold),
+            (Suppressed, false, false, Answer),
+            (Suppressed, false, true, Discard),
+        ];
+        for (kind, in_hold, routed, want) in table {
+            assert_eq!(
+                held_fate(kind, in_hold, routed),
+                want,
+                "{kind:?}, in_hold={in_hold}, routed={routed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_stamp_restarts_on_each_lookup_sent_and_session_started_but_only_once_for_packets_riding_a_lookup()
+     {
+        let t0 = Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+
+        let mut ridden = HeldStamp::new(t0);
+        ridden.restart(Restamp::LookupRidden, at(30));
+        assert_eq!(ridden.since, at(30), "the first ride restarts the age");
+        ridden.restart(Restamp::LookupRidden, at(60));
+        ridden.restart(Restamp::LookupRidden, at(90));
+        assert_eq!(ridden.since, at(30), "later rides leave it alone");
+
+        let mut sent = HeldStamp::new(t0);
+        sent.restart(Restamp::LookupSent, at(10));
+        sent.restart(Restamp::LookupRidden, at(20));
+        assert_eq!(
+            sent.since,
+            at(10),
+            "a ride after a sent lookup adds nothing"
+        );
+        sent.restart(Restamp::LookupSent, at(40));
+        assert_eq!(sent.since, at(40), "each new lookup restarts the age");
+        sent.restart(Restamp::SessionStarted, at(50));
+        assert_eq!(sent.since, at(50), "a session start restarts the age");
+        sent.restart(Restamp::SessionStarted, at(70));
+        assert_eq!(sent.since, at(70), "and so does each later one");
+
+        let mut session = HeldStamp::new(t0);
+        session.restart(Restamp::SessionStarted, at(5));
+        session.restart(Restamp::LookupRidden, at(15));
+        assert_eq!(
+            session.since,
+            at(15),
+            "a session start does not use up the one ride"
+        );
+    }
+
+    #[test]
+    fn routing_hold_is_active_with_no_peers_and_for_the_hold_after_peers_appear_and_rearms_after_they_all_go()
+     {
+        let t0 = Instant::now();
+        let mut hold = RoutingHold::default();
+        assert!(hold.active(t0), "no observation yet means no peers");
+
+        hold.observe(false, t0);
+        assert!(hold.active(t0 + Duration::from_secs(600)), "no peers: held");
+
+        let up = t0 + Duration::from_secs(1);
+        hold.observe(true, up);
+        assert!(hold.active(up));
+        assert!(hold.active(up + BLOOM_CONVERGENCE_HOLD - Duration::from_millis(1)));
+        assert!(!hold.active(up + BLOOM_CONVERGENCE_HOLD));
+
+        // Still having peers does not move the start.
+        hold.observe(true, up + Duration::from_secs(20));
+        assert!(!hold.active(up + BLOOM_CONVERGENCE_HOLD));
+
+        // All peers gone: held again, and the next peer re-arms the hold.
+        let down = up + Duration::from_secs(100);
+        hold.observe(false, down);
+        assert!(hold.active(down));
+        let back = down + Duration::from_secs(5);
+        hold.observe(true, back);
+        assert!(hold.active(back + BLOOM_CONVERGENCE_HOLD - Duration::from_millis(1)));
+        assert!(!hold.active(back + BLOOM_CONVERGENCE_HOLD));
+    }
+}
 
 /// Inputs to `try_send_session_data_pipelined` — the FSP+FMP pipelined
 /// fast path that hands both AEAD operations to the encrypt worker
@@ -3261,8 +3534,11 @@ impl Node {
                 }
                 return;
             }
-            // Session exists but not yet established — queue the packet
-            self.queue_pending_packet(dest_addr, ipv6_packet);
+            // Session exists but not yet established — queue the packet. A
+            // refusal from a full table stays a silent drop: the session's own
+            // establishment or timeout settles the flow, and a retransmit goes
+            // through once it is established.
+            let _ = self.queue_pending_packet(dest_addr, ipv6_packet);
             return;
         }
 
@@ -3279,14 +3555,111 @@ impl Node {
 
         // No session: initiate one and queue the packet.
         // If session initiation fails (no route), trigger discovery and
-        // queue the packet for retry when discovery completes.
+        // queue the packet for retry when discovery completes, unless no
+        // lookup is running and routing has had time to converge: then
+        // nothing would ever send it, so answer it now. A destination with a
+        // route whose setup failed on the link is dropped unanswered instead,
+        // for a retransmit to retry.
         if let Err(e) = self.initiate_session(dest_addr, dest_pubkey).await {
             debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to initiate session, trying discovery");
-            self.maybe_initiate_lookup(&dest_addr).await;
-            self.queue_pending_packet(dest_addr, ipv6_packet);
+            let kind = self.maybe_initiate_lookup(&dest_addr).await.kind();
+            let in_hold = self.routing_hold_active(std::time::Instant::now());
+            let routed =
+                self.peers.contains_key(&dest_addr) || self.find_next_hop(&dest_addr).is_some();
+            match held_fate(kind, in_hold, routed) {
+                HeldFate::Answer => {
+                    let released = self.release_held_tun(&dest_addr);
+                    self.send_icmpv6_dest_unreachable(&ipv6_packet);
+                    debug!(
+                        dest = %self.peer_display_name(&dest_addr),
+                        kind = ?kind,
+                        released,
+                        reason = "no-lookup",
+                        "No lookup pending for destination, answering no route"
+                    );
+                }
+                HeldFate::Discard => {
+                    debug!(
+                        dest = %self.peer_display_name(&dest_addr),
+                        kind = ?kind,
+                        reason = "setup-failed",
+                        "Session setup to a routed destination failed, dropping for a retransmit to retry"
+                    );
+                }
+                HeldFate::Hold => {
+                    // A refusal from a full table stays a silent drop: a
+                    // lookup is in flight or routing is converging, and a
+                    // retransmit is held once a slot frees.
+                    let _ = self.queue_pending_packet(dest_addr, ipv6_packet);
+                    // Age the destination from the lookup that can settle
+                    // it, not from a packet held earlier inside the hold.
+                    match kind {
+                        LookupOutcomeKind::Sent => {
+                            self.restamp_held(&dest_addr, Restamp::LookupSent);
+                        }
+                        LookupOutcomeKind::Deduplicated => {
+                            self.restamp_held(&dest_addr, Restamp::LookupRidden);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             return;
         }
-        self.queue_pending_packet(dest_addr, ipv6_packet);
+        // A refusal stays a silent drop, as behind a session being set up
+        // above: this session's establishment or timeout settles the flow.
+        let _ = self.queue_pending_packet(dest_addr, ipv6_packet);
+        // The destination may already have been held before this session
+        // started; age it from the start.
+        self.restamp_held(&dest_addr, Restamp::SessionStarted);
+    }
+
+    /// Whether the routing hold applies at `now`, after noting the current
+    /// peer table. The caller passes the time so one decision uses one clock
+    /// reading.
+    pub(in crate::node) fn routing_hold_active(&mut self, now: std::time::Instant) -> bool {
+        self.routing_hold.observe(!self.peers.is_empty(), now);
+        self.routing_hold.active(now)
+    }
+
+    /// Drop every TUN packet held for `dest`, answering each with ICMPv6
+    /// Destination Unreachable, the answer a final lookup timeout gives.
+    /// Returns how many were released, for the caller's log.
+    pub(in crate::node) fn release_held_tun(&mut self, dest: &NodeAddr) -> usize {
+        self.pending_tun_since.remove(dest);
+        let Some(packets) = self.pending_tun_packets.remove(dest) else {
+            return 0;
+        };
+        for packet in &packets {
+            self.send_icmpv6_dest_unreachable(packet);
+        }
+        packets.len()
+    }
+
+    /// Release `dest`'s held TUN packets as [`Self::release_held_tun`] does,
+    /// unless a session entry for it exists in any state: that session's
+    /// establishment or timeout settles them. Returns how many were released.
+    fn release_orphans(&mut self, dest: &NodeAddr) -> usize {
+        if self.sessions.contains_key(dest) {
+            0
+        } else {
+            self.release_held_tun(dest)
+        }
+    }
+
+    /// Restart the age of `dest`'s held packets, if it has any, because
+    /// `cause` started work that can settle them (see [`HeldStamp::restart`]).
+    /// A destination with no queue gets no stamp, so a refused packet adds
+    /// none.
+    fn restamp_held(&mut self, dest: &NodeAddr, cause: Restamp) {
+        if !self.pending_tun_packets.contains_key(dest) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.pending_tun_since
+            .entry(*dest)
+            .or_insert_with(|| HeldStamp::new(now))
+            .restart(cause, now);
     }
 
     /// Send ICMPv6 Destination Unreachable back through TUN.
@@ -3352,18 +3725,39 @@ impl Node {
     }
 
     /// Queue a packet while waiting for session establishment.
-    fn queue_pending_packet(&mut self, dest_addr: NodeAddr, packet: Vec<u8>) {
-        // Reject if we already have too many pending destinations
+    ///
+    /// Refuses, dropping the packet, when the destination is new and
+    /// `node.session.pending_max_destinations` destinations already have
+    /// packets held.
+    fn queue_pending_packet(&mut self, dest_addr: NodeAddr, packet: Vec<u8>) -> Held {
         let max_dests = self.config().node.session.pending_max_destinations;
-        if !self.pending_tun_packets.contains_key(&dest_addr)
-            && self.pending_tun_packets.len() >= max_dests
-        {
-            return;
+        let is_new = !self.pending_tun_packets.contains_key(&dest_addr);
+        if is_new && self.pending_tun_packets.len() >= max_dests {
+            debug!(
+                dest = %self.peer_display_name(&dest_addr),
+                reason = "held-destination-table-full",
+                "Held TUN packet refused"
+            );
+            self.stats_mut().record_reject(RejectReason::Session(
+                SessionReject::PendingDestinationsFull,
+            ));
+            if self.pending_tun_bound_log.refused(1) {
+                warn!(
+                    bound = max_dests,
+                    "Held-packet destination table full; packets to new destinations are refused"
+                );
+            }
+            return Held::Refused;
         }
 
+        if is_new {
+            self.pending_tun_since
+                .insert(dest_addr, HeldStamp::new(std::time::Instant::now()));
+        }
         let per_dest = self.config().node.session.pending_packets_per_dest;
         let queue = self.pending_tun_packets.entry(dest_addr).or_default();
         crate::proto::fsp::push_bounded_pending(queue, packet, per_dest);
+        Held::Queued
     }
 
     /// Flush pending packets for a destination whose session just reached Established.
@@ -3390,15 +3784,26 @@ impl Node {
         // Look up the destination's public key from the identity cache
         let mut prefix = [0u8; 15];
         prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
+        // The lookup has ended, so where the retry below starts no session
+        // and finds no session entry, nothing is working on the held TUN
+        // packets: they are answered now rather than left for the tick.
         let dest_pubkey = match self.lookup_by_fips_prefix(&prefix) {
             Some((_, pk)) => pk,
             None => {
-                debug!(dest = %self.peer_display_name(&dest_addr), "Discovery complete but no identity for session retry");
+                // A session entry can exist without a cached identity.
+                let released = self.release_orphans(&dest_addr);
+                debug!(
+                    dest = %self.peer_display_name(&dest_addr),
+                    released,
+                    reason = "no-identity",
+                    "Discovery complete but no identity for session retry"
+                );
                 return;
             }
         };
 
-        // Skip if a session already exists
+        // Skip if a session already exists; its establishment or timeout
+        // settles the held packets.
         if let Some(existing) = self.sessions.get(&dest_addr)
             && (existing.is_established() || existing.is_initiating())
         {
@@ -3406,15 +3811,31 @@ impl Node {
         }
 
         if !self.admit_new_session(&dest_addr) {
+            let released = self.release_held_tun(&dest_addr);
+            debug!(
+                dest = %self.peer_display_name(&dest_addr),
+                released,
+                reason = "admission-refused",
+                "Session retry after discovery not admitted"
+            );
             return;
         }
 
         match self.initiate_session(dest_addr, dest_pubkey).await {
             Ok(()) => {
+                self.restamp_held(&dest_addr, Restamp::SessionStarted);
                 debug!(dest = %self.peer_display_name(&dest_addr), "Session initiated after discovery");
             }
             Err(e) => {
-                debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Session retry after discovery failed");
+                // A responder handshake survives a failed initiation.
+                let released = self.release_orphans(&dest_addr);
+                debug!(
+                    dest = %self.peer_display_name(&dest_addr),
+                    error = %e,
+                    released,
+                    reason = "initiate-failed",
+                    "Session retry after discovery failed"
+                );
             }
         }
     }

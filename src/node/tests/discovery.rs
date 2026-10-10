@@ -2524,3 +2524,864 @@ async fn a_native_first_send_through_discovery_is_still_delivered_when_the_tick_
 
     cleanup_nodes(&mut nodes).await;
 }
+
+// ============================================================================
+// TUN packets held for destinations nothing is working to reach
+// ============================================================================
+
+/// Install a TUN sender, so ICMPv6 answers to local packets are observable.
+fn install_tun_channel(node: &mut Node) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    node.supervisor.tun_tx = Some(tun_tx);
+    tun_rx
+}
+
+/// Everything written to the TUN so far.
+fn drain_tun(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+/// A valid IPv6 packet from a local, non-multicast source to `dest`'s FIPS
+/// address, so `should_send_icmp_error` lets an answer through.
+fn tun_packet_to(dest: &NodeAddr) -> Vec<u8> {
+    let mut pkt = vec![0u8; 40];
+    pkt[0] = 0x60;
+    pkt[6] = 17;
+    pkt[7] = 64;
+    pkt[8] = 0xfd;
+    pkt[23] = 0x01;
+    let dest_ipv6 = crate::FipsAddress::from_node_addr(dest).to_ipv6();
+    pkt[24..40].copy_from_slice(&dest_ipv6.octets());
+    pkt
+}
+
+/// Assert `packet` is an ICMPv6 Destination Unreachable, no route.
+fn assert_no_route(packet: &[u8]) {
+    assert!(packet.len() >= 48, "ICMPv6 answer too short");
+    assert_eq!(packet[6], 58, "next header must be ICMPv6");
+    assert_eq!(packet[40], 1, "ICMPv6 type must be Destination Unreachable");
+    assert_eq!(packet[41], 0, "ICMPv6 code must be no route");
+}
+
+/// A fresh destination whose identity the node has cached, as a DNS answer
+/// for its name leaves it.
+fn registered_destination(node: &mut Node) -> NodeAddr {
+    let identity = Identity::generate();
+    let addr = *identity.node_addr();
+    node.register_identity(addr, identity.pubkey_full());
+    assert!(
+        node.has_cached_identity(&addr),
+        "precondition: the destination's identity is cached"
+    );
+    addr
+}
+
+/// Insert an authenticated peer whose filter holds exactly `reaches`, and,
+/// when `tree`, make it a tree peer by having it declare this node its parent.
+fn insert_filter_peer(node: &mut Node, reaches: &[NodeAddr], tree: bool) -> NodeAddr {
+    insert_filter_peer_as(node, &Identity::generate(), reaches, tree)
+}
+
+/// As `insert_filter_peer`, for a peer with the given identity.
+fn insert_filter_peer_as(
+    node: &mut Node,
+    identity: &Identity,
+    reaches: &[NodeAddr],
+    tree: bool,
+) -> NodeAddr {
+    use crate::peer::ActivePeer;
+    use crate::proto::bloom::BloomFilter;
+    use crate::transport::LinkId;
+
+    let peer_addr = *identity.node_addr();
+    let peer_identity = crate::PeerIdentity::from_pubkey(identity.pubkey());
+    let link = LinkId::new(node.peers.len() as u64 + 1);
+    let mut peer = ActivePeer::new(peer_identity, link, 0);
+    let mut bloom = BloomFilter::new();
+    for target in reaches {
+        bloom.insert(target);
+    }
+    peer.update_filter(bloom, 1, 0);
+    node.peers.insert(peer_addr, peer);
+    if tree {
+        let our_addr = *node.node_addr();
+        let decl = crate::proto::stp::ParentDeclaration::new(peer_addr, our_addr, 1, 0);
+        let coords = TreeCoordinate::from_addrs(vec![peer_addr, our_addr]).unwrap();
+        node.tree_state_mut().update_peer(decl, coords);
+        assert!(node.is_tree_peer(&peer_addr), "precondition: a tree peer");
+    }
+    peer_addr
+}
+
+/// Replace `peer`'s filter with one holding exactly `reaches`.
+fn set_peer_filter(node: &mut Node, peer: &NodeAddr, reaches: &[NodeAddr], sequence: u64) {
+    let mut bloom = crate::proto::bloom::BloomFilter::new();
+    for target in reaches {
+        bloom.insert(target);
+    }
+    node.peers
+        .get_mut(peer)
+        .expect("peer present")
+        .update_filter(bloom, sequence, 0);
+}
+
+/// Stand outside the routing hold: the node's peers appeared a minute ago.
+fn leave_hold(node: &mut Node) {
+    node.backdate_hold_for_test(std::time::Duration::from_secs(60));
+    assert!(
+        !node.routing_hold_active(std::time::Instant::now()),
+        "precondition: outside the routing hold"
+    );
+}
+
+#[tokio::test]
+async fn a_tun_packet_to_a_destination_no_peer_filter_reaches_is_answered_with_no_route_after_the_hold_and_not_held()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    insert_filter_peer(&mut node, &[], false);
+    leave_hold(&mut node);
+    let dest = registered_destination(&mut node);
+    let misses = node.metrics().lookup.req_bloom_miss.get();
+
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+
+    assert_eq!(
+        node.metrics().lookup.req_bloom_miss.get(),
+        misses + 1,
+        "control: the packet must have reached the lookup gate as a bloom miss"
+    );
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "a packet no lookup can deliver must be answered at once, but {} destinations are held",
+        node.pending_tun_destinations()
+    );
+    assert_no_route(&answers[0]);
+    assert_eq!(node.pending_tun_destinations(), 0, "nothing may be held");
+    assert!(node.lookup.pending_lookups.is_empty());
+    assert!(node.sessions.is_empty());
+}
+
+#[tokio::test]
+async fn two_hundred_fifty_seven_unreachable_destinations_each_get_no_route_and_the_held_table_never_fills()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    insert_filter_peer(&mut node, &[], false);
+    leave_hold(&mut node);
+    let sends = node.config().node.session.pending_max_destinations + 1;
+    let misses = node.metrics().lookup.req_bloom_miss.get();
+
+    let mut answers = 0usize;
+    let mut largest_held = 0usize;
+    for _ in 0..sends {
+        let dest = registered_destination(&mut node);
+        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+        for answer in drain_tun(&rx) {
+            assert_no_route(&answer);
+            answers += 1;
+        }
+        largest_held = largest_held.max(node.pending_tun_destinations());
+    }
+
+    assert_eq!(
+        node.metrics().lookup.req_bloom_miss.get(),
+        misses + sends as u64,
+        "control: every packet must have reached the lookup gate as a bloom miss"
+    );
+    assert_eq!(
+        answers, sends,
+        "every unreachable destination must be answered; the held table reached {largest_held}"
+    );
+    assert_eq!(largest_held, 0, "no unreachable destination may be held");
+    assert_eq!(
+        node.lookup.backoff.entry_count(),
+        0,
+        "the default disabled backoff must record none of the misses"
+    );
+}
+
+#[tokio::test]
+async fn a_tun_packet_whose_destination_only_a_non_tree_peer_filter_reaches_is_answered_with_no_route_after_the_hold()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    insert_filter_peer(&mut node, &[dest], false);
+    leave_hold(&mut node);
+    let initiated = node.metrics().lookup.req_initiated.get();
+    let misses = node.metrics().lookup.req_bloom_miss.get();
+
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+
+    assert_eq!(
+        node.metrics().lookup.req_initiated.get(),
+        initiated + 1,
+        "control: the gate must have proceeded"
+    );
+    assert_eq!(node.metrics().lookup.req_bloom_miss.get(), misses);
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "a lookup that reached no tree peer must answer the packet, but {} destinations are held",
+        node.pending_tun_destinations()
+    );
+    assert_no_route(&answers[0]);
+    assert_eq!(node.pending_tun_destinations(), 0);
+    assert!(node.lookup.pending_lookups.is_empty());
+}
+
+#[tokio::test]
+async fn after_the_hold_a_packet_to_a_direct_peer_whose_session_setup_fails_is_neither_answered_nor_held_so_a_retransmit_retries_it()
+ {
+    // A direct non-tree neighbour whose filter reaches itself, with no link
+    // to send on. Sendable, the session setup is routed to it and the send
+    // fails; reconnecting, it has no next hop while its link comes back.
+    let mut outcomes = Vec::new();
+    for reconnecting in [false, true] {
+        let mut node = make_node();
+        let rx = install_tun_channel(&mut node);
+        let identity = Identity::generate();
+        let dest = insert_filter_peer_as(&mut node, &identity, &[*identity.node_addr()], false);
+        node.register_identity(dest, identity.pubkey_full());
+        if reconnecting {
+            node.peers.get_mut(&dest).unwrap().mark_reconnecting();
+        }
+        leave_hold(&mut node);
+        assert_eq!(
+            node.find_next_hop(&dest).is_some(),
+            !reconnecting,
+            "precondition: a next hop exactly while the peer can send"
+        );
+        let initiated = node.metrics().lookup.req_initiated.get();
+
+        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+
+        assert_eq!(
+            node.metrics().lookup.req_initiated.get(),
+            initiated + 1,
+            "control: the session setup must have failed and the lookup gate proceeded"
+        );
+        assert!(node.sessions.is_empty(), "control: no session was started");
+        assert!(
+            node.lookup.pending_lookups.is_empty(),
+            "control: no lookup is pending"
+        );
+        outcomes.push((
+            reconnecting,
+            drain_tun(&rx).len(),
+            node.pending_tun_destinations(),
+        ));
+    }
+    assert_eq!(
+        outcomes,
+        [(false, 0, 0), (true, 0, 0)],
+        "a direct peer's failed session setup is not \"no route\": the packet must be \
+         neither answered nor held (reconnecting, answers, destinations held)"
+    );
+}
+
+#[tokio::test]
+async fn inside_the_hold_a_bloom_miss_packet_is_held_and_the_tick_releases_it_with_no_route_once_the_hold_ends()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    insert_filter_peer(&mut node, &[], false);
+    assert!(
+        node.routing_hold_active(std::time::Instant::now()),
+        "precondition: inside the routing hold"
+    );
+    assert_eq!(node.connection_count(), 0, "precondition: no handshake");
+    let dest = registered_destination(&mut node);
+
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(node.pending_tun_destinations(), 1, "held inside the hold");
+    assert!(drain_tun(&rx).is_empty(), "not answered inside the hold");
+
+    node.check_timeouts().await;
+    assert_eq!(
+        node.pending_tun_destinations(),
+        1,
+        "still held inside the hold"
+    );
+    assert!(drain_tun(&rx).is_empty());
+
+    node.backdate_hold_for_test(std::time::Duration::from_secs(60));
+    node.check_timeouts().await;
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "the tick after the hold must answer the held packet, but {} destinations are held",
+        node.pending_tun_destinations()
+    );
+    assert_no_route(&answers[0]);
+    assert_eq!(node.pending_tun_destinations(), 0);
+    assert!(node.pending_tun_since.is_empty());
+}
+
+#[tokio::test]
+async fn a_packet_answered_after_the_hold_also_answers_the_packets_held_for_its_destination_inside_the_hold_without_waiting_for_a_tick()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    insert_filter_peer(&mut node, &[], false);
+    assert!(
+        node.routing_hold_active(std::time::Instant::now()),
+        "precondition: inside the routing hold"
+    );
+    let dest = registered_destination(&mut node);
+    let misses = node.metrics().lookup.req_bloom_miss.get();
+
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(node.pending_tun_destinations(), 1, "held inside the hold");
+    assert!(drain_tun(&rx).is_empty(), "not answered inside the hold");
+
+    node.backdate_hold_for_test(std::time::Duration::from_secs(60));
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+
+    assert_eq!(
+        node.metrics().lookup.req_bloom_miss.get(),
+        misses + 2,
+        "control: both packets must have reached the lookup gate as bloom misses"
+    );
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        (answers.len(), node.pending_tun_destinations()),
+        (2, 0),
+        "the second packet's answer must also answer the one held earlier, \
+         with no tick between (answers, destinations held)"
+    );
+    for answer in &answers {
+        assert_no_route(answer);
+    }
+    assert!(node.pending_tun_since.is_empty(), "no stamp may be left");
+}
+
+#[tokio::test]
+async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_packets_with_no_route()
+ {
+    // (i) no cached identity
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let dest = *Identity::generate().node_addr();
+    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    node.retry_session_after_discovery(dest).await;
+    let no_identity = (drain_tun(&rx), node.pending_tun_destinations());
+
+    // (ii) identity cached, but no route: the next hop vanished
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    node.retry_session_after_discovery(dest).await;
+    let no_route = (drain_tun(&rx), node.pending_tun_destinations());
+
+    // (iii) identity cached and the session table full
+    let mut config = crate::Config::new();
+    config.node.limits.max_sessions = 1;
+    let mut node = make_node_with(config);
+    let rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    let other = Identity::generate();
+    let handshake = crate::noise::HandshakeState::new_xk_initiator(
+        node.identity().keypair(),
+        other.pubkey_full(),
+    );
+    node.sessions.insert(
+        *other.node_addr(),
+        crate::node::session::SessionEntry::new(
+            *other.node_addr(),
+            other.pubkey_full(),
+            crate::node::session::EndToEndState::Initiating(handshake),
+            1000,
+            true,
+        ),
+    );
+    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    let full = node.stats().session.table_full;
+    node.retry_session_after_discovery(dest).await;
+    assert_eq!(
+        node.stats().session.table_full,
+        full + 1,
+        "control: admission must have been refused"
+    );
+    let table_full = (drain_tun(&rx), node.pending_tun_destinations());
+
+    // (case, answers, destinations still held), all three shown together.
+    let cases = [
+        ("no identity", no_identity),
+        ("no route", no_route),
+        ("table full", table_full),
+    ];
+    let outcomes: Vec<(&str, usize, usize)> = cases
+        .iter()
+        .map(|(case, (answers, held))| (*case, answers.len(), *held))
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            ("no identity", 1, 0),
+            ("no route", 1, 0),
+            ("table full", 1, 0)
+        ],
+        "each held packet must be answered and nothing may stay held"
+    );
+    for (_, (answers, _)) in &cases {
+        assert_no_route(&answers[0]);
+    }
+}
+
+#[tokio::test]
+async fn a_held_destination_older_than_the_lookup_schedule_plus_handshake_timeout_is_released_even_with_a_lookup_pending()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    insert_filter_peer(&mut node, &[dest], true);
+    leave_hold(&mut node);
+    let initiated = node.metrics().lookup.req_initiated.get();
+
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(
+        node.metrics().lookup.req_initiated.get(),
+        initiated + 1,
+        "precondition: a lookup was sent"
+    );
+    let stamp = node.pending_tun_since[&dest].since;
+    let max_age = node.pending_tun_max_age();
+    let second = std::time::Duration::from_secs(1);
+
+    node.release_stranded_tun_packets(stamp + max_age - second);
+    assert_eq!(node.pending_tun_destinations(), 1, "kept while young");
+    assert!(drain_tun(&rx).is_empty());
+
+    node.release_stranded_tun_packets(stamp + max_age + second);
+    let answers = drain_tun(&rx);
+    assert_eq!(answers.len(), 1, "one answer per held packet");
+    assert_no_route(&answers[0]);
+    assert_eq!(node.pending_tun_destinations(), 0);
+}
+
+#[tokio::test]
+async fn a_destination_first_held_inside_the_hold_whose_lookup_starts_later_is_aged_from_the_lookup_start()
+ {
+    let backdate = std::time::Duration::from_secs(30);
+    let second = std::time::Duration::from_secs(1);
+
+    // (i) The node's own lookup starts once the target's filter arrives.
+    let mut node = make_node();
+    let _rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    let peer = insert_filter_peer(&mut node, &[], true);
+    assert!(node.routing_hold_active(std::time::Instant::now()));
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.backdate_held_for_test(&dest, backdate);
+    let first = node.pending_tun_since[&dest].since;
+    set_peer_filter(&mut node, &peer, &[dest], 2);
+    let initiated = node.metrics().lookup.req_initiated.get();
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(
+        node.metrics().lookup.req_initiated.get(),
+        initiated + 1,
+        "precondition: the retransmit sent a lookup"
+    );
+    let stamp = node.pending_tun_since[&dest].since;
+    assert!(
+        stamp >= first + backdate - second,
+        "the lookup start must restamp the destination"
+    );
+    node.release_stranded_tun_packets(stamp + node.pending_tun_max_age() - second);
+    assert_eq!(node.pending_tun_total_packets(), 2, "both packets kept");
+
+    // (ii) Another caller's lookup is already in flight.
+    let mut node = make_node();
+    let _rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    insert_filter_peer(&mut node, &[], true);
+    assert!(node.routing_hold_active(std::time::Instant::now()));
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.backdate_held_for_test(&dest, backdate);
+    let first = node.pending_tun_since[&dest].since;
+    node.lookup.pending_lookups.insert(
+        dest,
+        crate::proto::lookup::PendingLookup::new(Node::now_ms()),
+    );
+    let deduplicated = node.metrics().lookup.req_deduplicated.get();
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(
+        node.metrics().lookup.req_deduplicated.get(),
+        deduplicated + 1,
+        "precondition: the retransmit rode the pending lookup"
+    );
+    let stamp = node.pending_tun_since[&dest].since;
+    assert!(
+        stamp >= first + backdate - second,
+        "riding another caller's lookup must restamp the destination"
+    );
+    node.release_stranded_tun_packets(stamp + node.pending_tun_max_age() - second);
+    assert_eq!(node.pending_tun_total_packets(), 2, "both packets kept");
+}
+
+#[tokio::test]
+async fn a_node_with_no_peers_holds_a_bloom_miss_packet_and_rearms_the_hold_when_it_gains_a_peer() {
+    use crate::peer::ActivePeer;
+    let now = std::time::Instant::now;
+
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    assert!(node.routing_hold_active(now()), "no peers: inside the hold");
+    let first = registered_destination(&mut node);
+    node.handle_tun_outbound(tun_packet_to(&first)).await;
+    assert_eq!(node.pending_tun_destinations(), 1, "held with no peers");
+    assert!(drain_tun(&rx).is_empty());
+
+    let peer = insert_filter_peer(&mut node, &[], false);
+    leave_hold(&mut node);
+    let second = registered_destination(&mut node);
+    node.handle_tun_outbound(tun_packet_to(&second)).await;
+    let answers = drain_tun(&rx);
+    assert_eq!(answers.len(), 1, "answered once outside the hold");
+    assert_no_route(&answers[0]);
+
+    let removed: ActivePeer = node.peers.remove(&peer).unwrap();
+    assert!(node.routing_hold_active(now()), "no peers again: inside");
+    node.peers.insert(peer, removed);
+    assert!(
+        node.routing_hold_active(now()),
+        "regaining a peer must re-arm the hold"
+    );
+    let third = registered_destination(&mut node);
+    node.handle_tun_outbound(tun_packet_to(&third)).await;
+    assert!(drain_tun(&rx).is_empty(), "held inside the re-armed hold");
+    assert_eq!(node.pending_tun_destinations(), 2);
+
+    // A peer table that empties and refills between two observations is not
+    // seen as a transition.
+    leave_hold(&mut node);
+    let removed = node.peers.remove(&peer).unwrap();
+    node.peers.insert(peer, removed);
+    assert!(!node.routing_hold_active(now()));
+}
+
+#[tokio::test]
+async fn a_stale_first_held_stamp_left_by_a_removal_site_that_does_not_clear_it_is_dropped_on_the_next_tick()
+ {
+    let mut node = make_node();
+    let _rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    insert_filter_peer(&mut node, &[dest], true);
+    leave_hold(&mut node);
+    let initiated = node.metrics().lookup.req_initiated.get();
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(
+        node.metrics().lookup.req_initiated.get(),
+        initiated + 1,
+        "precondition: a lookup was sent"
+    );
+
+    let t0 = node.lookup.pending_lookups[&dest].initiated_ms;
+    for at in [1_000, 3_000, 7_000, 15_000] {
+        node.check_pending_lookups(t0 + at).await;
+    }
+    assert_eq!(
+        node.pending_tun_destinations(),
+        0,
+        "precondition: the final timeout removed the queue"
+    );
+    assert_eq!(
+        node.pending_tun_since.len(),
+        1,
+        "precondition: the final timeout left the stamp"
+    );
+
+    node.check_timeouts().await;
+    assert!(
+        node.pending_tun_since.is_empty(),
+        "the tick must drop a stamp whose queue is gone"
+    );
+}
+
+#[tokio::test]
+async fn with_the_held_table_full_of_destinations_awaiting_lookups_a_new_destinations_packet_is_dropped_and_its_retransmit_is_held_once_a_slot_frees()
+ {
+    use crate::proto::lookup::PendingLookup;
+
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    insert_filter_peer(&mut node, &[], false);
+    leave_hold(&mut node);
+    let cap = node.config().node.session.pending_max_destinations;
+    let deduplicated = node.metrics().lookup.req_deduplicated.get();
+    let refusals = node.stats().session.pending_destinations_full;
+
+    let mut held = Vec::with_capacity(cap);
+    for _ in 0..cap {
+        let dest = registered_destination(&mut node);
+        node.lookup
+            .pending_lookups
+            .insert(dest, PendingLookup::new(0));
+        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+        held.push(dest);
+    }
+    assert_eq!(node.pending_tun_destinations(), cap, "precondition: full");
+
+    let late = registered_destination(&mut node);
+    node.lookup
+        .pending_lookups
+        .insert(late, PendingLookup::new(0));
+    node.handle_tun_outbound(tun_packet_to(&late)).await;
+
+    assert!(
+        drain_tun(&rx).is_empty(),
+        "a refused packet is not answered"
+    );
+    assert!(!node.pending_tun_packets.contains_key(&late), "nor held");
+    assert_eq!(
+        node.metrics().lookup.req_deduplicated.get(),
+        deduplicated + cap as u64 + 1,
+        "control: every packet reached the held table behind its lookup"
+    );
+    assert_eq!(
+        node.stats().session.pending_destinations_full,
+        refusals + 1,
+        "the refusal must be counted"
+    );
+    assert_eq!(node.pending_tun_since.len(), cap, "no stamp for a refusal");
+
+    // One destination's lookup ends; the tick releases it.
+    node.lookup.pending_lookups.remove(&held[0]);
+    node.check_timeouts().await;
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "the destination with no lookup is answered"
+    );
+    assert_no_route(&answers[0]);
+    assert_eq!(node.pending_tun_destinations(), cap - 1);
+
+    node.handle_tun_outbound(tun_packet_to(&late)).await;
+    assert!(drain_tun(&rx).is_empty());
+    assert!(
+        node.pending_tun_packets.contains_key(&late),
+        "the retransmit is held once a slot frees"
+    );
+}
+
+#[tokio::test]
+async fn with_backoff_enabled_inside_the_hold_a_suppressed_retransmit_is_held_with_the_first_packet()
+ {
+    let mut config = crate::Config::new();
+    config.node.lookup.backoff_base_secs = 30;
+    config.node.lookup.backoff_max_secs = 300;
+    let mut node = make_node_with(config);
+    let rx = install_tun_channel(&mut node);
+    insert_filter_peer(&mut node, &[], false);
+    assert!(node.routing_hold_active(std::time::Instant::now()));
+    let dest = registered_destination(&mut node);
+    let suppressed = node.metrics().lookup.req_backoff_suppressed.get();
+
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+
+    assert_eq!(
+        node.metrics().lookup.req_backoff_suppressed.get(),
+        suppressed + 1,
+        "precondition: the retransmit was suppressed by backoff"
+    );
+    assert!(
+        drain_tun(&rx).is_empty(),
+        "nothing answered inside the hold"
+    );
+    assert_eq!(node.pending_tun_total_packets(), 2, "both packets held");
+}
+
+#[tokio::test]
+async fn a_destination_held_inside_the_hold_whose_filter_arrives_before_the_hold_ends_is_kept_past_it()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let peer = insert_filter_peer(&mut node, &[], false);
+    assert!(node.routing_hold_active(std::time::Instant::now()));
+    let dest = registered_destination(&mut node);
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(node.pending_tun_destinations(), 1, "precondition: held");
+
+    set_peer_filter(&mut node, &peer, &[dest], 2);
+    node.backdate_hold_for_test(std::time::Duration::from_secs(60));
+    node.check_timeouts().await;
+    assert_eq!(
+        node.pending_tun_destinations(),
+        1,
+        "a filter now reaches the destination, so it is kept past the hold"
+    );
+    assert!(drain_tun(&rx).is_empty());
+
+    let past_age =
+        std::time::Instant::now() + node.pending_tun_max_age() + std::time::Duration::from_secs(1);
+    node.release_stranded_tun_packets(past_age);
+    let answers = drain_tun(&rx);
+    assert_eq!(answers.len(), 1, "the age bound still releases it");
+    assert_no_route(&answers[0]);
+}
+
+#[tokio::test]
+async fn retransmits_riding_a_lookup_frozen_by_a_backward_clock_step_do_not_keep_a_destination_held_past_the_age_bound()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let dest = registered_destination(&mut node);
+    insert_filter_peer(&mut node, &[dest], true);
+    leave_hold(&mut node);
+
+    // A lookup on its last rung whose last send is stamped ten minutes ahead
+    // of the wall clock, as after the clock steps back ten minutes: its
+    // ladder cannot end it for those ten minutes.
+    let ahead = Node::now_ms() + 600_000;
+    let mut frozen = crate::proto::lookup::PendingLookup::new(ahead);
+    frozen.attempt = 4;
+    frozen.last_sent_ms = ahead;
+    node.lookup.pending_lookups.insert(dest, frozen);
+
+    let deduplicated = node.metrics().lookup.req_deduplicated.get();
+    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    assert_eq!(
+        node.metrics().lookup.req_deduplicated.get(),
+        deduplicated + 1,
+        "precondition: the packet rode the pending lookup"
+    );
+
+    // One retransmit per round, each round one second short of the age bound
+    // later than the last, the most a sender can space them and still keep
+    // the destination held if each one restarted its age.
+    // Each release is judged at the instant the hold was stamped, so the age
+    // it sees is exactly the steps backdated since, however long the runner
+    // takes between the send and the release.
+    let step = node.pending_tun_max_age() - std::time::Duration::from_secs(1);
+    let mut stamped = Some(node.pending_tun_since[&dest].since);
+    let mut rounds = Vec::new();
+    for _ in 0..6 {
+        node.backdate_held_for_test(&dest, step);
+        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+        let at = *stamped.get_or_insert_with(|| node.pending_tun_since[&dest].since);
+        node.release_stranded_tun_packets(at);
+        if !node.pending_tun_since.contains_key(&dest) {
+            stamped = None;
+        }
+        node.check_pending_lookups(Node::now_ms()).await;
+        let answers = drain_tun(&rx);
+        for answer in &answers {
+            assert_no_route(answer);
+        }
+        rounds.push((answers.len(), node.pending_tun_total_packets()));
+    }
+    assert!(
+        node.lookup.pending_lookups.contains_key(&dest),
+        "control: the lookup stayed pending throughout"
+    );
+    // (answers, packets still held) per round: a hold is kept one step, under
+    // the age bound, and released at the next, past it; the retransmit after
+    // a release starts a new hold, which ages the same way.
+    assert_eq!(
+        rounds,
+        vec![(0, 2), (3, 0), (0, 1), (0, 2), (3, 0), (0, 1)],
+        "a held destination must be released once it has waited past the age bound"
+    );
+}
+
+#[tokio::test]
+async fn a_lookup_answer_for_a_destination_with_a_session_entry_but_no_cached_identity_leaves_its_held_packets_to_the_session()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let dest = Identity::generate();
+    let dest_addr = *dest.node_addr();
+    let handshake = crate::noise::HandshakeState::new_xk_initiator(
+        node.identity().keypair(),
+        dest.pubkey_full(),
+    );
+    node.sessions.insert(
+        dest_addr,
+        crate::node::session::SessionEntry::new(
+            dest_addr,
+            dest.pubkey_full(),
+            crate::node::session::EndToEndState::Initiating(handshake),
+            1000,
+            true,
+        ),
+    );
+    assert!(
+        !node.has_cached_identity(&dest_addr),
+        "precondition: the identity is not cached"
+    );
+    node.queue_pending_tun_packet_for_test(dest_addr, tun_packet_to(&dest_addr));
+
+    node.retry_session_after_discovery(dest_addr).await;
+    assert!(
+        drain_tun(&rx).is_empty(),
+        "the session entry settles the packet, so it is not answered"
+    );
+    assert_eq!(
+        node.pending_tun_total_packets(),
+        1,
+        "the packet stays held behind the session"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_session_retry_after_a_lookup_answer_leaves_packets_held_behind_a_responder_handshake_to_it()
+ {
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+
+    // Control: with no session entry, a retry this node cannot route fails
+    // and answers the held packet.
+    let unrouted = registered_destination(&mut node);
+    node.queue_pending_tun_packet_for_test(unrouted, tun_packet_to(&unrouted));
+    node.retry_session_after_discovery(unrouted).await;
+    assert!(
+        !node.sessions.contains_key(&unrouted),
+        "control: the retry failed to start a session"
+    );
+    let answers = drain_tun(&rx);
+    assert_eq!(answers.len(), 1, "control: the failed retry answers");
+    assert_no_route(&answers[0]);
+
+    // The same failed retry, while the destination is mid-handshake with
+    // this node as responder.
+    let identity = Identity::generate();
+    let dest = *identity.node_addr();
+    node.register_identity(dest, identity.pubkey_full());
+    node.sessions.insert(
+        dest,
+        crate::node::session::SessionEntry::new(
+            dest,
+            identity.pubkey_full(),
+            crate::node::session::EndToEndState::AwaitingMsg3(
+                crate::noise::HandshakeState::new_xk_responder(node.identity().keypair()),
+            ),
+            Node::now_ms(),
+            false,
+        ),
+    );
+    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+
+    node.retry_session_after_discovery(dest).await;
+    assert!(
+        node.sessions[&dest].is_awaiting_msg3(),
+        "precondition: the retry failed and left the responder handshake"
+    );
+    assert!(
+        drain_tun(&rx).is_empty(),
+        "the responder handshake settles the packet, so it is not answered"
+    );
+    assert_eq!(
+        node.pending_tun_total_packets(),
+        1,
+        "the packet stays held behind the handshake"
+    );
+}

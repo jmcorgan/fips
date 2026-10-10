@@ -249,7 +249,10 @@ Before initiating a lookup, the originator checks whether *any* peer's
 bloom filter contains the target. If no peer advertises reachability, the
 lookup is skipped entirely and, when backoff is enabled, recorded as a
 failure for backoff purposes. This avoids wasting network resources when
-the target is not in the mesh.
+the target is not in the mesh. TUN traffic for such a target is answered with
+ICMPv6 Destination Unreachable (no route), except while the node has no
+peers and for 30 seconds after it gains one, when it is held while routing
+information arrives.
 
 ### Transit-Side Rate Limiting
 

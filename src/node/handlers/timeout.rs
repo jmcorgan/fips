@@ -59,6 +59,10 @@ impl Node {
     /// the retry-then-teardown choreography is the pure
     /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
     pub(in crate::node) async fn check_timeouts(&mut self) {
+        // First, and not behind the connection check below: a node with no
+        // handshake in progress still holds TUN packets.
+        self.release_stranded_tun_packets(std::time::Instant::now());
+
         if self.connection_count() == 0 {
             return;
         }
@@ -570,6 +574,86 @@ impl Node {
             .collect()
     }
 
+    /// Release TUN packets held for a destination nothing is still working
+    /// to deliver, or held for longer than any legitimate wait.
+    ///
+    /// A destination is live while it has a session entry in any state, a
+    /// pending lookup, or some peer's filter reaching it (a filter that
+    /// arrived inside the routing hold keeps the destination until its next
+    /// retransmit starts a lookup). Inside the hold no destination is
+    /// released for being not live; the age bound applies always. Each
+    /// released packet is answered with ICMPv6 no-route.
+    pub(in crate::node) fn release_stranded_tun_packets(&mut self, now: std::time::Instant) {
+        let in_hold = self.routing_hold_active(now);
+
+        // Queues written without a stamp still age out; stamps left behind by
+        // a removal site that does not clear them are dropped.
+        for dest in self.pending_tun_packets.keys() {
+            self.pending_tun_since
+                .entry(*dest)
+                .or_insert_with(|| super::session::HeldStamp::new(now));
+        }
+        let held = &self.pending_tun_packets;
+        self.pending_tun_since
+            .retain(|dest, _| held.contains_key(dest));
+
+        let max_age = self.pending_tun_max_age();
+        let stranded: Vec<(crate::NodeAddr, &'static str)> = self
+            .pending_tun_since
+            .iter()
+            .filter_map(|(dest, stamp)| {
+                let live = self.sessions.contains_key(dest)
+                    || self.lookup.pending_lookups.contains_key(dest)
+                    || self.peers.values().any(|peer| peer.may_reach(dest));
+                let age = now.saturating_duration_since(stamp.since);
+                is_stranded(live, in_hold, age, max_age)
+                    .then_some((*dest, if age > max_age { "max-age" } else { "not-live" }))
+            })
+            .collect();
+
+        for (dest, reason) in stranded {
+            let packets = self.release_held_tun(&dest);
+            debug!(
+                dest = %self.peer_display_name(&dest),
+                packets,
+                reason,
+                "Released held TUN packets nothing is still working to deliver"
+            );
+        }
+
+        let at_bound =
+            self.pending_tun_packets.len() >= self.config().node.session.pending_max_destinations;
+        if let Some(refused) = self.pending_tun_bound_log.tick(at_bound, now) {
+            info!(
+                refused,
+                "Held-packet destination table below its bound again; packets to new destinations were refused while it was full"
+            );
+        }
+    }
+
+    /// The longest a destination's TUN packets stay held, counted from the
+    /// destination's stamp (when it was first held, or the latest lookup or
+    /// session started for it; see `HeldStamp`), not from when each packet
+    /// was held: the whole lookup schedule plus the handshake timeout, the
+    /// longest a legitimate destination waits for its lookup and then its
+    /// session, with one tick of margin per lookup rung and one for the
+    /// handshake sweep, since each deadline is noticed on a tick.
+    pub(in crate::node) fn pending_tun_max_age(&self) -> std::time::Duration {
+        let node = &self.config().node;
+        let ladder = &node.lookup.attempt_timeouts_secs;
+        let rungs = ladder.len() as u64;
+        let secs = ladder
+            .iter()
+            .fold(0u64, |sum, s| sum.saturating_add(*s))
+            .saturating_add(node.rate_limit.handshake_timeout_secs)
+            .saturating_add(
+                rungs
+                    .saturating_add(1)
+                    .saturating_mul(node.tick_interval_secs),
+            );
+        std::time::Duration::from_secs(secs)
+    }
+
     /// Remove established sessions that have been idle too long.
     ///
     /// Only targets sessions in the Established state. Initiating/AwaitingMsg3
@@ -696,5 +780,52 @@ impl Node {
             expired = expired.len(),
             "Expired remote-learned path_mtu_lookup entries"
         );
+    }
+}
+
+/// Whether a held TUN destination is released: nothing is working to deliver
+/// it once routing has had time to converge, or it has waited past the age
+/// bound whatever else is true.
+fn is_stranded(
+    live: bool,
+    in_hold: bool,
+    age: std::time::Duration,
+    max_age: std::time::Duration,
+) -> bool {
+    (!live && !in_hold) || age > max_age
+}
+
+#[cfg(test)]
+mod stranded_tests {
+    use super::is_stranded;
+    use std::time::Duration;
+
+    #[test]
+    fn is_stranded_releases_a_destination_with_no_session_lookup_or_filter_only_after_the_hold_or_past_its_age()
+     {
+        let max = Duration::from_secs(50);
+        let young = Duration::ZERO;
+        let at_max = max;
+        let old = max + Duration::from_millis(1);
+        // (live, in_hold, age, released)
+        let table = [
+            (false, false, young, true),
+            (false, true, young, false),
+            (true, false, young, false),
+            (true, true, young, false),
+            (false, true, at_max, false),
+            (true, false, at_max, false),
+            (true, true, old, true),
+            (true, false, old, true),
+            (false, true, old, true),
+            (false, false, old, true),
+        ];
+        for (live, in_hold, age, want) in table {
+            assert_eq!(
+                is_stranded(live, in_hold, age, max),
+                want,
+                "live={live}, in_hold={in_hold}, age={age:?}"
+            );
+        }
     }
 }

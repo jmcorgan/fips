@@ -3101,6 +3101,332 @@ async fn test_tun_outbound_pending_queue_flush() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// A three-node line A - B - C, converged, with C's identity registered on A
+/// but no coordinates for C cached there, and TUN channels on A and C.
+async fn line_of_three_without_cached_coords() -> (
+    Vec<TestNode>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    let mut nodes = run_tree_test(3, &[(0, 1), (1, 2)], false).await;
+    verify_tree_convergence(&nodes);
+    let c = *nodes[2].node.node_addr();
+    let c_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(c, c_pubkey);
+    assert!(
+        nodes[0].node.coord_cache().get_entry(&c).is_none(),
+        "precondition: A has no coordinates for C"
+    );
+    let (a_tx, a_rx) = std::sync::mpsc::channel();
+    nodes[0].node.supervisor.tun_tx = Some(a_tx);
+    let (c_tx, c_rx) = std::sync::mpsc::channel();
+    nodes[2].node.supervisor.tun_tx = Some(c_tx);
+    (nodes, a_rx, c_rx)
+}
+
+#[tokio::test]
+async fn inside_the_hold_a_bloom_miss_packet_is_held_and_a_retransmit_after_the_target_enters_a_filter_establishes_the_session_and_flushes_both_packets()
+ {
+    let (mut nodes, a_rx, c_rx) = line_of_three_without_cached_coords().await;
+    let a = *nodes[0].node.node_addr();
+    let b = *nodes[1].node.node_addr();
+    let c = *nodes[2].node.node_addr();
+    let src = crate::FipsAddress::from_node_addr(&a);
+    let dst = crate::FipsAddress::from_node_addr(&c);
+
+    // B's filter on A, kept so it can arrive again later; meanwhile A sees an
+    // empty one, as before B's filter reached it.
+    let (b_filter, b_seq) = {
+        let peer = nodes[0].node.peers.get(&b).unwrap();
+        (
+            peer.inbound_filter().unwrap().clone(),
+            peer.filter_sequence(),
+        )
+    };
+    assert!(b_filter.contains(&c), "precondition: B's filter reaches C");
+    nodes[0].node.peers.get_mut(&b).unwrap().update_filter(
+        crate::proto::bloom::BloomFilter::new(),
+        b_seq + 1,
+        Node::now_ms(),
+    );
+    assert!(
+        nodes[0].node.routing_hold_active(std::time::Instant::now()),
+        "precondition: A is inside the routing hold"
+    );
+
+    let lookup = &nodes[0].node.metrics().lookup;
+    let (misses, initiated) = (lookup.req_bloom_miss.get(), lookup.req_initiated.get());
+    let syn = build_ipv6_packet(&src, &dst, b"syn");
+    nodes[0].node.handle_tun_outbound(syn.clone()).await;
+    assert_eq!(
+        nodes[0].node.metrics().lookup.req_bloom_miss.get(),
+        misses + 1
+    );
+    assert_eq!(nodes[0].node.pending_tun_total_packets(), 1, "held");
+    assert!(a_rx.try_recv().is_err(), "not answered inside the hold");
+
+    // B's filter arrives, and the retransmit starts a lookup.
+    nodes[0]
+        .node
+        .peers
+        .get_mut(&b)
+        .unwrap()
+        .update_filter(b_filter, b_seq + 2, Node::now_ms());
+    let retransmit = build_ipv6_packet(&src, &dst, b"syn-retransmit");
+    nodes[0].node.handle_tun_outbound(retransmit.clone()).await;
+    assert_eq!(
+        nodes[0].node.metrics().lookup.req_initiated.get(),
+        initiated + 1
+    );
+    assert_eq!(nodes[0].node.pending_tun_total_packets(), 2, "both held");
+    assert!(a_rx.try_recv().is_err());
+
+    // The hold ends with the lookup still in flight: nothing is released.
+    nodes[0]
+        .node
+        .backdate_hold_for_test(std::time::Duration::from_secs(60));
+    nodes[0].node.check_timeouts().await;
+    assert_eq!(nodes[0].node.pending_tun_total_packets(), 2);
+    assert!(a_rx.try_recv().is_err());
+    assert!(nodes[0].node.lookup.pending_lookups.contains_key(&c));
+
+    drain_to_quiescence(&mut nodes).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&c)
+            .is_some_and(|s| s.state().is_established()),
+        "the lookup's answer must start a session that establishes"
+    );
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| c_rx.try_recv().ok()).collect();
+    assert_eq!(delivered, vec![syn, retransmit], "both packets, in order");
+    assert!(a_rx.try_recv().is_err(), "A never answered");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn outside_the_hold_a_packet_to_a_destination_a_tree_peer_filter_reaches_is_held_without_an_answer_and_flushed_once_the_session_establishes()
+ {
+    let (mut nodes, a_rx, c_rx) = line_of_three_without_cached_coords().await;
+    let a = *nodes[0].node.node_addr();
+    let c = *nodes[2].node.node_addr();
+    nodes[0]
+        .node
+        .backdate_hold_for_test(std::time::Duration::from_secs(60));
+    assert!(
+        !nodes[0].node.routing_hold_active(std::time::Instant::now()),
+        "precondition: A is outside the routing hold"
+    );
+    let initiated = nodes[0].node.metrics().lookup.req_initiated.get();
+
+    let packet = build_ipv6_packet(
+        &crate::FipsAddress::from_node_addr(&a),
+        &crate::FipsAddress::from_node_addr(&c),
+        b"first",
+    );
+    nodes[0].node.handle_tun_outbound(packet.clone()).await;
+    assert_eq!(
+        nodes[0].node.metrics().lookup.req_initiated.get(),
+        initiated + 1,
+        "precondition: a lookup was sent"
+    );
+    assert_eq!(nodes[0].node.pending_tun_total_packets(), 1, "held");
+    assert!(a_rx.try_recv().is_err(), "a pending lookup is not answered");
+
+    drain_to_quiescence(&mut nodes).await;
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| c_rx.try_recv().ok()).collect();
+    assert_eq!(delivered, vec![packet]);
+    assert!(a_rx.try_recv().is_err());
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// On the line of three, hold a packet from A to C inside the routing hold
+/// as a bloom miss, then move its stamp back `by`, as if it was held that long
+/// ago. Returns the backdated stamp.
+async fn hold_a_bloom_miss_for_c_and_backdate_it(
+    nodes: &mut [TestNode],
+    by: std::time::Duration,
+) -> std::time::Instant {
+    let a = *nodes[0].node.node_addr();
+    let b = *nodes[1].node.node_addr();
+    let c = *nodes[2].node.node_addr();
+    let b_seq = nodes[0].node.peers.get(&b).unwrap().filter_sequence();
+    nodes[0].node.peers.get_mut(&b).unwrap().update_filter(
+        crate::proto::bloom::BloomFilter::new(),
+        b_seq + 1,
+        Node::now_ms(),
+    );
+    assert!(
+        nodes[0].node.routing_hold_active(std::time::Instant::now()),
+        "precondition: A is inside the routing hold"
+    );
+    let misses = nodes[0].node.metrics().lookup.req_bloom_miss.get();
+    let packet = build_ipv6_packet(
+        &crate::FipsAddress::from_node_addr(&a),
+        &crate::FipsAddress::from_node_addr(&c),
+        b"syn",
+    );
+    nodes[0].node.handle_tun_outbound(packet).await;
+    assert_eq!(
+        nodes[0].node.metrics().lookup.req_bloom_miss.get(),
+        misses + 1,
+        "precondition: held as a bloom miss"
+    );
+    assert_eq!(nodes[0].node.pending_tun_total_packets(), 1);
+    assert!(nodes[0].node.get_session(&c).is_none());
+    nodes[0].node.backdate_held_for_test(&c, by);
+    nodes[0].node.pending_tun_since[&c].since
+}
+
+#[tokio::test]
+async fn a_destination_held_inside_the_hold_whose_session_starts_on_a_retransmit_is_aged_from_the_session_start()
+ {
+    let (mut nodes, a_rx, _c_rx) = line_of_three_without_cached_coords().await;
+    let a = *nodes[0].node.node_addr();
+    let c = *nodes[2].node.node_addr();
+    let backdate = std::time::Duration::from_secs(30);
+    let second = std::time::Duration::from_secs(1);
+    let first = hold_a_bloom_miss_for_c_and_backdate_it(&mut nodes, backdate).await;
+
+    // C's coordinates arrive, as a hint or cache warming leaves them, so the
+    // retransmit starts a session itself rather than a lookup.
+    populate_all_coord_caches(&mut nodes);
+    let initiated = nodes[0].node.metrics().lookup.req_initiated.get();
+    let retransmit = build_ipv6_packet(
+        &crate::FipsAddress::from_node_addr(&a),
+        &crate::FipsAddress::from_node_addr(&c),
+        b"syn-retransmit",
+    );
+    nodes[0].node.handle_tun_outbound(retransmit).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&c)
+            .is_some_and(|s| s.state().is_initiating()),
+        "precondition: the retransmit started a session"
+    );
+    assert_eq!(
+        nodes[0].node.metrics().lookup.req_initiated.get(),
+        initiated,
+        "precondition: no lookup was sent, so only the session start can restamp"
+    );
+
+    let stamp = nodes[0].node.pending_tun_since[&c].since;
+    assert!(
+        stamp >= first + backdate - second,
+        "the session start must restamp the destination"
+    );
+    let max_age = nodes[0].node.pending_tun_max_age();
+    nodes[0]
+        .node
+        .release_stranded_tun_packets(stamp + max_age - second);
+    assert_eq!(
+        nodes[0].node.pending_tun_total_packets(),
+        2,
+        "both packets kept while the handshake may still complete"
+    );
+    assert!(a_rx.try_recv().is_err());
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_destination_held_inside_the_hold_whose_session_starts_after_its_lookup_answers_is_aged_from_the_session_start()
+ {
+    let (mut nodes, a_rx, _c_rx) = line_of_three_without_cached_coords().await;
+    let c = *nodes[2].node.node_addr();
+    let backdate = std::time::Duration::from_secs(30);
+    let second = std::time::Duration::from_secs(1);
+    let first = hold_a_bloom_miss_for_c_and_backdate_it(&mut nodes, backdate).await;
+
+    // The lookup's answer caches C's coordinates and retries the session.
+    populate_all_coord_caches(&mut nodes);
+    nodes[0].node.retry_session_after_discovery(c).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&c)
+            .is_some_and(|s| s.state().is_initiating()),
+        "precondition: the retry started a session"
+    );
+
+    let stamp = nodes[0].node.pending_tun_since[&c].since;
+    assert!(
+        stamp >= first + backdate - second,
+        "the session start must restamp the destination"
+    );
+    let max_age = nodes[0].node.pending_tun_max_age();
+    nodes[0]
+        .node
+        .release_stranded_tun_packets(stamp + max_age - second);
+    assert_eq!(
+        nodes[0].node.pending_tun_total_packets(),
+        1,
+        "the held packet is kept while the handshake may still complete"
+    );
+    assert!(a_rx.try_recv().is_err());
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn with_the_held_table_full_a_destination_with_an_initiating_session_gets_no_answer_and_its_retransmit_flushes_after_establishment()
+ {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    let node0 = *nodes[0].node.node_addr();
+    let node1 = *nodes[1].node.node_addr();
+    let (tx0, rx0) = std::sync::mpsc::channel();
+    nodes[0].node.supervisor.tun_tx = Some(tx0);
+    let (tx1, rx1) = std::sync::mpsc::channel();
+    nodes[1].node.supervisor.tun_tx = Some(tx1);
+
+    let cap = nodes[0].node.config().node.session.pending_max_destinations;
+    for i in 0..cap as u32 {
+        let mut bytes = [0xEEu8; 16];
+        bytes[..4].copy_from_slice(&i.to_be_bytes());
+        nodes[0]
+            .node
+            .queue_pending_tun_packet_for_test(NodeAddr::from_bytes(bytes), vec![0x60; 40]);
+    }
+    assert_eq!(nodes[0].node.pending_tun_destinations(), cap);
+
+    let src = crate::FipsAddress::from_node_addr(&node0);
+    let dst = crate::FipsAddress::from_node_addr(&node1);
+    nodes[0]
+        .node
+        .handle_tun_outbound(build_ipv6_packet(&src, &dst, b"first"))
+        .await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1)
+            .is_some_and(|s| s.state().is_initiating()),
+        "precondition: a session started"
+    );
+    assert!(rx0.try_recv().is_err(), "a refused packet is not answered");
+
+    drain_to_quiescence(&mut nodes).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1)
+            .is_some_and(|s| s.state().is_established())
+    );
+
+    let retransmit = build_ipv6_packet(&src, &dst, b"retransmit");
+    nodes[0].node.handle_tun_outbound(retransmit.clone()).await;
+    drain_to_quiescence(&mut nodes).await;
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| rx1.try_recv().ok()).collect();
+    assert_eq!(delivered, vec![retransmit]);
+    assert!(rx0.try_recv().is_err());
+
+    cleanup_nodes(&mut nodes).await;
+}
+
 // ============================================================================
 // Unit tests: Session idle timeout
 // ============================================================================
