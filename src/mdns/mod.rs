@@ -349,8 +349,13 @@ impl LanRendezvous {
     }
 }
 
+/// The first 16 bytes of `npub` for a log line, cut back to a character
+/// boundary: the text comes from a sender's TXT record and need not be ASCII.
 fn short(npub: &str) -> &str {
-    let end = 16.min(npub.len());
+    let end = (0..=16.min(npub.len()))
+        .rev()
+        .find(|&i| npub.is_char_boundary(i))
+        .unwrap_or(0);
     &npub[..end]
 }
 

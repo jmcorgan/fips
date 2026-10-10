@@ -211,3 +211,13 @@ async fn cross_scope_advert_is_filtered() {
 
     assert!(saw_b.is_none(), "cross-scope advert must be filtered");
 }
+
+/// A skipped advert's npub comes from the sender's TXT record, and the skip
+/// lines print its first 16 bytes. A multi-byte character across that cut
+/// must not panic the browser's event pump.
+#[test]
+fn a_non_ascii_npub_is_shortened_on_a_character_boundary_without_a_panic() {
+    assert_eq!(super::short("npub1aaaaaaaaaa\u{e9}zzzz"), "npub1aaaaaaaaaa");
+    assert_eq!(super::short("npub1aaaaaaaaaaazzzz"), "npub1aaaaaaaaaaa");
+    assert_eq!(super::short("npub1"), "npub1");
+}
