@@ -1643,6 +1643,18 @@ PYEOF
         check "$prefix: startup line for rev ${expect_rev} (found $rev_lines)" 1
         return 1
     fi
+    # The container's /var/run is not tmpfs, so the gateway keeps no pool
+    # state: it must say so once at this start and still answer, which the
+    # probe above showed. The cross-restart path itself needs a tmpfs and is
+    # not exercised here.
+    local tmpfs_warn
+    # The level token sits between colour codes in the container's log.
+    tmpfs_warn=$(sed 's/\x1b\[[0-9;]*m//g' <<< "$started_log" | grep -cE " WARN .*Pool state not saved.*not on tmpfs" || true)
+    if [ "$tmpfs_warn" -eq 1 ]; then
+        check "$prefix: one warning that pool state is not kept off tmpfs" 0
+    else
+        check "$prefix: warnings that pool state is not kept off tmpfs (found $tmpfs_warn, expected 1)" 1
+    fi
     GW_BASELINE=$(grep -c "Allocated virtual IP" <<< "$started_log" || true)
     return 0
 }

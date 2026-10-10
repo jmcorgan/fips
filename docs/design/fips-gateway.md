@@ -240,7 +240,10 @@ The pool allocates IPv6 addresses from a required CIDR (commonly
 `NodeAddr` rather than by hostname — different `.fips` aliases for
 the same node share a virtual IP. Address 0 (the network-equivalent)
 is reserved; the rest are allocatable. The pool is capped at 2^16
-addresses regardless of prefix length, to bound memory.
+addresses regardless of prefix length, to bound memory. A CIDR
+written with host bits set, such as `fd01::1/112`, is used as its
+prefix, with a warning; a `/128`, which has no address to issue, is
+refused at start.
 
 The pool tracks state per address:
 
@@ -289,6 +292,41 @@ Timing:
   recycled. It prevents immediate reuse from confusing hosts with
   cached DNS responses.
 - **Tick interval**: the pool re-evaluates state every 10 s.
+
+Addresses are handed out in ring order from a moving cursor that
+starts at a random address, so an address freed in one run is reused
+only after the cursor has gone round the pool.
+
+**Across a restart.** A client may cache an answer for up to the TTL,
+so a restarted gateway must not hand that address to a different node.
+The gateway keeps, in `/var/run/fips-gateway/pool.json`, how far it
+may issue and which addresses a client may still hold an answer for;
+the file holds no names, identities or mappings. It is written only to
+tmpfs, so a reboot, which ends every client's cache with it, starts
+from nothing. The first write with a stretch comes after the start
+steps that can fail and before any name is answered. A start that
+read a file writes what it holds back at once, with no stretch, so a
+start that fails or is killed before its first write leaves the same
+holds for the next one. The pool writes the
+file before issuing past the stretch the last write covered (about 512
+addresses at a time), off the DNS thread, and refuses new names for
+the moment the cursor reaches that point before the next write is
+confirmed. On a clean stop it writes the exact set of live addresses
+with no stretch ahead. The next start reads the file, removes it, and
+holds every address it names, and the stretch, for the TTL plus the
+grace period, then issues from where the stretch ends. A write that
+fails removes the file, and the gateway carries on issuing; the next
+start then begins at a random address. Where `/var/run` is not on
+tmpfs, as in most containers, the gateway warns once and keeps no
+state.
+
+After a crash or a kill, the last written stretch is held, which on a
+pool with fewer than 512 free addresses (a `/119` or narrower, or a
+`/118` with more than about 500 addresses in use) is every free address:
+new names are refused for the TTL plus the grace period, 2 minutes at
+the defaults. A clean stop has no such
+cost. A pool resized with the same base address starts at a random
+address with nothing held.
 
 Active session counts come from `/proc/net/nf_conntrack`, or, on a
 kernel without that file, from a dump of the IPv6 conntrack table over

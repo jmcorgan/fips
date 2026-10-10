@@ -8,11 +8,11 @@ use clap::Parser;
 #[cfg(target_os = "linux")]
 use fips::Config;
 #[cfg(target_os = "linux")]
-use fips::gateway::{control, dns, nat, net, pool};
+use fips::gateway::{control, dns, nat, net, pool, state};
 #[cfg(target_os = "linux")]
 use fips::version;
 #[cfg(target_os = "linux")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -105,6 +105,41 @@ fn report_unreadable_conntrack(
             "Conntrack still unreadable; every mapping reads zero sessions"
         ),
     }
+}
+
+/// Say what the start found of the previous run's pool state.
+#[cfg(target_os = "linux")]
+fn report_loaded_state(loaded: &state::Loaded) {
+    match loaded {
+        state::Loaded::Absent => {
+            info!("No pool state found; the pool starts at a random address")
+        }
+        state::Loaded::Invalid(reason) => warn!(
+            reason = %reason,
+            "Pool state unusable; the pool starts at a random address"
+        ),
+        state::Loaded::Restored(restored) => info!(
+            from = restored.from,
+            stretch = restored.span,
+            held = restored
+                .held
+                .iter()
+                .map(|[a, b]| u64::from(b - a) + 1)
+                .sum::<u64>(),
+            hold_secs = restored.hold_secs,
+            "Pool state restored; holding the previous run's addresses"
+        ),
+    }
+}
+
+/// Write the pool state on a blocking thread.
+#[cfg(target_os = "linux")]
+async fn save_pool_state(request: pool::PoolState) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        state::save(Path::new(state::STATE_DIR), &request, state::is_tmpfs)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
 }
 
 /// Check once at startup which conntrack source the tick will read, and say so.
@@ -414,21 +449,42 @@ async fn main() {
 
     // --- Initialize components ---
 
-    // Virtual IP pool
-    let ip_pool = match pool::VirtualIpPool::start(
+    // Virtual IP pool, started from the previous run's state when there is
+    // one, so no address a client may still hold an answer for is reissued.
+    let pool_total = match pool::pool_total(&gw_config.pool) {
+        Ok(total) => total,
+        Err(e) => {
+            error!(error = %e, "Failed to create virtual IP pool");
+            std::process::exit(1);
+        }
+    };
+    // A restored pool's holds are written back before the steps that can
+    // end the start, since loading removed the file.
+    let mut save_log = state::SaveLog::default();
+    let ip_pool = match state::start_pool(
+        Path::new(state::STATE_DIR),
         &gw_config.pool,
+        pool_total,
         gw_config.dns.ttl() as u64,
         gw_config.grace_period(),
-        pool::PoolStart::Fresh { offset: 1 },
+        rand::random::<u32>() % pool_total + 1,
         Instant::now(),
+        state::is_tmpfs,
     ) {
-        Ok(p) => p,
+        Ok(started) => {
+            report_loaded_state(&started.loaded);
+            if let Some(result) = &started.carried {
+                save_log.report(result);
+            }
+            started.pool
+        }
         Err(e) => {
             error!(error = %e, "Failed to create virtual IP pool");
             std::process::exit(1);
         }
     };
     let pool_network = ip_pool.network();
+
     let ip_pool = Arc::new(Mutex::new(ip_pool));
 
     // NAT manager
@@ -461,6 +517,22 @@ async fn main() {
     // The NAT table exists by now, so a kernel that provides the proc file
     // has loaded nf_conntrack and the probe sees what the first tick will.
     report_conntrack_source().await;
+
+    // Write the state that covers the first addresses before any is issued.
+    // This is the first write with a stretch, made after the last step that
+    // can end the start, so a start that fails earlier leaves no stretch for
+    // the next one to hold; later writes run off the runtime thread.
+    {
+        let mut pool_guard = ip_pool.lock().await;
+        if let Some(request) = pool_guard.mark_request() {
+            let result = state::save(Path::new(state::STATE_DIR), &request, state::is_tmpfs);
+            save_log.report(&result);
+            match result {
+                Ok(()) => pool_guard.confirm_mark(&request),
+                Err(_) => pool_guard.mark_failed(),
+            }
+        }
+    }
 
     // Nothing reads the reports yet, so they are dropped here.
     let (mut nat_driver, _) = nat::NatDriver::start(Box::new(nat_mgr));
@@ -528,6 +600,7 @@ async fn main() {
 
     let tick_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        let mut save_log = save_log;
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -547,8 +620,22 @@ async fn main() {
                     // Build snapshot for control socket
                     let pool_status = pool_guard.status();
                     let mappings = pool_guard.mapping_info(now);
+                    let request = pool_guard.mark_request();
                     drop(pool_guard);
                     debug!(mappings = mappings.len(), read_us, tick_us, "Pool tick");
+
+                    // Write the pool state off the runtime thread and without
+                    // the pool lock; names issued meanwhile fall in the stretch
+                    // the previous write already covers.
+                    if let Some(request) = request {
+                        let result = save_pool_state(request.clone()).await;
+                        save_log.report(&result);
+                        let mut pool_guard = tick_pool.lock().await;
+                        match result {
+                            Ok(()) => pool_guard.confirm_mark(&request),
+                            Err(_) => pool_guard.mark_failed(),
+                        }
+                    }
 
                     let snapshot = control::build_snapshot(
                         pool_status,
@@ -566,6 +653,7 @@ async fn main() {
                 _ = tick_shutdown.changed() => break,
             }
         }
+        save_log
     });
 
     // --- Event processing loop ---
@@ -645,10 +733,12 @@ async fn main() {
     if let Some(task) = dns_task {
         let _ = task.await;
     }
-    let _ = tick_task.await;
+    let mut save_log = tick_task.await.unwrap_or_default();
 
-    // Log final pool status
-    {
+    // Log final pool status, and write the exact set of addresses a client
+    // may still hold an answer for: nothing is issued any more, so the next
+    // start holds only these and resolves new names at once.
+    let final_state = {
         let pool_guard = ip_pool.lock().await;
         let status = pool_guard.status();
         info!(
@@ -659,7 +749,9 @@ async fn main() {
             free = status.free,
             "Final pool status"
         );
-    }
+        pool_guard.shutdown_state()
+    };
+    save_log.report(&save_pool_state(final_state).await);
 
     // Clean up network and NAT
     net_setup.cleanup().await;

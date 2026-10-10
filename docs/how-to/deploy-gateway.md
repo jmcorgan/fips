@@ -192,7 +192,12 @@ Constraints:
   because the pool never uses more than 65 535 addresses. Narrower is
   fine if you want a smaller pool; one narrower than `/118` (1023
   usable addresses) runs out before the 1000-mapping ceiling is
-  reached, so new names are refused sooner under churn.
+  reached, so new names are refused sooner under churn. After a crash
+  or a kill (not a clean stop or restart), a pool with fewer than 512
+  free addresses (a `/119` or narrower, or a `/118` with more than
+  about 500 addresses in use) refuses every new name for the DNS TTL
+  plus the grace period, 2 minutes at the defaults, while it waits out
+  answers the previous run may have given.
 
 ### Choose the DNS listen address
 

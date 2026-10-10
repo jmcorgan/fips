@@ -5,10 +5,10 @@
 //! with conntrack to determine active sessions.
 
 use crate::NodeAddr;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::Ipv6Addr;
-use std::time::Instant;
-use tracing::{debug, info};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 /// Most live mappings the pool holds before it refuses new names.
 ///
@@ -29,12 +29,27 @@ pub enum PoolError {
     InvalidCidr(String),
     #[error("pool exhausted ({0} addresses in use)")]
     Exhausted(usize),
-    #[error("prefix length must be between 1 and 128")]
+    #[error("prefix length must be between 1 and 127")]
     InvalidPrefix,
     #[error("live-mapping ceiling reached ({0} mappings)")]
     AtCeiling(usize),
     #[error("new-mapping rate limit reached")]
     RateLimited,
+    #[error("pool state write not yet confirmed")]
+    AwaitingMark,
+}
+
+impl PoolError {
+    /// A short name for the error, for structured log fields.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::AtCeiling(_) => "ceiling",
+            Self::RateLimited => "rate-limited",
+            Self::Exhausted(_) => "exhausted",
+            Self::AwaitingMark => "awaiting-mark",
+            Self::InvalidCidr(_) | Self::InvalidPrefix => "invalid",
+        }
+    }
 }
 
 /// State of a virtual IP mapping.
@@ -506,14 +521,134 @@ impl Bucket {
     }
 }
 
+/// Free offsets ahead of the cursor that the pool asks to cover with each
+/// state write.
+///
+/// One tick interval admits at most `MAPPING_BURST + MAPPING_RATE * 10` = 150
+/// new names (the tick runs every 10 s), so a write issued at one tick is
+/// confirmed long before the stretch it covers runs out; 512 also leaves room
+/// for one more write after `MARK_LOW_WATER` fires.
+pub const MARK_RESERVE: u32 = 512;
+
+/// Free offsets left before the durable mark below which the next tick asks
+/// for a new state write.
+///
+/// 300 covers a tick gap of 25 s at the full rate with a full bucket
+/// (`MAPPING_BURST + MAPPING_RATE * 25` = 300), which allows for a slow
+/// conntrack read (2 s per receive) and the write itself ahead of the tick.
+pub const MARK_LOW_WATER: u32 = 300;
+
+/// Consecutive read conntrack snapshots after which the pool trusts what they
+/// do not show.
+///
+/// It bounds how many consecutive read snapshots may miss a binding before
+/// the pool forgets it, and how many reads a removed address, an address
+/// held from the previous run and recovered evidence each wait for. The
+/// legitimate load it must exceed is the partial read: both readers return an
+/// interrupted dump or a non-atomic proc read as a successful snapshot, so one
+/// read can miss a live entry, and three misses in a row would take three
+/// interrupted reads that each skip it. It costs an attacker nothing they
+/// control, and legitimate users about 30 s more before a removed address is
+/// reused. The value is not measured: no rate of interrupted dumps was
+/// observed.
+pub const MAX_ABSENT_READS: u32 = 3;
+
+/// How long the pool must refuse nothing before its refusal warning is
+/// released with a count of what it refused meanwhile.
+pub const BOUND_LOG_HOLD: Duration = Duration::from_secs(60);
+
+/// Whether the durable mark bounds allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkMode {
+    /// No state has been written or failed yet; new names wait.
+    Pending,
+    /// New names are issued only below the durable mark.
+    Enforced,
+    /// The last write failed, or the pool keeps no state; marks are ignored.
+    Ignored,
+}
+
+/// The pool's one warning for refusing new names.
+///
+/// The first refusal of an episode warns; later ones are counted. The episode
+/// ends once the pool has refused nothing for `BOUND_LOG_HOLD`, and its count
+/// is reported then.
+#[derive(Debug, Default)]
+struct RefusalLatch {
+    /// The last refusal of the current episode and how many it holds.
+    open: Option<(Instant, u64)>,
+}
+
+impl RefusalLatch {
+    /// Count a refusal at `now`; returns whether it opens an episode.
+    fn refuse(&mut self, now: Instant) -> bool {
+        match &mut self.open {
+            Some((last, count)) => {
+                *last = (*last).max(now);
+                *count += 1;
+                false
+            }
+            None => {
+                self.open = Some((now, 1));
+                true
+            }
+        }
+    }
+
+    /// Close the episode if nothing was refused for `BOUND_LOG_HOLD` before
+    /// `now`, returning its count.
+    fn release(&mut self, now: Instant) -> Option<u64> {
+        match self.open {
+            Some((last, count)) if now.saturating_duration_since(last) >= BOUND_LOG_HOLD => {
+                self.open = None;
+                Some(count)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Addresses in a pool: offsets `1..=total` from its network address, at most
+/// 2^16 - 1 of them. A /128 has none, so it is refused.
+pub fn pool_total(cidr: &str) -> Result<u32, PoolError> {
+    let (_, prefix_len) = parse_ipv6_cidr(cidr)?;
+    if prefix_len == 0 || prefix_len >= 128 {
+        return Err(PoolError::InvalidPrefix);
+    }
+    let host_bits = 128 - prefix_len;
+    // Cap at 2^16 addresses to avoid massive allocations, and skip offset 0,
+    // the network address.
+    let addrs: u32 = if host_bits >= 16 {
+        1 << 16
+    } else {
+        1 << host_bits
+    };
+    Ok(addrs - 1)
+}
+
+/// The offset `steps` places on from `offset` round a ring of offsets
+/// `1..=total`.
+fn ring_step(offset: u32, steps: u64, total: u32) -> u32 {
+    let total = u64::from(total);
+    1 + ((u64::from(offset) - 1 + steps % total) % total) as u32
+}
+
 /// Virtual IP pool manager.
+///
+/// Addresses are issued in ring order from a moving cursor, so an address
+/// freed in this run is reused only after the cursor has gone round the pool.
+/// Positions on the ring count from the run's start offset; the durable mark
+/// is the first position not yet covered by a written state, and the pool
+/// does not issue at or past it while marks are enforced.
 pub struct VirtualIpPool {
     /// The pool CIDR as configured.
     cidr: String,
-    /// The pool's network address and prefix length.
+    /// The pool's network address, host bits cleared, and prefix length.
     network: (Ipv6Addr, u8),
-    /// Available addresses (free pool).
-    available: VecDeque<Ipv6Addr>,
+    /// The network address as an integer; offset `o` is `base + o`.
+    base: u128,
+    /// Offsets that may be issued.
+    free: BTreeSet<u32>,
     /// Active mappings keyed by NodeAddr.
     mappings: HashMap<NodeAddr, VirtualIpMapping>,
     /// Reverse map: virtual IP → NodeAddr.
@@ -523,11 +658,29 @@ pub struct VirtualIpPool {
     /// Grace period after last session before reclamation.
     grace_secs: u64,
     /// Total pool size.
-    total: usize,
+    total: u32,
     /// Most live mappings admitted before new names are refused.
     ceiling: usize,
     /// Rate limit on new mappings.
     bucket: Bucket,
+    /// The offset at ring position 0.
+    start: u32,
+    /// The ring position the next new name is issued at or after.
+    cursor: u64,
+    /// The first position no written state covers.
+    durable_mark: Option<u64>,
+    /// Whether the durable mark bounds allocation.
+    marks: MarkMode,
+    /// Offsets held because the previous run may have answered with them.
+    restart_held: BTreeSet<u32>,
+    /// When the previous run's answers have all expired.
+    hold_until: Option<Instant>,
+    /// The latest time the pool has been given, for state written without one.
+    clock: Instant,
+    /// The warning for refused new names.
+    refusals: RefusalLatch,
+    /// Refusals at a bound since start.
+    refused_total: u64,
 }
 
 impl VirtualIpPool {
@@ -546,8 +699,9 @@ impl VirtualIpPool {
 
     /// Create a pool with explicit admission limits.
     ///
-    /// Production uses `new`; this exists so tests can set limits small
-    /// enough to reach without allocating the compiled-in counts.
+    /// Production uses `start`; this exists so tests can set limits small
+    /// enough to reach without allocating the compiled-in counts. The pool
+    /// issues from the first address and keeps no state across a restart.
     pub fn with_limits(
         cidr: &str,
         ttl_secs: u64,
@@ -556,34 +710,22 @@ impl VirtualIpPool {
         burst: u32,
         rate: u32,
     ) -> Result<Self, PoolError> {
-        let (base, prefix_len) = parse_ipv6_cidr(cidr)?;
-        if prefix_len == 0 || prefix_len > 128 {
-            return Err(PoolError::InvalidPrefix);
+        let (addr, prefix_len) = parse_ipv6_cidr(cidr)?;
+        let total = pool_total(cidr)?;
+        // The kernel routes the prefix, not the address as written, so
+        // offsets count from the prefix's network address.
+        let base = u128::from(addr) & (u128::MAX << (128 - prefix_len));
+        let network = Ipv6Addr::from(base);
+        if network != addr {
+            warn!(cidr = %cidr, network = %network, "Pool CIDR has host bits set; the pool uses its network address");
         }
-
-        let mut available = VecDeque::new();
-        let host_bits = 128 - prefix_len;
-
-        // Cap at 2^16 addresses to avoid massive allocations
-        let max_addrs: u128 = if host_bits > 16 {
-            1u128 << 16
-        } else {
-            1u128 << host_bits
-        };
-
-        let base_int = u128::from(base);
-        // Skip address 0 (network equivalent)
-        for i in 1..max_addrs {
-            available.push_back(Ipv6Addr::from(base_int + i));
-        }
-
-        let total = available.len();
         info!(cidr = %cidr, addresses = total, "Virtual IP pool initialized");
 
         Ok(Self {
             cidr: cidr.to_string(),
-            network: (base, prefix_len as u8),
-            available,
+            network: (network, prefix_len as u8),
+            base,
+            free: (1..=total).collect(),
             mappings: HashMap::new(),
             reverse: HashMap::new(),
             ttl_secs,
@@ -591,18 +733,64 @@ impl VirtualIpPool {
             total,
             ceiling,
             bucket: Bucket::new(burst, rate),
+            start: 1,
+            cursor: 0,
+            durable_mark: None,
+            marks: MarkMode::Ignored,
+            restart_held: BTreeSet::new(),
+            hold_until: None,
+            clock: Instant::now(),
+            refusals: RefusalLatch::default(),
+            refused_total: 0,
         })
     }
 
     /// Create the pool the gateway runs with, from `start`, at `now`.
+    ///
+    /// The pool refuses new names until its first state write is confirmed
+    /// or has failed. A restored pool issues from where the previous run's
+    /// written stretch ends, and holds that stretch and every offset the
+    /// previous run had live until any answer naming them has expired.
     pub fn start(
         cidr: &str,
         ttl_secs: u64,
         grace_secs: u64,
-        _start: PoolStart,
-        _now: Instant,
+        start: PoolStart,
+        now: Instant,
     ) -> Result<Self, PoolError> {
-        Self::new(cidr, ttl_secs, grace_secs)
+        let mut pool = Self::new(cidr, ttl_secs, grace_secs)?;
+        pool.clock = now;
+        pool.marks = MarkMode::Pending;
+        let total = pool.total;
+        match start {
+            PoolStart::Fresh { offset } => pool.start = 1 + offset.saturating_sub(1) % total,
+            PoolStart::Restored(state) => {
+                let hold = now.checked_add(Duration::from_secs(state.hold_secs));
+                let valid = state.version == 1
+                    && state.total == total
+                    && (1..=total).contains(&state.from)
+                    && state.span <= total
+                    && state
+                        .held
+                        .iter()
+                        .all(|[a, b]| 1 <= *a && a <= b && *b <= total);
+                debug_assert!(valid && hold.is_some(), "state is validated before start");
+                if valid && let Some(hold) = hold {
+                    pool.start = ring_step(state.from, u64::from(state.span), total);
+                    let mut held: BTreeSet<u32> =
+                        state.held.iter().flat_map(|[a, b]| *a..=*b).collect();
+                    held.extend(
+                        (0..u64::from(state.span)).map(|k| ring_step(state.from, k, total)),
+                    );
+                    for offset in &held {
+                        pool.free.remove(offset);
+                    }
+                    pool.restart_held = held;
+                    pool.hold_until = Some(hold);
+                }
+            }
+        }
+        Ok(pool)
     }
 
     /// The pool's network address and prefix length.
@@ -610,24 +798,179 @@ impl VirtualIpPool {
         self.network
     }
 
-    /// The state to write before issuing further, if one is due.
-    pub fn mark_request(&self) -> Option<PoolState> {
-        Some(PoolState {
-            version: 1,
-            pool: self.cidr.clone(),
-            total: u32::try_from(self.total).unwrap_or(u32::MAX),
-            from: 1,
-            span: 0,
-            held: Vec::new(),
-            hold_secs: self.ttl_secs.saturating_add(self.grace_secs),
-        })
+    /// The address at `offset`.
+    fn offset_addr(&self, offset: u32) -> Ipv6Addr {
+        Ipv6Addr::from(self.base + u128::from(offset))
     }
 
-    /// Record that `state` was written.
-    pub fn confirm_mark(&mut self, _state: &PoolState) {}
+    /// The offset of `addr`, when it lies in the pool.
+    fn addr_offset(&self, addr: Ipv6Addr) -> Option<u32> {
+        let offset = u128::from(addr).checked_sub(self.base)?;
+        u32::try_from(offset)
+            .ok()
+            .filter(|o| (1..=self.total).contains(o))
+    }
 
-    /// Record that the state could not be written.
-    pub fn mark_failed(&mut self) {}
+    /// The offset at ring position `position`.
+    fn offset_at(&self, position: u64) -> u32 {
+        ring_step(self.start, position, self.total)
+    }
+
+    /// Positions from offset `from` forward to offset `to`, within one lap.
+    fn ring_distance(&self, from: u32, to: u32) -> u64 {
+        let total = u64::from(self.total);
+        (u64::from(to) + total - u64::from(from)) % total
+    }
+
+    /// Free offsets in ring order from the cursor, each with its position,
+    /// within one lap.
+    fn free_from_cursor(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
+        let here = self.offset_at(self.cursor);
+        self.free
+            .range(here..)
+            .chain(self.free.range(..here))
+            .map(move |&offset| (offset, self.cursor + self.ring_distance(here, offset)))
+    }
+
+    /// Release the offsets held from the previous run once their hold has
+    /// passed.
+    fn release_restart_holds(&mut self, now: Instant) {
+        if self.hold_until.is_some_and(|until| now >= until) {
+            self.free.append(&mut self.restart_held);
+            self.hold_until = None;
+        }
+    }
+
+    /// Offsets a client may still hold an answer for, as sorted inclusive
+    /// ranges: every mapped offset and every offset held from the previous
+    /// run.
+    fn held_ranges(&self) -> Vec<[u32; 2]> {
+        let mut held: BTreeSet<u32> = self
+            .reverse
+            .keys()
+            .filter_map(|addr| self.addr_offset(*addr))
+            .collect();
+        held.extend(self.restart_held.iter().copied());
+        let mut ranges: Vec<[u32; 2]> = Vec::new();
+        for offset in held {
+            match ranges.last_mut() {
+                Some([_, end]) if *end + 1 == offset => *end = offset,
+                _ => ranges.push([offset, offset]),
+            }
+        }
+        ranges
+    }
+
+    /// How long a client may hold an answer naming a held offset.
+    fn hold_secs(&self) -> u64 {
+        let restart = self.hold_until.map_or(0, |until| {
+            until
+                .saturating_duration_since(self.clock)
+                .as_secs()
+                .saturating_add(1)
+        });
+        self.ttl_secs.saturating_add(self.grace_secs).max(restart)
+    }
+
+    /// The state the pool would write, with the cursor's offset and `span`.
+    fn state(&self, span: u32) -> PoolState {
+        PoolState {
+            version: 1,
+            pool: self.cidr.clone(),
+            total: self.total,
+            from: self.offset_at(self.cursor),
+            span,
+            held: self.held_ranges(),
+            hold_secs: self.hold_secs(),
+        }
+    }
+
+    /// The state to write before issuing further, if one is due.
+    ///
+    /// One is due when no mark is durable yet, or fewer than
+    /// `MARK_LOW_WATER` free offsets lie between the cursor and the durable
+    /// mark. The new mark lies just past the `MARK_RESERVE`-th free offset
+    /// ahead of the cursor, or past the last free one within a lap.
+    pub fn mark_request(&self) -> Option<PoolState> {
+        if let Some(mark) = self.durable_mark {
+            let ahead = self
+                .free_from_cursor()
+                .take_while(|&(_, position)| position < mark)
+                .take(MARK_LOW_WATER as usize)
+                .count();
+            if ahead >= MARK_LOW_WATER as usize {
+                return None;
+            }
+        }
+        let mark = self
+            .free_from_cursor()
+            .take(MARK_RESERVE as usize)
+            .last()
+            .map_or(self.cursor, |(_, position)| position + 1);
+        let span = u32::try_from(mark - self.cursor).unwrap_or(self.total);
+        Some(self.state(span.min(self.total)))
+    }
+
+    /// The state to write when the gateway stops cleanly, after nothing can
+    /// be issued any more: no stretch, only the offsets a client may still
+    /// hold an answer for.
+    pub fn shutdown_state(&self) -> PoolState {
+        self.state(0)
+    }
+
+    /// The state that carries a restored pool's holds to the next start, for
+    /// a start that ends before its first write: the offsets it holds, with
+    /// no stretch, for the hold that remains. `None` for a pool that holds
+    /// nothing from a previous run.
+    pub fn carry_state(&self) -> Option<PoolState> {
+        let until = self.hold_until?;
+        let mut state = self.state(0);
+        state.hold_secs = until
+            .saturating_duration_since(self.clock)
+            .as_secs()
+            .saturating_add(1);
+        Some(state)
+    }
+
+    /// Record that `state`, taken from `mark_request`, was written.
+    pub fn confirm_mark(&mut self, state: &PoolState) {
+        let here = self.offset_at(self.cursor);
+        let from = self
+            .cursor
+            .saturating_sub(self.ring_distance(state.from, here));
+        let mark = from + u64::from(state.span);
+        self.durable_mark = Some(self.durable_mark.map_or(mark, |old| old.max(mark)));
+        self.marks = MarkMode::Enforced;
+    }
+
+    /// Record that the state could not be written: issue without marks
+    /// until a later write is confirmed.
+    pub fn mark_failed(&mut self) {
+        self.marks = MarkMode::Ignored;
+    }
+
+    /// Count a refusal at one of the pool's bounds, warning on the first of
+    /// an episode.
+    fn refuse(&mut self, error: PoolError, now: Instant) -> PoolError {
+        self.refused_total += 1;
+        if self.refusals.refuse(now) {
+            let bound = match &error {
+                PoolError::AtCeiling(_) => self.ceiling as u64,
+                PoolError::Exhausted(_) => u64::from(self.total),
+                PoolError::AwaitingMark => self
+                    .durable_mark
+                    .map_or(0, |mark| u64::from(self.offset_at(mark))),
+                _ => 0,
+            };
+            warn!(
+                reason = error.reason(),
+                bound,
+                error = %error,
+                "Pool refusing new names"
+            );
+        }
+        error
+    }
 
     /// Record that the NAT table no longer translates `virtual_ip` to
     /// `mesh_addr`.
@@ -680,6 +1023,9 @@ impl VirtualIpPool {
         dns_name: &str,
         now: Instant,
     ) -> Result<Allocation, PoolError> {
+        self.clock = self.clock.max(now);
+        self.release_restart_holds(now);
+
         // Idempotent: return existing mapping, refreshed.
         if self.refresh_at(node_addr, now)
             && let Some(mapping) = self.mappings.get(&node_addr)
@@ -696,11 +1042,21 @@ impl VirtualIpPool {
         if !self.bucket.has_token() {
             return Err(PoolError::RateLimited);
         }
-        let virtual_ip = self
-            .available
-            .pop_front()
-            .ok_or(PoolError::Exhausted(self.mappings.len()))?;
+        if self.marks == MarkMode::Pending {
+            return Err(self.refuse(PoolError::AwaitingMark, now));
+        }
+        let Some((offset, position)) = self.free_from_cursor().next() else {
+            return Err(PoolError::Exhausted(self.mappings.len()));
+        };
+        if self.marks == MarkMode::Enforced
+            && self.durable_mark.is_some_and(|mark| position >= mark)
+        {
+            return Err(self.refuse(PoolError::AwaitingMark, now));
+        }
         self.bucket.take();
+        self.free.remove(&offset);
+        self.cursor = position + 1;
+        let virtual_ip = self.offset_addr(offset);
 
         let mapping = VirtualIpMapping {
             node_addr,
@@ -740,6 +1096,11 @@ impl VirtualIpPool {
     /// Periodic tick — drives state transitions. Returns events for
     /// the NAT and network modules.
     pub fn tick(&mut self, now: Instant, conntrack: &ConntrackSnapshot) -> Vec<PoolEvent> {
+        self.clock = self.clock.max(now);
+        self.release_restart_holds(now);
+        if let Some(refused) = self.refusals.release(now) {
+            info!(refused, "Pool accepting new names again");
+        }
         let mut events = Vec::new();
         let mut to_free = Vec::new();
         let ttl = std::time::Duration::from_secs(self.ttl_secs);
@@ -816,7 +1177,9 @@ impl VirtualIpPool {
         for node_addr in to_free {
             if let Some(mapping) = self.mappings.remove(&node_addr) {
                 self.reverse.remove(&mapping.virtual_ip);
-                self.available.push_back(mapping.virtual_ip);
+                if let Some(offset) = self.addr_offset(mapping.virtual_ip) {
+                    self.free.insert(offset);
+                }
                 info!(
                     virtual_ip = %mapping.virtual_ip,
                     mesh_addr = %mapping.mesh_addr,
@@ -845,11 +1208,11 @@ impl VirtualIpPool {
             }
         }
         PoolStatus {
-            total: self.total,
+            total: self.total as usize,
             allocated,
             active,
             draining,
-            free: self.available.len(),
+            free: self.free.len(),
         }
     }
 
@@ -952,11 +1315,46 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_cidr_with_host_bits_set_issues_only_addresses_inside_its_prefix() {
+        let pool = VirtualIpPool::with_limits("fd01::1/112", 60, 60, 10, 10, 10).unwrap();
+        let network: Ipv6Addr = "fd01::".parse().unwrap();
+        assert_eq!(
+            pool.network(),
+            (network, 112),
+            "the pool's network is the configured address, not its prefix"
+        );
+        let mask = u128::MAX << 16;
+        for offset in [1, pool.total] {
+            let addr = pool.offset_addr(offset);
+            assert_eq!(
+                u128::from(addr) & mask,
+                u128::from(network),
+                "offset {offset} gives {addr}, outside fd01::/112"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pool_with_no_addresses_is_refused_at_start() {
+        assert!(
+            matches!(pool_total("fd01::1/128"), Err(PoolError::InvalidPrefix)),
+            "a /128 pool, which has no address to issue, was accepted"
+        );
+        let start = PoolStart::Fresh { offset: 1 };
+        assert!(VirtualIpPool::start("fd01::1/128", 60, 60, start, Instant::now()).is_err());
+        assert_eq!(
+            pool_total("fd01::/127").unwrap(),
+            1,
+            "a /127 has one address"
+        );
+    }
+
+    #[test]
     fn test_pool_creation() {
         let pool = VirtualIpPool::new("fd01::/120", 60, 60).unwrap();
         // /120 = 8 host bits = 256 addresses, minus 1 (network) = 255
         assert_eq!(pool.total, 255);
-        assert_eq!(pool.available.len(), 255);
+        assert_eq!(pool.free.len(), 255);
     }
 
     #[test]
@@ -968,7 +1366,7 @@ mod tests {
         let (vip, is_new) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
         assert!(is_new);
         assert_eq!(vip, "fd01::1".parse::<Ipv6Addr>().unwrap());
-        assert_eq!(pool.available.len(), 254);
+        assert_eq!(pool.free.len(), 254);
     }
 
     #[test]
@@ -982,7 +1380,7 @@ mod tests {
         assert!(new1);
         assert!(!new2);
         assert_eq!(vip1, vip2);
-        assert_eq!(pool.available.len(), 254);
+        assert_eq!(pool.free.len(), 254);
     }
 
     #[test]
@@ -1098,6 +1496,585 @@ mod tests {
         );
     }
 
+    /// A node address for index `i`, for tests that need more than 255.
+    fn node_n(i: u32) -> NodeAddr {
+        let mut bytes = [0u8; 16];
+        bytes[0] = 0x01;
+        bytes[12..].copy_from_slice(&i.to_be_bytes());
+        NodeAddr::from_bytes(bytes)
+    }
+
+    /// The mesh address for index `i`.
+    fn mesh_n(i: u32) -> Ipv6Addr {
+        let mut bytes = [0u8; 16];
+        bytes[0] = 0xfd;
+        bytes[1] = 0x9a;
+        bytes[12..].copy_from_slice(&i.to_be_bytes());
+        Ipv6Addr::from(bytes)
+    }
+
+    #[test]
+    fn a_restored_pool_does_not_reissue_the_previous_runs_addresses() {
+        let t0 = Instant::now();
+        let mut first =
+            VirtualIpPool::start("fd01::/112", 60, 60, PoolStart::Fresh { offset: 1 }, t0).unwrap();
+        // The start write, then three names in the stretch it covers, then a
+        // crash: nothing more is written.
+        let state = first
+            .mark_request()
+            .expect("a fresh pool has no durable mark, so it asks for one");
+        first.confirm_mark(&state);
+        let issued: Vec<Ipv6Addr> = (1..=3u8)
+            .map(|i| alloc(&mut first, i, t0).expect("the first run allocates").0)
+            .collect();
+
+        let t1 = t0 + Duration::from_secs(1);
+        let mut second =
+            VirtualIpPool::start("fd01::/112", 60, 60, PoolStart::Restored(state), t1).unwrap();
+        let mark = second
+            .mark_request()
+            .expect("a restored pool has no durable mark yet");
+        second.confirm_mark(&mark);
+        let next = alloc(&mut second, 4, t1);
+        assert!(
+            next.is_ok(),
+            "the restored pool refused a new name: {next:?}"
+        );
+        let (address, _) = next.unwrap();
+        assert!(
+            !issued.contains(&address),
+            "the restored pool gave a new name {address}, which the previous run \
+             issued as one of {issued:?}; a client's cached answer for it now \
+             reaches a different node"
+        );
+    }
+
+    /// A pool driven the way the gateway drives it: ticks every 10 s with a
+    /// read snapshot that pins the addresses in `pinned`, NAT removals
+    /// reported for every removed mapping, and every requested state written
+    /// and confirmed.
+    struct Sim {
+        pool: VirtualIpPool,
+        now: Instant,
+        next_tick: Instant,
+        pinned: Sessions,
+        /// The last state written, as a crash would leave it.
+        written: Option<PoolState>,
+    }
+
+    impl Sim {
+        fn started(cidr: &str, ttl: u64, grace: u64, start: PoolStart, now: Instant) -> Sim {
+            let mut pool = VirtualIpPool::start(cidr, ttl, grace, start, now).unwrap();
+            let state = pool
+                .mark_request()
+                .expect("a started pool asks for a write");
+            pool.confirm_mark(&state);
+            Sim {
+                pool,
+                now,
+                next_tick: now + Duration::from_secs(10),
+                pinned: Sessions::new(),
+                written: Some(state),
+            }
+        }
+
+        /// Move time on, ticking at every 10 s boundary passed.
+        fn advance(&mut self, by: Duration) {
+            let until = self.now + by;
+            while self.next_tick <= until {
+                self.now = self.next_tick;
+                self.tick();
+                self.next_tick += Duration::from_secs(10);
+            }
+            self.now = until;
+        }
+
+        fn tick(&mut self) {
+            for event in self.pool.tick(self.now, &self.pinned.snapshot()) {
+                if let PoolEvent::MappingRemoved {
+                    virtual_ip,
+                    mesh_addr,
+                } = event
+                {
+                    self.pool.nat_removed(virtual_ip, mesh_addr);
+                }
+            }
+            if let Some(state) = self.pool.mark_request() {
+                self.pool.confirm_mark(&state);
+                self.written = Some(state);
+            }
+        }
+
+        /// Allocate name `i` now.
+        fn alloc(&mut self, i: u32) -> Result<Allocation, PoolError> {
+            let allocation = self
+                .pool
+                .allocate_at(node_n(i), mesh_n(i), "test.fips", self.now)?;
+            if let Some(evicted) = allocation.evicted {
+                self.pool.nat_removed(evicted.virtual_ip, evicted.mesh_addr);
+            }
+            Ok(allocation)
+        }
+
+        /// Allocate name `i`, waiting out the rate limit and the mark.
+        fn alloc_waiting(&mut self, i: u32) -> Allocation {
+            for _ in 0..1000 {
+                match self.alloc(i) {
+                    Ok(allocation) => return allocation,
+                    Err(PoolError::RateLimited | PoolError::AwaitingMark) => {
+                        self.advance(Duration::from_millis(100))
+                    }
+                    Err(e) => panic!("name {i} refused: {e}"),
+                }
+            }
+            panic!("name {i} still refused after 100 s");
+        }
+
+        /// The offset of `addr` in this pool.
+        fn offset(&self, addr: Ipv6Addr) -> u32 {
+            self.pool.addr_offset(addr).expect("a pool address")
+        }
+    }
+
+    #[test]
+    fn a_restored_pool_holds_a_live_mapping_from_before_the_last_lap() {
+        let t0 = Instant::now();
+        let mut a = Sim::started("fd01::/120", 5, 5, PoolStart::Fresh { offset: 1 }, t0);
+        let n1 = a.alloc_waiting(1).virtual_ip;
+        a.pinned.set(n1, 1);
+        let n1_offset = a.offset(n1);
+
+        // New names, one a second, each left to expire, until the cursor has
+        // gone round and stands just behind n1. At that pace about 60
+        // addresses are mapped or waiting for release at once, so most of the
+        // pool is free at the restart.
+        let mut i = 2;
+        loop {
+            let allocation = a.alloc_waiting(i);
+            a.advance(Duration::from_secs(1));
+            i += 1;
+            if a.offset(allocation.virtual_ip) == a.pool.total
+                && a.pool.offset_at(a.pool.cursor) == n1_offset
+            {
+                break;
+            }
+            assert!(i < 2000, "control: the cursor did not lap");
+        }
+        assert!(i > 255, "control: the cursor lapped the pool");
+        assert_eq!(
+            a.pool.lookup_virtual_ip(&n1).map(|m| m.node_addr),
+            Some(node_n(1)),
+            "control: n1 is still mapped"
+        );
+
+        let state = a.pool.shutdown_state();
+        let t1 = a.now + Duration::from_secs(1);
+        let mut b = Sim::started("fd01::/120", 5, 5, PoolStart::Restored(state.clone()), t1);
+        for k in 0..20 {
+            let allocation = b.alloc(10_000 + k);
+            assert!(
+                allocation.is_ok(),
+                "the restored pool refused: {allocation:?}"
+            );
+            assert_ne!(
+                allocation.unwrap().virtual_ip,
+                n1,
+                "a live address from before the last lap was reissued after a restart"
+            );
+        }
+
+        // After the hold and the reads, n1's offset can be issued again.
+        b.advance(Duration::from_secs(
+            state.hold_secs + 10 * u64::from(MAX_ABSENT_READS),
+        ));
+        assert!(b.pool.free.contains(&n1_offset), "n1's offset is released");
+    }
+
+    #[test]
+    fn a_restored_slash_112_pool_holds_a_live_mapping_just_past_the_reserve() {
+        // At MAPPING_RATE new names a second, a name lives at most TTL plus
+        // grace (30 s) plus one tick (10 s), so at most MAPPING_BURST +
+        // 10 * 40 = 450 mappings are live at once, below MAPPING_CEILING: no
+        // name is ever evicted. The hold, 30 s, lets the restored pool issue
+        // MAPPING_BURST + 10 * 30 = 350 names, more than the 214 offsets at
+        // most between two written marks.
+        let (ttl, grace) = (5, 25);
+        let t0 = Instant::now();
+        let mut a = Sim::started("fd01::/112", ttl, grace, PoolStart::Fresh { offset: 1 }, t0);
+        let n1 = a.alloc_waiting(1).virtual_ip;
+        a.pinned.set(n1, 1);
+        let n1_offset = a.offset(n1);
+        let total = u64::from(a.pool.total);
+
+        // Lap until a written state's stretch ends at or before n1's
+        // position on the second lap, with n1 just past it.
+        let mut i = 2;
+        let state = loop {
+            a.alloc_waiting(i);
+            i += 1;
+            assert!(
+                u64::from(i) < 2 * total,
+                "control: no state ended just short of n1"
+            );
+            let Some(state) = a.written.clone() else {
+                continue;
+            };
+            if a.pool.cursor < total {
+                continue;
+            }
+            let end = (u64::from(state.from) - 1 + u64::from(state.span)) % total + 1;
+            let gap = (u64::from(n1_offset) + total - end) % total;
+            if state.span == MARK_RESERVE && gap < 300 && end != u64::from(n1_offset) + 1 {
+                break state;
+            }
+        };
+        assert_eq!(
+            a.pool.lookup_virtual_ip(&n1).map(|m| m.node_addr),
+            Some(node_n(1)),
+            "control: n1 is still mapped"
+        );
+
+        // A crash right after that write: the next run starts from it.
+        let t1 = a.now + Duration::from_secs(1);
+        let mut b = Sim::started(
+            "fd01::/112",
+            ttl,
+            grace,
+            PoolStart::Restored(state.clone()),
+            t1,
+        );
+        let hold_ends = t1 + Duration::from_secs(state.hold_secs);
+        // n1's position on the restored pool's ring: it lies just past the
+        // written stretch, so the pool reaches it within the hold.
+        let n1_position = b.pool.ring_distance(b.pool.start, n1_offset);
+        assert!(n1_position < 300, "control: n1 lies just past the stretch");
+        let mut k = 0;
+        while b.pool.cursor <= n1_position {
+            let allocation = b.alloc_waiting(100_000 + k);
+            k += 1;
+            assert!(
+                b.now < hold_ends,
+                "control: the restored pool passed n1 within the hold"
+            );
+            assert_ne!(
+                allocation.virtual_ip, n1,
+                "a live address just past the written stretch was reissued after a crash"
+            );
+        }
+        assert!(k > 0, "control: the restored pool issued names");
+    }
+
+    #[test]
+    fn a_full_lap_stretch_survives_a_restart() {
+        let t0 = Instant::now();
+        let mut a = Sim::started("fd01::/120", 600, 600, PoolStart::Fresh { offset: 1 }, t0);
+        // Every offset but the last stays mapped; the last expires.
+        for i in 1..=255u32 {
+            let vip = a.alloc_waiting(i).virtual_ip;
+            if i < 255 {
+                a.pinned.set(vip, 1);
+            }
+        }
+        let last = a.pool.offset_addr(255);
+        a.advance(Duration::from_secs(1300));
+        assert!(
+            a.pool.lookup_virtual_ip(&last).is_none(),
+            "control: the last name expired"
+        );
+        assert_eq!(
+            a.pool.offset_at(a.pool.cursor),
+            1,
+            "control: the cursor is just past it"
+        );
+
+        // The write covers a whole lap: the one free offset is just behind
+        // the cursor. A pool this small asks for a write on every tick.
+        let state = a.pool.mark_request().expect("no durable mark");
+        a.pool.confirm_mark(&state);
+        assert_eq!(state.span, 255, "control: a whole-lap stretch");
+        let issued = a.alloc_waiting(1000).virtual_ip;
+        assert_eq!(
+            issued, last,
+            "control: the name after the write takes the free offset"
+        );
+
+        let t1 = a.now + Duration::from_secs(1);
+        let mut b = Sim::started("fd01::/120", 600, 600, PoolStart::Restored(state), t1);
+        let next = b.alloc(2000);
+        assert!(
+            !matches!(next, Ok(Allocation { virtual_ip, .. }) if virtual_ip == issued),
+            "an address issued in a whole-lap stretch was reissued after a restart"
+        );
+    }
+
+    #[test]
+    fn the_mark_is_never_passed_until_the_next_one_is_confirmed() {
+        let t0 = Instant::now();
+        let mut pool =
+            VirtualIpPool::start("fd01::/112", 600, 600, PoolStart::Fresh { offset: 1 }, t0)
+                .unwrap();
+        assert!(
+            matches!(
+                pool.allocate_at(node_n(1), mesh_n(1), "test.fips", t0),
+                Err(PoolError::AwaitingMark)
+            ),
+            "a started pool waits for its first write"
+        );
+        assert_eq!(pool.refused_total, 1);
+        assert!(
+            pool.refusals.open.is_some(),
+            "the first refusal warns and latches"
+        );
+
+        let state = pool.mark_request().unwrap();
+        pool.confirm_mark(&state);
+        let mut now = t0;
+        let mut issued = 0;
+        let mut i = 1;
+        loop {
+            match pool.allocate_at(node_n(i), mesh_n(i), "test.fips", now) {
+                Ok(_) => {
+                    issued += 1;
+                    i += 1;
+                }
+                Err(PoolError::RateLimited) => now += Duration::from_millis(100),
+                Err(PoolError::AwaitingMark) => break,
+                Err(e) => panic!("unexpected refusal: {e}"),
+            }
+        }
+        assert_eq!(
+            issued, MARK_RESERVE,
+            "the pool issues exactly up to the mark"
+        );
+        assert!(matches!(
+            pool.allocate_at(
+                node_n(i),
+                mesh_n(i),
+                "test.fips",
+                now + Duration::from_secs(1)
+            ),
+            Err(PoolError::AwaitingMark)
+        ));
+        assert_eq!(
+            pool.refusals.open.map(|(_, count)| count),
+            Some(3),
+            "later refusals are counted in the open episode, not warned again"
+        );
+
+        let next = pool.mark_request().expect("the mark is reached");
+        pool.confirm_mark(&next);
+        assert!(
+            pool.allocate_at(
+                node_n(i),
+                mesh_n(i),
+                "test.fips",
+                now + Duration::from_secs(2)
+            )
+            .is_ok(),
+            "a confirmed mark lets allocation continue"
+        );
+
+        // The episode closes once nothing has been refused for the hold.
+        pool.tick(now + Duration::from_secs(30), &Sessions::new().snapshot());
+        assert!(pool.refusals.open.is_some(), "not yet");
+        pool.tick(
+            now + Duration::from_secs(1) + BOUND_LOG_HOLD,
+            &Sessions::new().snapshot(),
+        );
+        assert!(
+            pool.refusals.open.is_none(),
+            "released after BOUND_LOG_HOLD"
+        );
+    }
+
+    #[test]
+    fn a_late_tick_at_full_rate_never_hits_the_mark() {
+        let t0 = Instant::now();
+        let mut pool =
+            VirtualIpPool::start("fd01::/112", 600, 600, PoolStart::Fresh { offset: 1 }, t0)
+                .unwrap();
+        let state = pool.mark_request().unwrap();
+        pool.confirm_mark(&state);
+
+        // Allocate until exactly MARK_LOW_WATER free offsets are left before
+        // the mark.
+        let mut now = t0;
+        let mut i = 1;
+        while i <= MARK_RESERVE - MARK_LOW_WATER {
+            match pool.allocate_at(node_n(i), mesh_n(i), "test.fips", now) {
+                Ok(_) => i += 1,
+                Err(PoolError::RateLimited) => now += Duration::from_millis(100),
+                Err(e) => panic!("unexpected refusal: {e}"),
+            }
+        }
+        pool.tick(now, &Sessions::new().snapshot());
+        assert!(
+            pool.mark_request().is_none(),
+            "control: exactly MARK_LOW_WATER left is not yet a reason to write"
+        );
+
+        // Idle until the bucket is full, then no tick for 25 s at full rate.
+        let start = now + Duration::from_secs(5);
+        let mut admitted = 0;
+        for step in 0..=250u32 {
+            let at = start + Duration::from_millis(100) * step;
+            loop {
+                match pool.allocate_at(node_n(i), mesh_n(i), "test.fips", at) {
+                    Ok(_) => {
+                        admitted += 1;
+                        i += 1;
+                    }
+                    Err(PoolError::RateLimited) => break,
+                    Err(e) => panic!(
+                        "allocation {} of a 25 s late tick at full rate was refused: {e}",
+                        admitted + 1
+                    ),
+                }
+            }
+        }
+        assert_eq!(
+            admitted,
+            MAPPING_BURST + MAPPING_RATE * 25,
+            "control: a full bucket and 25 s at the full rate"
+        );
+    }
+
+    #[test]
+    fn a_run_of_mapped_addresses_ahead_of_the_cursor_does_not_starve_the_mark() {
+        // A start whose previous run held 300 offsets directly ahead of the
+        // cursor: the non-free run a new cursor can meet without a lap.
+        let t0 = Instant::now();
+        let state = PoolState {
+            version: 1,
+            pool: "fd01::/112".to_string(),
+            total: 65535,
+            from: 1,
+            span: 0,
+            held: vec![[1, 300]],
+            hold_secs: 600,
+        };
+        let mut pool =
+            VirtualIpPool::start("fd01::/112", 600, 600, PoolStart::Restored(state), t0).unwrap();
+        let request = pool.mark_request().unwrap();
+        assert_eq!(request.from, 1);
+        assert_eq!(
+            request.span,
+            300 + MARK_RESERVE,
+            "the mark covers the run plus MARK_RESERVE free offsets"
+        );
+        pool.confirm_mark(&request);
+        let allocation = pool
+            .allocate_at(node_n(1), mesh_n(1), "test.fips", t0)
+            .expect("allocation continues");
+        assert_eq!(pool.addr_offset(allocation.virtual_ip), Some(301));
+    }
+
+    #[test]
+    fn restart_holds_release_after_the_loaded_hold_and_not_before() {
+        let t0 = Instant::now();
+        let state = PoolState {
+            version: 1,
+            pool: "fd01::/120".to_string(),
+            total: 255,
+            from: 1,
+            span: 255,
+            held: Vec::new(),
+            hold_secs: 10,
+        };
+        let mut sim = Sim::started("fd01::/120", 5, 5, PoolStart::Restored(state), t0);
+        assert!(
+            matches!(sim.alloc(1), Err(PoolError::Exhausted(_))),
+            "every offset is held from the previous run"
+        );
+        sim.advance(Duration::from_secs(9));
+        assert!(matches!(sim.alloc(1), Err(PoolError::Exhausted(_))));
+
+        sim.advance(Duration::from_secs(10 * u64::from(MAX_ABSENT_READS)));
+        assert!(
+            sim.alloc(1).is_ok(),
+            "released after the hold and the reads"
+        );
+    }
+
+    #[test]
+    fn a_restored_pool_writes_a_hold_no_shorter_than_what_remains_of_its_loaded_one() {
+        // The previous run held offsets 1-10 for longer than this run's TTL
+        // plus grace, as after a restart with a lower DNS TTL.
+        let t0 = Instant::now();
+        let loaded = PoolState {
+            version: 1,
+            pool: "fd01::/120".to_string(),
+            total: 255,
+            from: 1,
+            span: 0,
+            held: vec![[1, 10]],
+            hold_secs: 600,
+        };
+        let mut a = Sim::started("fd01::/120", 5, 5, PoolStart::Restored(loaded), t0);
+        a.advance(Duration::from_secs(100));
+        let remaining = 500;
+
+        let crash = a.pool.mark_request().expect("a small pool asks again");
+        let clean = a.pool.shutdown_state();
+        for (name, state) in [("tick", &crash), ("shutdown", &clean)] {
+            assert!(
+                state.hold_secs >= remaining,
+                "the {name} state holds offsets 1-10 for {} s, less than the {remaining} s \
+                 left of the hold they were loaded with",
+                state.hold_secs
+            );
+        }
+
+        // The next run, after a crash, still refuses the earlier run's
+        // offsets once its own TTL plus grace and its start reads are past.
+        let waited = 10 + 10 * u64::from(MAX_ABSENT_READS) + 10;
+        let mut c = Sim::started("fd01::/120", 5, 5, PoolStart::Restored(crash), a.now);
+        c.advance(Duration::from_secs(waited));
+        for i in 0..255 {
+            match c.alloc(i) {
+                Ok(allocation) => {
+                    let offset = c.offset(allocation.virtual_ip);
+                    assert!(
+                        !(1..=10).contains(&offset),
+                        "offset {offset}, held by the earlier run for {remaining} s more, \
+                         was reissued after {waited} s"
+                    );
+                }
+                Err(PoolError::Exhausted(_)) => break,
+                Err(PoolError::RateLimited | PoolError::AwaitingMark) => {
+                    c.advance(Duration::from_millis(100))
+                }
+                Err(e) => panic!("name {i} refused: {e}"),
+            }
+        }
+        // Control: the refusal was the hold, and it ends.
+        c.advance(Duration::from_secs(
+            remaining + 10 * u64::from(MAX_ABSENT_READS),
+        ));
+        assert!(c.alloc(1000).is_ok(), "the hold never ended");
+    }
+
+    #[test]
+    fn a_clean_shutdown_state_holds_only_live_addresses() {
+        let t0 = Instant::now();
+        let mut a = Sim::started("fd01::/120", 60, 60, PoolStart::Fresh { offset: 1 }, t0);
+        let live: Vec<Ipv6Addr> = (1..=3).map(|i| a.alloc_waiting(i).virtual_ip).collect();
+
+        let clean = a.pool.shutdown_state();
+        let mut b = Sim::started("fd01::/120", 60, 60, PoolStart::Restored(clean), a.now);
+        let next = b.alloc(10);
+        assert!(
+            next.is_ok(),
+            "after a clean stop a new name resolves at once: {next:?}"
+        );
+        assert!(!live.contains(&next.unwrap().virtual_ip));
+
+        // The state a crash would leave holds a whole lap on a small pool.
+        let crash = a.pool.mark_request().unwrap();
+        let mut c = Sim::started("fd01::/120", 60, 60, PoolStart::Restored(crash), a.now);
+        assert!(matches!(c.alloc(10), Err(PoolError::Exhausted(_))));
+    }
+
     #[test]
     fn test_mapping_lifecycle_allocated_to_free() {
         let mut pool = VirtualIpPool::new("fd01::/120", 1, 1).unwrap();
@@ -1129,7 +2106,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], PoolEvent::MappingRemoved { .. }));
         assert_eq!(pool.mappings.len(), 0);
-        assert_eq!(pool.available.len(), 255); // returned to pool
+        assert_eq!(pool.free.len(), 255); // returned to pool
     }
 
     #[test]
