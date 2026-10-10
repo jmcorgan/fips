@@ -27,8 +27,16 @@
 //! ## Connection Pool
 //!
 //! BLE hardware limits concurrent connections (typically 4-10). The pool
-//! enforces a configurable maximum (default 7) with priority eviction:
-//! static (configured) peers get priority over discovered peers.
+//! enforces a configurable maximum (default 7). A link counts as a node's
+//! only while the node's active peer for that node uses it: the
+//! pre-handshake key exchange is a claim anyone in radio range can make.
+//! Until then the link blocks no other link claiming the same node and may
+//! be evicted, once it has had at least `connect_timeout_ms` (never less than
+//! 10 s) to verify; a verified link is never evicted, and a newcomer that
+//! finds nothing evictable is refused. Eviction happens only when the pool is
+//! full and nothing closes an unverified link on a timer, so with
+//! `max_connections` above what the adapter can hold, links that never
+//! verify can keep the adapter's remaining connections.
 
 pub mod addr;
 pub mod io;
@@ -60,7 +68,7 @@ use crate::identity::NodeAddr;
 use addr::BleAddr;
 use io::{BleIo, BleScanner, BleStream};
 use neighbor::NeighborBuffer;
-use pool::{BleConnection, ConnectionPool};
+use pool::{BleConnection, ConnectionPool, Insert, Verify};
 use stats::BleStats;
 use stream_read::BleStreamRead;
 
@@ -126,7 +134,7 @@ compile_error!(
 ///
 /// Provides connection-oriented, reliable delivery over BLE L2CAP CoC.
 /// Each peer has its own L2CAP connection; the pool enforces hardware
-/// connection limits with priority eviction.
+/// connection limits, evicting only unverified links.
 pub struct BleTransport<I: BleIo> {
     /// Unique transport identifier.
     transport_id: TransportId,
@@ -469,20 +477,16 @@ impl<I: BleIo> BleTransport<I> {
         let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
         // Pre-handshake pubkey exchange (temporary, pre-XX)
-        let mut peer_node: Option<NodeAddr> = None;
+        let mut peer_key: Option<XOnlyPublicKey> = None;
         if let Some(ref our_pubkey) = self.local_pubkey {
             match pubkey_exchange(stream.as_ref(), &mut reader, our_pubkey).await {
                 Ok(peer_pubkey) => {
                     debug!(addr = %addr, "BLE outbound pubkey exchange complete");
-                    let node = NodeAddr::from_pubkey(&peer_pubkey);
-                    peer_node = Some(node);
-                    let announced = announced_addr(&self.pool, &node, &ble_addr).await;
-                    self.neighbor_buffer
-                        .add_peer_with_pubkey(&announced, peer_pubkey);
+                    peer_key = Some(peer_pubkey);
                 }
                 Err(e) => {
                     self.stats.record_pubkey_exchange_failure();
-                    warn!(
+                    debug!(
                         addr = %addr, role = "central", outcome = "pubkey-exchange-failed",
                         error = %e, "BLE outbound pubkey exchange failed"
                     );
@@ -491,21 +495,24 @@ impl<I: BleIo> BleTransport<I> {
             }
         }
 
-        self.promote_connection(addr, &ble_addr, stream, reader, peer_node)
+        self.promote_connection(addr, &ble_addr, stream, reader, peer_key)
             .await
     }
 
     /// Promote a newly established stream into the connection pool.
     ///
-    /// Spawns the receive loop and inserts into the pool with eviction.
+    /// Spawns the receive loop and offers the link to the pool. An admitted
+    /// link whose remote sent `peer_key` is then announced; a refused one is
+    /// not, since there is no link behind it.
     async fn promote_connection(
         &self,
         addr: &TransportAddr,
         ble_addr: &BleAddr,
         stream: Arc<I::Stream>,
         reader: BleStreamRead<I::Stream>,
-        node_addr: Option<NodeAddr>,
+        peer_key: Option<XOnlyPublicKey>,
     ) -> Result<(), TransportError> {
+        let node_addr = peer_key.as_ref().map(NodeAddr::from_pubkey);
         let send_mtu = stream.send_mtu();
         let recv_mtu = stream.recv_mtu();
 
@@ -520,7 +527,6 @@ impl<I: BleIo> BleTransport<I> {
         ));
 
         let admitted = tokio::time::Instant::now();
-
         let conn = BleConnection {
             stream,
             recv_task: Some(recv_task),
@@ -528,28 +534,30 @@ impl<I: BleIo> BleTransport<I> {
             recv_mtu,
             established_at: admitted,
             grace_from: admitted,
-            is_static: false,
             verified: false,
             addr: ble_addr.clone(),
             node_addr,
         };
 
         let mut pool = self.pool.lock().await;
-        match pool.insert(addr.clone(), conn, admitted) {
-            Ok(Some(evicted)) => {
-                self.stats.record_pool_eviction();
-                debug!(addr = %addr, evicted = %evicted, "BLE connection established (evicted peer)");
-            }
-            Ok(None) => {
-                debug!(addr = %addr, "BLE connection established");
-            }
-            Err(e) => {
-                warn!(addr = %addr, error = %e, "BLE pool full, connection dropped");
-                self.stats.record_connection_rejected();
-                return Err(TransportError::SendFailed("pool full".into()));
-            }
+        let outcome = pool.insert(addr.clone(), conn, admitted);
+        if !note_insert(
+            &outcome,
+            addr,
+            "central",
+            &self.stats,
+            pool.max_connections(),
+        ) {
+            return Err(TransportError::SendFailed("pool full".into()));
         }
+        // From the held guard: `announced_addr` would take the same lock.
+        let announced = node_addr.map(|node| pool.verified_addr(&node).unwrap_or(ble_addr.clone()));
+        drop(pool);
+        debug!(addr = %addr, "BLE connection established");
         self.stats.record_connection_established();
+        if let (Some(at), Some(key)) = (announced, peer_key) {
+            self.neighbor_buffer.add_peer_with_pubkey(&at, key);
+        }
         Ok(())
     }
 
@@ -610,19 +618,16 @@ impl<I: BleIo> BleTransport<I> {
                     let mut reader = BleStreamRead::new(Arc::clone(&stream), recv_mtu);
 
                     // Pre-handshake pubkey exchange (temporary, pre-XX)
-                    let mut peer_node: Option<NodeAddr> = None;
+                    let mut peer_key: Option<XOnlyPublicKey> = None;
                     if let Some(ref our_pubkey) = local_pubkey {
                         match pubkey_exchange(stream.as_ref(), &mut reader, our_pubkey).await {
                             Ok(peer_pubkey) => {
                                 debug!(addr = %addr_clone, "BLE outbound pubkey exchange complete");
-                                let node = NodeAddr::from_pubkey(&peer_pubkey);
-                                peer_node = Some(node);
-                                let announced = announced_addr(&pool, &node, &ble_addr).await;
-                                neighbor_buffer.add_peer_with_pubkey(&announced, peer_pubkey);
+                                peer_key = Some(peer_pubkey);
                             }
                             Err(e) => {
                                 stats.record_pubkey_exchange_failure();
-                                warn!(
+                                debug!(
                                     addr = %addr_clone,
                                     role = "central",
                                     outcome = "pubkey-exchange-failed",
@@ -644,8 +649,8 @@ impl<I: BleIo> BleTransport<I> {
                         recv_mtu,
                     ));
 
+                    let peer_node = peer_key.as_ref().map(NodeAddr::from_pubkey);
                     let admitted = tokio::time::Instant::now();
-
                     let conn = BleConnection {
                         stream,
                         recv_task: Some(recv_task),
@@ -653,28 +658,29 @@ impl<I: BleIo> BleTransport<I> {
                         recv_mtu,
                         established_at: admitted,
                         grace_from: admitted,
-                        is_static: false,
                         verified: false,
-                        addr: ble_addr,
+                        addr: ble_addr.clone(),
                         node_addr: peer_node,
                     };
 
                     let mut pool = pool.lock().await;
-                    match pool.insert(addr_clone.clone(), conn, admitted) {
-                        Ok(Some(evicted)) => {
-                            stats.record_pool_eviction();
-                            debug!(addr = %addr_clone, evicted = %evicted, "BLE connection established (evicted peer)");
-                        }
-                        Ok(None) => {
-                            debug!(addr = %addr_clone, "BLE connection established");
-                        }
-                        Err(e) => {
-                            warn!(addr = %addr_clone, error = %e, "BLE pool full, connection dropped");
-                            stats.record_connection_rejected();
-                            return;
-                        }
+                    let outcome = pool.insert(addr_clone.clone(), conn, admitted);
+                    let max = pool.max_connections();
+                    if !note_insert(&outcome, &addr_clone, "central", &stats, max) {
+                        // Not announced: there is no link behind the address,
+                        // and the node dialled it itself.
+                        return;
                     }
+                    // From the held guard: `announced_addr` would take the
+                    // same lock.
+                    let announced =
+                        peer_node.map(|node| pool.verified_addr(&node).unwrap_or(ble_addr.clone()));
+                    drop(pool);
+                    debug!(addr = %addr_clone, "BLE connection established");
                     stats.record_connection_established();
+                    if let (Some(at), Some(key)) = (announced, peer_key) {
+                        neighbor_buffer.add_peer_with_pubkey(&at, key);
+                    }
                 }
                 Ok(Err(e)) => {
                     stats.record_connect_error();
@@ -730,19 +736,63 @@ impl<I: BleIo> BleTransport<I> {
     }
 
     /// Records that the node's active peer `node` now uses the link at `addr`.
-    /// Not acted on yet.
-    pub async fn mark_verified(&self, _addr: &TransportAddr, _node: &NodeAddr) {}
+    ///
+    /// The node calls this on every authenticated frame that arrives over
+    /// BLE, so the common case (the link is already verified for `node`) must
+    /// stay cheap and quiet.
+    pub async fn mark_verified(&self, addr: &TransportAddr, node: &NodeAddr) {
+        let outcome = self.pool.lock().await.mark_verified(addr, node);
+        match outcome {
+            // A remote holding two links can alternate its frames between
+            // them, demoting one per frame: never louder than trace.
+            Verify::Marked { demoted } => {
+                for other in demoted {
+                    trace!(
+                        addr = %other, node = %node, kept = %addr, outcome = "superseded",
+                        "BLE link no longer carries its node's session"
+                    );
+                }
+            }
+            // The remote chose what to claim, so this is attacker input:
+            // never louder than trace, since a frame can repeat it.
+            Verify::Mismatch => {
+                trace!(
+                    addr = %addr, outcome = "claim-mismatch",
+                    "BLE link authenticated as a different node than it claimed"
+                );
+            }
+            Verify::Absent => {
+                trace!(addr = %addr, outcome = "absent", "BLE link to verify is not pooled");
+            }
+        }
+    }
 
     /// Records that the node's active peer `node` no longer uses the link at
-    /// `addr`. Not acted on yet.
-    pub async fn clear_verified(&self, _addr: &TransportAddr, _node: &NodeAddr) {}
+    /// `addr`. The link stays pooled. When `removed`, the peer itself is gone
+    /// and the link gets its grace again; otherwise the peer moved to another
+    /// link and the link keeps the grace it had.
+    pub async fn clear_verified(&self, addr: &TransportAddr, node: &NodeAddr, removed: bool) {
+        let regrace = removed.then(tokio::time::Instant::now);
+        let cleared = self.pool.lock().await.clear_verified(addr, node, regrace);
+        if cleared {
+            trace!(addr = %addr, node = %node, "BLE link no longer verified");
+        }
+    }
 
     /// Whether the link at `addr` is verified; `None` when no link is pooled
     /// there.
     #[cfg(test)]
-    #[allow(dead_code)] // the verification tests read it
     pub(crate) async fn is_verified(&self, addr: &TransportAddr) -> Option<bool> {
         self.pool.lock().await.get(addr).map(|c| c.verified)
+    }
+
+    /// Hold the pool lock until the guard is dropped, so a test can queue
+    /// callers behind it in a known order.
+    #[cfg(test)]
+    pub(crate) async fn hold_pool(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, ConnectionPool<Arc<I::Stream>>> {
+        self.pool.lock().await
     }
 
     /// Get the link MTU for a specific address.
@@ -851,9 +901,11 @@ const PUBKEY_EXCHANGE_TIMEOUT_SECS: u64 = 5;
 /// again. `scan_probe_loop` breaks that cycle for its own probes, but callers
 /// that reach `connect_async` directly never consult it.
 ///
-/// So when the peer is already connected, report the address its link is
-/// actually on: same peer, named by the address that works. When it is not,
-/// there is no incumbent and the observed address stands.
+/// So when the node already has a verified link to the peer, report the
+/// address that link is actually on: same peer, named by the address that
+/// works. Otherwise the observed address stands. An unverified claim names
+/// nothing: anyone can claim a peer's key, and naming the claimant's address
+/// would send the node to dial the claimant for that peer.
 ///
 /// Canonicalising rather than withholding matters: suppressing the
 /// announcement would also stop the peer being offered at all, and consumers
@@ -865,8 +917,51 @@ async fn announced_addr<S>(
 ) -> BleAddr {
     pool.lock()
         .await
-        .live_addr_of_node(node)
+        .verified_addr(node)
         .unwrap_or_else(|| observed.clone())
+}
+
+/// Report the outcome of offering a link to the pool, and whether it was
+/// admitted.
+///
+/// A refusal is logged at debug, with one warning at the start of a run of
+/// refusals and one line with the count when the run ends: a full pool is a
+/// state an attacker in radio range can hold, so its log volume is bounded.
+fn note_insert(
+    outcome: &Insert,
+    ta: &TransportAddr,
+    role: &'static str,
+    stats: &BleStats,
+    max: usize,
+) -> bool {
+    let (Insert::Admitted { ended, .. } | Insert::Refused { ended, .. }) = outcome;
+    if let Some(n) = ended {
+        info!(refused = n, "BLE pool refusal run ended");
+    }
+    match outcome {
+        Insert::Admitted { evicted, .. } => {
+            if let Some(evicted) = evicted {
+                stats.record_pool_eviction();
+                debug!(
+                    addr = %ta, role, evicted = %evicted, outcome = "evicted-unverified",
+                    "BLE pool full, evicted an unverified link"
+                );
+            }
+            true
+        }
+        Insert::Refused { first, .. } => {
+            stats.record_connection_rejected();
+            debug!(addr = %ta, role, outcome = "pool-rejected", "BLE pool full, link dropped");
+            if *first {
+                warn!(
+                    bound = max,
+                    "BLE pool full of verified links or links still inside their grace \
+                     (max_connections); refusing new links"
+                );
+            }
+            false
+        }
+    }
 }
 
 /// Exchange public keys over a newly established L2CAP connection.
@@ -1053,26 +1148,28 @@ async fn admit_inbound<S>(
 
     // Pre-handshake pubkey exchange (temporary, pre-XX)
     let mut peer_node_addr: Option<NodeAddr> = None;
+    let mut peer_key: Option<XOnlyPublicKey> = None;
     if let Some(ref our_pubkey) = local_pubkey {
         match pubkey_exchange(stream.as_ref(), &mut reader, our_pubkey).await {
             Ok(peer_pubkey) => {
                 debug!(addr = %ta, "BLE inbound pubkey exchange complete");
                 let peer_node = NodeAddr::from_pubkey(&peer_pubkey);
                 peer_node_addr = Some(peer_node);
-                let announced = announced_addr(&pool, &peer_node, &addr).await;
-                neighbor_buffer.add_peer_with_pubkey(&announced, peer_pubkey);
+                peer_key = Some(peer_pubkey);
 
                 // Already linked to this peer on another address?
                 // A peer using resolvable private addresses rotates
                 // continually, and every rotation dials in looking
                 // like a new device. Admitting those would put one
-                // peer in several pool slots and evict real ones.
-                // The incumbent link is kept: it is known-good, and
-                // a genuinely dead one is already reaped by the
-                // send-error and receive-loop paths.
+                // peer in several pool slots. A verified incumbent is
+                // kept and the newcomer declined: it carries the
+                // peer's session, and a genuinely dead one is already
+                // reaped by the send-error and receive-loop paths. An
+                // unverified claim blocks nothing, because anyone in
+                // radio range can make one.
                 let dup = {
                     let pool_guard = pool.lock().await;
-                    pool_guard.find_by_node(&peer_node)
+                    pool_guard.find_verified(&peer_node)
                 };
                 if let Some(existing) = dup
                     && existing != ta
@@ -1085,6 +1182,10 @@ async fn admit_inbound<S>(
                         "BLE inbound: peer already connected on another address, dropping duplicate"
                     );
                     stats.record_duplicate_node_decline();
+                    // Named by its verified link, so the node is not handed an
+                    // alias with no link behind it.
+                    let announced = announced_addr(&pool, &peer_node, &addr).await;
+                    neighbor_buffer.add_peer_with_pubkey(&announced, peer_pubkey);
                     return;
                 }
 
@@ -1101,6 +1202,10 @@ async fn admit_inbound<S>(
                         outcome = "tiebreaker-drop",
                         "BLE inbound tie-breaker: dropping (our addr < peer, outbound wins)"
                     );
+                    // We are the smaller node, so we dial; the node needs to
+                    // learn the peer to do it.
+                    let announced = announced_addr(&pool, &peer_node, &addr).await;
+                    neighbor_buffer.add_peer_with_pubkey(&announced, peer_pubkey);
                     return;
                 }
             }
@@ -1128,7 +1233,6 @@ async fn admit_inbound<S>(
     ));
 
     let admitted = tokio::time::Instant::now();
-
     let conn = BleConnection {
         stream,
         recv_task: Some(recv_task),
@@ -1136,31 +1240,26 @@ async fn admit_inbound<S>(
         recv_mtu,
         established_at: admitted,
         grace_from: admitted,
-        is_static: false,
         verified: false,
-        addr,
+        addr: addr.clone(),
         node_addr: peer_node_addr,
     };
 
     let mut pool_guard = pool.lock().await;
-    match pool_guard.insert(ta.clone(), conn, admitted) {
-        Ok(Some(evicted)) => {
-            stats.record_pool_eviction();
-            info!(addr = %ta, evicted = %evicted, "BLE inbound accepted (evicted peer)");
-        }
-        Ok(None) => {
-            info!(addr = %ta, send_mtu, recv_mtu, "BLE inbound connection accepted");
-        }
-        Err(e) => {
-            stats.record_connection_rejected();
-            warn!(
-                addr = %ta, role = "peripheral", outcome = "pool-rejected",
-                error = %e, "BLE pool full, inbound connection rejected"
-            );
-            return;
-        }
+    let outcome = pool_guard.insert(ta.clone(), conn, admitted);
+    let max = pool_guard.max_connections();
+    if !note_insert(&outcome, &ta, "peripheral", &stats, max) {
+        // Not announced: there is no link behind the address.
+        return;
     }
+    // From the held guard: `announced_addr` would take the same lock.
+    let announced = peer_node_addr.map(|node| pool_guard.verified_addr(&node).unwrap_or(addr));
+    drop(pool_guard);
+    info!(addr = %ta, send_mtu, recv_mtu, "BLE inbound connection accepted");
     stats.record_connection_accepted();
+    if let (Some(at), Some(key)) = (announced, peer_key) {
+        neighbor_buffer.add_peer_with_pubkey(&at, key);
+    }
 }
 
 /// Receive loop: reads packets from a BLE stream and delivers to node.
@@ -1345,6 +1444,16 @@ impl PendingProbes {
     }
 }
 
+/// Why the probe loop resolved a link address to a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Learned {
+    /// Our probe yielded to the node's own dial: we hold the larger node
+    /// address, so a probe of the address always ends the same way.
+    Yield,
+    /// Our probe was declined beside the node's verified link.
+    Decline,
+}
+
 /// Combined scan + probe loop.
 ///
 /// Scanner events arrive continuously (both sides advertise continuously).
@@ -1379,12 +1488,13 @@ async fn scan_probe_loop<I: io::BleIo>(
     // after which the pool and `known_node_of` guards below cover it.
     let mut pending = PendingProbes::new(std::time::Duration::from_secs(cooldown_secs));
     // Link addresses already resolved to a node identity by a completed pubkey
-    // exchange. Lets the loop skip an address it has *already* learned belongs
-    // to a peer it is connected to, instead of paying a full connect and
-    // exchange to rediscover that every cooldown. Rotation means this grows by
-    // one per rotation, so entries are dropped once their node is no longer in
-    // the pool — a peer that genuinely goes away is probed again normally.
-    let mut known_node_of: HashMap<BleAddr, NodeAddr> = HashMap::new();
+    // exchange, and how. Lets the loop skip an address it has *already*
+    // learned belongs to a peer it is connected to, instead of paying a full
+    // connect and exchange to rediscover that every cooldown. Rotation means
+    // this grows by one per rotation, so entries are dropped once their node
+    // no longer holds the link that justified the skip: a peer that genuinely
+    // goes away is probed again normally.
+    let mut known_node_of: HashMap<BleAddr, (NodeAddr, Learned)> = HashMap::new();
     // L2CAP listener PSMs read out of peers' advertisements. A peer whose
     // platform assigns its listener PSM cannot be dialled at a configured
     // constant, so it publishes the number it actually bound and we dial
@@ -1453,10 +1563,19 @@ async fn scan_probe_loop<I: io::BleIo>(
         // to. Without this the loop re-dials every rotated address of a live
         // peer once per cooldown, forever: the duplicate is declined so it
         // never enters the pool, so the pool-keyed guard above never sees it.
-        if let Some(node) = known_node_of.get(&addr) {
+        if let Some((node, learned)) = known_node_of.get(&addr) {
             let still_connected = {
                 let pool_guard = pool.lock().await;
-                pool_guard.find_by_node(node).is_some()
+                match learned {
+                    // We yield on this address whatever is pooled, so any
+                    // claim to the node may stand in for it: probing again
+                    // could only end in the same yield.
+                    Learned::Yield => pool_guard.claims(node),
+                    // The decline needed a verified link, and so does the
+                    // skip: an unverified claim must not hide the node's own
+                    // address.
+                    Learned::Decline => pool_guard.find_verified(node).is_some(),
+                }
             };
             if still_connected {
                 pending.resolve(&addr);
@@ -1548,19 +1667,19 @@ async fn scan_probe_loop<I: io::BleIo>(
                     // address outright instead of paying another connect and
                     // exchange to yield again. The tie-breaker decision itself
                     // is unchanged — only the cost of re-reaching it.
-                    known_node_of.insert(addr.clone(), peer_node);
+                    known_node_of.insert(addr.clone(), (peer_node, Learned::Yield));
                     let announced = announced_addr(&pool, &peer_node, &addr).await;
                     buffer.add_peer_with_pubkey(&announced, peer_pubkey);
                     continue;
                 }
 
                 // Same duplicate guard as the inbound path: a rotated address
-                // for a peer we already hold a link to must not become a
-                // second pool entry. Checked after the tie-breaker so the two
-                // decisions stay independent.
+                // for a peer we already hold a verified link to must not
+                // become a second pool entry. Checked after the tie-breaker so
+                // the two decisions stay independent.
                 let dup = {
                     let pool_guard = pool.lock().await;
-                    pool_guard.find_by_node(&peer_node)
+                    pool_guard.find_verified(&peer_node)
                 };
                 if let Some(existing) = dup
                     && existing != ta
@@ -1577,7 +1696,7 @@ async fn scan_probe_loop<I: io::BleIo>(
                     // Remember what this address resolved to, so the next
                     // cooldown skips it outright rather than paying another
                     // connect and exchange to reach the same conclusion.
-                    known_node_of.insert(addr.clone(), peer_node);
+                    known_node_of.insert(addr.clone(), (peer_node, Learned::Decline));
                     // Report the peer under the address its live link is on,
                     // so the node layer is not handed an alias with no
                     // connection behind it.
@@ -1599,7 +1718,6 @@ async fn scan_probe_loop<I: io::BleIo>(
                 ));
 
                 let admitted = tokio::time::Instant::now();
-
                 let conn = BleConnection {
                     stream,
                     recv_task: Some(recv_task),
@@ -1607,45 +1725,38 @@ async fn scan_probe_loop<I: io::BleIo>(
                     recv_mtu,
                     established_at: admitted,
                     grace_from: admitted,
-                    is_static: false,
                     verified: false,
                     addr: addr.clone(),
                     node_addr: Some(peer_node),
                 };
 
                 let mut pool_guard = pool.lock().await;
-                match pool_guard.insert(ta.clone(), conn, admitted) {
-                    Ok(Some(evicted)) => {
-                        stats.record_pool_eviction();
-                        debug!(addr = %ta, evicted = %evicted, "BLE probe promoted (evicted peer)");
-                    }
-                    Ok(None) => {
-                        debug!(
-                            addr = %ta, role = "central", outcome = "connected",
-                            discovery_ms = probe_started.elapsed().as_millis() as u64,
-                            "BLE probe promoted to pool"
-                        );
-                    }
-                    Err(e) => {
-                        stats.record_connection_rejected();
-                        warn!(
-                            addr = %ta, role = "central", outcome = "pool-rejected",
-                            error = %e, "BLE pool full, probe connection dropped"
-                        );
-                        // The connection is dropped with `conn`, so there is
-                        // nothing to report and nothing to resolve. Leaving the
-                        // address in the retry book is the point: a slot may
-                        // free before the peer is advertised again. The inbound
-                        // path already returns here rather than falling through.
-                        continue;
-                    }
+                let outcome = pool_guard.insert(ta.clone(), conn, admitted);
+                let max = pool_guard.max_connections();
+                if !note_insert(&outcome, &ta, "central", &stats, max) {
+                    // The connection is dropped with `conn`, so there is
+                    // nothing to report and nothing to resolve. Leaving the
+                    // address in the retry book is the point: a slot may
+                    // free before the peer is advertised again. The inbound
+                    // path already returns here rather than falling through.
+                    continue;
                 }
+                // Announce the peer at its verified link if one appeared
+                // since the duplicate check, as the other admission paths do.
+                let announced = pool_guard
+                    .verified_addr(&peer_node)
+                    .unwrap_or_else(|| addr.clone());
                 drop(pool_guard);
+                debug!(
+                    addr = %ta, role = "central", outcome = "connected",
+                    discovery_ms = probe_started.elapsed().as_millis() as u64,
+                    "BLE probe promoted to pool"
+                );
                 stats.record_connection_established();
                 pending.resolve(&addr);
 
                 // Report to node layer for auto-connect / handshake
-                buffer.add_peer_with_pubkey(&addr, peer_pubkey);
+                buffer.add_peer_with_pubkey(&announced, peer_pubkey);
             }
             Err(e) => {
                 stats.record_pubkey_exchange_failure();
@@ -2176,25 +2287,22 @@ mod tests {
 
         // Put a pool entry in place so its removal is observable.
         let (parked, _other) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
-        pool.lock()
-            .await
-            .insert(
-                ta.clone(),
-                BleConnection {
-                    stream: Arc::new(parked),
-                    recv_task: None,
-                    send_mtu: 2048,
-                    recv_mtu: 2048,
-                    established_at: tokio::time::Instant::now(),
-                    is_static: false,
-                    verified: false,
-                    grace_from: tokio::time::Instant::now(),
-                    addr: test_addr(2),
-                    node_addr: None,
-                },
-                tokio::time::Instant::now(),
-            )
-            .unwrap();
+        let outcome = pool.lock().await.insert(
+            ta.clone(),
+            BleConnection {
+                stream: Arc::new(parked),
+                recv_task: None,
+                send_mtu: 2048,
+                recv_mtu: 2048,
+                established_at: tokio::time::Instant::now(),
+                verified: false,
+                grace_from: tokio::time::Instant::now(),
+                addr: test_addr(2),
+                node_addr: None,
+            },
+            tokio::time::Instant::now(),
+        );
+        assert!(matches!(outcome, Insert::Admitted { .. }));
         assert!(pool.lock().await.contains(&ta));
 
         // 0x16 is a TLS ClientHello record type; it parses as FMP version 1.
@@ -2276,7 +2384,6 @@ mod tests {
     /// The inbound tie-break drops an inbound when our node address is the
     /// smaller, so a test that wants an inbound admitted gives the transport
     /// the last (largest) key.
-    #[allow(dead_code)] // the verification tests draw their keys here
     fn pubkeys_by_node_addr(n: usize) -> Vec<[u8; 32]> {
         let mut keys: Vec<[u8; 32]> = (1..=n as u8).map(test_pubkey).collect();
         keys.sort_by_key(|k| NodeAddr::from_pubkey(&XOnlyPublicKey::from_slice(k).unwrap()));
@@ -2377,6 +2484,10 @@ mod tests {
                 .await
                 .contains(&test_addr(2).to_transport_addr())
         );
+        // The node's session runs over the first link.
+        transport
+            .mark_verified(&test_addr(2).to_transport_addr(), &node_of(&smaller))
+            .await;
 
         // The same node dials in again after rotating to link address 3.
         let (ours2, peer_b) = MockBleStream::pair(test_addr(1), test_addr(3), 2048);
@@ -2414,6 +2525,7 @@ mod tests {
         use std::sync::Mutex as StdMutex;
 
         let (smaller, larger) = pubkeys_ordered_by_node_addr();
+        let peer = node_of(&larger);
         let io = MockBleIo::new("hci0", test_addr(1));
 
         let connects: Arc<StdMutex<Vec<BleAddr>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -2456,6 +2568,10 @@ mod tests {
         settle().await;
         assert_eq!(transport.pool.lock().await.len(), 1);
         assert_eq!(connects.lock().unwrap().len(), 1);
+        // The peer's session runs over the first probe's link.
+        transport
+            .mark_verified(&test_addr(2).to_transport_addr(), &peer)
+            .await;
 
         // The peer rotates to address 3. That probe is paid once and declined.
         transport.io.inject_scan_result(test_addr(3)).await;
@@ -2482,12 +2598,9 @@ mod tests {
     /// as one. The inbound path already returns on rejection
     /// (`admit_inbound`); this pins the outbound probe path to the same shape.
     ///
-    /// Reaching the refusal needs `max_connections: 0`. `ConnectionPool::insert`
-    /// only fails when the pool is full *and* every slot is static, and every
-    /// BLE connection is built with `is_static: false`, so a non-empty pool
-    /// always has an evictable slot. That makes this arm unreachable in a
-    /// default deployment today and reachable the moment anything marks a
-    /// connection static, which the pool is already written for.
+    /// The pool refuses a link whenever every slot holds a verified link or
+    /// one still inside its grace; `max_connections: 0` reaches the refusal
+    /// without building either.
     #[tokio::test(start_paused = true)]
     async fn a_pool_rejected_probe_is_neither_established_nor_reported() {
         use std::sync::Mutex as StdMutex;
@@ -2860,27 +2973,22 @@ mod tests {
 
         let ta = test_addr(2).to_transport_addr();
         let (parked, _peer) = MockBleStream::pair(test_addr(1), test_addr(2), 2048);
-        transport
-            .pool
-            .lock()
-            .await
-            .insert(
-                ta.clone(),
-                BleConnection {
-                    stream: Arc::new(parked),
-                    recv_task: None,
-                    send_mtu: 64,
-                    recv_mtu: 64,
-                    established_at: tokio::time::Instant::now(),
-                    is_static: false,
-                    verified: false,
-                    grace_from: tokio::time::Instant::now(),
-                    addr: test_addr(2),
-                    node_addr: None,
-                },
-                tokio::time::Instant::now(),
-            )
-            .unwrap();
+        let outcome = transport.pool.lock().await.insert(
+            ta.clone(),
+            BleConnection {
+                stream: Arc::new(parked),
+                recv_task: None,
+                send_mtu: 64,
+                recv_mtu: 64,
+                established_at: tokio::time::Instant::now(),
+                verified: false,
+                grace_from: tokio::time::Instant::now(),
+                addr: test_addr(2),
+                node_addr: None,
+            },
+            tokio::time::Instant::now(),
+        );
+        assert!(matches!(outcome, Insert::Admitted { .. }));
 
         let err = transport.send_async(&ta, &[0u8; 128]).await.unwrap_err();
         assert!(matches!(err, TransportError::MtuExceeded { .. }));
@@ -3044,19 +3152,31 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn inbound_peers_within_the_handshake_budget_are_all_admitted() {
-        // The guard must not red a legitimately clean run.
+        // The guard must not red a legitimately clean run. The pool has room
+        // for every inbound, so none is refused for lack of a slot.
         let io = MockBleIo::new("hci0", test_addr(1));
-        let (mut transport, _rx) = make_transport(io);
-        let (our_pubkey, _) = test_keypair(1);
+        let config = BleConfig {
+            max_connections: Some(INBOUND_HANDSHAKE_INFLIGHT),
+            ..BleConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        let (our_pubkey, our_key) = test_keypair(1);
+        let ours = NodeAddr::from_pubkey(&our_key);
         transport.set_local_pubkey(our_pubkey);
         transport.start_async().await.unwrap();
 
         let mut peers = Vec::new();
         let mut wanted = Vec::new();
+        let mut kept = 0;
         for n in 0..INBOUND_HANDSHAKE_INFLIGHT {
             let addr = test_addr(40 + n as u8);
             let stream = connect_inbound(&transport, &addr).await;
             let (_, peer_pubkey) = test_keypair(10 + n as u8);
+            // The tie-break keeps an inbound only from a smaller node.
+            if NodeAddr::from_pubkey(&peer_pubkey) < ours {
+                kept += 1;
+            }
             send_pubkey(&stream, &peer_pubkey).await;
             peers.push(stream);
             wanted.push(addr);
@@ -3067,6 +3187,12 @@ mod tests {
             "a well-behaved peer inside the budget was not admitted"
         );
         assert_eq!(transport.stats.snapshot().handshakes_aborted, 0);
+        assert!(kept > 0, "test setup: some inbound passes the tie-break");
+        assert_eq!(
+            transport.pool.lock().await.len(),
+            kept,
+            "every inbound the tie-break keeps is pooled"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3094,5 +3220,594 @@ mod tests {
         .expect("the pubkey exchange send half parked with no deadline of its own");
 
         assert!(matches!(result, Err(TransportError::Timeout)));
+    }
+
+    // ------------------------------------------------------------------
+    // Claimed keys versus verified links
+    // ------------------------------------------------------------------
+
+    /// The node address a 32-byte x-only key derives.
+    fn node_of(pubkey: &[u8; 32]) -> NodeAddr {
+        NodeAddr::from_pubkey(&XOnlyPublicKey::from_slice(pubkey).unwrap())
+    }
+
+    /// A started transport that accepts inbound links and exchanges `ours`.
+    async fn accepting_transport(ours: [u8; 32]) -> BleTransport<MockBleIo> {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport =
+            BleTransport::new(TransportId::new(1), None, identity_test_config(), io, tx);
+        transport.set_local_pubkey(ours);
+        transport.start_async().await.unwrap();
+        transport
+    }
+
+    /// Dial in from `from`, claiming `claim` in the key exchange. The remote
+    /// end is returned and must be kept alive, or the link closes.
+    async fn dial_in(
+        transport: &BleTransport<MockBleIo>,
+        from: &BleAddr,
+        claim: &[u8; 32],
+    ) -> MockBleStream {
+        let (ours, theirs) = MockBleStream::pair(test_addr(1), from.clone(), 2048);
+        transport.io.inject_inbound(ours).await;
+        peer_side_exchange(&theirs, claim).await;
+        theirs
+    }
+
+    /// Whether a link is pooled at `addr`, without waiting on the lock. False
+    /// while the lock is held, so only a wait for presence may use it.
+    fn pooled(transport: &BleTransport<MockBleIo>, addr: &BleAddr) -> bool {
+        transport
+            .pool
+            .try_lock()
+            .map(|p| p.contains(&addr.to_transport_addr()))
+            .unwrap_or(false)
+    }
+
+    /// Whether no link is pooled at `addr`, without waiting on the lock. False
+    /// while the lock is held, so a wait for absence never ends early.
+    fn unpooled(transport: &BleTransport<MockBleIo>, addr: &BleAddr) -> bool {
+        transport
+            .pool
+            .try_lock()
+            .map(|p| !p.contains(&addr.to_transport_addr()))
+            .unwrap_or(false)
+    }
+
+    /// Whether a link is pooled at `addr`, waiting on the lock.
+    async fn holds(transport: &BleTransport<MockBleIo>, addr: &BleAddr) -> bool {
+        transport
+            .pool
+            .lock()
+            .await
+            .contains(&addr.to_transport_addr())
+    }
+
+    /// Wait until an inbound or probe at `addr` has been admitted or declined
+    /// as a duplicate, so the assertion that follows sees the decision.
+    async fn wait_decided(transport: &BleTransport<MockBleIo>, addr: &BleAddr, declines: u64) {
+        let stats = Arc::clone(&transport.stats);
+        wait_for("the link to be admitted or declined", || {
+            pooled(transport, addr) || stats.snapshot().duplicate_node_declines > declines
+        })
+        .await;
+    }
+
+    /// Whether `cond` comes to hold within a few seconds of the transport's
+    /// clock. Unlike [`wait_for`] it reports rather than fails, so that the
+    /// assertion after it names what did not happen.
+    async fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            settle().await;
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// The node address the link at `addr` claims, if one is pooled there.
+    async fn claim_at(transport: &BleTransport<MockBleIo>, addr: &BleAddr) -> Option<NodeAddr> {
+        transport
+            .pool
+            .lock()
+            .await
+            .get(&addr.to_transport_addr())
+            .and_then(|c| c.node_addr)
+    }
+
+    /// Every address the connect handler was asked to dial.
+    type Dials = Arc<std::sync::Mutex<Vec<BleAddr>>>;
+
+    /// A scanning transport holding `ours`, whose every dial is answered with
+    /// the key `answer`, as a device claiming that key at each address would.
+    fn scanning_transport(
+        ours: [u8; 32],
+        answer: [u8; 32],
+        accept: bool,
+    ) -> (BleTransport<MockBleIo>, Dials) {
+        let config = BleConfig {
+            scan: Some(true),
+            accept_connections: Some(accept),
+            ..identity_test_config()
+        };
+        answering_transport(ours, answer, config)
+    }
+
+    /// A transport under `config` holding `ours`, whose every dial is
+    /// answered with the key `answer`.
+    fn answering_transport(
+        ours: [u8; 32],
+        answer: [u8; 32],
+        config: BleConfig,
+    ) -> (BleTransport<MockBleIo>, Dials) {
+        gated_transport(ours, answer, config, None)
+    }
+
+    /// As [`answering_transport`], except that a dial to the address in
+    /// `gate` is answered only once its `Notify` is notified, so a test can
+    /// act while that probe waits on its exchange.
+    fn gated_transport(
+        ours: [u8; 32],
+        answer: [u8; 32],
+        config: BleConfig,
+        gate: Option<(BleAddr, Arc<tokio::sync::Notify>)>,
+    ) -> (BleTransport<MockBleIo>, Dials) {
+        let io = MockBleIo::new("hci0", test_addr(1));
+        let dials: Dials = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let dials = Arc::clone(&dials);
+            io.set_connect_handler(move |addr, _psm| {
+                let (mine, theirs) = MockBleStream::pair(test_addr(1), addr.clone(), 2048);
+                dials.lock().unwrap().push(addr.clone());
+                peer_tx
+                    .send((addr.clone(), theirs))
+                    .map_err(|_| TransportError::ConnectionRefused)?;
+                Ok(mine)
+            });
+        }
+        tokio::spawn(async move {
+            let mut alive = Vec::new();
+            while let Some((addr, theirs)) = peer_rx.recv().await {
+                if let Some((gated, open)) = &gate
+                    && *gated == addr
+                {
+                    open.notified().await;
+                }
+                peer_side_exchange(&theirs, &answer).await;
+                alive.push(theirs);
+            }
+        });
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut transport = BleTransport::new(TransportId::new(1), None, config, io, tx);
+        transport.set_local_pubkey(ours);
+        (transport, dials)
+    }
+
+    /// How many times `addr` was dialled.
+    fn dial_count(dials: &Dials, addr: &BleAddr) -> usize {
+        dials.lock().unwrap().iter().filter(|a| *a == addr).count()
+    }
+
+    /// A device that claims P's key first must not stop P's own inbound link
+    /// being admitted, nor have P announced at the device's address.
+    #[tokio::test]
+    async fn an_unverified_claim_does_not_decline_the_claimed_peers_inbound_channel() {
+        let keys = pubkeys_by_node_addr(2);
+        let (p, ours) = (keys[0], keys[1]);
+        let mut transport = accepting_transport(ours).await;
+
+        let _impostor = dial_in(&transport, &test_addr(9), &p).await;
+        wait_for("the impostor's link", || pooled(&transport, &test_addr(9))).await;
+        transport.neighbor_buffer.take();
+
+        let _genuine = dial_in(&transport, &test_addr(2), &p).await;
+        wait_decided(&transport, &test_addr(2), 0).await;
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "P's own link is admitted beside an unverified claim to P"
+        );
+        let peers = transport.neighbor_buffer.take();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(
+            peers[0].addr,
+            test_addr(2).to_transport_addr(),
+            "P is announced at its own link, not the impostor's"
+        );
+
+        let ta2 = test_addr(2).to_transport_addr();
+        transport.mark_verified(&ta2, &node_of(&p)).await;
+        assert_eq!(transport.is_verified(&ta2).await, Some(true));
+        assert_eq!(
+            transport
+                .is_verified(&test_addr(9).to_transport_addr())
+                .await,
+            Some(false)
+        );
+
+        let _third = dial_in(&transport, &test_addr(3), &p).await;
+        wait_decided(&transport, &test_addr(3), 0).await;
+        assert!(
+            !holds(&transport, &test_addr(3)).await,
+            "a verified link to P declines a further claim to P"
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The probe twin: an impostor's earlier claim to P must not decline our
+    /// probe of P's own address.
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_claim_does_not_decline_a_probe_to_the_claimed_peer() {
+        let keys = pubkeys_by_node_addr(2);
+        let (ours, p) = (keys[0], keys[1]);
+        let (mut transport, _dials) = scanning_transport(ours, p, false);
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(9)).await;
+        wait_for("the impostor's link", || pooled(&transport, &test_addr(9))).await;
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        wait_decided(&transport, &test_addr(2), 0).await;
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "our probe of P is admitted beside an unverified claim to P"
+        );
+        assert_eq!(transport.stats.snapshot().duplicate_node_declines, 0);
+
+        let ta2 = test_addr(2).to_transport_addr();
+        transport.mark_verified(&ta2, &node_of(&p)).await;
+        assert_eq!(
+            transport
+                .is_verified(&test_addr(9).to_transport_addr())
+                .await,
+            Some(false)
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// An impostor that renews its claim from a new address inside every
+    /// connect timeout, so its claim is never old, still does not decline P.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_renewed_inside_each_connect_timeout_does_not_decline_the_claimed_peer() {
+        let keys = pubkeys_by_node_addr(2);
+        let (p, ours) = (keys[0], keys[1]);
+        let mut transport = accepting_transport(ours).await;
+        let renewal = std::time::Duration::from_secs(9);
+
+        let mut current = test_addr(20);
+        let mut impostor = dial_in(&transport, &current, &p).await;
+        wait_for("the impostor's link", || pooled(&transport, &current)).await;
+        assert_eq!(claim_at(&transport, &current).await, Some(node_of(&p)));
+
+        for next in [test_addr(21), test_addr(22)] {
+            tokio::time::advance(renewal).await;
+            // Drop first, then open, so the renewed link is the only claim to
+            // P whatever a second claim would meet.
+            drop(impostor);
+            wait_for("the old link to close", || unpooled(&transport, &current)).await;
+            impostor = dial_in(&transport, &next, &p).await;
+            wait_for("the renewed link", || pooled(&transport, &next)).await;
+            assert_eq!(
+                claim_at(&transport, &next).await,
+                Some(node_of(&p)),
+                "the renewed link holds the claim to P"
+            );
+            current = next;
+        }
+
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        let _genuine = dial_in(&transport, &test_addr(2), &p).await;
+        wait_decided(&transport, &test_addr(2), 0).await;
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "P's own link is admitted beside a claim renewed every 9 s"
+        );
+        let ta2 = test_addr(2).to_transport_addr();
+        transport.mark_verified(&ta2, &node_of(&p)).await;
+        assert_eq!(
+            transport.is_verified(&current.to_transport_addr()).await,
+            Some(false)
+        );
+        drop(impostor);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// An address resolved by declining it beside P's verified link is probed
+    /// again once only an unverified claim to P remains.
+    #[tokio::test(start_paused = true)]
+    async fn a_resolved_alias_is_probed_again_when_only_an_unverified_claim_remains() {
+        let keys = pubkeys_by_node_addr(2);
+        let (ours, p) = (keys[0], keys[1]);
+        let (mut transport, dials) = scanning_transport(ours, p, false);
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        wait_for("P's link", || pooled(&transport, &test_addr(2))).await;
+        let ta2 = test_addr(2).to_transport_addr();
+        transport.mark_verified(&ta2, &node_of(&p)).await;
+
+        transport.io.inject_scan_result(test_addr(3)).await;
+        wait_decided(&transport, &test_addr(3), 0).await;
+        assert!(
+            !holds(&transport, &test_addr(3)).await,
+            "declined beside P's link"
+        );
+        assert_eq!(dial_count(&dials, &test_addr(3)), 1);
+
+        transport.close_connection_async(&ta2).await;
+        transport.io.inject_scan_result(test_addr(9)).await;
+        wait_for("the impostor's link", || pooled(&transport, &test_addr(9))).await;
+        assert_eq!(
+            transport
+                .is_verified(&test_addr(9).to_transport_addr())
+                .await,
+            Some(false)
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        transport.io.inject_scan_result(test_addr(3)).await;
+        let redialled = eventually(|| dial_count(&dials, &test_addr(3)) >= 2).await;
+        assert!(
+            redialled,
+            "an alias resolved beside a verified link is probed again once only an \
+             unverified claim remains"
+        );
+        wait_for("the re-probed alias", || pooled(&transport, &test_addr(3))).await;
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A probe whose peer's link is verified after the probe's duplicate
+    /// check, but before its insert, announces the peer at the verified link.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_admitted_beside_a_link_verified_meanwhile_announces_the_verified_link() {
+        let keys = pubkeys_by_node_addr(2);
+        let (ours, p) = (keys[0], keys[1]);
+        let config = BleConfig {
+            scan: Some(true),
+            accept_connections: Some(false),
+            ..identity_test_config()
+        };
+        let open = Arc::new(tokio::sync::Notify::new());
+        let gate = Some((test_addr(2), Arc::clone(&open)));
+        let (mut transport, dials) = gated_transport(ours, p, config, gate);
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(9)).await;
+        wait_for("P's first link", || pooled(&transport, &test_addr(9))).await;
+        transport.neighbor_buffer.take();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        wait_for("the probe's dial", || {
+            dial_count(&dials, &test_addr(2)) == 1
+        })
+        .await;
+
+        // With the pool held, let the probe finish its exchange and queue
+        // its duplicate check, then queue the mark behind it. The pool lock
+        // is first come, first served, so the mark lands between the
+        // duplicate check and the insert.
+        let ta9 = test_addr(9).to_transport_addr();
+        {
+            let held = transport.hold_pool().await;
+            open.notify_one();
+            settle().await;
+            let node = node_of(&p);
+            let mark = transport.mark_verified(&ta9, &node);
+            tokio::pin!(mark);
+            assert!(futures::poll!(&mut mark).is_pending());
+            drop(held);
+            mark.await;
+        }
+
+        wait_decided(&transport, &test_addr(2), 0).await;
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "the duplicate check ran before the mark, so the probe is admitted"
+        );
+        assert_eq!(transport.is_verified(&ta9).await, Some(true));
+        let peers = transport.neighbor_buffer.take();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(
+            peers[0].addr, ta9,
+            "P is announced at its verified link, not the probe's"
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// A link that never completes a handshake is not closed by any timer:
+    /// it leaves only by eviction or link loss.
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_link_that_never_handshakes_stays_open() {
+        let keys = pubkeys_by_node_addr(2);
+        let (p, ours) = (keys[0], keys[1]);
+        let mut transport = accepting_transport(ours).await;
+        let _link = dial_in(&transport, &test_addr(2), &p).await;
+        wait_for("the link", || pooled(&transport, &test_addr(2))).await;
+
+        for _ in 0..60 {
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+            settle().await;
+        }
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "still pooled after 600 s"
+        );
+        transport.stop_async().await.unwrap();
+    }
+
+    /// Two links claiming one node before any handshake both stay; once one
+    /// verifies, the other stays pooled and a further claim is declined and
+    /// announced at the verified link.
+    #[tokio::test]
+    async fn two_unverified_links_to_one_node_both_stay_and_one_verifies() {
+        let keys = pubkeys_by_node_addr(2);
+        let (p, ours) = (keys[0], keys[1]);
+        let mut transport = accepting_transport(ours).await;
+
+        let _first = dial_in(&transport, &test_addr(2), &p).await;
+        wait_for("the first link", || pooled(&transport, &test_addr(2))).await;
+        let _second = dial_in(&transport, &test_addr(3), &p).await;
+        wait_decided(&transport, &test_addr(3), 0).await;
+        assert!(
+            pooled(&transport, &test_addr(2)) && pooled(&transport, &test_addr(3)),
+            "both unverified links claiming P are pooled"
+        );
+
+        let ta2 = test_addr(2).to_transport_addr();
+        let ta3 = test_addr(3).to_transport_addr();
+        transport.mark_verified(&ta3, &node_of(&p)).await;
+        assert_eq!(transport.is_verified(&ta2).await, Some(false));
+        assert_eq!(transport.is_verified(&ta3).await, Some(true));
+        transport.neighbor_buffer.take();
+
+        let _third = dial_in(&transport, &test_addr(4), &p).await;
+        wait_decided(&transport, &test_addr(4), 0).await;
+        assert!(!holds(&transport, &test_addr(4)).await);
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "the unverified link stays"
+        );
+        let peers = transport.neighbor_buffer.take();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addr, ta3, "announced at the verified link");
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The larger node yields on a smaller neighbour's address whatever is
+    /// pooled, so it skips that address while any link claims the neighbour,
+    /// even one that never verifies.
+    #[tokio::test(start_paused = true)]
+    async fn a_larger_node_does_not_redial_a_smaller_neighbour_it_yielded_to() {
+        let keys = pubkeys_by_node_addr(2);
+        let (p, ours) = (keys[0], keys[1]);
+        let (mut transport, dials) = scanning_transport(ours, p, true);
+        transport.start_async().await.unwrap();
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        {
+            let stats = Arc::clone(&transport.stats);
+            wait_for("the yield", || stats.snapshot().tiebreaker_yields == 1).await;
+        }
+        let _p_dial = dial_in(&transport, &test_addr(5), &p).await;
+        wait_for("P's own dial", || pooled(&transport, &test_addr(5))).await;
+
+        transport.io.inject_scan_result(test_addr(2)).await;
+        for _ in 0..5 {
+            tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
+            settle().await;
+        }
+        assert_eq!(
+            dial_count(&dials, &test_addr(2)),
+            1,
+            "the yielded address is not re-dialled"
+        );
+        assert_eq!(transport.pool.lock().await.len(), 1);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// The whole chain once the node drops its peer: the withdrawn link gets
+    /// the grace again, then a newcomer takes its slot.
+    #[tokio::test(start_paused = true)]
+    async fn a_withdrawn_link_is_evicted_by_a_newcomer_once_past_its_grace() {
+        let keys = pubkeys_by_node_addr(4);
+        let (p, q, r, ours) = (keys[0], keys[1], keys[2], keys[3]);
+        let config = BleConfig {
+            max_connections: Some(1),
+            ..identity_test_config()
+        };
+        let (mut transport, _dials) = answering_transport(ours, p, config);
+        transport.start_async().await.unwrap();
+        let rejected = |t: &BleTransport<MockBleIo>| t.stats.snapshot().connections_rejected;
+        let secs = std::time::Duration::from_secs;
+
+        let _p_link = dial_in(&transport, &test_addr(2), &p).await;
+        wait_for("P's link", || pooled(&transport, &test_addr(2))).await;
+        let ta2 = test_addr(2).to_transport_addr();
+        transport.mark_verified(&ta2, &node_of(&p)).await;
+
+        tokio::time::advance(secs(20)).await;
+        let _q_link = dial_in(&transport, &test_addr(3), &q).await;
+        wait_for("Q's refusal", || rejected(&transport) == 1).await;
+        assert!(
+            !holds(&transport, &test_addr(3)).await,
+            "a verified link is kept"
+        );
+
+        tokio::time::advance(secs(1)).await;
+        transport.clear_verified(&ta2, &node_of(&p), true).await;
+        tokio::time::advance(secs(5)).await;
+        let _r_link = dial_in(&transport, &test_addr(4), &r).await;
+        wait_for("R's refusal", || rejected(&transport) == 2).await;
+        assert!(
+            pooled(&transport, &test_addr(2)),
+            "the withdrawn link is inside its new grace"
+        );
+
+        tokio::time::advance(secs(6)).await;
+        let _r_again = dial_in(&transport, &test_addr(5), &r).await;
+        wait_for("R's admission", || pooled(&transport, &test_addr(5))).await;
+        assert!(
+            !holds(&transport, &test_addr(2)).await,
+            "P's link was evicted"
+        );
+        assert_eq!(transport.stats.snapshot().pool_evictions, 1);
+        transport.stop_async().await.unwrap();
+    }
+
+    /// An inbound or a node dial the pool refuses has no link behind it and
+    /// must not be announced to the node.
+    #[tokio::test(start_paused = true)]
+    async fn an_inbound_or_dial_refused_by_a_full_pool_is_not_reported() {
+        let keys = pubkeys_by_node_addr(2);
+        let (p, ours) = (keys[0], keys[1]);
+        for max in [0, 2] {
+            let config = BleConfig {
+                max_connections: Some(max),
+                ..identity_test_config()
+            };
+            let (mut transport, _dials) = answering_transport(ours, p, config);
+            transport.start_async().await.unwrap();
+            let snapshot = Arc::clone(&transport.stats);
+            let settled = |n: u64| {
+                let stats = Arc::clone(&snapshot);
+                move || {
+                    let s = stats.snapshot();
+                    s.connections_rejected + s.connections_accepted + s.connections_established == n
+                }
+            };
+
+            let _inbound = dial_in(&transport, &test_addr(2), &p).await;
+            wait_for("the inbound to be decided", settled(1)).await;
+            let after_inbound = transport.neighbor_buffer.take();
+
+            transport
+                .connect_async(&test_addr(3).to_transport_addr())
+                .await
+                .unwrap();
+            wait_for("the dial to be decided", settled(2)).await;
+            let after_dial = transport.neighbor_buffer.take();
+
+            if max == 0 {
+                assert_eq!(snapshot.snapshot().connections_rejected, 2);
+                assert!(!holds(&transport, &test_addr(2)).await);
+                assert!(
+                    after_inbound.is_empty(),
+                    "a refused inbound is not announced: {after_inbound:?}"
+                );
+                assert!(
+                    after_dial.is_empty(),
+                    "a refused dial is not announced: {after_dial:?}"
+                );
+            } else {
+                // The control: with room, the same inbound and dial are
+                // announced, so an empty buffer above is not a dead path.
+                assert_eq!(after_inbound.len(), 1, "an admitted inbound is announced");
+                assert_eq!(after_dial.len(), 1, "an admitted dial is announced");
+            }
+            transport.stop_async().await.unwrap();
+        }
     }
 }

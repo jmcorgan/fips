@@ -15,4 +15,6 @@ mod forwarding;
 mod peer_actions;
 mod rx_loop;
 
+#[cfg(all(test, ble_available))]
+pub(in crate::node) use encrypted::LinkSlot;
 pub(in crate::node) use peer_actions::PeerActionCtx;

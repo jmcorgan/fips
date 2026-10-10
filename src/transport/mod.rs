@@ -18,6 +18,7 @@ pub mod ethernet;
 #[cfg(ble_available)]
 pub mod ble;
 
+use crate::identity::NodeAddr;
 #[cfg(ble_available)]
 use ble::DefaultBleTransport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1112,6 +1113,66 @@ impl TransportHandle {
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
             TransportHandle::Loopback(_) => {} // connectionless no-op
+        }
+    }
+
+    /// Tell the transport that the node's active peer `node` now sends over
+    /// the connection at `addr`.
+    ///
+    /// Only BLE acts on it: it keys connections by a key the remote claims
+    /// before any handshake, and needs to know which claims were proven.
+    pub async fn mark_verified(&self, addr: &TransportAddr, node: &NodeAddr) {
+        #[cfg(not(ble_available))]
+        let _ = (addr, node);
+        match self {
+            TransportHandle::Udp(_)
+            | TransportHandle::Tcp(_)
+            | TransportHandle::Tor(_)
+            | TransportHandle::Nym(_) => {}
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => {}
+            #[cfg(ble_available)]
+            TransportHandle::Ble(t) => t.mark_verified(addr, node).await,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => {}
+        }
+    }
+
+    /// Tell the transport that the node's active peer `node` no longer sends
+    /// over the connection at `addr`: `removed` when the peer itself is gone,
+    /// rather than moved to another connection.
+    pub async fn clear_verified(&self, addr: &TransportAddr, node: &NodeAddr, removed: bool) {
+        #[cfg(not(ble_available))]
+        let _ = (addr, node, removed);
+        match self {
+            TransportHandle::Udp(_)
+            | TransportHandle::Tcp(_)
+            | TransportHandle::Tor(_)
+            | TransportHandle::Nym(_) => {}
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => {}
+            #[cfg(ble_available)]
+            TransportHandle::Ble(t) => t.clear_verified(addr, node, removed).await,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => {}
+        }
+    }
+
+    /// Whether this transport needs [`Self::mark_verified`] on every
+    /// authenticated frame, so that no other transport pays an async call
+    /// per frame.
+    pub fn tracks_peers(&self) -> bool {
+        match self {
+            TransportHandle::Udp(_)
+            | TransportHandle::Tcp(_)
+            | TransportHandle::Tor(_)
+            | TransportHandle::Nym(_) => false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => false,
+            #[cfg(ble_available)]
+            TransportHandle::Ble(_) => true,
+            #[cfg(test)]
+            TransportHandle::Loopback(_) => false,
         }
     }
 

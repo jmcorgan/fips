@@ -816,10 +816,13 @@ A scan/probe loop dials discovered addresses, keeping the learned PSM
 per address beside a probe-cooldown book and falling back to the
 configured `DEFAULT_PSM` for a peer that advertises none.
 
-Peers are identified by node address, not by link address. A device
-using resolvable private addresses rotates continually, and modern
-phones do so by default, so an address-keyed pool sees every rotation as
-a new device and every already-connected guard fails to fire.
+A peer with a verified link is identified by node address, not by link
+address. A link is verified once the node's FIPS session with that peer
+uses it; the key a remote claims in the pre-handshake exchange proves
+nothing on its own. A device using resolvable private addresses rotates
+continually, and modern phones do so by default, so an address-keyed
+pool sees every rotation as a new device and every already-connected
+guard fails to fire.
 
 Failing addresses back off by powers of two up to
 `MAX_PROBE_BACKOFF_SHIFT`, and the retry book is capped at

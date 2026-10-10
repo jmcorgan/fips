@@ -773,7 +773,7 @@ on Android the radio is supplied by the embedding application.
 | `transports.ble.psm` | u16 | `0x0085` (133) | L2CAP Protocol/Service Multiplexer |
 | `transports.ble.mtu` | u16 | `2048` | Default MTU. Actual MTU is negotiated per-link during L2CAP connection setup. |
 | `transports.ble.max_connections` | usize | `7` | Maximum concurrent BLE connections |
-| `transports.ble.connect_timeout_ms` | u64 | `10000` | Outbound connect timeout in milliseconds |
+| `transports.ble.connect_timeout_ms` | u64 | `10000` | Outbound connect timeout in milliseconds; also how long a new link is protected from eviction (never less than 10 s) |
 | `transports.ble.advertise` | bool | `true` | Broadcast BLE beacon advertisements for peer discovery |
 | `transports.ble.scan` | bool | `true` | Listen for BLE beacon advertisements from other nodes |
 | `transports.ble.auto_connect` | bool | `false` | Automatically connect to discovered peers |
@@ -801,8 +801,19 @@ a deterministic tie-breaker based on NodeAddr comparison ensures only
 one connection is established.
 
 **Connection pool.** The `max_connections` parameter limits the number of
-concurrent BLE connections. When the pool is full, the least-recently-used
-connection is evicted to make room for new connections.
+concurrent BLE connections. A link counts as a node's once that node's FIPS
+session uses it; until then it is unverified, whatever key the remote
+claimed when it connected. A verified link is never evicted. When the pool
+is full, a new link evicts an unverified link that has had
+`connect_timeout_ms` (never less than 10 s) to complete its handshake,
+preferring a node's duplicate links and then the oldest; when no link may
+be evicted, the new link is refused.
+
+An unverified link is not closed on a timer, and the pool evicts only when
+it is full. Set `max_connections` no higher than the number of connections
+the Bluetooth adapter can hold, less any the host keeps for other devices:
+if the adapter runs out of connections first, links that never complete a
+handshake can hold the rest and no eviction makes room.
 
 ### BLE Example
 

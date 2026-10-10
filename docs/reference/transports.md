@@ -92,7 +92,7 @@ Nym is outbound-only (no inbound listener), so there are no
 | `mtu_exceeded` | Packets rejected for MTU violation |
 | `connections_established` | Successful outbound L2CAP connections |
 | `connections_accepted` | Accepted inbound L2CAP connections |
-| `connections_rejected` | Rejected inbound (limit exceeded) |
+| `connections_rejected` | Links a full pool refused (inbound, dialled or probed) |
 | `handshakes_aborted` | Inbound handshakes aborted to free an in-flight slot |
 | `connect_timeouts` | Connection timeout count |
 | `connect_errors` | Outbound connects that failed with an error rather than timing out |
@@ -102,7 +102,7 @@ Nym is outbound-only (no inbound listener), so there are no
 | `pool_evictions` | Connection-pool entries evicted |
 | `advertisements_sent` | BLE advertisements emitted |
 | `scan_results` | BLE scan results observed |
-| `duplicate_node_declines` | Connections declined because the peer was already linked on another link address |
+| `duplicate_node_declines` | Connections declined because a verified link to the same node already exists at another link address |
 
 ## See also
 

@@ -616,7 +616,9 @@ impl Node {
         };
         if !self.peer_machines.contains_key(&link) {
             debug_assert!(false, "peer machine present for every established peer");
+            let held = self.peer_link(&node_addr);
             self.remove_active_peer(&node_addr);
+            self.relink(&node_addr, held, None).await;
             self.note_link_dead(node_addr, now_ms);
             return;
         }

@@ -51,8 +51,13 @@ impl Node {
                 self.handle_lookup_response(from, payload).await;
             }
             0x50 => {
-                // Disconnect
+                // Disconnect. A malformed one keeps the peer, and with it
+                // the peer's claim to its link.
+                let held = self.peer_link(from);
                 self.handle_disconnect(from, payload);
+                if !self.peers.contains_key(from) {
+                    self.relink(from, held, None).await;
+                }
             }
             0x51 => {
                 // Heartbeat — no-op, last_recv_time already updated by record_recv()
