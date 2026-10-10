@@ -232,9 +232,12 @@ involving the DNS proxy or the pool.
    mapping that has carried traffic, creates nothing, and is answered
    with NODATA. At the ceiling of 1000 live mappings, a new name
    replaces the oldest mapping that has never carried traffic.
-7. If a new mapping was created, the pool emits `MappingCreated`,
-   which the main loop turns into `add_mapping` calls on the NAT
-   manager and `add_proxy_ndp` on the network setup.
+7. If a new mapping was created, the pool emits `MappingCreated`
+   (preceded by `MappingRemoved` for a mapping it replaced), which the
+   main loop turns into a command for the NAT worker thread, which
+   applies queued changes in one rebuild, and into `add_proxy_ndp` on
+   the network setup. A NAT rule can land a few milliseconds after the
+   answer.
 8. The gateway returns an `AAAA` response containing the virtual IP,
    with the configured TTL (default 60 s) for a mapping that has
    carried traffic, and otherwise with at most the time left until
@@ -587,7 +590,8 @@ sequence is:
 
 1. Add the table (which succeeds whether or not it exists), delete
    it, and add it again, so the delete always has a target.
-2. Add the `prerouting` and `postrouting` chains; the always-on
+2. Add the four chains and the mesh-source set with its elements; the
+   pool drop, the forged-source drop and the forward drop; the
    `oifname fips0` masquerade; the LAN-side masquerade if any
    port-forwards exist; per-mapping DNAT/SNAT rules for every live
    pool entry; per-port-forward DNAT rules.
@@ -601,6 +605,22 @@ sequence is:
    even when no new mapping event arrives. Each retry rebuilds the latest
    desired state, so a newer change supersedes an earlier failed one.
    Successful rebuilds clear the pending flag; clean tables are not retried.
+
+Rebuilds run on a NAT worker thread that owns the table, never on the
+thread that answers `.fips` queries: a rebuild is a netlink round trip
+that can wait up to five seconds for the kernel. The worker drains every
+queued change into one rebuild. If it stops for any reason the gateway
+exits non-zero so the service manager restarts it, rather than answer
+with addresses that have no rules. Repeated failures to apply NAT rules
+or proxy NDP entries log one warning or error per change of outcome,
+with the repeats at debug level. Each mapping change forks
+`ip -6 neigh` once, and a replaced mapping twice, so proxy NDP forks
+at most 20 times a second at the admission rate. The main loop makes
+these changes one at a time, and the DNS task hands them over through
+a queue of 64, so a burst of new names at the ceiling (up to 50, each
+replacing a mapping) can hold `.fips` answers back while the forks
+drain: 100 forks took 0.26 s on an x86 host, and router hardware is
+slower.
 
 The rustables crate does not expose rule-handle tracking, so
 incremental update of individual rules is not available. Atomic

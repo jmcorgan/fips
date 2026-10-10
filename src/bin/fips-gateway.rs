@@ -107,6 +107,35 @@ fn report_unreadable_conntrack(
     }
 }
 
+/// Log a proxy NDP outcome once per change of outcome: the first failure,
+/// or a changed one, at `error!` for an add and `warn!` for a removal;
+/// repeats at `debug!` with the same text; one line on recovery.
+#[cfg(target_os = "linux")]
+fn report_proxy_ndp(
+    report: nat::RetryReport,
+    add: bool,
+    virtual_ip: std::net::Ipv6Addr,
+    result: &Result<(), std::io::Error>,
+) {
+    match (report, result, add) {
+        (nat::RetryReport::Failed, Err(e), true) => {
+            error!(error = %e, virtual_ip = %virtual_ip, "Failed to add proxy NDP")
+        }
+        (nat::RetryReport::Repeated, Err(e), true) => {
+            debug!(error = %e, virtual_ip = %virtual_ip, "Failed to add proxy NDP")
+        }
+        (nat::RetryReport::Failed, Err(e), false) => {
+            warn!(error = %e, virtual_ip = %virtual_ip, "Failed to remove proxy NDP")
+        }
+        (nat::RetryReport::Repeated, Err(e), false) => {
+            debug!(error = %e, virtual_ip = %virtual_ip, "Failed to remove proxy NDP")
+        }
+        (nat::RetryReport::Recovered, _, true) => info!("Proxy NDP add recovered"),
+        (nat::RetryReport::Recovered, _, false) => info!("Proxy NDP removal recovered"),
+        _ => {}
+    }
+}
+
 /// Say what the start found of the previous run's pool state.
 #[cfg(target_os = "linux")]
 fn report_loaded_state(loaded: &state::Loaded) {
@@ -568,6 +597,7 @@ async fn main() {
 
     let (mut nat_driver, nat_reports) = nat::NatDriver::start(Box::new(nat_mgr));
     let nat_removed = nat_reports.removed;
+    let mut nat_exit = nat_reports.exit;
 
     // --- Channels ---
 
@@ -699,30 +729,39 @@ async fn main() {
     info!("fips-gateway running");
 
     let mut exit_code = 0;
-    let mut nat_retry = tokio::time::interval(std::time::Duration::from_secs(10));
-    nat_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ndp_log = net::NdpLog::default();
     loop {
         tokio::select! {
-            _ = nat_retry.tick() => {
-                nat_driver.retry();
+            // The NAT worker ends only on shutdown, which has not been
+            // signalled while this loop runs. Without it the gateway would
+            // answer .fips queries with addresses that have no rules.
+            _ = &mut nat_exit => {
+                error!("Gateway NAT worker stopped; exiting so the service manager restarts the gateway");
+                exit_code = 1;
+                break;
             }
             Some(event) = event_rx.recv() => {
-                match event {
+                let (command, virtual_ip) = match event {
                     pool::PoolEvent::MappingCreated { virtual_ip, mesh_addr } => {
-                        // Add NAT rules
-                        let _ = nat_driver.submit(nat::NatCommand::Add { virtual_ip, mesh_addr });
-                        // Add proxy NDP entry
-                        if let Err(e) = net_setup.add_proxy_ndp(virtual_ip).await {
-                            error!(error = %e, virtual_ip = %virtual_ip, "Failed to add proxy NDP");
-                        }
+                        (nat::NatCommand::Add { virtual_ip, mesh_addr }, virtual_ip)
                     }
                     pool::PoolEvent::MappingRemoved { virtual_ip, mesh_addr } => {
-                        // Remove NAT rules
-                        let _ = nat_driver.submit(nat::NatCommand::Remove { virtual_ip, mesh_addr });
-                        // Remove proxy NDP entry
-                        if let Err(e) = net_setup.remove_proxy_ndp(virtual_ip).await {
-                            warn!(error = %e, virtual_ip = %virtual_ip, "Failed to remove proxy NDP");
-                        }
+                        (nat::NatCommand::Remove { virtual_ip, mesh_addr }, virtual_ip)
+                    }
+                };
+                if nat_driver.submit(command).is_err() {
+                    error!("Gateway NAT worker stopped; exiting so the service manager restarts the gateway");
+                    exit_code = 1;
+                    break;
+                }
+                match command {
+                    nat::NatCommand::Add { .. } => {
+                        let result = net_setup.add_proxy_ndp(virtual_ip).await;
+                        report_proxy_ndp(ndp_log.observe_add(virtual_ip, &result), true, virtual_ip, &result);
+                    }
+                    nat::NatCommand::Remove { .. } => {
+                        let result = net_setup.remove_proxy_ndp(virtual_ip).await;
+                        report_proxy_ndp(ndp_log.observe_remove(virtual_ip, &result), false, virtual_ip, &result);
                     }
                 }
             }

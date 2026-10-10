@@ -3,6 +3,7 @@
 //! Manages proxy NDP entries and routes for the virtual IP range.
 //! Checks IP forwarding prerequisites.
 
+use super::nat::{RetryLog, RetryReport};
 use std::net::Ipv6Addr;
 use tracing::{debug, error, info, warn};
 
@@ -136,24 +137,34 @@ impl NetSetup {
             .output()
             .await?;
 
+        self.proxy_entries.retain(|a| *a != addr);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Silently ignore "No such file" — entry may have been cleaned already
+            // "No such file": the entry was already gone.
             if !stderr.contains("No such file") {
-                warn!(addr = %addr, error = %stderr.trim(), "Failed to remove proxy NDP");
+                return Err(std::io::Error::other(format!(
+                    "Failed to remove proxy NDP: {}",
+                    stderr.trim()
+                )));
             }
         }
-
-        self.proxy_entries.retain(|a| *a != addr);
         Ok(())
     }
 
     /// Clean up all proxy NDP entries and routes added during this run.
     pub async fn cleanup(&mut self) {
-        // Remove proxy NDP entries
+        // Remove proxy NDP entries, with one line for all failures.
         let entries: Vec<Ipv6Addr> = self.proxy_entries.clone();
+        let mut failed = 0usize;
+        let mut last_error = None;
         for addr in entries {
-            let _ = self.remove_proxy_ndp(addr).await;
+            if let Err(e) = self.remove_proxy_ndp(addr).await {
+                failed += 1;
+                last_error = Some(e);
+            }
+        }
+        if let Some(e) = last_error {
+            warn!(failed, error = %e, "Failed to remove proxy NDP entries at shutdown");
         }
 
         // Remove pool route
@@ -177,5 +188,100 @@ impl NetSetup {
             }
             self.route_added = false;
         }
+    }
+}
+
+/// Proxy NDP outcomes, latched per direction.
+///
+/// Each added entry comes from a LAN host naming a new name, and with
+/// eviction each also brings a removal, so a persistent `ip -6 neigh` failure
+/// would otherwise log a line per name. An error that names its address
+/// counts as the same error for every address.
+#[derive(Debug, Default)]
+pub struct NdpLog {
+    add: RetryLog,
+    remove: RetryLog,
+}
+
+impl NdpLog {
+    /// Record the outcome of adding the entry for `addr`.
+    pub fn observe_add(
+        &mut self,
+        addr: Ipv6Addr,
+        result: &Result<(), std::io::Error>,
+    ) -> RetryReport {
+        self.add.observe_message(failure_text(addr, result))
+    }
+
+    /// Record the outcome of removing the entry for `addr`.
+    pub fn observe_remove(
+        &mut self,
+        addr: Ipv6Addr,
+        result: &Result<(), std::io::Error>,
+    ) -> RetryReport {
+        self.remove.observe_message(failure_text(addr, result))
+    }
+}
+
+/// A failure's text with `addr`'s own text taken out.
+fn failure_text(addr: Ipv6Addr, result: &Result<(), std::io::Error>) -> Option<String> {
+    result
+        .as_ref()
+        .err()
+        .map(|e| e.to_string().replace(&addr.to_string(), "<addr>"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failure(addr: Ipv6Addr, why: &str) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other(format!(
+            "Failed to add proxy NDP: {why} for {addr}"
+        )))
+    }
+
+    #[test]
+    fn proxy_ndp_failures_log_once_per_change_of_outcome() {
+        let mut log = NdpLog::default();
+        let addrs: Vec<Ipv6Addr> = (1..=10u16)
+            .map(|i| Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, i))
+            .collect();
+
+        let reports: Vec<RetryReport> = addrs
+            .iter()
+            .map(|a| {
+                log.observe_add(
+                    *a,
+                    &failure(*a, "RTNETLINK answers: Operation not permitted"),
+                )
+            })
+            .collect();
+        assert_eq!(reports[0], RetryReport::Failed);
+        assert!(
+            reports[1..].iter().all(|r| *r == RetryReport::Repeated),
+            "an error naming its address must not count as a new error per name: {reports:?}"
+        );
+
+        // Removal keeps its own latch: its first failure is reported even
+        // while the same error is latched for adds.
+        assert_eq!(
+            log.observe_remove(
+                addrs[3],
+                &failure(addrs[3], "RTNETLINK answers: Operation not permitted")
+            ),
+            RetryReport::Failed
+        );
+
+        assert_eq!(
+            log.observe_add(
+                addrs[0],
+                &failure(addrs[0], "RTNETLINK answers: No buffer space")
+            ),
+            RetryReport::Failed,
+            "a different error is a new outcome"
+        );
+        assert_eq!(log.observe_add(addrs[1], &Ok(())), RetryReport::Recovered);
+        assert_eq!(log.observe_add(addrs[2], &Ok(())), RetryReport::Clean);
     }
 }

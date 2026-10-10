@@ -71,11 +71,16 @@ const SNDBUF_HEADROOM: u64 = 64 * 1024;
 const SNDBUF_OVERHEAD: u64 = 32;
 
 /// How long the rebuild waits for the kernel's acknowledgement. The rebuild
-/// runs inside the gateway's event loop, so this bounds the stall there.
+/// runs on the NAT worker thread, so this bounds how long one change can hold
+/// up the changes queued behind it.
 const ACK_TIMEOUT_SECS: libc::time_t = 5;
 
-/// How long shutdown waits for the NAT table to be deleted.
+/// How long shutdown waits for the NAT table to be deleted: two
+/// acknowledgement waits.
 pub const NAT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the NAT worker retries a rebuild the kernel refused.
+const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Length of a `struct nlmsghdr`.
 const NLMSG_HDRLEN: usize = 16;
@@ -128,7 +133,7 @@ impl fmt::Display for Errno {
 }
 
 /// Errors from NAT operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum NatError {
     #[error("nftables error: {0}")]
     Nftables(String),
@@ -146,6 +151,26 @@ pub enum NatError {
         admissible_limit()
     )]
     BatchTooLarge { bytes: usize },
+    /// The NAT worker thread has stopped.
+    #[error("the NAT worker has stopped")]
+    WorkerStopped,
+}
+
+impl NatError {
+    /// The failure as the log latches compare it: its text without the parts
+    /// that change from batch to batch for one cause, the index of the
+    /// rejected message and the batch size.
+    fn latch_key(&self) -> String {
+        match self {
+            Self::Kernel { errno, .. } => {
+                format!("kernel rejected a message of the NAT batch: {errno}")
+            }
+            Self::BatchTooLarge { .. } => {
+                "NAT batch exceeds the kernel's netlink limit".to_string()
+            }
+            other => other.to_string(),
+        }
+    }
 }
 
 impl From<rustables::error::QueryError> for NatError {
@@ -318,21 +343,15 @@ impl NatManager {
     }
 
     /// Add DNAT and SNAT rules for a virtual IP ↔ mesh address mapping.
+    ///
+    /// Tests only: the gateway applies changes through `NatTable::apply`.
+    #[cfg(test)]
     pub fn add_mapping(
         &mut self,
         virtual_ip: Ipv6Addr,
         mesh_addr: Ipv6Addr,
     ) -> Result<(), NatError> {
-        if let Some(old) = self.mappings.insert(
-            virtual_ip,
-            NatMapping {
-                virtual_ip,
-                mesh_addr,
-            },
-        ) && old.mesh_addr != mesh_addr
-        {
-            self.unconfirmed.insert((virtual_ip, old.mesh_addr));
-        }
+        self.set_mapping(virtual_ip, mesh_addr);
         let (result, elapsed_us) = self.timed_rebuild();
         let mappings = self.mappings.len();
         match &result {
@@ -355,7 +374,12 @@ impl NatManager {
         result
     }
 
-    /// Remove DNAT and SNAT rules for a virtual IP mapping.
+    /// Remove DNAT and SNAT rules for a virtual IP mapping, whichever mesh
+    /// address it holds.
+    ///
+    /// Tests only: the gateway removes a mapping through `NatTable::apply`,
+    /// which removes it only while it still names the expected mesh address.
+    #[cfg(test)]
     pub fn remove_mapping(&mut self, virtual_ip: Ipv6Addr) -> Result<(), NatError> {
         let Some(old) = self.mappings.remove(&virtual_ip) else {
             return Err(NatError::RuleNotFound(virtual_ip));
@@ -789,23 +813,51 @@ impl NatManager {
         }
     }
 
-    /// Apply one `Remove` command.
+    /// Map `virtual_ip` to `mesh_addr` in the desired state.
+    fn set_mapping(&mut self, virtual_ip: Ipv6Addr, mesh_addr: Ipv6Addr) {
+        if let Some(old) = self.mappings.insert(
+            virtual_ip,
+            NatMapping {
+                virtual_ip,
+                mesh_addr,
+            },
+        ) && old.mesh_addr != mesh_addr
+        {
+            self.unconfirmed.insert((virtual_ip, old.mesh_addr));
+        }
+    }
+
+    /// Apply one `Remove` command to the desired state.
     ///
-    /// A mapping that is absent has no rules in the kernel table, so its
-    /// removal is reported at once, unless an earlier removal of the same pair
-    /// is still waiting for the kernel.
+    /// Only a mapping to the command's mesh address is removed: a removal
+    /// queued behind the reissue of its address to another node must not
+    /// unmap the new holder. A mapping that is absent has no rules in the
+    /// kernel table, so its removal is reported at once, unless an earlier
+    /// removal of the same pair is still waiting for the kernel; a pair the
+    /// table no longer holds because the address is now another node's is
+    /// reported once a rebuild without it has succeeded.
     fn remove_command(
         &mut self,
         virtual_ip: Ipv6Addr,
         mesh_addr: Ipv6Addr,
     ) -> Result<(), NatError> {
-        if !self.mappings.contains_key(&virtual_ip) {
-            if !self.unconfirmed.contains(&(virtual_ip, mesh_addr)) {
-                self.removed.push((virtual_ip, mesh_addr));
+        match self.mappings.get(&virtual_ip) {
+            None => {
+                if !self.unconfirmed.contains(&(virtual_ip, mesh_addr)) {
+                    self.removed.push((virtual_ip, mesh_addr));
+                }
+                Err(NatError::RuleNotFound(virtual_ip))
             }
-            return Err(NatError::RuleNotFound(virtual_ip));
+            Some(current) if current.mesh_addr != mesh_addr => {
+                self.unconfirmed.insert((virtual_ip, mesh_addr));
+                Err(NatError::RuleNotFound(virtual_ip))
+            }
+            Some(_) => {
+                self.mappings.remove(&virtual_ip);
+                self.unconfirmed.insert((virtual_ip, mesh_addr));
+                Ok(())
+            }
         }
-        self.remove_mapping(virtual_ip)
     }
 }
 
@@ -850,15 +902,19 @@ pub trait NatTable: Send + 'static {
 }
 
 impl NatTable for NatManager {
+    /// Apply every command to the desired state, then rebuild once.
     fn apply(&mut self, commands: &[NatCommand]) -> NatApplied {
-        let outcomes = commands
+        let staged: Vec<(NatCommand, Result<(), NatError>)> = commands
             .iter()
             .map(|command| {
                 let result = match *command {
                     NatCommand::Add {
                         virtual_ip,
                         mesh_addr,
-                    } => self.add_mapping(virtual_ip, mesh_addr),
+                    } => {
+                        self.set_mapping(virtual_ip, mesh_addr);
+                        Ok(())
+                    }
                     NatCommand::Remove {
                         virtual_ip,
                         mesh_addr,
@@ -867,8 +923,50 @@ impl NatTable for NatManager {
                 (*command, result)
             })
             .collect();
+
+        let rebuild = if staged.iter().any(|(_, result)| result.is_ok()) {
+            let (result, elapsed_us) = self.timed_rebuild();
+            let mappings = self.mappings.len();
+            let added = commands.iter().any(|c| matches!(c, NatCommand::Add { .. }));
+            let count = commands.len();
+            match (&result, added) {
+                (Ok(()), true) => debug!(
+                    mappings,
+                    commands = count,
+                    elapsed_us,
+                    "Added DNAT/SNAT rules"
+                ),
+                (Ok(()), false) => debug!(
+                    mappings,
+                    commands = count,
+                    elapsed_us,
+                    "Removed DNAT/SNAT rules"
+                ),
+                (Err(e), true) => debug!(
+                    mappings,
+                    commands = count,
+                    elapsed_us,
+                    error = %e,
+                    "Added DNAT/SNAT rules"
+                ),
+                (Err(e), false) => debug!(
+                    mappings,
+                    commands = count,
+                    elapsed_us,
+                    error = %e,
+                    "Removed DNAT/SNAT rules"
+                ),
+            }
+            result
+        } else {
+            Ok(())
+        };
+
         NatApplied {
-            outcomes,
+            outcomes: staged
+                .into_iter()
+                .map(|(command, result)| (command, result.and_then(|()| rebuild.clone())))
+                .collect(),
             removed: std::mem::take(&mut self.removed),
         }
     }
@@ -896,30 +994,61 @@ pub struct NatReports {
     pub exit: tokio::sync::oneshot::Receiver<()>,
 }
 
-/// Applies mapping changes to the NAT table.
+/// A message to the NAT worker.
+enum WorkerMessage {
+    Command(NatCommand),
+    Stop,
+}
+
+/// Applies mapping changes to the NAT table on a thread of its own.
+///
+/// A rebuild is a netlink round trip that can wait seconds for the kernel,
+/// so it never runs on the runtime thread that answers `.fips` queries. The
+/// worker drains every queued command into one rebuild, retries a refused
+/// rebuild every `RETRY_INTERVAL`, and reports removals the kernel has
+/// applied. Its end, by shutdown, panic or a dropped driver, resolves
+/// `NatReports::exit`.
 pub struct NatDriver {
-    table: Box<dyn NatTable>,
-    retry_log: RetryLog,
+    commands: crossbeam_channel::Sender<WorkerMessage>,
+    stopped: crossbeam_channel::Receiver<Result<(), NatError>>,
     count: Arc<AtomicUsize>,
-    removed: crossbeam_channel::Sender<Vec<(Ipv6Addr, Ipv6Addr)>>,
-    _exit: tokio::sync::oneshot::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NatDriver {
     /// Take ownership of `table` and start applying changes to it.
+    ///
+    /// When the worker thread cannot be started, the exit report resolves at
+    /// once and every submit fails, so the gateway stops rather than answer
+    /// with addresses that have no rules.
     pub fn start(table: Box<dyn NatTable>) -> (NatDriver, NatReports) {
+        let (commands_tx, commands_rx) = crossbeam_channel::unbounded();
         let (removed_tx, removed_rx) = crossbeam_channel::unbounded();
+        let (stopped_tx, stopped_rx) = crossbeam_channel::bounded(1);
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
         let count = Arc::new(AtomicUsize::new(table.mapping_count()));
-        let driver = NatDriver {
-            table,
-            retry_log: RetryLog::default(),
-            count,
-            removed: removed_tx,
-            _exit: exit_tx,
+        let worker_count = Arc::clone(&count);
+        let spawned = std::thread::Builder::new()
+            .name("fips-gw-nat".to_string())
+            .spawn(move || {
+                // Dropped when the loop ends, by return or by panic.
+                let _exit = exit_tx;
+                run_worker(table, commands_rx, removed_tx, stopped_tx, worker_count);
+            });
+        let worker = match spawned {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                error!(error = %e, "Failed to start the NAT worker thread");
+                None
+            }
         };
         (
-            driver,
+            NatDriver {
+                commands: commands_tx,
+                stopped: stopped_rx,
+                count,
+                worker,
+            },
             NatReports {
                 removed: removed_rx,
                 exit: exit_rx,
@@ -929,30 +1058,12 @@ impl NatDriver {
 
     /// Queue one change.
     pub fn submit(&mut self, command: NatCommand) -> Result<(), NatError> {
-        let applied = self.table.apply(&[command]);
-        for (command, result) in &applied.outcomes {
-            match (command, result) {
-                (_, Ok(())) => {}
-                (NatCommand::Add { virtual_ip, .. }, Err(e)) => {
-                    error!(error = %e, virtual_ip = %virtual_ip, "Failed to add NAT rules")
-                }
-                (NatCommand::Remove { virtual_ip, .. }, Err(e)) => {
-                    warn!(error = %e, virtual_ip = %virtual_ip, "Failed to remove NAT rules")
-                }
-            }
-        }
-        self.publish(applied.removed);
-        Ok(())
+        self.commands
+            .send(WorkerMessage::Command(command))
+            .map_err(|_| NatError::WorkerStopped)
     }
 
-    /// Retry a rebuild the kernel refused.
-    pub fn retry(&mut self) {
-        let (result, removed) = self.table.retry_pending();
-        report_nat_retry(&mut self.retry_log, &result);
-        self.publish(removed);
-    }
-
-    /// Mappings in the table's desired state.
+    /// Mappings in the table's desired state, as of the last applied batch.
     pub fn mapping_count(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
@@ -963,19 +1074,147 @@ impl NatDriver {
     }
 
     /// Stop applying changes and delete the table, waiting at most `timeout`.
-    pub fn shutdown(self, _timeout: Duration) -> Result<(), NatError> {
-        self.table.cleanup()
-    }
-
-    /// Publish the table's count and any confirmed removals.
-    fn publish(&self, removed: Vec<(Ipv6Addr, Ipv6Addr)>) {
-        self.count
-            .store(self.table.mapping_count(), Ordering::Relaxed);
-        if !removed.is_empty() {
-            // Nobody listening is not an error: the reports are advisory.
-            let _ = self.removed.send(removed);
+    ///
+    /// On timeout the worker is left behind: the next start's rebuild
+    /// replaces the table whatever state it is in.
+    pub fn shutdown(mut self, timeout: Duration) -> Result<(), NatError> {
+        if self.commands.send(WorkerMessage::Stop).is_err() {
+            return Err(NatError::WorkerStopped);
+        }
+        match self.stopped.recv_timeout(timeout) {
+            Ok(result) => {
+                if let Some(worker) = self.worker.take() {
+                    let _ = worker.join();
+                }
+                result
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                    "NAT worker did not finish deleting the table in time"
+                );
+                Ok(())
+            }
         }
     }
+}
+
+/// The NAT worker's loop: apply queued changes in one rebuild, retry a
+/// refused rebuild on an interval, and delete the table on `Stop`.
+fn run_worker(
+    mut table: Box<dyn NatTable>,
+    commands: crossbeam_channel::Receiver<WorkerMessage>,
+    removed: crossbeam_channel::Sender<Vec<(Ipv6Addr, Ipv6Addr)>>,
+    stopped: crossbeam_channel::Sender<Result<(), NatError>>,
+    count: Arc<AtomicUsize>,
+) {
+    let mut retry_log = RetryLog::default();
+    let mut apply_log = RetryLog::default();
+    let mut next_retry = Instant::now() + RETRY_INTERVAL;
+    let publish = |table: &dyn NatTable, report: Vec<(Ipv6Addr, Ipv6Addr)>| {
+        count.store(table.mapping_count(), Ordering::Relaxed);
+        if !report.is_empty() {
+            // Nobody listening is not an error: the reports are advisory.
+            let _ = removed.send(report);
+        }
+    };
+    loop {
+        let wait = next_retry.saturating_duration_since(Instant::now());
+        match commands.recv_timeout(wait) {
+            Ok(WorkerMessage::Command(first)) => {
+                let mut batch = vec![first];
+                let mut stop = false;
+                for message in commands.try_iter() {
+                    match message {
+                        WorkerMessage::Command(command) => batch.push(command),
+                        WorkerMessage::Stop => {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                let applied = table.apply(&batch);
+                report_apply(&mut apply_log, &batch, &applied);
+                publish(table.as_ref(), applied.removed);
+                if stop {
+                    let _ = stopped.send(table.cleanup());
+                    return;
+                }
+            }
+            Ok(WorkerMessage::Stop) => {
+                let _ = stopped.send(table.cleanup());
+                return;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                let (result, report) = table.retry_pending();
+                report_nat_retry(&mut retry_log, &result);
+                publish(table.as_ref(), report);
+                next_retry = Instant::now() + RETRY_INTERVAL;
+            }
+            // The driver was dropped without a shutdown: leave the table.
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Log a batch's outcome once per change of outcome, and return how it
+/// compares with the batch before it.
+///
+/// Every added mapping comes from a LAN host naming a new name, so under a
+/// netlink failure that does not clear a line per batch would be a line per
+/// attacker input. The first failure, or a changed one, logs at `error!`
+/// when the batch adds a mapping and at `warn!` when it only removes; repeats
+/// log at `debug!` with the same text; the first success after a failure
+/// logs once. A remove of a mapping that is absent or now another node's is
+/// not a failure, and a batch made only of such removes rebuilt nothing, so
+/// it leaves the outcome as it was.
+pub fn report_apply(
+    log: &mut RetryLog,
+    commands: &[NatCommand],
+    applied: &NatApplied,
+) -> RetryReport {
+    let failure = applied
+        .outcomes
+        .iter()
+        .find_map(|(_, result)| match result {
+            Err(NatError::RuleNotFound(_)) | Ok(()) => None,
+            Err(e) => Some(e),
+        });
+    for (command, result) in &applied.outcomes {
+        if let Err(e) = result {
+            debug!(?command, error = %e, "NAT command not applied");
+        }
+    }
+    let adds = commands
+        .iter()
+        .filter(|c| matches!(c, NatCommand::Add { .. }))
+        .count();
+    let removes = commands.len() - adds;
+    let rebuilt = applied
+        .outcomes
+        .iter()
+        .any(|(_, result)| !matches!(result, Err(NatError::RuleNotFound(_))));
+    if !rebuilt {
+        return log.unchanged();
+    }
+    let report = log.observe(failure);
+    match (report, failure) {
+        (RetryReport::Failed, Some(e)) if adds > 0 => {
+            error!(error = %e, adds, removes, "Failed to add NAT rules")
+        }
+        (RetryReport::Failed, Some(e)) => {
+            warn!(error = %e, removes, "Failed to remove NAT rules")
+        }
+        (RetryReport::Repeated, Some(e)) if adds > 0 => {
+            debug!(error = %e, adds, removes, "Failed to add NAT rules")
+        }
+        (RetryReport::Repeated, Some(e)) => {
+            debug!(error = %e, removes, "Failed to remove NAT rules")
+        }
+        (RetryReport::Recovered, _) => info!("NAT rules applied again after failures"),
+        _ => {}
+    }
+    report
 }
 
 /// Log a pending NAT rebuild retry once per change of outcome.
@@ -1031,9 +1270,27 @@ impl RetryLog {
     /// Record a retry outcome and say how it compares with the last one.
     ///
     /// `None` is a success, whether or not anything was pending; `Some` is
-    /// the retry's error. Two failures are the same when their messages are.
+    /// the retry's error. Two failures are the same when their messages are,
+    /// leaving out the message index and batch size, which change with the
+    /// batch while the cause does not.
     pub fn observe(&mut self, failure: Option<&NatError>) -> RetryReport {
-        match (failure.map(ToString::to_string), self.last_failure.take()) {
+        self.observe_message(failure.map(NatError::latch_key))
+    }
+
+    /// The outcome as it stands, for an operation that learned nothing new:
+    /// `Repeated` while a failure is latched, otherwise `Clean`.
+    pub fn unchanged(&self) -> RetryReport {
+        if self.last_failure.is_some() {
+            RetryReport::Repeated
+        } else {
+            RetryReport::Clean
+        }
+    }
+
+    /// `observe` for a failure already rendered as text, so other repeated
+    /// operations can share the comparison.
+    pub fn observe_message(&mut self, failure: Option<String>) -> RetryReport {
+        match (failure, self.last_failure.take()) {
             (Some(now), Some(before)) => {
                 let report = if now == before {
                     RetryReport::Repeated
@@ -1534,6 +1791,35 @@ mod tests {
             log.observe(Some(&kernel(1))),
             RetryReport::Failed,
             "a failure after recovery warns again"
+        );
+    }
+
+    #[test]
+    fn failures_differing_only_in_message_index_or_size_count_as_the_same_failure() {
+        let kernel = |errno, seq| NatError::Kernel {
+            errno: Errno(errno),
+            seq,
+        };
+        let mut log = RetryLog::default();
+        assert_eq!(log.observe(Some(&kernel(2, 3))), RetryReport::Failed);
+        assert_eq!(
+            log.observe(Some(&kernel(2, 9))),
+            RetryReport::Repeated,
+            "the same rejection at another message index read as a new failure"
+        );
+        assert_eq!(
+            log.observe(Some(&kernel(1, 9))),
+            RetryReport::Failed,
+            "control: a different errno is a new failure"
+        );
+
+        let mut log = RetryLog::default();
+        let large = |bytes| NatError::BatchTooLarge { bytes };
+        assert_eq!(log.observe(Some(&large(300_000))), RetryReport::Failed);
+        assert_eq!(
+            log.observe(Some(&large(300_100))),
+            RetryReport::Repeated,
+            "an oversized batch of another size read as a new failure"
         );
     }
 
@@ -2137,6 +2423,479 @@ mod tests {
 
         mgr.track_rebuild(|_| Ok(())).unwrap();
         assert_eq!(mgr.removed, vec![(vip(1), mesh(1))]);
+    }
+
+    /// A NAT table that records the commands it is given, taking `delay` per
+    /// apply, as a slow netlink rebuild would.
+    struct SlowTable {
+        delay: Duration,
+        recorded: Arc<std::sync::Mutex<Vec<NatCommand>>>,
+        mappings: HashMap<Ipv6Addr, Ipv6Addr>,
+    }
+
+    impl SlowTable {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                recorded: Arc::default(),
+                mappings: HashMap::new(),
+            }
+        }
+    }
+
+    impl NatTable for SlowTable {
+        fn apply(&mut self, commands: &[NatCommand]) -> NatApplied {
+            std::thread::sleep(self.delay);
+            self.recorded.lock().unwrap().extend_from_slice(commands);
+            for command in commands {
+                match *command {
+                    NatCommand::Add {
+                        virtual_ip,
+                        mesh_addr,
+                    } => {
+                        self.mappings.insert(virtual_ip, mesh_addr);
+                    }
+                    NatCommand::Remove { virtual_ip, .. } => {
+                        self.mappings.remove(&virtual_ip);
+                    }
+                }
+            }
+            NatApplied {
+                outcomes: commands.iter().map(|c| (*c, Ok(()))).collect(),
+                removed: Vec::new(),
+            }
+        }
+
+        fn retry_pending(&mut self) -> (Result<bool, NatError>, Vec<(Ipv6Addr, Ipv6Addr)>) {
+            (Ok(false), Vec::new())
+        }
+
+        fn mapping_count(&self) -> usize {
+            self.mappings.len()
+        }
+
+        fn cleanup(self: Box<Self>) -> Result<(), NatError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn nat_changes_do_not_stall_the_runtime_thread() {
+        let table = SlowTable::new(Duration::from_millis(200));
+        let recorded = Arc::clone(&table.recorded);
+        let (mut driver, _reports) = NatDriver::start(Box::new(table));
+
+        let origin = Instant::now();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let timer = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            origin.elapsed()
+        });
+        started_rx.await.expect("the timer task started");
+
+        for i in 1..=10u16 {
+            driver
+                .submit(NatCommand::Add {
+                    virtual_ip: vip(i),
+                    mesh_addr: mesh(i),
+                })
+                .expect("the driver takes the command");
+        }
+        let observed = timer.await.expect("the timer task ran");
+        assert!(
+            observed <= Duration::from_millis(500),
+            "a 10 ms timer on the runtime thread fired after {observed:?}: \
+             submitting NAT changes blocked the thread that answers .fips queries"
+        );
+
+        // Control: the commands were applied, not dropped.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while driver.mapping_count() < 10 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(driver.mapping_count(), 10);
+        assert_eq!(recorded.lock().unwrap().len(), 10);
+    }
+
+    /// A NAT table whose behaviour each test sets, recording what it is
+    /// asked to do.
+    #[derive(Default)]
+    struct FakeTable {
+        /// Every batch `apply` was given, in order.
+        batches: Arc<std::sync::Mutex<Vec<Vec<NatCommand>>>>,
+        mappings: HashMap<Ipv6Addr, Ipv6Addr>,
+        /// When set, the first `apply` signals entry and then waits for the
+        /// release.
+        gate: Option<(
+            crossbeam_channel::Sender<()>,
+            crossbeam_channel::Receiver<()>,
+        )>,
+        /// Panic in `apply`.
+        panics: bool,
+        /// Fail every `apply` with this error.
+        fails: Option<NatError>,
+        /// How long `cleanup` takes.
+        cleanup_delay: Duration,
+        /// Set when `cleanup` runs.
+        cleaned: Arc<std::sync::atomic::AtomicBool>,
+        /// Set when the table is dropped.
+        dropped: DropFlag,
+    }
+
+    /// A flag set when its holder is dropped.
+    #[derive(Default)]
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl NatTable for FakeTable {
+        fn apply(&mut self, commands: &[NatCommand]) -> NatApplied {
+            assert!(!self.panics, "the fake table panics on apply");
+            if let Some((entered, release)) = self.gate.take() {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+            self.batches.lock().unwrap().push(commands.to_vec());
+            for command in commands {
+                match *command {
+                    NatCommand::Add {
+                        virtual_ip,
+                        mesh_addr,
+                    } => {
+                        self.mappings.insert(virtual_ip, mesh_addr);
+                    }
+                    NatCommand::Remove { virtual_ip, .. } => {
+                        self.mappings.remove(&virtual_ip);
+                    }
+                }
+            }
+            NatApplied {
+                outcomes: commands
+                    .iter()
+                    .map(|c| (*c, self.fails.clone().map_or(Ok(()), Err)))
+                    .collect(),
+                removed: Vec::new(),
+            }
+        }
+
+        fn retry_pending(&mut self) -> (Result<bool, NatError>, Vec<(Ipv6Addr, Ipv6Addr)>) {
+            (Ok(false), Vec::new())
+        }
+
+        fn mapping_count(&self) -> usize {
+            self.mappings.len()
+        }
+
+        fn cleanup(self: Box<Self>) -> Result<(), NatError> {
+            std::thread::sleep(self.cleanup_delay);
+            self.cleaned.store(true, Ordering::SeqCst);
+            Err(NatError::Nftables("cleanup ran".into()))
+        }
+    }
+
+    /// Poll `done` until it holds or five seconds pass.
+    fn eventually(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        done()
+    }
+
+    #[test]
+    fn nat_worker_applies_add_remove_and_readd_in_order() {
+        let table = FakeTable::default();
+        let batches = Arc::clone(&table.batches);
+        let (mut driver, _reports) = NatDriver::start(Box::new(table));
+        let commands = [
+            NatCommand::Add {
+                virtual_ip: vip(1),
+                mesh_addr: mesh(1),
+            },
+            NatCommand::Remove {
+                virtual_ip: vip(1),
+                mesh_addr: mesh(1),
+            },
+            NatCommand::Add {
+                virtual_ip: vip(1),
+                mesh_addr: mesh(2),
+            },
+        ];
+        for command in commands {
+            driver.submit(command).unwrap();
+        }
+        assert!(eventually(|| batches.lock().unwrap().concat().len() == 3));
+        assert_eq!(batches.lock().unwrap().concat(), commands);
+        assert_eq!(driver.mapping_count(), 1);
+    }
+
+    #[test]
+    fn a_stale_remove_does_not_unmap_a_reissued_address() {
+        let mut mgr = manager_with_mappings(0);
+        // Make encoding, and so every rebuild, fail without a socket.
+        mgr.pre_chain = Chain::new(&mgr.table);
+        mgr.apply(&[NatCommand::Add {
+            virtual_ip: vip(1),
+            mesh_addr: mesh(2),
+        }]);
+        let applied = mgr.apply(&[NatCommand::Remove {
+            virtual_ip: vip(1),
+            mesh_addr: mesh(1),
+        }]);
+        assert!(matches!(
+            applied.outcomes[0].1,
+            Err(NatError::RuleNotFound(_))
+        ));
+        assert_eq!(
+            mgr.mappings.get(&vip(1)).map(|m| m.mesh_addr),
+            Some(mesh(2)),
+            "a removal for the address's previous holder unmapped its new one"
+        );
+        assert!(
+            applied.removed.is_empty(),
+            "the old pair is reported only after a rebuild without it succeeds"
+        );
+        mgr.track_rebuild(|_| Ok(())).unwrap();
+        assert_eq!(mgr.removed, vec![(vip(1), mesh(1))]);
+    }
+
+    #[test]
+    fn queued_changes_are_applied_in_one_rebuild() {
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let table = FakeTable {
+            gate: Some((entered_tx, release_rx)),
+            ..FakeTable::default()
+        };
+        let batches = Arc::clone(&table.batches);
+        let (mut driver, _reports) = NatDriver::start(Box::new(table));
+        let add = |i| NatCommand::Add {
+            virtual_ip: vip(i),
+            mesh_addr: mesh(i),
+        };
+        driver.submit(add(1)).unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first apply started");
+        for i in 2..=10 {
+            driver.submit(add(i)).unwrap();
+        }
+        release_tx.send(()).unwrap();
+        assert!(eventually(|| batches.lock().unwrap().len() == 2));
+        let batches = batches.lock().unwrap();
+        assert_eq!(batches.len(), 2, "{batches:?}");
+        assert_eq!(batches[1].len(), 9, "the queued changes share one rebuild");
+    }
+
+    #[test]
+    fn stop_runs_cleanup_and_reports_it() {
+        let table = FakeTable::default();
+        let cleaned = Arc::clone(&table.cleaned);
+        let (driver, _reports) = NatDriver::start(Box::new(table));
+        let result = driver.shutdown(Duration::from_secs(5));
+        assert!(cleaned.load(Ordering::SeqCst), "cleanup ran");
+        assert!(
+            matches!(result, Err(NatError::Nftables(ref m)) if m == "cleanup ran"),
+            "the cleanup's result is reported: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_queued_behind_changes_still_runs_cleanup() {
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let table = FakeTable {
+            gate: Some((entered_tx, release_rx)),
+            ..FakeTable::default()
+        };
+        let cleaned = Arc::clone(&table.cleaned);
+        let (mut driver, _reports) = NatDriver::start(Box::new(table));
+        let queue = driver.commands.clone();
+        driver
+            .submit(NatCommand::Add {
+                virtual_ip: vip(1),
+                mesh_addr: mesh(1),
+            })
+            .unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first apply started");
+        driver
+            .submit(NatCommand::Add {
+                virtual_ip: vip(2),
+                mesh_addr: mesh(2),
+            })
+            .unwrap();
+
+        // The stop waits in the queue behind the second change, so the
+        // worker meets it while draining a batch.
+        let started = Instant::now();
+        let stopping = std::thread::spawn(move || driver.shutdown(NAT_STOP_TIMEOUT));
+        assert!(
+            eventually(|| queue.len() == 2),
+            "control: the change and the stop are queued"
+        );
+        release_tx.send(()).unwrap();
+        let result = stopping.join().unwrap();
+        assert!(
+            started.elapsed() < NAT_STOP_TIMEOUT / 2,
+            "the stop was lost in the batch; shutdown waited {:?}",
+            started.elapsed()
+        );
+        assert!(cleaned.load(Ordering::SeqCst), "cleanup ran");
+        assert!(
+            matches!(result, Err(NatError::Nftables(ref m)) if m == "cleanup ran"),
+            "the cleanup's result is reported: {result:?}"
+        );
+    }
+
+    #[test]
+    fn stop_returns_after_the_timeout_when_the_worker_hangs() {
+        let table = FakeTable {
+            cleanup_delay: Duration::from_secs(3),
+            ..FakeTable::default()
+        };
+        let (driver, _reports) = NatDriver::start(Box::new(table));
+        let started = Instant::now();
+        let _ = driver.shutdown(Duration::from_millis(100));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "shutdown waited {:?} for a hung cleanup",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_worker_panic_is_reported_to_the_driver() {
+        let table = FakeTable {
+            panics: true,
+            ..FakeTable::default()
+        };
+        let (mut driver, reports) = NatDriver::start(Box::new(table));
+        driver
+            .submit(NatCommand::Add {
+                virtual_ip: vip(1),
+                mesh_addr: mesh(1),
+            })
+            .unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), reports.exit).await;
+        assert!(ended.is_ok(), "the worker's end was not reported");
+        assert!(
+            eventually(|| driver
+                .submit(NatCommand::Remove {
+                    virtual_ip: vip(1),
+                    mesh_addr: mesh(1),
+                })
+                .is_err()),
+            "submitting to a stopped worker must fail"
+        );
+    }
+
+    #[test]
+    fn a_dropped_driver_ends_its_worker() {
+        let table = FakeTable::default();
+        let dropped = Arc::clone(&table.dropped.0);
+        let cleaned = Arc::clone(&table.cleaned);
+        let (driver, _reports) = NatDriver::start(Box::new(table));
+        drop(driver);
+        assert!(
+            eventually(|| dropped.load(Ordering::SeqCst)),
+            "the worker did not end"
+        );
+        assert!(
+            !cleaned.load(Ordering::SeqCst),
+            "no cleanup without shutdown"
+        );
+    }
+
+    #[test]
+    fn apply_failures_log_once_per_change_of_outcome() {
+        let mut table = FakeTable {
+            fails: Some(NatError::Kernel {
+                errno: Errno(libc::ENOBUFS),
+                seq: 3,
+            }),
+            ..FakeTable::default()
+        };
+        let mut log = RetryLog::default();
+        let mut reports = Vec::new();
+        for i in 1..=10u16 {
+            let batch = [NatCommand::Add {
+                virtual_ip: vip(i),
+                mesh_addr: mesh(i),
+            }];
+            let applied = table.apply(&batch);
+            reports.push(report_apply(&mut log, &batch, &applied));
+        }
+        assert_eq!(reports[0], RetryReport::Failed);
+        assert!(
+            reports[1..].iter().all(|r| *r == RetryReport::Repeated),
+            "a persistent failure logged more than once: {reports:?}"
+        );
+
+        table.fails = None;
+        let batch = [NatCommand::Remove {
+            virtual_ip: vip(1),
+            mesh_addr: mesh(1),
+        }];
+        let applied = table.apply(&batch);
+        assert_eq!(
+            report_apply(&mut log, &batch, &applied),
+            RetryReport::Recovered
+        );
+        // A stale remove is not a failure.
+        let stale = NatApplied {
+            outcomes: vec![(batch[0], Err(NatError::RuleNotFound(vip(1))))],
+            removed: Vec::new(),
+        };
+        assert_eq!(report_apply(&mut log, &batch, &stale), RetryReport::Clean);
+    }
+
+    #[test]
+    fn a_batch_of_stale_removes_during_a_failure_does_not_report_recovery() {
+        let failure = NatError::Kernel {
+            errno: Errno(libc::ENOBUFS),
+            seq: 3,
+        };
+        let mut log = RetryLog::default();
+        let add = [NatCommand::Add {
+            virtual_ip: vip(1),
+            mesh_addr: mesh(1),
+        }];
+        let failed = NatApplied {
+            outcomes: vec![(add[0], Err(failure.clone()))],
+            removed: Vec::new(),
+        };
+        assert_eq!(report_apply(&mut log, &add, &failed), RetryReport::Failed);
+
+        // Nothing reached the kernel: the remove named a mapping already gone.
+        let remove = [NatCommand::Remove {
+            virtual_ip: vip(2),
+            mesh_addr: mesh(2),
+        }];
+        let stale = NatApplied {
+            outcomes: vec![(remove[0], Err(NatError::RuleNotFound(vip(2))))],
+            removed: Vec::new(),
+        };
+        let report = report_apply(&mut log, &remove, &stale);
+        assert_ne!(
+            report,
+            RetryReport::Recovered,
+            "a batch that rebuilt nothing reported the failing table as recovered"
+        );
+        assert_eq!(
+            report_apply(&mut log, &add, &failed),
+            RetryReport::Repeated,
+            "the same failure after a stale remove logged as a new one"
+        );
     }
 
     /// The encoded rebuild of a manager holding `count` mappings.
