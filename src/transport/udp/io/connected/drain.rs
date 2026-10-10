@@ -239,6 +239,17 @@ fn drain_loop(
                 continue;
             }
             stats.record_recv(len);
+            // Punch probes and acks are discarded here as on the shared
+            // socket: they are traversal traffic, never FMP.
+            if crate::nostr::is_punch_packet(&backing[i][..len]) {
+                trace!(
+                    transport_id = %transport_id,
+                    peer_addr = %peer_addr,
+                    bytes = len,
+                    "Dropping stray punch probe/ack on UDP transport"
+                );
+                continue;
+            }
             // Move the filled buffer out, refill the slot with a
             // fresh one. Same zero-copy pattern the wildcard listen
             // socket uses (see `transport/udp/mod.rs::run_receive_loop`).
@@ -458,6 +469,32 @@ mod tests {
         }
     }
 
+    /// The IPv4 address the kernel bound `socket` to, read with
+    /// getsockname. The tests bind IPv4 loopback only; the family is checked
+    /// before the sockaddr_in cast.
+    fn bound_v4_addr(socket: &ConnectedPeerSocket) -> SocketAddr {
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let r = unsafe {
+            libc::getsockname(
+                socket.as_raw_fd(),
+                &mut storage as *mut _ as *mut libc::sockaddr,
+                &mut len,
+            )
+        };
+        assert!(r >= 0, "getsockname failed");
+        assert_eq!(
+            storage.ss_family as i32,
+            libc::AF_INET,
+            "test assumes IPv4 loopback"
+        );
+        let sin: &libc::sockaddr_in =
+            unsafe { &*(&storage as *const _ as *const libc::sockaddr_in) };
+        let port = u16::from_be(sin.sin_port);
+        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+        SocketAddr::from((ip, port))
+    }
+
     /// End-to-end: open a ConnectedPeerSocket, spawn a drain thread
     /// on it, send packets at it from a remote, verify they land in
     /// the packet_tx mpsc with the correct transport_id + peer_addr,
@@ -481,31 +518,8 @@ mod tests {
         let transport_id = TransportId::new(42);
 
         // Find out what local_addr the kernel assigned to our socket
-        // so the peer can sendto() it. Use getsockname; cast the
-        // returned sockaddr_storage to sockaddr_in (we only test on
-        // IPv4 loopback here, so this is safe).
-        let our_local_addr: SocketAddr = {
-            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-            let r = unsafe {
-                libc::getsockname(
-                    socket.as_raw_fd(),
-                    &mut storage as *mut _ as *mut libc::sockaddr,
-                    &mut len,
-                )
-            };
-            assert!(r >= 0, "getsockname failed");
-            assert_eq!(
-                storage.ss_family as i32,
-                libc::AF_INET,
-                "test assumes IPv4 loopback"
-            );
-            let sin: &libc::sockaddr_in =
-                unsafe { &*(&storage as *const _ as *const libc::sockaddr_in) };
-            let port = u16::from_be(sin.sin_port);
-            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            SocketAddr::from((ip, port))
-        };
+        // so the peer can sendto() it.
+        let our_local_addr = bound_v4_addr(&socket);
 
         // Spawn the drain.
         let stats = Arc::new(UdpStats::new());
@@ -537,6 +551,44 @@ mod tests {
         assert_eq!(counted.bytes_recv, 20);
         // Drop the drain handle — should stop the thread within one
         // poll iteration.
+    }
+
+    #[tokio::test]
+    async fn the_connected_drain_drops_punch_packets() {
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer local_addr");
+        let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let owned =
+            crate::transport::udp::open_connected_fd(local_addr, peer_addr, 1 << 20, 1 << 20)
+                .expect("open_connected_fd");
+        let socket = Arc::new(ConnectedPeerSocket::from_fd(owned, peer_addr, local_addr));
+        let our_local_addr = bound_v4_addr(&socket);
+        let (tx, mut rx) = mpsc::channel::<ReceivedPacket>(64);
+        let stats = Arc::new(UdpStats::new());
+        let _drain = PeerRecvDrain::spawn(
+            socket.clone(),
+            TransportId::new(42),
+            peer_addr,
+            tx,
+            stats.clone(),
+        )
+        .expect("PeerRecvDrain::spawn");
+
+        let probe = [0x4E, 0x50, 0x54, 0x43, 0, 0, 0, 1, 0xAA, 0xBB];
+        peer.send_to(&probe, our_local_addr).expect("send probe");
+        peer.send_to(&[0x00, 0x11, 0x22, 0x33], our_local_addr)
+            .expect("send packet");
+
+        let first = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("timeout waiting for a packet")
+            .expect("packet channel closed");
+        assert_eq!(first.data, vec![0x00, 0x11, 0x22, 0x33], "probe delivered");
+        assert_eq!(
+            stats.snapshot().packets_recv,
+            2,
+            "the drain counts what it drops as well as what it delivers"
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -1172,6 +1172,87 @@ fn an_honest_dual_stack_offer_fills_no_more_than_the_target_cap() {
     assert!(!tally.suspicious());
 }
 
+/// A driver holding one adopted bootstrap transport (id 7) that reached
+/// `peer` at 198.51.100.7:4000.
+fn driver_with_bootstrap(peer: &crate::PeerIdentity) -> super::RendezvousDriver {
+    let mut driver = super::RendezvousDriver::default();
+    driver.insert_bootstrap_transport(
+        crate::transport::TransportId::new(7),
+        peer.npub(),
+        *peer.node_addr(),
+        "198.51.100.7:4000".parse().unwrap(),
+    );
+    driver
+}
+
+#[test]
+fn mismatch_evidence_names_the_traversed_peer_only_for_its_own_address_before_a_link() {
+    use super::MismatchEvidence;
+    let peer = crate::PeerIdentity::from_pubkey(crate::Identity::generate().pubkey());
+    let driver = driver_with_bootstrap(&peer);
+    let t7 = crate::transport::TransportId::new(7);
+    let unlinked = |_: &NodeAddr| false;
+    let npub = peer.npub();
+
+    assert_eq!(
+        driver.mismatch_evidence(
+            &crate::transport::TransportId::new(8),
+            Some(endpoint("198.51.100.7:4000")),
+            unlinked
+        ),
+        MismatchEvidence::NotBootstrap
+    );
+    assert_eq!(
+        driver.mismatch_evidence(&t7, Some(endpoint("203.0.113.99:5000")), unlinked),
+        MismatchEvidence::ForeignSource
+    );
+    assert_eq!(
+        driver.mismatch_evidence(&t7, None, unlinked),
+        MismatchEvidence::ForeignSource
+    );
+    assert_eq!(
+        driver.mismatch_evidence(&t7, Some(endpoint("198.51.100.7:4001")), unlinked),
+        MismatchEvidence::ForeignSource
+    );
+    assert_eq!(
+        driver.mismatch_evidence(&t7, Some(endpoint("198.51.100.7:4000")), unlinked),
+        MismatchEvidence::Traversed(&npub)
+    );
+    // A dual-stack socket reports an IPv4 source in its mapped form.
+    assert_eq!(
+        driver.mismatch_evidence(&t7, Some(endpoint("[::ffff:198.51.100.7]:4000")), unlinked),
+        MismatchEvidence::Traversed(&npub)
+    );
+    let linked = |addr: &NodeAddr| addr == peer.node_addr();
+    assert_eq!(
+        driver.mismatch_evidence(&t7, Some(endpoint("198.51.100.7:4000")), linked),
+        MismatchEvidence::AfterLink
+    );
+}
+
+#[test]
+fn note_linked_bootstraps_keeps_refusing_after_the_link_drops() {
+    use super::MismatchEvidence;
+    let peer = crate::PeerIdentity::from_pubkey(crate::Identity::generate().pubkey());
+    let other = crate::PeerIdentity::from_pubkey(crate::Identity::generate().pubkey());
+    let mut driver = driver_with_bootstrap(&peer);
+    let t7 = crate::transport::TransportId::new(7);
+
+    // A link to some other node latches nothing.
+    driver.note_linked_bootstraps(|addr| addr == other.node_addr());
+    assert!(matches!(
+        driver.mismatch_evidence(&t7, Some(endpoint("198.51.100.7:4000")), |_| false),
+        MismatchEvidence::Traversed(_)
+    ));
+
+    driver.note_linked_bootstraps(|addr| addr == peer.node_addr());
+    assert_eq!(
+        driver.mismatch_evidence(&t7, Some(endpoint("198.51.100.7:4000")), |_| false),
+        MismatchEvidence::AfterLink,
+        "the link has gone, but it was seen"
+    );
+}
+
 #[test]
 fn split_address_predicates_match_the_old_advert_predicate() {
     // Expected values are hand-derived from the single disjunction the advert

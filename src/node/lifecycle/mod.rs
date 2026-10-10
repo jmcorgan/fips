@@ -974,6 +974,10 @@ impl Node {
         bootstrap.set_outbound_admission(self.outbound_admission_check());
         self.push_advert_protection();
         bootstrap.maintain_advert_cache();
+        let peers = &self.peers;
+        self.supervisor
+            .nostr_rendezvous
+            .note_linked_bootstraps(|addr| peers.contains_key(addr));
 
         if let Err(err) = self.refresh_overlay_advert(&bootstrap).await {
             debug!(error = %err, "Failed to refresh local Nostr overlay advert");

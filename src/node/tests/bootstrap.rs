@@ -904,3 +904,159 @@ async fn one_on_link_lan_advert_is_dialled_once() {
     assert_eq!(node.connection_count(), before + 1);
     stop_transports(&mut node).await;
 }
+
+/// An unknown-version datagram on an adopted traversal transport.
+fn unknown_version_from(transport_id: TransportId, from: &str) -> crate::transport::ReceivedPacket {
+    crate::transport::ReceivedPacket::new(
+        transport_id,
+        TransportAddr::from_string(from),
+        vec![0x40, 0, 0, 0],
+    )
+}
+
+/// A node with a Nostr engine and one adopted traversal transport (id 7)
+/// that reached `peer` at 198.51.100.7:4000.
+fn node_with_traversed_peer(
+    peer: PeerIdentity,
+) -> (Node, std::sync::Arc<crate::nostr::NostrRendezvous>) {
+    let mut node = make_node();
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+    node.supervisor.nostr_rendezvous.insert_bootstrap_transport(
+        TransportId::new(7),
+        peer.npub(),
+        *peer.node_addr(),
+        "198.51.100.7:4000".parse().unwrap(),
+    );
+    (node, engine)
+}
+
+/// Only the traversed address can set the protocol-mismatch cooldown; a
+/// datagram from anywhere else on the adopted transport cannot.
+#[tokio::test]
+async fn a_foreign_source_on_an_adopted_transport_cannot_set_a_mismatch_cooldown() {
+    let peer = make_peer_identity();
+    let (mut node, engine) = node_with_traversed_peer(peer);
+
+    node.process_packet(unknown_version_from(
+        TransportId::new(7),
+        "203.0.113.99:5000",
+    ))
+    .await;
+    assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), None);
+
+    // Control: the same datagram from the traversed address sets it.
+    node.process_packet(unknown_version_from(
+        TransportId::new(7),
+        "198.51.100.7:4000",
+    ))
+    .await;
+    assert!(
+        engine
+            .cooldown_until(&peer.npub(), Node::now_ms())
+            .is_some()
+    );
+}
+
+/// Once a link to the traversed peer exists, the version check has already
+/// been passed, so a later unknown-version datagram from its address sets
+/// no cooldown, even after that peer leaves the peer table.
+#[tokio::test]
+async fn a_mismatch_from_the_traversed_address_after_the_link_is_up_sets_no_cooldown() {
+    let mut node = make_node();
+    let link_id = LinkId::new(1);
+    let peer = seed_completed_connection(&mut node, link_id, TransportId::new(7), 1000);
+    node.promote_connection(link_id, peer, 2000).unwrap();
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+    node.supervisor.nostr_rendezvous.insert_bootstrap_transport(
+        TransportId::new(7),
+        peer.npub(),
+        *peer.node_addr(),
+        "198.51.100.7:4000".parse().unwrap(),
+    );
+
+    node.process_packet(unknown_version_from(
+        TransportId::new(7),
+        "198.51.100.7:4000",
+    ))
+    .await;
+    assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), None);
+
+    node.poll_nostr_rendezvous().await;
+    node.remove_peer(peer.node_addr());
+    node.process_packet(unknown_version_from(
+        TransportId::new(7),
+        "198.51.100.7:4000",
+    ))
+    .await;
+    assert_eq!(
+        engine.cooldown_until(&peer.npub(), Node::now_ms()),
+        None,
+        "the link was seen, so the window has closed"
+    );
+}
+
+/// The honest case the cooldown exists for: a peer on another FMP version
+/// answers the traversal from the traversed address before any link. The
+/// cooldown is set once and a repeat leaves it where it was.
+#[tokio::test]
+async fn an_unknown_version_from_the_traversed_address_before_any_link_sets_the_cooldown_once() {
+    let peer = make_peer_identity();
+    let (mut node, engine) = node_with_traversed_peer(peer);
+
+    node.process_packet(unknown_version_from(
+        TransportId::new(7),
+        "198.51.100.7:4000",
+    ))
+    .await;
+    let first = engine.cooldown_until(&peer.npub(), Node::now_ms());
+    assert!(first.is_some());
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    node.process_packet(unknown_version_from(
+        TransportId::new(7),
+        "198.51.100.7:4000",
+    ))
+    .await;
+    assert_eq!(engine.cooldown_until(&peer.npub(), Node::now_ms()), first);
+}
+
+/// The address the receive path reports for a datagram on a real adopted
+/// socket matches the one stored at adoption, so an honest mismatch is
+/// still recognised end to end.
+#[tokio::test]
+async fn an_unknown_version_datagram_on_a_real_adopted_socket_sets_the_cooldown() {
+    let mut node = make_node();
+    let (packet_tx, packet_rx) = packet_channel(64);
+    node.supervisor.packet_tx = Some(packet_tx);
+    node.packet_rx = Some(packet_rx);
+    node.supervisor.state = NodeState::Running;
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+
+    let peer = make_peer_identity();
+    let peer_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let peer_addr = peer_socket.local_addr().unwrap();
+    let adopted_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let adopted_addr = adopted_socket.local_addr().unwrap();
+    let handoff =
+        EstablishedTraversal::new("sess-mismatch", peer.npub(), peer_addr, adopted_socket)
+            .with_transport_name("nostr-punched");
+    node.adopt_established_traversal(handoff).await.unwrap();
+
+    peer_socket.send_to(&[0x40, 0, 0, 0], adopted_addr).unwrap();
+    tokio::select! {
+        result = node.run_rx_loop() => {
+            panic!("rx loop exited unexpectedly: {:?}", result);
+        }
+        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+    }
+
+    assert!(
+        engine
+            .cooldown_until(&peer.npub(), Node::now_ms())
+            .is_some()
+    );
+    stop_transports(&mut node).await;
+}

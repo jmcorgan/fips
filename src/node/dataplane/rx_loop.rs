@@ -3,11 +3,13 @@
 use crate::control::{ControlSocket, commands};
 use crate::node::reject::{RejectReason, TransportReject};
 use crate::node::{Node, NodeError};
+use crate::nostr::MismatchEvidence;
 use crate::proto::fmp::wire::{
     COMMON_PREFIX_SIZE, CommonPrefix, FMP_VERSION, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2,
     expected_payload_len,
 };
 use crate::transport::ReceivedPacket;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -546,40 +548,47 @@ impl Node {
         };
 
         if prefix.version != FMP_VERSION {
+            // The sender is unauthenticated. Whether this datagram may set
+            // the protocol-mismatch cooldown rests only on its source being
+            // the address the traversal reached and on no link to that peer
+            // having been seen; that is all the evidence there is.
+            let source = packet
+                .remote_addr
+                .as_str()
+                .and_then(|text| text.parse::<SocketAddr>().ok());
+            let peers = &self.peers;
+            let evidence = self.supervisor.nostr_rendezvous.mismatch_evidence(
+                &packet.transport_id,
+                source,
+                |addr| peers.contains_key(addr),
+            );
             debug!(
                 version = prefix.version,
                 transport_id = %packet.transport_id,
+                remote_addr = %packet.remote_addr,
+                evidence = %evidence.label(),
                 "Unknown FMP version, dropping"
             );
 
-            // If the packet arrived on an adopted Nostr-NAT bootstrap
-            // transport, the originating peer is necessarily on a
-            // different FMP-protocol version than us — the discovery
-            // sweep would otherwise re-traverse them every cycle even
-            // though no msg1/msg2 exchange can ever succeed. Bump the
-            // discovery-layer cooldown to the long protocol-mismatch
-            // window and emit a single WARN per fresh observation.
-            if self
-                .supervisor
-                .nostr_rendezvous
-                .is_bootstrap_transport(&packet.transport_id)
-                && let Some(npub) = self
-                    .supervisor
-                    .nostr_rendezvous
-                    .bootstrap_transport_npub(&packet.transport_id)
-                    .cloned()
+            // From the traversed peer's address before any link: the
+            // discovery sweep would otherwise re-traverse a peer no msg1/msg2
+            // exchange can succeed with. Bump the discovery-layer cooldown to
+            // the long protocol-mismatch window and emit a single WARN per
+            // fresh observation.
+            if let MismatchEvidence::Traversed(npub) = evidence
                 && let Some(handle) = self.nostr_rendezvous_handle()
             {
                 let now_ms = Self::now_ms();
                 let cooldown_secs = handle.protocol_mismatch_cooldown_secs();
-                if handle.record_protocol_mismatch(&npub, now_ms) {
+                if handle.record_protocol_mismatch(npub, now_ms) {
                     warn!(
                         peer_npub = %npub,
                         transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
                         peer_version = prefix.version,
                         our_version = FMP_VERSION,
                         cooldown_secs,
-                        "Nostr-discovered peer speaks a different FMP version; suppressing retraversal"
+                        "Datagram from the traversed peer's address carried another FMP version; suppressing re-traversal"
                     );
                 }
             }

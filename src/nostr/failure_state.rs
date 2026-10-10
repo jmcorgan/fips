@@ -39,6 +39,11 @@ pub(super) struct NpubFailureRecord {
     /// `cooldown_until_ms.is_some_and(|t| t > now)`, retries are
     /// suppressed.
     pub cooldown_until_ms: Option<u64>,
+    /// When the cooldown set by the first protocol-mismatch observation
+    /// ends. Held apart from `cooldown_until_ms`, which a transient failure
+    /// also writes, so a repeat mismatch can restore it without extending
+    /// it.
+    pub mismatch_until_ms: Option<u64>,
     /// Most recent NTP-style skew estimate (B5a), in ms (positive =
     /// peer ahead of us). `None` if the peer hasn't successfully
     /// answered an offer with `offerReceivedAt` populated, or if
@@ -54,6 +59,7 @@ impl NpubFailureRecord {
             last_failure_at_ms: now_ms,
             last_warn_at_ms: None,
             cooldown_until_ms: None,
+            mismatch_until_ms: None,
             last_observed_skew_ms: None,
         }
     }
@@ -147,6 +153,7 @@ impl FailureState {
         if let Some(entry) = map.get_mut(npub) {
             entry.consecutive_failures = 0;
             entry.cooldown_until_ms = None;
+            entry.mismatch_until_ms = None;
             entry.last_failure_at_ms = now_ms;
         }
         // No insert if absent — successful peers don't need a record.
@@ -173,6 +180,7 @@ impl FailureState {
         if let Some(entry) = map.get_mut(npub) {
             entry.consecutive_failures = 0;
             entry.cooldown_until_ms = None;
+            entry.mismatch_until_ms = None;
         }
     }
 
@@ -180,9 +188,10 @@ impl FailureState {
     /// `cooldown_ms` immediately (independent of the streak threshold).
     ///
     /// Returns `true` when this is a fresh mismatch entry (caller should
-    /// log a one-shot WARN) or `false` if a comparable mismatch cooldown
-    /// is already in place (caller should remain silent — repeat
-    /// observations of the same mismatch are uninteresting).
+    /// log a one-shot WARN) or `false` while the cooldown the first
+    /// observation set is still running (caller should remain silent). A
+    /// repeat inside that cooldown never extends it, at any point in the
+    /// window; it only restores it if a transient failure shortened it.
     ///
     /// Used when the rx loop sees an unhandshakable packet (e.g.,
     /// `Unknown FMP version`) on a Nostr-adopted bootstrap transport:
@@ -203,23 +212,24 @@ impl FailureState {
         // Treat the mismatch as crossing the streak threshold so other
         // visibility paths (e.g. show_peers JSON) reflect the failed state.
         entry.consecutive_failures = entry.consecutive_failures.max(self.threshold);
+        // Refreshed even on a repeat: it orders size-cap eviction, and a
+        // peer that keeps sending must not be evicted early, which would end
+        // its cooldown.
         entry.last_failure_at_ms = now_ms;
 
+        if let Some(until) = entry.mismatch_until_ms.filter(|&t| t > now_ms) {
+            entry.cooldown_until_ms = Some(entry.cooldown_until_ms.map_or(until, |t| t.max(until)));
+            return false;
+        }
         let cooldown_until = now_ms.saturating_add(cooldown_ms);
-        // "Fresh" means we weren't already inside a comparable cooldown
-        // window. Use the existing-cooldown's remaining time as the test
-        // so that an entry shifted forward by a few seconds doesn't keep
-        // re-triggering WARNs.
-        let already_suppressed = entry
-            .cooldown_until_ms
-            .is_some_and(|t| t > now_ms && t.saturating_sub(now_ms) >= cooldown_ms / 2);
         entry.cooldown_until_ms = Some(cooldown_until);
+        entry.mismatch_until_ms = Some(cooldown_until);
 
         if map.len() > self.max_entries {
             evict_oldest(&mut map, self.max_entries);
         }
 
-        !already_suppressed
+        true
     }
 
     /// Return cooldown_until_ms if the peer is currently in extended
@@ -357,19 +367,45 @@ mod tests {
     }
 
     #[test]
-    fn record_protocol_mismatch_repeat_inside_window_returns_false() {
+    fn a_repeat_protocol_mismatch_inside_the_cooldown_does_not_extend_it() {
         let s = fs();
         let cooldown_ms = 24 * 60 * 60 * 1000;
         s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
-        // 30s later, same mismatch — caller should NOT re-WARN
-        assert!(
-            !s.record_protocol_mismatch("npub1mismatch", 31_000, cooldown_ms),
-            "second mismatch inside the existing cooldown must NOT signal fresh"
-        );
-        // Cooldown extends forward.
+        for repeat in [
+            31_000,
+            1000 + cooldown_ms / 2 + 1,
+            1000 + cooldown_ms * 6 / 10,
+        ] {
+            assert!(
+                !s.record_protocol_mismatch("npub1mismatch", repeat, cooldown_ms),
+                "a repeat inside the cooldown must NOT signal fresh"
+            );
+            assert_eq!(
+                s.cooldown_until("npub1mismatch", repeat),
+                Some(1000 + cooldown_ms),
+                "a repeat at {repeat} moved the cooldown"
+            );
+            let snap = s.snapshot();
+            let (_, rec) = snap
+                .iter()
+                .find(|(n, _)| n == "npub1mismatch")
+                .expect("entry present");
+            assert_eq!(rec.last_failure_at_ms, repeat);
+        }
+    }
+
+    #[test]
+    fn a_transient_failure_inside_a_mismatch_cooldown_does_not_shorten_it_past_the_next_mismatch() {
+        let s = fs();
+        let cooldown_ms = 24 * 60 * 60 * 1000;
+        s.record_protocol_mismatch("npub1mismatch", 1000, cooldown_ms);
+        // A transient failure past the streak threshold writes its own,
+        // much shorter, cooldown over the mismatch one.
+        let _ = s.record_failure("npub1mismatch", 2000);
+        assert!(!s.record_protocol_mismatch("npub1mismatch", 3000, cooldown_ms));
         assert_eq!(
-            s.cooldown_until("npub1mismatch", 32_000),
-            Some(31_000 + cooldown_ms),
+            s.cooldown_until("npub1mismatch", 3000),
+            Some(1000 + cooldown_ms)
         );
     }
 
