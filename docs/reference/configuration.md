@@ -316,6 +316,11 @@ mDNS adverts are unauthenticated, so a LAN advert is treated only as a
 routing hint. Identity is still proven end-to-end by the Noise IK
 handshake the node initiates against the observed endpoint; a spoofed
 advert carrying another peer's npub fails the handshake and is dropped.
+The node dials an advertised address only when it lies on the link the
+advert's address record arrived on, so an advert carried between subnets
+by an mDNS reflector is not dialled. New LAN dials are paced: at most 8
+handshakes to unconfigured LAN peers are in flight at once, and at most
+2 to any one address.
 LAN discovery requires an active UDP transport (peers dial the
 advertised UDP port to begin the handshake).
 

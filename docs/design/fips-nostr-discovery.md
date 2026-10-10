@@ -443,7 +443,24 @@ LAN discovery adds two capabilities, both confined to the local link:
   operator's network bridges mDNS.
 - **Browsing.** The node concurrently browses for the same service
   type, learns the endpoints of other FIPS nodes on the link, and
-  initiates a normal FMP link to each newly-seen peer.
+  initiates a normal FMP link to each newly-seen peer. It dials an
+  advertised address only when it lies on the link its address record
+  arrived on (inside a prefix of the interface that received the
+  record, or IPv6 link-local with a scope); an address outside it, for
+  example one carried in by an mDNS reflector between subnets or one
+  in the prefix of the node's VPN or container interface, is ignored.
+  The advert's service host must also be the advertised node's own
+  `fips-` host name, since the mDNS library looks a host's addresses
+  up on every interface and does not report which interface the
+  advert arrived on; a sender on one link can therefore still name a
+  FIPS node on another of the node's links, at any port and under
+  npubs it mints to share that node's host name, but no other host.
+  New LAN dials are paced: they share the per-tick discovery budget,
+  need room under `max_peers`, and at most 8 handshakes to
+  unconfigured LAN peers are in flight at once, at most 2 of them to
+  any one address. Adverts waiting for a dial are held for up to ten
+  minutes in a set of at most 64, with configured peers dialled
+  first.
 
 The mDNS service type is `_fips._udp.local.`
 (`src/mdns/mod.rs:45`). Per RFC 6763 the `_udp` label denotes

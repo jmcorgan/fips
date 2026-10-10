@@ -30,7 +30,7 @@ use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Instant;
 
-use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ResolvedService, ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -80,6 +80,9 @@ pub struct LanDiscoveredPeer {
     pub npub: String,
     pub scope: Option<String>,
     pub addr: SocketAddr,
+    /// OS indexes of the interfaces the address record arrived on; empty
+    /// when mdns-sd recorded none.
+    pub interfaces: Vec<u32>,
     pub observed_at: Instant,
 }
 
@@ -169,11 +172,7 @@ impl LanRendezvous {
         let daemon = ServiceDaemon::new().map_err(|e| LanRendezvousError::Daemon(e.to_string()))?;
 
         let npub = identity.npub();
-        // mDNS DNS labels are capped at 63 bytes. 16 bech32 chars of npub
-        // give 80 bits of effective entropy — collisions on a single LAN
-        // are vanishingly unlikely. Prefixed for human-readable logs.
-        let label_npub = &npub[..16.min(npub.len())];
-        let instance_name = format!("fips-{label_npub}");
+        let instance_name = advert_label(&npub);
         let host_name = format!("{instance_name}.local.");
 
         let mut props: HashMap<String, String> = HashMap::new();
@@ -228,44 +227,18 @@ impl LanRendezvous {
                 };
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
-                        let mut peer_npub: Option<String> = None;
-                        let mut peer_scope: Option<String> = None;
-                        for prop in info.get_properties().iter() {
-                            match prop.key() {
-                                TXT_KEY_NPUB => {
-                                    peer_npub = Some(prop.val_str().to_string());
-                                }
-                                TXT_KEY_SCOPE => {
-                                    peer_scope = Some(prop.val_str().to_string());
-                                }
-                                _ => {}
+                        let advert = match check_advert(&info, &own_npub, scope_filter.as_deref()) {
+                            Ok(advert) => advert,
+                            Err(skip) => {
+                                log_skipped_advert(&info, &skip, scope_filter.as_deref());
+                                continue;
                             }
-                        }
-                        let Some(peer_npub) = peer_npub else {
-                            debug!(
-                                instance = info.get_fullname(),
-                                "lan: skip advert without npub TXT"
-                            );
-                            continue;
                         };
-                        if peer_npub == own_npub {
-                            // Our own advert echoed back on a loopback
-                            // or multi-homed interface.
-                            continue;
-                        }
-                        if scope_filter.is_some() && scope_filter != peer_scope {
-                            debug!(
-                                npub = %short(&peer_npub),
-                                their_scope = ?peer_scope,
-                                our_scope = ?scope_filter,
-                                "lan: skip cross-scope advert"
-                            );
-                            continue;
-                        }
-                        let port = info.get_port();
-                        if port == 0 {
-                            continue;
-                        }
+                        let AdvertFields {
+                            npub: peer_npub,
+                            scope: peer_scope,
+                            port,
+                        } = advert;
                         let observed_at = Instant::now();
                         // mdns-sd may report multiple interface IPs for
                         // a multi-homed responder. Surface all routable
@@ -289,6 +262,7 @@ impl LanRendezvous {
                                     npub: peer_npub.clone(),
                                     scope: peer_scope.clone(),
                                     addr,
+                                    interfaces: arrival_interfaces(scoped),
                                     observed_at,
                                 }))
                                 .is_err()
@@ -349,6 +323,130 @@ impl LanRendezvous {
     }
 }
 
+/// The instance and host label a FIPS responder registers for `npub`:
+/// `fips-` and the npub's first 16 characters. mDNS DNS labels are capped
+/// at 63 bytes; the 11 bech32 characters after `npub1` make collisions on
+/// one LAN unlikely. `None` when `npub` has no 16-character ASCII prefix.
+fn advert_label_of(npub: &str) -> Option<String> {
+    let prefix = npub.get(..16)?;
+    prefix.is_ascii().then(|| format!("fips-{prefix}"))
+}
+
+/// [`advert_label_of`] for this node's own npub, which is always ASCII.
+fn advert_label(npub: &str) -> String {
+    advert_label_of(npub).unwrap_or_else(|| format!("fips-{npub}"))
+}
+
+/// Whether `host`, the service host an advert's SRV record names, is the
+/// host a FIPS responder for `npub` registers: [`advert_label_of`] under
+/// `.local.`, or that label with the `-N` suffix an mDNS responder appends
+/// to settle a name conflict. DNS names compare without regard to ASCII case.
+///
+/// mdns-sd resolves an advert's addresses by its host name on every
+/// interface, and does not say which interface the SRV record arrived on.
+/// Without this check, a sender on one link could name the host of a
+/// machine on another of this node's links and so aim dials there.
+fn host_is_advertisers(host: &str, npub: &str) -> bool {
+    let Some(expected) = advert_label_of(npub) else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    let Some(label) = host
+        .strip_suffix(".local.")
+        .or_else(|| host.strip_suffix(".local"))
+    else {
+        return false;
+    };
+    match label.strip_prefix(&expected.to_ascii_lowercase()) {
+        Some("") => true,
+        Some(rest) => rest
+            .strip_prefix('-')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        None => false,
+    }
+}
+
+/// The FIPS fields of a resolved advert that passed [`check_advert`].
+#[derive(Debug)]
+struct AdvertFields {
+    npub: String,
+    scope: Option<String>,
+    port: u16,
+}
+
+/// Why [`check_advert`] skips a resolved advert as a whole.
+#[derive(Debug, PartialEq, Eq)]
+enum AdvertSkip {
+    /// No `npub` TXT entry.
+    NoNpub,
+    /// Our own advert, echoed back on a loopback or multi-homed interface.
+    Own,
+    /// A discovery scope other than ours.
+    CrossScope { npub: String, scope: Option<String> },
+    /// The service host is not the one the advertised npub registers.
+    ForeignHost,
+    /// No port to dial.
+    ZeroPort,
+}
+
+/// The service-level checks on a resolved advert, before its addresses are
+/// read: it must carry an npub other than ours, match our discovery scope
+/// when we have one, name the advertised npub's own host, and give a port.
+fn check_advert(
+    info: &ResolvedService,
+    own_npub: &str,
+    scope_filter: Option<&str>,
+) -> Result<AdvertFields, AdvertSkip> {
+    let mut npub: Option<String> = None;
+    let mut scope: Option<String> = None;
+    for prop in info.get_properties().iter() {
+        match prop.key() {
+            TXT_KEY_NPUB => npub = Some(prop.val_str().to_string()),
+            TXT_KEY_SCOPE => scope = Some(prop.val_str().to_string()),
+            _ => {}
+        }
+    }
+    let npub = npub.ok_or(AdvertSkip::NoNpub)?;
+    if npub == own_npub {
+        return Err(AdvertSkip::Own);
+    }
+    if scope_filter.is_some() && scope_filter != scope.as_deref() {
+        return Err(AdvertSkip::CrossScope { npub, scope });
+    }
+    if !host_is_advertisers(info.get_hostname(), &npub) {
+        return Err(AdvertSkip::ForeignHost);
+    }
+    let port = info.get_port();
+    if port == 0 {
+        return Err(AdvertSkip::ZeroPort);
+    }
+    Ok(AdvertFields { npub, scope, port })
+}
+
+/// Log why a resolved advert was skipped; an echo of our own advert and a
+/// zero port are skipped silently, as before.
+fn log_skipped_advert(info: &ResolvedService, skip: &AdvertSkip, scope_filter: Option<&str>) {
+    match skip {
+        AdvertSkip::NoNpub => debug!(
+            instance = info.get_fullname(),
+            "lan: skip advert without npub TXT"
+        ),
+        AdvertSkip::CrossScope { npub, scope } => debug!(
+            npub = %short(npub),
+            their_scope = ?scope,
+            our_scope = ?scope_filter,
+            "lan: skip cross-scope advert"
+        ),
+        AdvertSkip::ForeignHost => debug!(
+            instance = info.get_fullname(),
+            host = info.get_hostname(),
+            reason = "foreign-host",
+            "lan: skip advert whose service host is not the advertised node's"
+        ),
+        AdvertSkip::Own | AdvertSkip::ZeroPort => {}
+    }
+}
+
 /// The first 16 bytes of `npub` for a log line, cut back to a character
 /// boundary: the text comes from a sender's TXT record and need not be ASCII.
 fn short(npub: &str) -> &str {
@@ -371,6 +469,25 @@ fn socket_addr_from_scoped_ip(scoped: &ScopedIp, port: u16) -> Option<SocketAddr
             Some(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id)))
         }
         _ => None,
+    }
+}
+
+/// The OS indexes of the interfaces an address record arrived on, as
+/// mdns-sd records them: every interface an IPv4 record was seen on, and the
+/// scope of an IPv6 one. Index 0 means unknown and is left out.
+fn arrival_interfaces(scoped: &ScopedIp) -> Vec<u32> {
+    match scoped {
+        ScopedIp::V4(v4) => v4
+            .interface_ids()
+            .iter()
+            .map(|id| id.index)
+            .filter(|index| *index != 0)
+            .collect(),
+        ScopedIp::V6(v6) => Some(v6.scope_id().index)
+            .filter(|index| *index != 0)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

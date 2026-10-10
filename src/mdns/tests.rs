@@ -46,6 +46,28 @@ fn non_link_local_ipv6_advert_is_preserved() {
     assert_eq!(addr, Some("[::1]:51820".parse().unwrap()));
 }
 
+#[test]
+fn an_ipv4_record_carries_every_interface_it_arrived_on() {
+    let mut scoped = mdns_sd::ScopedIpV4::new(
+        Ipv4Addr::new(192, 168, 1, 7),
+        mdns_sd::InterfaceId {
+            name: "eth0".to_string(),
+            index: 2,
+        },
+    );
+    assert_eq!(
+        super::arrival_interfaces(&ScopedIp::V4(scoped.clone())),
+        vec![2]
+    );
+    scoped = mdns_sd::ScopedIpV4::new(
+        Ipv4Addr::new(192, 168, 1, 7),
+        mdns_sd::InterfaceId::default(),
+    );
+    assert!(super::arrival_interfaces(&ScopedIp::V4(scoped)).is_empty());
+    let unscoped = ScopedIp::from(IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert!(super::arrival_interfaces(&unscoped).is_empty());
+}
+
 async fn wait_for_peer(
     discovery: &LanRendezvous,
     expected_npub: &str,
@@ -212,12 +234,144 @@ async fn cross_scope_advert_is_filtered() {
     assert!(saw_b.is_none(), "cross-scope advert must be filtered");
 }
 
-/// A skipped advert's npub comes from the sender's TXT record, and the skip
-/// lines print its first 16 bytes. A multi-byte character across that cut
-/// must not panic the browser's event pump.
+/// A resolved advert as mdns-sd hands it to the browser: service host
+/// `host`, one IPv4 address, `port`, and the given TXT entries.
+fn resolved_advert(
+    host: &str,
+    addr: &str,
+    port: u16,
+    txt: &[(&str, &str)],
+) -> mdns_sd::ResolvedService {
+    let props: std::collections::HashMap<String, String> = txt
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    mdns_sd::ServiceInfo::new(super::SERVICE_TYPE, "evil", host, addr, port, Some(props))
+        .expect("valid service info")
+        .as_resolved_service()
+}
+
+/// The host name a FIPS responder for `npub` registers.
+fn fips_host(npub: &str) -> String {
+    format!("{}.local.", super::advert_label(npub))
+}
+
+/// A sender on one link advertises its own instance whose SRV record names
+/// the host of a machine on another of this node's links. mdns-sd resolves
+/// that host's address on the other link and reports the advert with it, so
+/// the advert must be refused here, before any address is read.
 #[test]
-fn a_non_ascii_npub_is_shortened_on_a_character_boundary_without_a_panic() {
-    assert_eq!(super::short("npub1aaaaaaaaaa\u{e9}zzzz"), "npub1aaaaaaaaaa");
-    assert_eq!(super::short("npub1aaaaaaaaaaazzzz"), "npub1aaaaaaaaaaa");
-    assert_eq!(super::short("npub1"), "npub1");
+fn an_advert_whose_service_host_is_another_machine_yields_no_lan_candidate() {
+    let npub = Identity::generate().npub();
+    let own = Identity::generate().npub();
+    let forged = resolved_advert("printer.local.", "10.2.0.5", 22, &[("npub", &npub)]);
+    assert_eq!(
+        super::check_advert(&forged, &own, None).unwrap_err(),
+        super::AdvertSkip::ForeignHost
+    );
+
+    // Control: the same advert naming the advertised node's own host passes.
+    let honest = resolved_advert(&fips_host(&npub), "10.2.0.5", 22, &[("npub", &npub)]);
+    let fields = super::check_advert(&honest, &own, None).expect("own host passes");
+    assert_eq!(fields.npub, npub);
+    assert_eq!(fields.port, 22);
+}
+
+#[test]
+fn an_advert_naming_another_fips_nodes_host_yields_no_lan_candidate() {
+    let npub = Identity::generate().npub();
+    let other = Identity::generate().npub();
+    let own = Identity::generate().npub();
+    let advert = resolved_advert(&fips_host(&other), "10.2.0.5", 2121, &[("npub", &npub)]);
+    assert_eq!(
+        super::check_advert(&advert, &own, None).unwrap_err(),
+        super::AdvertSkip::ForeignHost
+    );
+}
+
+#[test]
+fn a_fips_responders_host_name_matches_in_any_case_and_after_a_conflict_rename() {
+    let npub = Identity::generate().npub();
+    let label = super::advert_label(&npub);
+    for host in [
+        format!("{label}.local."),
+        format!("{label}.local"),
+        format!("{label}.local.").to_ascii_uppercase(),
+        format!("{label}-2.local."),
+        format!("{label}-17.local."),
+    ] {
+        assert!(super::host_is_advertisers(&host, &npub), "{host}");
+    }
+    for host in [
+        format!("{label}-.local."),
+        format!("{label}-x.local."),
+        format!("{label}x.local."),
+        format!("{label}.example."),
+        format!("x{label}.local."),
+        "printer.local.".to_string(),
+    ] {
+        assert!(!super::host_is_advertisers(&host, &npub), "{host}");
+    }
+    // An npub with no 16-character ASCII prefix names no host.
+    assert!(!super::host_is_advertisers(
+        "fips-npub1ééé.local.",
+        "npub1ééééééé"
+    ));
+}
+
+#[test]
+fn the_advert_checks_keep_their_other_refusals() {
+    let npub = Identity::generate().npub();
+    let own = Identity::generate().npub();
+    let host = fips_host(&npub);
+    let no_npub = resolved_advert(&host, "10.2.0.5", 2121, &[("v", "1")]);
+    assert_eq!(
+        super::check_advert(&no_npub, &own, None).unwrap_err(),
+        super::AdvertSkip::NoNpub
+    );
+    let echo = resolved_advert(&host, "10.2.0.5", 2121, &[("npub", &npub)]);
+    assert_eq!(
+        super::check_advert(&echo, &npub, None).unwrap_err(),
+        super::AdvertSkip::Own
+    );
+    let scoped = resolved_advert(&host, "10.2.0.5", 2121, &[("npub", &npub), ("scope", "b")]);
+    assert!(matches!(
+        super::check_advert(&scoped, &own, Some("a")).unwrap_err(),
+        super::AdvertSkip::CrossScope { .. }
+    ));
+    let same_scope = super::check_advert(&scoped, &own, Some("b")).expect("same scope passes");
+    assert_eq!(same_scope.scope.as_deref(), Some("b"));
+    let no_port = resolved_advert(&host, "10.2.0.5", 0, &[("npub", &npub)]);
+    assert_eq!(
+        super::check_advert(&no_port, &own, None).unwrap_err(),
+        super::AdvertSkip::ZeroPort
+    );
+}
+
+/// A skipped advert's npub comes from the sender's TXT record, and the
+/// cross-scope skip line prints its first 16 bytes. A multi-byte character
+/// across that cut must not panic the browser's event pump.
+#[test]
+fn a_cross_scope_advert_with_a_non_ascii_npub_is_logged_without_a_panic() {
+    let own = Identity::generate().npub();
+    let npub = "npub1aaaaaaaaaa\u{e9}zzzz";
+    let advert = resolved_advert(
+        "anything.local.",
+        "10.2.0.5",
+        2121,
+        &[("npub", npub), ("scope", "b")],
+    );
+    let skip = super::check_advert(&advert, &own, Some("a")).unwrap_err();
+    assert!(matches!(skip, super::AdvertSkip::CrossScope { .. }));
+
+    let ((), logs) = crate::testutil::capture_logs(|| {
+        super::log_skipped_advert(&advert, &skip, Some("a"));
+    });
+    let lines = logs.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("npub=npub1aaaaaaaaaa ") && line.contains("cross-scope")),
+        "skip line not logged: {lines:?}"
+    );
 }

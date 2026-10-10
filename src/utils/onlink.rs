@@ -3,8 +3,9 @@
 //! [`OnLinkPrefixes`] answers one question: whether an address lies on one of
 //! this node's own links, judged by the prefixes (address and prefix length)
 //! its interfaces hold. Discovery code uses it to decide whether an address a
-//! remote party named is one this node can reach directly, and whether two
-//! addresses share a link.
+//! remote party named is one this node can reach directly, whether it lies on
+//! the particular interface something arrived on, and whether two addresses
+//! share a link.
 //!
 //! A set is built for each use and never cached, because interfaces change
 //! under DHCP renumbering and VPNs coming and going. An empty set holds no
@@ -15,12 +16,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{debug, warn};
 
-/// The interface prefixes of this node, as `(address, prefix length)` pairs.
+/// The interface prefixes of this node, each an address, a prefix length and
+/// the index of the interface that holds it.
 #[derive(Clone, Debug, Default)]
 pub struct OnLinkPrefixes {
-    entries: Vec<(IpAddr, u8)>,
-    /// Pairs `from_pairs` dropped for a zero prefix length.
+    entries: Vec<Prefix>,
+    /// Entries dropped for a zero prefix length.
     discarded: usize,
+    /// Set when the system read failed, as opposed to finding no prefix.
+    failed: bool,
+}
+
+/// One interface prefix.
+#[derive(Clone, Copy, Debug)]
+struct Prefix {
+    net: IpAddr,
+    len: u8,
+    /// The OS index of the interface holding the prefix, when known.
+    index: Option<u32>,
 }
 
 /// Set once the first failed interface read has been logged at warn level.
@@ -58,21 +71,46 @@ impl OnLinkPrefixes {
     /// discarded rather than kept: it would put every address on-link, and it
     /// is what a platform netmask the reader could not decode turns into.
     /// Lengths beyond the family's width are clamped to it.
+    /// The interface of each pair is unknown, so the set answers
+    /// [`Self::contains_on`] with `false`.
     pub fn from_pairs(pairs: impl IntoIterator<Item = (IpAddr, u8)>) -> Self {
+        Self::from_indexed(pairs.into_iter().map(|(ip, len)| (ip, len, None)))
+    }
+
+    /// Build a set from `(address, prefix length, interface index)` triples,
+    /// with the same rules as [`Self::from_pairs`].
+    pub fn from_indexed(entries: impl IntoIterator<Item = (IpAddr, u8, Option<u32>)>) -> Self {
         let mut discarded = 0;
-        let entries = pairs
+        let entries = entries
             .into_iter()
-            .filter_map(|(ip, len)| {
-                let ip = canonical(ip);
-                let width = if ip.is_ipv4() { 32 } else { 128 };
+            .filter_map(|(ip, len, index)| {
+                let net = canonical(ip);
+                let width = if net.is_ipv4() { 32 } else { 128 };
                 if len == 0 {
                     discarded += 1;
                     return None;
                 }
-                Some((ip, len.min(width)))
+                Some(Prefix {
+                    net,
+                    len: len.min(width),
+                    index,
+                })
             })
             .collect();
-        Self { entries, discarded }
+        Self {
+            entries,
+            discarded,
+            failed: false,
+        }
+    }
+
+    /// The set a failed system read yields: it holds nothing, and
+    /// [`Self::read_failed`] tells it apart from a read that found nothing.
+    pub fn failed() -> Self {
+        Self {
+            failed: true,
+            ..Self::default()
+        }
     }
 
     /// Read this node's interface prefixes from the system.
@@ -81,11 +119,16 @@ impl OnLinkPrefixes {
     /// reports as down (`Down`, `NotPresent` and `LowerLayerDown`, which only
     /// Windows reports); any other status counts, since the POSIX platforms
     /// report only `Up` or `Unknown`. A failed read returns an empty set,
-    /// which refuses every candidate gated with it.
+    /// which refuses every candidate gated with it, marked so a caller holding
+    /// state can tell it from a read that found nothing.
     ///
     /// Read at each use and never cached, because interfaces change under
-    /// DHCP and VPNs. The cost is one `getifaddrs` call, a netlink dump on
-    /// Linux.
+    /// DHCP and VPNs. The cost is one `getifaddrs` call (a netlink dump on
+    /// Linux), plus one `if_nametoindex` call per address on the POSIX
+    /// platforms. LAN discovery reads once a second while it holds
+    /// candidates, including ticks on which the in-flight cap leaves nothing
+    /// to dial, so a sender on the link who keeps candidates held keeps this
+    /// read running once a second.
     pub fn read_system() -> Self {
         let interfaces = match if_addrs::get_if_addrs() {
             Ok(interfaces) => interfaces,
@@ -93,15 +136,15 @@ impl OnLinkPrefixes {
                 if !READ_FAILED_WARNED.swap(true, Ordering::Relaxed) {
                     warn!(
                         error = %err,
-                        "interface read failed; private traversal candidates and off-link mDNS targets will be refused"
+                        "interface read failed; private traversal candidates and mDNS targets other than IPv6 link-local will be refused"
                     );
                 } else {
                     debug!(error = %err, "interface read failed");
                 }
-                return Self::default();
+                return Self::failed();
             }
         };
-        let pairs: Vec<(IpAddr, u8)> = interfaces
+        let entries: Vec<(IpAddr, u8, Option<u32>)> = interfaces
             .iter()
             .filter(|iface| !iface.is_loopback())
             .filter(|iface| {
@@ -113,18 +156,18 @@ impl OnLinkPrefixes {
                 )
             })
             .map(|iface| match &iface.addr {
-                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
-                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen, iface.index),
+                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen, iface.index),
             })
             .collect();
-        let considered = pairs.len();
-        let set = Self::from_pairs(pairs);
+        let considered = entries.len();
+        let set = Self::from_indexed(entries);
         if read_suspect(considered, &set) {
             if !READ_SUSPECT_WARNED.swap(true, Ordering::Relaxed) {
                 warn!(
                     considered,
                     discarded = set.discarded,
-                    "interface prefixes unreadable; private traversal candidates and off-link mDNS targets will be refused"
+                    "interface prefixes unreadable; private traversal candidates and mDNS targets other than IPv6 link-local will be refused"
                 );
             } else {
                 debug!(
@@ -142,12 +185,26 @@ impl OnLinkPrefixes {
         self.discarded
     }
 
+    /// Whether this set stands for a failed system read.
+    pub fn read_failed(&self) -> bool {
+        self.failed
+    }
+
     /// Whether `ip` lies inside any prefix of the set.
     pub fn contains(&self, ip: IpAddr) -> bool {
         let ip = canonical(ip);
-        self.entries
-            .iter()
-            .any(|(net, len)| prefix_holds(*net, *len, ip))
+        self.entries.iter().any(|p| prefix_holds(p.net, p.len, ip))
+    }
+
+    /// Whether `ip` lies inside a prefix held by one of the interfaces whose
+    /// indexes are in `interfaces`. A prefix whose interface is unknown never
+    /// matches, so an empty `interfaces` matches nothing.
+    pub fn contains_on(&self, ip: IpAddr, interfaces: &[u32]) -> bool {
+        let ip = canonical(ip);
+        self.entries.iter().any(|p| {
+            p.index.is_some_and(|index| interfaces.contains(&index))
+                && prefix_holds(p.net, p.len, ip)
+        })
     }
 
     /// Whether one prefix of the set holds both `a` and `b`.
@@ -155,7 +212,7 @@ impl OnLinkPrefixes {
         let (a, b) = (canonical(a), canonical(b));
         self.entries
             .iter()
-            .any(|(net, len)| prefix_holds(*net, *len, a) && prefix_holds(*net, *len, b))
+            .any(|p| prefix_holds(p.net, p.len, a) && prefix_holds(p.net, p.len, b))
     }
 
     /// Whether the set holds no prefix at all.
@@ -242,6 +299,25 @@ mod tests {
         assert!(!s.share_link(ip("192.168.1.5"), ip("192.168.2.5")));
         assert!(OnLinkPrefixes::default().is_empty());
         assert!(!OnLinkPrefixes::default().share_link(ip("10.0.0.1"), ip("10.0.0.2")));
+    }
+
+    #[test]
+    fn contains_on_holds_only_the_named_interfaces_prefixes() {
+        let s = OnLinkPrefixes::from_indexed([
+            (ip("192.168.1.10"), 24, Some(2)),
+            (ip("10.8.0.2"), 24, Some(3)),
+            (ip("172.17.0.1"), 16, None),
+        ]);
+        assert!(s.contains_on(ip("192.168.1.7"), &[2]));
+        assert!(!s.contains_on(ip("10.8.0.5"), &[2]));
+        assert!(s.contains_on(ip("10.8.0.5"), &[2, 3]));
+        assert!(
+            !s.contains_on(ip("172.17.0.9"), &[2, 3]),
+            "unknown interface"
+        );
+        assert!(!s.contains_on(ip("192.168.1.7"), &[]));
+        assert!(s.contains(ip("172.17.0.9")));
+        assert!(!set(&[("192.168.1.10", 24)]).contains_on(ip("192.168.1.7"), &[2]));
     }
 
     #[test]

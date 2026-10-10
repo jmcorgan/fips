@@ -30,7 +30,8 @@
 //!    below).
 //! 3. **Opportunistic growth** — transport-neighbor beacons (subsumes
 //!    `poll_transport_discovery`, budget + per-peer cap) and LAN mDNS peers
-//!    (subsumes `poll_lan_rendezvous`, connected/connecting skip only).
+//!    (held candidates from `poll_lan_rendezvous`, budget, admission and an
+//!    in-flight cap on unconfigured dials).
 //! 4. **Ceiling** — not a separate pass; the `node.limits` triple plus the
 //!    per-tick and per-peer caps are enforced inline in every layer through the
 //!    [`Budget`] the driver builds. "Any limb binds → stop growing".
@@ -75,6 +76,7 @@ use crate::nostr::{OverlayEndpointAdvert, RendezvousDriver};
 use crate::proto::fmp::backoff_ms;
 use crate::transport::{TransportAddr, TransportId};
 
+use super::lan::MAX_LAN_DIALS_IN_FLIGHT;
 use super::retry::RetryState;
 
 /// Drain/run gate derived from the supervisor's published [`NodeState`].
@@ -167,6 +169,9 @@ pub(crate) struct Observed {
     /// pending_connects(addr), used by the per-peer parallel cap. Anonymous
     /// None-identity legs never key this map.
     pub in_flight_by_peer: HashMap<NodeAddr, usize>,
+    /// Unconfigured LAN dials still connecting, held against
+    /// [`MAX_LAN_DIALS_IN_FLIGHT`].
+    pub lan_in_flight: usize,
 }
 
 /// A dialable candidate. Mirrors the discovery tuple exactly
@@ -224,8 +229,10 @@ pub(crate) struct DiscoveryPools {
     pub overlay: Vec<(String, Vec<OverlayEndpointAdvert>, u64)>,
     /// `transport.discover()` beacons (auto-connect transports), pre-resolved.
     pub transport_neighbors: Vec<Candidate>,
-    /// mDNS `LanEvent::Discovered` peers, pre-resolved.
+    /// Held mDNS candidates, pre-resolved, configured ones first.
     pub lan: Vec<Candidate>,
+    /// The configured nodes among `lan`, which bypass the LAN in-flight cap.
+    pub lan_configured: HashSet<NodeAddr>,
     /// `config.peers()` npub set (the overlay configured-vs-open filter).
     pub configured_npubs: HashSet<String>,
     /// npubs with `bootstrap.cooldown_until(npub, now).is_some()`.
@@ -707,10 +714,13 @@ impl PeeringReconciler {
     /// Layer 3 — opportunistic growth (transport neighbors + LAN).
     ///
     /// Transport-neighbor growth (subsumes `poll_transport_discovery`) uses the
-    /// discovery connect budget and the per-peer parallel cap; LAN growth
-    /// (subsumes `poll_lan_rendezvous`) is simpler — connected/connecting skip
-    /// only, no budget. The driver pre-filters self, "fresh enough to skip", and
-    /// "already connecting on this exact path" when building the pools.
+    /// discovery connect budget and the per-peer parallel cap. LAN growth
+    /// (from the held mDNS candidates) continues from the same budget, needs
+    /// admission for a new peer, and keeps unconfigured LAN handshakes in
+    /// flight to at most `MAX_LAN_DIALS_IN_FLIGHT`. The driver pre-filters
+    /// self, "fresh enough to skip", and "already connecting on this exact
+    /// path" when building the pools. The two drivers call this layer
+    /// separately, so each gets the per-tick discovery budget.
     fn layer_opportunistic(
         &self,
         observed: &Observed,
@@ -745,17 +755,40 @@ impl PeeringReconciler {
             connect_budget = connect_budget.saturating_sub(1);
         }
 
-        // LAN: skip if connected or connecting, else dial (lifecycle:936). No
-        // budget or per-peer cap in today's poll_lan_rendezvous.
+        // LAN: anyone on the link can advertise, so LAN growth draws on the
+        // same discovery budget, needs admission for a new peer, dials each
+        // node once per call, and keeps unconfigured dials in flight to at
+        // most MAX_LAN_DIALS_IN_FLIGHT. Configured peers bypass that cap but
+        // not the budget.
+        let mut queued: HashSet<NodeAddr> = HashSet::new();
+        let mut lan_in_flight = observed.lan_in_flight;
         for cand in &pools.lan {
             let Some(identity) = cand.identity else {
                 continue;
             };
             let addr = *identity.node_addr();
-            if observed.connected.contains(&addr) || observed.connecting.contains(&addr) {
+            if observed.connected.contains(&addr)
+                || observed.connecting.contains(&addr)
+                || queued.contains(&addr)
+            {
+                continue;
+            }
+            if connect_budget == 0 {
+                break;
+            }
+            if self.path_candidate_budget(&addr, observed, budget) == 0 {
+                continue;
+            }
+            let configured = pools.lan_configured.contains(&addr);
+            if !configured && lan_in_flight >= MAX_LAN_DIALS_IN_FLIGHT {
                 continue;
             }
             actions.push(PeeringAction::Connect(cand.clone()));
+            queued.insert(addr);
+            connect_budget = connect_budget.saturating_sub(1);
+            if !configured {
+                lan_in_flight += 1;
+            }
         }
     }
 
@@ -922,6 +955,8 @@ pub(crate) struct Peering {
     /// The protected advert authors last pushed to the Nostr engine, so the
     /// per-tick push sends only changes.
     pub(in crate::node) advert_protected: HashSet<String>,
+    /// Held LAN discovery candidates awaiting a dial.
+    pub(in crate::node) lan: super::lan::PendingLan,
 }
 
 impl Peering {
@@ -931,6 +966,7 @@ impl Peering {
             reconciler: PeeringReconciler::default(),
             pending_connects: Vec::new(),
             advert_protected: HashSet::new(),
+            lan: super::lan::PendingLan::default(),
         }
     }
 }
@@ -1449,5 +1485,112 @@ mod tests {
         fn insert_retry_for_test(&mut self, addr: NodeAddr, state: RetryState) {
             self.retry_pending.insert(addr, state);
         }
+    }
+
+    // ---- LAN growth ---------------------------------------------------------
+
+    /// A LAN candidate for a fresh peer at `port` on loopback.
+    fn lan_cand(identity: PeerIdentity, port: u16) -> Candidate {
+        Candidate {
+            transport_id: TransportId::new(1),
+            remote_addr: TransportAddr::from_string(&format!("127.0.0.1:{port}")),
+            identity: Some(identity),
+            active_refresh: false,
+        }
+    }
+
+    fn opportunistic(budget: &Budget, observed: &Observed, pools: &DiscoveryPools) -> usize {
+        let mut r = PeeringReconciler::default();
+        count_connects(&r.reconcile_opportunistic(
+            &base_policy(),
+            observed,
+            budget,
+            pools,
+            1_000,
+            Gate::Reconciling,
+        ))
+    }
+
+    #[test]
+    fn lan_candidates_are_limited_to_the_discovery_budget() {
+        let pools = DiscoveryPools {
+            lan: (0..100u16)
+                .map(|i| lan_cand(mk_peer().0, 10_000 + i))
+                .collect(),
+            ..DiscoveryPools::default()
+        };
+        let mut budget = ample_budget();
+        budget.discovery_per_tick = 3;
+        assert_eq!(opportunistic(&budget, &Observed::default(), &pools), 3);
+    }
+
+    #[test]
+    fn lan_candidates_for_new_peers_are_refused_when_admission_binds() {
+        let pools = DiscoveryPools {
+            lan: (0..5u16)
+                .map(|i| lan_cand(mk_peer().0, 10_000 + i))
+                .collect(),
+            ..DiscoveryPools::default()
+        };
+        let mut full = ample_budget();
+        full.admission_ok = false;
+        full.peer_slots = 0;
+        assert_eq!(opportunistic(&full, &Observed::default(), &pools), 0);
+
+        // Controls: a connected peer is never redialled, and with admission
+        // open the same five candidates are dialled.
+        let (connected, connected_addr, _) = mk_peer();
+        let observed = Observed {
+            connected: [connected_addr].into_iter().collect(),
+            ..Observed::default()
+        };
+        let one_connected = DiscoveryPools {
+            lan: vec![lan_cand(connected, 9_999)],
+            ..DiscoveryPools::default()
+        };
+        assert_eq!(opportunistic(&ample_budget(), &observed, &one_connected), 0);
+        assert_eq!(
+            opportunistic(&ample_budget(), &Observed::default(), &pools),
+            5
+        );
+    }
+
+    #[test]
+    fn configured_lan_candidates_bypass_the_in_flight_cap_but_not_the_budget() {
+        let peers: Vec<PeerIdentity> = (0..100).map(|_| mk_peer().0).collect();
+        let pools = DiscoveryPools {
+            lan: peers
+                .iter()
+                .enumerate()
+                .map(|(i, id)| lan_cand(*id, 10_000 + i as u16))
+                .collect(),
+            lan_configured: peers.iter().map(|id| *id.node_addr()).collect(),
+            ..DiscoveryPools::default()
+        };
+        let observed = Observed {
+            lan_in_flight: MAX_LAN_DIALS_IN_FLIGHT,
+            ..Observed::default()
+        };
+        assert_eq!(opportunistic(&ample_budget(), &observed, &pools), 16);
+    }
+
+    #[test]
+    fn lan_dials_wait_when_eight_are_in_flight_and_resume_when_one_finishes() {
+        let (configured, configured_addr, _) = mk_peer();
+        let mut lan = vec![lan_cand(configured, 9_000)];
+        lan.extend((0..5u16).map(|i| lan_cand(mk_peer().0, 10_000 + i)));
+        let pools = DiscoveryPools {
+            lan,
+            lan_configured: [configured_addr].into_iter().collect(),
+            ..DiscoveryPools::default()
+        };
+        let at = |in_flight| Observed {
+            lan_in_flight: in_flight,
+            ..Observed::default()
+        };
+        // At the cap only the configured candidate is dialled.
+        assert_eq!(opportunistic(&ample_budget(), &at(8), &pools), 1);
+        // One finished: one unconfigured dial resumes beside the configured.
+        assert_eq!(opportunistic(&ample_budget(), &at(7), &pools), 2);
     }
 }

@@ -581,3 +581,326 @@ async fn a_restarted_nostr_engine_receives_the_configured_set_before_any_tick() 
             .contains(&configured.npub())
     );
 }
+
+/// A running node with one started UDP transport on loopback, for driving
+/// LAN discovery through the real dial path.
+async fn lan_node() -> Node {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let (packet_tx, packet_rx) = packet_channel(1024);
+    node.supervisor.packet_tx = Some(packet_tx.clone());
+    node.packet_rx = Some(packet_rx);
+    node.supervisor.state = NodeState::Running;
+    let mut transport = UdpTransport::new(
+        transport_id,
+        None,
+        UdpConfig {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            mtu: Some(1280),
+            ..Default::default()
+        },
+        packet_tx,
+    );
+    transport.start_async().await.unwrap();
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(transport));
+    node
+}
+
+/// The interface index the tests' loopback prefix and adverts use.
+const LAN_TEST_IF: u32 = 1;
+
+/// One mDNS discovery of a fresh npub at `addr`, arriving on
+/// [`LAN_TEST_IF`].
+fn lan_event(addr: &str) -> crate::mdns::LanEvent {
+    lan_event_on(addr, LAN_TEST_IF)
+}
+
+/// One mDNS discovery of a fresh npub at `addr`, arriving on `interface`.
+fn lan_event_on(addr: &str, interface: u32) -> crate::mdns::LanEvent {
+    crate::mdns::LanEvent::Discovered(crate::mdns::LanDiscoveredPeer {
+        npub: make_peer_identity().npub(),
+        scope: None,
+        addr: addr.parse().unwrap(),
+        interfaces: vec![interface],
+        observed_at: std::time::Instant::now(),
+    })
+}
+
+/// 127.0.0.1/32 on interface [`LAN_TEST_IF`].
+fn loopback_prefix() -> crate::utils::onlink::OnLinkPrefixes {
+    crate::utils::onlink::OnLinkPrefixes::from_indexed([(
+        "127.0.0.1".parse().unwrap(),
+        32,
+        Some(LAN_TEST_IF),
+    )])
+}
+
+async fn stop_transports(node: &mut Node) {
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+/// An mDNS advert naming an address off this node's links (one an mDNS
+/// reflector could carry in from another subnet) is not dialled.
+#[tokio::test]
+async fn an_off_link_lan_advert_is_not_dialled() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+
+    node.handle_lan_events(vec![lan_event("127.0.0.2:9")], &loopback_prefix())
+        .await;
+    assert_eq!(node.connection_count(), before, "off-link advert dialled");
+
+    // Control: the same path dials an on-link advert.
+    node.handle_lan_events(vec![lan_event("127.0.0.1:9")], &loopback_prefix())
+        .await;
+    assert_eq!(node.connection_count(), before + 1);
+    stop_transports(&mut node).await;
+}
+
+/// An advert that arrived on one interface naming an address in another
+/// interface's prefix (a VPN or container network on the same node) is not
+/// dialled, though both prefixes are this node's own.
+#[tokio::test]
+async fn a_lan_advert_naming_another_interfaces_prefix_is_not_dialled() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+    let prefixes = crate::utils::onlink::OnLinkPrefixes::from_indexed([
+        ("127.0.0.1".parse().unwrap(), 32, Some(1)),
+        ("127.0.0.2".parse().unwrap(), 32, Some(2)),
+    ]);
+
+    node.handle_lan_events(vec![lan_event_on("127.0.0.2:9", 1)], &prefixes)
+        .await;
+    assert_eq!(
+        node.connection_count(),
+        before,
+        "advert on interface 1 dialled into interface 2's prefix"
+    );
+
+    // Control: the same path dials an address on the arrival interface.
+    node.handle_lan_events(vec![lan_event_on("127.0.0.1:9", 1)], &prefixes)
+        .await;
+    assert_eq!(node.connection_count(), before + 1);
+    stop_transports(&mut node).await;
+}
+
+/// 127.0.0.0/8 on interface [`LAN_TEST_IF`], for tests that dial several
+/// loopback addresses.
+#[cfg(target_os = "linux")]
+fn loopback_net() -> crate::utils::onlink::OnLinkPrefixes {
+    crate::utils::onlink::OnLinkPrefixes::from_indexed([(
+        "127.0.0.0".parse().unwrap(),
+        8,
+        Some(LAN_TEST_IF),
+    )])
+}
+
+/// 100 adverts under fresh keys, two at each of 50 loopback addresses.
+/// Only Linux answers on all of 127.0.0.0/8 without configuration.
+#[cfg(target_os = "linux")]
+fn spread_burst() -> Vec<crate::mdns::LanEvent> {
+    (0..100u16)
+        .map(|i| lan_event(&format!("127.0.0.{}:{}", 1 + i / 2, 10_001 + i)))
+        .collect()
+}
+
+/// A burst of adverts under fresh keys, none of which will ever complete a
+/// handshake, starts no more handshakes than the in-flight cap.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_burst_of_lan_adverts_under_fresh_keys_is_dialled_at_the_in_flight_cap() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+
+    node.handle_lan_events(spread_burst(), &loopback_net())
+        .await;
+    assert_eq!(node.connection_count() - before, 8);
+    stop_transports(&mut node).await;
+}
+
+/// Adverts under any number of fresh npubs that all resolve to one host's
+/// address, at ports the sender chooses (as forged npubs sharing a FIPS
+/// node's host name do), start at most two handshakes to that host, on the
+/// first tick and while those two are still connecting.
+#[tokio::test]
+async fn adverts_under_many_npubs_for_one_address_start_at_most_two_handshakes_to_it() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+    let events = (10_001..=10_100u16)
+        .map(|port| lan_event(&format!("127.0.0.1:{port}")))
+        .collect();
+
+    node.handle_lan_events(events, &loopback_prefix()).await;
+    assert_eq!(node.connection_count() - before, 2);
+    node.dial_pending_lan(&loopback_prefix()).await;
+    assert_eq!(node.connection_count() - before, 2);
+    stop_transports(&mut node).await;
+}
+
+/// The off-link check acts before the pending set, so an off-link advert
+/// never takes a slot there: it neither stays held nor, at a full set,
+/// displaces a held on-link candidate.
+#[tokio::test]
+async fn an_off_link_lan_advert_never_enters_the_pending_set() {
+    let mut node = lan_node().await;
+    node.handle_lan_events(vec![lan_event("127.0.0.2:9")], &loopback_prefix())
+        .await;
+    assert!(node.peering.lan.is_empty());
+
+    // A full set of held on-link candidates, all at one address, then a
+    // burst of off-link adverts: the dial pass takes the two that address
+    // allows, and the other 62 are all still held.
+    let mut rng = rand::rng();
+    let none = std::collections::HashSet::new();
+    for port in 20_001..=20_064u16 {
+        let identity = make_peer_identity();
+        let pair = crate::node::peering::lan::PendingPair {
+            node: *identity.node_addr(),
+            identity,
+            transport_id: TransportId::new(1),
+            addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            interfaces: vec![LAN_TEST_IF],
+            first_seen_ms: 0,
+        };
+        node.peering.lan.offer(pair, &none, 0, &mut rng);
+    }
+    let off_link = (1..=20u16)
+        .map(|i| lan_event(&format!("127.0.0.2:{i}")))
+        .collect();
+    node.handle_lan_events(off_link, &loopback_prefix()).await;
+    assert_eq!(
+        node.peering.lan.len(),
+        64 - crate::node::peering::lan::MAX_LAN_DIALS_PER_ADDR
+    );
+    stop_transports(&mut node).await;
+}
+
+/// Held candidates are not dialled again while the first eight dials are
+/// still connecting.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn pending_lan_dials_are_not_repeated_while_the_first_eight_are_connecting() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+    node.handle_lan_events(spread_burst(), &loopback_net())
+        .await;
+    assert_eq!(node.connection_count() - before, 8);
+    assert!(!node.peering.lan.is_empty(), "the rest are held");
+
+    node.dial_pending_lan(&loopback_net()).await;
+    assert_eq!(node.connection_count() - before, 8);
+    stop_transports(&mut node).await;
+}
+
+/// The set-full latch is released by the tick itself, without any further
+/// mDNS event or held candidate.
+#[tokio::test]
+async fn the_lan_set_full_latch_is_released_on_ticks_with_no_mdns_events() {
+    let mut node = lan_node().await;
+    let mut rng = rand::rng();
+    let none = std::collections::HashSet::new();
+    for i in 0..=crate::node::peering::lan::MAX_PENDING_LAN_CANDIDATES {
+        let identity = make_peer_identity();
+        let pair = crate::node::peering::lan::PendingPair {
+            node: *identity.node_addr(),
+            identity,
+            transport_id: TransportId::new(1),
+            addr: format!("192.168.1.{}:2121", 1 + i % 250).parse().unwrap(),
+            interfaces: vec![LAN_TEST_IF],
+            first_seen_ms: 0,
+        };
+        node.peering.lan.offer(pair, &none, 0, &mut rng);
+    }
+    assert!(node.peering.lan.is_latched());
+    node.peering
+        .lan
+        .retain_on_link(&crate::utils::onlink::OnLinkPrefixes::default());
+    assert!(node.peering.lan.is_empty());
+
+    let t = 1_000;
+    node.lan_tick(Vec::new(), t).await;
+    assert!(node.peering.lan.is_latched(), "held for a minute first");
+    node.lan_tick(Vec::new(), t + 60_000).await;
+    assert!(!node.peering.lan.is_latched());
+    stop_transports(&mut node).await;
+}
+
+/// A multi-homed peer's other held addresses go once it connects through
+/// one of them, on a tick with no mDNS events, so the held set does not keep
+/// the per-tick interface read running for nothing.
+#[tokio::test]
+async fn a_connected_peers_other_lan_addresses_are_dropped_on_a_tick_without_adverts() {
+    let mut node = lan_node().await;
+    let link_id = LinkId::new(1);
+    let peer = seed_completed_connection(&mut node, link_id, TransportId::new(1), 1000);
+    node.promote_connection(link_id, peer, 2000).unwrap();
+    let mut rng = rand::rng();
+    let none = std::collections::HashSet::new();
+    for port in [9u16, 10] {
+        let pair = crate::node::peering::lan::PendingPair {
+            node: *peer.node_addr(),
+            identity: peer,
+            transport_id: TransportId::new(1),
+            addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            interfaces: vec![LAN_TEST_IF],
+            first_seen_ms: 0,
+        };
+        node.peering.lan.offer(pair, &none, 0, &mut rng);
+    }
+    assert_eq!(node.peering.lan.len(), 2);
+
+    node.dial_pending_lan(&loopback_prefix()).await;
+    assert!(
+        node.peering.lan.is_empty(),
+        "a connected peer's addresses are still held"
+    );
+    stop_transports(&mut node).await;
+}
+
+/// A failed interface read is not taken for a host with no addresses: the
+/// held candidates are kept, undialled, for the next tick, because mDNS
+/// would not report them again.
+#[tokio::test]
+async fn a_failed_interface_read_keeps_held_lan_candidates_for_the_next_tick() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+    let mut rng = rand::rng();
+    let none = std::collections::HashSet::new();
+    let identity = make_peer_identity();
+    let pair = crate::node::peering::lan::PendingPair {
+        node: *identity.node_addr(),
+        identity,
+        transport_id: TransportId::new(1),
+        addr: "127.0.0.1:9".parse().unwrap(),
+        interfaces: vec![LAN_TEST_IF],
+        first_seen_ms: 0,
+    };
+    node.peering.lan.offer(pair, &none, 0, &mut rng);
+
+    node.dial_pending_lan(&crate::utils::onlink::OnLinkPrefixes::failed())
+        .await;
+    assert_eq!(node.peering.lan.len(), 1, "held candidate discarded");
+    assert_eq!(node.connection_count(), before);
+
+    // The next tick's good read dials it.
+    node.dial_pending_lan(&loopback_prefix()).await;
+    assert_eq!(node.connection_count(), before + 1);
+    stop_transports(&mut node).await;
+}
+
+/// One honest on-link advert is dialled once, and not again on the next
+/// call.
+#[tokio::test]
+async fn one_on_link_lan_advert_is_dialled_once() {
+    let mut node = lan_node().await;
+    let before = node.connection_count();
+    node.handle_lan_events(vec![lan_event("127.0.0.1:9")], &loopback_prefix())
+        .await;
+    assert_eq!(node.connection_count(), before + 1);
+    node.dial_pending_lan(&loopback_prefix()).await;
+    assert_eq!(node.connection_count(), before + 1);
+    stop_transports(&mut node).await;
+}

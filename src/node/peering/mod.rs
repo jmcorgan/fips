@@ -10,5 +10,6 @@
 //! persist in the reconciler, not per-connection.
 
 pub(in crate::node) mod driver;
+pub(in crate::node) mod lan;
 pub(in crate::node) mod reconcile;
 pub(in crate::node) mod retry;
