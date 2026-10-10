@@ -20,10 +20,15 @@ const DEFAULT_TUN_MTU: u16 = 1280;
 /// traffic to a TUN address is attributed to the TUN's ifindex —
 /// causing the mesh-interface filter to silently drop every query.
 ///
-/// To expose the responder to mesh peers, set `bind_addr: "::"` in
-/// fips.yaml. The `is_mesh_interface_query` filter in `src/upper/dns.rs`
-/// is still in place to prevent hosts-file alias enumeration in that
-/// mode. See `packaging/common/fips-dns-setup` for backend selection.
+/// A non-loopback `bind_addr` such as `"::"` answers every host that can
+/// reach it, so set one only to serve other hosts (LAN clients, or a
+/// gateway reaching the daemon over IPv4). On Linux, macOS and FreeBSD,
+/// with the daemon's own TUN, the `is_mesh_interface_query` filter drops
+/// queries arriving on the mesh interface, so mesh peers are not served,
+/// unless the daemon logged "Mesh interface index unresolved; DNS mesh
+/// filter disabled" at start; on Windows, or with an application-supplied
+/// TUN, they are. See `packaging/common/fips-dns-setup` for backend
+/// selection.
 const DEFAULT_DNS_BIND_ADDR: &str = "::1";
 
 /// Default DNS responder port.

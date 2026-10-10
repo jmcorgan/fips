@@ -2007,9 +2007,13 @@ impl Node {
                     // to fips0 in PKTINFO and gets silently dropped by the
                     // mesh-interface filter in src/upper/dns.rs.
                     //
-                    // For mesh-reachable resolution (rare), set bind_addr: "::"
-                    // in fips.yaml. The mesh-interface filter remains active to
-                    // prevent hosts-file alias enumeration in that mode.
+                    // A non-loopback bind_addr such as "::" answers every host
+                    // that can reach it. On Linux, macOS and FreeBSD, with the
+                    // daemon's own TUN, that same mesh-interface filter drops
+                    // queries arriving on the mesh interface, so mesh peers are
+                    // not served, unless the daemon logs "Mesh interface index
+                    // unresolved; DNS mesh filter disabled" at start; on
+                    // Windows, or with an application-supplied TUN, they are.
                     // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
                     // 127.0.0.1 still reach us regardless of kernel sysctl
                     // defaults — but only when bind is on a wildcard / IPv6 path.

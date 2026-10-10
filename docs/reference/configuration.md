@@ -515,7 +515,7 @@ with the node for routing.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `dns.enabled` | bool | `true` | Enable DNS responder |
-| `dns.bind_addr` | string | `"::1"` | Bind address. Default is IPv6 loopback only; the shipped `fips-dns-setup` configures systemd-resolved to forward `.fips` queries to `[::1]:5354`. To expose the responder to mesh peers (or to the gateway over IPv4), override (e.g., `"::"` for all interfaces). |
+| `dns.bind_addr` | string | `"::1"` | Bind address. Default is IPv6 loopback only; the shipped `fips-dns-setup` configures systemd-resolved to forward `.fips` queries to `[::1]:5354`. A non-loopback address (e.g. `"::"` for all interfaces) answers every host that can reach it: set one only to serve other hosts, such as LAN clients, or a gateway that reaches the daemon over IPv4. On Linux, macOS and FreeBSD, when the daemon creates its own TUN, queries arriving on the mesh interface are dropped, so mesh peers are not served, unless the daemon logs 'Mesh interface index unresolved; DNS mesh filter disabled' at start, in which case they are; on Windows, or with an application-supplied TUN, they are. The reply goes to the query's source address by the routing table, so a host on one of those networks that forges a mesh source address (`fd00::/8`) has the reply sent into the mesh, from this node's mesh address, to the address and port it forged. |
 | `dns.port` | u16 | `5354` | Listen port |
 | `dns.ttl` | u32 | `300` | AAAA record TTL in seconds. Values above 2147483647 are treated as 2147483647. |
 

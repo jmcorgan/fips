@@ -80,6 +80,9 @@ Only FIPS traffic for `fd00::/8` is forwarded through the sidecar. Regular
 internet traffic still uses the macOS host network and does not route through
 `wg0` or `fips0`.
 
+The container's DNS port 5354 is published on `127.0.0.1` only, for the macOS
+resolver that `/etc/resolver/fips` points at, and not to the network.
+
 ## Sidecar FIPS Identity
 
 `fips-on.sh` generates `identity/fips.key` and `identity/fips.pub` on first run by calling:

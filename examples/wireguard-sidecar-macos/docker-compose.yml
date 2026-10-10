@@ -15,8 +15,8 @@ services:
       - net.ipv6.conf.all.forwarding=1
       - net.ipv4.ip_forward=1
     ports:
-      - "5354:5354/udp"
-      - "5354:5354/tcp"
+      - "127.0.0.1:5354:5354/udp"
+      - "127.0.0.1:5354:5354/tcp"
       - "2222:22/tcp"
       - "51820:51820/udp"
     volumes:

@@ -72,10 +72,16 @@ dns:
   # /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
   # [::1]:5354.
   #
-  # Set "::" to expose the responder to mesh peers as well (e.g. for
-  # gateway hosts that resolve .fips on behalf of LAN clients). The
-  # mesh-interface filter in src/upper/dns.rs will still defend
-  # /etc/fips/hosts aliases from cross-mesh enumeration.
+  # Set "::" to serve .fips names to other hosts on this machine's
+  # networks (e.g. LAN clients behind a gateway host). Every host that
+  # can reach port 5354 can then query it. On Linux, macOS and FreeBSD,
+  # with the daemon's own TUN, queries arriving on the mesh interface are
+  # dropped, so mesh peers are not served, unless the daemon logged
+  # "Mesh interface index unresolved; DNS mesh filter disabled" at
+  # start; on Windows, or with an application-supplied TUN, they are.
+  # Replies follow the routing table, so a host on those networks that
+  # forges a mesh source address (fd00::/8) has the reply sent into the
+  # mesh from this node's mesh address.
   # bind_addr: "::1"
   port: 5354
 
