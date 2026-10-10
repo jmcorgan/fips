@@ -97,6 +97,7 @@ pub fn resolve_fips_query_with_hosts(
 /// for hostname resolution before falling back to direct npub resolution.
 pub fn handle_dns_packet(
     query_bytes: &[u8],
+    _src_port: u16,
     ttl: u32,
     hosts: &HostMap,
 ) -> Option<(Vec<u8>, Option<DnsResolvedIdentity>)> {
@@ -216,7 +217,7 @@ pub(crate) async fn run_responder(
         // (cheap stat call).
         refresh_hosts(&mut reloader, aliases.as_mut());
 
-        match handle_dns_packet(query_bytes, ttl, reloader.hosts()) {
+        match handle_dns_packet(query_bytes, src.port(), ttl, reloader.hosts()) {
             Some((response_bytes, identity)) => {
                 if let Some(id) = identity {
                     debug!(
@@ -533,7 +534,7 @@ mod tests {
         let query_name = format!("{}.fips", npub);
         let query_packet = build_test_query(&query_name, TYPE::AAAA);
 
-        let result = handle_dns_packet(&query_packet, 300, &hosts);
+        let result = handle_dns_packet(&query_packet, 53000, 300, &hosts);
         assert!(result.is_some(), "should handle AAAA query");
 
         let (response_bytes, identity_opt) = result.unwrap();
@@ -560,7 +561,7 @@ mod tests {
 
         let query_packet = build_test_query("gateway.fips", TYPE::AAAA);
 
-        let result = handle_dns_packet(&query_packet, 300, &hosts);
+        let result = handle_dns_packet(&query_packet, 53000, 300, &hosts);
         assert!(result.is_some(), "should handle hostname AAAA query");
 
         let (response_bytes, identity_opt) = result.unwrap();
@@ -584,7 +585,7 @@ mod tests {
         let hosts = HostMap::new();
         let query_packet = build_test_query("unknown.fips", TYPE::AAAA);
 
-        let result = handle_dns_packet(&query_packet, 300, &hosts);
+        let result = handle_dns_packet(&query_packet, 53000, 300, &hosts);
         assert!(result.is_some());
 
         let (response_bytes, identity_opt) = result.unwrap();
@@ -605,7 +606,7 @@ mod tests {
         let query_name = format!("{}.fips", identity.npub());
         let query_packet = build_test_query(&query_name, TYPE::A);
 
-        let result = handle_dns_packet(&query_packet, 300, &hosts);
+        let result = handle_dns_packet(&query_packet, 53000, 300, &hosts);
         assert!(result.is_some());
 
         let (response_bytes, identity_opt) = result.unwrap();

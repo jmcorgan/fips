@@ -269,6 +269,7 @@ pub async fn serve(
 
                 let response = match handle_query(
                     query_bytes,
+                    client_addr.port(),
                     upstream,
                     ttl,
                     &pool,
@@ -293,8 +294,9 @@ pub async fn serve(
 }
 
 /// Handle a single DNS query. Returns the response bytes to send back.
-async fn handle_query(
+pub(crate) async fn handle_query(
     query_bytes: &[u8],
+    _src_port: u16,
     upstream: SocketAddr,
     ttl: u32,
     pool: &std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
@@ -650,6 +652,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let response = handle_query(
             &build_query(0x1234, "test.fips"),
+            53000,
             upstream,
             TEST_TTL,
             &pool,
@@ -687,6 +690,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let response = handle_query(
             &build_query(0x1234, "test.fips"),
+            53000,
             upstream,
             TEST_TTL,
             &pool,
@@ -720,6 +724,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let response = handle_query(
             &build_query(0x1234, "test.fips"),
+            53000,
             upstream,
             TEST_TTL,
             &pool,
@@ -750,6 +755,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let response = handle_query(
             &build_query(0x1234, "test.fips"),
+            53000,
             upstream,
             TEST_TTL,
             &pool,
@@ -779,6 +785,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let response = handle_query(
             &build_query_of_type(0x1234, "test.fips", QTYPE::TYPE(TYPE::A)),
+            53000,
             upstream,
             TEST_TTL,
             &pool,
@@ -821,6 +828,7 @@ mod tests {
         });
         let response = handle_query(
             &build_query_of_type(id, qname, qtype),
+            53000,
             upstream,
             TEST_TTL,
             pool,
@@ -947,6 +955,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let response = handle_query(
             &build_query(0x1234, "test.fips"),
+            53000,
             upstream,
             TEST_TTL,
             &pool,
