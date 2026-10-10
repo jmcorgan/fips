@@ -21,7 +21,7 @@ calls. The only extra requirement over the `.ipk` build is the `apk` binary.
 | `apk-version.test.sh` | Case-table test for `apk-version.sh` (`sh apk-version.test.sh`) |
 
 The installed-filesystem payload (init scripts, `fips.yaml`, sysctl drop-ins,
-hotplug, uci-defaults, …) is **shared** with the `.ipk` package — there is one
+uci-defaults, …) is **shared** with the `.ipk` package — there is one
 canonical copy in [`../openwrt-ipk/files/`](../openwrt-ipk/files/). `build-apk.sh`
 stages from there, so the two packages ship the same files apart from one
 staged rewrite: `build-apk.sh` changes `ethernet.wan.interface` in the staged

@@ -35,7 +35,10 @@
 #     route while staying associated.
 #   - ISOLATED           — own network and firewall zone: no path to
 #     br-lan, no forwarding to the WAN, and AP client isolation on.
-#     Associated clients reach only the FIPS handshake surface.
+#     On the access network, associated clients reach ICMPv6, DHCPv4,
+#     mDNS and the FIPS transports, nothing else. What they send over
+#     FIPS to the router arrives on fips0 and meets the fips zone, which
+#     rejects all but replies, ping and gateway port forwards.
 #
 # Interfaces are named per radio index (radio0 -> fips-ap0, radio1 ->
 # fips-ap1). Unlike the 802.11s backhaul there is NO same-channel
@@ -310,11 +313,13 @@ uci set "dhcp.$SECTION.limit=200"
 # ---------------------------------------------------------------------------
 # Firewall: one shared 'fips_ap' zone for all instances. Everything is
 # rejected except what a FIPS client needs — DHCPv4 (addressing), ICMPv6
-# (SLAAC itself), mDNS (discovery), and the FIPS UDP/TCP transports (the
-# handshake surface).
+# of every type (SLAAC itself), mDNS (discovery), and the FIPS UDP/TCP
+# transports (the handshake surface).
 # The raw-Ethernet transport (EtherType 0x2121) is not IP and never
 # traverses the firewall. No forwardings exist, so there is no path to
-# br-lan or the WAN.
+# br-lan or the WAN. Traffic a client then sends over FIPS to the router
+# arrives on fips0, not here, and meets the fips zone, which rejects all
+# but replies, ping and gateway port forwards.
 # ---------------------------------------------------------------------------
 
 if [ "$(uci -q get firewall.fips_ap)" != "zone" ]; then

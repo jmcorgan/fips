@@ -1,14 +1,18 @@
 # FIPS Mesh-Interface Security
 
 This document describes the threat model and design rationale for the
-operator-facing security posture of the `fips0` mesh interface on Linux.
-The default-deny nftables baseline shipped as `/etc/fips/fips.nft` is the
-artifact discussed below; for the operator activation steps and drop-in
-extension recipes, see [enable-mesh-firewall.md](../how-to/enable-mesh-firewall.md).
+operator-facing security posture of the `fips0` mesh interface on Linux
+and on OpenWrt. On a general Linux host, the default-deny nftables
+baseline shipped as `/etc/fips/fips.nft` is the artifact discussed
+below; for the operator activation steps and drop-in extension recipes,
+see [enable-mesh-firewall.md](../how-to/enable-mesh-firewall.md).
 
-The baseline is a documented operator conffile, not an auto-loaded
-package side-effect. Activation is an explicit one-liner. The
-rationale for that design follows.
+There, the baseline is a documented operator conffile, not an
+auto-loaded package side-effect. Activation is an explicit one-liner.
+The rationale for that design follows. OpenWrt is different: the router
+already runs a zone firewall, and the package gives `fips0` a
+default-deny zone of its own at install (see
+[OpenWrt: a zone, set up at install](#openwrt-a-zone-set-up-at-install)).
 
 ## Threat Model for `fips0`
 
@@ -76,9 +80,10 @@ documentation that the rest of this document references.
 
 ## Why no auto-load on package install
 
-The `postinst` script does **not** enable `fips-firewall.service`.
-This is deliberate. Quietly mutating host firewall state on package
-install is hostile on every axis that matters: it surprises operators
+On a general Linux host, the `postinst` script does **not** enable
+`fips-firewall.service`. This is deliberate. Quietly mutating host
+firewall state on package install is hostile on every axis that
+matters: it surprises operators
 who already have their own nftables ruleset, it can collide with
 podman/Docker/OPNsense integrations even though the early-return
 makes it technically safe, and it converts an explicit security
@@ -89,6 +94,46 @@ The activation gesture is one short, well-formed command. The
 rationale is documented in the file's inline header and in this
 document. That is enough; auto-loading would trade discoverability
 for no real gain.
+
+## OpenWrt: a zone, set up at install
+
+A router is different. It already runs a zone firewall (fw4), every
+interface is expected to sit in a zone, and an interface left out of
+every zone meets the firewall's default policy, which accepts input on
+stock OpenWrt 22.03. So the OpenWrt package does configure the firewall
+at install: it gives `fips0` a zone of its own, `fips`, with the inbound
+posture `fips.nft` gives a Linux host, expressed in fw4's terms. Unlike
+`fips.nft`, which has only an input hook, the zone also governs forwarding.
+
+- Inbound connections from FIPS peers to the router are refused (input
+  REJECT, where `fips.nft` drops), except replies to the router's own
+  connections, related ICMPv6, echo-request, and fips-gateway's port
+  forwards.
+- Outbound traffic from the router into the mesh is unrestricted
+  (output ACCEPT).
+- Forwarding into the mesh is allowed from the `lan` zone, which is the
+  gateway's path, and from any zone the operator gives a forwarding to
+  `fips`. OpenWrt's stock rules also accept ICMPv6 from `wan` into every
+  zone; a second packaged include refuses it into `fips0`. fips-gateway
+  translates only traffic that arrives on its LAN interface and drops
+  new traffic from its other interfaces into the mesh, so a port forward
+  in another zone, whose translated flows fw4 accepts in that zone's
+  forward chain, does not open the mesh to it.
+- Forwarding from the mesh is refused except for the gateway's port
+  forwards.
+
+The port forwards are DNAT rules in fips-gateway's own nftables table,
+so the package installs a small fw4 include that accepts them in the
+zone, after the zone's own rules. A rule with `src fips` can therefore
+restrict them, and opening a port to FIPS peers is likewise a `src fips`
+rule; `src_ip` takes a peer's mesh address. Once created, the zone is
+the operator's: the package creates it only while no zone holds `fips0`
+and never rewrites it. The OpenWrt package README describes the zone
+and how to change it.
+
+If the firewall fails to reload during an upgrade, the package blocks
+new connections from `fips0` in the loaded ruleset until the firewall
+reloads cleanly, and says so.
 
 ## Coexistence with other firewalls
 
@@ -174,7 +219,8 @@ the application's, the same as on any other shared network.
 
 ## Future Work
 
-The current baseline is Linux-only. Parallel work for other targets:
+The baseline covers Linux and OpenWrt; macOS and the cross-OS gateway
+still lack one. Parallel work for those targets:
 
 - **macOS PF baseline.** macOS uses Packet Filter (PF), inherited
   from OpenBSD. PF maps cleanly onto the same conceptual model as
@@ -186,12 +232,6 @@ The current baseline is Linux-only. Parallel work for other targets:
   is `utunN` rather than `fips0`, so the rule template needs runtime
   substitution or a PF interface group assigned at TUN bring-up;
   this is being worked through with the macOS port.
-- **OpenWrt fw4 path.** OpenWrt's fw4 already drives nftables under
-  the hood, but rules go into `/etc/nftables.d/` includes or UCI
-  entries in `/etc/config/firewall`, not a free-standing
-  `fips.nft`. The ipk will ship a layout-compatible variant or
-  document the operator setup separately, decided when the OpenWrt
-  packaging is updated.
 - **Cross-OS gateway abstraction.** `fips-gateway` is currently
   Linux-only because `src/gateway/nat.rs` uses the `rustables`
   netlink API directly. macOS gateway support requires a PF-backed

@@ -36,7 +36,11 @@ Three deliberate choices distinguish this from a stock guest network:
   MITM) but does not gate who may peer, and admission is open up to the
   daemon's max-peers cap. What confines a hostile peer is the isolated
   `fips_ap` zone (no path to br-lan or the WAN — see below), not the
-  handshake. What you concede: any nearby device can reach the FIPS
+  handshake. On the access network a client reaches ICMPv6, DHCPv4, mDNS
+  and the FIPS transports, and nothing else. What a peer then reaches on
+  the router over FIPS is governed by the `fips` firewall zone on
+  `fips0`, which admits only replies, ping and gateway port forwards.
+  What you concede: any nearby device can reach the FIPS
   overlay surface (handshake, discovery, lookup, routing) and peer with
   the router; L2 metadata is visible in the air; a hostile radio can
   burn airtime — all inherent to an open radio link.
@@ -250,8 +254,10 @@ stays associated — that is the designed steady state, not an error.
 - **Strangers can associate and peer — by design.** Open access means
   any nearby device can complete the Noise handshake and become a FIPS
   peer (up to the max-peers cap); the handshake authenticates each link,
-  it does not restrict who joins. They reach only the FIPS overlay
-  surface — the isolated zone gives no path to br-lan or the WAN. Do not
+  it does not restrict who joins. On the access network they reach only
+  ICMPv6, DHCPv4, mDNS and the FIPS transports, since the isolated zone
+  gives no path to br-lan or the WAN; over FIPS, the router's `fips` zone
+  admits only replies, ping and gateway port forwards. Do not
   add forwardings to the `fips_ap` zone: that would turn the open SSID
   into a hotspot and hand the isolation away.
 - **Roaming is client-driven.** Clients decide when to hop BSSIDs

@@ -53,6 +53,9 @@ node:
 
 tun:
   enabled: true
+  # The fips firewall zone holds the TUN by this name. A new name must be
+  # added to the zone too (uci add_list firewall.fips.device=<name>), or
+  # the TUN is in no firewall zone.
   name: fips0
   mtu: 1280
 
@@ -63,10 +66,17 @@ dns:
   # /etc/systemd/resolved.conf.d/fips.conf drop-in pointing at
   # [::1]:5354.
   #
-  # Set "::" to expose the responder to mesh peers as well (e.g. for
-  # gateway hosts that resolve .fips on behalf of LAN clients). The
-  # mesh-interface filter in src/upper/dns.rs will still defend
-  # /etc/fips/hosts aliases from cross-mesh enumeration.
+  # A wildcard bind such as "::" serves hosts on the router's other
+  # networks that the firewall admits to the port (the LAN zone, by
+  # default). While fips0 is in the fips firewall zone, that zone rejects
+  # mesh peers' queries, and the responder also drops queries arriving on
+  # fips0 while its mesh filter is on (it is off when the daemon logs
+  # "Mesh interface index unresolved; DNS mesh filter disabled" at start).
+  # Any address other than loopback is reachable by every host the
+  # firewall admits on that network. Replies follow the routing table, and
+  # the stock fw4 zones do not filter by source address, so a host on
+  # those networks that forges a mesh source address (fd00::/8) has the
+  # reply sent into the mesh from this node's mesh address.
   # bind_addr: "::1"
   port: 5354
 
@@ -152,8 +162,11 @@ transports:
     # fips-ap1); 'fips-ap-setup remove' re-comments it. Restart fips after
     # — a transport whose interface is missing at startup is skipped, not
     # retried. The SSID is OPEN and isolated on purpose: FIPS's Noise
-    # handshake is the only security layer, and associated clients reach
-    # nothing but the FIPS handshake surface. See
+    # handshake is the only security layer. On the access network,
+    # associated clients reach ICMPv6, DHCPv4, mDNS and the FIPS
+    # transports and nothing else; what they then send over FIPS to the
+    # router arrives on fips0 and meets the fips firewall zone, which
+    # rejects all but replies, ping and gateway port forwards. See
     # docs/how-to/set-up-open-access-ssid.md.
     # ap0:
     #   interface: "fips-ap0"
