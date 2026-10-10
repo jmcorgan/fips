@@ -159,9 +159,26 @@ impl GatewayDnsConfig {
         self.upstream.as_deref().unwrap_or(DEFAULT_DNS_UPSTREAM)
     }
 
-    /// Get the TTL in seconds (default: 60).
+    /// Get the TTL in seconds (default: 60), at most 2147483647.
+    ///
+    /// Resolvers read a TTL with the top bit set as zero (RFC 2181 Section
+    /// 8), so a larger configured value is used as 2147483647, with one
+    /// warning per process.
     pub fn ttl(&self) -> u32 {
-        self.ttl.unwrap_or(DEFAULT_DNS_TTL)
+        let configured = self.ttl.unwrap_or(DEFAULT_DNS_TTL);
+        let used = crate::dnsmsg::clamp_ttl(configured);
+        if used != configured {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    configured,
+                    used,
+                    "gateway.dns.ttl is above 2147483647, the largest TTL resolvers honour; \
+                     using 2147483647"
+                );
+            });
+        }
+        used
     }
 
     /// The port of a listen address: the digits after its last `:`, or
@@ -430,5 +447,20 @@ port_forwards:
 "#;
         let config: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
         config.validate_port_forwards().unwrap();
+    }
+}
+
+/// The `gateway.dns.ttl` setting read through its accessor.
+#[cfg(test)]
+mod ttl_tests {
+    use super::*;
+
+    #[test]
+    fn a_gateway_dns_ttl_of_2147483648_is_read_as_2147483647() {
+        let config: GatewayConfig = serde_yaml::from_str(
+            "pool: \"fd01::/112\"\nlan_interface: \"eth0\"\ndns:\n  ttl: 2147483648\n",
+        )
+        .unwrap();
+        assert_eq!(config.dns.ttl(), 2_147_483_647);
     }
 }

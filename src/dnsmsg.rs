@@ -70,6 +70,15 @@ const SERVICE_PORTS: [u16; 6] = [0, 7, 13, 17, 19, 37];
 /// Section 2.3.4).
 const MAX_NAME: usize = 255;
 
+/// Largest TTL a resolver honours (RFC 2181 Section 8): a TTL with the top
+/// bit set is read as zero.
+pub(crate) const MAX_TTL: u32 = 0x7FFF_FFFF;
+
+/// A configured TTL, clamped to [`MAX_TTL`].
+pub(crate) fn clamp_ttl(ttl: u32) -> u32 {
+    ttl.min(MAX_TTL)
+}
+
 /// What [`screen`] decided about a datagram.
 pub(crate) enum Screen<'a> {
     /// Send nothing.
@@ -659,6 +668,15 @@ mod tests {
                 .to_string();
             assert_eq!(ours, theirs, "name {name:02x?}");
         }
+    }
+
+    #[test]
+    fn clamp_ttl_keeps_2147483647_and_clamps_2147483648_and_u32_max() {
+        assert_eq!(clamp_ttl(0), 0);
+        assert_eq!(clamp_ttl(300), 300);
+        assert_eq!(clamp_ttl(2_147_483_647), 2_147_483_647);
+        assert_eq!(clamp_ttl(2_147_483_648), 2_147_483_647);
+        assert_eq!(clamp_ttl(u32::MAX), MAX_TTL);
     }
 
     #[test]
