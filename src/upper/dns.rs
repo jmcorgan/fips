@@ -1637,3 +1637,126 @@ mod screening_tests {
         handle.abort();
     }
 }
+
+/// The gateway's forwarder relaying through this responder, end to end over
+/// loopback. Linux-only, like the gateway.
+#[cfg(all(test, target_os = "linux"))]
+mod interop_tests {
+    use super::*;
+    use crate::Identity;
+    use crate::gateway::dns::handle_query;
+    use crate::gateway::pool::{PoolEvent, VirtualIpPool};
+    use std::sync::Arc;
+    use tokio::net::UdpSocket;
+    use tokio::sync::mpsc;
+
+    /// The gateway's configured record TTL, in seconds.
+    const TTL: u32 = 60;
+
+    /// The big-endian `u16` at `offset`.
+    fn word(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    /// An AAAA IN query for `name` with RD set.
+    fn rd_query(id: u16, name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&id.to_be_bytes());
+        out.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+        for label in name.split('.') {
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.extend_from_slice(&[0, 0, 28, 0, 1]);
+        out
+    }
+
+    /// The daemon's responder on `127.0.0.1:0`, with a hosts file mapping
+    /// `gateway` to a fresh identity.
+    async fn spawn_daemon() -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        let identity = Identity::generate();
+        let dir = tempfile::tempdir().unwrap();
+        let hosts_path = dir.path().join("hosts");
+        std::fs::write(&hosts_path, format!("gateway   {}\n", identity.npub())).unwrap();
+        let reloader = HostMapReloader::new(HostMap::new(), hosts_path);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(16);
+        let handle = tokio::spawn(async move {
+            let _keep = identity_rx;
+            run_dns_responder(socket, identity_tx, 300, reloader, None).await
+        });
+        (addr, handle, dir)
+    }
+
+    /// A fresh gateway address pool on `fd01::/112`.
+    fn pool() -> Arc<tokio::sync::Mutex<VirtualIpPool>> {
+        Arc::new(tokio::sync::Mutex::new(
+            VirtualIpPool::new("fd01::/112", TTL as u64, 30).unwrap(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn the_gateway_relays_a_mixed_case_query_through_the_real_daemon_and_maps_it() {
+        let (daemon, handle, _dir) = spawn_daemon().await;
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let query = rd_query(0x5151, "GateWay.FIPS");
+        let reply = handle_query(&query, 53000, daemon, TTL, &pool(), &event_tx)
+            .await
+            .expect("the gateway answers");
+        assert_eq!(word(&reply, 2) & 0x000F, 0, "rcode");
+        assert_eq!(word(&reply, 6), 1, "one answer");
+        assert_eq!(
+            &reply[12..query.len()],
+            &query[12..],
+            "the client's question, case and all"
+        );
+        let answer = &reply[reply.len() - 16..];
+        assert_eq!(&answer[..2], &[0xfd, 0x01], "a pool address");
+        assert!(
+            matches!(event_rx.try_recv(), Ok(PoolEvent::MappingCreated { .. })),
+            "one MappingCreated"
+        );
+        assert!(event_rx.try_recv().is_err(), "only one MappingCreated");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn the_gateway_copies_rd_and_adds_an_soa_to_a_relayed_nxdomain_through_the_real_daemon() {
+        let (daemon, handle, _dir) = spawn_daemon().await;
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let pool = pool();
+
+        let query = rd_query(0x5252, "GateWay.FIPS");
+        let reply = handle_query(&query, 53000, daemon, TTL, &pool, &event_tx)
+            .await
+            .expect("the gateway answers");
+        assert_eq!(
+            word(&reply, 2) & 0x0180,
+            0x0180,
+            "flags {:#06x}: RD and RA not both set",
+            word(&reply, 2)
+        );
+
+        let query = rd_query(0x5253, "nosuchname.fips");
+        let reply = handle_query(&query, 53000, daemon, TTL, &pool, &event_tx)
+            .await
+            .expect("the gateway answers");
+        assert_eq!(word(&reply, 2) & 0x000F, 3, "rcode NXDOMAIN");
+        assert_eq!(word(&reply, 8), 1, "one authority record");
+        let record = &reply[query.len()..];
+        assert_eq!(word(record, 2), 6, "the authority record is an SOA");
+        // "nosuchname.fips": the fips label starts 11 bytes into the name.
+        assert_eq!(
+            word(record, 0),
+            0xC000 | (12 + 11),
+            "owned by the fips label"
+        );
+        assert_eq!(reply.len(), query.len() + 51, "reply length");
+        handle.abort();
+    }
+}

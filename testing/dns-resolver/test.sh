@@ -1200,6 +1200,7 @@ EOF'
         docker exec "$name" tail -20 /var/log/fips-gateway.log 2>&1 || true
     fi
     check_gateway_default_bind "$name"
+    check_source_port_screen "$name" gateway 5365 "$npub"
 
     # Stop the gateway (it may have failed after the DNS bind on something
     # unrelated in this minimal container).

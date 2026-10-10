@@ -206,11 +206,27 @@ involving the DNS proxy or the pool.
    loopback. Operators on a host without a pre-existing resolver on
    53 can override the listen value to `"[::]:53"` to let LAN clients
    query the gateway directly.
-2. If the question is not for a `.fips` domain, the gateway replies
-   `REFUSED`. The proxy is intentionally narrow — it does not resolve
-   public DNS, and the LAN's primary resolver should hold port 53 on
-   the gateway host (the OpenWrt init script wires dnsmasq to forward
-   `.fips` queries to the loopback listener automatically).
+2. The gateway screens the datagram before it reads the question.
+   It drops, with no answer, a response (QR set); a datagram not
+   shaped like a query (more than one question, any answer or
+   authority record, or more than one additional record); one
+   shorter than a DNS header, or one that fills the 4096-byte
+   receive buffer and so may have been cut short; and anything from
+   source port 0, 7, 13, 17, 19 or 37, the UDP services that answer
+   arbitrary input, so that a reply cannot start an endless exchange
+   with one. A query with an opcode other than `QUERY` gets
+   `NOTIMP`, one with no question or a malformed question name gets
+   `FORMERR`, and one with a class other than IN or ANY gets
+   `REFUSED`. If the question is not for a `.fips` domain, the
+   gateway replies `REFUSED`. Every reply carries the client's ID and
+   its RD and CD bits. The `NOTIMP` and `FORMERR` replies carry
+   nothing else; every other reply carries the client's question
+   byte for byte and only the records the gateway produced, nothing
+   else from the query. The proxy is intentionally narrow — it does
+   not resolve public DNS, and the LAN's primary resolver should hold
+   port 53 on the gateway host (the OpenWrt init script wires dnsmasq
+   to forward `.fips` queries to the loopback listener
+   automatically).
 3. The gateway forwards the query to the daemon resolver
    (`gateway.dns.upstream`, default `[::1]:5354`). The daemon must
    match: an IPv6 socket bound to `[::1]` does not accept v4-mapped
@@ -218,8 +234,11 @@ involving the DNS proxy or the pool.
    bound on `[::1]:5354`.
 4. If the daemon is unreachable or times out (5 s), the gateway
    replies `SERVFAIL`. If the daemon answers with an error such as
-   `NXDOMAIN`, the gateway relays that response code; if it answers
-   without an AAAA record, the gateway replies `SERVFAIL`.
+   `NXDOMAIN`, the gateway relays that response code. A relayed
+   `NXDOMAIN` carries an SOA record, as NODATA does, so the client
+   may cache it for up to `gateway.dns.ttl`; any other relayed error
+   carries the question only. If the daemon answers without an AAAA
+   record, the gateway replies `SERVFAIL`.
 5. The gateway extracts the AAAA (`fd00::/8`) record from the
    daemon's response. This resolution primes the daemon's identity
    cache as a side effect — a prerequisite for `fips0` routing,

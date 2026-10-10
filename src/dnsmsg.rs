@@ -17,7 +17,8 @@ use std::net::Ipv6Addr;
 /// Length of the fixed DNS message header.
 pub(crate) const HEADER_LEN: usize = 12;
 
-/// Receive buffer size of both DNS responders.
+/// Receive buffer size of both DNS responders, and of the gateway's read of
+/// its upstream's answer.
 ///
 /// Bounds how much of a datagram either responder reads. A datagram of this
 /// length or more may have been cut short by the read (on Linux the kernel
@@ -31,6 +32,14 @@ pub(crate) const MAX_DATAGRAM: usize = 4096;
 /// Record type AAAA.
 pub(crate) const TYPE_AAAA: u16 = 28;
 
+/// Record type ANY (a QTYPE only).
+#[cfg(target_os = "linux")]
+pub(crate) const TYPE_ANY: u16 = 255;
+
+/// Record type SOA.
+#[cfg(target_os = "linux")]
+const TYPE_SOA: u16 = 6;
+
 /// Class IN.
 pub(crate) const CLASS_IN: u16 = 1;
 
@@ -39,6 +48,10 @@ const CLASS_ANY: u16 = 255;
 
 /// Header flag AA (authoritative answer), which a caller of [`reply`] may ask for.
 pub(crate) const AA: u16 = 0x0400;
+
+/// Header flag RA (recursion available), which a caller of [`reply`] may ask for.
+#[cfg(target_os = "linux")]
+pub(crate) const RA: u16 = FLAG_RA;
 
 /// Header flag QR: set in a response, clear in a query.
 const FLAG_QR: u16 = 0x8000;
@@ -143,6 +156,14 @@ pub(crate) struct Query<'a> {
     pub qtype: u16,
 }
 
+#[cfg(target_os = "linux")]
+impl Query<'_> {
+    /// The question name as it appears on the wire.
+    pub(crate) fn qname_wire(&self) -> &[u8] {
+        &self.question[..self.question.len() - 4]
+    }
+}
+
 /// A DNS response code.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Rcode(u8);
@@ -152,12 +173,22 @@ impl Rcode {
     pub(crate) const NOERROR: Rcode = Rcode(0);
     /// The query could not be interpreted.
     pub(crate) const FORMERR: Rcode = Rcode(1);
+    /// The server could not answer, here because the upstream failed.
+    #[cfg(target_os = "linux")]
+    pub(crate) const SERVFAIL: Rcode = Rcode(2);
     /// The name does not exist.
     pub(crate) const NXDOMAIN: Rcode = Rcode(3);
     /// The opcode is not supported.
     pub(crate) const NOTIMP: Rcode = Rcode(4);
     /// The server will not answer this query.
     pub(crate) const REFUSED: Rcode = Rcode(5);
+
+    /// The response code in a message's header, from the header's fourth
+    /// byte (its low four bits).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_header(header_byte3: u8) -> Rcode {
+        Rcode(header_byte3 & 0x0F)
+    }
 }
 
 /// The code's mnemonic (RFC 6895 Section 2.3) for codes 0 to 10, or its
@@ -203,6 +234,114 @@ pub(crate) fn aaaa(addr: Ipv6Addr, ttl: u32) -> Record {
         ttl,
         rdata: addr.octets().to_vec(),
     }
+}
+
+/// An SOA record for a negative answer to `query` in `zone`.
+///
+/// The record is owned by the zone apex, as RFC 2308 Section 3 asks: the
+/// point in the question name where its remaining labels equal `zone`'s,
+/// ignoring ASCII case. A question not in the zone has its whole name as
+/// the owner. `mname` and `rname` are written as their leading labels and a
+/// pointer to that apex when they end in `zone` and the question is in it,
+/// otherwise whole. Refresh, retry, expire, minimum and the record's TTL are
+/// all `ttl`.
+///
+/// Size: 51 bytes for the gateway's names when the question ends in the
+/// zone, 59 otherwise.
+#[cfg(target_os = "linux")]
+pub(crate) fn soa(
+    query: &Query<'_>,
+    zone: &str,
+    mname: &str,
+    rname: &str,
+    serial: u32,
+    ttl: u32,
+) -> Record {
+    let apex = zone_offset(query.qname_wire(), zone);
+    let owner = (HEADER_LEN + apex.unwrap_or(0)) as u16;
+    let pointer = apex.map(|_| owner);
+    let mut rdata = Vec::new();
+    for name in [mname, rname] {
+        write_name(&mut rdata, name, zone, pointer);
+    }
+    rdata.extend_from_slice(&serial.to_be_bytes());
+    for _ in 0..4 {
+        rdata.extend_from_slice(&ttl.to_be_bytes());
+    }
+    Record {
+        owner,
+        rtype: TYPE_SOA,
+        ttl,
+        rdata,
+    }
+}
+
+/// The offset in a wire name (no pointers) where its remaining labels are
+/// `zone`'s labels, ignoring ASCII case.
+#[cfg(target_os = "linux")]
+fn zone_offset(qname: &[u8], zone: &str) -> Option<usize> {
+    let zone: Vec<&[u8]> = zone.split('.').map(str::as_bytes).collect();
+    let mut starts = Vec::new();
+    let mut pos = 0;
+    while let Some(&len) = qname.get(pos).filter(|&&len| len != 0) {
+        starts.push(pos);
+        pos += 1 + len as usize;
+    }
+    starts.into_iter().find(|&start| {
+        let mut pos = start;
+        let mut labels = Vec::new();
+        while let Some(&len) = qname.get(pos).filter(|&&len| len != 0) {
+            labels.push(&qname[pos + 1..pos + 1 + len as usize]);
+            pos += 1 + len as usize;
+        }
+        labels.len() == zone.len()
+            && labels
+                .iter()
+                .zip(&zone)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+/// Write a dotted name: its labels before `zone` and then `pointer` when it
+/// ends in `zone` and a pointer is given, otherwise all its labels and the
+/// root.
+#[cfg(target_os = "linux")]
+fn write_name(out: &mut Vec<u8>, name: &str, zone: &str, pointer: Option<u16>) {
+    let labels: Vec<&str> = name.split('.').filter(|l| !l.is_empty()).collect();
+    let zone_len = zone.split('.').count();
+    let in_zone = labels.len() > zone_len
+        && labels[labels.len() - zone_len..]
+            .iter()
+            .zip(zone.split('.'))
+            .all(|(a, b)| a.eq_ignore_ascii_case(b));
+    let (written, tail) = match pointer {
+        Some(pointer) if in_zone => (&labels[..labels.len() - zone_len], Some(pointer)),
+        _ => (&labels[..], None),
+    };
+    for label in written {
+        let len = u8::try_from(label.len())
+            .ok()
+            .filter(|&len| len <= 63)
+            .expect("SOA names are constants with labels of at most 63 bytes");
+        out.push(len);
+        out.extend_from_slice(label.as_bytes());
+    }
+    match tail {
+        Some(pointer) => out.extend_from_slice(&(0xC000 | pointer).to_be_bytes()),
+        None => out.push(0),
+    }
+}
+
+/// A one-question query: `id`, no flags, then the name, type and class.
+#[cfg(target_os = "linux")]
+pub(crate) fn encode_query(id: u16, qname_wire: &[u8], qtype: u16, qclass: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN + qname_wire.len() + 4);
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    out.extend_from_slice(qname_wire);
+    out.extend_from_slice(&qtype.to_be_bytes());
+    out.extend_from_slice(&qclass.to_be_bytes());
+    out
 }
 
 /// Decide what to do with a datagram received from `src_port`.
@@ -323,7 +462,10 @@ fn parse_query(datagram: &[u8]) -> Result<Query<'_>, (Rcode, Vec<u8>)> {
 ///
 /// Size: a question is at most 259 bytes, an AAAA record 28 bytes, so a reply
 /// with one AAAA answer is the query's header and question plus 28 bytes, at
-/// most 299 bytes, under 512.
+/// most 299 bytes. An SOA from `soa` with the gateway's names is at most 59
+/// bytes, and 51 when the question name ends in the zone, so a reply with one
+/// is at most 330 bytes.
+/// Both are under 512.
 pub(crate) fn reply(
     query: &Query<'_>,
     rcode: Rcode,
@@ -690,6 +832,106 @@ mod tests {
     fn drop_reasons_log_as_kebab_case_strings() {
         assert_eq!(DropReason::FillsBuffer.as_str(), "fills-buffer");
         assert_eq!(DropReason::NotQueryShaped.as_str(), "not-query-shaped");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn from_header_maps_the_header_rcode_nibble() {
+        assert_eq!(Rcode::from_header(0x82), Rcode::SERVFAIL);
+        assert_eq!(Rcode::from_header(0x83), Rcode::NXDOMAIN);
+        assert_eq!(Rcode::from_header(0x8F), Rcode(15));
+        assert_eq!(Rcode::from_header(0x80), Rcode::NOERROR);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn encode_query_matches_simple_dns_new_query_for_the_same_name() {
+        use simple_dns::{CLASS, Name, Packet, QTYPE, Question, TYPE};
+        let bytes = aaaa_query("GateWay.FIPS");
+        let query = accepted(screen(&bytes, PORT));
+        let ours = encode_query(0xBEEF, query.qname_wire(), TYPE_AAAA, CLASS_IN);
+        let mut packet = Packet::new_query(0xBEEF);
+        packet.questions.push(Question::new(
+            Name::new_unchecked("GateWay.FIPS"),
+            QTYPE::TYPE(TYPE::AAAA),
+            CLASS::IN.into(),
+            false,
+        ));
+        assert_eq!(ours, packet.build_bytes_vec().unwrap());
+    }
+
+    /// The SOA the gateway puts in a negative answer.
+    #[cfg(target_os = "linux")]
+    fn gateway_soa(query: &Query<'_>) -> Record {
+        soa(query, "fips", "gateway.fips", "nobody.fips", 1, 60)
+    }
+
+    /// The owner, MNAME, RNAME and MINIMUM of the one SOA in `out`, as
+    /// `simple-dns` parses them.
+    #[cfg(target_os = "linux")]
+    fn parsed_soa(out: &[u8]) -> (String, String, String, u32) {
+        let packet = simple_dns::Packet::parse(out).expect("simple-dns parses the reply");
+        assert_eq!(packet.name_servers.len(), 1);
+        let record = &packet.name_servers[0];
+        match &record.rdata {
+            simple_dns::rdata::RData::SOA(soa) => (
+                record.name.to_string(),
+                soa.mname.to_string(),
+                soa.rname.to_string(),
+                soa.minimum,
+            ),
+            other => panic!("expected SOA, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_soa_for_a_fips_question_is_owned_by_the_fips_label_and_the_reply_is_the_query_length_plus_51()
+     {
+        let bytes = aaaa_query("a.fips");
+        assert_eq!(bytes.len(), 24);
+        let query = accepted(screen(&bytes, PORT));
+        let out = reply(&query, Rcode::NXDOMAIN, RA, &[], &[gateway_soa(&query)]);
+        assert_eq!(out.len(), 75);
+        assert_eq!(&out[24..26], &[0xC0, 14], "owner points at the fips label");
+        let (owner, mname, rname, minimum) = parsed_soa(&out);
+        assert_eq!(owner, "fips");
+        assert_eq!(mname, "gateway.fips");
+        assert_eq!(rname, "nobody.fips");
+        assert_eq!(minimum, 60);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_soa_for_an_upper_case_fips_question_still_points_and_parses() {
+        let bytes = aaaa_query("Host.FIPS");
+        let query = accepted(screen(&bytes, PORT));
+        let out = reply(&query, Rcode::NOERROR, RA, &[], &[gateway_soa(&query)]);
+        assert_eq!(out.len(), bytes.len() + 51);
+        let (owner, mname, rname, _) = parsed_soa(&out);
+        assert_eq!(owner, "FIPS");
+        assert_eq!(mname, "gateway.FIPS");
+        assert_eq!(rname, "nobody.FIPS");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_soa_for_a_question_not_in_the_zone_is_owned_by_the_question_name_and_is_the_query_length_plus_59()
+     {
+        for name in [
+            wire_name("example.com"),
+            vec![5, b'.', b'f', b'i', b'p', b's', 0],
+        ] {
+            let bytes = message(9, 0, [1, 0, 0, 0], &question(&name, TYPE_AAAA, CLASS_IN));
+            let query = accepted(screen(&bytes, PORT));
+            let out = reply(&query, Rcode::NXDOMAIN, RA, &[], &[gateway_soa(&query)]);
+            assert_eq!(out.len(), bytes.len() + 59, "name {name:02x?}");
+            assert_eq!(&out[bytes.len()..bytes.len() + 2], &[0xC0, 0x0C]);
+            let (owner, mname, rname, _) = parsed_soa(&out);
+            assert_eq!(owner, query.name);
+            assert_eq!(mname, "gateway.fips");
+            assert_eq!(rname, "nobody.fips");
+        }
     }
 
     // --- replies ---
