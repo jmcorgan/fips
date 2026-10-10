@@ -465,22 +465,27 @@ pub(crate) fn on_response_accepted(
 ///
 /// The core has already applied the state mutations: retried entries have had
 /// their attempt bumped and last_sent updated; timed-out entries have been
-/// removed and a backoff failure recorded. The shell drives the effects.
+/// removed and a backoff failure recorded (when backoff is enabled). The shell
+/// drives the effects.
 pub(crate) struct PollOutcome {
     /// (target, new attempt number) — shell re-sends via initiate_lookup.
     pub retries: Vec<(NodeAddr, u8)>,
     /// (target, failure_count after recording) — shell emits unreachable.
-    pub timeouts: Vec<(NodeAddr, u32)>,
+    /// The count is `None` while backoff is disabled, since nothing is
+    /// recorded then.
+    pub timeouts: Vec<(NodeAddr, Option<u32>)>,
 }
 
 /// Advance the pending-lookup retry ladder. Pure over `Lookup` state +
-/// injected clock: partitions due entries into retries (attempt bumped) and
-/// final timeouts (removed + backoff failure recorded). No I/O, no view.
+/// injected clock: forgets expired backoff entries, then partitions due
+/// entries into retries (attempt bumped) and final timeouts (removed +
+/// backoff failure recorded). No I/O, no view.
 pub(crate) fn poll_pending(
     lookup: &mut Lookup,
     now_ms: u64,
     attempt_timeouts_secs: &[u64],
 ) -> PollOutcome {
+    lookup.backoff.prune(now_ms);
     let max_attempts = attempt_timeouts_secs.len() as u8;
 
     // Collect targets needing action (can't mutate while iterating).
@@ -508,11 +513,14 @@ pub(crate) fn poll_pending(
         }
     }
 
-    let mut timeouts: Vec<(NodeAddr, u32)> = Vec::new();
+    let mut timeouts: Vec<(NodeAddr, Option<u32>)> = Vec::new();
     for target in timeout_targets {
         lookup.pending_lookups.remove(&target);
         lookup.backoff.record_failure(&target, now_ms);
-        let failures = lookup.backoff.failure_count(&target);
+        let failures = lookup
+            .backoff
+            .is_enabled()
+            .then(|| lookup.backoff.failure_count(&target));
         timeouts.push((target, failures));
     }
 
@@ -525,7 +533,8 @@ pub(crate) enum InitiateDecision {
     Deduplicated,
     /// Suppressed by post-failure backoff. `failures` is the current count (for the log).
     Suppressed { failures: u32 },
-    /// No peer's bloom filter reaches the target — skip (a failure was recorded).
+    /// No peer's bloom filter reaches the target — skip (a failure was
+    /// recorded when backoff is enabled).
     BloomMiss,
     /// Proceed: a PendingLookup was inserted; the shell sends the first attempt.
     Proceed,
@@ -533,8 +542,9 @@ pub(crate) enum InitiateDecision {
 
 /// Gate a lookup initiation against pending-dedup, backoff
 /// suppression, and bloom reachability (passed in — the shell reads the peer
-/// filters). On BloomMiss records a failure; on Proceed inserts the pending
-/// lookup. Pure over Lookup state + injected clock; no I/O, no view.
+/// filters). On BloomMiss records a failure (when backoff is enabled); on
+/// Proceed inserts the pending lookup. Pure over Lookup state + injected
+/// clock; no I/O, no view.
 pub(crate) fn initiate_gate(
     lookup: &mut Lookup,
     dest: &NodeAddr,
@@ -560,7 +570,8 @@ pub(crate) fn initiate_gate(
 }
 
 /// Roll back a lookup whose first attempt reached no tree peers (sent == 0):
-/// drop the pending entry and record a backoff failure.
+/// drop the pending entry and record a backoff failure (when backoff is
+/// enabled).
 pub(crate) fn initiate_failed(lookup: &mut Lookup, dest: &NodeAddr, now_ms: u64) {
     lookup.pending_lookups.remove(dest);
     lookup.backoff.record_failure(dest, now_ms);

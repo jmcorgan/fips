@@ -8,7 +8,7 @@
 use crate::node::Node;
 use crate::node::reject::DiscoveryReject;
 use crate::proto::lookup::{
-    LookupAction, LookupRequest, LookupResponse, MAX_RECENT_LOOKUP_REQUESTS,
+    LookupAction, LookupRequest, LookupResponse, MAX_BACKOFF_ENTRIES, MAX_RECENT_LOOKUP_REQUESTS,
 };
 use crate::proto::probe::LookupOutcomeKind;
 use crate::transport::{TransportAddr, TransportId};
@@ -795,17 +795,47 @@ impl Node {
             self.metrics().lookup.resp_timed_out.inc();
             let queued = self.pending_tun_packets.remove(&addr);
             let pkt_count = queued.as_ref().map_or(0, |p| p.len());
-            info!(
-                target_node = %self.peer_display_name(&addr),
-                queued_packets = pkt_count,
-                failures = failures,
-                "Discovery lookup timed out, destination unreachable"
-            );
+            // A local application is told only when packets were held, so that
+            // is the case worth `info!`; a timeout with nothing queued is one
+            // an outside sender can drive per name it keeps pending.
+            if pkt_count > 0 {
+                info!(
+                    target_node = %self.peer_display_name(&addr),
+                    queued_packets = pkt_count,
+                    failures = failures,
+                    "Discovery lookup timed out, destination unreachable"
+                );
+            } else {
+                debug!(
+                    target_node = %self.peer_display_name(&addr),
+                    queued_packets = pkt_count,
+                    failures = failures,
+                    "Discovery lookup timed out, destination unreachable"
+                );
+            }
             if let Some(packets) = queued {
                 for pkt in &packets {
                     self.send_icmpv6_dest_unreachable(pkt);
                 }
             }
+        }
+
+        let evicted = self.lookup.backoff.take_evicted();
+        if self.backoff_bound_log.refused(evicted) {
+            warn!(
+                bound = MAX_BACKOFF_ENTRIES,
+                "Lookup failure table at its bound; evicting the entries nearest expiry"
+            );
+        }
+        let at_bound = self.lookup.backoff.entry_count() >= MAX_BACKOFF_ENTRIES;
+        if let Some(evicted) = self
+            .backoff_bound_log
+            .tick(at_bound, std::time::Instant::now())
+        {
+            info!(
+                evicted,
+                "Lookup failure table below its bound again; entries evicted while it was full"
+            );
         }
     }
 

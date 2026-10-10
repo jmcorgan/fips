@@ -31,6 +31,13 @@ impl RoutingView for MockRoutingView {
     }
 }
 
+/// A distinct target per `i`, beyond the 256 that `make_node_addr` gives.
+pub(super) fn distinct_addr(i: u32) -> NodeAddr {
+    let mut bytes = [0u8; 16];
+    bytes[..4].copy_from_slice(&i.to_be_bytes());
+    NodeAddr::from_bytes(bytes)
+}
+
 pub(super) fn make_request(ttl: u8) -> LookupRequest {
     let target = make_node_addr(0xAA);
     let origin = make_node_addr(0xBB);

@@ -26,7 +26,9 @@ pub(crate) use core::{
     initiate_gate, on_response_accepted, plan_forward, plan_initiate, plan_response_route,
     poll_pending,
 };
-pub(crate) use limits::{LookupBackoff, LookupForwardRateLimiter, MAX_RECENT_LOOKUP_REQUESTS};
+pub(crate) use limits::{
+    LookupBackoff, LookupForwardRateLimiter, MAX_BACKOFF_ENTRIES, MAX_RECENT_LOOKUP_REQUESTS,
+};
 #[cfg(test)]
 pub(crate) use state::RecentRequest;
 pub(crate) use state::{Lookup, PendingLookup};

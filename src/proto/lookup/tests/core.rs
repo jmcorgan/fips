@@ -1,7 +1,8 @@
 //! Tests for the sans-IO lookup decision core.
 
 use super::util::{
-    MockRoutingView, action_peers, empty_lookup, make_request, make_request_id, suppressing_lookup,
+    MockRoutingView, action_peers, distinct_addr, empty_lookup, make_request, make_request_id,
+    suppressing_lookup,
 };
 use crate::TreeCoordinate;
 use crate::proto::lookup::*;
@@ -273,7 +274,8 @@ fn classify_response_unsolicited_when_nothing_correlates_the_id() {
 #[test]
 fn on_response_accepted_clears_state_and_emits_effects() {
     let target = make_node_addr(0x5A);
-    let mut lookup = empty_lookup();
+    // Backoff enabled, so the seeded failure below is recorded.
+    let mut lookup = suppressing_lookup();
 
     // Seed a backoff entry and a pending lookup for the target.
     lookup.backoff.record_failure(&target, 1000);
@@ -426,16 +428,123 @@ fn poll_pending_final_timeout_at_max_attempt() {
     assert!(outcome.retries.is_empty(), "max attempt cannot retry");
     assert_eq!(
         outcome.timeouts,
-        vec![(target, 1)],
-        "one timeout, failure #1"
+        vec![(target, None)],
+        "one timeout, no failure count while backoff is disabled"
     );
 
-    // Entry removed and a backoff failure recorded.
+    // Entry removed and, with the default disabled backoff, nothing recorded.
     assert!(
         !lookup.pending_lookups.contains_key(&target),
         "timed-out entry must be removed"
     );
+    assert_eq!(lookup.backoff.entry_count(), 0);
+}
+
+#[test]
+fn poll_pending_final_timeout_at_max_attempt_records_a_failure_with_backoff_enabled() {
+    let target = make_node_addr(0x32);
+    let mut lookup = suppressing_lookup();
+
+    let tn = 50_000u64;
+    let mut entry = PendingLookup::new(tn);
+    entry.attempt = 4;
+    entry.last_sent_ms = tn;
+    lookup.pending_lookups.insert(target, entry);
+
+    let outcome = poll_pending(&mut lookup, tn + 8000, &[1, 2, 4, 8]);
+    assert_eq!(
+        outcome.timeouts,
+        vec![(target, Some(1))],
+        "one timeout, failure #1"
+    );
+    assert!(!lookup.pending_lookups.contains_key(&target));
     assert_eq!(lookup.backoff.failure_count(&target), 1);
+}
+
+#[test]
+fn with_backoff_enabled_an_entry_is_forgotten_once_its_window_and_one_cap_interval_have_passed_on_the_lookup_tick()
+ {
+    let target = make_node_addr(0x34);
+    // 30 s base, 300 s cap.
+    let mut lookup = suppressing_lookup();
+    let t = 1_000u64;
+    assert!(matches!(
+        initiate_gate(&mut lookup, &target, t, false),
+        InitiateDecision::BloomMiss
+    ));
+    assert_eq!(lookup.backoff.entry_count(), 1, "precondition: recorded");
+
+    let forget_at = t + 30_000 + 300_000;
+    poll_pending(&mut lookup, forget_at - 1, &[1, 2, 4, 8]);
+    assert_eq!(
+        lookup.backoff.entry_count(),
+        1,
+        "one millisecond before the forget time the entry must be kept"
+    );
+
+    poll_pending(&mut lookup, forget_at, &[1, 2, 4, 8]);
+    assert_eq!(
+        lookup.backoff.entry_count(),
+        0,
+        "the lookup tick must forget an entry once its window and one cap interval have passed"
+    );
+}
+
+#[test]
+fn a_bloom_miss_under_the_default_disabled_backoff_records_nothing_so_ten_thousand_distinct_misses_leave_the_failure_table_empty()
+ {
+    let mut lookup = empty_lookup();
+    let mut misses = 0u32;
+    for i in 0..10_000u32 {
+        if matches!(
+            initiate_gate(&mut lookup, &distinct_addr(i), 1_000 + u64::from(i), false),
+            InitiateDecision::BloomMiss
+        ) {
+            misses += 1;
+        }
+    }
+    // Control: every call took the bloom-miss path, so an empty table below
+    // is not a path that never ran.
+    assert_eq!(misses, 10_000);
+    assert_eq!(
+        lookup.backoff.entry_count(),
+        0,
+        "disabled backoff must record no failure, but the table holds {} entries",
+        lookup.backoff.entry_count()
+    );
+    assert!(lookup.pending_lookups.is_empty());
+}
+
+#[test]
+fn with_backoff_enabled_a_failed_target_is_suppressed_inside_its_window_allowed_after_it_and_escalates_on_the_next_failure()
+ {
+    let target = make_node_addr(0x35);
+    let mut lookup = suppressing_lookup();
+    let t = 1_000u64;
+    assert!(matches!(
+        initiate_gate(&mut lookup, &target, t, false),
+        InitiateDecision::BloomMiss
+    ));
+
+    match initiate_gate(&mut lookup, &target, t + 29_999, true) {
+        InitiateDecision::Suppressed { failures } => assert_eq!(failures, 1),
+        _ => panic!("expected Suppressed inside the 30 s window"),
+    }
+
+    // The lookup tick at the window's end must keep the count.
+    poll_pending(&mut lookup, t + 30_000, &[1, 2, 4, 8]);
+    assert_eq!(lookup.backoff.failure_count(&target), 1);
+
+    assert!(matches!(
+        initiate_gate(&mut lookup, &target, t + 30_000, false),
+        InitiateDecision::BloomMiss
+    ));
+    assert_eq!(lookup.backoff.failure_count(&target), 2, "escalates");
+    assert!(lookup.backoff.is_suppressed(&target, t + 30_000 + 59_999));
+    assert!(
+        !lookup.backoff.is_suppressed(&target, t + 30_000 + 60_000),
+        "the second window is 60 s"
+    );
 }
 
 // --- classify_request tests ---
@@ -780,8 +889,9 @@ fn poll_pending_full_ladder_end_to_end() {
     let last = t0 + 1000 + 2000 + 4000;
     let o = poll_pending(&mut lookup, last + 8000, &ladder);
     assert!(o.retries.is_empty());
-    assert_eq!(o.timeouts, vec![(target, 1)]);
+    assert_eq!(o.timeouts, vec![(target, None)]);
     assert!(!lookup.pending_lookups.contains_key(&target));
+    assert_eq!(lookup.backoff.entry_count(), 0);
 }
 
 // --- initiate_gate / initiate_failed tests ---
@@ -821,13 +931,22 @@ fn initiate_gate_suppressed_by_backoff() {
 #[test]
 fn initiate_gate_bloom_miss_records_failure() {
     let dest = make_node_addr(0x42);
-    let mut lookup = empty_lookup();
 
+    // Default (disabled) backoff: nothing recorded.
+    let mut lookup = empty_lookup();
     assert!(matches!(
         initiate_gate(&mut lookup, &dest, 1000, false),
         InitiateDecision::BloomMiss
     ));
-    // A backoff failure was recorded, and no pending entry created.
+    assert_eq!(lookup.backoff.entry_count(), 0);
+    assert!(!lookup.pending_lookups.contains_key(&dest));
+
+    // Enabled backoff: a failure was recorded, and no pending entry created.
+    let mut lookup = suppressing_lookup();
+    assert!(matches!(
+        initiate_gate(&mut lookup, &dest, 1000, false),
+        InitiateDecision::BloomMiss
+    ));
     assert_eq!(lookup.backoff.failure_count(&dest), 1);
     assert!(!lookup.pending_lookups.contains_key(&dest));
 }
@@ -854,15 +973,25 @@ fn initiate_gate_proceed_inserts_pending() {
 #[test]
 fn initiate_failed_drops_pending_and_records_failure() {
     let dest = make_node_addr(0x44);
+
+    // Default (disabled) backoff: the entry is dropped and nothing recorded.
     let mut lookup = empty_lookup();
     lookup
         .pending_lookups
         .insert(dest, PendingLookup::new(1000));
-
     initiate_failed(&mut lookup, &dest, 1000);
     assert!(
         !lookup.pending_lookups.contains_key(&dest),
         "pending entry must be dropped"
     );
+    assert_eq!(lookup.backoff.entry_count(), 0);
+
+    // Enabled backoff: the failure is recorded.
+    let mut lookup = suppressing_lookup();
+    lookup
+        .pending_lookups
+        .insert(dest, PendingLookup::new(1000));
+    initiate_failed(&mut lookup, &dest, 1000);
+    assert!(!lookup.pending_lookups.contains_key(&dest));
     assert_eq!(lookup.backoff.failure_count(&dest), 1);
 }

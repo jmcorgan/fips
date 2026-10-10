@@ -6,8 +6,12 @@
 //!   suppression of fresh lookups after the per-attempt sequence in
 //!   `node.lookup.attempt_timeouts_secs` has been exhausted.
 //!   **Disabled by default** (base/cap = 0); the per-attempt sequence
-//!   is the only retry pacing in the standard configuration. Reset on
-//!   topology changes (parent change, new peer, first RTT, reconnection).
+//!   is the only retry pacing in the standard configuration, and nothing
+//!   is recorded while it is disabled. Reset on topology changes (parent
+//!   change, new peer, first RTT, reconnection). The table is bounded at
+//!   [`MAX_BACKOFF_ENTRIES`]: an entry is forgotten one maximum backoff
+//!   interval after its window ends, and at the bound the entry nearest
+//!   expiry is evicted.
 //!
 //! - **`LookupForwardRateLimiter`** (transit-side): Per-target minimum
 //!   interval for forwarded requests. Defense-in-depth against misbehaving
@@ -15,7 +19,7 @@
 
 use crate::NodeAddr;
 use crate::proto::rate_limit::{PerAddrRateLimiter, RecordOutcome};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 // ============================================================================
 // Receive-side: Request dedup cache bound
@@ -35,17 +39,36 @@ const DEFAULT_BACKOFF_BASE_SECS: u64 = 0;
 /// Default maximum backoff cap. `0` = disabled.
 const DEFAULT_BACKOFF_MAX_SECS: u64 = 0;
 
+/// Most targets the post-failure backoff table holds at once.
+///
+/// The legitimate load is the number of distinct targets that failed within
+/// one backoff window plus one cap interval, which an ordinary node does not
+/// approach; the value has no measured basis and matches
+/// [`MAX_RECENT_LOOKUP_REQUESTS`]. At roughly 80 to 100 bytes an entry with
+/// its expiry index (estimated) the table stays under about 400 KB. A sender
+/// that fails more targets than this only evicts the entries nearest expiry,
+/// and eviction fails open: an evicted target can only be retried sooner.
+pub(crate) const MAX_BACKOFF_ENTRIES: usize = 4096;
+
 /// Exponential backoff for failed lookups.
 ///
 /// Tracks targets whose lookups have timed out and suppresses
 /// re-initiation with increasing delays. Cleared on topology changes.
+/// Records nothing while backoff is disabled (a zero base or cap), and
+/// holds at most [`MAX_BACKOFF_ENTRIES`] targets.
 pub struct LookupBackoff {
     /// Maps target → (suppress_until, consecutive_failures).
     pub(crate) entries: BTreeMap<NodeAddr, BackoffEntry>,
+    /// The same targets ordered by when their windows end, so the entry
+    /// nearest expiry and the forgettable ones are found without scanning
+    /// the table. Holds exactly one `(suppress_until_ms, target)` per entry.
+    by_expiry: BTreeSet<(u64, NodeAddr)>,
     /// Base backoff in milliseconds (first failure).
     base_ms: u64,
     /// Maximum backoff cap in milliseconds.
     max_ms: u64,
+    /// Entries evicted at the bound since the shell last took the count.
+    evicted: u64,
 }
 
 pub(crate) struct BackoffEntry {
@@ -65,9 +88,19 @@ impl LookupBackoff {
     pub fn with_params(base_secs: u64, max_secs: u64) -> Self {
         Self {
             entries: BTreeMap::new(),
+            by_expiry: BTreeSet::new(),
             base_ms: base_secs * 1000,
             max_ms: max_secs * 1000,
+            evicted: 0,
         }
+    }
+
+    /// Whether a failure can suppress anything.
+    ///
+    /// The window is `base * 2^k` capped at the maximum, so a zero base or a
+    /// zero cap both mean no suppression, and nothing is worth recording.
+    pub fn is_enabled(&self) -> bool {
+        self.base_ms > 0 && self.max_ms > 0
     }
 
     /// Check if a lookup for this target is suppressed.
@@ -85,8 +118,21 @@ impl LookupBackoff {
     /// Record a lookup failure (timeout) for a target.
     ///
     /// Increments the failure count and sets the next suppression
-    /// window using exponential backoff.
+    /// window using exponential backoff. Does nothing while backoff is
+    /// disabled. A new target arriving at [`MAX_BACKOFF_ENTRIES`] first
+    /// prunes forgotten entries and, if the table is still full, evicts the
+    /// entry nearest expiry.
     pub fn record_failure(&mut self, target: &NodeAddr, now_ms: u64) {
+        if !self.is_enabled() {
+            return;
+        }
+        if !self.entries.contains_key(target) && self.entries.len() >= MAX_BACKOFF_ENTRIES {
+            self.prune(now_ms);
+            if self.entries.len() >= MAX_BACKOFF_ENTRIES {
+                self.evict_nearest_expiry();
+            }
+        }
+
         let failures = self.entries.get(target).map_or(0, |e| e.failures) + 1;
 
         let backoff_ms = crate::proto::rate_limit::backoff_ms(
@@ -95,18 +141,55 @@ impl LookupBackoff {
             self.max_ms,
         );
 
-        self.entries.insert(
+        let suppress_until_ms = now_ms + backoff_ms;
+        if let Some(old) = self.entries.insert(
             *target,
             BackoffEntry {
-                suppress_until_ms: now_ms + backoff_ms,
+                suppress_until_ms,
                 failures,
             },
-        );
+        ) {
+            self.by_expiry.remove(&(old.suppress_until_ms, *target));
+        }
+        self.by_expiry.insert((suppress_until_ms, *target));
+    }
+
+    /// Forget entries whose window ended more than one maximum backoff
+    /// interval ago.
+    ///
+    /// The grace keeps a target that fails again soon after its window
+    /// escalating; once it has passed, the target's count starts over,
+    /// which can only shorten its next window.
+    pub fn prune(&mut self, now_ms: u64) {
+        let grace_ms = self.max_ms;
+        while let Some(&(until, target)) = self.by_expiry.first() {
+            if now_ms < until.saturating_add(grace_ms) {
+                break;
+            }
+            self.by_expiry.pop_first();
+            self.entries.remove(&target);
+        }
+    }
+
+    /// Return and reset the count of entries evicted at the bound.
+    pub fn take_evicted(&mut self) -> u64 {
+        ::core::mem::take(&mut self.evicted)
+    }
+
+    /// Drop the entry whose window ends first; it is the one an eviction
+    /// costs least, since it would have been retryable soonest anyway.
+    fn evict_nearest_expiry(&mut self) {
+        if let Some((_, target)) = self.by_expiry.pop_first() {
+            self.entries.remove(&target);
+            self.evicted += 1;
+        }
     }
 
     /// Record a successful lookup — remove backoff for this target.
     pub fn record_success(&mut self, target: &NodeAddr) {
-        self.entries.remove(target);
+        if let Some(old) = self.entries.remove(target) {
+            self.by_expiry.remove(&(old.suppress_until_ms, *target));
+        }
     }
 
     /// Clear all backoff entries.
@@ -115,6 +198,7 @@ impl LookupBackoff {
     /// targets reachable (parent change, new peer, first RTT, reconnection).
     pub fn reset_all(&mut self) {
         self.entries.clear();
+        self.by_expiry.clear();
     }
 
     /// Whether any entries exist.

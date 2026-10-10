@@ -312,6 +312,121 @@ struct PendingConnect {
     peer_identity: PeerIdentity,
 }
 
+/// How long a bounded table must stay below its bound before its log latch
+/// clears.
+const BOUND_LOG_HOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Holds the log for one bounded table to two lines a minute.
+///
+/// The first refusal at the bound sets the latch, and the caller logs one
+/// `warn!`. While latched, refusals are only counted. The latch clears once
+/// the table has stayed below its bound for [`BOUND_LOG_HOLD`], and the caller
+/// logs one `info!` carrying the count. It decides and returns; it never logs.
+#[derive(Default)]
+pub(in crate::node) struct BoundLog {
+    latched: bool,
+    refused: u64,
+    below_since: Option<std::time::Instant>,
+}
+
+impl BoundLog {
+    /// Note `n` refusals; true when this note sets the latch, and the caller
+    /// logs one `warn!`.
+    pub(in crate::node) fn refused(&mut self, n: u64) -> bool {
+        if n == 0 {
+            return false;
+        }
+        self.refused = self.refused.saturating_add(n);
+        self.below_since = None;
+        let newly = !self.latched;
+        self.latched = true;
+        newly
+    }
+
+    /// Note the table's state on a tick; `Some(refused)` when the latch
+    /// clears, and the caller logs one `info!`.
+    pub(in crate::node) fn tick(&mut self, at_bound: bool, now: std::time::Instant) -> Option<u64> {
+        if !self.latched {
+            return None;
+        }
+        if at_bound {
+            self.below_since = None;
+            return None;
+        }
+        let since = *self.below_since.get_or_insert(now);
+        if now.saturating_duration_since(since) < BOUND_LOG_HOLD {
+            return None;
+        }
+        self.latched = false;
+        self.below_since = None;
+        Some(std::mem::take(&mut self.refused))
+    }
+}
+
+#[cfg(test)]
+mod bound_log_tests {
+    use super::{BOUND_LOG_HOLD, BoundLog};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_thousand_refusals_set_the_latch_once() {
+        let mut log = BoundLog::default();
+        let latches = (0..1000).filter(|_| log.refused(1)).count();
+        assert_eq!(latches, 1);
+        assert!(!log.refused(0), "no refusals is not a note");
+    }
+
+    #[test]
+    fn the_latch_clears_only_after_a_full_hold_below_the_bound_with_the_count() {
+        let mut log = BoundLog::default();
+        let t0 = Instant::now();
+        assert!(log.refused(1000));
+        assert_eq!(log.tick(true, t0), None);
+        assert_eq!(log.tick(false, t0), None, "the hold starts here");
+        assert_eq!(
+            log.tick(false, t0 + BOUND_LOG_HOLD - Duration::from_millis(1)),
+            None,
+            "59,999 ms below the bound must not clear the latch"
+        );
+        assert_eq!(log.tick(false, t0 + BOUND_LOG_HOLD), Some(1000));
+        assert_eq!(
+            log.tick(false, t0 + BOUND_LOG_HOLD * 2),
+            None,
+            "cleared once"
+        );
+        assert!(log.refused(1), "a refusal after the clear latches again");
+    }
+
+    #[test]
+    fn a_return_to_the_bound_inside_the_hold_restarts_the_wait_without_a_second_latch() {
+        let mut log = BoundLog::default();
+        let t0 = Instant::now();
+        assert!(log.refused(1));
+        assert_eq!(log.tick(false, t0), None);
+        assert_eq!(log.tick(true, t0 + Duration::from_secs(30)), None);
+        assert!(!log.refused(1), "still latched: no second warn");
+        assert_eq!(log.tick(false, t0 + Duration::from_secs(40)), None);
+        assert_eq!(
+            log.tick(
+                false,
+                t0 + Duration::from_secs(40) + BOUND_LOG_HOLD - Duration::from_millis(1)
+            ),
+            None,
+            "the wait restarted when the table returned to its bound"
+        );
+        assert_eq!(
+            log.tick(false, t0 + Duration::from_secs(40) + BOUND_LOG_HOLD),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn an_unlatched_log_never_clears() {
+        let mut log = BoundLog::default();
+        assert_eq!(log.tick(false, Instant::now() + BOUND_LOG_HOLD), None);
+    }
+}
+
 /// A running FIPS node instance.
 ///
 /// This is the top-level container holding all node state.
@@ -486,6 +601,9 @@ pub struct Node {
     /// inside `lookup` because it is an `Instant`-based limiter and the
     /// `proto` tree is clockless.
     discovery_sign_limiter: LookupSignRateLimiter,
+    /// Log latch for the lookup failure table at its bound. Held here rather
+    /// than inside `lookup` because the shell logs it on the monotonic clock.
+    backoff_bound_log: BoundLog,
 
     // === Diagnostics ===
     /// In-flight `probe` jobs plus their per-target ownership claims. Driven
@@ -873,6 +991,7 @@ impl Node {
                 LookupForwardRateLimiter::with_interval_ms(forward_min_interval_secs * 1000),
             ),
             discovery_sign_limiter: LookupSignRateLimiter::new(),
+            backoff_bound_log: BoundLog::default(),
             peering: peering::reconcile::Peering::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
@@ -1031,6 +1150,7 @@ impl Node {
             probes: handlers::probe::ProbeRegistry::new(),
             lookup: Lookup::new(LookupBackoff::new(), LookupForwardRateLimiter::new()),
             discovery_sign_limiter: LookupSignRateLimiter::new(),
+            backoff_bound_log: BoundLog::default(),
             peering: peering::reconcile::Peering::new(),
             last_parent_reeval: None,
             last_congestion_log: None,

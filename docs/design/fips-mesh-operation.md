@@ -235,12 +235,21 @@ enabled, backoff is **reset on topology changes** that might make
 previously unreachable targets reachable: parent switch, new peer
 connection, first RTT measurement from MMP, or peer reconnection.
 
+While backoff is disabled (a zero base or a zero cap), no failure is
+recorded at all. When it is enabled, the failure table is bounded: an entry
+is forgotten once its window and one further cap interval have passed, so a
+target that fails again soon after its window still escalates, and the
+table holds at most 4096 targets. A new failure at that bound evicts the
+entry whose window ends first, which can only let that target be retried
+sooner.
+
 ### Bloom Filter Pre-Check
 
 Before initiating a lookup, the originator checks whether *any* peer's
 bloom filter contains the target. If no peer advertises reachability, the
-lookup is skipped entirely and recorded as a failure for backoff purposes.
-This avoids wasting network resources when the target is not in the mesh.
+lookup is skipped entirely and, when backoff is enabled, recorded as a
+failure for backoff purposes. This avoids wasting network resources when
+the target is not in the mesh.
 
 ### Transit-Side Rate Limiting
 
@@ -321,8 +330,8 @@ to that destination can proceed via the normal `find_next_hop()` priority
 chain.
 
 If discovery times out (no response after all retry attempts), queued
-packets receive ICMPv6 Destination Unreachable and the target enters
-backoff.
+packets receive ICMPv6 Destination Unreachable and, when backoff is
+enabled, the target enters backoff.
 
 ## Coordinate Cache Warming
 
