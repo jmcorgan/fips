@@ -12,6 +12,7 @@ extern crate alloc;
 pub mod cache;
 pub mod config;
 pub mod control;
+pub(crate) mod dnsmsg;
 #[cfg(target_os = "linux")]
 pub mod gateway;
 pub mod identity;

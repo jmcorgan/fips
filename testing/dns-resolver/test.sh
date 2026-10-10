@@ -892,6 +892,43 @@ check_gateway_default_bind() {
     fi
 }
 
+# Source-port screening: a DNS listener answers a query from an ordinary
+# port and ignores one from chargen's port 19, which no resolver sends
+# from. dig runs as root here, so it can bind the low port. A drop must
+# show as a timeout, not as a failed bind, so a dig that never sent
+# cannot pass as a dropped query. The control comes first, so a listener
+# that is not up fails the control rather than passing the drop.
+# Args: <container> <label> <listen port on ::1> <npub>
+check_source_port_screen() {
+    local name="$1" who="$2" port="$3" npub="$4"
+    local out
+    out=$(docker exec "$name" dig -b '::1#53000' +tries=1 +time=2 @::1 -p "$port" AAAA "${npub}.fips" 2>&1)
+    if echo "$out" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+        pass "$who: dig from source port 53000 returns AAAA"
+    else
+        fail "$who: dig from source port 53000 did not return AAAA"
+        echo "  --- dig output ---"
+        echo "$out" | tail -15
+        return
+    fi
+    out=$(docker exec "$name" dig -b '::1#19' +tries=1 +time=2 @::1 -p "$port" AAAA "${npub}.fips" 2>&1)
+    if echo "$out" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+        fail "$who: dig from source port 19 was answered"
+        echo "  --- dig output ---"
+        echo "$out" | tail -15
+    elif echo "$out" | grep -qiE 'failed|bind'; then
+        fail "$who: dig from source port 19 did not send (bind or send failed)"
+        echo "  --- dig output ---"
+        echo "$out" | tail -15
+    elif echo "$out" | grep -q 'timed out'; then
+        pass "$who: dig from source port 19 gets no reply"
+    else
+        fail "$who: dig from source port 19: neither an answer nor a timeout"
+        echo "  --- dig output ---"
+        echo "$out" | tail -15
+    fi
+}
+
 # The gateway exits at the DNS bind when its listen port is held. The
 # daemon in this container holds [::1]:5354, so a gateway configured to
 # listen there must exit non-zero with the hint naming the daemon, before
@@ -1104,6 +1141,8 @@ EOF'
         echo "  --- dig output ---"
         echo "$direct_output" | tail -15
     fi
+
+    check_source_port_screen "$name" daemon 5354 "$npub"
 
     # End-to-end via systemd-resolved stub.
     local stub_output
