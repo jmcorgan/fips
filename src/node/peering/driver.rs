@@ -11,8 +11,13 @@
 //! [`crate::node::lifecycle`] next to the surviving budget helpers and limit
 //! constants they wrap.
 
+use std::collections::HashSet;
+
+use crate::PeerIdentity;
 use crate::identity::NodeAddr;
 use crate::node::{Node, NodeError};
+use crate::nostr::NostrRendezvous;
+use crate::peer::ActivePeer;
 use tracing::warn;
 
 use super::reconcile::{DiscoveryPools, Gate, PeeringAction};
@@ -152,5 +157,54 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// The authors whose cached adverts survive a full advert cache: every
+    /// configured peer and every peer with an established link.
+    ///
+    /// Configured npubs are canonicalised through `PeerIdentity`, because the
+    /// cache keys adverts by canonical bech32 while configuration keeps the
+    /// text as written. A configured entry that does not parse is left out; it
+    /// cannot be dialled either.
+    fn advert_protection_set(&self) -> HashSet<String> {
+        self.config()
+            .peers()
+            .iter()
+            .filter_map(|peer| PeerIdentity::from_npub(&peer.npub).ok())
+            .map(|identity| identity.npub())
+            .chain(
+                self.peers
+                    .values()
+                    .map(ActivePeer::npub_str)
+                    .map(str::to_string),
+            )
+            .collect()
+    }
+
+    /// Push the protected advert authors to the running Nostr engine when
+    /// they changed since the last push. Called once per tick, so a dropped
+    /// link or a configuration reload takes effect on the next tick.
+    pub(in crate::node) fn push_advert_protection(&mut self) {
+        let Some(engine) = self.supervisor.nostr_rendezvous.engine_arc() else {
+            return;
+        };
+        let set = self.advert_protection_set();
+        if set != self.peering.advert_protected {
+            engine.set_advert_protection(set.clone());
+            self.peering.advert_protected = set;
+        }
+    }
+
+    /// Give a freshly started Nostr engine the protected advert authors.
+    /// The start path calls this before its first await, so before relays
+    /// can replay adverts on that task; the engine's own loops, already
+    /// spawned, could still cache or refuse an advert on another worker
+    /// thread in the moment before. Unconditional, unlike the per-tick push:
+    /// the peering state outlives a stop and start, so an unchanged set
+    /// would otherwise never reach the new engine.
+    pub(in crate::node) fn install_advert_protection(&mut self, engine: &NostrRendezvous) {
+        let set = self.advert_protection_set();
+        engine.set_advert_protection(set.clone());
+        self.peering.advert_protected = set;
     }
 }

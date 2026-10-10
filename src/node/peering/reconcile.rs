@@ -217,8 +217,10 @@ impl Candidate {
 /// data, no runtime handles.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DiscoveryPools {
-    /// `bootstrap.cached_open_discovery_candidates(64)`:
-    /// `(npub, endpoints, created_at_secs)`.
+    /// `bootstrap.cached_open_discovery_candidates(64, &skip)`:
+    /// `(npub, endpoints, created_at_secs)`. The configured authors without
+    /// an established link, plus a random draw of up to 64 unconfigured
+    /// authors that are neither linked nor already queued.
     pub overlay: Vec<(String, Vec<OverlayEndpointAdvert>, u64)>,
     /// `transport.discover()` beacons (auto-connect transports), pre-resolved.
     pub transport_neighbors: Vec<Candidate>,
@@ -917,6 +919,9 @@ pub(crate) struct Peering {
     /// `Node.pending_connects`). This is driver I/O-completion state, not a
     /// decision, so it lives on the owner, not the pure core.
     pub(in crate::node) pending_connects: Vec<crate::node::PendingConnect>,
+    /// The protected advert authors last pushed to the Nostr engine, so the
+    /// per-tick push sends only changes.
+    pub(in crate::node) advert_protected: HashSet<String>,
 }
 
 impl Peering {
@@ -925,6 +930,7 @@ impl Peering {
         Self {
             reconciler: PeeringReconciler::default(),
             pending_connects: Vec::new(),
+            advert_protected: HashSet::new(),
         }
     }
 }

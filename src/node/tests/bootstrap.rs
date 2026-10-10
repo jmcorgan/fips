@@ -493,3 +493,91 @@ async fn test_connected_udp_activates_on_an_adopted_traversal_transport_and_on_a
         transport.stop().await.ok();
     }
 }
+
+/// An on-demand configured peer on a placeholder address nothing dials.
+fn on_demand_peer(npub: String) -> crate::config::PeerConfig {
+    crate::config::PeerConfig {
+        npub,
+        alias: None,
+        addresses: vec![crate::config::PeerAddress::new("udp", "127.0.0.1:9")],
+        connect_policy: crate::config::ConnectPolicy::OnDemand,
+        auto_reconnect: false,
+        via_nostr: false,
+    }
+}
+
+/// The node tick tells the advert cache which authors to keep when it is
+/// full: configured peers (in canonical form, whatever case the configuration
+/// wrote) and peers with an established link, following link loss and
+/// configuration reloads.
+#[tokio::test]
+async fn the_peering_tick_pushes_configured_and_linked_npubs_to_the_advert_cache() {
+    let configured = make_peer_identity();
+    let mut config = Config::new();
+    config.peers = vec![on_demand_peer(configured.npub().to_uppercase())];
+    let mut node = make_node_with(config);
+
+    let link_id = LinkId::new(1);
+    let linked = seed_completed_connection(&mut node, link_id, TransportId::new(1), 1000);
+    node.promote_connection(link_id, linked, 2000).unwrap();
+
+    let engine = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.supervisor.nostr_rendezvous.set_engine(engine.clone());
+
+    node.poll_nostr_rendezvous().await;
+    let protected = engine.advert_protection_for_test();
+    assert!(protected.contains(&linked.npub()), "linked peer protected");
+    assert!(
+        protected.contains(&configured.npub()),
+        "configured peer protected under its canonical npub"
+    );
+
+    node.remove_peer(linked.node_addr());
+    node.poll_nostr_rendezvous().await;
+    assert!(
+        !engine.advert_protection_for_test().contains(&linked.npub()),
+        "a dropped link loses protection on the next tick"
+    );
+
+    let added = make_peer_identity();
+    node.update_peers(vec![on_demand_peer(added.npub())])
+        .await
+        .unwrap();
+    node.poll_nostr_rendezvous().await;
+    let protected = engine.advert_protection_for_test();
+    assert!(
+        !protected.contains(&configured.npub()),
+        "removed peer dropped"
+    );
+    assert!(protected.contains(&added.npub()), "added peer protected");
+}
+
+/// A Nostr engine started again on the same node gets the configured authors
+/// at once, before any tick, even though the set has not changed since the
+/// last push to the previous engine.
+#[tokio::test]
+async fn a_restarted_nostr_engine_receives_the_configured_set_before_any_tick() {
+    let configured = make_peer_identity();
+    let mut config = Config::new();
+    config.peers = vec![on_demand_peer(configured.npub())];
+    let mut node = make_node_with(config);
+
+    let engine_a = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.install_advert_protection(&engine_a);
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(engine_a.clone());
+    node.poll_nostr_rendezvous().await;
+
+    let engine_b = std::sync::Arc::new(crate::nostr::NostrRendezvous::new_for_test());
+    node.install_advert_protection(&engine_b);
+    node.supervisor
+        .nostr_rendezvous
+        .set_engine(engine_b.clone());
+
+    assert!(
+        engine_b
+            .advert_protection_for_test()
+            .contains(&configured.npub())
+    );
+}

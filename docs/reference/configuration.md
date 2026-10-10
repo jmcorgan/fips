@@ -259,7 +259,7 @@ inert otherwise.
 | `node.rendezvous.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
 | `node.rendezvous.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
 | `node.rendezvous.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. Zero is rejected, since it refuses every inbound offer rather than disabling the limit |
-| `node.rendezvous.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic |
+| `node.rendezvous.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic. When the cache is full, an advert from a new author that is neither a configured peer nor linked to this node is refused until an entry expires; configured and linked authors are always cached |
 | `node.rendezvous.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
 | `node.rendezvous.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
 | `node.rendezvous.nostr.advert_relays` | list[string] | `["wss://relay.damus.io", "wss://nos.lol", "wss://offchain.pub"]` | Relays used for service adverts |

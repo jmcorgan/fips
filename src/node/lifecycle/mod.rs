@@ -957,6 +957,8 @@ impl Node {
         // cheap atomic store. One-tick lag is acceptable: the inbound
         // msg1 gate in handshake.rs remains the authoritative cap.
         bootstrap.set_outbound_admission(self.outbound_admission_check());
+        self.push_advert_protection();
+        bootstrap.maintain_advert_cache();
 
         if let Err(err) = self.refresh_overlay_advert(&bootstrap).await {
             debug!(error = %err, "Failed to refresh local Nostr overlay advert");
@@ -1639,6 +1641,11 @@ impl Node {
                     .await
                     {
                         Ok(runtime) => {
+                            // Before the first await: the engine's relay loops
+                            // are already running and can replay stored
+                            // adverts, which a full cache would refuse for
+                            // configured peers it did not know were protected.
+                            self.install_advert_protection(&runtime);
                             if let Err(err) = self.refresh_overlay_advert(&runtime).await {
                                 warn!(error = %err, "Failed to publish initial Nostr overlay advert");
                             }
@@ -2659,7 +2666,7 @@ impl Node {
     /// layer.
     ///
     /// The driver builds the [`DiscoveryPools`] overlay input from
-    /// `bootstrap.cached_open_discovery_candidates(64)` (the I/O), excluding the
+    /// `bootstrap.cached_open_discovery_candidates(64, &skip)` (the I/O), excluding the
     /// node's own advert (the sans-IO core has no self-identity
     /// input), and supplies the configured-npub set, the per-npub cooldown set,
     /// and the startup-sweep max-age. `max_age_secs` is `None` for the per-tick
@@ -2710,7 +2717,23 @@ impl Node {
         // exactly that set (below) — reproducing the old sweep's per-enqueue
         // `peer_aliases` / `register_identity` side effects byte-for-byte.
         let now_secs = now_ms / 1000;
-        let candidates = bootstrap.cached_open_discovery_candidates(64).await;
+        // Authors the sweep is certain to pass over without acting: those with
+        // an established link, and unconfigured authors already queued. Left
+        // out of the cache's window so they cannot take its slots.
+        let skip = self
+            .peers
+            .values()
+            .map(|peer| peer.npub_str().to_string())
+            .chain(
+                self.peering
+                    .reconciler
+                    .retry_pending
+                    .values()
+                    .map(|state| state.peer_config.npub.clone())
+                    .filter(|npub| !configured_npubs.contains(npub)),
+            )
+            .collect::<HashSet<_>>();
+        let candidates = bootstrap.cached_open_discovery_candidates(64, &skip).await;
         // `cached` and the self buckets feed the operator sweep summary below: the
         // raw cache size and the self-advert filter are the driver's to count,
         // since the sans-IO core never sees self (it is excluded from the pool).

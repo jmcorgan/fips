@@ -179,11 +179,17 @@ advert wins; adverts whose `protocol` tag does not match the local
 `app` value are rejected at validation.
 
 Results are kept in an in-memory cache keyed by author npub. Cache
-entries carry the advert's expiration time; a periodic prune drops
-expired entries, and an LRU-by-expiry eviction enforces
-`advert_cache_max_entries`. A parallel long-lived subscription on the
-advert relays populates the cache passively, so open-discovery
-candidates do not require per-dial fetches.
+entries carry the advert's expiration time, and a periodic prune drops
+expired entries. When the cache holds `advert_cache_max_entries` valid
+adverts, an advert from a new author that is neither a configured peer
+nor linked to this node is refused until an entry expires; adverts
+already cached are not evicted for it. Configured and linked authors are
+always cached, taking the slot of the unprotected entry cached most
+recently. A parallel long-lived subscription on the advert relays
+populates the cache passively, so open-discovery candidates do not
+require per-dial fetches. Each open-discovery sweep considers the
+configured authors not yet linked and a fresh random draw of up to 64
+other cached authors that are neither linked nor already queued.
 
 On cache hit, advert endpoints are appended to the peer's static
 address list with lower priority; the static list is tried first.
@@ -324,7 +330,7 @@ machinery:
 | --- | --- | --- | --- |
 | Offer semaphore (`max_concurrent_incoming_offers`) | 16 | CPU and memory exhaustion from offer spam on DM relays. | Warn log, offer dropped. |
 | Per-npub offer allowance (`max_concurrent_offers_per_npub`) | 4 | One sender identity holding every offer slot and denying traversal onboarding to everyone else. Does not prevent the same denial from several throwaway npubs. | Debug log, offer dropped. |
-| Advert cache (`advert_cache_max_entries`) | 2048 | Memory growth from ambient advert traffic under `policy: open`. | LRU-by-expiry eviction. |
+| Advert cache (`advert_cache_max_entries`) | 2048 | Memory growth from ambient advert traffic under `policy: open`. | New unconfigured authors refused until an entry expires; configured and linked authors kept. |
 | Seen-sessions (`seen_sessions_max_entries`) | 2048 | Replay of stale `sessionId` values. | Oldest entry evicted. |
 | Signal TTL (`signal_ttl_secs`) | 120 s | Indefinite in-flight offers on relays. | Expired offers rejected at validation. |
 | Open discovery queue (`open_discovery_max_pending`) | 64 | Unbounded retry queue under ambient advert load. | New candidates skipped until the queue drains. |

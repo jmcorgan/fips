@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::advert::{AdvertMachine, PublishPlan};
+use super::advert::{AdvertAdmission, AdvertMachine, PublishPlan};
 use super::failure_state::FailureState;
 use super::handoff::EstablishedTraversal;
 use super::offer_admission::{AdmissionReject, OfferAdmission};
@@ -644,7 +644,19 @@ impl NostrRendezvous {
                     created_at: relay_created_at,
                     valid_until_ms,
                 };
-                self.advert.insert_fetched(peer_npub, updated, now_ms());
+                if let AdvertAdmission::Refused { first_at_bound } =
+                    self.advert.insert_fetched(peer_npub, updated, now_ms())
+                {
+                    // The cache does not hold this advert, so the streak is
+                    // not reset on the strength of it.
+                    self.log_advert_cache_full(first_at_bound);
+                    debug!(
+                        peer = %short_npub(peer_npub),
+                        reason = "cache-full",
+                        "advert cache full; refetched advert not cached"
+                    );
+                    return NostrRefetchOutcome::Skipped;
+                }
                 self.failure_state.reset_streak_after_refresh(peer_npub);
                 NostrRefetchOutcome::Refreshed
             }
@@ -689,13 +701,38 @@ impl NostrRendezvous {
         self.advert.set_protected(npubs);
     }
 
+    /// The cached adverts the open-discovery sweep should consider: the
+    /// protected entries not in `skip`, plus up to `max` unprotected entries
+    /// not in `skip`, drawn at random on each call.
     pub async fn cached_open_discovery_candidates(
         &self,
         max: usize,
+        skip: &HashSet<String>,
     ) -> Vec<(String, Vec<OverlayEndpointAdvert>, u64)> {
         self.prune_advert_cache();
         self.advert
-            .open_discovery_candidates(max, now_ms(), &HashSet::new(), &mut rand::rng())
+            .open_discovery_candidates(max, now_ms(), skip, &mut rand::rng())
+    }
+
+    /// Expire cached adverts, trim the cache to its cap, and release the
+    /// cache-full warning once the cache has stayed below its cap long
+    /// enough. Called once per node tick.
+    pub fn maintain_advert_cache(&self) {
+        self.prune_advert_cache();
+        if let Some(refused) = self.advert.bound_tick(Instant::now()) {
+            info!(refused, "advert cache below cap again");
+        }
+    }
+
+    /// The one warning a full advert cache produces until it has been below
+    /// its cap for a minute.
+    fn log_advert_cache_full(&self, first_at_bound: bool) {
+        if first_at_bound {
+            warn!(
+                bound = self.config.advert_cache_max_entries,
+                "advert cache full; refusing adverts from new unconfigured authors"
+            );
+        }
     }
 
     pub async fn shutdown(&self) -> Result<(), BootstrapError> {
@@ -774,19 +811,32 @@ impl NostrRendezvous {
                                 event.created_at.as_secs(),
                                 now_ms(),
                             );
-                            if self.advert.observe_advert(
+                            match self.advert.observe_advert(
                                 &author_npub,
                                 advert,
                                 created_at,
                                 valid_until_ms,
                                 now_ms(),
                             ) {
-                                debug!(
-                                    peer = %short_npub(&author_npub),
-                                    endpoints = %endpoints,
-                                    event = %short_id(&event.id.to_string()),
-                                    "advert: peer cached"
-                                );
+                                AdvertAdmission::Admitted | AdvertAdmission::Updated
+                                    if author_npub != self.npub =>
+                                {
+                                    debug!(
+                                        peer = %short_npub(&author_npub),
+                                        endpoints = %endpoints,
+                                        event = %short_id(&event.id.to_string()),
+                                        "advert: peer cached"
+                                    );
+                                }
+                                AdvertAdmission::Refused { first_at_bound } => {
+                                    self.log_advert_cache_full(first_at_bound);
+                                    debug!(
+                                        peer = %short_npub(&author_npub),
+                                        reason = "cache-full",
+                                        "advert cache full; advert not cached"
+                                    );
+                                }
+                                _ => {}
                             }
                         }
                         self.prune_advert_cache();
@@ -1600,8 +1650,17 @@ impl NostrRendezvous {
             endpoints = %endpoint_summary(&cached.advert.endpoints),
             "advert: resolved"
         );
-        self.advert
-            .insert_fetched(peer_npub, cached.clone(), now_ms());
+        if let AdvertAdmission::Refused { first_at_bound } =
+            self.advert
+                .insert_fetched(peer_npub, cached.clone(), now_ms())
+        {
+            self.log_advert_cache_full(first_at_bound);
+            debug!(
+                peer = %short_npub(peer_npub),
+                reason = "cache-full",
+                "advert cache full; fetched advert used for this dial only"
+            );
+        }
         self.prune_advert_cache();
         Ok(cached.advert)
     }
@@ -1748,12 +1807,13 @@ impl NostrRendezvous {
     }
 
     fn prune_advert_cache(&self) {
-        if let Some((evicted, retained)) = self.advert.prune(now_ms()) {
+        let report = self.advert.prune(now_ms());
+        if report.evicted > 0 {
             debug!(
-                evicted,
-                retained,
+                evicted = report.evicted,
+                retained = report.retained,
                 cap = self.config.advert_cache_max_entries,
-                "advert cache overflow; evicted oldest entries"
+                "advert cache over cap; evicted unprotected entries"
             );
         }
     }
@@ -2028,7 +2088,12 @@ impl NostrRendezvous {
     /// Insert a cached advert directly into the in-memory cache. Used by
     /// unit tests to set up consumer-side state without needing live relays.
     pub(crate) async fn insert_advert_for_test(&self, npub: String, advert: CachedOverlayAdvert) {
-        self.advert.insert_fetched(&npub, advert, now_ms());
+        let _ = self.advert.insert_fetched(&npub, advert, now_ms());
+    }
+
+    /// The authors the advert cache currently protects.
+    pub(crate) fn advert_protection_for_test(&self) -> HashSet<String> {
+        self.advert.protected()
     }
 
     /// The cached `created_at` for `npub`, or `None` when nothing is cached.
