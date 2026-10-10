@@ -781,6 +781,16 @@ impl BleConfig {
             .unwrap_or(DEFAULT_BLE_CONNECT_TIMEOUT_MS)
     }
 
+    /// How long a newly admitted BLE link is protected from eviction so its
+    /// FIPS handshake can complete: `connect_timeout_ms`, never less than its
+    /// 10 s default.
+    pub fn verify_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.connect_timeout_ms()
+                .max(DEFAULT_BLE_CONNECT_TIMEOUT_MS),
+        )
+    }
+
     /// Whether to broadcast advertisements. Default: true.
     pub fn advertise(&self) -> bool {
         self.advertise.unwrap_or(true)
@@ -1070,5 +1080,20 @@ mod tests {
         let bogus: Result<EthernetConfig, _> =
             serde_yaml::from_str("interface: eth0\nbogus: true\n");
         assert!(bogus.is_err());
+    }
+
+    /// The BLE eviction grace follows the connect timeout, but lowering the
+    /// timeout to speed up dials must not shrink the time a new link has to
+    /// complete its handshake.
+    #[test]
+    fn ble_verify_grace_is_the_connect_timeout_but_never_below_ten_seconds() {
+        let with = |ms| BleConfig {
+            connect_timeout_ms: ms,
+            ..Default::default()
+        };
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(with(Some(1_000)).verify_grace(), secs(10));
+        assert_eq!(with(Some(30_000)).verify_grace(), secs(30));
+        assert_eq!(with(None).verify_grace(), secs(10));
     }
 }

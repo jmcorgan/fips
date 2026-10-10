@@ -27,6 +27,14 @@ pub struct BleConnection<S> {
     pub established_at: tokio::time::Instant,
     /// Whether this is a static (configured) peer.
     pub is_static: bool,
+    /// Whether the node's active peer for [`Self::node_addr`] uses this link.
+    ///
+    /// The pre-handshake key exchange is a claim anyone in radio range can
+    /// make, and proves nothing. Not acted on yet.
+    pub verified: bool,
+    /// When this link's protection from eviction began: its admission, or the
+    /// last time its peer left it. `established_at` stays the link's age.
+    pub grace_from: tokio::time::Instant,
     /// Parsed remote address.
     pub addr: BleAddr,
     /// The peer's node address, once the pubkey exchange has learned it.
@@ -64,7 +72,10 @@ pub struct ConnectionPool<S> {
 
 impl<S> ConnectionPool<S> {
     /// Create a new pool with the given maximum capacity.
-    pub fn new(max_connections: usize) -> Self {
+    ///
+    /// `_verify_grace` is how long a new link is protected from eviction while
+    /// its handshake completes. Not acted on yet.
+    pub fn new(max_connections: usize, _verify_grace: std::time::Duration) -> Self {
         Self {
             connections: HashMap::new(),
             max_connections,
@@ -146,6 +157,7 @@ impl<S> ConnectionPool<S> {
         &mut self,
         addr: TransportAddr,
         conn: BleConnection<S>,
+        _now: tokio::time::Instant,
     ) -> Result<Option<TransportAddr>, TransportError> {
         use std::collections::hash_map::Entry;
 
@@ -244,17 +256,39 @@ mod tests {
             recv_mtu: 2048,
             established_at: tokio::time::Instant::now(),
             is_static,
+            verified: false,
+            grace_from: tokio::time::Instant::now(),
             addr: test_ble_addr(n),
             node_addr: None,
         }
     }
 
+    /// A link at `test_addr(n)` claiming `test_node(node)`, admitted at `at`.
+    #[allow(dead_code)] // the pool's verification tests build on it
+    fn claimed(n: u8, node: u8, verified: bool, at: tokio::time::Instant) -> BleConnection<()> {
+        let mut conn = test_conn(n, false);
+        conn.node_addr = Some(test_node(node));
+        conn.verified = verified;
+        conn.established_at = at;
+        conn.grace_from = at;
+        conn
+    }
+
+    /// The insertion instant for tests that do not depend on time.
+    fn now() -> tokio::time::Instant {
+        tokio::time::Instant::now()
+    }
+
+    /// The grace every pool test runs with.
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
     #[test]
     fn test_pool_basic_insert() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         assert!(pool.is_empty());
 
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
         assert_eq!(pool.len(), 1);
         assert!(!pool.is_empty());
         assert!(pool.contains(&test_addr(1)));
@@ -262,22 +296,26 @@ mod tests {
 
     #[test]
     fn test_pool_remove() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
         assert!(pool.remove(&test_addr(1)).is_some());
         assert!(pool.is_empty());
     }
 
     #[test]
     fn test_pool_full_eviction() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(3);
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
-        pool.insert(test_addr(2), test_conn(2, false)).unwrap();
-        pool.insert(test_addr(3), test_conn(3, false)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(3, GRACE);
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
+        pool.insert(test_addr(2), test_conn(2, false), now())
+            .unwrap();
+        pool.insert(test_addr(3), test_conn(3, false), now())
+            .unwrap();
         assert!(pool.is_full());
 
         // Inserting a 4th should evict the oldest non-static
-        let result = pool.insert(test_addr(4), test_conn(4, false));
+        let result = pool.insert(test_addr(4), test_conn(4, false), now());
         assert!(result.is_ok());
         assert!(result.unwrap().is_some()); // something was evicted
         assert_eq!(pool.len(), 3);
@@ -286,12 +324,14 @@ mod tests {
 
     #[test]
     fn test_pool_static_evicts_nonstatic() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(2);
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
-        pool.insert(test_addr(2), test_conn(2, false)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(2, GRACE);
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
+        pool.insert(test_addr(2), test_conn(2, false), now())
+            .unwrap();
 
         // Static peer should evict a non-static
-        let result = pool.insert(test_addr(3), test_conn(3, true));
+        let result = pool.insert(test_addr(3), test_conn(3, true), now());
         assert!(result.is_ok());
         assert_eq!(pool.len(), 2);
         assert!(pool.contains(&test_addr(3)));
@@ -299,22 +339,25 @@ mod tests {
 
     #[test]
     fn test_pool_all_static_rejects() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(2);
-        pool.insert(test_addr(1), test_conn(1, true)).unwrap();
-        pool.insert(test_addr(2), test_conn(2, true)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(2, GRACE);
+        pool.insert(test_addr(1), test_conn(1, true), now())
+            .unwrap();
+        pool.insert(test_addr(2), test_conn(2, true), now())
+            .unwrap();
 
         // Non-static peer cannot evict static peers
-        let result = pool.insert(test_addr(3), test_conn(3, false));
+        let result = pool.insert(test_addr(3), test_conn(3, false), now());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_pool_replace_existing() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(2);
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(2, GRACE);
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
 
         // Re-inserting same address should replace, not grow
-        let result = pool.insert(test_addr(1), test_conn(1, true));
+        let result = pool.insert(test_addr(1), test_conn(1, true), now());
         assert!(result.is_ok());
         assert_eq!(pool.len(), 1);
         assert!(pool.get(&test_addr(1)).unwrap().is_static);
@@ -330,9 +373,11 @@ mod tests {
 
     #[test]
     fn test_pool_addrs() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
-        pool.insert(test_addr(2), test_conn(2, false)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
+        pool.insert(test_addr(2), test_conn(2, false), now())
+            .unwrap();
 
         let mut addrs = pool.addrs();
         addrs.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
@@ -343,11 +388,11 @@ mod tests {
     /// — the whole point of the lookup, since the link address rotates.
     #[test]
     fn test_find_by_node_matches_across_a_rotated_link_address() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         let node = test_node(1);
         let mut conn = test_conn(1, false);
         conn.node_addr = Some(node);
-        pool.insert(test_addr(1), conn).unwrap();
+        pool.insert(test_addr(1), conn, now()).unwrap();
 
         // Found under the address it was inserted with...
         assert_eq!(pool.find_by_node(&node), Some(test_addr(1)));
@@ -360,31 +405,32 @@ mod tests {
 
     #[test]
     fn test_find_by_node_ignores_unidentified_connections() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         // No pubkey exchange yet, so no node address.
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
         assert_eq!(pool.find_by_node(&test_node(1)), None);
     }
 
     #[test]
     fn test_find_by_node_returns_none_for_an_unconnected_node() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         let mut conn = test_conn(1, false);
         conn.node_addr = Some(test_node(1));
-        pool.insert(test_addr(1), conn).unwrap();
+        pool.insert(test_addr(1), conn, now()).unwrap();
         assert_eq!(pool.find_by_node(&test_node(2)), None);
     }
 
     /// Distinct nodes do not alias: each resolves to its own link address.
     #[test]
     fn test_find_by_node_distinguishes_two_nodes() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         let mut a = test_conn(1, false);
         a.node_addr = Some(test_node(1));
         let mut b = test_conn(2, false);
         b.node_addr = Some(test_node(2));
-        pool.insert(test_addr(1), a).unwrap();
-        pool.insert(test_addr(2), b).unwrap();
+        pool.insert(test_addr(1), a, now()).unwrap();
+        pool.insert(test_addr(2), b, now()).unwrap();
 
         assert_eq!(pool.find_by_node(&test_node(1)), Some(test_addr(1)));
         assert_eq!(pool.find_by_node(&test_node(2)), Some(test_addr(2)));
@@ -395,11 +441,11 @@ mod tests {
     /// current address rather than merely test for one.
     #[test]
     fn test_live_addr_of_node_reports_the_incumbent_not_the_alias() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         let node = test_node(1);
         let mut conn = test_conn(1, false);
         conn.node_addr = Some(node);
-        pool.insert(test_addr(1), conn).unwrap();
+        pool.insert(test_addr(1), conn, now()).unwrap();
 
         assert_eq!(pool.live_addr_of_node(&node), Some(test_ble_addr(1)));
         assert!(!pool.contains(&test_addr(99)));
@@ -410,8 +456,9 @@ mod tests {
 
     #[test]
     fn test_live_addr_of_node_ignores_unidentified_connections() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
-        pool.insert(test_addr(1), test_conn(1, false)).unwrap();
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
+        pool.insert(test_addr(1), test_conn(1, false), now())
+            .unwrap();
         assert_eq!(pool.live_addr_of_node(&test_node(1)), None);
     }
 
@@ -420,12 +467,12 @@ mod tests {
     /// With it, the caller sees the peer is already present and declines.
     #[test]
     fn test_rotated_addresses_would_otherwise_fill_the_pool() {
-        let mut pool: ConnectionPool<()> = ConnectionPool::new(7);
+        let mut pool: ConnectionPool<()> = ConnectionPool::new(7, GRACE);
         let node = test_node(1);
 
         let mut first = test_conn(1, false);
         first.node_addr = Some(node);
-        pool.insert(test_addr(1), first).unwrap();
+        pool.insert(test_addr(1), first, now()).unwrap();
 
         // Ten rotations arrive. Each is a distinct link address, so `contains`
         // says "new" every time — but `find_by_node` recognises all of them.

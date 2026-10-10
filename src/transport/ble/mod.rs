@@ -176,13 +176,14 @@ impl<I: BleIo> BleTransport<I> {
         packet_tx: PacketTx,
     ) -> Self {
         let max_conns = config.max_connections();
+        let verify_grace = config.verify_grace();
         Self {
             transport_id,
             name,
             config,
             state: TransportState::Configured,
             io: Arc::new(io),
-            pool: Arc::new(Mutex::new(ConnectionPool::new(max_conns))),
+            pool: Arc::new(Mutex::new(ConnectionPool::new(max_conns, verify_grace))),
             connecting: Arc::new(Mutex::new(HashMap::new())),
             packet_tx,
             accept_task: None,
@@ -518,19 +519,23 @@ impl<I: BleIo> BleTransport<I> {
             recv_mtu,
         ));
 
+        let admitted = tokio::time::Instant::now();
+
         let conn = BleConnection {
             stream,
             recv_task: Some(recv_task),
             send_mtu,
             recv_mtu,
-            established_at: tokio::time::Instant::now(),
+            established_at: admitted,
+            grace_from: admitted,
             is_static: false,
+            verified: false,
             addr: ble_addr.clone(),
             node_addr,
         };
 
         let mut pool = self.pool.lock().await;
-        match pool.insert(addr.clone(), conn) {
+        match pool.insert(addr.clone(), conn, admitted) {
             Ok(Some(evicted)) => {
                 self.stats.record_pool_eviction();
                 debug!(addr = %addr, evicted = %evicted, "BLE connection established (evicted peer)");
@@ -639,19 +644,23 @@ impl<I: BleIo> BleTransport<I> {
                         recv_mtu,
                     ));
 
+                    let admitted = tokio::time::Instant::now();
+
                     let conn = BleConnection {
                         stream,
                         recv_task: Some(recv_task),
                         send_mtu,
                         recv_mtu,
-                        established_at: tokio::time::Instant::now(),
+                        established_at: admitted,
+                        grace_from: admitted,
                         is_static: false,
+                        verified: false,
                         addr: ble_addr,
                         node_addr: peer_node,
                     };
 
                     let mut pool = pool.lock().await;
-                    match pool.insert(addr_clone.clone(), conn) {
+                    match pool.insert(addr_clone.clone(), conn, admitted) {
                         Ok(Some(evicted)) => {
                             stats.record_pool_eviction();
                             debug!(addr = %addr_clone, evicted = %evicted, "BLE connection established (evicted peer)");
@@ -718,6 +727,22 @@ impl<I: BleIo> BleTransport<I> {
             debug!(addr = %addr, "BLE connection closed");
             drop(conn); // recv_task aborted via Drop
         }
+    }
+
+    /// Records that the node's active peer `node` now uses the link at `addr`.
+    /// Not acted on yet.
+    pub async fn mark_verified(&self, _addr: &TransportAddr, _node: &NodeAddr) {}
+
+    /// Records that the node's active peer `node` no longer uses the link at
+    /// `addr`. Not acted on yet.
+    pub async fn clear_verified(&self, _addr: &TransportAddr, _node: &NodeAddr) {}
+
+    /// Whether the link at `addr` is verified; `None` when no link is pooled
+    /// there.
+    #[cfg(test)]
+    #[allow(dead_code)] // the verification tests read it
+    pub(crate) async fn is_verified(&self, addr: &TransportAddr) -> Option<bool> {
+        self.pool.lock().await.get(addr).map(|c| c.verified)
     }
 
     /// Get the link MTU for a specific address.
@@ -1102,19 +1127,23 @@ async fn admit_inbound<S>(
         recv_mtu,
     ));
 
+    let admitted = tokio::time::Instant::now();
+
     let conn = BleConnection {
         stream,
         recv_task: Some(recv_task),
         send_mtu,
         recv_mtu,
-        established_at: tokio::time::Instant::now(),
+        established_at: admitted,
+        grace_from: admitted,
         is_static: false,
+        verified: false,
         addr,
         node_addr: peer_node_addr,
     };
 
     let mut pool_guard = pool.lock().await;
-    match pool_guard.insert(ta.clone(), conn) {
+    match pool_guard.insert(ta.clone(), conn, admitted) {
         Ok(Some(evicted)) => {
             stats.record_pool_eviction();
             info!(addr = %ta, evicted = %evicted, "BLE inbound accepted (evicted peer)");
@@ -1569,19 +1598,23 @@ async fn scan_probe_loop<I: io::BleIo>(
                     recv_mtu,
                 ));
 
+                let admitted = tokio::time::Instant::now();
+
                 let conn = BleConnection {
                     stream,
                     recv_task: Some(recv_task),
                     send_mtu,
                     recv_mtu,
-                    established_at: tokio::time::Instant::now(),
+                    established_at: admitted,
+                    grace_from: admitted,
                     is_static: false,
+                    verified: false,
                     addr: addr.clone(),
                     node_addr: Some(peer_node),
                 };
 
                 let mut pool_guard = pool.lock().await;
-                match pool_guard.insert(ta.clone(), conn) {
+                match pool_guard.insert(ta.clone(), conn, admitted) {
                     Ok(Some(evicted)) => {
                         stats.record_pool_eviction();
                         debug!(addr = %ta, evicted = %evicted, "BLE probe promoted (evicted peer)");
@@ -1884,7 +1917,10 @@ mod tests {
     /// Wire up a receive loop over one end of a mock stream pair.
     fn spawn_receive_loop(local: MockBleStream) -> ReceiveLoopHarness {
         let addr = test_addr(2).to_transport_addr();
-        let pool = Arc::new(Mutex::new(ConnectionPool::new(7)));
+        let pool = Arc::new(Mutex::new(ConnectionPool::new(
+            7,
+            std::time::Duration::from_secs(10),
+        )));
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let reader = BleStreamRead::new(Arc::new(local), 2048);
         let task = tokio::spawn(receive_loop(
@@ -2151,9 +2187,12 @@ mod tests {
                     recv_mtu: 2048,
                     established_at: tokio::time::Instant::now(),
                     is_static: false,
+                    verified: false,
+                    grace_from: tokio::time::Instant::now(),
                     addr: test_addr(2),
                     node_addr: None,
                 },
+                tokio::time::Instant::now(),
             )
             .unwrap();
         assert!(pool.lock().await.contains(&ta));
@@ -2230,6 +2269,18 @@ mod tests {
         let na = NodeAddr::from_pubkey(&XOnlyPublicKey::from_slice(&a).unwrap());
         let nb = NodeAddr::from_pubkey(&XOnlyPublicKey::from_slice(&b).unwrap());
         if na < nb { (a, b) } else { (b, a) }
+    }
+
+    /// `n` pubkeys sorted ascending by node address.
+    ///
+    /// The inbound tie-break drops an inbound when our node address is the
+    /// smaller, so a test that wants an inbound admitted gives the transport
+    /// the last (largest) key.
+    #[allow(dead_code)] // the verification tests draw their keys here
+    fn pubkeys_by_node_addr(n: usize) -> Vec<[u8; 32]> {
+        let mut keys: Vec<[u8; 32]> = (1..=n as u8).map(test_pubkey).collect();
+        keys.sort_by_key(|k| NodeAddr::from_pubkey(&XOnlyPublicKey::from_slice(k).unwrap()));
+        keys
     }
 
     /// Run the peer half of the pubkey exchange over a mock stream end.
@@ -2822,9 +2873,12 @@ mod tests {
                     recv_mtu: 64,
                     established_at: tokio::time::Instant::now(),
                     is_static: false,
+                    verified: false,
+                    grace_from: tokio::time::Instant::now(),
                     addr: test_addr(2),
                     node_addr: None,
                 },
+                tokio::time::Instant::now(),
             )
             .unwrap();
 
