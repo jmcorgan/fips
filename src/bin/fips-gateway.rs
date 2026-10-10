@@ -16,7 +16,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 #[cfg(target_os = "linux")]
@@ -104,30 +104,6 @@ fn report_unreadable_conntrack(
             error,
             "Conntrack still unreadable; every mapping reads zero sessions"
         ),
-    }
-}
-
-/// Log a pending NAT rebuild retry once per change of outcome.
-///
-/// A recovery is reported whether the retry applied the rules itself or a
-/// mapping change applied them in between and left nothing pending.
-#[cfg(target_os = "linux")]
-fn report_nat_retry(log: &mut nat::RetryLog, result: &Result<bool, nat::NatError>) {
-    match (log.observe(result.as_ref().err()), result) {
-        (nat::RetryReport::Failed, Err(e)) => {
-            warn!(error = %e, "Failed to retry pending NAT rules")
-        }
-        (nat::RetryReport::Repeated, Err(e)) => {
-            debug!(error = %e, "Pending NAT rules still failing to apply")
-        }
-        (nat::RetryReport::Recovered, Ok(true)) => {
-            info!("Applied pending NAT rules; retries recovered")
-        }
-        (nat::RetryReport::Recovered, _) => {
-            info!("Pending NAT rules were applied by a later update; retries recovered")
-        }
-        (nat::RetryReport::Clean, Ok(true)) => info!("Applied pending NAT rules"),
-        _ => {}
     }
 }
 
@@ -439,20 +415,24 @@ async fn main() {
     // --- Initialize components ---
 
     // Virtual IP pool
-    let ip_pool = match pool::VirtualIpPool::new(
+    let ip_pool = match pool::VirtualIpPool::start(
         &gw_config.pool,
         gw_config.dns.ttl() as u64,
         gw_config.grace_period(),
+        pool::PoolStart::Fresh { offset: 1 },
+        Instant::now(),
     ) {
-        Ok(p) => Arc::new(Mutex::new(p)),
+        Ok(p) => p,
         Err(e) => {
             error!(error = %e, "Failed to create virtual IP pool");
             std::process::exit(1);
         }
     };
+    let pool_network = ip_pool.network();
+    let ip_pool = Arc::new(Mutex::new(ip_pool));
 
     // NAT manager
-    let mut nat_mgr = match nat::NatManager::new(gw_config.lan_interface.clone()) {
+    let mut nat_mgr = match nat::NatManager::new(gw_config.lan_interface.clone(), pool_network) {
         Ok(n) => n,
         Err(e) => {
             error!(error = %e, "Failed to create nftables table — do you have CAP_NET_ADMIN?");
@@ -481,6 +461,9 @@ async fn main() {
     // The NAT table exists by now, so a kernel that provides the proc file
     // has loaded nf_conntrack and the probe sees what the first tick will.
     report_conntrack_source().await;
+
+    // Nothing reads the reports yet, so they are dropped here.
+    let (mut nat_driver, _) = nat::NatDriver::start(Box::new(nat_mgr));
 
     // --- Channels ---
 
@@ -525,7 +508,7 @@ async fn main() {
 
     // --- NAT mapping counter (shared with tick task for snapshots) ---
 
-    let nat_count = Arc::new(AtomicUsize::new(0));
+    let nat_count = nat_driver.mapping_counter();
 
     // --- Start pool tick task ---
 
@@ -592,31 +575,24 @@ async fn main() {
     let mut exit_code = 0;
     let mut nat_retry = tokio::time::interval(std::time::Duration::from_secs(10));
     nat_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut nat_retry_log = nat::RetryLog::default();
     loop {
         tokio::select! {
             _ = nat_retry.tick() => {
-                report_nat_retry(&mut nat_retry_log, &nat_mgr.retry_pending());
+                nat_driver.retry();
             }
             Some(event) = event_rx.recv() => {
                 match event {
                     pool::PoolEvent::MappingCreated { virtual_ip, mesh_addr } => {
                         // Add NAT rules
-                        if let Err(e) = nat_mgr.add_mapping(virtual_ip, mesh_addr) {
-                            error!(error = %e, virtual_ip = %virtual_ip, "Failed to add NAT rules");
-                        }
-                        nat_count.store(nat_mgr.mapping_count(), Ordering::Relaxed);
+                        let _ = nat_driver.submit(nat::NatCommand::Add { virtual_ip, mesh_addr });
                         // Add proxy NDP entry
                         if let Err(e) = net_setup.add_proxy_ndp(virtual_ip).await {
                             error!(error = %e, virtual_ip = %virtual_ip, "Failed to add proxy NDP");
                         }
                     }
-                    pool::PoolEvent::MappingRemoved { virtual_ip, mesh_addr: _ } => {
+                    pool::PoolEvent::MappingRemoved { virtual_ip, mesh_addr } => {
                         // Remove NAT rules
-                        if let Err(e) = nat_mgr.remove_mapping(virtual_ip) {
-                            warn!(error = %e, virtual_ip = %virtual_ip, "Failed to remove NAT rules");
-                        }
-                        nat_count.store(nat_mgr.mapping_count(), Ordering::Relaxed);
+                        let _ = nat_driver.submit(nat::NatCommand::Remove { virtual_ip, mesh_addr });
                         // Remove proxy NDP entry
                         if let Err(e) = net_setup.remove_proxy_ndp(virtual_ip).await {
                             warn!(error = %e, virtual_ip = %virtual_ip, "Failed to remove proxy NDP");
@@ -687,7 +663,7 @@ async fn main() {
 
     // Clean up network and NAT
     net_setup.cleanup().await;
-    if let Err(e) = nat_mgr.cleanup() {
+    if let Err(e) = nat_driver.shutdown(nat::NAT_STOP_TIMEOUT) {
         warn!(error = %e, "Failed to clean up nftables table");
     }
 

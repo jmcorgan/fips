@@ -3,12 +3,14 @@
 //! Manages nftables DNAT/SNAT rules via the rustables netlink API
 //! for translating between virtual IPs and FIPS mesh addresses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::Ipv6Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::time::Instant;
-use tracing::{debug, info};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, warn};
 
 use rustables::expr::{
     Cmp, CmpOp, HighLevelPayload, IPv6HeaderField, Immediate, Masquerade, Meta, MetaType, Nat,
@@ -21,6 +23,11 @@ use crate::config::{PortForward, Proto};
 const TABLE_NAME: &str = "fips_gateway";
 const PREROUTING_CHAIN: &str = "prerouting";
 const POSTROUTING_CHAIN: &str = "postrouting";
+
+/// The mesh TUN interface, as the kernel compares interface names: the name
+/// and its terminating NUL. Every interface match on the TUN is built from
+/// this one constant.
+const TUN_IFACE: &[u8] = b"fips0\0";
 
 /// NAT priority constants (matching nftables standard priorities).
 const DSTNAT_PRIORITY: i32 = -100;
@@ -42,6 +49,9 @@ const SNDBUF_OVERHEAD: u64 = 32;
 /// How long the rebuild waits for the kernel's acknowledgement. The rebuild
 /// runs inside the gateway's event loop, so this bounds the stall there.
 const ACK_TIMEOUT_SECS: libc::time_t = 5;
+
+/// How long shutdown waits for the NAT table to be deleted.
+pub const NAT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Length of a `struct nlmsghdr`.
 const NLMSG_HDRLEN: usize = 16;
@@ -176,6 +186,12 @@ pub struct NatManager {
     port_forwards: Vec<PortForward>,
     /// Desired state has not yet been acknowledged by the kernel.
     rebuild_pending: bool,
+    /// Mappings removed from the desired state whose removal the kernel has
+    /// not yet acknowledged, as virtual IP and mesh address.
+    unconfirmed: HashSet<(Ipv6Addr, Ipv6Addr)>,
+    /// Removals the kernel has acknowledged, or that never had rules, not yet
+    /// handed to the caller.
+    removed: Vec<(Ipv6Addr, Ipv6Addr)>,
 }
 
 impl NatManager {
@@ -183,8 +199,13 @@ impl NatManager {
     ///
     /// Everything `new` does except sending the first rebuild, so a test can
     /// exercise the batch builder with no socket and no privileges.
-    fn with_state(lan_interface: String) -> Self {
-        let table = Table::new(ProtocolFamily::Inet).with_name(TABLE_NAME);
+    fn with_state(lan_interface: String, pool: (Ipv6Addr, u8)) -> Self {
+        Self::with_state_in(TABLE_NAME, lan_interface, pool)
+    }
+
+    /// `with_state` with the table, and every object in it, under `table_name`.
+    fn with_state_in(table_name: &str, lan_interface: String, _pool: (Ipv6Addr, u8)) -> Self {
+        let table = Table::new(ProtocolFamily::Inet).with_name(table_name);
         let pre_chain = Chain::new(&table)
             .with_name(PREROUTING_CHAIN)
             .with_type(ChainType::Nat)
@@ -202,6 +223,8 @@ impl NatManager {
             mappings: HashMap::new(),
             port_forwards: Vec::new(),
             rebuild_pending: false,
+            unconfirmed: HashSet::new(),
+            removed: Vec::new(),
         }
     }
 
@@ -212,9 +235,10 @@ impl NatManager {
     /// address, allowing return traffic to route back through the mesh.
     ///
     /// `lan_interface` is the gateway's LAN-facing interface name,
-    /// needed by the port-forward LAN-side masquerade rule.
-    pub fn new(lan_interface: String) -> Result<Self, NatError> {
-        let mgr = Self::with_state(lan_interface);
+    /// needed by the port-forward LAN-side masquerade rule. `pool` is the
+    /// virtual IP range as its network address and prefix length.
+    pub fn new(lan_interface: String, pool: (Ipv6Addr, u8)) -> Result<Self, NatError> {
+        let mgr = Self::with_state(lan_interface, pool);
         mgr.rebuild()?;
 
         info!("Created nftables table '{TABLE_NAME}' with NAT chains and fips0 masquerade");
@@ -239,13 +263,16 @@ impl NatManager {
         virtual_ip: Ipv6Addr,
         mesh_addr: Ipv6Addr,
     ) -> Result<(), NatError> {
-        self.mappings.insert(
+        if let Some(old) = self.mappings.insert(
             virtual_ip,
             NatMapping {
                 virtual_ip,
                 mesh_addr,
             },
-        );
+        ) && old.mesh_addr != mesh_addr
+        {
+            self.unconfirmed.insert((virtual_ip, old.mesh_addr));
+        }
         let (result, elapsed_us) = self.timed_rebuild();
         let mappings = self.mappings.len();
         match &result {
@@ -270,9 +297,10 @@ impl NatManager {
 
     /// Remove DNAT and SNAT rules for a virtual IP mapping.
     pub fn remove_mapping(&mut self, virtual_ip: Ipv6Addr) -> Result<(), NatError> {
-        if self.mappings.remove(&virtual_ip).is_none() {
+        let Some(old) = self.mappings.remove(&virtual_ip) else {
             return Err(NatError::RuleNotFound(virtual_ip));
-        }
+        };
+        self.unconfirmed.insert((virtual_ip, old.mesh_addr));
         let (result, elapsed_us) = self.timed_rebuild();
         let mappings = self.mappings.len();
         match &result {
@@ -378,124 +406,141 @@ impl NatManager {
         for op in ops {
             match *op {
                 NatOp::Table(msg_type) => batch.add(&self.table, msg_type),
-                NatOp::PreChain => batch.add(&self.pre_chain, MsgType::Add),
-                NatOp::PostChain => batch.add(&self.post_chain, MsgType::Add),
-                NatOp::FipsMasquerade => {
-                    // Rewrite the source address of traffic leaving fips0.
-                    // Without this, LAN clients' source addresses (e.g.
-                    // fd02::20) are not routable on the mesh, so return
-                    // traffic would be black-holed.
-                    let rule = Rule::new(&self.post_chain)?
-                        .with_expr(Meta::new(MetaType::OifName))
-                        .with_expr(Cmp::new(CmpOp::Eq, b"fips0\0".to_vec()))
-                        .with_expr(Masquerade::default());
-                    batch.add(&rule, MsgType::Add);
-                }
-                NatOp::Dnat(virtual_ip) => {
-                    let mapping = self.mapping(virtual_ip)?;
-                    let rule = Rule::new(&self.pre_chain)?
-                        .with_expr(Meta::new(MetaType::NfProto))
-                        .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
-                        .with_expr(
-                            HighLevelPayload::Network(NetworkHeaderField::IPv6(
-                                IPv6HeaderField::Daddr,
-                            ))
-                            .build(),
-                        )
-                        .with_expr(Cmp::new(CmpOp::Eq, mapping.virtual_ip.octets()))
-                        .with_expr(Immediate::new_data(
-                            mapping.mesh_addr.octets().to_vec(),
-                            Register::Reg1,
-                        ))
-                        .with_expr(
-                            Nat::default()
-                                .with_nat_type(NatType::DNat)
-                                .with_family(ProtocolFamily::Ipv6)
-                                .with_ip_register(Register::Reg1),
-                        );
-                    batch.add(&rule, MsgType::Add);
-                }
-                NatOp::Snat(virtual_ip) => {
-                    let mapping = self.mapping(virtual_ip)?;
-                    let rule = Rule::new(&self.post_chain)?
-                        .with_expr(Meta::new(MetaType::NfProto))
-                        .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
-                        .with_expr(
-                            HighLevelPayload::Network(NetworkHeaderField::IPv6(
-                                IPv6HeaderField::Saddr,
-                            ))
-                            .build(),
-                        )
-                        .with_expr(Cmp::new(CmpOp::Eq, mapping.mesh_addr.octets()))
-                        .with_expr(Immediate::new_data(
-                            mapping.virtual_ip.octets().to_vec(),
-                            Register::Reg1,
-                        ))
-                        .with_expr(
-                            Nat::default()
-                                .with_nat_type(NatType::SNat)
-                                .with_family(ProtocolFamily::Ipv6)
-                                .with_ip_register(Register::Reg1),
-                        );
-                    batch.add(&rule, MsgType::Add);
-                }
-                NatOp::PortForward(index) => {
-                    let pf = self
-                        .port_forwards
-                        .get(index)
-                        .expect("rebuild_batches only emits indices it read from port_forwards");
-                    let l4proto: u8 = match pf.proto {
-                        Proto::Tcp => libc::IPPROTO_TCP as u8,
-                        Proto::Udp => libc::IPPROTO_UDP as u8,
-                    };
-                    let dport_field = match pf.proto {
-                        Proto::Tcp => TransportHeaderField::Tcp(TCPHeaderField::Dport),
-                        Proto::Udp => TransportHeaderField::Udp(UDPHeaderField::Dport),
-                    };
-                    let target_ip = *pf.target.ip();
-                    let target_port_be = pf.target.port().to_be_bytes();
-
-                    let rule = Rule::new(&self.pre_chain)?
-                        .with_expr(Meta::new(MetaType::IifName))
-                        .with_expr(Cmp::new(CmpOp::Eq, b"fips0\0".to_vec()))
-                        .with_expr(Meta::new(MetaType::NfProto))
-                        .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
-                        .with_expr(Meta::new(MetaType::L4Proto))
-                        .with_expr(Cmp::new(CmpOp::Eq, [l4proto]))
-                        .with_expr(HighLevelPayload::Transport(dport_field).build())
-                        .with_expr(Cmp::new(CmpOp::Eq, pf.listen_port.to_be_bytes().to_vec()))
-                        .with_expr(Immediate::new_data(
-                            target_ip.octets().to_vec(),
-                            Register::Reg1,
-                        ))
-                        .with_expr(Immediate::new_data(target_port_be.to_vec(), Register::Reg2))
-                        .with_expr(
-                            Nat::default()
-                                .with_nat_type(NatType::DNat)
-                                .with_family(ProtocolFamily::Ipv6)
-                                .with_ip_register(Register::Reg1)
-                                .with_port_register(Register::Reg2),
-                        );
-                    batch.add(&rule, MsgType::Add);
-                }
-                NatOp::LanMasquerade => {
-                    let mut lan_iface = self.lan_interface.clone().into_bytes();
-                    lan_iface.push(0);
-                    let rule = Rule::new(&self.post_chain)?
-                        .with_expr(Meta::new(MetaType::IifName))
-                        .with_expr(Cmp::new(CmpOp::Eq, b"fips0\0".to_vec()))
-                        .with_expr(Meta::new(MetaType::OifName))
-                        .with_expr(Cmp::new(CmpOp::Eq, lan_iface))
-                        .with_expr(Meta::new(MetaType::NfProto))
-                        .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
-                        .with_expr(Masquerade::default());
-                    batch.add(&rule, MsgType::Add);
+                _ => {
+                    if let Some(chain) = self.chain_for(*op) {
+                        batch.add(chain, MsgType::Add);
+                    } else if let Some(rule) = self.rule_for(*op)? {
+                        batch.add(&rule, MsgType::Add);
+                    }
                 }
             }
         }
         let mut bytes = batch.finalize();
         keep_last_ack(&mut bytes)?;
         Ok(bytes)
+    }
+
+    /// The chain a chain op adds, or `None` for any other op.
+    fn chain_for(&self, op: NatOp) -> Option<&Chain> {
+        match op {
+            NatOp::PreChain => Some(&self.pre_chain),
+            NatOp::PostChain => Some(&self.post_chain),
+            _ => None,
+        }
+    }
+
+    /// The rule an op adds, or `None` for an op that adds no rule.
+    fn rule_for(&self, op: NatOp) -> Result<Option<Rule>, NatError> {
+        match op {
+            NatOp::Table(_) | NatOp::PreChain | NatOp::PostChain => Ok(None),
+            NatOp::FipsMasquerade => {
+                // Rewrite the source address of traffic leaving fips0.
+                // Without this, LAN clients' source addresses (e.g.
+                // fd02::20) are not routable on the mesh, so return
+                // traffic would be black-holed.
+                let rule = Rule::new(&self.post_chain)?
+                    .with_expr(Meta::new(MetaType::OifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Masquerade::default());
+                Ok(Some(rule))
+            }
+            NatOp::Dnat(virtual_ip) => {
+                let mapping = self.mapping(virtual_ip)?;
+                let rule = Rule::new(&self.pre_chain)?
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(
+                        HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Daddr))
+                            .build(),
+                    )
+                    .with_expr(Cmp::new(CmpOp::Eq, mapping.virtual_ip.octets()))
+                    .with_expr(Immediate::new_data(
+                        mapping.mesh_addr.octets().to_vec(),
+                        Register::Reg1,
+                    ))
+                    .with_expr(
+                        Nat::default()
+                            .with_nat_type(NatType::DNat)
+                            .with_family(ProtocolFamily::Ipv6)
+                            .with_ip_register(Register::Reg1),
+                    );
+                Ok(Some(rule))
+            }
+            NatOp::Snat(virtual_ip) => {
+                let mapping = self.mapping(virtual_ip)?;
+                let rule = Rule::new(&self.post_chain)?
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(
+                        HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Saddr))
+                            .build(),
+                    )
+                    .with_expr(Cmp::new(CmpOp::Eq, mapping.mesh_addr.octets()))
+                    .with_expr(Immediate::new_data(
+                        mapping.virtual_ip.octets().to_vec(),
+                        Register::Reg1,
+                    ))
+                    .with_expr(
+                        Nat::default()
+                            .with_nat_type(NatType::SNat)
+                            .with_family(ProtocolFamily::Ipv6)
+                            .with_ip_register(Register::Reg1),
+                    );
+                Ok(Some(rule))
+            }
+            NatOp::PortForward(index) => {
+                let pf = self
+                    .port_forwards
+                    .get(index)
+                    .expect("rebuild_batches only emits indices it read from port_forwards");
+                let l4proto: u8 = match pf.proto {
+                    Proto::Tcp => libc::IPPROTO_TCP as u8,
+                    Proto::Udp => libc::IPPROTO_UDP as u8,
+                };
+                let dport_field = match pf.proto {
+                    Proto::Tcp => TransportHeaderField::Tcp(TCPHeaderField::Dport),
+                    Proto::Udp => TransportHeaderField::Udp(UDPHeaderField::Dport),
+                };
+                let target_ip = *pf.target.ip();
+                let target_port_be = pf.target.port().to_be_bytes();
+
+                let rule = Rule::new(&self.pre_chain)?
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(Meta::new(MetaType::L4Proto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [l4proto]))
+                    .with_expr(HighLevelPayload::Transport(dport_field).build())
+                    .with_expr(Cmp::new(CmpOp::Eq, pf.listen_port.to_be_bytes().to_vec()))
+                    .with_expr(Immediate::new_data(
+                        target_ip.octets().to_vec(),
+                        Register::Reg1,
+                    ))
+                    .with_expr(Immediate::new_data(target_port_be.to_vec(), Register::Reg2))
+                    .with_expr(
+                        Nat::default()
+                            .with_nat_type(NatType::DNat)
+                            .with_family(ProtocolFamily::Ipv6)
+                            .with_ip_register(Register::Reg1)
+                            .with_port_register(Register::Reg2),
+                    );
+                Ok(Some(rule))
+            }
+            NatOp::LanMasquerade => {
+                let mut lan_iface = self.lan_interface.clone().into_bytes();
+                lan_iface.push(0);
+                let rule = Rule::new(&self.post_chain)?
+                    .with_expr(Meta::new(MetaType::IifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Meta::new(MetaType::OifName))
+                    .with_expr(Cmp::new(CmpOp::Eq, lan_iface))
+                    .with_expr(Meta::new(MetaType::NfProto))
+                    .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
+                    .with_expr(Masquerade::default());
+                Ok(Some(rule))
+            }
+        }
     }
 
     /// The mapping an op names, or the error a caller can report.
@@ -541,7 +586,237 @@ impl NatManager {
         self.rebuild_pending = true;
         apply(self)?;
         self.rebuild_pending = false;
+        self.confirm_removals();
         Ok(())
+    }
+
+    /// After a rebuild the kernel accepted, move every removed pair that the
+    /// accepted table no longer holds to the removals reported to the caller.
+    fn confirm_removals(&mut self) {
+        let mappings = &self.mappings;
+        let gone: Vec<(Ipv6Addr, Ipv6Addr)> = self
+            .unconfirmed
+            .iter()
+            .filter(|(virtual_ip, mesh_addr)| {
+                mappings.get(virtual_ip).map(|m| m.mesh_addr) != Some(*mesh_addr)
+            })
+            .copied()
+            .collect();
+        for pair in gone {
+            self.unconfirmed.remove(&pair);
+            self.removed.push(pair);
+        }
+    }
+
+    /// Apply one `Remove` command.
+    ///
+    /// A mapping that is absent has no rules in the kernel table, so its
+    /// removal is reported at once, unless an earlier removal of the same pair
+    /// is still waiting for the kernel.
+    fn remove_command(
+        &mut self,
+        virtual_ip: Ipv6Addr,
+        mesh_addr: Ipv6Addr,
+    ) -> Result<(), NatError> {
+        if !self.mappings.contains_key(&virtual_ip) {
+            if !self.unconfirmed.contains(&(virtual_ip, mesh_addr)) {
+                self.removed.push((virtual_ip, mesh_addr));
+            }
+            return Err(NatError::RuleNotFound(virtual_ip));
+        }
+        self.remove_mapping(virtual_ip)
+    }
+}
+
+/// One change to the NAT table's mappings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NatCommand {
+    /// Translate `virtual_ip` to `mesh_addr`.
+    Add {
+        virtual_ip: Ipv6Addr,
+        mesh_addr: Ipv6Addr,
+    },
+    /// Stop translating `virtual_ip`, which was mapped to `mesh_addr`.
+    Remove {
+        virtual_ip: Ipv6Addr,
+        mesh_addr: Ipv6Addr,
+    },
+}
+
+/// What applying a list of commands did.
+#[derive(Debug, Default)]
+pub struct NatApplied {
+    /// Each command with its outcome, in the order given.
+    pub outcomes: Vec<(NatCommand, Result<(), NatError>)>,
+    /// Virtual IP and mesh address pairs whose rules are now gone from the
+    /// kernel table.
+    pub removed: Vec<(Ipv6Addr, Ipv6Addr)>,
+}
+
+/// The NAT table as the driver sees it.
+///
+/// `NatManager` is the real table; tests substitute fakes.
+pub trait NatTable: Send + 'static {
+    /// Apply the commands, in order.
+    fn apply(&mut self, commands: &[NatCommand]) -> NatApplied;
+    /// Retry a rebuild the kernel refused, returning whether one was applied
+    /// and the removals it confirmed.
+    fn retry_pending(&mut self) -> (Result<bool, NatError>, Vec<(Ipv6Addr, Ipv6Addr)>);
+    /// Mappings in the desired state.
+    fn mapping_count(&self) -> usize;
+    /// Delete the table.
+    fn cleanup(self: Box<Self>) -> Result<(), NatError>;
+}
+
+impl NatTable for NatManager {
+    fn apply(&mut self, commands: &[NatCommand]) -> NatApplied {
+        let outcomes = commands
+            .iter()
+            .map(|command| {
+                let result = match *command {
+                    NatCommand::Add {
+                        virtual_ip,
+                        mesh_addr,
+                    } => self.add_mapping(virtual_ip, mesh_addr),
+                    NatCommand::Remove {
+                        virtual_ip,
+                        mesh_addr,
+                    } => self.remove_command(virtual_ip, mesh_addr),
+                };
+                (*command, result)
+            })
+            .collect();
+        NatApplied {
+            outcomes,
+            removed: std::mem::take(&mut self.removed),
+        }
+    }
+
+    fn retry_pending(&mut self) -> (Result<bool, NatError>, Vec<(Ipv6Addr, Ipv6Addr)>) {
+        let result = NatManager::retry_pending(self);
+        (result, std::mem::take(&mut self.removed))
+    }
+
+    fn mapping_count(&self) -> usize {
+        self.mappings.len()
+    }
+
+    fn cleanup(self: Box<Self>) -> Result<(), NatError> {
+        NatManager::cleanup(*self)
+    }
+}
+
+/// Removals the NAT table has applied, and the end of the driver.
+pub struct NatReports {
+    /// Virtual IP and mesh address pairs whose rules are gone from the kernel
+    /// table, in batches.
+    pub removed: crossbeam_channel::Receiver<Vec<(Ipv6Addr, Ipv6Addr)>>,
+    /// Resolves when the driver stops applying changes.
+    pub exit: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Applies mapping changes to the NAT table.
+pub struct NatDriver {
+    table: Box<dyn NatTable>,
+    retry_log: RetryLog,
+    count: Arc<AtomicUsize>,
+    removed: crossbeam_channel::Sender<Vec<(Ipv6Addr, Ipv6Addr)>>,
+    _exit: tokio::sync::oneshot::Sender<()>,
+}
+
+impl NatDriver {
+    /// Take ownership of `table` and start applying changes to it.
+    pub fn start(table: Box<dyn NatTable>) -> (NatDriver, NatReports) {
+        let (removed_tx, removed_rx) = crossbeam_channel::unbounded();
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let count = Arc::new(AtomicUsize::new(table.mapping_count()));
+        let driver = NatDriver {
+            table,
+            retry_log: RetryLog::default(),
+            count,
+            removed: removed_tx,
+            _exit: exit_tx,
+        };
+        (
+            driver,
+            NatReports {
+                removed: removed_rx,
+                exit: exit_rx,
+            },
+        )
+    }
+
+    /// Queue one change.
+    pub fn submit(&mut self, command: NatCommand) -> Result<(), NatError> {
+        let applied = self.table.apply(&[command]);
+        for (command, result) in &applied.outcomes {
+            match (command, result) {
+                (_, Ok(())) => {}
+                (NatCommand::Add { virtual_ip, .. }, Err(e)) => {
+                    error!(error = %e, virtual_ip = %virtual_ip, "Failed to add NAT rules")
+                }
+                (NatCommand::Remove { virtual_ip, .. }, Err(e)) => {
+                    warn!(error = %e, virtual_ip = %virtual_ip, "Failed to remove NAT rules")
+                }
+            }
+        }
+        self.publish(applied.removed);
+        Ok(())
+    }
+
+    /// Retry a rebuild the kernel refused.
+    pub fn retry(&mut self) {
+        let (result, removed) = self.table.retry_pending();
+        report_nat_retry(&mut self.retry_log, &result);
+        self.publish(removed);
+    }
+
+    /// Mappings in the table's desired state.
+    pub fn mapping_count(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// The count `mapping_count` reads, for a task that has no driver.
+    pub fn mapping_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.count)
+    }
+
+    /// Stop applying changes and delete the table, waiting at most `timeout`.
+    pub fn shutdown(self, _timeout: Duration) -> Result<(), NatError> {
+        self.table.cleanup()
+    }
+
+    /// Publish the table's count and any confirmed removals.
+    fn publish(&self, removed: Vec<(Ipv6Addr, Ipv6Addr)>) {
+        self.count
+            .store(self.table.mapping_count(), Ordering::Relaxed);
+        if !removed.is_empty() {
+            // Nobody listening is not an error: the reports are advisory.
+            let _ = self.removed.send(removed);
+        }
+    }
+}
+
+/// Log a pending NAT rebuild retry once per change of outcome.
+///
+/// A recovery is reported whether the retry applied the rules itself or a
+/// mapping change applied them in between and left nothing pending.
+pub fn report_nat_retry(log: &mut RetryLog, result: &Result<bool, NatError>) {
+    match (log.observe(result.as_ref().err()), result) {
+        (RetryReport::Failed, Err(e)) => {
+            warn!(error = %e, "Failed to retry pending NAT rules")
+        }
+        (RetryReport::Repeated, Err(e)) => {
+            debug!(error = %e, "Pending NAT rules still failing to apply")
+        }
+        (RetryReport::Recovered, Ok(true)) => {
+            info!("Applied pending NAT rules; retries recovered")
+        }
+        (RetryReport::Recovered, _) => {
+            info!("Pending NAT rules were applied by a later update; retries recovered")
+        }
+        (RetryReport::Clean, Ok(true)) => info!("Applied pending NAT rules"),
+        _ => {}
     }
 }
 
@@ -957,6 +1232,7 @@ fn send_batch(bytes: &[u8]) -> Result<(), NatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustables::expr::ExpressionVariant;
     use std::net::SocketAddrV6;
 
     fn vip(last: u16) -> Ipv6Addr {
@@ -967,9 +1243,17 @@ mod tests {
         Ipv6Addr::new(0xfd02, 0, 0, 0, 0, 0, 0, last)
     }
 
+    /// The pool the test managers are built with.
+    const TEST_POOL: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, 0), 112);
+
     /// A manager holding `count` mappings and no netlink socket.
     fn manager_with_mappings(count: u16) -> NatManager {
-        let mut mgr = NatManager::with_state("br-lan".to_string());
+        manager_with_mappings_in(TABLE_NAME, count)
+    }
+
+    /// `manager_with_mappings` with every object under `table_name`.
+    fn manager_with_mappings_in(table_name: &str, count: u16) -> NatManager {
+        let mut mgr = NatManager::with_state_in(table_name, "br-lan".to_string(), TEST_POOL);
         for i in 1..=count {
             mgr.mappings.insert(
                 vip(i),
@@ -1092,17 +1376,8 @@ mod tests {
     #[test]
     #[ignore = "requires CAP_NET_ADMIN and nft in an isolated network namespace"]
     fn kernel_rejection_retries_latest_state_without_another_mapping_event() {
-        let mut mgr = manager_with_mappings(2);
         let table_name = format!("{TABLE_NAME}_retry_test_{}", std::process::id());
-        mgr.table = Table::new(ProtocolFamily::Inet).with_name(&table_name);
-        mgr.pre_chain = Chain::new(&mgr.table)
-            .with_name(PREROUTING_CHAIN)
-            .with_type(ChainType::Nat)
-            .with_hook(Hook::new(HookClass::PreRouting, DSTNAT_PRIORITY));
-        mgr.post_chain = Chain::new(&mgr.table)
-            .with_name(POSTROUTING_CHAIN)
-            .with_type(ChainType::Nat)
-            .with_hook(Hook::new(HookClass::PostRouting, SRCNAT_PRIORITY));
+        let mut mgr = manager_with_mappings_in(&table_name, 2);
         mgr.rebuild().unwrap();
         let listing = || {
             let output = std::process::Command::new("nft")
@@ -1145,7 +1420,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.get("rule").is_some())
                 .count(),
-            3
+            emitted_rules(&mgr).len()
         );
         assert!(String::from_utf8(after).unwrap().contains("fd02::63"));
 
@@ -1281,6 +1556,124 @@ mod tests {
                  {ops:?}"
             );
         }
+    }
+
+    /// Every rule a rebuild of `mgr` adds, in order.
+    fn emitted_rules(mgr: &NatManager) -> Vec<Rule> {
+        mgr.rebuild_batches()
+            .into_iter()
+            .flatten()
+            .filter_map(|op| mgr.rule_for(op).expect("the rule builds"))
+            .collect()
+    }
+
+    /// Every chain a rebuild of `mgr` adds, in order.
+    fn emitted_chains(mgr: &NatManager) -> Vec<&Chain> {
+        mgr.rebuild_batches()
+            .into_iter()
+            .flatten()
+            .filter_map(|op| mgr.chain_for(op))
+            .collect()
+    }
+
+    /// The expressions of a rule, in order.
+    fn expressions(rule: &Rule) -> Vec<ExpressionVariant> {
+        rule.get_expressions()
+            .map(|list| list.iter().filter_map(|e| e.get_data().cloned()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether `rule` holds `expected` as consecutive expressions.
+    fn has_sequence(rule: &Rule, expected: &[ExpressionVariant]) -> bool {
+        expressions(rule)
+            .windows(expected.len())
+            .any(|window| window == expected)
+    }
+
+    /// Whether `rule` holds every expression of `expected`, in that order,
+    /// though not necessarily adjacent.
+    fn has_in_order(rule: &Rule, expected: &[ExpressionVariant]) -> bool {
+        let mut wanted = expected.iter().peekable();
+        for expr in expressions(rule) {
+            if wanted.peek() == Some(&&expr) {
+                wanted.next();
+            }
+        }
+        wanted.peek().is_none()
+    }
+
+    /// A `meta <key>` load followed by a compare.
+    fn meta_cmp(key: MetaType, op: CmpOp, data: &[u8]) -> [ExpressionVariant; 2] {
+        [
+            ExpressionVariant::from(Meta::new(key)),
+            ExpressionVariant::from(Cmp::new(op, data.to_vec())),
+        ]
+    }
+
+    #[test]
+    fn rebuild_adds_the_nat_chains_with_their_hooks() {
+        let mgr = manager_with_mappings(1);
+        let chains = emitted_chains(&mgr);
+        let hook = |name: &str| {
+            let chain = chains
+                .iter()
+                .find(|c| c.get_name().map(String::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("no chain named {name}"));
+            chain.get_hook().cloned().expect("a base chain has a hook")
+        };
+        assert_eq!(
+            hook(PREROUTING_CHAIN),
+            Hook::new(HookClass::PreRouting, DSTNAT_PRIORITY)
+        );
+        assert_eq!(
+            hook(POSTROUTING_CHAIN),
+            Hook::new(HookClass::PostRouting, SRCNAT_PRIORITY)
+        );
+    }
+
+    #[test]
+    fn lan_ingress_rules_keep_their_shape() {
+        let mut mgr = manager_with_mappings(1);
+        mgr.port_forwards = vec![PortForward {
+            proto: Proto::Tcp,
+            listen_port: 8080,
+            target: SocketAddrV6::new(Ipv6Addr::LOCALHOST, 80, 0, 0),
+        }];
+        let rules = emitted_rules(&mgr);
+        let from_tun = meta_cmp(MetaType::IifName, CmpOp::Eq, TUN_IFACE);
+        let to_lan = meta_cmp(MetaType::OifName, CmpOp::Eq, b"br-lan\0");
+
+        let forward_dnat = rules
+            .iter()
+            .filter(|rule| {
+                has_sequence(rule, &from_tun)
+                    && expressions(rule).iter().any(|e| {
+                        matches!(e, ExpressionVariant::Nat(nat) if nat.get_port_register().is_some())
+                    })
+            })
+            .count();
+        assert_eq!(
+            forward_dnat, 1,
+            "the port-forward DNAT matches iifname fips0"
+        );
+
+        let lan_masquerade: Vec<&Rule> = rules
+            .iter()
+            .filter(|rule| {
+                expressions(rule)
+                    .iter()
+                    .any(|e| matches!(e, ExpressionVariant::Masquerade(_)))
+                    && has_sequence(rule, &to_lan)
+            })
+            .collect();
+        assert_eq!(lan_masquerade.len(), 1);
+        assert!(
+            has_in_order(
+                lan_masquerade[0],
+                &[from_tun[0].clone(), from_tun[1].clone(), to_lan[0].clone()]
+            ),
+            "the LAN masquerade matches iifname fips0 and oifname br-lan"
+        );
     }
 
     /// The encoded rebuild of a manager holding `count` mappings.

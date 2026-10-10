@@ -469,14 +469,16 @@ async fn handle_query(
 
     // Allocate virtual IP from pool
     let mut pool_guard = pool.lock().await;
-    let (virtual_ip, is_new) = match pool_guard.allocate(node_addr, mesh_addr, &fips_name) {
-        Ok(result) => result,
+    let allocation = match pool_guard.allocate(node_addr, mesh_addr, &fips_name) {
+        Ok(allocation) => allocation,
         Err(e) => {
             warn!(error = %e, "Pool allocation failed");
             return build_servfail(&query);
         }
     };
     drop(pool_guard);
+    let virtual_ip = allocation.virtual_ip;
+    let is_new = allocation.is_new;
 
     // Notify NAT module of new mapping
     if is_new {
@@ -497,7 +499,7 @@ async fn handle_query(
         "Resolved .fips query"
     );
 
-    build_aaaa_response(&query, virtual_ip, ttl)
+    build_aaaa_response(&query, virtual_ip, allocation.ttl)
 }
 
 #[cfg(test)]

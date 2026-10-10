@@ -119,15 +119,47 @@ const CONNTRACK_PROC_PATH: &str = "/proc/net/nf_conntrack";
 ///
 /// Taken once per tick, so the pool does a map lookup per mapping instead of
 /// reading and scanning the whole conntrack table per mapping under its lock.
+///
+/// `read` says whether the snapshot came from a successful read. The default
+/// snapshot, which stands in for a failed read, is not read.
 #[derive(Debug, Clone, Default)]
 pub struct ConntrackSnapshot {
     sessions: HashMap<Ipv6Addr, u32>,
+    /// Original destination to the reply-tuple sources of every entry.
+    bindings: HashMap<Ipv6Addr, HashSet<Ipv6Addr>>,
+    /// The same, for entries that have seen a reply.
+    replied: HashMap<Ipv6Addr, HashSet<Ipv6Addr>>,
+    /// Whether the snapshot is the result of a successful read.
+    pub read: bool,
 }
 
 impl ConntrackSnapshot {
-    /// Build a snapshot from counts already keyed by destination address.
+    /// Build a read snapshot from counts already keyed by destination address.
     pub fn from_counts(sessions: HashMap<Ipv6Addr, u32>) -> Self {
-        Self { sessions }
+        Self {
+            sessions,
+            read: true,
+            ..Self::default()
+        }
+    }
+
+    /// Record that an entry with original destination `orig_dst` has reply
+    /// source `reply_src`, and whether it has seen a reply.
+    pub fn record_binding(&mut self, orig_dst: Ipv6Addr, reply_src: Ipv6Addr, replied: bool) {
+        self.bindings.entry(orig_dst).or_default().insert(reply_src);
+        if replied {
+            self.replied.entry(orig_dst).or_default().insert(reply_src);
+        }
+    }
+
+    /// Whether an entry addressed to `virtual_ip` has seen a reply from
+    /// `mesh_addr`, which is not the virtual IP itself.
+    pub fn replied_from(&self, virtual_ip: Ipv6Addr, mesh_addr: Ipv6Addr) -> bool {
+        mesh_addr != virtual_ip
+            && self
+                .replied
+                .get(&virtual_ip)
+                .is_some_and(|sources| sources.contains(&mesh_addr))
     }
 
     /// Sessions whose destination is `virtual_ip`, or zero if there are none.
@@ -362,6 +394,57 @@ impl ConntrackReadLog {
     }
 }
 
+/// A virtual IP handed out for a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Allocation {
+    /// The address.
+    pub virtual_ip: Ipv6Addr,
+    /// Whether the mapping was created by this allocation.
+    pub is_new: bool,
+    /// The TTL the answer carries, in seconds.
+    pub ttl: u32,
+    /// The mapping this allocation replaced, if any.
+    pub evicted: Option<Evicted>,
+}
+
+/// A mapping removed to make room for another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evicted {
+    pub virtual_ip: Ipv6Addr,
+    pub mesh_addr: Ipv6Addr,
+}
+
+/// What a pool keeps across a restart: no identities, only which offsets a
+/// client may still hold an answer for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoolState {
+    /// Format version, 1.
+    pub version: u32,
+    /// The pool CIDR as configured.
+    pub pool: String,
+    /// Addresses in the pool.
+    pub total: u32,
+    /// Offset of the cursor when the state was taken.
+    pub from: u32,
+    /// Positions, from `from` onward in ring order, that may be issued before
+    /// the next state is written; `0..=total`.
+    pub span: u32,
+    /// Offsets mapped or held when the state was taken, as sorted inclusive
+    /// ranges.
+    pub held: Vec<[u32; 2]>,
+    /// How long, in seconds, a client may hold an answer naming any of them.
+    pub hold_secs: u64,
+}
+
+/// How a pool begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoolStart {
+    /// With nothing held, issuing from `offset`.
+    Fresh { offset: u32 },
+    /// From the state a previous run wrote.
+    Restored(PoolState),
+}
+
 /// Token bucket for new mappings.
 ///
 /// The level is kept in token-nanoseconds so refill is exact integer
@@ -425,6 +508,10 @@ impl Bucket {
 
 /// Virtual IP pool manager.
 pub struct VirtualIpPool {
+    /// The pool CIDR as configured.
+    cidr: String,
+    /// The pool's network address and prefix length.
+    network: (Ipv6Addr, u8),
     /// Available addresses (free pool).
     available: VecDeque<Ipv6Addr>,
     /// Active mappings keyed by NodeAddr.
@@ -494,6 +581,8 @@ impl VirtualIpPool {
         info!(cidr = %cidr, addresses = total, "Virtual IP pool initialized");
 
         Ok(Self {
+            cidr: cidr.to_string(),
+            network: (base, prefix_len as u8),
             available,
             mappings: HashMap::new(),
             reverse: HashMap::new(),
@@ -504,6 +593,45 @@ impl VirtualIpPool {
             bucket: Bucket::new(burst, rate),
         })
     }
+
+    /// Create the pool the gateway runs with, from `start`, at `now`.
+    pub fn start(
+        cidr: &str,
+        ttl_secs: u64,
+        grace_secs: u64,
+        _start: PoolStart,
+        _now: Instant,
+    ) -> Result<Self, PoolError> {
+        Self::new(cidr, ttl_secs, grace_secs)
+    }
+
+    /// The pool's network address and prefix length.
+    pub fn network(&self) -> (Ipv6Addr, u8) {
+        self.network
+    }
+
+    /// The state to write before issuing further, if one is due.
+    pub fn mark_request(&self) -> Option<PoolState> {
+        Some(PoolState {
+            version: 1,
+            pool: self.cidr.clone(),
+            total: u32::try_from(self.total).unwrap_or(u32::MAX),
+            from: 1,
+            span: 0,
+            held: Vec::new(),
+            hold_secs: self.ttl_secs.saturating_add(self.grace_secs),
+        })
+    }
+
+    /// Record that `state` was written.
+    pub fn confirm_mark(&mut self, _state: &PoolState) {}
+
+    /// Record that the state could not be written.
+    pub fn mark_failed(&mut self) {}
+
+    /// Record that the NAT table no longer translates `virtual_ip` to
+    /// `mesh_addr`.
+    pub fn nat_removed(&mut self, _virtual_ip: Ipv6Addr, _mesh_addr: Ipv6Addr) {}
 
     /// Refresh an existing mapping's TTL clock, never creating one.
     ///
@@ -536,7 +664,7 @@ impl VirtualIpPool {
         node_addr: NodeAddr,
         mesh_addr: Ipv6Addr,
         dns_name: &str,
-    ) -> Result<(Ipv6Addr, bool), PoolError> {
+    ) -> Result<Allocation, PoolError> {
         self.allocate_at(node_addr, mesh_addr, dns_name, Instant::now())
     }
 
@@ -551,12 +679,12 @@ impl VirtualIpPool {
         mesh_addr: Ipv6Addr,
         dns_name: &str,
         now: Instant,
-    ) -> Result<(Ipv6Addr, bool), PoolError> {
+    ) -> Result<Allocation, PoolError> {
         // Idempotent: return existing mapping, refreshed.
         if self.refresh_at(node_addr, now)
             && let Some(mapping) = self.mappings.get(&node_addr)
         {
-            return Ok((mapping.virtual_ip, false));
+            return Ok(self.allocation(mapping.virtual_ip, false));
         }
 
         // Ceiling first, so a refusal there costs no token and names the
@@ -596,7 +724,17 @@ impl VirtualIpPool {
             "Allocated virtual IP"
         );
 
-        Ok((virtual_ip, true))
+        Ok(self.allocation(virtual_ip, true))
+    }
+
+    /// The allocation for `virtual_ip`, answered with the configured TTL.
+    fn allocation(&self, virtual_ip: Ipv6Addr, is_new: bool) -> Allocation {
+        Allocation {
+            virtual_ip,
+            is_new,
+            ttl: u32::try_from(self.ttl_secs).unwrap_or(u32::MAX),
+            evicted: None,
+        }
     }
 
     /// Periodic tick — drives state transitions. Returns events for
@@ -781,6 +919,11 @@ mod tests {
         }
     }
 
+    /// An allocation's address and whether it was new.
+    fn pair(allocation: Allocation) -> (Ipv6Addr, bool) {
+        (allocation.virtual_ip, allocation.is_new)
+    }
+
     fn make_node_addr(byte: u8) -> NodeAddr {
         let mut bytes = [0u8; 16];
         bytes[0] = byte;
@@ -822,7 +965,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip, is_new) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip, is_new) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
         assert!(is_new);
         assert_eq!(vip, "fd01::1".parse::<Ipv6Addr>().unwrap());
         assert_eq!(pool.available.len(), 254);
@@ -834,8 +977,8 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip1, new1) = pool.allocate(node, mesh, "test.fips").unwrap();
-        let (vip2, new2) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip1, new1) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
+        let (vip2, new2) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
         assert!(new1);
         assert!(!new2);
         assert_eq!(vip1, vip2);
@@ -866,6 +1009,7 @@ mod tests {
     /// Allocate node `i` at `now`.
     fn alloc(pool: &mut VirtualIpPool, i: u8, now: Instant) -> Result<(Ipv6Addr, bool), PoolError> {
         pool.allocate_at(make_node_addr(i), make_mesh_addr(i), "test.fips", now)
+            .map(pair)
     }
 
     #[test]
@@ -961,7 +1105,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        pool.allocate(node, mesh, "test.fips").unwrap();
+        pair(pool.allocate(node, mesh, "test.fips").unwrap());
 
         // Tick before TTL — no change
         let now = Instant::now();
@@ -995,7 +1139,7 @@ mod tests {
         let ct = ConntrackSnapshot::default();
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
-        let (vip, _) = pool.allocate_at(node, mesh, "test.fips", t0).unwrap();
+        let (vip, _) = pair(pool.allocate_at(node, mesh, "test.fips", t0).unwrap());
 
         pool.tick(t0 + Duration::from_secs(61), &ct);
         assert_eq!(pool.mappings[&node].state, MappingState::Draining);
@@ -1004,7 +1148,7 @@ mod tests {
         // The answer reuses the same address and promises another 60s TTL.
         let renewed = t0 + Duration::from_secs(120);
         assert_eq!(
-            pool.allocate_at(node, mesh, "test.fips", renewed).unwrap(),
+            pair(pool.allocate_at(node, mesh, "test.fips", renewed).unwrap()),
             (vip, false)
         );
         assert_eq!(pool.bucket.tokens(), 0);
@@ -1059,7 +1203,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip, _) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip, _) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
 
         // Simulate active sessions
         ct.set(vip, 3);
@@ -1098,7 +1242,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip, _) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip, _) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
         ct.set(vip, 2);
 
         let mut t = Instant::now();
@@ -1130,7 +1274,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip, _) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip, _) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
 
         // Activate with traffic.
         ct.set(vip, 1);
@@ -1166,7 +1310,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip, _) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip, _) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
 
         // Activate.
         ct.set(vip, 1);
@@ -1227,7 +1371,7 @@ mod tests {
         let node = make_node_addr(1);
         let mesh = make_mesh_addr(1);
 
-        let (vip, _) = pool.allocate(node, mesh, "test.fips").unwrap();
+        let (vip, _) = pair(pool.allocate(node, mesh, "test.fips").unwrap());
         let mapping = pool.lookup_virtual_ip(&vip).unwrap();
         assert_eq!(mapping.node_addr, node);
         assert_eq!(mapping.mesh_addr, mesh);
