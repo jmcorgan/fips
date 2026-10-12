@@ -12,11 +12,22 @@
 //!
 //! - daemon → agent: the radio commands, and outbound bytes ([`Frame::Send`]);
 //! - agent → daemon: [`Frame::Hello`] once, then accepted and dialled
-//!   channels, adverts, inbound bytes ([`Frame::Recv`]) and closures.
+//!   channels, adverts, inbound bytes ([`Frame::Recv`]), send credit
+//!   ([`Frame::Credit`]) and closures.
 //!
 //! Channels are named on the wire by the agent's identifier for them, never
 //! the bridge's: the agent allocates it when the channel opens, before the
 //! daemon has registered anything.
+//!
+//! # Flow control
+//!
+//! Outbound bytes are credit-based, per channel. The agent grants a window
+//! when a channel opens and returns credit for each packet once its radio has
+//! taken it; the daemon sends only while it holds credit. A peer that stops
+//! taking bytes therefore stalls its own channel at the daemon, never the
+//! agent's session, which must keep reading so that every other channel's
+//! data and every `Close` still get through. A daemon that sends past its
+//! credit has the channel closed on it.
 //!
 //! # Framing
 //!
@@ -30,13 +41,21 @@ use super::super::addr::BleAddr;
 use super::super::io_radio::RADIO_ADAPTER;
 
 /// Protocol version carried in [`Frame::Hello`].
-pub const VERSION: u8 = 1;
+///
+/// 2: per-channel send credit ([`Frame::Credit`]) and the daemon's refusal
+/// of a second agent ([`Frame::Busy`]).
+pub const VERSION: u8 = 2;
 
 /// Largest frame accepted, tag included. Comfortably above the largest data
 /// frame either end builds — a channel identifier and one read or packet of
 /// at most a 16-bit MTU — so a length beyond it is a corrupt or hostile
 /// stream.
 pub const MAX_FRAME: usize = 128 * 1024;
+
+/// Largest first frame accepted from a new connection: a hello is a handful
+/// of bytes, so a connection that has not yet said who it is cannot make
+/// the daemon allocate a full [`MAX_FRAME`].
+pub const MAX_HELLO_FRAME: usize = 16;
 
 /// One message on the agent socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,11 +78,15 @@ pub enum Frame {
     Close {
         ch: u32,
     },
-    /// Bytes to write to channel `ch`.
+    /// Bytes to write to channel `ch`. Spends `data.len()` of the channel's
+    /// credit.
     Send {
         ch: u32,
         data: Vec<u8>,
     },
+    /// Another agent already lends the radio; this one is refused and should
+    /// back off before trying again.
+    Busy,
 
     // --- agent → daemon ------------------------------------------------
     /// First frame of every connection: who is speaking, and the PSM its
@@ -102,6 +125,11 @@ pub enum Frame {
     Closed {
         ch: u32,
     },
+    /// The daemon may send `bytes` more on channel `ch`.
+    Credit {
+        ch: u32,
+        bytes: u32,
+    },
 }
 
 mod tag {
@@ -112,12 +140,14 @@ mod tag {
     pub const STOP_SCANNING: u8 = 5;
     pub const CLOSE: u8 = 6;
     pub const SEND: u8 = 7;
+    pub const BUSY: u8 = 8;
     pub const HELLO: u8 = 16;
     pub const INBOUND: u8 = 17;
     pub const CONNECT_RESULT: u8 = 18;
     pub const SCAN: u8 = 19;
     pub const RECV: u8 = 20;
     pub const CLOSED: u8 = 21;
+    pub const CREDIT: u8 = 22;
 }
 
 /// Wire value for "no PSM in the advert".
@@ -152,6 +182,7 @@ impl Frame {
                 out.extend_from_slice(&ch.to_be_bytes());
                 out.extend_from_slice(data);
             }
+            Frame::Busy => out.push(tag::BUSY),
             Frame::Hello { version, psm } => {
                 out.push(tag::HELLO);
                 out.push(*version);
@@ -192,6 +223,11 @@ impl Frame {
                 out.push(tag::CLOSED);
                 out.extend_from_slice(&ch.to_be_bytes());
             }
+            Frame::Credit { ch, bytes } => {
+                out.push(tag::CREDIT);
+                out.extend_from_slice(&ch.to_be_bytes());
+                out.extend_from_slice(&bytes.to_be_bytes());
+            }
         }
         let len = (out.len() - 4) as u32;
         out[..4].copy_from_slice(&len.to_be_bytes());
@@ -217,6 +253,7 @@ impl Frame {
                 ch: r.u32()?,
                 data: r.rest(),
             },
+            tag::BUSY => Frame::Busy,
             tag::HELLO => Frame::Hello {
                 version: r.u8()?,
                 psm: r.u16()?,
@@ -243,6 +280,10 @@ impl Frame {
                 data: r.rest(),
             },
             tag::CLOSED => Frame::Closed { ch: r.u32()? },
+            tag::CREDIT => Frame::Credit {
+                ch: r.u32()?,
+                bytes: r.u32()?,
+            },
             other => return Err(bad(&format!("unknown frame tag {other}"))),
         };
         Ok(frame)
@@ -252,13 +293,18 @@ impl Frame {
 /// Read one frame from a blocking reader. `Ok(None)` is a clean end of
 /// stream between frames.
 pub fn read_frame(r: &mut impl io::Read) -> io::Result<Option<Frame>> {
+    read_frame_limited(r, MAX_FRAME)
+}
+
+/// [`read_frame`], refusing a frame longer than `max` before allocating it.
+pub fn read_frame_limited(r: &mut impl io::Read, max: usize) -> io::Result<Option<Frame>> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let mut body = vec![0u8; checked_len(len)?];
+    let mut body = vec![0u8; checked_len(len, max)?];
     r.read_exact(&mut body)?;
     Frame::decode(&body).map(Some)
 }
@@ -275,15 +321,15 @@ pub async fn read_frame_async(
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let mut body = vec![0u8; checked_len(len)?];
+    let mut body = vec![0u8; checked_len(len, MAX_FRAME)?];
     r.read_exact(&mut body).await?;
     Frame::decode(&body).map(Some)
 }
 
-fn checked_len(len: [u8; 4]) -> io::Result<usize> {
+fn checked_len(len: [u8; 4], max: usize) -> io::Result<usize> {
     match u32::from_be_bytes(len) as usize {
         0 => Err(bad("empty frame")),
-        n if n > MAX_FRAME => Err(bad(&format!("frame of {n} bytes exceeds {MAX_FRAME}"))),
+        n if n > max => Err(bad(&format!("frame of {n} bytes exceeds {max}"))),
         n => Ok(n),
     }
 }
@@ -361,6 +407,7 @@ mod tests {
                 ch: 9,
                 data: vec![],
             },
+            Frame::Busy,
             Frame::Hello {
                 version: VERSION,
                 psm: 0x00C0,
@@ -399,6 +446,10 @@ mod tests {
                 data: vec![0; 2048],
             },
             Frame::Closed { ch: 3 },
+            Frame::Credit {
+                ch: 3,
+                bytes: 32 * 1024,
+            },
         ]
     }
 
@@ -446,6 +497,28 @@ mod tests {
             read_frame(&mut r).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn a_first_frame_longer_than_a_hello_is_rejected_before_allocating() {
+        let wire = Frame::Recv {
+            ch: 1,
+            data: vec![0; 64],
+        }
+        .encode();
+        let mut r = std::io::Cursor::new(wire);
+        assert_eq!(
+            read_frame_limited(&mut r, MAX_HELLO_FRAME)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let hello = Frame::Hello {
+            version: VERSION,
+            psm: 0x00C0,
+        }
+        .encode();
+        assert!(hello.len() - 4 <= MAX_HELLO_FRAME);
     }
 
     #[test]

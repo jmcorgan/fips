@@ -720,6 +720,12 @@ pub struct RadioStream {
 }
 
 impl RadioStream {
+    /// The bridge's identifier for this channel.
+    #[cfg(test)]
+    pub(crate) fn ch_id(&self) -> i64 {
+        self.ch_id
+    }
+
     fn from_endpoints(ep: StreamEndpoints, radio: Arc<dyn BleRadio>) -> Self {
         Self {
             ch_id: ep.ch_id,

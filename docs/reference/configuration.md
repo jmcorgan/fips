@@ -956,7 +956,11 @@ it uses CoreBluetooth: `adapter` is ignored, more than one `ble` instance
 is a config error, and the packaged daemon, which macOS does not let use
 Bluetooth, gets the radio from the `fips-ble-agent` LaunchAgent running in
 a logged-in session of a `fips` group member (see the BLE section of
-[the transport layer design](../design/fips-transport-layer.md)).
+[the transport layer design](../design/fips-transport-layer.md)). Linux
+and Android cannot dial a Mac, so a Mac needs `auto_connect: true` to
+peer with them: the link forms only from the Mac's own dial. A Mac can
+dial only scan-discovered peers, so a BLE peer address naming any
+adapter but `ble0` is a config error on macOS.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

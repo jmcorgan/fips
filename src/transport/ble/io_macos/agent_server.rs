@@ -9,34 +9,50 @@
 //! the difference. An agent that disconnects is a radio switched off; one
 //! that reconnects is a radio replaced.
 //!
+//! One agent at a time. While one is live, another that says hello is told
+//! [`Frame::Busy`] and dropped, rather than displacing it: two users in the
+//! `fips` group logged in at once would otherwise take the radio from each
+//! other on every reconnect.
+//!
 //! Plain threads, like the in-process radio's pumps: one accepting, one
 //! reading each connection, one writing its control frames, and one pulling
 //! each open channel's outbound bytes.
 
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
 use super::super::io_radio::{BleRadio, BleRadioBridge, BleRadioSlot};
-use super::agent_proto::{Frame, VERSION, read_frame};
+use super::agent_proto::{Frame, MAX_HELLO_FRAME, VERSION, read_frame, read_frame_limited};
 
 /// How long a channel's pump waits for an outbound packet before checking
 /// whether the channel has closed.
 const PUMP_IDLE_POLL: Duration = Duration::from_millis(100);
 
-/// How long a new connection has to say hello. One that never does would
-/// otherwise hold its thread for the life of the daemon.
+/// How long a new connection has, in all, to say hello. One that never does
+/// would otherwise hold its thread for the life of the daemon.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The live agent's socket, shut down when another agent replaces it or the
-/// server stops: one radio at a time.
-type LiveAgent = Arc<Mutex<Option<UnixStream>>>;
+/// How long the refusal of a second agent may take to write.
+const BUSY_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The agent whose bridge is in the slot, if any.
+struct Live {
+    /// Which connection it is, so the one ending clears only itself.
+    id: u64,
+    /// Its socket, shut down when the server stops.
+    stream: UnixStream,
+}
+
+/// The live agent: one radio at a time. The slot is installed and cleared
+/// under this lock, so two connections can never both believe they hold it.
+type LiveAgent = Arc<Mutex<Option<Live>>>;
 
 /// Listens for the agent and installs each connection as the radio.
 pub struct AgentServer {
@@ -86,13 +102,13 @@ impl Drop for AgentServer {
         // End the live agent's session too, so its threads and bridge do not
         // outlive the transport that owned them.
         if let Some(agent) = lock_live(&self.live).take() {
-            let _ = agent.shutdown(std::net::Shutdown::Both);
+            let _ = agent.stream.shutdown(std::net::Shutdown::Both);
         }
         crate::utils::sockbind::cleanup(&self.path, "BLE agent");
     }
 }
 
-fn lock_live(live: &LiveAgent) -> std::sync::MutexGuard<'_, Option<UnixStream>> {
+fn lock_live(live: &LiveAgent) -> MutexGuard<'_, Option<Live>> {
     live.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -102,6 +118,7 @@ fn accept_loop(
     stopped: Arc<AtomicBool>,
     live: LiveAgent,
 ) {
+    let next_id = AtomicU64::new(1);
     for conn in listener.incoming() {
         if stopped.load(Ordering::Relaxed) {
             break;
@@ -115,10 +132,11 @@ fn accept_loop(
         };
         let slot = Arc::clone(&slot);
         let live = Arc::clone(&live);
+        let id = next_id.fetch_add(1, Ordering::Relaxed);
         let spawned = std::thread::Builder::new()
             .name("fips-ble-agent-rx".into())
             .spawn(move || {
-                if let Err(e) = serve_agent(slot, stream, &live) {
+                if let Err(e) = serve_agent(slot, stream, &live, id) {
                     debug!(error = %e, "BLE: agent connection ended");
                 }
             });
@@ -130,12 +148,23 @@ fn accept_loop(
 
 /// Serve one agent connection until it ends.
 ///
-/// The connection displaces the live agent only once it has said a valid
-/// hello, so a connection that never does cannot take the radio down.
-fn serve_agent(slot: Arc<BleRadioSlot>, stream: UnixStream, live: &LiveAgent) -> io::Result<()> {
+/// The connection takes the radio only once it has said a valid hello, and
+/// only if no other agent holds it, so a connection that never says hello
+/// cannot take the radio down and a second agent cannot take it over.
+fn serve_agent(
+    slot: Arc<BleRadioSlot>,
+    stream: UnixStream,
+    live: &LiveAgent,
+    id: u64,
+) -> io::Result<()> {
     let mut reader = stream.try_clone()?;
-    reader.set_read_timeout(Some(HELLO_TIMEOUT))?;
-    let hello = read_frame(&mut reader)?;
+    let hello = read_frame_limited(
+        &mut DeadlineReader {
+            stream: &reader,
+            deadline: Instant::now() + HELLO_TIMEOUT,
+        },
+        MAX_HELLO_FRAME,
+    )?;
     reader.set_read_timeout(None)?;
     let psm = match hello {
         Some(Frame::Hello { version, psm }) if version == VERSION => psm,
@@ -153,15 +182,21 @@ fn serve_agent(slot: Arc<BleRadioSlot>, stream: UnixStream, live: &LiveAgent) ->
         }
     };
 
-    let previous = lock_live(live).replace(stream.try_clone()?);
-    if let Some(old) = previous {
-        let _ = old.shutdown(std::net::Shutdown::Both);
-    }
-
-    let link = AgentLink::new(stream, psm)?;
-    let bridge = BleRadioBridge::new(Arc::clone(&link) as Arc<dyn BleRadio>);
+    let (link, bridge) = {
+        let mut held = lock_live(live);
+        if held.is_some() {
+            info!("BLE: another fips BLE agent connected while one is live; refusing it");
+            drop(held);
+            refuse(&stream);
+            return Ok(());
+        }
+        let link = AgentLink::new(stream.try_clone()?, psm)?;
+        let bridge = BleRadioBridge::new(Arc::clone(&link) as Arc<dyn BleRadio>);
+        *held = Some(Live { id, stream });
+        slot.install(Arc::clone(&bridge));
+        (link, bridge)
+    };
     info!(psm, "BLE: fips BLE agent connected; radio up");
-    slot.install(Arc::clone(&bridge));
 
     let result = (|| {
         while let Some(frame) = read_frame(&mut reader)? {
@@ -172,16 +207,50 @@ fn serve_agent(slot: Arc<BleRadioSlot>, stream: UnixStream, live: &LiveAgent) ->
 
     info!("BLE: fips BLE agent disconnected; radio down");
     link.alive.store(false, Ordering::Relaxed);
-    if slot
-        .current()
-        .is_some_and(|current| Arc::ptr_eq(&current, &bridge))
+    link.credit_changed.notify_all();
     {
-        slot.clear();
+        let mut held = lock_live(live);
+        if held.as_ref().is_some_and(|l| l.id == id) {
+            *held = None;
+        }
+        if slot
+            .current()
+            .is_some_and(|current| Arc::ptr_eq(&current, &bridge))
+        {
+            slot.clear();
+        }
     }
     for ch in link.channels().drain_bridge_ids() {
         bridge.channel_closed(ch);
     }
     result
+}
+
+/// Tell a second agent the radio is taken, and hang up.
+fn refuse(stream: &UnixStream) {
+    let mut stream = stream;
+    let _ = stream.set_write_timeout(Some(BUSY_WRITE_TIMEOUT));
+    let _ = stream.write_all(&Frame::Busy.encode());
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+/// Reads from a socket until a deadline, however many reads that takes: a
+/// per-read timeout alone would let a peer trickle a byte at a time forever.
+struct DeadlineReader<'a> {
+    stream: &'a UnixStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buf)
+    }
 }
 
 // ============================================================================
@@ -195,28 +264,36 @@ struct ChannelMap {
     to_bridge: HashMap<u32, i64>,
     /// Bridge channel → agent channel.
     to_agent: HashMap<i64, u32>,
+    /// Agent channel → bytes the agent will still take on it. May go
+    /// negative by one packet: a packet is sent whole once any credit is
+    /// left.
+    credit: HashMap<u32, i64>,
 }
 
 impl ChannelMap {
     fn insert(&mut self, agent: u32, bridge: i64) {
         self.to_bridge.insert(agent, bridge);
         self.to_agent.insert(bridge, agent);
+        self.credit.insert(agent, 0);
     }
 
     fn remove_agent(&mut self, agent: u32) -> Option<i64> {
         let bridge = self.to_bridge.remove(&agent)?;
         self.to_agent.remove(&bridge);
+        self.credit.remove(&agent);
         Some(bridge)
     }
 
     fn remove_bridge(&mut self, bridge: i64) -> Option<u32> {
         let agent = self.to_agent.remove(&bridge)?;
         self.to_bridge.remove(&agent);
+        self.credit.remove(&agent);
         Some(agent)
     }
 
     fn drain_bridge_ids(&mut self) -> Vec<i64> {
         self.to_bridge.clear();
+        self.credit.clear();
         self.to_agent.drain().map(|(bridge, _)| bridge).collect()
     }
 }
@@ -231,6 +308,9 @@ struct AgentLink {
     socket: Arc<Mutex<UnixStream>>,
     control: Mutex<mpsc::Sender<Frame>>,
     channels: Mutex<ChannelMap>,
+    /// Signalled when a channel gains credit or goes away, and when the link
+    /// dies, waking pumps waiting to send.
+    credit_changed: Condvar,
     alive: AtomicBool,
 }
 
@@ -253,11 +333,12 @@ impl AgentLink {
             socket,
             control: Mutex::new(control),
             channels: Mutex::new(ChannelMap::default()),
+            credit_changed: Condvar::new(),
             alive: AtomicBool::new(true),
         }))
     }
 
-    fn channels(&self) -> std::sync::MutexGuard<'_, ChannelMap> {
+    fn channels(&self) -> MutexGuard<'_, ChannelMap> {
         self.channels.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -301,9 +382,16 @@ impl AgentLink {
             }
             Frame::Closed { ch } => {
                 let bridge_ch = self.channels().remove_agent(ch);
+                self.credit_changed.notify_all();
                 if let Some(bridge_ch) = bridge_ch {
                     bridge.channel_closed(bridge_ch);
                 }
+            }
+            Frame::Credit { ch, bytes } => {
+                if let Some(credit) = self.channels().credit.get_mut(&ch) {
+                    *credit += i64::from(bytes);
+                }
+                self.credit_changed.notify_all();
             }
             Frame::Hello { .. } => {}
             other => debug!(frame = ?other, "BLE: unexpected frame from the agent"),
@@ -332,11 +420,19 @@ impl AgentLink {
     }
 
     /// Carry channel `bridge_ch`'s outbound bytes to the agent until it
-    /// closes.
+    /// closes, each once the agent has granted credit for it.
+    ///
+    /// Waiting here, rather than in the agent, is what keeps a peer that
+    /// stops taking bytes from stalling anything but its own channel: the
+    /// bridge's send queue fills behind this pump, and the transport's send
+    /// waits.
     fn pump(&self, bridge: &BleRadioBridge, ch: u32, bridge_ch: i64) {
         while self.alive.load(Ordering::Relaxed) {
             match bridge.next_send(bridge_ch, PUMP_IDLE_POLL) {
                 Some(data) => {
+                    if !self.spend_credit(bridge, ch, bridge_ch, data.len()) {
+                        return;
+                    }
                     if write_frame(&self.socket, &Frame::Send { ch, data }).is_err() {
                         bridge.channel_closed(bridge_ch);
                         return;
@@ -344,6 +440,38 @@ impl AgentLink {
                 }
                 None if !bridge.channel_open(bridge_ch) => return,
                 None => {}
+            }
+        }
+    }
+}
+
+impl AgentLink {
+    /// Wait until agent channel `ch` has credit, and spend `len` of it.
+    /// `false` when the channel or the link went away first.
+    fn spend_credit(&self, bridge: &BleRadioBridge, ch: u32, bridge_ch: i64, len: usize) -> bool {
+        loop {
+            if !self.alive.load(Ordering::Relaxed) {
+                return false;
+            }
+            {
+                let mut channels = self.channels();
+                match channels.credit.get_mut(&ch) {
+                    None => return false,
+                    Some(credit) if *credit > 0 => {
+                        *credit -= len as i64;
+                        return true;
+                    }
+                    Some(_) => {}
+                }
+                // Released before asking the bridge, whose lock is taken
+                // with this one never held.
+                let _ = self
+                    .credit_changed
+                    .wait_timeout(channels, PUMP_IDLE_POLL)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            if !bridge.channel_open(bridge_ch) {
+                return false;
             }
         }
     }
@@ -388,6 +516,7 @@ impl BleRadio for AgentLink {
 
     fn close_channel(&self, ch_id: i64) {
         let agent_ch = self.channels().remove_bridge(ch_id);
+        self.credit_changed.notify_all();
         if let Some(ch) = agent_ch {
             self.command(Frame::Close { ch });
         }

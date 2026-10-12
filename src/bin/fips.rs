@@ -51,7 +51,8 @@ struct Args {
     #[arg(long)]
     ble_agent: bool,
 
-    /// The daemon's BLE agent socket (default: beside the control socket).
+    /// The daemon's BLE agent socket (default: /var/run/fips/ble-agent.sock).
+    /// Whatever the path, the agent serves it only if root answers.
     #[cfg(target_os = "macos")]
     #[arg(long, value_name = "PATH", requires = "ble_agent")]
     ble_agent_socket: Option<PathBuf>,

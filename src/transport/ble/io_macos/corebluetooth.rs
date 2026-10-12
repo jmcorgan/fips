@@ -80,6 +80,10 @@ const PEER_FORGET_AFTER: Duration = Duration::from_secs(600);
 /// RSSI CoreBluetooth reports when it has no reading.
 const RSSI_UNAVAILABLE: i16 = 127;
 
+/// How long after a failed listener publish to try again, while advertising
+/// is wanted.
+const PUBLISH_RETRY: Duration = Duration::from_secs(10);
+
 /// Map a Foundation error onto an `io::Error`.
 fn ns_err(context: &str, error: Option<&NSError>) -> io::Error {
     match error {
@@ -202,9 +206,11 @@ pub fn start_daemon_radio(
 }
 
 /// Run the BLE agent: CoreBluetooth in this login session, lent to the
-/// daemon listening at `socket`, or at the default agent socket path —
-/// resolved afresh on every attempt — when it is `None`. Runs until the
-/// process is killed.
+/// daemon listening at `socket`, or at [`super::agent_socket_path`] when it
+/// is `None`. Runs until the process is killed.
+///
+/// The agent serves only a socket answered by root: the daemon is a root
+/// launchd job, and anything else answering is not it.
 pub async fn run_agent(socket: Option<std::path::PathBuf>) -> io::Result<()> {
     let slot = Arc::new(BleRadioSlot::new());
     let radio = MacRadio::start(Arc::clone(&slot), crate::config::BleConfig::default().mtu());
@@ -216,8 +222,8 @@ pub async fn run_agent(socket: Option<std::path::PathBuf>) -> io::Result<()> {
         move || slot.is_installed().then(|| radio.listener_psm())
     };
     let io = Arc::new(super::super::io_radio::RadioIo::with_owner(slot, radio));
-    let socket = move || socket.clone().unwrap_or_else(super::agent_socket_path);
-    super::agent::run(io, socket, super::super::DEFAULT_PSM, radio_psm).await
+    let socket = socket.unwrap_or_else(super::agent_socket_path);
+    super::agent::run(io, socket, Some(0), super::super::DEFAULT_PSM, radio_psm).await
 }
 
 // ============================================================================
@@ -324,6 +330,8 @@ impl Shared {
         }
         st.peers.clear();
         st.throttle = None;
+        // The next session's transport says again what it wants.
+        st.wants_advertising = false;
     }
 
     /// The listener was published, or failed to be.
@@ -339,8 +347,13 @@ impl Shared {
             Some(e) => {
                 // Still come up: scanning and dialling work without a
                 // listener, and `listen` reporting 0 tells the bridge so.
+                // Advertising waits for a listener: an advert would draw
+                // dials to a PSM nothing serves.
                 warn!(error = %ns_err("publish", Some(e)), "BLE: no L2CAP listener");
                 st.published = Some(0);
+                if st.wants_advertising {
+                    Self::retry_publish_later(weak);
+                }
             }
             None => {
                 debug!(psm, "BLE: L2CAP listener published");
@@ -351,6 +364,39 @@ impl Shared {
             }
         }
         self.power_changed(st, weak);
+        if psm != 0 && error.is_none() && st.wants_advertising && st.session.is_some() {
+            self.start_advertising(st);
+        }
+    }
+
+    /// Publish the listener again, if Bluetooth is up with none.
+    fn republish(&self, st: &mut QueueState) {
+        if st.published != Some(0) || st.publishing || !st.manager_on {
+            return;
+        }
+        if let Some(manager) = &st.manager {
+            debug!("BLE: publishing L2CAP listener again");
+            st.publishing = true;
+            unsafe { manager.publishL2CAPChannelWithEncryption(false) };
+        }
+    }
+
+    /// Try the publish again after [`PUBLISH_RETRY`], off the queue so the
+    /// wait blocks nothing.
+    fn retry_publish_later(weak: &Weak<Shared>) {
+        let weak = weak.clone();
+        let _ = std::thread::Builder::new()
+            .name("fips-ble-republish".into())
+            .spawn(move || {
+                std::thread::sleep(PUBLISH_RETRY);
+                if let Some(shared) = weak.upgrade() {
+                    Shared::on_queue(&shared, |shared, st| {
+                        if st.wants_advertising {
+                            shared.republish(st);
+                        }
+                    });
+                }
+            });
     }
 
     // --- scanning --------------------------------------------------------
@@ -630,6 +676,13 @@ impl Shared {
     // --- transport commands ----------------------------------------------
 
     fn start_advertising(&self, st: &mut QueueState) {
+        st.wants_advertising = true;
+        if st.published == Some(0) {
+            // No listener to advertise; advertising starts when one is
+            // published.
+            self.republish(st);
+            return;
+        }
         let (Some(manager), Some(uuid)) = (&st.manager, &st.service_uuid) else {
             return;
         };
@@ -648,6 +701,7 @@ impl Shared {
     }
 
     fn stop_advertising(&self, st: &mut QueueState) {
+        st.wants_advertising = false;
         if let Some(manager) = &st.manager {
             unsafe { manager.stopAdvertising() };
         }
@@ -811,6 +865,9 @@ struct QueueState {
     publishing: bool,
     /// `None` until the listener publish completes; `Some(0)` if it failed.
     published: Option<CBL2CAPPSM>,
+    /// Whether the transport asked to advertise. Held while there is no
+    /// listener, so advertising starts once a re-publish succeeds.
+    wants_advertising: bool,
     service: Option<Retained<CBMutableService>>,
     /// The live bridge, while Bluetooth is up.
     session: Option<Arc<BleRadioBridge>>,
@@ -1116,8 +1173,11 @@ impl BleRadio for Session {
 struct StreamReader(Retained<NSInputStream>);
 
 // SAFETY: after the queue opens it, the input stream is read only on its pump
-// thread. The queue's one other use of it is `close`, which is what ends a
-// blocked read.
+// thread. The queue's one other use of it is `close`, from the queue while a
+// read may be blocked here. That a close from another thread is sound and
+// ends the blocked read is an assumption — Foundation does not document it —
+// checked on hardware by
+// `a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware`.
 unsafe impl Send for StreamReader {}
 
 impl ChannelRead for StreamReader {
@@ -1133,7 +1193,10 @@ impl ChannelRead for StreamReader {
 /// A channel's output stream, written on its pump thread.
 struct StreamWriter(Retained<NSOutputStream>);
 
-// SAFETY: as for `StreamReader`, with the writer pump as the one user.
+// SAFETY: as for `StreamReader`, with the writer pump as the one user, and
+// the assumption that a close ends a write blocked on a peer that stopped
+// reading checked by
+// `a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware`.
 unsafe impl Send for StreamWriter {}
 
 impl ChannelWrite for StreamWriter {
@@ -1476,5 +1539,160 @@ mod tests {
         println!("received {n} bytes: {}", hex::encode(&buf[..n]));
         assert!(n > 0, "the peer's opening message arrived");
         io.stop_scanning().await.unwrap();
+    }
+
+    // --- cross-thread stream close -----------------------------------------
+    //
+    // A channel's pump threads block in `read:maxLength:` and
+    // `write:maxLength:` on unscheduled streams, and are unblocked by the
+    // queue closing those streams from another thread. Foundation does not
+    // document that a close ends a blocked call; these tests are what the
+    // `SAFETY` comments on `StreamReader` and `StreamWriter` rest on.
+
+    /// The radio, up, as the transport sees it.
+    async fn radio_up() -> crate::transport::ble::io_radio::RadioIo {
+        let slot = Arc::new(BleRadioSlot::new());
+        let radio = MacRadio::start(Arc::clone(&slot), 2048);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !slot.is_installed() {
+            assert!(Instant::now() < deadline, "Bluetooth never came up");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        crate::transport::ble::io_radio::RadioIo::with_owner(slot, radio)
+    }
+
+    /// Dial the first FIPS peer heard, as `dials_a_peer_on_hardware` does.
+    async fn dial_first_peer(
+        io: &crate::transport::ble::io_radio::RadioIo,
+    ) -> crate::transport::ble::io_radio::RadioStream {
+        use crate::transport::ble::io::{BleIo, BleScanner};
+        let mut scanner = io.start_scanning().await.unwrap();
+        let advert = tokio::time::timeout(Duration::from_secs(15), scanner.next())
+            .await
+            .expect("no FIPS peer in range")
+            .unwrap();
+        let psm = advert.psm.unwrap_or(crate::transport::ble::DEFAULT_PSM);
+        println!("dialling {} at psm {psm:#06x}", advert.addr);
+        let stream = tokio::time::timeout(Duration::from_secs(20), io.connect(&advert.addr, psm))
+            .await
+            .expect("dial timed out")
+            .expect("dial failed");
+        io.stop_scanning().await.unwrap();
+        stream
+    }
+
+    /// Wait up to `within` for channel `ch_id`'s `pump` thread to exit.
+    async fn assert_pump_exits(
+        pump: super::super::pump_census::Pump,
+        ch_id: i64,
+        within: Duration,
+    ) {
+        let started = Instant::now();
+        while super::super::pump_census::running(pump, ch_id) {
+            assert!(
+                started.elapsed() < within,
+                "{pump:?} thread of channel {ch_id} still running {within:?} after its stream was dropped"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        println!("{pump:?} exited {:?} after the drop", started.elapsed());
+    }
+
+    /// A reader parked in a blocking read ends when the stream is dropped:
+    /// the drop closes the platform stream from the radio's queue, on
+    /// another thread, and that close must end the read.
+    ///
+    /// Needs a FIPS peer in range. The peer sends its opening message and
+    /// then waits for ours, which never comes, so after reading the opener
+    /// the reader is parked.
+    ///
+    /// `cargo test --lib corebluetooth -- --ignored --nocapture blocked_reader`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs Bluetooth permission and a FIPS peer in range"]
+    async fn a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware() {
+        use super::super::pump_census::Pump;
+        use crate::transport::ble::io::BleStream;
+
+        let io = radio_up().await;
+        let stream = dial_first_peer(&io).await;
+        let ch_id = stream.ch_id();
+        let mut buf = [0u8; 256];
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.recv(&mut buf))
+            .await
+            .expect("nothing received")
+            .unwrap();
+        assert!(n > 0, "the peer's opening message arrived");
+        // Nothing more is coming: give the reader time to park in the read.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(super::super::pump_census::running(Pump::Reader, ch_id));
+
+        drop(stream);
+        assert_pump_exits(Pump::Reader, ch_id, Duration::from_secs(5)).await;
+        assert_pump_exits(Pump::Writer, ch_id, Duration::from_secs(5)).await;
+    }
+
+    /// A writer blocked because the peer stopped reading ends when the
+    /// stream is dropped.
+    ///
+    /// Needs a FIPS peer in range that accepts a channel and then stops
+    /// reading it — another Mac running `sink_on_hardware` is one. The test
+    /// writes until a send has waited a full second, which means the radio
+    /// has stopped taking bytes and the writer is parked in a write, then
+    /// drops the stream.
+    ///
+    /// `cargo test --lib corebluetooth -- --ignored --nocapture blocked_writer`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs Bluetooth permission and a peer that stops reading"]
+    async fn a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware() {
+        use super::super::pump_census::Pump;
+        use crate::transport::ble::io::BleStream;
+
+        let io = radio_up().await;
+        let stream = Arc::new(dial_first_peer(&io).await);
+        let ch_id = stream.ch_id();
+
+        let packet = vec![0xA5u8; 1024];
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut sent = 0usize;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the peer kept reading {sent} bytes; this test needs one that stops"
+            );
+            match tokio::time::timeout(Duration::from_secs(1), stream.send(&packet)).await {
+                Ok(Ok(())) => sent += packet.len(),
+                Ok(Err(e)) => panic!("the peer closed the channel after {sent} bytes: {e}"),
+                Err(_) => break,
+            }
+        }
+        println!("writer blocked after {sent} bytes");
+        assert!(super::super::pump_census::running(Pump::Writer, ch_id));
+
+        drop(Arc::into_inner(stream).expect("no send still holds the stream"));
+        assert_pump_exits(Pump::Writer, ch_id, Duration::from_secs(5)).await;
+        assert_pump_exits(Pump::Reader, ch_id, Duration::from_secs(5)).await;
+    }
+
+    /// The peer `a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware`
+    /// needs: advertises, accepts channels for two minutes, and never reads
+    /// them. Run it on a second Mac.
+    ///
+    /// `cargo test --lib corebluetooth -- --ignored --nocapture sink_on_hardware`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "a helper for the blocked-writer test, run on a second Mac"]
+    async fn sink_on_hardware() {
+        use crate::transport::ble::io::{BleAcceptor, BleIo, BleStream};
+
+        let io = radio_up().await;
+        let (mut acceptor, psm) = io.listen(crate::transport::ble::DEFAULT_PSM).await.unwrap();
+        io.start_advertising(psm).await.unwrap();
+        println!("sink advertising; listener on psm {psm:#06x}");
+        let mut held = Vec::new();
+        let until = tokio::time::Instant::now() + Duration::from_secs(120);
+        while let Ok(Ok(stream)) = tokio::time::timeout_at(until, acceptor.accept()).await {
+            println!("holding a channel from {} unread", stream.remote_addr());
+            held.push(stream);
+        }
+        io.stop_advertising().await.unwrap();
     }
 }

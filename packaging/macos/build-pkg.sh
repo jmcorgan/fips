@@ -119,6 +119,17 @@ done
 # names a process after the file it executed, and a symlink resolves to fips.
 ln "${STAGING_DIR}/usr/local/bin/fips" "${STAGING_DIR}/usr/local/bin/fips-ble-agent"
 
+# CoreBluetooth kills a process that has no NSBluetoothAlwaysUsageDescription
+# in its Info.plist. build.rs embeds one in the fips binary through a linker
+# argument, which nothing else would notice going missing: check the stripped
+# binary that ships still carries it.
+if ! launchctl plist __TEXT,__info_plist "${STAGING_DIR}/usr/local/bin/fips" 2>/dev/null \
+        | grep -q NSBluetoothAlwaysUsageDescription; then
+    echo "fips binary has no NSBluetoothAlwaysUsageDescription in __TEXT,__info_plist;" \
+         "BLE would crash it. Check the -sectcreate link argument in build.rs." >&2
+    exit 1
+fi
+
 # Config (marked as conf file via postinstall logic — won't overwrite on upgrade)
 cp "${PACKAGING_DIR}/common/fips.yaml" "${STAGING_DIR}/usr/local/etc/fips/fips.yaml.default"
 cp "${PACKAGING_DIR}/common/hosts" "${STAGING_DIR}/usr/local/etc/fips/hosts.default"

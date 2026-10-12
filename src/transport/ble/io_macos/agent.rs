@@ -15,13 +15,21 @@
 //! The radio is the agent's for its whole life. Listening starts once, the
 //! scanner once, at first request; a daemon that disconnects and reconnects
 //! finds them still running. What a session owns is its channels, which end
-//! with it.
+//! with it. A session lasts only while the radio is up on the PSM its hello
+//! reported: the radio going down, or coming back on another PSM, ends it, so
+//! the daemon never holds a radio that is not there.
+//!
+//! The session loop never waits on a channel. Outbound bytes are queued per
+//! channel and bounded by the send credit the agent grants (see
+//! [`super::agent_proto`]), so one peer that stops taking bytes stalls only
+//! its own channel.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -31,7 +39,7 @@ use tracing::{debug, info, warn};
 
 use super::super::addr::BleAddr;
 use super::super::io::{BleAcceptor, BleIo, BleScanner, BleStream};
-use super::agent_proto::{Frame, VERSION, read_frame_async};
+use super::agent_proto::{Frame, MAX_FRAME, VERSION, read_frame_async};
 
 /// How long a dial may run before the agent reports it failed. The daemon's
 /// transport gives up sooner and ignores a late answer.
@@ -40,31 +48,50 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to wait between attempts to reach the daemon.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
-/// How often to check whether the radio has come up, before connecting.
+/// Longest wait between attempts once the daemon keeps turning the agent
+/// away — another agent holds the radio, or it speaks another version.
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+
+/// A session that lasted this long was accepted, and resets the backoff.
+const STABLE_SESSION: Duration = Duration::from_secs(30);
+
+/// How often to check whether the radio is up, before connecting and during
+/// a session.
 const RADIO_POLL: Duration = Duration::from_millis(200);
 
-/// Depth of each channel's outbound queue, towards the radio.
-const CHANNEL_QUEUE: usize = 32;
-
-/// Run the agent forever: start the radio's listener, then serve whichever
-/// daemon is listening at the path `socket` yields, reconnecting whenever it
-/// goes away.
+/// The send credit each channel starts with, in bytes: how much the daemon
+/// may have queued at the agent for one channel before it must wait for the
+/// radio to take some.
 ///
-/// `socket` is asked again before every attempt. The default path depends on
-/// which runtime directories exist, and an agent started at login can come
-/// up before the daemon has created its own; resolving once would pin the
-/// agent to a fallback path no daemon ever listens on.
+/// Small, like the bridge's own send queue, because a BLE link's
+/// bandwidth-delay product is about a packet and a deeper queue only adds
+/// latency.
+pub const CHANNEL_WINDOW: u32 = 32 * 1024;
+
+/// Bytes queued on one channel beyond which the daemon has overrun its
+/// credit. The daemon may spend its last credit on a packet larger than what
+/// remained, so one frame of slack.
+const CHANNEL_OVERRUN: usize = CHANNEL_WINDOW as usize + MAX_FRAME;
+
+/// Depth of the queue of channel bytes and adverts towards the daemon.
+const DATA_QUEUE: usize = 256;
+
+/// Run the agent forever: start the radio's listener, then serve the daemon
+/// listening at `socket`, reconnecting whenever it goes away.
+///
+/// `daemon_uid`, when given, is the only user the agent will serve: a socket
+/// answered by anyone else is not the daemon and is dropped before the hello.
 ///
 /// `radio_psm` is the PSM the radio's listener bound, `Some(0)` for a radio
-/// that is up with no listener, and `None` while the radio is not up. It is
-/// read before every connection, and the agent does not connect until the
-/// radio is up: `listen` reports only the requested fallback until then, and
-/// the hello would hand the daemon a PSM nothing listens on. Reading it per
-/// connection also carries the new PSM across a Bluetooth toggle, which
-/// republishes the listener.
+/// that is up with no listener, and `None` while the radio is not up. The
+/// agent does not connect until the radio is up — `listen` reports only the
+/// requested fallback until then, and the hello would hand the daemon a PSM
+/// nothing listens on — and ends the session when it goes down or comes back
+/// on another PSM, then says hello again with the new one.
 pub async fn run<I: BleIo>(
     io: Arc<I>,
-    socket: impl Fn() -> PathBuf,
+    socket: PathBuf,
+    daemon_uid: Option<u32>,
     requested_psm: u16,
     radio_psm: impl Fn() -> Option<u16>,
 ) -> io::Result<()> {
@@ -89,26 +116,77 @@ pub async fn run<I: BleIo>(
         }
     });
     let mut scans = ScanFeed::default();
+    let mut backoff = RECONNECT_DELAY;
 
     loop {
         let psm = wait_for_radio(&radio_psm).await;
-        let socket = socket();
         match UnixStream::connect(&socket).await {
             Ok(stream) => {
-                info!(path = %socket.display(), "BLE agent: connected to the daemon");
-                if let Err(e) = serve(&io, stream, psm, &mut inbound, &mut scans).await {
-                    debug!(error = %e, "BLE agent: session ended");
+                if let Err(e) = check_peer(&stream, daemon_uid) {
+                    warn!(path = %socket.display(), error = %e, "BLE agent: not the daemon; not serving it");
+                    backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
+                    tokio::time::sleep(backoff).await;
+                    continue;
                 }
-                info!("BLE agent: daemon gone");
+                info!(path = %socket.display(), "BLE agent: connected to the daemon");
+                let started = Instant::now();
+                let outcome = serve(&io, stream, psm, &radio_psm, &mut inbound, &mut scans).await;
                 let _ = io.stop_advertising().await;
                 let _ = io.stop_scanning().await;
+                match outcome {
+                    Ok(Outcome::Busy) => {
+                        backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
+                        info!(
+                            retry_in = ?backoff,
+                            "BLE agent: another agent lends the daemon its radio; standing by"
+                        );
+                    }
+                    Ok(Outcome::RadioChanged) => {
+                        info!("BLE agent: radio went down or changed PSM; reconnecting");
+                        backoff = RECONNECT_DELAY;
+                    }
+                    Ok(Outcome::Ended) | Err(_) => {
+                        if let Err(e) = &outcome {
+                            debug!(error = %e, "BLE agent: session ended");
+                        }
+                        info!("BLE agent: daemon gone");
+                        // A session the daemon cut short at once — another
+                        // version, say — backs off; one that ran a while is
+                        // a daemon restart, and is retried promptly.
+                        backoff = if started.elapsed() >= STABLE_SESSION {
+                            RECONNECT_DELAY
+                        } else {
+                            (backoff * 2).min(MAX_RECONNECT_DELAY)
+                        };
+                    }
+                }
+                tokio::time::sleep(backoff).await;
             }
             Err(e) => {
-                debug!(path = %socket.display(), error = %e, "BLE agent: daemon not reachable")
+                debug!(path = %socket.display(), error = %e, "BLE agent: daemon not reachable");
+                tokio::time::sleep(RECONNECT_DELAY).await;
             }
         }
-        tokio::time::sleep(RECONNECT_DELAY).await;
     }
+}
+
+/// Refuse a socket not answered by `daemon_uid`.
+///
+/// The socket's directory is the daemon's, but the agent runs as an ordinary
+/// user and would otherwise hand its radio, and every peer's bytes, to
+/// whoever got there first.
+fn check_peer(stream: &UnixStream, daemon_uid: Option<u32>) -> io::Result<()> {
+    let Some(expected) = daemon_uid else {
+        return Ok(());
+    };
+    let uid = stream.peer_cred()?.uid();
+    if uid != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("socket owned by uid {uid}, expected {expected}"),
+        ));
+    }
+    Ok(())
 }
 
 /// The PSM to report in the hello, once the radio is up.
@@ -161,8 +239,27 @@ impl ScanFeed {
 
 /// A channel this session has handed to the daemon.
 struct Channel {
-    tx: mpsc::Sender<Vec<u8>>,
+    /// Outbound bytes, towards the radio. Unbounded as a queue, bounded by
+    /// the credit the daemon holds, which `queued` checks.
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// Bytes in `tx` not yet taken by the radio.
+    queued: Arc<AtomicUsize>,
     tasks: [JoinHandle<()>; 2],
+}
+
+impl Channel {
+    /// Queue `data` for the radio, without waiting. `false` means the daemon
+    /// has sent past its credit.
+    fn queue(&self, data: Vec<u8>) -> bool {
+        let queued = self.queued.fetch_add(data.len(), Ordering::Relaxed) + data.len();
+        if queued > CHANNEL_OVERRUN {
+            return false;
+        }
+        // A writer that has stopped has met a dead stream, and the reader
+        // will report the channel ended.
+        let _ = self.tx.send(data);
+        true
+    }
 }
 
 impl Drop for Channel {
@@ -187,44 +284,101 @@ enum Event<S> {
     },
 }
 
+/// How a session ended without an error.
+enum Outcome {
+    /// The daemon hung up.
+    Ended,
+    /// The daemon already has an agent.
+    Busy,
+    /// The radio went down, or came back on another PSM.
+    RadioChanged,
+}
+
+/// The two queues towards the daemon.
+///
+/// Control frames — channel openings and closings, dial results, credit —
+/// go first and are never refused, so the session loop never waits on them;
+/// they are few and small. Channel bytes and adverts share a bounded queue
+/// behind them: a reader waits for room, an advert is dropped.
+#[derive(Clone)]
+struct ToDaemon {
+    control: mpsc::UnboundedSender<Frame>,
+    data: mpsc::Sender<Frame>,
+}
+
+impl ToDaemon {
+    fn control(&self, frame: Frame) -> io::Result<()> {
+        self.control
+            .send(frame)
+            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+}
+
 /// Serve one daemon connection until it ends.
 async fn serve<I: BleIo>(
     io: &Arc<I>,
     stream: UnixStream,
     psm: u16,
+    radio_psm: &impl Fn() -> Option<u16>,
     inbound: &mut mpsc::Receiver<I::Stream>,
     scans: &mut ScanFeed,
-) -> io::Result<()> {
+) -> io::Result<Outcome> {
     // Inbound channels that arrived with no daemon to take them are stale.
     while inbound.try_recv().is_ok() {}
 
     let (mut rd, mut wr) = stream.into_split();
-    let (out, mut out_rx) = mpsc::channel::<Frame>(256);
+    // Frames are read on a task of their own: a read is not cancel-safe, and
+    // in the loop's `select!` any other branch firing mid-frame would drop
+    // the bytes read so far and desynchronise the stream.
+    let (frames_tx, mut frames) = mpsc::channel::<io::Result<Frame>>(1);
+    let _reader = AbortOnDrop(tokio::spawn(async move {
+        loop {
+            let frame = match read_frame_async(&mut rd).await {
+                Ok(Some(frame)) => Ok(frame),
+                Ok(None) => return,
+                Err(e) => Err(e),
+            };
+            let failed = frame.is_err();
+            if frames_tx.send(frame).await.is_err() || failed {
+                return;
+            }
+        }
+    }));
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Frame>();
+    let (data_tx, mut data_rx) = mpsc::channel::<Frame>(DATA_QUEUE);
     let writer = tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
+        loop {
+            let frame = tokio::select! {
+                biased;
+                Some(frame) = control_rx.recv() => frame,
+                Some(frame) = data_rx.recv() => frame,
+                else => return,
+            };
             if wr.write_all(&frame.encode()).await.is_err() {
                 return;
             }
         }
     });
     let _writer = AbortOnDrop(writer);
-    send(
-        &out,
-        Frame::Hello {
-            version: VERSION,
-            psm,
-        },
-    )
-    .await?;
+    let out = ToDaemon {
+        control: control_tx,
+        data: data_tx,
+    };
+    out.control(Frame::Hello {
+        version: VERSION,
+        psm,
+    })?;
 
     let (events_tx, mut events) = mpsc::channel::<Event<I::Stream>>(64);
     let mut channels: HashMap<u32, Channel> = HashMap::new();
     let mut next_ch: u32 = 1;
+    let mut radio_check = tokio::time::interval(RADIO_POLL);
+    radio_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
-            frame = read_frame_async(&mut rd) => {
-                let Some(frame) = frame? else { return Ok(()) };
+            frame = frames.recv() => {
+                let Some(frame) = frame.transpose()? else { return Ok(Outcome::Ended) };
                 match frame {
                     Frame::Connect { id, addr, psm } => {
                         let io = Arc::clone(io);
@@ -251,50 +405,61 @@ async fn serve<I: BleIo>(
                         let _ = io.stop_scanning().await;
                     }
                     Frame::Send { ch, data } => {
-                        let tx = channels.get(&ch).map(|c| c.tx.clone());
-                        if let Some(tx) = tx {
-                            // Waits for room, so a slow radio pushes back on the
-                            // daemon rather than the agent buffering without
-                            // bound.
-                            let _ = tx.send(data).await;
+                        if let Some(channel) = channels.get(&ch)
+                            && !channel.queue(data)
+                        {
+                            warn!(ch, "BLE agent: daemon sent past its credit; closing the channel");
+                            channels.remove(&ch);
+                            out.control(Frame::Closed { ch })?;
                         }
                     }
                     Frame::Close { ch } => {
                         channels.remove(&ch);
                     }
+                    Frame::Busy => return Ok(Outcome::Busy),
                     other => debug!(frame = ?other, "BLE agent: unexpected frame"),
                 }
             }
             Some(stream) = inbound.recv() => {
                 let ch = allocate(&mut next_ch);
-                let frame = Frame::Inbound {
+                // Announced before its reader starts, so the daemon knows
+                // the channel by the time its first bytes arrive.
+                out.control(Frame::Inbound {
                     ch,
                     addr: stream.remote_addr().clone(),
                     mtu: stream.recv_mtu(),
-                };
+                })?;
+                out.control(Frame::Credit { ch, bytes: CHANNEL_WINDOW })?;
                 channels.insert(ch, open_channel(stream, ch, &out, &events_tx));
-                send(&out, frame).await?;
             }
             Some(advert) = scans.next() => {
-                send(&out, Frame::Scan { addr: advert.addr, psm: advert.psm, rssi: advert.rssi }).await?;
+                // Adverts repeat; one dropped while the daemon is behind is
+                // heard again in a second.
+                let _ = out.data.try_send(Frame::Scan { addr: advert.addr, psm: advert.psm, rssi: advert.rssi });
             }
             Some(event) = events.recv() => match event {
                 Event::Dialled { id, addr, result: Ok(stream) } => {
                     let ch = allocate(&mut next_ch);
                     let mtu = stream.recv_mtu();
+                    out.control(Frame::ConnectResult { id, ok: true, ch, addr, mtu })?;
+                    out.control(Frame::Credit { ch, bytes: CHANNEL_WINDOW })?;
                     channels.insert(ch, open_channel(stream, ch, &out, &events_tx));
-                    send(&out, Frame::ConnectResult { id, ok: true, ch, addr, mtu }).await?;
                 }
                 Event::Dialled { id, addr, result: Err(e) } => {
                     debug!(addr = %addr, error = %e, "BLE agent: dial failed");
-                    send(&out, Frame::ConnectResult { id, ok: false, ch: 0, addr, mtu: 0 }).await?;
+                    out.control(Frame::ConnectResult { id, ok: false, ch: 0, addr, mtu: 0 })?;
                 }
                 Event::Ended { ch } => {
                     if channels.remove(&ch).is_some() {
-                        send(&out, Frame::Closed { ch }).await?;
+                        out.control(Frame::Closed { ch })?;
                     }
                 }
             },
+            _ = radio_check.tick() => {
+                if radio_psm() != Some(psm) {
+                    return Ok(Outcome::RadioChanged);
+                }
+            }
         }
     }
 }
@@ -305,25 +470,20 @@ fn allocate(next: &mut u32) -> u32 {
     ch
 }
 
-async fn send(out: &mpsc::Sender<Frame>, frame: Frame) -> io::Result<()> {
-    out.send(frame)
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
-}
-
 /// Start the two tasks carrying channel `ch`'s bytes.
 fn open_channel<S: BleStream + 'static>(
     stream: S,
     ch: u32,
-    out: &mpsc::Sender<Frame>,
+    out: &ToDaemon,
     events: &mpsc::Sender<Event<S>>,
 ) -> Channel {
     let stream = Arc::new(stream);
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(CHANNEL_QUEUE);
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let queued = Arc::new(AtomicUsize::new(0));
 
     let reader = {
         let stream = Arc::clone(&stream);
-        let out = out.clone();
+        let data = out.data.clone();
         let events = events.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; usize::from(stream.recv_mtu()).max(64)];
@@ -331,8 +491,11 @@ fn open_channel<S: BleStream + 'static>(
                 match stream.recv(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let data = buf[..n].to_vec();
-                        if out.send(Frame::Recv { ch, data }).await.is_err() {
+                        let frame = Frame::Recv {
+                            ch,
+                            data: buf[..n].to_vec(),
+                        };
+                        if data.send(frame).await.is_err() {
                             return;
                         }
                     }
@@ -341,15 +504,28 @@ fn open_channel<S: BleStream + 'static>(
             let _ = events.send(Event::Ended { ch }).await;
         })
     };
-    let writer = tokio::spawn(async move {
-        while let Some(data) = rx.recv().await {
-            if stream.send(&data).await.is_err() {
-                return;
+    let writer = {
+        let queued = Arc::clone(&queued);
+        let control = out.control.clone();
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                if stream.send(&data).await.is_err() {
+                    return;
+                }
+                queued.fetch_sub(data.len(), Ordering::Relaxed);
+                // The radio has the bytes: the daemon may send as many more.
+                if !data.is_empty() {
+                    let bytes = data.len() as u32;
+                    if control.send(Frame::Credit { ch, bytes }).is_err() {
+                        return;
+                    }
+                }
             }
-        }
-    });
+        })
+    };
     Channel {
         tx,
+        queued,
         tasks: [reader, writer],
     }
 }
@@ -420,7 +596,7 @@ mod tests {
         let agent_io = Arc::clone(&radio);
         let agent_path = path.clone();
         let agent = tokio::spawn(async move {
-            let _ = run(agent_io, move || agent_path.clone(), 0x0085, radio_psm).await;
+            let _ = run(agent_io, agent_path, None, 0x0085, radio_psm).await;
         });
 
         Rig {
@@ -608,5 +784,215 @@ mod tests {
             assert!(Instant::now() < deadline, "slot still holds the lost agent");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// A peer that stops taking bytes stalls only its own channel: the
+    /// session keeps carrying every other channel's bytes, and still acts on
+    /// the daemon closing the stalled one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_channel_does_not_stall_the_others() {
+        let rig = rig().await;
+        let (mut acceptor, _) = rig.daemon.listen(0x0085).await.unwrap();
+
+        let (stalled_local, stalled_peer) = MockBleStream::pair(addr(0), addr(5), 512);
+        rig.radio.inject_inbound(stalled_local).await;
+        let stalled = Arc::new(
+            tokio::time::timeout(Duration::from_secs(5), acceptor.accept())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let (live_local, live_peer) = MockBleStream::pair(addr(0), addr(6), 512);
+        rig.radio.inject_inbound(live_local).await;
+        let live = tokio::time::timeout(Duration::from_secs(5), acceptor.accept())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Far more than the stalled peer will ever take; the send blocks.
+        let flood = {
+            let stalled = Arc::clone(&stalled);
+            tokio::spawn(async move {
+                let packet = vec![0x5Au8; 1024];
+                loop {
+                    if stalled.send(&packet).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        live.send(b"still flowing").await.unwrap();
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(5), live_peer.recv(&mut buf))
+            .await
+            .expect("the live channel stalled behind the stalled one")
+            .unwrap();
+        assert_eq!(&buf[..n], b"still flowing");
+
+        // The daemon giving up on the stalled channel reaches the agent,
+        // which closes it on the radio: past what the peer had buffered, it
+        // reads end of stream.
+        flood.abort();
+        let _ = flood.await;
+        drop(Arc::into_inner(stalled).unwrap());
+        let mut buf = [0u8; 2048];
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while stalled_peer.recv(&mut buf).await.unwrap() > 0 {}
+        })
+        .await;
+        assert!(ended.is_ok(), "the close never reached the radio");
+    }
+
+    /// A second agent is refused while one is live, and the live one keeps
+    /// the radio.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_agent_is_refused_and_the_first_keeps_the_radio() {
+        use tokio::io::AsyncWriteExt;
+        let rig = rig().await;
+        let live = rig.slot.current().unwrap();
+
+        let mut second = UnixStream::connect(rig._dir.path().join("ble-agent.sock"))
+            .await
+            .unwrap();
+        second
+            .write_all(
+                &Frame::Hello {
+                    version: VERSION,
+                    psm: 0x00C9,
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), read_frame_async(&mut second))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer, Some(Frame::Busy));
+
+        let current = rig.slot.current().expect("the live agent was dropped");
+        assert!(Arc::ptr_eq(&current, &live), "the radio was replaced");
+    }
+
+    /// An agent whose radio goes down hangs up, so the daemon's slot empties;
+    /// when the radio is back on a new PSM, it says hello again with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_agent_hangs_up_while_its_radio_is_down() {
+        let radio_psm = Arc::new(std::sync::Mutex::new(Some(0x00C0)));
+        let source = Arc::clone(&radio_psm);
+        let rig = rig_with(move || *source.lock().unwrap()).await;
+        wait_installed(&rig.slot).await;
+
+        *radio_psm.lock().unwrap() = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rig.slot.is_installed() {
+            assert!(
+                Instant::now() < deadline,
+                "the daemon still holds a downed radio"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        *radio_psm.lock().unwrap() = Some(0x00C7);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if rig.slot.is_installed() {
+                let (_acceptor, psm) = rig.daemon.listen(0x0085).await.unwrap();
+                if psm == 0x00C7 {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the agent never came back on the new PSM"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A daemon that sends past its credit has the channel closed on it,
+    /// rather than the agent queueing without bound.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sending_past_the_credit_closes_the_channel() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ble-agent.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let radio = Arc::new(MockBleIo::new(RADIO_ADAPTER, addr(0)));
+        let agent_io = Arc::clone(&radio);
+        let _agent = AbortOnDrop(tokio::spawn(async move {
+            let _ = run(agent_io, path, None, 0x0085, || Some(0x00C0)).await;
+        }));
+
+        let (mut daemon, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(next(&mut daemon).await, Frame::Hello { .. }));
+
+        // A peer that never reads: the agent's queue for it only grows.
+        let (local, _peer) = MockBleStream::pair(addr(0), addr(5), 512);
+        radio.inject_inbound(local).await;
+        let Frame::Inbound { ch, .. } = next(&mut daemon).await else {
+            panic!("expected the inbound channel");
+        };
+        assert_eq!(
+            next(&mut daemon).await,
+            Frame::Credit {
+                ch,
+                bytes: CHANNEL_WINDOW
+            }
+        );
+
+        let packet = vec![0u8; 4096];
+        for _ in 0..(CHANNEL_OVERRUN / packet.len() + 128) {
+            daemon
+                .write_all(
+                    &Frame::Send {
+                        ch,
+                        data: packet.clone(),
+                    }
+                    .encode(),
+                )
+                .await
+                .unwrap();
+        }
+        loop {
+            match next(&mut daemon).await {
+                Frame::Credit { .. } => continue,
+                frame => {
+                    assert_eq!(frame, Frame::Closed { ch });
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn next(daemon: &mut UnixStream) -> Frame {
+        tokio::time::timeout(Duration::from_secs(5), read_frame_async(daemon))
+            .await
+            .expect("the agent went quiet")
+            .unwrap()
+            .unwrap()
+    }
+
+    /// The agent serves only the user it was told the daemon runs as.
+    #[tokio::test]
+    async fn a_socket_answered_by_another_user_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ble-agent.sock");
+        let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let me = unsafe { libc::getuid() };
+        assert!(check_peer(&stream, None).is_ok());
+        assert!(check_peer(&stream, Some(me)).is_ok());
+        assert_eq!(
+            check_peer(&stream, Some(me.wrapping_add(1)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

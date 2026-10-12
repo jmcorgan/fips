@@ -56,9 +56,17 @@ use super::io_radio::{BleRadioBridge, RADIO_ADAPTER};
 use super::psm;
 
 /// Where the daemon listens for the BLE agent, and where the agent looks for
-/// it: beside the control socket.
+/// it.
+///
+/// Fixed, not resolved like the control socket: that resolution falls back to
+/// `/tmp` when `/var/run/fips` does not exist yet, and an agent looking there
+/// would find whatever another local account bound first. The daemon, as
+/// root, creates the directory when it binds.
+pub const AGENT_SOCKET_PATH: &str = "/var/run/fips/ble-agent.sock";
+
+/// [`AGENT_SOCKET_PATH`] as a path.
 pub fn agent_socket_path() -> std::path::PathBuf {
-    crate::config::resolve_default_socket("ble-agent.sock").into()
+    AGENT_SOCKET_PATH.into()
 }
 
 /// The FIPS service UUID, in the string form CoreBluetooth parses.
@@ -308,6 +316,8 @@ pub fn spawn_pumps<R: ChannelRead, W: ChannelWrite>(
     std::thread::Builder::new()
         .name(format!("fips-ble-rx-{ch_id}"))
         .spawn(move || {
+            #[cfg(test)]
+            let _live = pump_census::Live::new(pump_census::Pump::Reader, ch_id);
             let mut buf = vec![0u8; read_chunk.max(1)];
             loop {
                 match reader.read(&mut buf) {
@@ -324,6 +334,8 @@ pub fn spawn_pumps<R: ChannelRead, W: ChannelWrite>(
     std::thread::Builder::new()
         .name(format!("fips-ble-tx-{ch_id}"))
         .spawn(move || {
+            #[cfg(test)]
+            let _live = pump_census::Live::new(pump_census::Pump::Writer, ch_id);
             loop {
                 match bridge.next_send(ch_id, WRITER_IDLE_POLL) {
                     Some(packet) => {
@@ -341,6 +353,47 @@ pub fn spawn_pumps<R: ChannelRead, W: ChannelWrite>(
             }
         })?;
     Ok(())
+}
+
+/// Which pump threads are running, for tests that need to see one exit.
+#[cfg(test)]
+pub(crate) mod pump_census {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Pump {
+        Reader,
+        Writer,
+    }
+
+    static LIVE: Mutex<Option<HashSet<(Pump, i64)>>> = Mutex::new(None);
+
+    fn with<T>(f: impl FnOnce(&mut HashSet<(Pump, i64)>) -> T) -> T {
+        let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        f(live.get_or_insert_with(HashSet::new))
+    }
+
+    /// Whether the `pump` thread of channel `ch_id` is still running.
+    pub fn running(pump: Pump, ch_id: i64) -> bool {
+        with(|live| live.contains(&(pump, ch_id)))
+    }
+
+    /// Held by a pump thread for as long as it runs.
+    pub struct Live(Pump, i64);
+
+    impl Live {
+        pub fn new(pump: Pump, ch_id: i64) -> Self {
+            with(|live| live.insert((pump, ch_id)));
+            Self(pump, ch_id)
+        }
+    }
+
+    impl Drop for Live {
+        fn drop(&mut self) {
+            with(|live| live.remove(&(self.0, self.1)));
+        }
+    }
 }
 
 /// Write all of `data`, however many writes that takes.
@@ -382,6 +435,13 @@ mod tests {
     fn the_mapping_is_pinned() {
         let id: [u8; 16] = std::array::from_fn(|i| i as u8);
         assert_eq!(peer_addr(id).device, [0x7E, 0x84, 0xDC, 0x94, 0x77, 0x85]);
+    }
+
+    /// Config validation names the CoreBluetooth adapter without access to
+    /// this module; the two must agree.
+    #[test]
+    fn config_names_the_radio_adapter() {
+        assert_eq!(crate::config::Config::COREBLUETOOTH_ADAPTER, RADIO_ADAPTER);
     }
 
     #[test]
