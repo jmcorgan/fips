@@ -779,49 +779,57 @@ mod tests {
         }
     }
 
+    // Return true in the parent after the child passes; false in the child so
+    // it runs the test body. Re-exec before opening sockets: other tests can
+    // spawn processes whose inherited descriptors keep a dropped socket open
+    // until exec. A separate process also bounds executor-starving regressions.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn run_receive_loop_test_in_child(test_name: &str) -> bool {
+        const CHILD: &str = "FIPS_TEST_UDP_RECV_LOOP_CHILD";
+        if std::env::var(CHILD).is_ok_and(|name| name == test_name) {
+            return false;
+        }
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD, test_name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("{test_name} timed out in child process");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{test_name} failed in child process:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child did not run {test_name}: {}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+        true
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test(start_paused = true)]
     async fn receive_loop_backs_off_persistent_errors_and_remains_cancellable() {
         use std::net::{TcpListener, TcpStream, UdpSocket};
         use std::os::fd::OwnedFd;
 
-        const CHILD: &str = "FIPS_TEST_UDP_RECV_LOOP_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            // The regression starves the executor, including async timeouts.
-            // Bound the test from a separate process so it fails rather than
-            // hanging the rest of the test suite.
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "transport::udp::tests::receive_loop_backs_off_persistent_errors_and_remains_cancellable",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while child.try_wait().unwrap().is_none() {
-                if Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    child.wait().unwrap();
-                    panic!("receive loop starved the executor");
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-                "child did not run the receive-loop regression: {}",
-                String::from_utf8_lossy(&output.stdout),
-            );
+        if run_receive_loop_test_in_child(
+            "transport::udp::tests::receive_loop_backs_off_persistent_errors_and_remains_cancellable",
+        ) {
             return;
         }
 
@@ -871,6 +879,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn receive_loop_resets_backoff_after_a_datagram() {
         use std::net::UdpSocket;
+
+        if run_receive_loop_test_in_child(
+            "transport::udp::tests::receive_loop_resets_backoff_after_a_datagram",
+        ) {
+            return;
+        }
 
         // Sending to a closed loopback port queues ECONNREFUSED. Also queue a
         // datagram: EPOLLERR alone does not satisfy AsyncFd::readable(). The
