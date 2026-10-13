@@ -22,10 +22,11 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
+use portable_atomic::AtomicU64;
 use tracing::{debug, info, warn};
 
 use super::super::io_radio::{BleRadio, BleRadioBridge, BleRadioSlot};

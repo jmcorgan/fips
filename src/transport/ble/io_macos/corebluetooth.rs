@@ -1602,29 +1602,27 @@ mod tests {
     /// the drop closes the platform stream from the radio's queue, on
     /// another thread, and that close must end the read.
     ///
-    /// Needs a FIPS peer in range. The peer sends its opening message and
-    /// then waits for ours, which never comes, so after reading the opener
-    /// the reader is parked.
+    /// Needs `sink_on_hardware` running on a second Mac, and no other FIPS
+    /// peer in range. The sink sends nothing and never closes, so the reader
+    /// is parked from the start and only the close can end its read. A FIPS
+    /// node would not do: it hangs up after its pubkey-exchange timeout, and
+    /// the read would end on that EOF whether or not the close works.
     ///
     /// `cargo test --lib corebluetooth -- --ignored --nocapture blocked_reader`
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "needs Bluetooth permission and a FIPS peer in range"]
+    #[ignore = "needs Bluetooth permission and sink_on_hardware on a second Mac"]
     async fn a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware() {
         use super::super::pump_census::Pump;
-        use crate::transport::ble::io::BleStream;
 
         let io = radio_up().await;
         let stream = dial_first_peer(&io).await;
         let ch_id = stream.ch_id();
-        let mut buf = [0u8; 256];
-        let n = tokio::time::timeout(Duration::from_secs(10), stream.recv(&mut buf))
-            .await
-            .expect("nothing received")
-            .unwrap();
-        assert!(n > 0, "the peer's opening message arrived");
-        // Nothing more is coming: give the reader time to park in the read.
+        // Give the reader time to park in the read.
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(super::super::pump_census::running(Pump::Reader, ch_id));
+        assert!(
+            super::super::pump_census::running(Pump::Reader, ch_id),
+            "the reader ended before the drop: the peer closed the channel, so it is not the sink"
+        );
 
         drop(stream);
         assert_pump_exits(Pump::Reader, ch_id, Duration::from_secs(5)).await;
@@ -1634,15 +1632,15 @@ mod tests {
     /// A writer blocked because the peer stopped reading ends when the
     /// stream is dropped.
     ///
-    /// Needs a FIPS peer in range that accepts a channel and then stops
-    /// reading it — another Mac running `sink_on_hardware` is one. The test
+    /// Needs `sink_on_hardware` running on a second Mac, and no other FIPS
+    /// peer in range: the sink accepts a channel and never reads it. The test
     /// writes until a send has waited a full second, which means the radio
     /// has stopped taking bytes and the writer is parked in a write, then
     /// drops the stream.
     ///
     /// `cargo test --lib corebluetooth -- --ignored --nocapture blocked_writer`
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "needs Bluetooth permission and a peer that stops reading"]
+    #[ignore = "needs Bluetooth permission and sink_on_hardware on a second Mac"]
     async fn a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware() {
         use super::super::pump_census::Pump;
         use crate::transport::ble::io::BleStream;
@@ -1673,13 +1671,13 @@ mod tests {
         assert_pump_exits(Pump::Reader, ch_id, Duration::from_secs(5)).await;
     }
 
-    /// The peer `a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware`
-    /// needs: advertises, accepts channels for two minutes, and never reads
+    /// The peer the blocked-reader and blocked-writer tests need: advertises,
+    /// accepts channels for two minutes, and never reads, writes or closes
     /// them. Run it on a second Mac.
     ///
     /// `cargo test --lib corebluetooth -- --ignored --nocapture sink_on_hardware`
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "a helper for the blocked-writer test, run on a second Mac"]
+    #[ignore = "a helper for the blocked-stream tests, run on a second Mac"]
     async fn sink_on_hardware() {
         use crate::transport::ble::io::{BleAcceptor, BleIo, BleStream};
 

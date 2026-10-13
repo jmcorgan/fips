@@ -721,7 +721,7 @@ pub struct RadioStream {
 
 impl RadioStream {
     /// The bridge's identifier for this channel.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn ch_id(&self) -> i64 {
         self.ch_id
     }

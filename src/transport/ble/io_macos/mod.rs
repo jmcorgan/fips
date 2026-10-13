@@ -375,6 +375,7 @@ pub(crate) mod pump_census {
     }
 
     /// Whether the `pump` thread of channel `ch_id` is still running.
+    #[cfg(target_os = "macos")]
     pub fn running(pump: Pump, ch_id: i64) -> bool {
         with(|live| live.contains(&(pump, ch_id)))
     }

@@ -450,9 +450,9 @@ async fn serve<I: BleIo>(
                     out.control(Frame::ConnectResult { id, ok: false, ch: 0, addr, mtu: 0 })?;
                 }
                 Event::Ended { ch } => {
-                    if channels.remove(&ch).is_some() {
-                        out.control(Frame::Closed { ch })?;
-                    }
+                    // The reader has already queued `Closed` behind its
+                    // last bytes.
+                    channels.remove(&ch);
                 }
             },
             _ = radio_check.tick() => {
@@ -500,6 +500,12 @@ fn open_channel<S: BleStream + 'static>(
                         }
                     }
                 }
+            }
+            // On the data queue, behind the bytes read before the peer hung
+            // up: on the control queue it would overtake them, and the
+            // daemon would drop them as belonging to a closed channel.
+            if data.send(Frame::Closed { ch }).await.is_err() {
+                return;
             }
             let _ = events.send(Event::Ended { ch }).await;
         })
@@ -843,6 +849,43 @@ mod tests {
         })
         .await;
         assert!(ended.is_ok(), "the close never reached the radio");
+    }
+
+    /// A peer that sends and then hangs up has every byte delivered before
+    /// the daemon sees the channel end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_closing_peers_last_bytes_arrive_before_the_close() {
+        let rig = rig().await;
+        let (mut acceptor, _) = rig.daemon.listen(0x0085).await.unwrap();
+        let (local, peer) = MockBleStream::pair(addr(0), addr(5), 512);
+        rig.radio.inject_inbound(local).await;
+        let stream = tokio::time::timeout(Duration::from_secs(5), acceptor.accept())
+            .await
+            .unwrap()
+            .unwrap();
+
+        const TOTAL: usize = 750 * 1024;
+        tokio::spawn(async move {
+            let packet = vec![0x3Cu8; 512];
+            for _ in 0..TOTAL / packet.len() {
+                peer.send(&packet).await.unwrap();
+            }
+            // Dropping the peer hangs up.
+        });
+
+        let mut received = 0;
+        let mut buf = [0u8; 2048];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(10), stream.recv(&mut buf))
+                .await
+                .expect("the channel stalled")
+                .unwrap();
+            if n == 0 {
+                break;
+            }
+            received += n;
+        }
+        assert_eq!(received, TOTAL, "bytes lost to an early close");
     }
 
     /// A second agent is refused while one is live, and the live one keeps

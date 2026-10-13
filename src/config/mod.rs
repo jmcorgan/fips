@@ -1736,7 +1736,9 @@ impl Config {
     /// above debug level to say why. `corebluetooth` is a parameter so the
     /// rule is tested on every host.
     fn validate_ble_peer_addresses(&self, corebluetooth: bool) -> Result<(), ConfigError> {
-        if !corebluetooth {
+        // With no BLE transport, a BLE address is never dialled; a config
+        // shared with other hosts may list one.
+        if !corebluetooth || self.transports.ble.is_empty() {
             return Ok(());
         }
         for peer in &self.peers {
@@ -4779,6 +4781,9 @@ node:
         let yaml = |addr: &str| {
             format!(
                 r#"
+transports:
+  ble:
+    mtu: 2048
 peers:
   - npub: "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
     addresses:
@@ -4798,6 +4803,12 @@ peers:
 
         let radio: Config = serde_yaml::from_str(&yaml("ble0/02:00:00:00:00:01")).unwrap();
         assert!(radio.validate_ble_peer_addresses(true).is_ok());
+
+        // A Mac with no BLE transport never dials the address, and may share
+        // its config with hosts that do.
+        let mut no_ble = hci;
+        no_ble.transports.ble = Default::default();
+        assert!(no_ble.validate_ble_peer_addresses(true).is_ok());
     }
 
     /// One radio per host: a second BLE instance is a config error there,
