@@ -2612,7 +2612,7 @@ mod unix_tests {
         let recv = UdpSocket::bind("127.0.0.1:0").expect("bind recv");
         let peer = recv.local_addr().unwrap();
         let local: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let owned = crate::transport::udp::open_connected_fd(local, peer, 1 << 16, 1 << 16)
+        let owned = crate::transport::udp::open_connected_fd(local, peer, 1 << 16, 1 << 16, None)
             .expect("open a connected UDP socket");
         let connected = Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
             owned, peer, local,
@@ -2696,7 +2696,7 @@ mod unix_tests {
         let recv = UdpSocket::bind("127.0.0.1:0").expect("bind recv");
         let good = recv.local_addr().unwrap();
         let local: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let owned = crate::transport::udp::open_connected_fd(local, peer, 1 << 16, 1 << 16)
+        let owned = crate::transport::udp::open_connected_fd(local, peer, 1 << 16, 1 << 16, None)
             .expect("open a connected UDP socket");
         let connected = Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
             owned, peer, local,

@@ -308,9 +308,13 @@ impl Node {
         {
             return true;
         }
-        if self.peers.values().any(|p| {
-            p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
-        }) {
+        // Any path, not only the one we send on: a rekey msg1 arrives on the
+        // path the *peer* sends on.
+        if self
+            .peers
+            .values()
+            .any(|p| p.is_reachable_at(transport_id, remote_addr))
+        {
             return true;
         }
         false
@@ -383,9 +387,7 @@ impl Node {
         // yields an identity when it matches.
         self.peers
             .values()
-            .find(|p| {
-                p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
-            })
+            .find(|p| p.is_reachable_at(transport_id, remote_addr))
             .map(|p| Msg1Waiver::Expect(*p.node_addr()))
             .unwrap_or(Msg1Waiver::Unattributed)
     }
@@ -1026,10 +1028,8 @@ impl Node {
                     if let Some(existing) = self.peers.get_mut(&peer)
                         && let Some(idx) = existing.abandon_rekey()
                     {
-                        if let Some(tid) = existing.transport_id() {
-                            self.peers_by_index.remove(&(tid, idx.as_u32()));
-                            self.pending_outbound.remove(&(tid, idx.as_u32()));
-                        }
+                        self.peers_by_index.remove(&idx.as_u32());
+                        self.pending_outbound.remove(&idx.as_u32());
                         let _ = self.index_allocator.free(idx);
                     }
                 }
@@ -1081,28 +1081,24 @@ impl Node {
                 // redialed sends only msg1s on its new connection, so nothing
                 // else would move it.
                 let wire_msg2 = build_msg2(our_new_index, wire.their_index, &wire.msg2_payload);
-                let sent = self.answer_msg1(&peer, &packet, &wire_msg2).await;
-                let link_transport = match sent {
-                    Ok(tid) => tid,
-                    Err(e) => {
-                        warn!(
-                            peer = %self.peer_display_name(&peer),
-                            error = %e,
-                            transport_id = %packet.transport_id,
-                            remote_addr = %packet.remote_addr,
-                            link_tid = %path.link_tid(),
-                            link_addr = %path.link_addr(),
-                            same_path = path.same_path(),
-                            msg1_sidx = %msg1_sidx,
-                            msg1_dg = %msg1_dg,
-                            "Failed to send rekey msg2"
-                        );
-                        let _ = self.index_allocator.free(our_new_index);
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                        return;
-                    }
-                };
+                if let Err(e) = self.answer_msg1(&peer, &packet, &wire_msg2).await {
+                    warn!(
+                        peer = %self.peer_display_name(&peer),
+                        error = %e,
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        link_tid = %path.link_tid(),
+                        link_addr = %path.link_addr(),
+                        same_path = path.same_path(),
+                        msg1_sidx = %msg1_sidx,
+                        msg1_dg = %msg1_dg,
+                        "Failed to send rekey msg2"
+                    );
+                    let _ = self.index_allocator.free(our_new_index);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
+                }
                 debug!(
                     peer = %self.peer_display_name(&peer),
                     new_our_index = %our_new_index,
@@ -1133,12 +1129,8 @@ impl Node {
                     existing.record_peer_rekey();
                 }
 
-                // Register new index in peers_by_index, under the transport
-                // the msg2 went out on: the peer's frames on the new session
-                // arrive there, and retirement removes the entry by the
-                // peer's transport, not the one the msg1 came in on.
-                self.peers_by_index
-                    .insert((link_transport, our_new_index.as_u32()), peer);
+                // Register new index in peers_by_index.
+                self.peers_by_index.insert(our_new_index.as_u32(), peer);
 
                 // Do NOT touch addr_to_link — the entry must keep pointing at the
                 // original link so future msg1s from this address are recognized
@@ -1602,7 +1594,7 @@ impl Node {
         };
 
         // Look up our pending handshake by our sender_idx (receiver_idx in msg2)
-        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        let key = header.receiver_idx.as_u32();
         let link_id = match self.pending_outbound.get(&key) {
             Some(id) => *id,
             None => {
@@ -1660,10 +1652,8 @@ impl Node {
                             }
                             peer.set_pending_session(session, our_index, header.sender_idx);
 
-                            if let Some(transport_id) = peer.transport_id() {
-                                self.peers_by_index
-                                    .insert((transport_id, our_index.as_u32()), peer_node_addr);
-                            }
+                            self.peers_by_index
+                                .insert(our_index.as_u32(), peer_node_addr);
 
                             if remote_epoch_changed {
                                 peer.note_restart();
@@ -1718,9 +1708,7 @@ impl Node {
                                 "Rekey msg2 processing failed"
                             );
                             if let Some(idx) = peer.abandon_rekey() {
-                                if let Some(tid) = peer.transport_id() {
-                                    self.peers_by_index.remove(&(tid, idx.as_u32()));
-                                }
+                                self.peers_by_index.remove(&idx.as_u32());
                                 let _ = self.index_allocator.free(idx);
                             }
                             self.stats_mut()
@@ -1965,14 +1953,12 @@ impl Node {
                     );
 
                     // Update peers_by_index: remove old inbound index, add outbound
-                    let transport_id = peer.transport_id().unwrap();
                     if let Some(old_idx) = old_our_index {
-                        self.peers_by_index
-                            .remove(&(transport_id, old_idx.as_u32()));
+                        self.peers_by_index.remove(&old_idx.as_u32());
                         let _ = self.index_allocator.free(old_idx);
                     }
                     self.peers_by_index
-                        .insert((transport_id, outbound_our_index.as_u32()), peer_node_addr);
+                        .insert(outbound_our_index.as_u32(), peer_node_addr);
 
                     if suppressed > 0 {
                         debug!(
@@ -2042,10 +2028,25 @@ impl Node {
 
             // Clean up outbound connection state
             self.pending_outbound.remove(&key);
-            // Close the losing leg's connection: a separate socket on TCP, a
-            // no-op when connectionless, and left open when it is the very
-            // connection the promoted peer runs on (BLE).
-            self.close_handshake_link_connection(link_id).await;
+
+            // The handshake ran over some (transport, address). Whichever
+            // session won, that is where the peer answered just now — but a
+            // handshake creates no path state: the probe exchange, which is
+            // authenticated and replay-checked under the surviving session,
+            // is the one way a path is proven. Leave the address as a
+            // candidate for the heartbeat tick. The link record goes (the
+            // peer's link is the one its session rides), but the transport
+            // connection stays: on TCP, Tor or Nym that socket is what the
+            // probe will go out on, and closing it would only have the
+            // first probe dial it again — or, on the responder, find that
+            // our ephemeral port cannot be dialled at all. `api_disconnect`
+            // closes every path's connection. A connectionless close was a
+            // no-op either way.
+            if let Some(link) = self.links.get(&link_id) {
+                let tid = link.transport_id();
+                let addr = link.remote_addr().clone();
+                self.add_path_candidate(peer_node_addr, tid, addr);
+            }
             self.remove_link(&link_id);
 
             // Send TreeAnnounce now that sessions are aligned
@@ -2227,10 +2228,8 @@ impl Node {
                 let loser_link_id = old_peer.link_id();
 
                 // Clean up old peer's index from peers_by_index
-                if let (Some(old_tid), Some(old_idx)) =
-                    (old_peer.transport_id(), old_peer.our_index())
-                {
-                    self.peers_by_index.remove(&(old_tid, old_idx.as_u32()));
+                if let Some(old_idx) = old_peer.our_index() {
+                    self.peers_by_index.remove(&old_idx.as_u32());
                     // Unregister the OLD cache_key from the decrypt
                     // worker pool BEFORE freeing the index for reuse.
                     // Otherwise the worker's per-shard HashMap retains a
@@ -2241,7 +2240,7 @@ impl Node {
                     // jobs that land at the recycled cache_key resolve
                     // to the wrong session and AEAD silently fails.
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((old_tid, old_idx.as_u32()));
+                    self.unregister_decrypt_worker_session(old_idx.as_u32());
                     let _ = self.index_allocator.free(old_idx);
                 }
 
@@ -2280,9 +2279,16 @@ impl Node {
                     self.config().node.tree.announce_min_interval_ms,
                 );
 
+                new_peer.set_path_role(
+                    transport_id,
+                    self.transports
+                        .get(&transport_id)
+                        .map(|t| t.role())
+                        .unwrap_or_default(),
+                );
                 self.peers.insert(peer_node_addr, new_peer);
                 self.peers_by_index
-                    .insert((transport_id, our_index.as_u32()), peer_node_addr);
+                    .insert(our_index.as_u32(), peer_node_addr);
                 self.peering
                     .reconciler
                     .retry_pending
@@ -2395,9 +2401,16 @@ impl Node {
                 new_peer.set_last_tree_announce_sent_ms(ts);
             }
 
+            new_peer.set_path_role(
+                transport_id,
+                self.transports
+                    .get(&transport_id)
+                    .map(|t| t.role())
+                    .unwrap_or_default(),
+            );
             self.peers.insert(peer_node_addr, new_peer);
             self.peers_by_index
-                .insert((transport_id, our_index.as_u32()), peer_node_addr);
+                .insert(our_index.as_u32(), peer_node_addr);
             self.peering
                 .reconciler
                 .retry_pending

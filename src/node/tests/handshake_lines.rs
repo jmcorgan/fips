@@ -256,7 +256,7 @@ async fn every_msg1_dropped_by_winning_a_dual_rekey_initiation_is_logged() {
     node.get_peer_mut(&peer)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    arm_local_rekey(&mut node, &sender, &peer, tid);
+    arm_local_rekey(&mut node, &sender, &peer);
 
     let msg1s = (0xAA00..0xAA06)
         .map(|i| craft_msg1_wire(&node, &sender, EPOCH, SessionIndex::new(i), 2000))

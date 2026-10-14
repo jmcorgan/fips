@@ -443,8 +443,7 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
         ),
     );
     node.addr_to_link.insert((tcp_id, addr.clone()), link_id);
-    node.pending_outbound
-        .insert((tcp_id, our_index.as_u32()), link_id);
+    node.pending_outbound.insert(our_index.as_u32(), link_id);
     let mut machine = PeerMachine::new_outbound(link_id, target, now_ms);
     let _ = machine.step(
         PeerEvent::Dial {
@@ -1303,21 +1302,24 @@ async fn a_rekey_msg1_is_answered_on_its_connection_only_on_the_established_tran
         let pending = node
             .get_peer(&sender_addr)
             .is_some_and(|p| p.pending_new_session().is_some());
-        let indexed = node.peers_by_index.keys().any(|(t, _)| *t == arrival);
+        let indexed = node
+            .get_peer(&sender_addr)
+            .and_then(|p| p.pending_our_index())
+            .is_some_and(|i| node.peers_by_index.contains_key(&i.as_u32()));
         stop_all(&mut node).await;
         println!(
-            "redial       other transport {other}: {r:?}, answered {answered}, pending {pending}, indexed there {indexed}"
+            "redial       other transport {other}: {r:?}, answered {answered}, pending {pending}, indexed {indexed}"
         );
 
         assert_no_dial("rekey msg1 on a new connection", &r);
         if other {
             assert!(!answered, "a msg2 went out on another transport");
             assert!(!pending, "an unanswered rekey msg1 stores no session");
-            assert!(!indexed, "an index was registered on another transport");
+            assert!(!indexed, "an unanswered rekey msg1 registers no index");
         } else {
             assert!(answered, "the msg1's own connection got no msg2");
             assert!(pending, "the answered rekey stores its session");
-            assert!(indexed, "the new index is registered on the transport");
+            assert!(indexed, "the new index is registered");
         }
     }
 }

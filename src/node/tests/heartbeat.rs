@@ -279,7 +279,7 @@ async fn a_failing_peer_is_retried_after_the_gap_and_not_before() {
         .peers
         .get_mut(&addr_1)
         .expect("peer 1 is established")
-        .set_current_addr(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
+        .rebind_transport(dead_id, TransportAddr::from_string("10.0.0.2:2121"));
 
     // Long overdue and healthy-looking, so the sweep will try.
     age_heartbeat(&mut nodes[0].node, &addr_1, Duration::from_secs(10));
@@ -368,7 +368,7 @@ async fn a_detached_transport_withdraws_the_peers_that_needed_it() {
         .transport_id()
         .expect("an established peer names its transport");
 
-    let reaped = nodes[0].node.reap_peers_on_transport(transport_id).await;
+    let reaped = nodes[0].node.withdraw_transport(transport_id).await;
 
     assert_eq!(reaped, 1);
     assert!(
@@ -399,7 +399,7 @@ async fn a_detached_transport_leaves_other_transports_peers_alone() {
 
     // A transport this peer was never reachable through.
     let unrelated = TransportId::new(peer_transport.as_u32() + 100);
-    let reaped = nodes[0].node.reap_peers_on_transport(unrelated).await;
+    let reaped = nodes[0].node.withdraw_transport(unrelated).await;
 
     assert_eq!(reaped, 0, "an unrelated transport withdraws nothing");
     assert!(

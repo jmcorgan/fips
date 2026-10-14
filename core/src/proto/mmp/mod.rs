@@ -39,7 +39,7 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-pub use algorithms::DualEwma;
+pub use algorithms::{DualEwma, quality_index};
 pub use core::{
     BackoffUpdate, LinkReportKind, LinkReportSnapshot, MmpAction, PeerLivenessSnapshot, SendResult,
     SessionReportKind, SessionReportSnapshot,

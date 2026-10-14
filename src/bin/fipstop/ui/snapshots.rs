@@ -112,6 +112,161 @@ fn bloom_peer_filters_alignment() {
     assert_eq!(cols[0], cols[1], "fill: columns align across rows");
 }
 
+/// Peers multi-path: a peer with two paths renders each as a tree-drawn
+/// child row carrying the path-specific columns (the peer row's own
+/// Transport / SRTT / LQI go blank), the active path green and a standby
+/// dimmed; a single-path peer stays one line with its transport inline.
+/// Selection stays on peer rows: the highlight of peer 1 lands on its own
+/// row, not on a child of peer 0.
+#[test]
+fn peers_paths_render_as_child_rows() {
+    let data = json!({
+        "peers": [
+            {
+                "display_name": "alice", "npub": "npub1alice",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.0.2:2121",
+                "mmp": { "srtt_ms": 12.0, "lqi": 1.10 },
+                "paths": [
+                    { "transport_id": 1, "transport": "cable", "transport_type": "udp",
+                      "addr": "10.0.0.2:2121", "state": "live", "active": true,
+                      "remote_active": true, "role": "normal", "pinned": false,
+                      "last_rtt_ms": 12, "min_rtt_ms": 10, "rtt_samples": 4,
+                      "etx": 1.0, "score": 1.10 },
+                    { "transport_id": 2, "transport": "wifi", "transport_type": "udp",
+                      "addr": "10.0.1.2:2121", "state": "live", "active": false,
+                      "remote_active": false, "role": "backup", "pinned": false,
+                      "last_rtt_ms": 30, "min_rtt_ms": 28, "rtt_samples": 4,
+                      "etx": 1.0, "score": 1.28 }
+                ]
+            },
+            {
+                "display_name": "bob", "npub": "npub1bob",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.2.2:2121",
+                "mmp": { "srtt_ms": 7.0, "lqi": 2.07 },
+                "paths": [
+                    { "transport_id": 1, "transport": "cable", "transport_type": "udp",
+                      "addr": "10.0.2.2:2121", "state": "live", "active": true,
+                      "remote_active": true, "role": "normal", "pinned": false,
+                      "last_rtt_ms": 7, "min_rtt_ms": 7, "rtt_samples": 4,
+                      "etx": 1.0, "score": 1.07 }
+                ]
+            }
+        ]
+    });
+    let mut app = app_with(Tab::Peers, data);
+    app.table_states
+        .entry(Tab::Peers)
+        .or_default()
+        .select(Some(1));
+    let buf = testkit::render(140, 20, |frame, area| {
+        super::peers::draw(frame, &mut app, area);
+    });
+
+    let y_alice = testkit::find(&buf, "alice").map(|(_, y)| y).unwrap();
+    let (_, y_cable) = testkit::find(&buf, "├─ cable").expect("first path row");
+    let (_, y_wifi) = testkit::find(&buf, "└─ wifi").expect("last path row");
+    let y_bob = testkit::find(&buf, "bob").map(|(_, y)| y).unwrap();
+    assert_eq!(y_cable, y_alice + 1, "active path directly under its peer");
+    assert_eq!(y_wifi, y_alice + 2, "standby path after the active one");
+    assert_eq!(y_bob, y_alice + 3, "next peer follows the last path row");
+
+    assert!(
+        testkit::contains_row(&buf, "active"),
+        "active path labelled"
+    );
+    assert!(
+        testkit::contains_row(&buf, "live,backup"),
+        "standby carries state and role"
+    );
+    assert!(
+        testkit::contains_row(&buf, "udp/10.0.1.2:2121"),
+        "path address shown"
+    );
+    assert_eq!(
+        testkit::fg_at(&buf, "├─ cable"),
+        Some(ratatui::style::Color::Green),
+        "active path green"
+    );
+    assert_eq!(
+        testkit::fg_at(&buf, "└─ wifi"),
+        Some(ratatui::style::Color::DarkGray),
+        "standby path dimmed"
+    );
+
+    // alice's own row carries no transport: that moved to the child rows.
+    let alice_row = &testkit::lines(&buf)[y_alice as usize];
+    assert!(
+        !alice_row.contains("udp/10.0.0.2:2121") && !alice_row.contains("12.0"),
+        "multi-path peer row leaves Transport and SRTT to its child rows: {alice_row}"
+    );
+
+    // bob has one path: a single line with the transport inline, no children.
+    let bob_row = &testkit::lines(&buf)[y_bob as usize];
+    assert!(
+        bob_row.contains("udp/10.0.2.2:2121") && bob_row.contains("7.0"),
+        "single-path peer keeps transport and SRTT on its own row: {bob_row}"
+    );
+    assert!(
+        !testkit::contains_row(&buf, "└─ cable"),
+        "single-path peer draws no child row"
+    );
+
+    // bob (peer index 1) is selected: the highlight symbol sits on bob's
+    // display row, not on alice's child rows.
+    let (_, y_sel) = testkit::find(&buf, "▶ ").expect("selection marker");
+    assert_eq!(
+        y_sel, y_bob,
+        "selection lands on the peer row, skipping path rows"
+    );
+}
+
+/// A peer that predates multi-path never acks a probe: its second path sits
+/// in `probing` forever with no RTT or score. It still renders as a tree —
+/// the operator sees the transport is there and unproven — in yellow.
+#[test]
+fn peers_probing_path_renders_unproven() {
+    let data = json!({
+        "peers": [
+            {
+                "display_name": "oldpeer", "npub": "npub1old",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.0.2:2121",
+                "paths": [
+                    { "transport_id": 1, "transport": "cable", "transport_type": "udp",
+                      "addr": "10.0.0.2:2121", "state": "live", "active": true,
+                      "remote_active": false, "role": "normal", "pinned": false,
+                      "last_rtt_ms": null, "min_rtt_ms": null, "rtt_samples": 0,
+                      "etx": 1.0, "score": null },
+                    { "transport_id": 2, "transport": "wifi", "transport_type": "udp",
+                      "addr": "10.0.1.2:2121", "state": "probing", "active": false,
+                      "remote_active": false, "role": "normal", "pinned": false,
+                      "last_rtt_ms": null, "min_rtt_ms": null, "rtt_samples": 0,
+                      "etx": 1.0, "score": null }
+                ]
+            }
+        ]
+    });
+    let mut app = app_with(Tab::Peers, data);
+    let buf = testkit::render(140, 20, |frame, area| {
+        super::peers::draw(frame, &mut app, area);
+    });
+
+    let (_, y_wifi) = testkit::find(&buf, "└─ wifi").expect("probing path row");
+    let row = &testkit::lines(&buf)[y_wifi as usize];
+    assert!(row.contains("probing"), "unproven path labelled: {row}");
+    assert!(
+        row.contains("udp/10.0.1.2:2121"),
+        "its transport shown: {row}"
+    );
+    assert_eq!(
+        testkit::fg_at(&buf, "└─ wifi"),
+        Some(ratatui::style::Color::Yellow),
+        "probing path yellow"
+    );
+}
+
 /// Peers group-sort: the comparator orders parent before STP children
 /// before other peers, regardless of LQI, while preserving within-group
 /// LQI order.

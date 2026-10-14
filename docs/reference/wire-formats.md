@@ -21,6 +21,9 @@ The FMP link layer defines the following message types, dispatched by the
 | 0x31 | LookupResponse | Forwarded — reverse-path via `recent_requests` |
 | 0x50 | Disconnect | Peer-to-peer (orderly link teardown) |
 | 0x51 | Heartbeat | Peer-to-peer (link liveness) |
+| 0x52 | PathProbe | Peer-to-peer (per-path liveness and path discovery) |
+| 0x53 | PathAck | Peer-to-peer (echo of a PathProbe, on the same path) |
+| 0x54 | PathClose | Peer-to-peer (a path is going; sent on a surviving path) |
 
 Handshake messages travel before encryption is established and are identified
 by the FMP common-prefix `phase` field rather than a `msg_type` byte
@@ -155,6 +158,9 @@ the 1-byte message type and message-specific fields.
 | 0x31 | LookupResponse | Coordinate discovery response |
 | 0x50 | Disconnect | Orderly link teardown |
 | 0x51 | Heartbeat | Link liveness probe |
+| 0x52 | PathProbe | Per-path liveness probe; proves a transport as a path |
+| 0x53 | PathAck | Echo of a PathProbe, sent back on the same path |
+| 0x54 | PathClose | Notice that a path is going, sent on a surviving path |
 
 ### Noise IK Message 1 (phase 0x1)
 
@@ -404,6 +410,49 @@ Orderly link teardown with reason code.
 | 0x06 | ConfigurationChange | Peer removed from configuration |
 | 0x07 | Timeout | Heartbeat liveness timeout |
 | 0xFF | Other | Unspecified reason |
+
+### PathProbe (0x52) and PathAck (0x53)
+
+A node reachable over more than one transport holds a *path* per
+transport under one session
+(`docs/design/fips-multi-path-switchover.md`). A PathProbe is sent on a
+candidate or standby path — and, once a peer has more than one path, on
+the active one as its heartbeat; the receiver, having decrypted it under
+the session, has proof the sender is reachable there and answers with a
+PathAck **on the same path**. Both share one layout.
+
+| Offset | Field | Size | Encoding |
+| ------ | ----- | ---- | -------- |
+| 0 | msg_type | 1 | `0x52` (probe) or `0x53` (ack) |
+| 1 | probe_id | 4 | u32 LE — the path's probe sequence; the ack echoes the probe's |
+| 5 | flags | 1 | bit 0 `remote_active`: "this path is where I send"; other bits zero |
+| 6 | path_id | 4 | u32 LE — the sender's own identifier for the path this travels on |
+| 10 | padding | 0..MTU | Zero; ignored by the decoder |
+
+**Fixed part: 10 bytes.** The first probe on a standby, and one a minute
+after on every path, are padded to the link MTU so a medium that passes
+small frames and drops large ones never proves itself; the ack echoes the
+probe's size. Transport ids are local to each node, so each side learns
+the other's `path_id` from its probes and acks; a PathClose names a path
+by the *receiver's* id.
+
+### PathClose (0x54)
+
+Sent on a surviving path when the sender loses a path to the receiver
+(interface gone, carrier lost, operator), so the receiver moves at once
+rather than after its own timeout.
+
+| Offset | Field | Size | Encoding |
+| ------ | ----- | ---- | -------- |
+| 0 | msg_type | 1 | `0x54` |
+| 1 | path_id | 4 | u32 LE — the *receiver's* id for the path being closed |
+| 5 | reason | 1 | `0` unspecified, `1` interface gone, `2` carrier lost, `3` operator |
+
+**Total: 6 bytes.**
+
+A node that predates these types drops them at debug after
+authenticating the frame; a probe to such a node is never acked and the
+path never becomes eligible.
 
 ### SenderReport (0x01)
 

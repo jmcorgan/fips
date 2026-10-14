@@ -818,10 +818,9 @@ fn index_entries(tn: &TestNode, peer: &NodeAddr) -> usize {
         .count()
 }
 
-/// Whether `tn` still maps `index` on `peer`'s transport.
+/// Whether `tn` still maps `index` to `peer`.
 fn maps_index(tn: &TestNode, peer: &NodeAddr, index: SessionIndex) -> bool {
-    let tid = tn.node.get_peer(peer).unwrap().transport_id().unwrap();
-    tn.node.peers_by_index.contains_key(&(tid, index.as_u32()))
+    tn.node.peers_by_index.get(&index.as_u32()) == Some(peer)
 }
 
 /// B has just handled A's rekey msg1, which it must have answered: check B

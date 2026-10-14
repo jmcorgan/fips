@@ -468,12 +468,16 @@ async fn test_connected_udp_activates_on_an_adopted_traversal_transport_and_on_a
     );
 
     let Some(connected) = node_a.get_peer(&peer_b_node_addr).unwrap().connected_udp() else {
-        let direct =
-            match crate::transport::udp::open_connected_fd(result.local_addr, addr_b, 65536, 65536)
-            {
-                Ok(_) => "succeeds".to_string(),
-                Err(e) => format!("fails with {e}"),
-            };
+        let direct = match crate::transport::udp::open_connected_fd(
+            result.local_addr,
+            addr_b,
+            65536,
+            65536,
+            None,
+        ) {
+            Ok(_) => "succeeds".to_string(),
+            Err(e) => format!("fails with {e}"),
+        };
         panic!(
             "node_a's peer on the adopted transport must get a connected UDP socket; \
              opening one on the adopted socket's address directly {direct}"
