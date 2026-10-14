@@ -209,11 +209,17 @@ stage was unnecessary, and everything after a *failed path* stage,
 because the path preview touches nothing and the session can still
 succeed where the preview named no next hop.
 
-Below the stage block, the `path:` line renders the whole tree walk on
-one line, from this node to the target, through the least common
-ancestor, which is emphasised on a terminal. It is the same computed
-walk the `ours`, `theirs` and `tree walk` lines describe, read in one
-piece.
+The path row appears in the stage block only when the stage failed or
+was skipped. Below the block, a `path:` section describes the route
+whenever the probe got as far as the path stage. Its `ours` and
+`theirs` lines list the two coordinates with their depths. The `route`
+line renders the tree walk on one line, from this node to the target,
+through the least common ancestor, which is emphasised on a terminal;
+it reads `none` when the two coordinates have different roots. The
+`walk` line counts the hops up and down and the tree distance, and the
+`next hop` line names the peer this node would send through and its
+class. When no coordinates were available, a single `coords` line
+replaces the tree lines and only the `next hop` line follows.
 
 `--json` is unaffected and still emits exactly one document, when the
 probe ends, so a script parsing the report does not have to skip past
@@ -240,6 +246,10 @@ deliberate and worth knowing about:
 Running a probe against a production node is safe: the job carries its
 own deadline daemon-side, so it cleans up whether or not the client is
 still there.
+
+For a walk-through that starts from a failed stage and works back to
+its cause, see
+[diagnose-reachability.md](../how-to/diagnose-reachability.md).
 
 ### `profile tick <on|off|status>`
 

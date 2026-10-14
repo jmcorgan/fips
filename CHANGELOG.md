@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Docs & contributor tooling
+
+- [`docs/how-to/diagnose-reachability.md`](docs/how-to/diagnose-reachability.md)
+  — an operator how-to for the question "can this node reach that one,
+  by what route, and if not, why not?". It starts from `fipsctl probe`
+  and maps each failing stage and its reason to the next thing to
+  check: `show sessions` rather than `show peers` for nodes reached
+  through a relay, an npub rerolled by an ephemeral identity
+  (`persistent: false`, the default), the target's own link and the
+  relay ACL that may be refusing it, which unknown nodes an ACL lets
+  link (an allowlist alone denies no one, and an accepted inbound link
+  is not logged at `info`), and `.fips` name resolution, including the
+  v0.3.0 macOS resolver file that pointed at `127.0.0.1` and a
+  `/etc/resolv.conf` that bypasses systemd-resolved. Linked from the
+  how-to index and from the `fipsctl probe` reference, whose description
+  of the `path:` section now matches the real output.
+
 ### Changed
 
 #### Linux packages

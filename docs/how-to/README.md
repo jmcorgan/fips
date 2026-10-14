@@ -27,6 +27,7 @@ X" to "X is done".
 | [set-up-bluetooth-peer.md](set-up-bluetooth-peer.md) | Configure a Bluetooth Low Energy peer link |
 | [set-up-80211s-mesh-backhaul.md](set-up-80211s-mesh-backhaul.md) | Link OpenWrt FIPS routers over an open 802.11s radio backhaul (FIPS provides encryption, authentication, and routing) |
 | [set-up-open-access-ssid.md](set-up-open-access-ssid.md) | Broadcast the open `!FIPS` access SSID so phones and laptops roam onto the mesh (one ESS: save once, roam every FIPS router) |
+| [diagnose-reachability.md](diagnose-reachability.md) | Find out whether one node can reach another, by what route, and why not: `fipsctl probe`, peers versus sessions, rerolled identities, relay ACLs and `.fips` name resolution |
 | [diagnose-mtu-issues.md](diagnose-mtu-issues.md) | Triage MTU-shaped failures and rule out their imposters (bufferbloat, transport saturation) |
 | [use-the-native-datagram-api.md](use-the-native-datagram-api.md) | Enable the experimental native datagram API and write a program that sends and receives datagrams by pubkey and port (no IPv6 emulation, no TUN). Read the `fips` group warning first |
 | [write-a-native-api-client.md](write-a-native-api-client.md) | Speak the native datagram API's line protocol directly from C, Python or Go, where there is no client library |
