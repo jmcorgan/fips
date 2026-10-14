@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### OpenWrt
 
+- The `fips` and `fips-gateway` procd services now respawn without limit.
+  procd stopped respawning either one for good after it exited five times in
+  a row, each time within an hour of starting, so a router whose daemon hit a
+  run of failures, such as a missing interface at boot, stayed off the mesh
+  until someone restarted it by hand. Each exit is still followed by a 5 s
+  delay. The old init script comment said procd would reset its count and
+  try again, which it does not.
 - Release-candidate OpenWrt `.ipk` packages are now versioned `vX.Y.Z~rcN`, so
   opkg sorts them below the final release and the release upgrades a router
   that ran the candidate. The package file name keeps the tag's `-rcN`.

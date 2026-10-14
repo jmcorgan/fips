@@ -1315,3 +1315,38 @@ fn fips_dns_setup_no_resolver_hint_starts_resolved_and_names_no_package_manager_
         problems.join("\n  ")
     );
 }
+
+/// procd stops respawning a service for good once its retry count is used up,
+/// and nothing starts it again, so a router whose daemon fails a few times in
+/// a row would stay off the mesh. Every procd instance the OpenWrt package
+/// declares must respawn without a limit: `respawn <threshold> <timeout> 0`.
+#[test]
+fn openwrt_services_respawn_without_a_retry_limit() {
+    const INITS: [&str; 2] = [
+        "packaging/openwrt-ipk/files/etc/init.d/fips",
+        "packaging/openwrt-ipk/files/etc/init.d/fips-gateway",
+    ];
+    let mut problems = Vec::new();
+    for init in INITS {
+        let script = repo_file(init);
+        let respawns: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("procd_set_param respawn"))
+            .collect();
+        if respawns.is_empty() {
+            problems.push(format!("{init}: no procd_set_param respawn line"));
+        }
+        for line in respawns {
+            let retry = line.split_whitespace().nth(4);
+            if retry != Some("0") {
+                problems.push(format!("{init}: retry limit is not 0: {line}"));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "OpenWrt services must respawn without giving up:\n  {}",
+        problems.join("\n  ")
+    );
+}

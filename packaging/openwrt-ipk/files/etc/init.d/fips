@@ -25,9 +25,12 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" --config "$CONFIG"
-	# Respawn: restart after 5 s, give up after 5 consecutive failures within
-	# a 3600 s window, then reset the failure counter and try again.
-	procd_set_param respawn 3600 5 5
+	# Respawn: restart 5 s after every exit, without giving up. A run shorter
+	# than 3600 s counts as a failure, and the third value is how many
+	# failures in a row procd tolerates before it stops respawning for good;
+	# 0 means no limit. A node that stops retrying stays down until someone
+	# restarts it by hand, and the mesh may be the only way to reach it.
+	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
