@@ -152,6 +152,11 @@ in
         ExecStart = "${cfg.package}/bin/fips --config ${stateDir}/fips.yaml";
         Restart = "on-failure";
         RestartSec = 5;
+        # Back off between automatic restarts: 5s, 7s, 10s, 15s, 21s, then
+        # 30s. Cleared by a manual start or restart, or reset-failed, not by
+        # a run that succeeds.
+        RestartSteps = 5;
+        RestartMaxDelaySec = 30;
 
         # Writable state directory (/var/lib/fips/) for config + keys.
         # root:fips 0775 so group members can edit the config.
@@ -202,6 +207,11 @@ in
         ExecStart = "${cfg.package}/bin/fips-gateway --config ${stateDir}/fips.yaml";
         Restart = "on-failure";
         RestartSec = 5;
+        # Back off between automatic restarts: 5s, 7s, 10s, 15s, 21s, then
+        # 30s. Cleared by a manual start or restart, or reset-failed, not by
+        # a run that succeeds.
+        RestartSteps = 5;
+        RestartMaxDelaySec = 30;
         TimeoutStopSec = 15;
         ProtectHome = "yes";
         PrivateTmp = true;

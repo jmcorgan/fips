@@ -19,6 +19,12 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip link show fips0 >/dev/null 
 ExecStart=/usr/local/bin/fips-gateway --config /etc/fips/fips.yaml
 Restart=on-failure
 RestartSec=5
+# Back off between automatic restarts: 5s, 7s, 10s, 15s, 21s, then 30s. The
+# step count is cleared by a manual start or restart, or systemctl
+# reset-failed, not by a run that succeeds. systemd before v254 ignores these
+# two keys and keeps the fixed 5s delay.
+RestartSteps=5
+RestartMaxDelaySec=30
 StandardOutput=journal
 StandardError=journal
 TimeoutStopSec=15

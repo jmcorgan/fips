@@ -149,6 +149,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Linux packages
 
+- The `fips` and `fips-gateway` systemd units (tarball, `.deb`, AUR and
+  NixOS) now back off between automatic restarts, waiting 5 s, 7 s, 10 s,
+  15 s, 21 s and then 30 s per restart, instead of restarting every 5 s for as
+  long as the start keeps failing. A daemon that could not start, for example
+  on an empty config, respawned every 5 s indefinitely. The units still never
+  give up. The longer delay stays in effect after a restart that succeeds,
+  until the unit is started or restarted by hand or `systemctl reset-failed`
+  is run. systemd older than v254 ignores the new settings and keeps the fixed
+  5 s delay.
 - The systemd tarball's `install.sh` restarts fips-dns and fips-gateway after
   an upgrade when they were running. It stopped fips first, which stopped both
   through `Requires=fips.service`, then restarted only fips, so `.fips`

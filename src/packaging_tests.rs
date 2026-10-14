@@ -1315,3 +1315,76 @@ fn fips_dns_setup_no_resolver_hint_starts_resolved_and_names_no_package_manager_
         problems.join("\n  ")
     );
 }
+
+/// Returns the value of every `key=` line in a systemd unit, in file order.
+fn unit_values(unit: &str, key: &str) -> Vec<String> {
+    let prefix = format!("{key}=");
+    unit.lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix(prefix.as_str()))
+        .map(|v| v.trim().to_string())
+        .collect()
+}
+
+/// Guards the restart backoff of the units that systemd restarts on failure.
+///
+/// `Restart=on-failure` with a fixed `RestartSec=` and the default start limit
+/// restarts a daemon whose start cannot succeed every few seconds for as long
+/// as it is left. Each such unit must also set `RestartSteps=` and
+/// `RestartMaxDelaySec=`, the tarball and `.deb` copies of a unit must agree
+/// on both, and the NixOS module must set both in every service it restarts on
+/// failure.
+#[test]
+fn restarting_units_back_off_between_restarts() {
+    for name in ["fips.service", "fips-gateway.service"] {
+        let mut values = Vec::new();
+        for dir in ["packaging/systemd", "packaging/debian"] {
+            let rel = format!("{dir}/{name}");
+            let unit = repo_file(&rel);
+            assert_eq!(
+                unit_values(&unit, "Restart"),
+                ["on-failure"],
+                "control: {rel} no longer sets Restart=on-failure once"
+            );
+            let steps = unit_values(&unit, "RestartSteps");
+            let max = unit_values(&unit, "RestartMaxDelaySec");
+            assert_eq!(
+                steps.len(),
+                1,
+                "{rel}: Restart=on-failure needs exactly one RestartSteps=, read {steps:?}"
+            );
+            assert_eq!(
+                max.len(),
+                1,
+                "{rel}: Restart=on-failure needs exactly one RestartMaxDelaySec=, read {max:?}"
+            );
+            values.push((rel, steps, max));
+        }
+        let (first, rest) = values.split_first().unwrap();
+        for other in rest {
+            assert_eq!(
+                (&first.1, &first.2),
+                (&other.1, &other.2),
+                "{} and {} disagree on RestartSteps=/RestartMaxDelaySec=",
+                first.0,
+                other.0
+            );
+        }
+    }
+
+    let rel = "packaging/nixos/default.nix";
+    let nix = repo_file(rel);
+    let count = |needle: &str| nix.lines().filter(|l| l.trim().starts_with(needle)).count();
+    let restarts = count("Restart = \"on-failure\";");
+    assert!(
+        restarts >= 2,
+        "control: expected Restart = \"on-failure\" in both services of {rel}, found {restarts}"
+    );
+    for key in ["RestartSteps =", "RestartMaxDelaySec ="] {
+        assert_eq!(
+            count(key),
+            restarts,
+            "{rel}: {restarts} services set Restart = \"on-failure\" but {key} appears a different number of times"
+        );
+    }
+}
