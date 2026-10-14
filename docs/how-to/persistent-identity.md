@@ -66,7 +66,9 @@ identity:
    The npub printed by `fipsctl show status` should match
    `/etc/fips/fips.pub`. If the daemon was already running
    ephemeral, the npub changes once at this restart and is stable
-   from then on.
+   from then on. The start logs the change, naming the ephemeral
+   npub it replaced; if a `fips.key.unused` is present, it warns
+   instead and names the npub that key holds.
 
 The package's `postinst` script does **not** generate the keypair.
 The first successful daemon start with `persistent: true` does, so
