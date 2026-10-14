@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Identity and config
+
+- `fips` refuses to start when its config file configures nothing: no
+  `node.identity.nsec`, `node.identity.persistent` off, no transports, no
+  peers and no `gateway` section. Run without `--config`, the same applies to
+  the files found on the search path taken together. This covers an empty
+  file, one holding only comments, a byte-order mark, document markers, `{}`
+  or an empty `node:` section, and one that sets only other settings such as
+  `node.log_level`. Such a config started a node with an ephemeral identity,
+  no transports and no peers, which failed with "no operational transports
+  came up" and points at the network instead of the config. Worse, the
+  ephemeral start moved `fips.key` aside to `fips.key.unused`, so once the
+  config was restored the persistent start found no key and generated a new
+  identity. `fips-gateway` already exited on such a config, and now names
+  the file instead of reporting that the configuration has no gateway
+  section. Finding no config file at all still starts on the defaults, and a
+  blank file on the search path beside one that configures the node is still
+  accepted.
+
 #### Linux packages
 
 - A release-candidate `.deb` is versioned `X.Y.Z~rcN` instead of

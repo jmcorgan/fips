@@ -43,7 +43,7 @@ YAML configuration. See [configuration.md](configuration.md).
 | Code | Meaning |
 | ---- | ------- |
 | `0` | Clean shutdown after `SIGINT` / `SIGTERM`. |
-| `1` | Failed to load configuration, resolve identity, construct the node, or start the node. The reason is printed to stderr before exit. |
+| `1` | Failed to load configuration, resolve identity, construct the node, or start the node. The reason is printed to stderr before exit. A configuration that configures nothing (no identity, transports, peers or gateway section) counts as a load failure; see [Files](#files). |
 
 ## Environment
 
@@ -75,6 +75,17 @@ On macOS and FreeBSD both system directories are probed: `/etc/fips`
 first, then `/usr/local/etc/fips`, so the packaged file wins over a
 leftover `/etc/fips` copy from an earlier install. Windows likewise
 probes `\etc\fips` on the current drive, then `C:\ProgramData\fips`.
+
+If the file given with `-c`, or the files found on the search path taken
+together, configure nothing (no `node.identity.nsec`,
+`node.identity.persistent` off, no transports, no peers and no `gateway`
+section), `fips` refuses to start and names the file or files, rather than
+start an ephemeral node with no transports. This covers an empty or
+comments-only file, and one that sets only other settings such as
+`node.log_level`. A blank file beside one that configures the node is
+accepted. With no config file found at all, `fips` starts on the built-in
+defaults. See
+[configuration.md](configuration.md#empty-configuration).
 
 Adjacent to the highest-priority config file the daemon keeps the
 identity files:

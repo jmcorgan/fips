@@ -1,8 +1,11 @@
 # FIPS Configuration
 
 FIPS uses YAML-based configuration with a cascading multi-file priority system.
-All parameters have sensible defaults; a node can run with no configuration file
-at all (it will generate an ephemeral identity and listen on default addresses).
+All parameters have sensible defaults. With no configuration file at all, a
+node starts on those defaults: an ephemeral identity and no transports or
+peers, so it stops with no operational transports until a config adds one. A
+configuration file that is present but configures nothing is refused instead;
+see [Empty Configuration](#empty-configuration).
 
 ## Configuration Loading
 
@@ -39,6 +42,35 @@ fips -c /path/to/config.yaml
 ```
 
 When `-c` is specified, only that file is loaded (search paths are skipped).
+
+### Empty Configuration
+
+`fips` refuses to start when the configuration it loaded configures nothing:
+no `node.identity.nsec`, `node.identity.persistent` off, no `transports`, no
+`peers` and no `gateway` section. With `-c` the check applies to that file;
+without it, to the files found on the search path merged together. Such a
+config is almost always one emptied or truncated by accident, and starting on
+it would run an ephemeral node with nothing to talk over, moving an existing
+`fips.key` aside to `fips.key.unused` on the way. The check covers a file
+that is empty or holds only comments, a byte-order mark, document markers,
+`{}` or an empty `node:` section, and also one that sets only other settings,
+such as `node.log_level`, which no node can start on without a transport.
+The error names the file, or every file found:
+
+```text
+config file /etc/fips/fips.yaml configures nothing (no identity, transports,
+peers or gateway section); refusing to start on built-in defaults (ephemeral
+identity, no transports, no peers)
+```
+
+On platforms other than Linux, which have no gateway, the parenthesis reads
+"no identity, transports or peers".
+
+The check is on the configuration as a whole, so a blank file on the search
+path beside one that configures the node is accepted, while a blank file with
+the other search paths missing is refused. Finding no file at all is not
+refused. `fips-gateway` loads its configuration the same way and exits with
+the same error.
 
 ### Partial Configuration
 

@@ -981,6 +981,32 @@ pub enum IdentitySource {
     Ephemeral,
 }
 
+/// The text of [`ConfigError::EmptyConfig`], naming the one file or every
+/// file that was loaded.
+/// What a config that [`Config::configures_nothing`] refuses is missing.
+#[cfg(target_os = "linux")]
+const NOTHING_CONFIGURED: &str = "no identity, transports, peers or gateway section";
+#[cfg(not(target_os = "linux"))]
+const NOTHING_CONFIGURED: &str = "no identity, transports or peers";
+
+fn empty_config_message(paths: &[PathBuf]) -> String {
+    let why = format!(
+        "({NOTHING_CONFIGURED}); refusing to start on built-in defaults (ephemeral identity, \
+         no transports, no peers)"
+    );
+    match paths {
+        [path] => format!("config file {} configures nothing {why}", path.display()),
+        _ => {
+            let names = paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("none of the config files found ({names}) configures anything {why}")
+        }
+    }
+}
+
 /// Errors that can occur during configuration loading.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -995,6 +1021,9 @@ pub enum ConfigError {
         path: PathBuf,
         source: serde_yaml::Error,
     },
+
+    #[error("{}", empty_config_message(.paths))]
+    EmptyConfig { paths: Vec<PathBuf> },
 
     #[error("key file is empty: {path}")]
     EmptyKeyFile { path: PathBuf },
@@ -1485,13 +1514,54 @@ impl Config {
             config.node = merged;
         }
 
+        // Checked on the merged result, so a blank override beside a file
+        // that configures the node is accepted. Finding no file at all is
+        // not refused: that start on defaults is deliberate.
+        if !loaded_paths.is_empty() && config.configures_nothing() {
+            return Err(ConfigError::EmptyConfig {
+                paths: loaded_paths,
+            });
+        }
+
         Ok((config, loaded_paths))
     }
 
     /// Load configuration from a single file.
     pub fn load_file(path: &Path) -> Result<Self, ConfigError> {
         let contents = Self::read_text(path)?;
-        Self::parse_text(path, &contents)
+        let config = Self::parse_text(path, &contents)?;
+        if config.configures_nothing() {
+            return Err(ConfigError::EmptyConfig {
+                paths: vec![path.to_path_buf()],
+            });
+        }
+        Ok(config)
+    }
+
+    /// Whether this config leaves the node on its built-in defaults for
+    /// everything that makes it reachable or keeps its identity: no key in
+    /// `node.identity.nsec`, `node.identity.persistent` off, no transports,
+    /// no peers and (on Linux) no `gateway` section.
+    ///
+    /// A config file that loads to this is almost certainly one blanked or
+    /// truncated by accident, whatever is left in it (comments, a byte-order
+    /// mark, `{}`, an empty `node:` header, a `log_level`). Starting on it
+    /// would run an ephemeral node with nothing to talk over, which fails
+    /// with no operational transports, and the ephemeral start moves an
+    /// existing `fips.key` aside, so the persistent identity is lost once
+    /// the config is restored. Other settings do not count: none of them
+    /// lets a node with no transports start.
+    fn configures_nothing(&self) -> bool {
+        let identity = &self.node.identity;
+        #[cfg(target_os = "linux")]
+        let no_gateway = self.gateway.is_none();
+        #[cfg(not(target_os = "linux"))]
+        let no_gateway = true;
+        identity.nsec.is_none()
+            && !identity.persistent
+            && self.transports.is_empty()
+            && self.peers.is_empty()
+            && no_gateway
     }
 
     /// Read a config file's text.
@@ -2209,6 +2279,160 @@ node:
         );
     }
 
+    /// Texts that parse to a config that configures nothing.
+    const CONFIGURES_NOTHING: &[&str] = &[
+        "",
+        "\n  \n",
+        "# only a comment\n",
+        "---\n# c\n...\n",
+        "---\n",
+        "--- # comment\n",
+        "\u{feff}",
+        "\u{feff}# a comment after a byte-order mark\n",
+        "{}\n",
+        "node:\n",
+        "node: {}\n",
+        "node:\n  identity: {}\n",
+        "%YAML 1.2\n---\n",
+        "node:\n  log_level: debug\n",
+    ];
+
+    #[test]
+    fn a_config_file_that_configures_nothing_is_refused() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+
+        for text in CONFIGURES_NOTHING {
+            fs::write(&config_path, text).unwrap();
+            let err = Config::load_file(&config_path).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::EmptyConfig { paths } if paths.as_slice() == std::slice::from_ref(&config_path)),
+                "load_file on {text:?} gave {err}"
+            );
+            let err = Config::load_from_paths(std::slice::from_ref(&config_path)).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::EmptyConfig { paths } if paths.as_slice() == std::slice::from_ref(&config_path)),
+                "load_from_paths on {text:?} gave {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_file_that_configures_one_thing_loads() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+
+        let mut minimal = vec![
+            "transports:\n  udp:\n    bind_addr: \"0.0.0.0:2121\"\n",
+            "node:\n  identity:\n    persistent: true\n",
+            "node:\n  identity:\n    nsec: \"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\"\n",
+            "peers:\n  - npub: \"npub1example\"\n    addresses:\n      - transport: udp\n        addr: \"192.0.2.1:2121\"\n",
+            "\u{feff}transports:\n  udp: {}\n",
+        ];
+        if cfg!(target_os = "linux") {
+            minimal
+                .push("gateway:\n  enabled: true\n  pool: \"fd01::/112\"\n  lan_interface: eth0\n");
+        }
+        for text in minimal {
+            fs::write(&config_path, text).unwrap();
+            if let Err(e) = Config::load_file(&config_path) {
+                panic!("load_file on {text:?} gave {e}");
+            }
+            if let Err(e) = Config::load_from_paths(std::slice::from_ref(&config_path)) {
+                panic!("load_from_paths on {text:?} gave {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_empty_config_error_names_the_one_file_or_every_file_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let low = temp_dir.path().join("low.yaml");
+        let high = temp_dir.path().join("high.yaml");
+        fs::write(&low, "").unwrap();
+        fs::write(&high, "# nothing here\n").unwrap();
+
+        let err = Config::load_file(&low).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!(
+                "config file {} configures nothing ({NOTHING_CONFIGURED}); refusing to start \
+                 on built-in defaults (ephemeral identity, no transports, no peers)",
+                low.display()
+            )
+        );
+
+        let err = Config::load_from_paths(&[low.clone(), high.clone()])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            format!(
+                "none of the config files found ({}, {}) configures anything \
+                 ({NOTHING_CONFIGURED}); refusing to start on built-in defaults (ephemeral \
+                 identity, no transports, no peers)",
+                low.display(),
+                high.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_blank_config_file_beside_a_configured_one_is_accepted() {
+        let temp_dir = TempDir::new().unwrap();
+        let blank = temp_dir.path().join("blank.yaml");
+        let configured = temp_dir.path().join("fips.yaml");
+        fs::write(&blank, "# overrides go here\n").unwrap();
+        fs::write(&configured, "node:\n  identity:\n    persistent: true\n").unwrap();
+
+        let (config, loaded) =
+            Config::load_from_paths(&[configured.clone(), blank.clone()]).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(config.node.identity.persistent);
+
+        let (config, loaded) = Config::load_from_paths(&[blank, configured]).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(config.node.identity.persistent);
+    }
+
+    #[test]
+    fn a_blank_config_file_with_the_others_missing_is_refused() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("missing.yaml");
+        let blank = temp_dir.path().join("fips.yaml");
+        fs::write(&blank, "\u{feff}# fips.yaml\n").unwrap();
+
+        let err = Config::load_from_paths(&[missing, blank.clone()]).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EmptyConfig { paths } if paths.as_slice() == std::slice::from_ref(&blank)),
+            "gave {err}"
+        );
+    }
+
+    #[test]
+    fn config_files_that_each_set_only_other_settings_are_refused() {
+        let temp_dir = TempDir::new().unwrap();
+        let low = temp_dir.path().join("low.yaml");
+        let high = temp_dir.path().join("high.yaml");
+        fs::write(&low, "node:\n  log_level: debug\n").unwrap();
+        fs::write(&high, "tun:\n  enabled: true\n").unwrap();
+
+        let err = Config::load_from_paths(&[low.clone(), high.clone()]).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EmptyConfig { paths } if paths == &[low, high]),
+            "gave {err}"
+        );
+    }
+
+    #[test]
+    fn finding_no_config_file_at_all_still_loads_the_defaults() {
+        let temp_dir = TempDir::new().unwrap();
+        let (config, loaded) =
+            Config::load_from_paths(&[temp_dir.path().join("missing.yaml")]).unwrap();
+        assert!(loaded.is_empty());
+        assert!(config.transports.is_empty());
+    }
+
     #[test]
     fn test_load_skips_missing_files() {
         let temp_dir = TempDir::new().unwrap();
@@ -2233,12 +2457,18 @@ node:
         assert_eq!(config.node.identity.nsec, Some("existing_nsec".to_string()));
     }
 
+    /// A config section that configures the node without touching `node`,
+    /// so a test of `node` settings alone is not refused as configuring
+    /// nothing.
+    const A_TRANSPORT: &str = "transports:\n  udp: {}\n";
+
     /// Write each text to its own file, in order, and load them all through
     /// `load_from_paths`, as `Config::load()` does with the search paths.
+    /// A first file holding [`A_TRANSPORT`] is loaded before them.
     fn load_layers(texts: &[&str]) -> Config {
         let temp_dir = TempDir::new().unwrap();
-        let paths: Vec<PathBuf> = texts
-            .iter()
+        let paths: Vec<PathBuf> = std::iter::once(&A_TRANSPORT)
+            .chain(texts)
             .enumerate()
             .map(|(i, text)| {
                 let path = temp_dir.path().join(format!("layer{i}.yaml"));
@@ -2247,7 +2477,7 @@ node:
             })
             .collect();
         let (config, loaded) = Config::load_from_paths(&paths).unwrap();
-        assert_eq!(loaded.len(), texts.len());
+        assert_eq!(loaded.len(), texts.len() + 1);
         config
     }
 
@@ -2353,7 +2583,9 @@ node:
     #[test]
     fn test_load_from_paths_keeps_unquoted_numeric_and_hex_text_in_string_fields_exactly_as_load_file_reads_it()
      {
-        let text = "node:\n  rendezvous:\n    lan:\n      scope: 2026\n      service_type: 0x10\n";
+        let text = format!(
+            "node:\n  rendezvous:\n    lan:\n      scope: 2026\n      service_type: 0x10\n{A_TRANSPORT}"
+        );
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("fips.yaml");
         fs::write(&path, text).unwrap();
@@ -2472,7 +2704,7 @@ node:
         // The typed parse takes the tagged mapping as the plain struct.
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("fips.yaml");
-        fs::write(&path, high).unwrap();
+        fs::write(&path, format!("{high}{A_TRANSPORT}")).unwrap();
         assert_eq!(Config::load_file(&path).unwrap().node.rekey.after_secs, 5);
 
         let config = load_layers(&[low, high]);
@@ -2482,7 +2714,9 @@ node:
 
     #[test]
     fn test_load_from_paths_loads_a_file_with_a_duplicated_unknown_node_key_as_load_file_does() {
-        let text = "node:\n  log_level: debug\n  zz_unknown: 1\n  zz_unknown: 2\n  zz_big: 99999999999999999999\n";
+        let text = format!(
+            "node:\n  log_level: debug\n  zz_unknown: 1\n  zz_unknown: 2\n  zz_big: 99999999999999999999\n{A_TRANSPORT}"
+        );
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("fips.yaml");
         fs::write(&path, text).unwrap();
@@ -2978,6 +3212,11 @@ node:
         names
     }
 
+    /// A config that leaves the identity ephemeral. It carries a transport,
+    /// as a real ephemeral config does: one with nothing else in it is
+    /// refused as configuring nothing.
+    const EPHEMERAL_CONFIG: &str = "node:\n  identity: {}\ntransports:\n  udp: {}\n";
+
     /// The npub a resolved identity runs as.
     fn resolved_npub(resolved: &ResolvedIdentity) -> String {
         crate::Identity::from_secret_str(&resolved.nsec)
@@ -2992,7 +3231,7 @@ node:
         let key_path = temp_dir.path().join("fips.key");
         let aside_path = temp_dir.path().join("fips.key.unused");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         let identity = crate::Identity::generate();
         let existing = crate::encode_nsec(&identity.keypair().secret_key());
         write_key_file(&key_path, &existing).unwrap();
@@ -3038,7 +3277,7 @@ node:
         let aside_path = temp_dir.path().join("fips.key.unused");
         let target = temp_dir.path().join("absent-target");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         std::os::unix::fs::symlink(&target, &key_path).unwrap();
 
         let config = Config::load_file(&config_path).unwrap();
@@ -3078,7 +3317,7 @@ node:
         let key_path = temp_dir.path().join("fips.key");
         let aside_path = temp_dir.path().join("fips.key.unused");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         let current = crate::encode_nsec(&crate::Identity::generate().keypair().secret_key());
         let earlier = crate::encode_nsec(&crate::Identity::generate().keypair().secret_key());
         write_key_file(&key_path, &current).unwrap();
@@ -3141,7 +3380,7 @@ node:
         let config_path = temp_dir.path().join("fips.yaml");
         let key_path = temp_dir.path().join("fips.key");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         let existing = crate::encode_nsec(&crate::Identity::generate().keypair().secret_key());
         write_key_file(&key_path, &existing).unwrap();
         let planted = fs::read(&key_path).unwrap();
@@ -3177,7 +3416,7 @@ node:
         let config_path = temp_dir.path().join("fips.yaml");
         let pub_path = temp_dir.path().join("fips.pub");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         let config = Config::load_file(&config_path).unwrap();
 
         for start in 1..=3 {
@@ -3259,7 +3498,7 @@ node:
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("fips.yaml");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
 
         let config = Config::load_file(&config_path).unwrap();
         let (_resolved, logs) =
@@ -3343,7 +3582,7 @@ node:
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("fips.yaml");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
 
         let config = Config::load_file(&config_path).unwrap();
         assert!(!config.node.identity.persistent);
@@ -3370,7 +3609,7 @@ node:
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("fips.yaml");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
 
         let config = Config::load_file(&config_path).unwrap();
         let first = resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap();
