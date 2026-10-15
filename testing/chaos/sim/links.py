@@ -117,10 +117,14 @@ class LinkManager:
         a, b = edge
         state = self.link_states[edge]
 
+        # Stamp before the tc calls: each `_set_held` is a docker inspect
+        # plus a docker exec, and the first direction is already dropping
+        # traffic while the second is still being installed. Stamping after
+        # them can put the down later than the switch it caused.
+        now = time.time()
         self._set_held(a, b, True)
         self._set_held(b, a, True)
 
-        now = time.time()
         state.is_down = True
         state.down_since = now
         state.restore_at = now + duration

@@ -745,7 +745,7 @@ def evaluate_switch_latency(
         if not after:
             from datetime import datetime, timezone
 
-            when = datetime.fromtimestamp(down_at, timezone.utc).strftime("%H:%M:%S")
+            when = datetime.fromtimestamp(down_at, timezone.utc).strftime("%H:%M:%S.%f")[:-3]
             missing.append(f"{a}--{b} down at {when}Z")
             continue
         latency = min(after)
