@@ -184,7 +184,9 @@ sudo fipsctl show status | grep '"npub"'
 The npub should be **different** from the one in Step 1 — the
 daemon discarded the old in-memory ephemeral keypair and minted
 a new one which it has now persisted to disk. From here forward
-this is *your* npub.
+this is *your* npub. The journal records the change with both
+npubs; if a `fips.key.unused` is present, the start warns
+instead and names the npub that key holds.
 
 ## Step 4: Locate the keypair on disk
 
