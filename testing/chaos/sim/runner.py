@@ -842,7 +842,13 @@ class SimRunner:
 
             sl_cfg = self.scenario.assertions.switch_latency
             if sl_cfg is not None:
-                flap_events = self.link_mgr.flap_events if self.link_mgr else []
+                # The link manager records edges by node id; log lines are
+                # keyed by container name. Name both ends the same way.
+                cname = self.topology.container_name
+                flap_events = [
+                    (t, kind, cname(a), cname(b))
+                    for t, kind, a, b in (self.link_mgr.flap_events if self.link_mgr else [])
+                ]
                 outcome = evaluate_switch_latency(
                     sl_cfg, flap_events, result.path_switches
                 )

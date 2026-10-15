@@ -716,10 +716,11 @@ def evaluate_switch_latency(
 
     ``flap_events`` is the link manager's record: ``(epoch, "down" | "up",
     a, b)``. ``switches`` is ``AnalysisResult.path_switches``: ``(source,
-    line)``, where ``source`` is the node id and the line carries its own
-    timestamp. For each down edge, the latency is the earliest switch line
-    on ``a`` or ``b`` stamped at or after the down; a down with no switch
-    inside ``max_ms`` fails. The worst flap is what is reported.
+    line)``, where ``source`` is the container name and the line carries
+    its own timestamp; ``a`` and ``b`` must be named the same way. For each
+    down edge, the latency is the earliest switch line on ``a`` or ``b``
+    stamped at or after the down; a down with no switch inside ``max_ms``
+    fails. The worst flap is what is reported.
     """
     downs = [(t, a, b) for t, kind, a, b in flap_events if kind == "down"]
     if not downs:
