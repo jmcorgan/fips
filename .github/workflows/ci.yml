@@ -178,14 +178,14 @@ jobs:
   # because `ring` compiles C at build time.
   # ───────────────────────────────────────────────────────────────────────────
   android-check:
-    name: Android cross-check (aarch64)
+    name: Android cross-check (aarch64, armv7)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain (+ Android target)
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          target: aarch64-linux-android
+          target: aarch64-linux-android,armv7-linux-androideabi
           components: clippy
           cache: false
           rustflags: ''
@@ -206,7 +206,7 @@ jobs:
       - name: Clippy the library for Android
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
-          cargo ndk -t arm64-v8a clippy --lib -- -D warnings
+          cargo ndk -t arm64-v8a -t armeabi-v7a clippy --lib -- -D warnings
 
   build:
     name: Build (${{ matrix.os }})

@@ -437,7 +437,7 @@ fn sendmsg_pinned(
     // refers to a local that outlives the sendmsg call.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_name = &mut name as *mut _ as *mut _;
-    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in6>() as u32;
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut _;
@@ -546,7 +546,7 @@ fn recvmsg_with_pktinfo(
 
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_name = &mut src_store as *mut _ as *mut _;
-    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as u32;
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut _;

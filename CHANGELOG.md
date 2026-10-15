@@ -96,6 +96,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+#### Android
+
+- fips now builds for 32-bit Android (`armeabi-v7a` and `x86`). The DNS
+  responder set `msg_namelen` with a `u32` cast, which does not compile
+  against 32-bit bionic, where `socklen_t` is `i32`. CI now cross-checks
+  `armeabi-v7a` alongside `arm64-v8a`.
+
 #### FreeBSD
 
 - With pkg dnsmasq, the DNS setup and teardown scripts now restart dnsmasq
