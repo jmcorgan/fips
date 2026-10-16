@@ -1,6 +1,6 @@
 # FIPS v0.5.3
 
-**Released**: 2026-10-16 (provisional: the date is confirmed when the release is tagged)
+**Released**: 2026-10-16
 
 v0.5.3 is a maintenance release on the v0.5.x line. Most of it is security work: OpenWrt routers get default-deny firewall zones for FIPS and for the 802.11s mesh, the gateway translates only its LAN's traffic, the DNS responder stops answering forged or non-query traffic, and link handshakes, session setup and discovery no longer yield to forged or replayed messages. It also makes link rekeys recover from lost messages, fixes the gateway, transports and the Linux, OpenWrt, FreeBSD, macOS and Windows builds, and publishes the Rust package on crates.io as `fips-mesh`. There is no wire format change, so a mixed mesh works and nodes can be upgraded one at a time.
 
@@ -136,7 +136,7 @@ The Rust package is now named `fips-mesh` and is published on crates.io under th
 fips = { package = "fips-mesh", version = "0.5.3" }
 ```
 
-The git dependency in the [native datagram API how-to](https://github.com/jmcorgan/fips/blob/v0.5.3/docs/how-to/use-the-native-datagram-api.md) pins `tag = "v0.5.3"`, because the default branch does not carry the rename yet. The published crate does not carry the examples, the `docs/` tree or the test harnesses; the two native API examples build from a checkout. `cargo install fips-mesh` installs the four binaries but is not an install path: the daemon also needs its service units, a config, the `fips` group and the DNS setup, which the packages provide.
+The git dependency in the [native datagram API how-to](https://github.com/jmcorgan/fips/blob/v0.5.3/docs/how-to/use-the-native-datagram-api.md) pins `tag = "v0.5.3"`, so it builds this release rather than the default branch, which is the next release in development. The published crate does not carry the examples, the `docs/` tree or the test harnesses; the two native API examples build from a checkout. `cargo install fips-mesh` installs the four binaries but is not an install path: the daemon also needs its service units, a config, the `fips` group and the DNS setup, which the packages provide.
 
 ## Compatibility
 
@@ -211,16 +211,16 @@ No crate was added to `Cargo.lock`: it lists 449 packages at v0.5.2 and at this 
 - The `.deb` upgrade from the published v0.5.2 package on Debian 12 amd64, with an edited `fips.nft` under both answers to dpkg's prompt, without a terminal, and with a renamed TUN, using a package built from the release's packaging files.
 - The Debian package built through the release's container script, with all four binaries at a glibc floor of 2.34 against the 2.35 the package declares, installed on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04, with the upgrade path exercised on Debian 12 against a repacked copy of the same package.
 - The OpenWrt `.ipk` cross-compiled for aarch64 and x86_64, and its contents listed. The `.apk` cannot be built on the build host used here and is built by the release workflow.
+- The release candidate's Windows ZIP on GitHub-hosted Windows runners, under Windows PowerShell 5.1 and PowerShell 7: a fresh install, an upgrade from an installer-made v0.5.2 service with its address kept, the refusal when only `\etc\fips\fips.key` exists, the warning when the config is loaded from `\etc\fips`, and the key move for a service registered by hand, following the upgrade notes, with the node's identity kept.
 - A compile check for macOS, Windows and FreeBSD targets from Linux.
 - The wire format, by the diff described under Compatibility.
 
 **Not measured when this was written:**
 
 - No published v0.5.3 artifact existed. The checks above ran against artifacts built by the same scripts and workflows the release uses.
-- The Windows install and upgrade checks on GitHub-hosted runners, and the OpenWrt 25.12 router upgrade test, had not run.
 - Recovery from a key desynchronisation against a v0.5.2 peer: no way to cause one in the test harness was available.
 - No field soak was run. Not exercised on live nodes under real mixed-version traffic: link rekey msg1 replay refusal and same-epoch msg1 handling, the msg2 resend, session setup without the responder's SessionAck resend, recovery from a key desynchronisation against a v0.5.2 peer, and the handshake changes in the security fixes (a msg2 that fails to authenticate discarded and the handshake restored, and the handling of replayed msg1s for peerings not yet heard from).
-- The OpenWrt upgrades on router hardware: the firewall zone move, the basic rates and the LAN prefix change are tested in CI in a BusyBox container against stubs and rootfs images, not under a real opkg or apk upgrade.
+- The OpenWrt upgrades on router hardware: no upgrade from v0.5.2 was run on a router, on OpenWrt 25.12 or any other release. The firewall zone move, the basic rates and the LAN prefix change are tested in CI in a BusyBox container against stubs and rootfs images, not under a real opkg or apk upgrade.
 - BLE, which is tested with mock I/O only, and macOS and Android, which were not run on hardware.
 - The `.deb` upgrade from v0.5.2 on Ubuntu or arm64, and the AUR upgrade on an Arch host.
 - Reproducibility across machines, which has never been tested. The tarball builds byte-identically twice on one machine.
@@ -239,7 +239,7 @@ No crate was added to `Cargo.lock`: it lists 449 packages at v0.5.2 and at this 
 
 There is no Android daemon artifact. Android is supported as an embedded crate.
 
-The full changelog lives in [`CHANGELOG.md`](https://github.com/jmcorgan/fips/blob/v0.5.3/CHANGELOG.md). The release has 195 commits since v0.5.2 (`git rev-list --count --no-merges v0.5.2..v0.5.3`): 193 of source content, these notes, and the version change. Issues and discussion at [github.com/jmcorgan/fips](https://github.com/jmcorgan/fips). Security reports have a private channel; see [`SECURITY.md`](https://github.com/jmcorgan/fips/blob/v0.5.3/SECURITY.md).
+The full changelog lives in [`CHANGELOG.md`](https://github.com/jmcorgan/fips/blob/v0.5.3/CHANGELOG.md). The release has 197 commits since v0.5.2 (`git rev-list --count --no-merges v0.5.2..v0.5.3`): 194 of source content, two for these notes, and the version change. Issues and discussion at [github.com/jmcorgan/fips](https://github.com/jmcorgan/fips). Security reports have a private channel; see [`SECURITY.md`](https://github.com/jmcorgan/fips/blob/v0.5.3/SECURITY.md).
 
 ## Contributors
 
