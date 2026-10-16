@@ -21,6 +21,11 @@
 //! Sessions are numbered so a command from a bridge that has since been
 //! replaced cannot act on the current one.
 //!
+//! A power-off does not release the listener's PSM in bluetoothd, so the
+//! next power-on unpublishes it before publishing again (see
+//! [`super::Listener`]). In the daemon, a radio refused by CoreBluetooth
+//! retires once the BLE agent fallback starts, so only the agent publishes.
+//!
 //! # Channels
 //!
 //! An open `CBL2CAPChannel`'s streams are opened here and then pumped by
@@ -59,7 +64,8 @@ use super::super::io_radio::{BleRadio, BleRadioBridge, BleRadioSlot};
 use super::super::psm;
 use super::{
     ADVERT_REPORT_INTERVAL, AdvertThrottle, ChannelRead, ChannelWrite, DialPlan, DialStep,
-    FIPS_SERVICE_UUID, is_psm_service_data_key, parse_uuid, peer_addr, spawn_pumps,
+    FIPS_SERVICE_UUID, Listener, PublishOutcome, is_psm_service_data_key, parse_uuid, peer_addr,
+    spawn_pumps,
 };
 
 /// How long a dial may sit unanswered before the radio gives up on it.
@@ -156,8 +162,11 @@ impl Drop for MacRadio {
                 unsafe {
                     manager.stopAdvertising();
                     manager.removeAllServices();
-                    if let Some(psm) = st.published.filter(|&p| p != 0) {
-                        manager.unpublishL2CAPChannel(psm);
+                    if st.manager_on {
+                        st.listener.power_off();
+                        for psm in st.listener.take_stale() {
+                            manager.unpublishL2CAPChannel(psm);
+                        }
                     }
                 }
             }
@@ -257,15 +266,20 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// CoreBluetooth refused this process; run the fallback, once.
-    fn denied(&self) {
+    /// CoreBluetooth refused this process; run the fallback, once. Returns
+    /// whether there was one, in which case this radio retires.
+    fn denied(&self) -> bool {
         let hook = self
             .on_denied
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        if let Some(hook) = hook {
-            hook();
+        match hook {
+            Some(hook) => {
+                hook();
+                true
+            }
+            None => false,
         }
     }
 
@@ -281,23 +295,21 @@ impl Shared {
 
     /// Re-evaluate whether Bluetooth is up after either manager changed state.
     fn power_changed(&self, st: &mut QueueState, weak: &Weak<Shared>) {
+        if st.retired {
+            return;
+        }
         if !st.manager_on {
-            // Publications and services do not survive the peripheral
-            // manager powering off.
-            st.published = None;
-            st.publishing = false;
+            // Power off clears the GATT database, but not the L2CAP
+            // publication: `Listener` keeps its PSM to unpublish once the
+            // manager is back, since a powered-off one takes no commands.
+            st.listener.power_off();
             st.service = None;
             self.psm.store(0, Ordering::Relaxed);
-        } else if st.published.is_none()
-            && !st.publishing
-            && let Some(manager) = &st.manager
-        {
-            debug!("BLE: publishing L2CAP listener");
-            st.publishing = true;
-            unsafe { manager.publishL2CAPChannelWithEncryption(false) };
+        } else if !st.manager_pending && st.listener.wants_publish() {
+            st.publish();
         }
 
-        let up = st.central_on && st.manager_on && st.published.is_some();
+        let up = st.central_on && st.manager_on && st.listener.published().is_some();
         if up && st.session.is_none() {
             st.generation += 1;
             let bridge = BleRadioBridge::new(Arc::new(Session {
@@ -319,7 +331,13 @@ impl Shared {
     /// Withdraw the session: empty the slot, fail pending dials, close every
     /// channel and forget every peer, whose peripheral objects are dead now.
     fn go_down(&self, st: &mut QueueState) {
-        if st.session.take().is_some() {
+        if let Some(session) = st.session.take()
+            && self
+                .slot
+                .current()
+                .is_some_and(|current| Arc::ptr_eq(&current, &session))
+        {
+            // Only our own bridge: the slot may hold the BLE agent's.
             self.slot.clear();
         }
         for (addr, dial) in st.dials.drain() {
@@ -334,6 +352,42 @@ impl Shared {
         st.wants_advertising = false;
     }
 
+    /// CoreBluetooth refused this process and the daemon has fallen back to
+    /// the BLE agent: stand down for good.
+    ///
+    /// The managers stay alive otherwise, and a root daemon's are not always
+    /// refused for ever — after a Bluetooth toggle they have been seen to
+    /// report powered on, publish a listener of their own and install a
+    /// bridge over the agent's in the slot. Two stacks then each hold a PSM,
+    /// and this one's power-off clears the slot under the agent.
+    fn retire(&self, st: &mut QueueState) {
+        if st.retired {
+            return;
+        }
+        debug!("BLE: in-process CoreBluetooth retired in favour of the BLE agent");
+        self.go_down(st);
+        if let Some(manager) = st.manager.take() {
+            st.listener.power_off();
+            unsafe {
+                manager.stopAdvertising();
+                manager.removeAllServices();
+            }
+            if st.manager_on {
+                for psm in st.listener.take_stale() {
+                    unsafe { manager.unpublishL2CAPChannel(psm) };
+                }
+            }
+        }
+        if let Some(central) = st.central.take() {
+            unsafe { central.stopScan() };
+        }
+        st.retired = true;
+        st.manager_on = false;
+        st.central_on = false;
+        st.service = None;
+        self.psm.store(0, Ordering::Relaxed);
+    }
+
     /// The listener was published, or failed to be.
     fn published(
         &self,
@@ -342,61 +396,81 @@ impl Shared {
         psm: u16,
         error: Option<&NSError>,
     ) {
-        st.publishing = false;
-        match error {
-            Some(e) => {
+        match st.listener.on_published(psm, error.is_none()) {
+            PublishOutcome::Stray => {
+                debug!(psm, "BLE: answer to an abandoned publish");
+                if st.manager_on {
+                    st.unpublish_stale();
+                }
+                return;
+            }
+            PublishOutcome::Failed {
+                failures,
+                warn,
+                recreate,
+            } => {
                 // Still come up: scanning and dialling work without a
                 // listener, and `listen` reporting 0 tells the bridge so.
                 // Advertising waits for a listener: an advert would draw
                 // dials to a PSM nothing serves.
-                warn!(error = %ns_err("publish", Some(e)), "BLE: no L2CAP listener");
-                st.published = Some(0);
+                let error = ns_err("publish", error);
+                if warn {
+                    warn!(error = %error, failures, "BLE: no L2CAP listener");
+                } else {
+                    debug!(error = %error, failures, "BLE: no L2CAP listener");
+                }
+                if recreate {
+                    // SAFETY: on the queue.
+                    unsafe { st.replace_manager(weak) };
+                }
                 if st.wants_advertising {
-                    Self::retry_publish_later(weak);
+                    self.retry_publish_later(st, weak);
                 }
             }
-            None => {
-                debug!(psm, "BLE: L2CAP listener published");
-                st.published = Some(psm);
+            PublishOutcome::Up { psm, failures } => {
+                if failures > 0 {
+                    info!(
+                        psm,
+                        failures, "BLE: L2CAP listener published after failures"
+                    );
+                } else {
+                    debug!(psm, "BLE: L2CAP listener published");
+                }
                 self.psm.store(psm, Ordering::Relaxed);
                 // SAFETY: on the queue.
                 unsafe { st.serve_psm(psm) };
             }
         }
         self.power_changed(st, weak);
-        if psm != 0 && error.is_none() && st.wants_advertising && st.session.is_some() {
+        if st.listener.psm().is_some() && st.wants_advertising && st.session.is_some() {
             self.start_advertising(st);
         }
     }
 
     /// Publish the listener again, if Bluetooth is up with none.
     fn republish(&self, st: &mut QueueState) {
-        if st.published != Some(0) || st.publishing || !st.manager_on {
+        if st.retired || !st.manager_on || st.manager_pending || !st.listener.may_republish() {
             return;
         }
-        if let Some(manager) = &st.manager {
-            debug!("BLE: publishing L2CAP listener again");
-            st.publishing = true;
-            unsafe { manager.publishL2CAPChannelWithEncryption(false) };
-        }
+        st.publish();
     }
 
-    /// Try the publish again after [`PUBLISH_RETRY`], off the queue so the
-    /// wait blocks nothing.
-    fn retry_publish_later(weak: &Weak<Shared>) {
+    /// Try the publish again after [`PUBLISH_RETRY`], unless a retry is
+    /// already due.
+    fn retry_publish_later(&self, st: &mut QueueState, weak: &Weak<Shared>) {
+        if !st.listener.schedule_retry() {
+            return;
+        }
         let weak = weak.clone();
-        let _ = std::thread::Builder::new()
-            .name("fips-ble-republish".into())
-            .spawn(move || {
-                std::thread::sleep(PUBLISH_RETRY);
-                if let Some(shared) = weak.upgrade() {
-                    Shared::on_queue(&shared, |shared, st| {
-                        if st.wants_advertising {
-                            shared.republish(st);
-                        }
-                    });
-                }
-            });
+        let when = DispatchTime::try_from(PUBLISH_RETRY).unwrap_or(DispatchTime::FOREVER);
+        let _ = self.queue.after(when, move || {
+            let Some(shared) = weak.upgrade() else { return };
+            let mut st = shared.lock();
+            st.listener.retry_fired();
+            if st.wants_advertising {
+                shared.republish(&mut st);
+            }
+        });
     }
 
     // --- scanning --------------------------------------------------------
@@ -677,7 +751,7 @@ impl Shared {
 
     fn start_advertising(&self, st: &mut QueueState) {
         st.wants_advertising = true;
-        if st.published == Some(0) {
+        if st.listener.published() == Some(0) {
             // No listener to advertise; advertising starts when one is
             // published.
             self.republish(st);
@@ -850,6 +924,12 @@ impl OpenChannel {
     }
 }
 
+/// A CoreBluetooth object carried into a closure that runs on the queue.
+struct QueueOnly<T>(#[allow(dead_code)] T);
+
+// SAFETY: only moved to the radio's queue and used (dropped) there.
+unsafe impl<T> Send for QueueOnly<T> {}
+
 /// Everything CoreBluetooth, touched only on the queue.
 #[derive(Default)]
 struct QueueState {
@@ -862,9 +942,12 @@ struct QueueState {
     psm_char_uuid: Option<Retained<CBUUID>>,
     central_on: bool,
     manager_on: bool,
-    publishing: bool,
-    /// `None` until the listener publish completes; `Some(0)` if it failed.
-    published: Option<CBL2CAPPSM>,
+    /// A replaced peripheral manager has yet to report its state; nothing
+    /// is published until it does.
+    manager_pending: bool,
+    /// Gave the radio up to the BLE agent; see [`Shared::retire`].
+    retired: bool,
+    listener: Listener,
     /// Whether the transport asked to advertise. Held while there is no
     /// listener, so advertising starts once a re-publish succeeds.
     wants_advertising: bool,
@@ -919,6 +1002,85 @@ impl QueueState {
             self.manager_delegate = Some(manager_delegate);
         }
         debug!("BLE: CoreBluetooth managers created");
+    }
+
+    /// Publish the L2CAP listener, first unpublishing every PSM an earlier
+    /// publish was given and not given back.
+    fn publish(&mut self) {
+        let Some(manager) = &self.manager else {
+            return;
+        };
+        let stale = self.listener.begin();
+        unsafe {
+            for &psm in &stale {
+                debug!(psm, "BLE: unpublishing stale L2CAP listener");
+                manager.unpublishL2CAPChannel(psm);
+            }
+            debug!("BLE: publishing L2CAP listener");
+            manager.publishL2CAPChannelWithEncryption(false);
+        }
+    }
+
+    /// Unpublish the stale PSMs now. The manager must be powered on.
+    fn unpublish_stale(&mut self) {
+        let Some(manager) = &self.manager else {
+            return;
+        };
+        for psm in self.listener.take_stale() {
+            debug!(psm, "BLE: unpublishing stale L2CAP listener");
+            unsafe { manager.unpublishL2CAPChannel(psm) };
+        }
+    }
+
+    /// Replace the peripheral manager after publishes keep failing.
+    ///
+    /// bluetoothd answers "No resources available for L2CAP" once it holds
+    /// too many listeners. Ours that were lost before they could be
+    /// unpublished, by an older build or a crash, belong to an older
+    /// manager; a new one starts a new session with bluetoothd, and the old
+    /// one's end may release what it held. Whether it does is not
+    /// documented. The listener publishes again once the new manager reports
+    /// powered on.
+    ///
+    /// # Safety
+    /// Must run on the radio's queue.
+    unsafe fn replace_manager(&mut self, shared: &Weak<Shared>) {
+        let (Some(strong), Some(delegate)) = (shared.upgrade(), self.manager_delegate.clone())
+        else {
+            return;
+        };
+        info!("BLE: replacing the CoreBluetooth peripheral manager");
+        if let Some(old) = self.manager.take() {
+            unsafe {
+                old.stopAdvertising();
+                old.removeAllServices();
+                for psm in self.listener.take_stale() {
+                    old.unpublishL2CAPChannel(psm);
+                }
+            }
+            // Released on a later turn of the queue, not inside the callback
+            // that the old manager is delivering.
+            let old = QueueOnly(old);
+            strong.queue.exec_async(move || drop(old));
+        }
+        self.service = None;
+        self.manager_pending = true;
+        self.listener.manager_replaced();
+        self.manager = Some(unsafe {
+            CBPeripheralManager::initWithDelegate_queue(
+                CBPeripheralManager::alloc(),
+                Some(ProtocolObject::from_ref(&*delegate)),
+                Some(&strong.queue),
+            )
+        });
+    }
+
+    /// Whether `manager` is the current peripheral manager, rather than one
+    /// replaced whose callbacks are still arriving.
+    fn is_current_manager(&self, manager: &CBPeripheralManager) -> bool {
+        self.manager
+            .as_deref()
+            .is_some_and(|current| std::ptr::eq(current, manager))
     }
 
     /// Serve `psm` from the GATT PSM characteristic, replacing any previous
@@ -1238,8 +1400,10 @@ define_class!(
                 let state = unsafe { central.state() };
                 st.central_on = state == CBManagerState::PoweredOn;
                 report_state("central", state);
-                if state == CBManagerState::Unauthorized {
-                    shared.denied();
+                if state == CBManagerState::Unauthorized && shared.denied() {
+                    // Later on the queue: this callback's manager is among
+                    // what retiring releases.
+                    Shared::on_queue(shared, |shared, st| shared.retire(st));
                 }
                 shared.power_changed(st, &weak);
             });
@@ -1302,20 +1466,30 @@ define_class!(
         fn did_update_state(&self, manager: &CBPeripheralManager) {
             let weak = self.ivars().clone();
             with_state(self.ivars(), |shared, st| {
+                if !st.is_current_manager(manager) {
+                    return;
+                }
                 let state = unsafe { manager.state() };
                 st.manager_on = state == CBManagerState::PoweredOn;
+                st.manager_pending = false;
                 report_state("peripheral manager", state);
-                if state == CBManagerState::Unauthorized {
-                    shared.denied();
+                if state == CBManagerState::Unauthorized && shared.denied() {
+                    // Later on the queue: this callback's manager is among
+                    // what retiring releases.
+                    Shared::on_queue(shared, |shared, st| shared.retire(st));
                 }
                 shared.power_changed(st, &weak);
             });
         }
 
         #[unsafe(method(peripheralManager:didPublishL2CAPChannel:error:))]
-        fn did_publish(&self, _manager: &CBPeripheralManager, psm: CBL2CAPPSM, error: Option<&NSError>) {
+        fn did_publish(&self, manager: &CBPeripheralManager, psm: CBL2CAPPSM, error: Option<&NSError>) {
             let weak = self.ivars().clone();
-            with_state(self.ivars(), |shared, st| shared.published(st, &weak, psm, error));
+            with_state(self.ivars(), |shared, st| {
+                if st.is_current_manager(manager) {
+                    shared.published(st, &weak, psm, error);
+                }
+            });
         }
 
         #[unsafe(method(peripheralManager:didAddService:error:))]
