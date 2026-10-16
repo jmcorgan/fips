@@ -1141,7 +1141,7 @@ with v0.5.x or earlier peers.
   and logged at WARN. The threshold is `node.bloom.child_echo_threshold`
   (default 0.8; 1.0 or above turns the check off).
 
-## [0.5.3] - 2026-10-16 (provisional)
+## [0.5.3] - 2026-10-16
 
 ### Added
 
