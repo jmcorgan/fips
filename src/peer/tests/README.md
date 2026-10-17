@@ -9,6 +9,14 @@ Unit tests for the modules in `src/peer/`, kept out of the source files.
   machine refuses it and keeps the handshake, so the genuine msg2 still
   completes the session.
 
+- `active.rs`: tests for `ActivePeer` (`src/peer/active.rs`), declared from
+  that file as `#[cfg(test)] #[path = "tests/active.rs"] mod tests;`, so they
+  are a child module of `active` and keep their test names. They cover the
+  peer's link state: tree position and filter bookkeeping, decrypt-failure
+  and replay counters, rekey jitter and msg1 resends, the pending, current
+  and previous session slots across a cutover, and the withheld handshake
+  diagnostics.
+
 `machine.rs` and `mod.rs` also carry older inline `mod tests` blocks. New tests
 go here rather than into those blocks; the inline blocks are not converted in
 passing.
