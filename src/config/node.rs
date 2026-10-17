@@ -1208,14 +1208,18 @@ impl BuffersConfig {
 
 /// Rekey / session rekeying configuration (`node.rekey.*`).
 ///
-/// Controls periodic full rekey for both FMP (link layer) and FSP
+/// Sets when periodic full rekey starts for both FMP (link layer) and FSP
 /// (session layer) Noise sessions. Rekeying provides true forward secrecy
-/// with fresh DH randomness, nonce reset, and session index rotation.
+/// with fresh DH randomness, nonce reset, and session index rotation. A node
+/// always answers its peers' rekeys; these thresholds set when it starts its
+/// own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RekeyConfig {
-    /// Enable periodic rekey (`node.rekey.enabled`).
-    #[serde(default = "RekeyConfig::default_enabled")]
-    pub enabled: bool,
+    /// COMPAT (drop at the v2 cutover): the removed `node.rekey.enabled`
+    /// switch, read only so that [`Config::normalize_deprecated_keys`] can
+    /// warn that it is ignored. Never re-serialized.
+    #[serde(default, rename = "enabled", skip_serializing)]
+    pub(crate) legacy_enabled: Option<bool>,
 
     /// Initiate rekey after this many seconds (`node.rekey.after_secs`).
     #[serde(default = "RekeyConfig::default_after_secs")]
@@ -1229,7 +1233,7 @@ pub struct RekeyConfig {
 impl Default for RekeyConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            legacy_enabled: None,
             after_secs: 120,
             after_messages: 1 << 16, // 65536
         }
@@ -1237,9 +1241,6 @@ impl Default for RekeyConfig {
 }
 
 impl RekeyConfig {
-    fn default_enabled() -> bool {
-        true
-    }
     fn default_after_secs() -> u64 {
         120
     }

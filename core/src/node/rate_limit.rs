@@ -320,10 +320,6 @@ impl Drop for PendingHandshake {
 /// exists; the stranger bucket's own parameters are returned so an
 /// unlimited-peers node gets a second bucket the same size as its first
 /// rather than a bucket of one token.
-///
-/// `rekey.enabled` is deliberately ignored: restart and reconnect msg1 exist
-/// regardless, and branching on it would make the disabled-rekey
-/// configuration the under-provisioned one.
 pub fn derive_established_bucket(
     max_peers: usize,
     rekey_after_secs: u64,

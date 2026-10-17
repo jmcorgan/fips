@@ -1270,7 +1270,6 @@ async fn test_bloom_unchanged_filter_with_newer_sequence_marks_no_peer() {
 fn arm_rekeys(nodes: &mut [TestNode], a: usize) {
     nodes[a].node.replace_context(|ctx| {
         let mut cfg = (*ctx.config).clone();
-        cfg.node.rekey.enabled = true;
         cfg.node.rekey.after_messages = 1;
         cfg.node.rekey.after_secs = u64::MAX;
         ctx.config = std::sync::Arc::new(cfg);

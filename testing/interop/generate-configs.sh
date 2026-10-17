@@ -250,7 +250,6 @@ for nid in "${NODE_IDS[@]}"; do
         echo "  identity:"
         echo "    nsec: \"${NSEC[$nid]}\""
         echo "  rekey:"
-        echo "    enabled: true"
         echo "    after_secs: $REKEY_AFTER_SECS"
         echo "    after_messages: 65536"
         echo ""

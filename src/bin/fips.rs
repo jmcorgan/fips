@@ -4,7 +4,7 @@
 //! On Windows, can run as a Windows Service when invoked with `--service`.
 
 use clap::Parser;
-use fips::config::{IdentitySource, resolve_identity};
+use fips::config::{IdentitySource, LoadLog, resolve_identity};
 use fips::utils::logfile::{ROLL_BYTES, ROLL_KEEP, RollingFile, SharedLog};
 use fips::version;
 use fips::{Config, Node};
@@ -191,28 +191,26 @@ async fn run_daemon(
     }
 
     // Load configuration before initializing logging so we can use
-    // the config's log_level as the tracing filter default.
-    let (config, loaded_paths) = if let Some(config_path) = &config_path {
-        match Config::load_file(config_path) {
-            Ok(config) => (config, vec![config_path.clone()]),
-            Err(e) => {
-                let msg = format!(
+    // the config's log_level as the tracing filter default. What the load
+    // logs, such as a removed key's warning, is held and replayed below,
+    // since no subscriber exists yet to receive it.
+    let (loaded, load_log) = LoadLog::hold(|| match &config_path {
+        Some(path) => Config::load_file(path).map(|config| (config, vec![path.clone()])),
+        None => Config::load(),
+    });
+    let (config, loaded_paths) = match loaded {
+        Ok(result) => result,
+        Err(e) => {
+            let msg = match &config_path {
+                Some(path) => format!(
                     "Failed to load configuration from {}: {}",
-                    config_path.display(),
+                    path.display(),
                     e
-                );
-                startup_error(&msg);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        match Config::load() {
-            Ok(result) => result,
-            Err(e) => {
-                let msg = format!("Failed to load configuration: {}", e);
-                startup_error(&msg);
-                std::process::exit(1);
-            }
+                ),
+                None => format!("Failed to load configuration: {}", e),
+            };
+            startup_error(&msg);
+            std::process::exit(1);
         }
     };
 
@@ -309,6 +307,7 @@ async fn run_daemon(
             info!(path = %path.display(), "Loaded config file");
         }
     }
+    load_log.replay();
 
     // The hosts/ACL defaults on these platforms moved from /etc/fips to
     // /usr/local/etc/fips; flag files stranded at the old location.

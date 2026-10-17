@@ -527,15 +527,17 @@ stays set for all subsequent hops to the destination.
 
 ### Rekey (`node.rekey.*`)
 
-Controls periodic Noise rekey for forward secrecy. When enabled, both FMP
+Sets when periodic Noise rekey starts, for forward secrecy. Both FMP
 (link-layer IK) and FSP (session-layer XK) sessions perform fresh Diffie-Hellman
 key exchanges after a time or message count threshold, whichever comes first.
 A 10-second drain window keeps the old session active for decryption during
-cutover.
+cutover. A node always answers its peers' rekeys, and starts its own when
+either threshold below is reached. The `node.rekey.enabled` key was removed
+in v0.6.0; a config that still sets it loads, the key is ignored, and the
+daemon logs a warning naming it.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.rekey.enabled` | bool | `true` | Initiate periodic Noise rekey on links and sessions. A peer-driven session rekey is still answered when this is off, so session keys can still rotate. Disabling rekey is unsupported: it runs the node on a less-tested path, and the option is removed in v2. |
 | `node.rekey.after_secs` | u64 | `120` | Initiate rekey after this many seconds on a session |
 | `node.rekey.after_messages` | u64 | `65536` | Initiate rekey after this many messages sent on a session |
 
@@ -1432,8 +1434,6 @@ node:
     loss_threshold: 0.05             # MMP loss rate threshold for CE marking (5%)
     etx_threshold: 3.0               # MMP ETX threshold for CE marking
   rekey:
-    # enabled: false is unsupported, less tested, and removed in v2
-    enabled: true                    # periodic Noise rekey for forward secrecy
     after_secs: 120                  # rekey interval (seconds)
     after_messages: 65536            # rekey after N messages sent
   control:

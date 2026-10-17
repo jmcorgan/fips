@@ -34,7 +34,6 @@ const FRAMES: usize = 25;
 /// by message count.
 pub(super) fn rekey_config(after_secs: u64) -> crate::config::Config {
     let mut config = crate::config::Config::new();
-    config.node.rekey.enabled = true;
     config.node.rekey.after_secs = after_secs;
     config.node.rekey.after_messages = u64::MAX;
     config

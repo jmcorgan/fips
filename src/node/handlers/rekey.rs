@@ -152,10 +152,6 @@ impl Node {
     ///   within the hold, retire it
     /// - If the rekey timer/counter fires, initiate a new handshake
     pub(in crate::node) async fn check_rekey(&mut self) {
-        if !self.config().node.rekey.enabled {
-            return;
-        }
-
         let cfg = RekeyCfg {
             after_secs: self.config().node.rekey.after_secs,
             after_messages: self.config().node.rekey.after_messages,
@@ -534,10 +530,6 @@ impl Node {
     /// Called from the tick loop. Uses the same resend interval and max
     /// resend count as initial handshakes.
     pub(in crate::node) async fn resend_pending_rekeys(&mut self, now_ms: u64) {
-        if !self.config().node.rekey.enabled {
-            return;
-        }
-
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
         let backoff = self.config().node.rate_limit.handshake_resend_backoff;
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
@@ -673,7 +665,7 @@ impl Node {
     /// is safe — an abandoned cycle never leaves a divergent unsafe
     /// state.
     pub(in crate::node) async fn resend_pending_session_msg3(&mut self, now: SessionInstant) {
-        if !self.config().node.rekey.enabled || self.sessions.is_empty() {
+        if self.sessions.is_empty() {
             return;
         }
 
@@ -767,20 +759,12 @@ impl Node {
     ///   handshake timeout, drop it so the trigger can start a fresh one
     ///   (see [`FspAction::ExpireInitiation`])
     /// - If the rekey timer/counter fires, initiate a new XK handshake
-    ///   (this last one only when `node.rekey.enabled`)
     ///
     /// msg3 retransmission is handled separately by
     /// `resend_pending_session_msg3`; its lifetime is tied to the
     /// responder receiving msg3, not to this initiator's cutover.
     pub(in crate::node) async fn check_session_rekey(&mut self) {
-        // The cutover, drain and abandoned-handshake sweeps run whether or not
-        // periodic rekey is enabled: a peer's setup message is answered in
-        // either configuration, so both a superseded key epoch and an
-        // abandoned handshake can exist with rekey disabled. Only the trigger
-        // that starts a rekey of our own is gated, and the gate now travels
-        // into the core as `RekeyCfg::enabled`.
         let cfg = crate::proto::fsp::RekeyCfg {
-            enabled: self.config().node.rekey.enabled,
             after_secs: self.config().node.rekey.after_secs,
             after_messages: self.config().node.rekey.after_messages,
         };

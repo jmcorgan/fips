@@ -36,18 +36,6 @@ fn session_snapshot(addr_byte: u8) -> SessionSnapshot {
 
 fn cfg(after_secs: u64, after_messages: u64) -> RekeyCfg {
     RekeyCfg {
-        enabled: true,
-        after_secs,
-        after_messages,
-    }
-}
-
-/// The same thresholds with periodic rekey switched off
-/// (`node.rekey.enabled = false`), which must gate the trigger and nothing
-/// else: a peer's setup message is answered in either configuration.
-fn cfg_rekey_off(after_secs: u64, after_messages: u64) -> RekeyCfg {
-    RekeyCfg {
-        enabled: false,
         after_secs,
         after_messages,
     }
@@ -348,28 +336,24 @@ fn poll_rekey_retires_an_initiated_handshake_only_on_its_own_deadline() {
     );
 }
 
-/// The expiry of a handshake this node armed does not depend on whether
-/// periodic rekey is enabled, and it is grouped with the other abandoned
-/// handshakes in input order.
+/// The expiry of a handshake this node armed is grouped with the other
+/// abandoned handshakes in input order.
 #[test]
-fn poll_rekey_retires_an_expired_initiation_with_periodic_rekey_off() {
+fn poll_rekey_retires_an_expired_initiation_in_the_abandon_group() {
     let fsp = Fsp::new();
     assert_eq!(
-        fsp.poll_rekey(vec![unanswered_initiation(9)], &cfg_rekey_off(100, 1000)),
+        fsp.poll_rekey(vec![unanswered_initiation(9)], &cfg(100, 1000)),
         vec![FspAction::ExpireInitiation {
             addr: make_node_addr(9)
         }],
-        "an existing handshake must be retired whatever the trigger policy"
+        "an existing handshake must be retired on its expiry"
     );
 
     let mut peer_armed = session_snapshot(7);
     peer_armed.rekey_in_progress = true;
     peer_armed.armed_handshake_expired = true;
     assert_eq!(
-        fsp.poll_rekey(
-            vec![peer_armed, unanswered_initiation(9)],
-            &cfg_rekey_off(100, 1000)
-        ),
+        fsp.poll_rekey(vec![peer_armed, unanswered_initiation(9)], &cfg(100, 1000)),
         vec![
             FspAction::AbandonHandshake {
                 addr: make_node_addr(7)
@@ -434,49 +418,6 @@ fn poll_rekey_groups_abandons_between_the_drains_and_the_rekeys() {
             },
         ],
         "phase grouped: cutovers, drains, abandoned handshakes, then rekeys"
-    );
-}
-
-#[test]
-fn poll_rekey_with_periodic_rekey_off_suppresses_the_trigger_and_nothing_else() {
-    let fsp = Fsp::new();
-    // The trigger is the only decision the flag gates.
-    let mut trigger = session_snapshot(1);
-    trigger.elapsed_secs = 1000;
-    trigger.counter = 5000;
-    assert!(
-        fsp.poll_rekey(vec![trigger], &cfg_rekey_off(100, 1000))
-            .is_empty(),
-        "a node with periodic rekey off must not start one of its own"
-    );
-
-    // Cutover, drain and abandonment all still run: a peer's setup message is
-    // answered with the flag off, so all three states can exist.
-    let mut cut = session_snapshot(2);
-    cut.has_pending = true;
-    cut.is_rekey_initiator = true;
-    cut.cutover_timer_elapsed = true;
-    let mut drain = session_snapshot(3);
-    drain.is_draining = true;
-    drain.drain_expired = true;
-    let mut armed = session_snapshot(4);
-    armed.rekey_in_progress = true;
-    armed.armed_handshake_expired = true;
-    assert_eq!(
-        fsp.poll_rekey(vec![cut, drain, armed], &cfg_rekey_off(100, 1000)),
-        vec![
-            FspAction::CutOver {
-                addr: make_node_addr(2)
-            },
-            FspAction::CompleteDrain {
-                addr: make_node_addr(3)
-            },
-            FspAction::AbandonHandshake {
-                addr: make_node_addr(4)
-            },
-        ],
-        "the superseded epoch must still be retired and the abandoned \
-         handshake still cleared with periodic rekey off"
     );
 }
 

@@ -38,6 +38,7 @@ mod lookup_echo;
 mod mmp_chartests;
 mod netmon;
 mod probe;
+mod rekey_answer;
 mod rekey_parity;
 mod routing;
 mod rx_stall;

@@ -547,7 +547,7 @@ impl Node {
     /// of `handle_session_setup`, which answers a setup from the waiting
     /// responder with this msg3. The payload is released by the first inbound frame that
     /// authenticates on the session (`handle_encrypted_session_msg`) or, here,
-    /// when the budget is spent. Runs whether or not periodic rekey is enabled.
+    /// when the budget is spent.
     async fn resend_initial_msg3(&mut self, now: SessionInstant) {
         use crate::proto::link::SessionDatagram;
 

@@ -551,6 +551,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The `node.rekey.enabled` setting, deprecated in v0.5.3. No setting now
+  stops a node answering its established peers' rekeys, on links or
+  sessions, and the `node.rekey.after_secs` and `node.rekey.after_messages`
+  thresholds alone decide when it starts one of its own. The replaced
+  session is retired when the drain window ends. With the setting off, a
+  node used to treat each link rekey its peer started as a duplicate dial
+  and refuse it, so that link's keys never rotated, whatever the peer was
+  configured to do.
+  **Upgrade note: a node configured with `node.rekey.enabled: false` now
+  rekeys, which its peers can see.** It sends rekey handshakes on its links
+  and sessions every `node.rekey.after_secs` (120 s by default) and answers
+  its peers' link rekeys instead of refusing them. The config still loads:
+  the key is ignored and the daemon logs a warning naming it at each start,
+  so delete it from the config. Nothing on the wire changes, and peers on any
+  earlier release complete these rekeys as they do with a node that never
+  set the key. **Source-breaking for consumers of the library crate**:
+  `RekeyConfig::enabled` is gone.
+
 - **Source-breaking for consumers of the library crate**: `ActivePeer` no
   longer stores a connectivity state. `ActivePeer::connectivity`, `can_send`,
   `is_healthy`, `mark_stale`, `mark_reconnecting`, `mark_disconnected` and
@@ -655,6 +673,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where the fix listed under macOS below dropped these packets; only packets
   already queued to the exited worker are lost. With the macOS ordered sender,
   a packet sent this way can arrive out of order with the rest of its flow.
+
+- The `fips` daemon's log now carries the warnings raised while its config
+  loads, such as the one naming a deprecated `node.discovery` block. The
+  daemon loads its config before it sets up its log, because the config
+  chooses the log level and file, so those warnings reached nothing and were
+  lost. They are now held and written once the log is open, after the
+  `Loaded config file` lines. `fips-gateway` sets up its log first and
+  already logged them.
 
 #### Data plane and transports
 

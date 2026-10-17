@@ -87,7 +87,6 @@ import yaml
 with open('$cfg') as f:
     cfg = yaml.safe_load(f)
 cfg.setdefault('node', {})['rekey'] = {
-    'enabled': True,
     'after_secs': $REKEY_AFTER_SECS,
     'after_messages': 65536,
 }

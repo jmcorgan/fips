@@ -443,26 +443,6 @@ fn establish_inbound_aged_session_rekey_responds() {
 }
 
 #[test]
-fn establish_inbound_rekey_gate_requires_enabled() {
-    // Aged session but rekey disabled → same-epoch msg1 is a duplicate,
-    // not a rekey.
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot();
-    snap.has_existing_peer = true;
-    snap.existing_peer_epoch = Some([7u8; 8]);
-    snap.has_session = true;
-    snap.existing_session_age_secs = 31;
-    snap.existing_link_age_secs = 31;
-    snap.rekey_enabled = false;
-    snap.setup_match = true;
-    let wire = wire_outcome(Some([7u8; 8]));
-    assert!(matches!(
-        fmp.establish_inbound(&snap, &wire),
-        InboundDecision::ResendMsg2 { .. }
-    ));
-}
-
-#[test]
 fn establish_inbound_rekey_gate_boundary_at_30s() {
     // A link of exactly 30s satisfies `>= 30` → rekey; 29s does not → duplicate.
     let fmp = Fmp::new();

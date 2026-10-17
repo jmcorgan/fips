@@ -93,18 +93,6 @@ fn any_other_same_epoch_msg1_on_a_young_session_asks_to_replace_the_session() {
 }
 
 #[test]
-fn with_rekey_off_an_aged_session_follows_the_same_three_rules() {
-    let rekey_off = || {
-        let mut snap = young_snapshot();
-        snap.existing_session_age_secs = 31;
-        snap.rekey_enabled = false;
-        snap
-    };
-    let found = three_rules(rekey_off, "rekey off");
-    assert!(found.is_empty(), "{}", found.join("\n"));
-}
-
-#[test]
 fn an_off_link_msg1_on_a_young_session_is_classified_by_digest_and_never_refused_as_off_link() {
     let off_link = || {
         let mut snap = young_snapshot();

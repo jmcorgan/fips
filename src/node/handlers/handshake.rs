@@ -253,7 +253,6 @@ impl EstablishView for Node {
                     .map(|id| id.node_addr() == peer_addr)
                     .unwrap_or(false)
             }),
-            rekey_enabled: self.config().node.rekey.enabled,
             our_node_addr: *self.identity().node_addr(),
             silent_backoff: self
                 .silent_sessions

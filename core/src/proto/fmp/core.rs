@@ -422,10 +422,6 @@ pub struct EstablishSnapshot {
     /// A pending outbound connection to this same peer identity already exists
     /// (a cross-connection in progress); bypasses the max-peers cap.
     pub has_pending_outbound_to_peer: bool,
-    /// Whether the local rekey trigger is enabled in config (gates treating a
-    /// same-epoch msg1 from an established peer as a rekey rather than a
-    /// duplicate).
-    pub rekey_enabled: bool,
     /// This node's own address, for the dual-initiation tie-break.
     pub our_node_addr: NodeAddr,
     /// The refusal in force for this identity after its sessions ended
@@ -889,8 +885,7 @@ impl Fmp {
                 }
                 _ => {
                     // Same epoch (or no epoch captured on either side).
-                    let is_rekey = snap.rekey_enabled
-                        && snap.has_session
+                    let is_rekey = snap.has_session
                         && snap.existing_link_age_secs >= REKEY_MIN_LINK_AGE_SECS
                         && snap.existing_session_age_secs >= REKEY_MIN_CUTOVER_AGE_SECS;
                     if !is_rekey {

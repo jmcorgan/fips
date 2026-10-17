@@ -75,7 +75,7 @@ pub(super) fn resend_snapshot(link: LinkId, resend_count: u32, msg1: Vec<u8>) ->
 }
 
 /// Build a quiescent `EstablishSnapshot` for a net-new inbound msg1: no existing
-/// peer, not at cap, rekey enabled, our node addr fixed. Tests override only the
+/// peer, not at cap, our node addr fixed. Tests override only the
 /// fields the case exercises.
 pub(super) fn establish_snapshot() -> EstablishSnapshot {
     EstablishSnapshot {
@@ -94,7 +94,6 @@ pub(super) fn establish_snapshot() -> EstablishSnapshot {
         existing_msg2: None,
         at_max_peers: false,
         has_pending_outbound_to_peer: false,
-        rekey_enabled: true,
         our_node_addr: make_node_addr(0x10),
         silent_backoff: None,
     }

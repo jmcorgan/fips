@@ -386,10 +386,9 @@ rotating the session indices that addressed packets carry on the wire.
 A rekey is initiated when either threshold is reached on the link's current
 session: `node.rekey.after_secs` (default 120) elapsed since the link came
 up or last rekeyed, or `node.rekey.after_messages` (default 65536) frames
-sent. Either side can be the initiator independently. Rekey is on by
-default. `node.rekey.enabled: false` stops this node initiating rekey, but
-that configuration is unsupported: it is a less-tested path, and the option
-is removed in v2 (the configuration tree is documented in
+sent. Either side can be the initiator independently, and a node answers
+its peer's rekey whatever its own settings (the configuration tree is
+documented in
 [../reference/configuration.md](../reference/configuration.md)).
 
 ### Mechanism

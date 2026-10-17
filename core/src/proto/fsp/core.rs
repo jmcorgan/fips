@@ -114,13 +114,6 @@ pub enum FspAction {
 
 /// The rekey trigger thresholds, read shell-side from node config.
 pub struct RekeyCfg {
-    /// Whether this node starts rekeys of its own (`node.rekey.enabled`).
-    ///
-    /// Gates the trigger and nothing else. A peer's setup message is answered
-    /// in either configuration, so a superseded key epoch and a handshake the
-    /// peer armed and abandoned both exist with periodic rekey off; the
-    /// cutover, drain and abandoned-handshake decisions therefore ignore this.
-    pub enabled: bool,
     /// Rekey after this many seconds of session age (before jitter).
     pub after_secs: u64,
     /// Rekey after this many sent messages.
@@ -248,12 +241,6 @@ impl Fsp {
     /// - Failing both, the rekey trigger fires when the session is neither
     ///   mid-rekey, holding a pending session, retaining a msg3 payload, nor
     ///   dampened, and its jittered time threshold or send counter is reached.
-    ///   Only this last decision is gated on `cfg.enabled`: the cutover, the
-    ///   drain and the abandon of a peer-armed handshake maintain state a
-    ///   peer's setup message can create with periodic rekey switched off.
-    ///   A handshake this node armed exists only when the trigger fired, but
-    ///   its expiry sits above the gate too, so whether an existing
-    ///   handshake is retired does not depend on whether new ones may start.
     ///
     /// Actions are returned phase-grouped (all cutovers, then all drains, then
     /// all abandoned or expired handshakes, then all rekey initiations) to
@@ -297,9 +284,6 @@ impl Fsp {
                 continue;
             }
             // 4. Rekey trigger.
-            if !cfg.enabled {
-                continue;
-            }
             if s.rekey_in_progress || s.has_pending || s.has_rekey_msg3_payload || s.is_dampened {
                 continue;
             }
