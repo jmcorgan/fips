@@ -59,7 +59,7 @@ pub(super) fn verify_declaration(
     let signature = Signature::from_slice(sig_bytes)
         .map_err(|_| TreeError::InvalidSignature(*decl.node_addr()))?;
 
-    let secp = secp256k1::Secp256k1::verification_only();
+    let secp = fips_core::identity::secp();
     let hash = signing_hash(decl);
 
     secp.verify_schnorr(&signature, &hash, pubkey)
