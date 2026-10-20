@@ -1,8 +1,6 @@
 //! Shared test helpers for the FMP connection-lifecycle unit tests.
 
-use crate::proto::fmp::{
-    ConnSnapshot, EstablishSnapshot, PeerSnapshot, RekeyClaim, RekeyResendSnapshot, WireOutcome,
-};
+use crate::proto::fmp::{ConnSnapshot, EstablishSnapshot, RekeyClaim, WireOutcome};
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
 use alloc::vec::Vec;
@@ -39,8 +37,8 @@ pub(super) fn resend_snapshot(link: LinkId, resend_count: u32, msg1: Vec<u8>) ->
 
 /// Build an `EstablishSnapshot` describing an existing, same-epoch
 /// peer owned by node `our_byte`.
-/// The default is a quiescent session on the same link with no
-/// in-flight rekey / pending and no rekey declared by the sender. Tests override
+/// The default is a session on the same link with no rekey declared by the
+/// sender. Tests override
 /// only the fields their branch exercises. `existing_peer_epoch` defaults to
 /// `[0x01; 8]`.
 pub(super) fn establish_snapshot(our_byte: u8) -> EstablishSnapshot {
@@ -48,9 +46,7 @@ pub(super) fn establish_snapshot(our_byte: u8) -> EstablishSnapshot {
         has_existing_peer: true,
         existing_peer_epoch: Some([0x01; 8]),
         has_session: true,
-        pending_new_session: false,
-        rekey_in_progress: false,
-        existing_msg2: None,
+        stored_msg2: None,
         different_link: false,
         rekey_claim: RekeyClaim::None,
         // Idle by default, so the epoch-restart gate does not fire unless a

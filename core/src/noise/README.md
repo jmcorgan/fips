@@ -36,15 +36,18 @@ reserved, and, from its tests only, `open`, which is behind the
   `CipherState`, the transport cipher with its nonce counter, its
   `seal` and `open` helpers, and `take_cleared` and `clear_slot`, which
   clear the bytes a moved-out secret leaves in its slot.
-- `handshake.rs`: `HandshakeState<E>`, the XX state machine, the
-  symmetric state under it, and `Message2Rollback`, the state message 2
-  overwrites, kept so `restore_message_2` can put it back; `into_session`
-  turns a completed handshake into a `NoiseSession`.
+- `handshake.rs`: `HandshakeState<E>`, the XX state machine, and the
+  symmetric state under it; `into_session` turns a completed handshake
+  into a `NoiseSession`. The reads here run in place; a caller that may
+  be handed a forgery reads on a fork (`fork.rs`).
 - `fork.rs`: the `Fork` trait, a copy of a handshake made for one read,
   its implementation for `HandshakeState`, and the read-on-fork methods
-  `fork_msg2` (IK msg2 at the initiator), `fork_xk2` (XK msg2 at the
-  initiator) and `fork_xk3` (XK msg3 at the responder). Each borrows the
-  handshake immutably and returns the fork the read advanced.
+  `fork_msg2` (XX msg2 at the initiator) and `fork_msg3` (XX msg3 at the
+  responder). Each takes the base message and any negotiation payload
+  after it, reads both on one fork (the payload's decrypt advances the
+  cipher the next message is written under), borrows the handshake
+  immutably, and returns the fork the read advanced with the decrypted
+  payload.
 - `session.rs`: `NoiseSession`, the two cipher states and the replay
   window of a completed handshake, and the key hand-outs
   (`send_cipher_clone`, `recv_cipher_clone`) and counter calls the

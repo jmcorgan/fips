@@ -158,29 +158,21 @@ async fn test_api_connect_on_current_fresh_path_is_a_no_op() {
 /// and the dial leaves the link where it was at both ends. This is the
 /// failover path; a live peer is not dialled at all.
 ///
-/// Both sessions are past the 30 s rekey floor, and the alternate address
-/// reaches the peer from the dialer's usual source, so the peer answers the
-/// msg1 as a rekey of the link it already has. What each end is left holding
-/// depends on which is the smaller address and which end set the link up:
+/// Both sessions are aged past 30 s, and the alternate-path handshake declares
+/// no rekey, so each end resolves it as a cross-connection by node order:
 ///
-/// - dialer smaller, or dialer larger on a link it set up itself: it moves to
-///   the session of the dial, its session index changes, and its first frame
-///   promotes the peer's pending session;
-/// - dialer larger on a link the peer set up: it keeps its own session, and
-///   the peer is left holding a responder pending the dialer will never
-///   adopt.
+/// - dialer smaller: both ends swap to the alternate-path session;
+/// - dialer larger: both ends keep the session they had.
 ///
-/// In no case does the link, its transport or its remote address change at
-/// either end. The last case is recorded here as what the code does, not as
-/// what it should do. Only the dialer's view of the peer is quiet; the peer
-/// still hears the dialer.
+/// Either way neither end is left holding a pending session, and in neither
+/// orientation does the link, its transport or its remote address change at
+/// either end. Only the dialer's view of the peer is quiet; the peer still
+/// hears the dialer.
 #[tokio::test]
 async fn test_api_connect_to_a_second_address_of_a_quiet_peer_dials_it_and_leaves_the_link_on_its_path()
  {
     for dialer_smaller in [true, false] {
-        for dialer_set_up in [true, false] {
-            alternate_path_for_quiet_peer(dialer_smaller, dialer_set_up).await;
-        }
+        alternate_path_for_quiet_peer(dialer_smaller).await;
     }
 }
 
@@ -219,12 +211,10 @@ fn link_view(tn: &TestNode, peer: &NodeAddr) -> LinkView {
 
 /// One orientation of
 /// [`test_api_connect_to_a_second_address_of_a_quiet_peer_dials_it_and_leaves_the_link_on_its_path`].
-async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool) {
+async fn alternate_path_for_quiet_peer(dialer_smaller: bool) {
     use super::rekey_parity::{age_link, deliver, failures, heartbeat};
-    use super::spanning_tree::initiate_handshake;
-    use fips_core::proto::rekey::Role;
 
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
     let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
     let (d, p) = if zero_smaller == dialer_smaller {
         (0, 1)
@@ -233,15 +223,6 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
     };
     let dialer_addr = *nodes[d].node.node_addr();
     let peer_addr = *nodes[p].node.node_addr();
-    let (from, to) = if dialer_set_up { (d, p) } else { (p, d) };
-    initiate_handshake(&mut nodes, from, to).await;
-    drain_all_packets(&mut nodes, false).await;
-    assert!(
-        nodes[d].node.get_peer(&peer_addr).is_some()
-            && nodes[p].node.get_peer(&dialer_addr).is_some(),
-        "precondition: the two nodes are peered"
-    );
-    let swaps = dialer_smaller || dialer_set_up;
     let peer_npub = nodes[p].node.npub();
     let transport_id = nodes[d].transport_id;
     age_link(&mut nodes, d, p, Duration::from_secs(31));
@@ -276,25 +257,6 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
             .is_connecting_to_peer_on_path(&peer_addr, transport_id, &alternate),
         "an outbound leg should exist on the alternate path"
     );
-
-    // Deliver the msg1 to the peer only: it answers as a rekey of the link it
-    // already has, because the alternate address reaches it from the
-    // dialer's usual source.
-    assert_eq!(
-        deliver(&mut nodes[p]).await,
-        1,
-        "only the dialer's msg1 is queued at the peer (dialer smaller: {dialer_smaller})"
-    );
-    let peer_pending = {
-        let peer = nodes[p].node.get_peer(&dialer_addr).unwrap();
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Responder),
-            "the peer holds a responder pending after the msg1 (dialer smaller: {dialer_smaller})"
-        );
-        peer.pending_our_index()
-            .expect("the peer's responder pending has an index")
-    };
 
     // Let the alternate handshake run to completion.
     for _ in 0..20 {
@@ -340,17 +302,33 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
         "the dialer holds no leg toward the peer once the dial resolves (dialer smaller: {dialer_smaller})"
     );
 
-    // Session: the smaller dialer, and a larger one that set the link up,
-    // moved to the dial's; a larger one on the peer's link kept its own.
-    if swaps {
-        assert_ne!(
-            dialer_after.our_index, dialer_before.our_index,
-            "the dialer moves to the alternate-path session (dialer smaller: {dialer_smaller})"
-        );
-    } else {
-        assert_eq!(
-            dialer_after.our_index, dialer_before.our_index,
-            "the larger dialer on the peer's link keeps its own session"
+    // Session: by node order, both ends swap when the dialer is the smaller,
+    // and both keep their own when it is the larger.
+    for (end, before, after) in [
+        ("dialer", &dialer_before, &dialer_after),
+        ("peer", &peer_before, &peer_after),
+    ] {
+        if dialer_smaller {
+            assert_ne!(
+                after.our_index, before.our_index,
+                "the {end} swaps to the alternate-path session when the dialer is the smaller"
+            );
+        } else {
+            assert_eq!(
+                after.our_index, before.our_index,
+                "the {end} keeps its own session when the dialer is the larger"
+            );
+        }
+    }
+    for (end, tn, other) in [("dialer", d, peer_addr), ("peer", p, dialer_addr)] {
+        assert!(
+            nodes[tn]
+                .node
+                .get_peer(&other)
+                .unwrap()
+                .pending_new_session()
+                .is_none(),
+            "the {end} holds no pending session (dialer smaller: {dialer_smaller})"
         );
     }
     // Each end's next frame must authenticate at the other.
@@ -380,37 +358,6 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
                 .packets_recv,
             recv_before + 1,
             "node {from}'s heartbeat must authenticate at node {to} (dialer smaller: {dialer_smaller})"
-        );
-    }
-
-    let peer = nodes[p].node.get_peer(&dialer_addr).unwrap();
-    if swaps {
-        assert!(
-            peer.pending_role().is_none(),
-            "the swapped dialer's first frame promotes the peer's pending (dialer smaller: {dialer_smaller})"
-        );
-        assert_eq!(
-            peer.our_index(),
-            Some(peer_pending),
-            "the peer is on the former pending session"
-        );
-    } else {
-        // The larger dialer never adopts the session the peer answered with,
-        // so the peer keeps holding it; this pending also refuses the
-        // dialer's own rekeys until it is retired.
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Responder),
-            "the peer still holds the unadopted responder pending"
-        );
-        assert!(
-            peer.rekey_answer().is_some(),
-            "the peer still holds its answer to the dialer's msg1"
-        );
-        assert_eq!(
-            peer.our_index(),
-            peer_before.our_index,
-            "the peer stays on its original session"
         );
     }
 

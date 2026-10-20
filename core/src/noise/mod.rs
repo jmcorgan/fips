@@ -8,6 +8,11 @@
 //! against. They are wire format. The root crate re-exports this module's
 //! items other than `aead` as `fips::noise`, with `HandshakeState` drawing its
 //! ephemeral keys from the host's entropy source.
+//!
+//! A msg2 or msg3 that nothing has authenticated yet is read on a fork of
+//! the handshake ([`Fork`], `HandshakeState::fork_msg2` and `fork_msg3`),
+//! never on the handshake itself, so a message that fails partway leaves the
+//! handshake able to read the genuine one.
 
 pub mod aead;
 mod cipher;
@@ -26,8 +31,8 @@ pub use cipher::{
 };
 #[doc(hidden)]
 pub use cipher::{clear_slot, take_cleared};
-pub use fork::Fork;
-pub use handshake::{HandshakeState, Message2Rollback};
+pub use fork::{Fork, ForkRead};
+pub use handshake::HandshakeState;
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;
 

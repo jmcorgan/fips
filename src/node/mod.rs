@@ -3189,67 +3189,22 @@ impl Node {
 
     /// Single choke-point for dropping a per-peer control machine. Also drops the
     /// machine's timer store so no armed `SetTimer` outlives it (the store and the
-    /// machine share the `LinkId` lifetime). Every teardown path routes machine
-    /// removal here rather than calling `peer_machines.remove` directly.
+    /// machine share the `LinkId` lifetime), and releases the lease on a
+    /// handshake leg's index that the machine still holds, so no exit of a leg
+    /// leaks its index. Every teardown path routes machine removal here rather
+    /// than calling `peer_machines.remove` directly.
     pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
-        self.peer_machines.remove(&link);
-        self.peer_timers.remove(&link);
-    }
-
-    /// Does anything live claim this session index?
-    ///
-    /// The orphaned-pending-inbound arm in `handle_msg3` is the one place that
-    /// must free an index it cannot read off a machine — the machine's absence
-    /// is what selects the arm — so the only value available is the msg3
-    /// header's `receiver_idx`, a field the sender chooses. The
-    /// `pending_inbound` hit that precedes the arm proves the index was one WE
-    /// allocated, but not that it is still that leg's: every free site is
-    /// expected to drop the map entry along with the index, and that is a
-    /// convention rather than an invariant. No path to that arm has been found;
-    /// this is unconditional defence-in-depth, not a fix for a demonstrated
-    /// state. If any live holder claims the index, we do not free it.
-    ///
-    /// **Deliberately transport-blind.** `index_allocator` is one node-global
-    /// `HashSet<u32>`, so an index value is unique across every transport, while
-    /// every registry scanned below is keyed `(TransportId, u32)`. Filtering
-    /// this scan by the transport the msg3 arrived on would let an index held by
-    /// a peer on a DIFFERENT transport read as unclaimed — the one direction
-    /// that turns this guard into the teardown primitive it exists to prevent.
-    /// The `ActivePeer` limb must likewise not be filtered by `transport_id()`.
-    /// No production path builds a peer with `transport_id() == None` — both
-    /// `self.peers` insertion sites go through `ActivePeer::with_session`, which
-    /// takes a concrete `TransportId` — but `remove_active_peer` gates its index
-    /// frees on `if let Some(tid)`, so if one ever arose its indices would stay
-    /// allocated forever and are exactly what must not be handed back here.
-    /// Scan by index value only.
-    ///
-    /// The `ActivePeer` limb also has to carry slots the maps do not: the
-    /// `peers_by_index` insert for a rekeying peer's `pending_our_index` is
-    /// itself gated on `if let Some(tid)` in `handle_msg2`'s rekey branch.
-    ///
-    /// Should-not-happen-path guard, not a general-purpose lookup: it is O(live
-    /// sessions) and has exactly one call site.
-    fn session_index_is_claimed(&self, idx: crate::utils::index::SessionIndex) -> bool {
-        let raw = idx.as_u32();
-        if self.peers_by_index.keys().any(|(_, i)| *i == raw)
-            || self.pending_outbound.keys().any(|(_, i)| *i == raw)
-            || self.pending_inbound.keys().any(|(_, i)| *i == raw)
-        {
-            return true;
-        }
-        if self
+        if let Some(lease) = self
             .peer_machines
-            .values()
-            .any(|m| m.our_index() == Some(idx))
+            .remove(&link)
+            .as_mut()
+            .and_then(PeerMachine::take_our_index)
         {
-            return true;
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(lease.release()));
         }
-        self.peers.values().any(|p| {
-            p.our_index() == Some(idx)
-                || p.rekey_our_index() == Some(idx)
-                || p.pending_our_index() == Some(idx)
-                || p.previous_our_index() == Some(idx)
-        })
+        self.peer_timers.remove(&link);
     }
 
     /// Debug-build coherence sweep over the peer-lifecycle maps, run once per

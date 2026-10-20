@@ -148,7 +148,7 @@ impl Node {
             let idx = lease.release();
             if let Some(tid) = transport_id {
                 self.pending_outbound.remove(&(tid, idx));
-                self.pending_inbound.remove(&(tid, idx.as_u32()));
+                self.pending_inbound.remove(&(tid, idx));
             }
             let _ = self
                 .index_allocator

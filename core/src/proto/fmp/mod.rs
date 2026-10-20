@@ -4,25 +4,25 @@
 //! connection lifecycle, migrated out of the async node shell. The async I/O
 //! adapters remain in `node::handlers::{timeout,rekey}`.
 //!
-//! This covers the four tick-poll maintain/teardown drivers (handshake
-//! timeout/teardown, msg1 resend, rekey cutover/drain/trigger, rekey-msg1
-//! resend) plus the XX inbound `msg3` establish classification
-//! ([`InboundDecision`], decided by [`Fmp::establish_inbound`]). Handshake
+//! This covers the two tick-poll maintain/teardown drivers (handshake
+//! timeout/teardown and msg1 resend) plus the XX inbound `msg3` establish
+//! classification ([`InboundDecision`], decided by [`Fmp::establish_inbound`]);
+//! link rekeys are decided by each link's rekey machine on the `rekey/`
+//! profile, and a declared rekey at `msg3` is handed to that machine. Handshake
 //! message bytes are opaque blobs throughout — the establish leaf's Noise wire
 //! construction and `promote_connection` effects are born-on-next and stay in
 //! `node/`; only the classification decision lives here.
 //!
 //! - `core.rs` — the [`LifecycleView`] read-seam trait, the [`ConnAction`]
 //!   effect vocabulary, the snapshot types, the [`InboundDecision`] establish
-//!   classification, the [`RekeyMsg2Decision`] initiator-side rekey `msg2`
-//!   static-continuity classification, the [`DialMsg2Decision`]
-//!   initiator-side initial `msg2` dial-identity classification, the pure
-//!   `poll_*`/`establish_inbound`/`rekey_outbound`/`dial_outbound` decisions, the
-//!   [`cross_connection_winner`] tie-break helper, and the FMP negotiation
-//!   decision logic (version agreement, profile validation).
+//!   classification, the [`DialMsg2Decision`] initiator-side initial `msg2`
+//!   dial-identity classification, the pure
+//!   `poll_*`/`establish_inbound`/`establish_outbound`/`dial_outbound`
+//!   decisions, the [`cross_connection_winner`] tie-break helper, and the FMP
+//!   negotiation decision logic (version agreement, profile validation).
 //! - `limits.rs` — the pure connection-retry backoff math.
-//! - `rekey/` — the link profile of the shared rekey machine (Noise IK) and
-//!   the node-level msg1 read; hidden from the docs.
+//! - `rekey/` — the link profile of the shared rekey machine (Noise XX) and
+//!   the node-level msg3 read of an inbound leg; hidden from the docs.
 //! - `silent.rs` — [`SilentSessions`], the per-identity record of link
 //!   sessions that ended without an authenticated frame, and the msg1
 //!   refusal it drives.
@@ -51,9 +51,8 @@ mod tests;
 pub use core::{
     ConnAction, ConnSnapshot, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot,
     EPOCH_RESTART_MIN_INTERVAL_SECS, EphemeralDigest, EstablishSnapshot, InboundDecision,
-    InboundReject, LifecycleView, Msg1Digest, OutboundDecision, OutboundSnapshot, PeerSnapshot,
-    RekeyCfg, RekeyClaim, RekeyMsg2Decision, RekeyMsg2Reject, RekeyMsg2Snapshot,
-    RekeyResendSnapshot, WireOutcome, decide_fmp_negotiation,
+    InboundReject, LifecycleView, Msg1Digest, OutboundDecision, OutboundSnapshot, RekeyClaim,
+    WireOutcome, decide_fmp_negotiation,
 };
 pub use core::{PromotionResult, cross_connection_winner};
 pub use limits::backoff_ms;

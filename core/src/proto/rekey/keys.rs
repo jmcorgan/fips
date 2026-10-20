@@ -2,8 +2,8 @@
 //! `crate::noise`.
 //!
 //! The machine never names Noise: it reaches an epoch's keys only through
-//! [`SessionKeys`]. The link profile (`proto::fmp::rekey::ik`) and the
-//! session profile (`proto::fsp::rekey::xk`) both bind it to a Noise
+//! [`SessionKeys`]. The link profile (`proto::fmp::rekey::xx`) and the
+//! session profile (`proto::fsp::rekey::xx`) both bind it to a Noise
 //! transport session, and differ only in how much of a frame's cleartext
 //! header the AEAD authenticates: the 16-byte link header, or the 12-byte
 //! session header. That length is the type parameter of [`NoiseKeys`], so
@@ -182,16 +182,4 @@ pub(crate) fn peer_key<E: crate::entropy::EntropySource>(
 ) -> Result<PeerKey, HsError> {
     let remote = hs.remote_static().ok_or(HsError)?;
     Ok(PeerKey::from_xonly(&remote.x_only_public_key().0))
-}
-
-/// The full public key an initiator pins, from the x-only key the machine
-/// holds. The handshake hashes the responder's static with even parity and
-/// its DH uses the X coordinate alone, so even parity is what the deployed
-/// initiator uses for a key it knows only as an npub.
-pub(crate) fn pinned(peer: &PeerKey) -> Result<secp256k1::PublicKey, HsError> {
-    let x = secp256k1::XOnlyPublicKey::from_slice(peer.bytes()).map_err(|_| HsError)?;
-    Ok(secp256k1::PublicKey::from_x_only_public_key(
-        x,
-        secp256k1::Parity::Even,
-    ))
 }

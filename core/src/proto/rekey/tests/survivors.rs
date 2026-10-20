@@ -246,9 +246,9 @@ fn no_deployed_rekey_rule_of_either_layer_survives_in_the_core_and_the_scan_find
     // they drive, its link accessors and the parameters a policy lived in.
     for want in [
         "proto/fsp/core.rs",
-        "proto/fsp/rekey/xk.rs",
+        "proto/fsp/rekey/xx.rs",
         "proto/fmp/core.rs",
-        "proto/fmp/rekey/ik.rs",
+        "proto/fmp/rekey/xx.rs",
         "proto/rekey/machine.rs",
         "proto/rekey/access.rs",
         "proto/rekey/params.rs",

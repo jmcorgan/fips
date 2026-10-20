@@ -5,13 +5,11 @@
 
 mod explore;
 // The `slow-tests` feature (see the crate's Cargo.toml) gates the
-// guard-switch meta-test and the models of the deployed releases.
+// guard-switch meta-test.
 #[cfg(feature = "slow-tests")]
 mod faults;
 mod fmp;
 mod fsp;
-#[cfg(feature = "slow-tests")]
-mod legacy;
 mod next;
 mod regress;
 mod sim;

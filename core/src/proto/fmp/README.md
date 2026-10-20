@@ -19,9 +19,11 @@ it out. Handshake message bytes are opaque here.
   `EphemeralDigest` of the ephemeral an XX msg1 consists of, which the
   silent-session record can key on; this line passes it none, since an
   XX session is promoted only at msg3), the `poll_*` decisions
-  (handshake timeout, msg1 resend, rekey), the classification of an inbound msg3 and of an
-  outbound msg2, the cross-connection tie-break, and the negotiation
-  payload's version and profile checks.
+  (handshake timeout and msg1 resend), the classification of an inbound
+  msg3 (a msg3 declaring a rekey of the session held goes to the peer's
+  rekey machine, which owns the tie-break against a rekey of its own) and
+  of an outbound msg2, the cross-connection tie-break, and the
+  negotiation payload's version and profile checks.
 - `state.rs`: `ConnectionState`, the bookkeeping of a connection in its
   handshake phase, which holds this node's index for the handshake as an
   `IndexLease` from the rekey machine's `lease::allocate`, so promotion
@@ -32,10 +34,9 @@ it out. Handshake message bytes are opaque here.
   applied at msg3, where the XX handshake first names the initiator.
 - `limits.rs`: the connection-retry backoff arithmetic.
 - `rekey/`: the link's profile of the shared rekey machine
-  (`proto::rekey`) over Noise IK, the node-level read of a peer's msg1,
-  and the replay record of a link setup. Hidden from the docs; the root
-  crate's active peers hold their link's sessions in a machine on it. Its
-  README describes it.
+  (`proto::rekey`) over Noise XX, and the node-level read of an inbound
+  leg's msg3. Hidden from the docs; the root crate's active peers hold
+  their link's sessions in a machine on it. Its README describes it.
 - `wire.rs`: the link framing codec: the common prefix, the encrypted,
   msg1, msg2 and msg3 headers, the handshake message types, the
   negotiation payload, disconnect reasons and the disconnect message.

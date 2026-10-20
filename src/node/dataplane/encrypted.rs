@@ -1,8 +1,9 @@
 //! Encrypted frame handling (hot path).
 
 use crate::node::Node;
-use crate::node::diag::{self, KeyView, OrNone, Trial};
-use crate::noise::NoiseError;
+use crate::node::diag::{KeyView, OrNone, Trial};
+use crate::node::reject::DataplaneReject;
+use crate::noise::{NoiseError, TAG_SIZE};
 use crate::proto::fmp::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, strip_inner_header};
 use crate::proto::link::LinkMessageType;
 use crate::transport::{ReceivedPacket, TransportAddr, TransportId};
@@ -246,18 +247,6 @@ impl Node {
         let mut present = false;
         let mut prior = None;
         if let Some(peer) = self.peers.get_mut(&node_addr) {
-            // Initiator-side msg3 confirm (see process_authentic_fmp_plaintext):
-            // a frame authenticated against post-cutover `current` (no pending)
-            // proves the responder reached the new epoch. A frame on the
-            // previous session proves nothing about msg3: a responder that
-            // never received it keeps sending on the old session. Inline-decrypt
-            // path mirror of the worker-bounce confirm.
-            if slot == LinkSlot::Current
-                && peer.rekey_msg3_payload().is_some()
-                && peer.pending_new_session().is_none()
-            {
-                peer.clear_rekey_msg3_payload();
-            }
             present = true;
             if peer.transport_id() != Some(packet.transport_id)
                 || peer.current_addr() != Some(&packet.remote_addr)
@@ -433,22 +422,6 @@ impl Node {
         if let Some(peer) = self.peers.get_mut(node_addr) {
             present = true;
             peer.reset_decrypt_failures();
-            // If we are the rekey initiator that already cut over on its
-            // own timer (no `pending`, `current` is the new session) but
-            // still retain a msg3 retransmission payload, an authenticated
-            // peer frame here decrypts against the post-cutover `current`
-            // session — proof the responder reached the new epoch. Stop
-            // retransmitting. Mirrors the FSP Current-slot confirm in
-            // handle_encrypted_session_msg. Only a `Current` frame counts: a
-            // bounce under the previous session's index is the responder
-            // still on the old keys, which is exactly what a lost msg3 looks
-            // like, and confirming on it would stop the resend that recovers.
-            if slot == LinkSlot::Current
-                && peer.rekey_msg3_payload().is_some()
-                && peer.pending_new_session().is_none()
-            {
-                peer.clear_rekey_msg3_payload();
-            }
             if peer.transport_id() != Some(transport_id) || peer.current_addr() != Some(remote_addr)
             {
                 prior = peer.transport_id().zip(peer.current_addr().cloned());
@@ -504,10 +477,13 @@ impl Node {
         let plaintext = &fallback.packet_data[fallback.fmp_plaintext_offset
             ..fallback.fmp_plaintext_offset + fallback.fmp_plaintext_len];
         // The worker decrypted with the session registered under the
-        // frame's receiver index. Only the current session's index is
-        // current; any other is the previous session draining, or one
-        // already gone by the time the bounce is processed.
-        let current = self
+        // frame's receiver index: the peering's current session, its
+        // previous one draining, or one already gone by the time the bounce
+        // is processed. A session that is gone authenticates nothing about
+        // the peering now holding the address, and the link's rekey machine
+        // holds no epoch to hear the frame under, so it is dropped, as the
+        // inline path, which cannot decrypt such a frame at all, drops it.
+        let (current, previous) = self
             .peers
             .get(&fallback.source_node_addr)
             .map(|p| {

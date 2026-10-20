@@ -4,16 +4,16 @@
 //! sender is on. A peer restart that our rekey reveals leaves the two ends of
 //! a link holding K-bits that do not reflect the same history: the restarted
 //! peer promotes our rekey as a fresh link at K-bit 0, while we complete it as
-//! a rekey. After that, the peer's frames on a new session can carry a K-bit
-//! equal to ours. These tests drive that path over loopback, with the XX
+//! a rekey, cutting over at once to K-bit 0 to match. After that, the peer's
+//! frames on a new session can carry a K-bit equal to ours. These tests drive that path over loopback, with the XX
 //! rekey's three messages, and assert on promotion of the pending session and
 //! on the receiver's consecutive decryption failure count, never on whether
 //! the peer survives.
 
 use super::*;
 use crate::node::tests::spanning_tree::{
-    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
-    process_available_packets, restarted_node,
+    TestNode, add_loopback_alias, cleanup_nodes, drain_all_packets, initiate_handshake,
+    make_test_node_with_config, process_available_packets, restarted_node,
 };
 use crate::proto::fmp::wire::{
     CommonPrefix, FLAG_KEY_EPOCH, PHASE_ESTABLISHED, PHASE_MSG2, PHASE_MSG3,
@@ -56,6 +56,16 @@ pub(super) async fn heartbeat(from: &mut TestNode, to: &NodeAddr) {
 /// Process every packet queued at `tn`, and only there.
 pub(super) async fn deliver(tn: &mut TestNode) -> usize {
     process_available_packets(std::slice::from_mut(tn)).await
+}
+
+/// Deliver queued packets between the nodes until a round moves none.
+pub(super) async fn pump(nodes: &mut [TestNode]) {
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if process_available_packets(nodes).await == 0 {
+            break;
+        }
+    }
 }
 
 /// `tn`'s consecutive decryption failure count for `peer`. A peer that is no
@@ -128,15 +138,6 @@ pub(super) async fn rekey_to_pending(
         1,
         "precondition: only the rekey msg1 is queued at the responder"
     );
-    let index = {
-        let peer = nodes[to].node.get_peer(&from_addr).unwrap();
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Responder),
-            "precondition: the responder holds a responder pending after the msg1"
-        );
-        peer.pending_our_index().unwrap()
-    };
     assert_eq!(
         deliver(&mut nodes[from]).await,
         1,
@@ -160,9 +161,17 @@ pub(super) async fn rekey_to_pending(
     peer.pending_our_index().unwrap()
 }
 
-/// Run `node`'s rekey tick, which cuts over the pending it initiated.
+/// Advance the test clock past the delay after which a link rekey's
+/// initiator cuts over to the pending session it completed.
+pub(super) fn pass_cutover_delay() {
+    crate::time::advance(fips_core::proto::rekey::Config::fmp().delay);
+}
+
+/// Run `node`'s rekey tick after the cutover delay, which cuts over the
+/// pending it initiated.
 pub(super) async fn cutover(tn: &mut TestNode, peer: &NodeAddr) {
     let expected = tn.node.get_peer(peer).unwrap().pending_our_index();
+    pass_cutover_delay();
     tn.node.poll_link_rekeys().await;
     let p = tn.node.get_peer(peer).unwrap();
     assert!(
@@ -171,21 +180,23 @@ pub(super) async fn cutover(tn: &mut TestNode, peer: &NodeAddr) {
     );
 }
 
-/// A link node A dialled to node B, after B restarted and A's rekey msg1
+/// A link node A dialled to node B, after B restarted and A's rekey
 /// revealed it. Built by [`restart_revealed_by_our_rekey`].
 pub(super) struct RestartedPeer {
     /// A at 0, the restarted B at 1.
     pub(super) nodes: Vec<TestNode>,
     pub(super) a_addr: NodeAddr,
     pub(super) b_addr: NodeAddr,
-    /// The index of the pending session A's rekey produced.
-    pub(super) pending_index: SessionIndex,
-    /// The restarted B's frames to A that arrived after its msg2, held back.
+    /// The index of the session A's rekey produced, current at A since
+    /// the msg2 that revealed the restart.
+    pub(super) new_index: SessionIndex,
+    /// The restarted B's frames to A that arrived after its promotion of
+    /// A's msg3, held back.
     pub(super) held: Vec<ReceivedPacket>,
 }
 
-/// Peer A and B, restart B, and let A's rekey msg1 reach the restarted B,
-/// as [`reveal_restart`] does.
+/// Peer A and B, restart B, and let A's rekey reach the restarted B, as
+/// [`reveal_restart`] does.
 async fn restart_revealed_by_our_rekey() -> RestartedPeer {
     reveal_restart(
         linked_pair(
@@ -197,13 +208,15 @@ async fn restart_revealed_by_our_rekey() -> RestartedPeer {
     .await
 }
 
-/// Restart B in the pair `nodes` built by [`linked_pair`], A at 0, and let
-/// A's rekey msg1 reach the restarted B.
+/// Restart B in the pair `nodes` built by [`linked_pair`], A at 0, and run
+/// A's rekey to the restarted B.
 ///
-/// B has no peer for A, so it promotes the msg1 as a fresh link at K-bit 0.
-/// A completes B's msg2 as a rekey, sees B's new startup epoch, and holds the
-/// session as an initiator pending. B's first frames on the new link, which
-/// name A's pending index, are held back from A.
+/// B has no peer for A: its leg answers A's rekey msg1, and it promotes A's
+/// msg3 as a fresh link at K-bit 0. A reads B's msg2, sees B's new startup
+/// epoch, and cuts over to the new session at once at K-bit 0, the value
+/// the restarted B holds, keeping its msg3 to resend until B is heard. A's
+/// msg3 and the frames A sent after its cutover reach B in that order. B's
+/// first frames on the new link are held back from A.
 pub(super) async fn reveal_restart(mut nodes: Vec<TestNode>) -> RestartedPeer {
     let a_addr = *nodes[0].node.node_addr();
     let b_addr = *nodes[1].node.node_addr();
@@ -221,6 +234,12 @@ pub(super) async fn reveal_restart(mut nodes: Vec<TestNode>) -> RestartedPeer {
         nodes[0].node.get_peer(&b_addr).unwrap().rekey_in_progress(),
         "precondition: A started a rekey to the restarted B"
     );
+    let attempt = nodes[0]
+        .node
+        .get_peer(&b_addr)
+        .unwrap()
+        .rekey_our_index()
+        .expect("precondition: A's rekey holds an index");
     assert_eq!(
         deliver(&mut nodes[1]).await,
         1,
@@ -236,40 +255,50 @@ pub(super) async fn reveal_restart(mut nodes: Vec<TestNode>) -> RestartedPeer {
     let msg2 = queued.remove(at);
     nodes[0].node.handle_msg2(msg2).await;
 
-    let pending_index = {
+    {
         let peer = nodes[0].node.get_peer(&b_addr).unwrap();
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Initiator),
-            "precondition: A holds an initiator pending after the msg2"
+        assert!(
+            peer.pending_role().is_none() && peer.our_index() == Some(attempt),
+            "precondition: A cut over to its rekey's session at the msg2 that revealed the restart"
         );
+        assert!(!peer.current_k_bit(), "precondition: A is at K-bit 0");
         assert_eq!(
             peer.remote_epoch(),
             Some(nodes[1].node.startup_epoch()),
             "precondition: A recorded the restarted B's startup epoch"
         );
-        peer.pending_our_index().unwrap()
-    };
-
-    let msg3s: Vec<ReceivedPacket> =
-        std::iter::from_fn(|| nodes[1].packet_rx.try_recv().ok()).collect();
-    assert!(
-        msg3s
-            .iter()
-            .all(|p| CommonPrefix::parse(&p.data).map(|c| c.phase) == Some(PHASE_MSG3)),
-        "precondition: only A's msg3 is queued at the restarted B"
-    );
-    for msg3 in msg3s {
-        nodes[1].node.handle_msg3(msg3).await;
     }
-    assert!(
-        nodes[1].node.get_peer(&a_addr).is_some(),
-        "precondition: the restarted B promoted A's rekey as a fresh link"
+
+    let to_b: Vec<ReceivedPacket> =
+        std::iter::from_fn(|| nodes[1].packet_rx.try_recv().ok()).collect();
+    assert_eq!(
+        to_b.first()
+            .and_then(|p| CommonPrefix::parse(&p.data))
+            .map(|c| c.phase),
+        Some(PHASE_MSG3),
+        "precondition: A's msg3 is the first thing queued at the restarted B"
     );
-    assert!(
-        !nodes[1].node.get_peer(&a_addr).unwrap().current_k_bit(),
-        "precondition: the restarted B is at K-bit 0"
-    );
+    for packet in to_b {
+        match CommonPrefix::parse(&packet.data).map(|c| c.phase) {
+            Some(PHASE_MSG3) => nodes[1].node.handle_msg3(packet).await,
+            _ => nodes[1].node.handle_encrypted_frame(packet).await,
+        }
+    }
+    {
+        let peer = nodes[1]
+            .node
+            .get_peer(&a_addr)
+            .expect("precondition: the restarted B promoted A's rekey as a fresh link");
+        assert!(
+            !peer.current_k_bit(),
+            "precondition: the restarted B is at K-bit 0"
+        );
+        assert_eq!(
+            peer.consecutive_decrypt_failures(),
+            0,
+            "precondition: the restarted B decrypts what A sent after its cutover"
+        );
+    }
 
     queued.extend(std::iter::from_fn(|| nodes[0].packet_rx.try_recv().ok()));
     assert!(
@@ -283,7 +312,7 @@ pub(super) async fn reveal_restart(mut nodes: Vec<TestNode>) -> RestartedPeer {
         nodes,
         a_addr,
         b_addr,
-        pending_index,
+        new_index: attempt,
         held: queued,
     }
 }
@@ -308,10 +337,7 @@ async fn a_peer_restart_revealed_by_our_rekey_leaves_the_peers_next_rekey_adopte
  {
     let mut r = restart_revealed_by_our_rekey().await;
     let (a_addr, b_addr) = (r.a_addr, r.b_addr);
-    cutover(&mut r.nodes[0], &b_addr).await;
     deliver_held(&mut r).await;
-    // A's cutover prompt reaches B.
-    deliver(&mut r.nodes[1]).await;
 
     // B rekeys and A answers.
     age_link(&mut r.nodes, 0, 1, trigger_age());
@@ -344,12 +370,24 @@ async fn a_peer_restart_revealed_by_our_rekey_leaves_the_peers_next_rekey_adopte
     cleanup_nodes(&mut r.nodes).await;
 }
 
-/// The restarted peer's first frames name our pending index with K-bit 0,
-/// equal to ours. They must promote the pending before our own tick does.
+/// The msg2 of our rekey that reveals a peer restart cuts over at once, to
+/// K-bit 0, the value the restarted peer promoted our rekey at: a
+/// three-message rekey has its msg3 to resend, so nothing waits for the
+/// peer's frames. The restarted peer's first frames then decrypt on our
+/// new session.
 #[tokio::test]
-async fn a_restarted_peers_first_frames_on_our_pending_index_promote_it_before_our_cutover() {
+async fn a_restart_our_rekey_msg2_reveals_cuts_over_at_once_and_the_restarted_peers_first_frames_decrypt()
+ {
     let mut r = restart_revealed_by_our_rekey().await;
     let (a_addr, b_addr) = (r.a_addr, r.b_addr);
+    {
+        let peer = r.nodes[0].node.get_peer(&b_addr).unwrap();
+        assert!(
+            peer.pending_new_session().is_none() && peer.our_index() == Some(r.new_index),
+            "A holds the rekey's session as current, with nothing pending"
+        );
+        assert!(!peer.current_k_bit(), "A's K-bit is 0");
+    }
     let held = std::mem::take(&mut r.held);
     let total = held.len() + 3;
     let mut held = held.into_iter();
@@ -367,18 +405,14 @@ async fn a_restarted_peers_first_frames_on_our_pending_index_promote_it_before_o
             0,
             "A's decrypt-failure count after B's frame {n}"
         );
-        if n == 1 {
-            let peer = r.nodes[0].node.get_peer(&b_addr).unwrap();
-            assert!(
-                peer.pending_new_session().is_none() && peer.our_index() == Some(r.pending_index),
-                "A's pending session is promoted by B's frame 1"
-            );
-            assert!(
-                !peer.current_k_bit(),
-                "A's K-bit is the frame's, 0, after the promotion"
-            );
-        }
     }
+    let peer = r.nodes[0].node.get_peer(&b_addr).unwrap();
+    assert_eq!(
+        peer.our_index(),
+        Some(r.new_index),
+        "A stays on the session"
+    );
+    assert!(!peer.current_k_bit(), "A's K-bit stays 0");
 
     cleanup_nodes(&mut r.nodes).await;
 }
@@ -438,10 +472,7 @@ async fn a_peer_rekey_frame_on_our_pending_index_promotes_it_even_when_the_k_bit
 /// handshake of its own, as one held before `peer` restarted would be.
 pub(super) fn stale_session(node: &mut Node, peer: NodeAddr) {
     let remote = crate::Identity::generate();
-    let mut initiator = crate::noise::HandshakeState::new_initiator(
-        node.identity().keypair(),
-        remote.pubkey_full(),
-    );
+    let mut initiator = crate::noise::HandshakeState::new_initiator(node.identity().keypair());
     initiator.set_local_epoch([1; 8]);
     let mut responder = crate::noise::HandshakeState::new_responder(remote.keypair());
     responder.set_local_epoch([2; 8]);
@@ -449,6 +480,8 @@ pub(super) fn stale_session(node: &mut Node, peer: NodeAddr) {
     responder.read_message_1(&msg1).unwrap();
     let msg2 = responder.write_message_2().unwrap();
     initiator.read_message_2(&msg2).unwrap();
+    let msg3 = initiator.write_message_3().unwrap();
+    responder.read_message_3(&msg3).unwrap();
     let entry = crate::node::session::SessionEntry::keyed(
         peer,
         initiator.into_session().unwrap(),
@@ -462,17 +495,22 @@ pub(super) fn stale_session(node: &mut Node, peer: NodeAddr) {
     );
 }
 
-/// After a cutover on a rekey that revealed a peer restart, our K-bit must be
-/// 0, the value the restarted peer holds, and a later cutover must toggle it
-/// as usual; the peer adopts our next rekey and the two K-bits stay equal.
-/// The cutover clears the end-to-end session the restarted peer lost.
+/// The cutover at the msg2 of a rekey that revealed a peer restart takes
+/// K-bit 0, the value the restarted peer holds, and a later cutover toggles
+/// it as usual; the peer adopts our next rekey and the two K-bits stay
+/// equal. The cutover clears the end-to-end session the restarted peer
+/// lost.
 #[tokio::test]
-async fn our_cutover_after_a_restart_revealing_msg2_takes_k_bit_zero_and_our_next_rekey_toggles_it()
-{
-    let mut r = restart_revealed_by_our_rekey().await;
-    let (a_addr, b_addr) = (r.a_addr, r.b_addr);
-    stale_session(&mut r.nodes[0].node, b_addr);
-    cutover(&mut r.nodes[0], &b_addr).await;
+async fn our_cutover_at_a_restart_revealing_msg2_takes_k_bit_zero_and_our_next_rekey_toggles_it() {
+    let mut nodes = linked_pair(
+        rekey_config(REKEY_AFTER_SECS),
+        rekey_config(REKEY_AFTER_SECS),
+    )
+    .await;
+    let b_addr = *nodes[1].node.node_addr();
+    stale_session(&mut nodes[0].node, b_addr);
+    let mut r = reveal_restart(nodes).await;
+    let a_addr = r.a_addr;
     assert!(
         !r.nodes[0].node.get_peer(&b_addr).unwrap().current_k_bit(),
         "A takes K-bit 0 at the cutover a revealed restart caused"
@@ -482,8 +520,6 @@ async fn our_cutover_after_a_restart_revealing_msg2_takes_k_bit_zero_and_our_nex
         "the cutover a revealed restart caused clears the end-to-end session the restarted peer lost"
     );
     deliver_held(&mut r).await;
-    // A's cutover prompt reaches B.
-    deliver(&mut r.nodes[1]).await;
 
     // A rekeys again, B answers, A cuts over.
     age_link(&mut r.nodes, 0, 1, trigger_age());
@@ -525,22 +561,13 @@ async fn our_cutover_after_a_restart_revealing_msg2_takes_k_bit_zero_and_our_nex
 async fn responder_pending_pair() -> (Vec<TestNode>, SessionIndex) {
     let mut nodes = linked_pair(rekey_config(REKEY_AFTER_SECS), rekey_config(u64::MAX)).await;
     age_link(&mut nodes, 0, 1, trigger_age());
+    let index = rekey_to_pending(&mut nodes, 0, 1).await;
     let b_addr = *nodes[0].node.node_addr();
-    nodes[0].node.poll_link_rekeys().await;
     assert_eq!(
-        deliver(&mut nodes[1]).await,
-        1,
-        "precondition: only B's rekey msg1 is queued at A"
+        nodes[1].node.get_peer(&b_addr).unwrap().pending_role(),
+        Some(Role::Responder),
+        "precondition: A holds a responder pending after the msg3"
     );
-    let index = {
-        let peer = nodes[1].node.get_peer(&b_addr).unwrap();
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Responder),
-            "precondition: A holds a responder pending after the msg1"
-        );
-        peer.pending_our_index().unwrap()
-    };
     let held: Vec<ReceivedPacket> =
         std::iter::from_fn(|| nodes[0].packet_rx.try_recv().ok()).collect();
     assert!(held.is_empty(), "precondition: nothing is queued at B");
@@ -642,117 +669,6 @@ async fn a_k_flipped_frame_on_the_current_index_that_fails_the_trial_still_decry
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A second-path dial on an aged session is answered as a rekey by the
-/// larger node and completed as a cross-connection swap by the smaller one,
-/// which keeps its K-bit. The smaller node's frames on the new session must
-/// promote the larger node's pending session, leave the two K-bits equal,
-/// and count no decryption failure.
-///
-/// The smaller node sees the larger as quiet, since a peer whose link is
-/// live is not dialled; the larger node still hears the smaller one.
-#[tokio::test]
-async fn an_alternate_path_dial_on_an_aged_session_leaves_both_ends_able_to_authenticate() {
-    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
-    let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
-        (0, 1)
-    } else {
-        (1, 0)
-    };
-    let s_addr = *nodes[s].node.node_addr();
-    let l_addr = *nodes[l].node.node_addr();
-    age_link(&mut nodes, s, l, Duration::from_secs(31));
-    super::control::quieten(&mut nodes[s], &l_addr);
-    let s_index_before = nodes[s].node.get_peer(&l_addr).unwrap().our_index();
-
-    // The smaller node dials the larger one on a second address.
-    let alias = add_loopback_alias(&nodes[l].addr);
-    let l_npub = nodes[l].node.npub();
-    nodes[s]
-        .node
-        .api_connect(&l_npub, &alias.to_string(), "loopback")
-        .await
-        .expect("precondition: api_connect on an alternate path succeeds");
-
-    // Deliver the msg1 to the larger node only: it answers as a rekey.
-    assert_eq!(
-        deliver(&mut nodes[l]).await,
-        1,
-        "precondition: only the smaller node's msg1 is queued at the larger node"
-    );
-    let pending_index = {
-        let peer = nodes[l].node.get_peer(&s_addr).unwrap();
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Responder),
-            "precondition: L holds a responder pending after the msg1"
-        );
-        peer.pending_our_index()
-            .expect("precondition: L's responder pending has an index")
-    };
-
-    // The smaller node completes the dial as a cross-connection swap.
-    pump(&mut nodes).await;
-    assert_ne!(
-        nodes[s].node.get_peer(&l_addr).unwrap().our_index(),
-        s_index_before,
-        "precondition: S swapped to the alternate-path session"
-    );
-
-    for n in 1..=5 {
-        heartbeat(&mut nodes[s], &l_addr).await;
-        deliver(&mut nodes[l]).await;
-        assert_eq!(
-            failures(&nodes[l], &s_addr),
-            0,
-            "L's decrypt-failure count after S's heartbeat {n}"
-        );
-        if n == 1 {
-            let peer = nodes[l].node.get_peer(&s_addr).unwrap();
-            assert!(
-                peer.pending_new_session().is_none(),
-                "L's pending session is promoted by heartbeat 1"
-            );
-            assert_eq!(
-                peer.our_index(),
-                Some(pending_index),
-                "L's current index is the pending index after heartbeat 1"
-            );
-            assert_eq!(
-                peer.current_k_bit(),
-                nodes[s].node.get_peer(&l_addr).unwrap().current_k_bit(),
-                "L's K-bit equals S's after the adoption"
-            );
-        }
-    }
-
-    // The larger node's reply decrypts at the smaller node.
-    let recv_before = nodes[s]
-        .node
-        .get_peer(&l_addr)
-        .unwrap()
-        .link_stats()
-        .packets_recv;
-    heartbeat(&mut nodes[l], &s_addr).await;
-    deliver(&mut nodes[s]).await;
-    assert_eq!(
-        failures(&nodes[s], &l_addr),
-        0,
-        "S's decrypt-failure count after L's heartbeat"
-    );
-    assert_eq!(
-        nodes[s]
-            .node
-            .get_peer(&l_addr)
-            .unwrap()
-            .link_stats()
-            .packets_recv,
-        recv_before + 1,
-        "S receives L's heartbeat on its current session"
-    );
-
-    cleanup_nodes(&mut nodes).await;
-}
-
 /// A cross-connection move puts the peer on the winning session with a new
 /// link rekey machine built from what the replaced one hands back. The
 /// smaller node's own rekey in flight is abandoned and its drain of the
@@ -762,11 +678,11 @@ async fn an_alternate_path_dial_on_an_aged_session_leaves_both_ends_able_to_auth
 /// epoch, the key-epoch bit last seen on the peer's frames, and the replay
 /// record.
 ///
-/// The larger node dials the smaller one, so the smaller node's record
-/// holds the link setup. The smaller node rekeys the link, cuts over and
-/// hears the peer under the new session, starts another rekey, and then
-/// dials the larger node on a second address, which the larger node
-/// answers as a rekey and the smaller node completes as a swap.
+/// The larger node dials the smaller one. The smaller node rekeys the link,
+/// cuts over and hears the peer under the new session, starts another
+/// rekey, and then dials the larger node on a second address, which the
+/// larger node answers with a fresh leg and the smaller node completes as a
+/// swap: the smaller node's outbound handshake wins the crossing.
 #[tokio::test]
 async fn a_cross_connection_move_abandons_our_rekey_ends_the_drain_and_keeps_the_k_bits_start_link_age_and_record()
  {
@@ -809,10 +725,8 @@ async fn a_cross_connection_move_abandons_our_rekey_ends_the_drain_and_keeps_the
     let replaced = nodes[s].node.get_peer(&l_addr).unwrap().our_index();
     let before = nodes[s].node.get_peer(&l_addr).unwrap().link_anchors();
     assert!(
-        before.as_ref().is_some_and(
-            |a| a.peer_k.is_some() && a.record != fips_core::proto::rekey::Record::new()
-        ),
-        "precondition: S has seen L's key-epoch bit and holds the link setup's record"
+        before.as_ref().is_some_and(|a| a.peer_k.is_some()),
+        "precondition: S has seen L's key-epoch bit"
     );
     #[cfg(unix)]
     {
@@ -823,8 +737,8 @@ async fn a_cross_connection_move_abandons_our_rekey_ends_the_drain_and_keeps_the
         node.run_link_outputs(&l_addr, offer);
     }
 
-    // S dials L on a second address; L answers as a rekey, and S completes
-    // the dial as a cross-connection swap.
+    // S dials L on a second address; L answers on a fresh leg, and S
+    // completes the dial as a cross-connection swap.
     super::control::quieten(&mut nodes[s], &l_addr);
     let alias = add_loopback_alias(&nodes[l].addr);
     let l_npub = nodes[l].node.npub();
@@ -869,105 +783,6 @@ async fn a_cross_connection_move_abandons_our_rekey_ends_the_drain_and_keeps_the
     );
 
     cleanup_nodes(&mut nodes).await;
-}
-
-/// Hand A a fresh msg1 with the restarted B's identity and startup epoch,
-/// arriving from B's address on A's established link, after discarding
-/// whatever was queued at B. Returns whether anything A sent in answer is a
-/// msg2 queued at B.
-async fn crossing_dial_from_restarted_peer(r: &mut RestartedPeer) -> bool {
-    while r.nodes[1].packet_rx.try_recv().is_ok() {}
-    let b_identity = r.nodes[1].node.identity().clone();
-    let b_epoch = r.nodes[1].node.startup_epoch();
-    let source = r.nodes[0]
-        .node
-        .get_peer(&r.b_addr)
-        .unwrap()
-        .current_addr()
-        .cloned()
-        .expect("precondition: A holds B's link address");
-    let data = super::establish_chartests::craft_msg1_wire(
-        &r.nodes[0].node,
-        &b_identity,
-        b_epoch,
-        SessionIndex::new(0x7171),
-        Node::now_ms(),
-    );
-    let transport_id = r.nodes[0].transport_id;
-    r.nodes[0]
-        .node
-        .handle_msg1(ReceivedPacket::with_timestamp(
-            transport_id,
-            source,
-            data,
-            Node::now_ms(),
-        ))
-        .await;
-    std::iter::from_fn(|| r.nodes[1].packet_rx.try_recv().ok())
-        .any(|p| CommonPrefix::parse(&p.data).map(|c| c.phase) == Some(PHASE_MSG2))
-}
-
-/// Our rekey revealed B's restart, and A has cut over to the session it
-/// produced. 12 s later a crossing dial from B, which promoted A's msg1 as
-/// a fresh link, must not be taken for a rekey: the link A shares with the
-/// restarted B is 12 s old, however old A's peering is.
-#[tokio::test]
-async fn a_peer_restart_revealed_by_our_rekey_restarts_our_link_age_so_its_crossing_dial_is_not_taken_for_a_rekey()
- {
-    let mut r = restart_revealed_by_our_rekey().await;
-    let b_addr = r.b_addr;
-    cutover(&mut r.nodes[0], &b_addr).await;
-    deliver_held(&mut r).await;
-    let link = {
-        let p = r.nodes[0].node.get_peer_mut(&b_addr).unwrap();
-        p.test_backdate_session_established(Duration::from_secs(12));
-        p.test_backdate_drain_started(Duration::from_secs(12));
-        p.link_id()
-    };
-
-    let answered = crossing_dial_from_restarted_peer(&mut r).await;
-
-    let p = r.nodes[0].node.get_peer(&b_addr).expect("A keeps B");
-    assert!(
-        p.pending_new_session().is_none(),
-        "the crossing dial must arm no pending"
-    );
-    assert_eq!(p.link_id(), link, "A's peering must keep its link");
-    assert!(!answered, "the crossing dial must draw no msg2");
-    cleanup_nodes(&mut r.nodes).await;
-}
-
-/// Our rekey revealed B's restart, and A still holds the pending it
-/// produced. A crossing dial from B, silent at A for 16 s, must be refused
-/// while the pending is held: A keeps its pending and its link, and the
-/// cutover then proceeds.
-#[tokio::test]
-async fn a_resent_dial_from_a_silent_restarted_peer_while_our_restart_pending_is_held_is_refused_and_keeps_the_link()
- {
-    let mut r = restart_revealed_by_our_rekey().await;
-    let b_addr = r.b_addr;
-    let link = {
-        let p = r.nodes[0].node.get_peer_mut(&b_addr).unwrap();
-        p.touch(Node::now_ms() - 16_000);
-        p.link_id()
-    };
-
-    let answered = crossing_dial_from_restarted_peer(&mut r).await;
-
-    let p = r.nodes[0]
-        .node
-        .get_peer(&b_addr)
-        .expect("A must keep its peering with B");
-    assert_eq!(p.link_id(), link, "A's peering must keep its link");
-    assert_eq!(
-        p.pending_our_index(),
-        Some(r.pending_index),
-        "A must keep the pending its rekey produced"
-    );
-    assert!(!answered, "the crossing dial must draw no msg2");
-    cutover(&mut r.nodes[0], &b_addr).await;
-    deliver_held(&mut r).await;
-    cleanup_nodes(&mut r.nodes).await;
 }
 
 /// Our link rekey's new session takes the inverse of the K-bit the peer

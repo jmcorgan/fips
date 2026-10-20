@@ -1,25 +1,30 @@
 # core/src/proto/fmp/rekey/tests
 
-The link rekey profile's tests, attached from `ik.rs` with `#[path]` so
+The link rekey profile's tests, attached from `xx.rs` with `#[path]` so
 they can name its private items.
 
-- `ik.rs`: a conformance test. It checks that the profile's msg1 and
-  msg2 parse with the deployed link parsers and read with a deployed
-  Noise IK handshake, that each carries its sender's startup epoch and
-  the indices the framing names, that `read_msg1` refuses an altered copy
-  or a msg1 for another static key, that a failed msg2 read leaves the
-  attempt readable, that the epoch keys open each other's frames over the
-  16-byte header with counters from 0 and refuse a repeated counter and
-  `2^64 - 1`, and that the prompt is a Heartbeat under the inner header.
-- `ik.rs` also holds the replay-record test. A responder's machine built
-  from a link setup's `setup_record` takes msg1s read by `read_msg1`: the
-  setup msg1 again draws the setup msg2 while the link is young, a copy
-  with its sender index rewritten is refused as answered before, a fresh
-  msg1 goes to the shell and is remembered, and once the link is old
-  enough both setup copies are refused, a fresh msg1 arms a pending, that
-  msg1 again draws the same msg2 and a rewritten copy of it is refused.
-  It holds the two digests the production profile computes (of the whole
-  framed msg1 and of the Noise ephemeral behind the header) to the ones
-  the record compares.
-
-Whole rekeys on this profile run in `proto/rekey/tests/legacy/`.
+- `xx.rs`:
+  - `xx_profile_writes_and_reads_the_handshake_and_frames_next_sends_byte_for_byte`:
+    msg1 and msg3 equal what next's plain code writes from the same
+    entropy and state; next's leg reads the msg3 with its payload and
+    declaration; a failed msg2 read leaves the attempt readable; a reply
+    with no index to declare is refused; `read_final` takes the msg3 to
+    the same facts and session as the plain read, and a tampered copy
+    hands its lease back and leaves the leg readable; frames sealed by
+    the profile open under next's plain session and back; the prompt is
+    a Heartbeat.
+  - `xx_reply_reads_the_payload_on_its_fork`: a plain responder reads the
+    msg3 `reply` writes after a msg2 with a payload and reaches the same
+    handshake hash, and `read_final` reaches a plain initiator's.
+  - `two_xx_link_machines_rekey_through_a_leg_and_the_delayed_cutover`:
+    two machines built on one XX link; the initiator's attempt answered
+    by a leg stand-in (plain responder code, a leased index), its msg3
+    read by `read_final` and handed to the responder as a rekey; the
+    initiator cuts over after its delay and resends msg3 until the peer
+    is heard, the responder adopts on the first frame, frames open at
+    both ends, and every index is accounted for.
+  - `lost_xx_final_is_resent_until_heard`: the first msg3 is lost; a
+    resend completes the leg and both ends end on the new epoch.
+  - `xx_rekey_reply_from_another_key_keeps_the_attempt`: a msg2 from a
+    third key reads, fails the bond, sends no msg3 and leaves the attempt
+    and its deadline as they were; the peer's msg2 then completes it.

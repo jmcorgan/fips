@@ -566,13 +566,15 @@ of one tick after the last resend `node.rate_limit.handshake_max_resends`
 allows and the handshake timeout); the next waits a backoff of one tick,
 doubled for each rekey given up in a row (at most 120 seconds at the
 defaults), plus up to 15 seconds. A msg1 or msg2 the transport fails to
-send counts as lost and does not end the rekey. A link starts no rekey of its
-own within 30 seconds of answering one its peer started, nor, whatever the
-thresholds, before the link is one tick past 30 seconds old and one tick
-past 30 seconds since its last rekey. For links,
-`node.rekey.after_secs` below 45 seconds (the 15 seconds of jitter plus the
-30-second link age at which a peer answers a rekey) is taken as 45, with a
-warning.
+send counts as lost and does not end the rekey. The node that started a link
+rekey moves to the new keys 2 seconds after it completes, or after the
+handshake's round trip when that is longer, and resends its msg3 at 1, 3, 7
+and 15 seconds until it hears the peer under the new keys. A link starts no
+rekey of its own within 30 seconds of taking one its peer started, while its
+msg3 still waits for the peer, nor, whatever the thresholds, before the link
+is one tick past 30 seconds old and one tick past 30 seconds since its last
+rekey. For links, `node.rekey.after_secs` below 45 seconds (the 15 seconds
+of jitter plus that 30-second link age) is taken as 45, with a warning.
 For sessions, a value above the largest the rekey timers take (4294967295
 seconds, 2^62 messages) is taken as that largest value, which never falls
 due. The `node.rekey.enabled` key was removed

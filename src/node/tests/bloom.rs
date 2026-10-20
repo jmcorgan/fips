@@ -1298,7 +1298,17 @@ fn arm_rekey(fx: &mut FlipFixture) {
 /// cut over.
 async fn cutover(nodes: &mut [TestNode], a: usize, b: usize) {
     let before = epoch_of(nodes, a, b);
+    let addr_b = *nodes[b].node.node_addr();
     for _ in 0..6 {
+        // An initiator holding the pending its msg2 completed cuts over at
+        // its first poll after the cutover delay.
+        if nodes[a]
+            .node
+            .get_peer(&addr_b)
+            .is_some_and(|p| p.pending_new_session().is_some())
+        {
+            super::rekey_parity::pass_cutover_delay();
+        }
         nodes[a].node.poll_link_rekeys().await;
         nodes[b].node.poll_link_rekeys().await;
         for _ in 0..3 {
@@ -1556,7 +1566,9 @@ async fn test_bloom_reports_from_the_previous_session_do_not_trigger_resends() {
     }
     assert!(!held.is_empty(), "setup: P must queue its reports for M");
 
-    // M cuts over, then receives P's old-session frames.
+    // M cuts over after the cutover delay, then receives P's old-session
+    // frames.
+    super::rekey_parity::pass_cutover_delay();
     fx.nodes[M].node.poll_link_rekeys().await;
     assert_ne!(link_epoch(&fx), before, "setup: M must cut over");
     for packet in held {
@@ -2144,90 +2156,6 @@ async fn filter_announce_debounce_stamps_the_monotonic_clock() {
         node.metrics().bloom.debounce_suppressed.get(),
         suppressed,
         "a peer inside the debounce window must not enter the ready set"
-    );
-
-    cleanup_nodes(&mut nodes).await;
-}
-
-/// A peer that drops its side of an aged link and dials again is answered
-/// as a rekey: the answering node keeps the peer, and with it the record of
-/// the filter it last sent, which the redialing peer discarded with the old
-/// peering. Once the answering node cuts over to the redial's session it
-/// sends the peer its filter again, so the peer holds one within a few
-/// Bloom ticks.
-#[tokio::test]
-async fn redial_answered_as_a_rekey_resends_the_filter() {
-    use super::rekey_parity::{deliver, linked_pair, pump, rekey_config, trigger_age};
-    use fips_core::proto::rekey::Role;
-
-    let (a, b) = (0, 1);
-    let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
-    let a_addr = *nodes[a].node.node_addr();
-    let b_addr = *nodes[b].node.node_addr();
-    assert!(
-        nodes[a]
-            .node
-            .get_peer(&b_addr)
-            .unwrap()
-            .inbound_filter()
-            .is_some(),
-        "precondition: A holds B's filter on the first peering"
-    );
-    for tn in nodes.iter_mut() {
-        tn.node.bloom_state.set_update_debounce_ms(0);
-    }
-
-    // B's link is old enough to answer a same-epoch msg1 as a rekey. A drops
-    // B without a word and dials it again from the same process.
-    nodes[b]
-        .node
-        .get_peer_mut(&a_addr)
-        .unwrap()
-        .test_backdate_session_established(trigger_age());
-    nodes[a].node.remove_active_peer(&b_addr);
-    initiate_handshake(&mut nodes, a, b).await;
-    assert_eq!(
-        deliver(&mut nodes[b]).await,
-        1,
-        "precondition: only A's msg1 is queued at B"
-    );
-    let pending = {
-        let peer = nodes[b].node.get_peer(&a_addr).unwrap();
-        assert_eq!(
-            peer.pending_role(),
-            Some(Role::Responder),
-            "precondition: B answers the redial as a rekey"
-        );
-        peer.pending_our_index().unwrap()
-    };
-
-    // A promotes B from the msg2 and sends under the new session, which B
-    // adopts.
-    pump(&mut nodes).await;
-    assert_eq!(
-        nodes[b].node.get_peer(&a_addr).unwrap().our_index(),
-        Some(pending),
-        "precondition: B cut over to the redial's session"
-    );
-    assert!(
-        nodes[a].node.get_peer(&b_addr).is_some(),
-        "precondition: A holds B again"
-    );
-
-    for _ in 0..3 {
-        for tn in nodes.iter_mut() {
-            tn.node.check_bloom_state().await;
-        }
-        pump(&mut nodes).await;
-    }
-    assert!(
-        nodes[a]
-            .node
-            .get_peer(&b_addr)
-            .unwrap()
-            .inbound_filter()
-            .is_some(),
-        "A must hold B's filter after B answered its redial as a rekey"
     );
 
     cleanup_nodes(&mut nodes).await;

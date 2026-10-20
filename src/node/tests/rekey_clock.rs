@@ -6,7 +6,9 @@
 //! clock and advance the monotonic one independently, with the test hooks of
 //! `crate::time`, and assert that only monotonic time moves a rekey.
 
-use super::rekey_parity::{age_link, linked_pair, rekey_config, trigger_age};
+use super::rekey_parity::{
+    age_link, deliver, linked_pair, pass_cutover_delay, rekey_config, trigger_age,
+};
 use super::spanning_tree::{TestNode, cleanup_nodes};
 use super::*;
 
@@ -129,10 +131,16 @@ async fn a_message_triggered_link_rekey_waits_for_the_31_s_link_and_session_age_
         "the first rekey must start at the first poll once the link is 31 s old, not at {at:?}"
     );
 
-    // Node 1 answers, node 0 cuts over, and its next frame is counted.
+    // Node 1's leg answers, node 0 completes on the msg2 and node 1 takes
+    // its msg3, node 0 cuts over after the delay, the two hear each other
+    // under the new session, and node 0's next frame is counted.
     nodes[1].node.handle_msg1(msg1).await;
-    super::rekey_parity::deliver(&mut nodes[0]).await;
+    deliver(&mut nodes[0]).await;
+    deliver(&mut nodes[1]).await;
+    pass_cutover_delay();
     nodes[0].node.poll_link_rekeys().await;
+    deliver(&mut nodes[1]).await;
+    deliver(&mut nodes[0]).await;
     assert!(
         nodes[0]
             .node

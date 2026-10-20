@@ -26,7 +26,6 @@ use crate::peer::ActivePeer;
 use crate::proto::bloom::BloomFilter;
 use crate::proto::fmp::Msg1Digest;
 use crate::utils::index::SessionIndex;
-use fips_core::proto::rekey::Role;
 use std::fmt;
 use std::time::Instant;
 
@@ -138,6 +137,44 @@ impl<T: fmt::Display> fmt::Display for OrNone<T> {
     }
 }
 
+/// Whether a failing frame was tried against the peer's pending session.
+/// The link's rekey machine opens a frame under the one session its
+/// receiver index names, so the pending session is tried exactly for a
+/// frame that names its index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trial {
+    /// The peer held no pending session.
+    NotRunNoPending,
+    /// A pending session was held, but the frame named another index.
+    NotRunOtherIndex,
+    /// The frame named the pending session's index, was tried against it,
+    /// and did not authenticate.
+    RunIndex,
+}
+
+impl Trial {
+    /// The trial outcome for a frame naming `index` that went on to fail,
+    /// with the peer's pending index `pending`. A trial that succeeded never
+    /// reaches a failure line.
+    pub(crate) fn of(pending: Option<SessionIndex>, index: SessionIndex) -> Self {
+        match pending {
+            None => Self::NotRunNoPending,
+            Some(p) if p == index => Self::RunIndex,
+            Some(_) => Self::NotRunOtherIndex,
+        }
+    }
+}
+
+impl fmt::Display for Trial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotRunNoPending => "not-run-no-pending",
+            Self::NotRunOtherIndex => "not-run-other-index",
+            Self::RunIndex => "run-index",
+        })
+    }
+}
+
 /// Which of a peer's sessions a receiver index names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
@@ -160,11 +197,7 @@ impl Slot {
         } else if peer.previous_our_index() == Some(idx) {
             Self::Previous
         } else if peer.pending_our_index() == Some(idx) {
-            match peer.pending_role() {
-                Some(Role::Responder) => Self::PendingResponder,
-                Some(Role::Initiator) => Self::PendingInitiator,
-                None => Self::Unknown,
-            }
+            Self::Pending
         } else {
             Self::Unknown
         }

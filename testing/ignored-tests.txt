@@ -31,10 +31,6 @@ environment   fips-mesh  mdns::tests::matched_scope_peers_observe_each_other  sr
 environment   fips-mesh  node::netmon::tests::a_route_change_alone_reaches_the_watcher  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_going_down_is_reported_only_when_a_peer_was_reached_over_it  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_no_peer_is_reached_through_does_not_move_the_fingerprint  src/node/netmon/tests.rs
-environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_after_claims_of_a_connected_peer_stop_at_the_drop  src/node/tests/claim_slots.rs
-environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_when_its_retries_fall_between_slot_releases  src/node/tests/claim_slots.rs
-environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_when_no_claims_are_made  src/node/tests/claim_slots.rs
-environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_while_claims_of_a_connected_peer_continue  src/node/tests/claim_slots.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::the_radio_comes_up_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::dials_a_peer_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware  src/transport/ble/io_macos/corebluetooth.rs

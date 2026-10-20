@@ -10,8 +10,8 @@
 
 use super::*;
 use crate::node::tests::rekey_parity::{
-    cutover, deliver, deliver_held, failures, heartbeat, linked_pair, pump, rekey_config,
-    reveal_restart, stale_session,
+    deliver, deliver_held, failures, heartbeat, linked_pair, pump, rekey_config, reveal_restart,
+    stale_session,
 };
 use crate::node::tests::spanning_tree::{
     TestNode, cleanup_nodes, initiate_handshake, restarted_node,
@@ -43,8 +43,8 @@ fn clamp(node: &Node, peer: &NodeAddr) -> Option<u16> {
     node.path_mtu_lookup_get(&crate::Ipv6Address::from_node_addr(peer))
 }
 
-/// Our rekey msg2 reveals that B restarted. At the cutover A resets what it
-/// held for B's previous run (its tree declaration, its filter, the
+/// Our rekey msg2 reveals that B restarted, and A cuts over at once. At the
+/// cutover A resets what it held for B's previous run (its tree declaration, its filter, the
 /// end-to-end session and the clamp entry that session tightened) and
 /// announces its tree and filter again under the new session, which B
 /// decrypts; B's own announces, whose sequence numbers began again, are
@@ -78,7 +78,6 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         .set_last_tree_announce_sent_ms(0);
 
     let mut r = reveal_restart(nodes).await;
-    cutover(&mut r.nodes[0], &b_addr).await;
 
     {
         let a = &r.nodes[0].node;
@@ -182,12 +181,15 @@ async fn outbound_completion_with_a_changed_epoch_replaces_the_machine() {
         drop(std::mem::replace(&mut nodes[r], restarted));
         let epoch = nodes[r].node.startup_epoch();
         initiate_handshake(&mut nodes, d, r).await;
+        // The restarted node's leg answers the msg1, the dialer reads the
+        // msg2 and sends msg3, and the restarted node promotes the dial.
+        deliver(&mut nodes[r]).await;
+        deliver(&mut nodes[d]).await;
         deliver(&mut nodes[r]).await;
         assert!(
             nodes[r].node.get_peer(&d_addr).is_some(),
             "precondition ({dialer_smaller}): the restarted node promoted the dial as a fresh link"
         );
-        deliver(&mut nodes[d]).await;
 
         {
             let dn = &nodes[d].node;
@@ -218,10 +220,7 @@ async fn outbound_completion_with_a_changed_epoch_replaces_the_machine() {
         heartbeat(&mut nodes[d], &r_addr).await;
         deliver(&mut nodes[r]).await;
         assert!(
-            nodes[r]
-                .node
-                .get_peer(&d_addr)
-                .is_some_and(|p| p.is_heard()),
+            nodes[r].node.get_peer(&d_addr).is_some_and(|p| p.heard()),
             "the restarted node hears the dialer under the dial's session (dialer smaller: {dialer_smaller})"
         );
         heartbeat(&mut nodes[r], &d_addr).await;

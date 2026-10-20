@@ -3104,13 +3104,14 @@ async fn drive_xx_handshake(
 
     // node_a initiates the outbound handshake.
     let link_id_a = node_a.allocate_link_id();
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_lease_a = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = SessionIndex::new(our_lease_a.index());
     // Mirror the production dial path: the seam seeds the outbound leg's
     // control machine, which owns the handshake crypto.
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_lease_a)
                 .with_transport_id(transport_id)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -3261,6 +3262,14 @@ async fn handle_msg3_silent_drops_at_cap_for_new_peer() {
         node_b.index_allocator.count(),
         before_index_count,
         "rejected handshake's allocated session index must be freed"
+    );
+
+    // The refusal is counted as the cap's, not as a bad state.
+    let hs = &node_b.stats().handshake;
+    assert_eq!(hs.max_peers, 1, "the cap refusal must count as max_peers");
+    assert_eq!(
+        hs.bad_state, 0,
+        "the cap refusal must not count as bad_state"
     );
 }
 
@@ -4824,11 +4833,12 @@ async fn pump_one_msg1(
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
 
     let link_id_a = node_a.allocate_link_id();
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_lease_a = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = SessionIndex::new(our_lease_a.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_lease_a)
                 .with_transport_id(transport_id)
                 .with_source_addr(remote_addr_b.clone()),
         )

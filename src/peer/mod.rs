@@ -8,7 +8,6 @@
 mod active;
 pub(crate) mod machine;
 
-pub(crate) use active::RekeyMsg2Step;
 pub use active::{ActivePeer, ConnectivityState};
 
 use crate::NodeAddr;
@@ -73,8 +72,9 @@ pub(crate) fn test_link_params() -> Params {
 
 /// What building a link's rekey machine borrows from the node: its index
 /// allocator, its static keys, its address, the parameters a new link's
-/// machine is built with, the replay record it starts from and whether a
-/// decrypt-worker pool runs.
+/// machine is built with, the replay record it starts from, whether a
+/// decrypt-worker pool runs and the node's profile, which a rekey's msg3
+/// carries.
 pub(crate) struct LinkCaps<'a> {
     /// The node's session-index allocator.
     pub(crate) indices: &'a mut IndexAllocator,
@@ -84,8 +84,7 @@ pub(crate) struct LinkCaps<'a> {
     pub(crate) me: NodeAddr,
     /// The parameters a new link's machine is built with.
     pub(crate) params: Params,
-    /// The record a closed link with the same peer at the same startup
-    /// epoch left, empty when there was none; the machine takes it. A
+    /// The record the machine starts from, empty for a new link. A
     /// cross-connection move does not read it: the moved machine takes the
     /// record of the machine it replaces.
     pub(crate) record: Record,
@@ -93,6 +92,8 @@ pub(crate) struct LinkCaps<'a> {
     /// its first session at once. False at a promotion, which offers it once
     /// the peer is in the node's table.
     pub(crate) workers: bool,
+    /// The node's profile.
+    pub(crate) profile: crate::proto::fmp::NodeProfile,
 }
 
 // ============================================================================

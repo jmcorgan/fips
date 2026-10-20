@@ -138,17 +138,13 @@ impl Node {
     /// current, pending and previous sessions' indices and its own rekey
     /// handshake's from `peers_by_index` by the transport recorded at each
     /// binding, revoke them from the decrypt workers that hold them, and
-    /// free them. The machine's replay record is filed under the peer and
-    /// its startup epoch, for the next link with the peer at that epoch.
+    /// free them.
     pub(in crate::node) fn release_peer_indices(
         &mut self,
         node_addr: &NodeAddr,
         peer: &mut crate::peer::ActivePeer,
     ) {
-        let (out, carried) = peer.close();
-        if let Some((epoch, record)) = carried {
-            self.link_records.file(*node_addr, epoch, record);
-        }
+        let out = peer.close();
         self.run_link_outputs(node_addr, out);
     }
 

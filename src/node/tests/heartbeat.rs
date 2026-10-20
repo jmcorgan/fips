@@ -341,44 +341,6 @@ async fn a_peer_heard_only_under_the_previous_session_after_a_cutover_keeps_it_t
     cleanup_nodes(&mut nodes).await;
 }
 
-/// Next-only: a peer past the link-dead timeout is NOT reaped while a
-/// retained FMP rekey msg3 is still being retransmitted with its budget
-/// unexhausted. This is the XX/next msg3-liveness arm of the suppression
-/// predicate, distinct from the msg1 arm above.
-#[tokio::test]
-async fn heartbeat_suppressed_during_msg3_retransmit() {
-    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
-    verify_tree_convergence(&nodes);
-
-    let addr_1 = *nodes[1].node.node_addr();
-    assert!(nodes[0].node.get_peer(&addr_1).is_some());
-
-    set_link_dead_timeout(&mut nodes[0].node, 0);
-
-    // Retain a msg3 payload with budget left (count 0 < max_resends), with
-    // no msg1 rekey in flight: only the msg3 arm of the guard can hold.
-    let peer = nodes[0].node.get_peer_mut(&addr_1).unwrap();
-    peer.set_rekey_msg3_payload(vec![0xCD; 64], 1000);
-    assert!(!peer.rekey_in_progress());
-    assert_eq!(
-        nodes[0]
-            .node
-            .get_peer(&addr_1)
-            .unwrap()
-            .rekey_msg3_resend_count(),
-        0
-    );
-
-    nodes[0].node.check_link_heartbeats().await;
-
-    assert!(
-        nodes[0].node.get_peer(&addr_1).is_some(),
-        "peer reaped despite a retained rekey msg3 with budget remaining"
-    );
-
-    cleanup_nodes(&mut nodes).await;
-}
-
 /// Regression guard: with no rekey in flight, a peer past the link-dead
 /// timeout is reaped exactly as before.
 #[tokio::test]

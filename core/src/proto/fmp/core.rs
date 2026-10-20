@@ -261,17 +261,10 @@ pub struct EstablishSnapshot {
     pub existing_peer_epoch: Option<[u8; 8]>,
     /// The existing peer has an established Noise session.
     pub has_session: bool,
-    /// The existing peer already holds a pending post-rekey session awaiting
-    /// K-bit cutover. On XX this is one of the two dual-init tie-break states
-    /// (the widened window IK never reached) — NOT an unconditional reject.
-    pub pending_new_session: bool,
-    /// The existing peer has a rekey handshake in flight (the other dual-init
-    /// tie-break state).
-    pub rekey_in_progress: bool,
-    /// The existing peer's stored `msg2` wire bytes (an opaque blob), resent on
-    /// a same-epoch duplicate `msg3`. `None` when there is no existing peer or
-    /// it has no stored `msg2`.
-    pub existing_msg2: Option<Vec<u8>>,
+    /// The existing peer's stored `msg2` wire bytes (an opaque blob), sent
+    /// again on a same-epoch duplicate `msg3`. `None` when there is no
+    /// existing peer or it has no stored `msg2`.
+    pub stored_msg2: Option<Vec<u8>>,
     /// The `msg3` arrived on a *different* link than the existing peer's active
     /// link (`existing_peer.link_id() != link_id`). Required for the inline
     /// cross-connection branch: a `msg3` on the same link is never a
@@ -331,40 +324,17 @@ pub struct OutboundSnapshot {
     /// Pre-evaluated cross-connection tie-break: our *outbound* connection wins
     /// (we are the smaller NodeAddr). Only meaningful when `has_existing_peer`.
     pub our_outbound_wins: bool,
-    /// The existing peer's link was set up by an earlier dial of ours, not by
-    /// the peer's msg1. Only meaningful when `has_existing_peer`.
-    pub own_dial: bool,
-}
-
-/// A snapshot of the two identities the *initiator's rekey* `msg2` completion
-/// decision compares, taken by the shell once the Noise step has run.
-///
-/// A rekey `msg2` is dispatched to its peer by the session index the initiator
-/// itself allocated, which travels in the cleartext rekey-`msg1` header and is
-/// therefore observable on path. Under XX the responder's static is *learned*
-/// from `msg2` rather than pinned a priori (as it was under IK), so a
-/// cryptographically valid `msg2` on its own proves only that *someone*
-/// answered — not that the peer we are already bonded to answered. This
-/// snapshot carries the two facts that settle it; no Noise material reaches the
-/// core.
-pub struct RekeyMsg2Snapshot {
-    /// The node address of the established peer whose rekey this `msg2` claims
-    /// to complete — the `Node::peers` key the rekey index resolved to.
-    pub established_peer: NodeAddr,
-    /// The node address derived from the static key learned in this `msg2`,
-    /// i.e. the identity the completed Noise session would actually be bound to.
-    pub learned_peer: NodeAddr,
 }
 
 /// A snapshot of the two identities the *initial outbound* `msg2` completion
 /// decision compares, taken by the shell once the Noise step has run.
 ///
-/// The sibling of [`RekeyMsg2Snapshot`] one rung earlier in the lifecycle: the
-/// rekey gate protects a link that is already established, this one protects the
-/// link being formed. Same root cause — XX *learns* the responder's static from
-/// `msg2` instead of pinning it a priori as IK did, so a cryptographically valid
-/// `msg2` proves only that *someone* answered the dial, never that the peer we
-/// meant to reach answered it. No Noise material reaches the core.
+/// XX *learns* the responder's static from `msg2` instead of pinning it a
+/// priori as IK did, so a cryptographically valid `msg2` proves only that
+/// *someone* answered the dial, never that the peer we meant to reach answered
+/// it. A link rekey's `msg2` gets the same check from the link's rekey machine
+/// (`Bond::check`); this one protects the link being formed. No Noise material
+/// reaches the core.
 pub struct DialMsg2Snapshot {
     /// The node address this leg was dialed at, or `None` if the dial named no
     /// peer.
@@ -429,10 +399,10 @@ pub trait LifecycleView {
 /// initiator's identity only at `msg3`, the same-epoch cross-connection
 /// tie-break resolves *here* (on `msg3`) rather than on the outbound `msg2`
 /// completion — hence the [`CrossConnect`](InboundDecision::CrossConnect)
-/// variant that the IK inbound decision deliberately lacked. The dual-init
-/// tie-break is also widened: it covers both the `rekey_in_progress` and the
-/// `pending_new_session` states (see [`EstablishSnapshot::pending_new_session`]),
-/// where IK only caught the former.
+/// variant that the IK inbound decision deliberately lacked. A declared rekey
+/// is not decided here: the completion goes to the peer's rekey machine
+/// ([`PeerRekey`](InboundDecision::PeerRekey)), which holds the tie-break
+/// against a rekey of its own.
 #[derive(Debug)]
 pub enum InboundDecision {
     /// No existing peer for this identity: promote the completed connection via
@@ -446,9 +416,8 @@ pub enum InboundDecision {
     /// the teardown / reconnect target.
     RestartThenPromote { peer: NodeAddr },
     /// Same-epoch cross-connection resolved inline on `msg3`: a session
-    /// with no rekey of ours in flight received a concurrent `msg3` on a
-    /// different link that declares no rekey — so it is a fresh dial crossing
-    /// ours. `our_inbound_wins` (the larger-NodeAddr side) selects
+    /// received a concurrent `msg3` on a different link that declares no
+    /// rekey — so it is a fresh dial crossing ours. `our_inbound_wins` (the larger-NodeAddr side) selects
     /// swap-to-inbound vs keep-outbound; the shell frees the loser index and
     /// tears down the temporary link either way. `peer` is the tie-break target.
     CrossConnect {
@@ -456,18 +425,16 @@ pub enum InboundDecision {
         our_inbound_wins: bool,
     },
     /// Same-epoch `msg3` on a session, declared by its sender to replace
-    /// that very session: respond as the rekey responder. The shell extracts the
-    /// fresh Noise session from the live
-    /// connection, allocates a new index, and stores it as the peer's pending
-    /// (post-rekey) session awaiting K-bit cutover. `abandon_first` is set only
-    /// on the dual-initiation *loser* path (larger NodeAddr), where we first
-    /// abandon our own in-flight rekey/pending state. `peer` is the rekey target.
-    RekeyRespond { peer: NodeAddr, abandon_first: bool },
-    /// Same-epoch duplicate `msg3` (not a cross-connection, not a rekey): resend
-    /// the existing peer's stored `msg2`. `msg2` is the opaque stored bytes
-    /// (`None` → nothing to resend, the silent no-op preserved from the
-    /// pre-refactor path). The active peer is left untouched.
-    ResendMsg2 { msg2: Option<Vec<u8>> },
+    /// that very session: hand the completion to `peer`'s rekey machine as a
+    /// rekey. The machine decides whether it takes it, including the
+    /// tie-break against a rekey of its own in flight, and owns the leg's
+    /// index from then on.
+    PeerRekey { peer: NodeAddr },
+    /// Same-epoch duplicate `msg3` (not a cross-connection, not a rekey): send
+    /// the existing peer's stored `msg2` again. `msg2` is the opaque stored
+    /// bytes (`None` → nothing to send, a silent no-op). The active peer is
+    /// left untouched.
+    RepeatMsg2 { msg2: Option<Vec<u8>> },
     /// Drop this `msg3` with a handshake reject and no promotion. Every reject
     /// but [`InboundReject::SilentBackoff`] records `HandshakeReject::BadState`;
     /// that one records its own reason. `reason` otherwise selects only the
@@ -484,9 +451,6 @@ pub enum InboundDecision {
 /// reason.
 #[derive(Debug)]
 pub enum InboundReject {
-    /// Dual rekey initiation and we are the tie-break *winner* (smaller
-    /// NodeAddr): drop the peer's `msg3` and keep driving our own rekey.
-    DualRekeyWon,
     /// An epoch-mismatch msg1 that would tear down a peering still carrying
     /// authenticated traffic, or a second epoch change for this identity
     /// inside the dampening interval. Drop it; see
@@ -529,39 +493,6 @@ pub enum OutboundDecision {
     /// Tear the stale peer down as on a restart and promote the completed
     /// outbound connection, without the tie-break.
     RestartThenPromote,
-}
-
-/// The classification outcome for one initiator-side rekey `msg2` completion,
-/// decided purely from the [`RekeyMsg2Snapshot`]. The shell matches on this and
-/// drives the effects; the core consumes nothing and touches no live state.
-///
-/// This is the initiator-side counterpart of the continuity the responder gets
-/// structurally: an inbound rekey completes keyed by the node address derived
-/// from the authenticated static, so a non-matching static resolves to a
-/// different peer and can never displace an established session. The initiator
-/// dispatches by its own session index instead, so the same guarantee has to be
-/// stated as an explicit decision.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RekeyMsg2Decision {
-    /// The rekey was answered by the peer we are bonded to: install the fresh
-    /// session as the peer's pending (post-rekey) session awaiting K-bit
-    /// cutover, the unchanged pre-existing behaviour.
-    Install,
-    /// The rekey was answered by some other identity: drop this `msg2` with a
-    /// handshake reject, keep the rekey cycle so the established peer's own
-    /// `msg2` can still complete it, and leave the established session
-    /// completely undisturbed. `reason` selects only the diagnostic log line.
-    Reject { reason: RekeyMsg2Reject },
-}
-
-/// Why an initiator-side rekey `msg2` was dropped by the core classification.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RekeyMsg2Reject {
-    /// The static learned in `msg2` derives to a different node address than
-    /// the established peer's — an on-path party raced a valid XX `msg2` of its
-    /// own against the observable rekey `msg1`, or the peer's identity changed
-    /// underneath the link. Either way the established session is kept.
-    StaticMismatch,
 }
 
 /// The classification outcome for one initiator-side *initial* `msg2`
@@ -663,7 +594,7 @@ impl Fmp {
     ///    identity ([`InboundReject::SilentBackoff`]).
     /// 2. Existing peer, different epoch → [`RestartThenPromote`].
     /// 3. Same epoch, marker naming a session we do not hold
-    ///    ([`Mismatch`](RekeyClaim::Mismatch)) → [`ResendMsg2`], not a reject:
+    ///    ([`Mismatch`](RekeyClaim::Mismatch)) → [`RepeatMsg2`], not a reject:
     ///    the sender has already committed to its pending session and the reject
     ///    path sends nothing back.
     /// 4. Same epoch, no marker, different link, with a session → inline
@@ -672,23 +603,19 @@ impl Fmp {
     ///    `cross_connection_winner(our, peer, /*outbound=*/ false)`. Taken
     ///    regardless of any rekey of ours in flight — the peer's outbound half of
     ///    this tie-break cannot see that state, so declining here would diverge
-    ///    the pair; the executor abandons the displaced rekey instead.
+    ///    the pair; moving the session closes the link's rekey machine, which
+    ///    abandons the displaced rekey.
     /// 5. Same epoch, marker naming the session we hold
-    ///    ([`Matches`](RekeyClaim::Matches)), with a session → [`RekeyRespond`],
-    ///    whatever the local `rekey.enabled` says: that flag governs whether we
-    ///    initiate rekeys, never whether we accept one, or an asymmetric setting
-    ///    would diverge the two ends of the link.
-    ///    The widened dual-init tie-break fires when the peer
-    ///    is in *either* the `rekey_in_progress` or the `pending_new_session`
-    ///    state: the smaller NodeAddr wins ([`Reject`] the peer's `msg3`), the
-    ///    larger loses (`abandon_first`, then respond).
-    /// 6. Otherwise same epoch → duplicate [`ResendMsg2`].
+    ///    ([`Matches`](RekeyClaim::Matches)), with a session → [`PeerRekey`],
+    ///    whatever the local configuration says: a responder never declines a
+    ///    rekey the sender has already committed to. Whether a rekey of ours in
+    ///    flight wins is the peer's machine's tie-break, not this decision's.
+    /// 6. Otherwise same epoch → duplicate [`RepeatMsg2`].
     ///
     /// [`CrossConnect`]: InboundDecision::CrossConnect
     /// [`RestartThenPromote`]: InboundDecision::RestartThenPromote
-    /// [`RekeyRespond`]: InboundDecision::RekeyRespond
-    /// [`Reject`]: InboundDecision::Reject
-    /// [`ResendMsg2`]: InboundDecision::ResendMsg2
+    /// [`PeerRekey`]: InboundDecision::PeerRekey
+    /// [`RepeatMsg2`]: InboundDecision::RepeatMsg2
     pub fn establish_inbound(
         &self,
         snap: &EstablishSnapshot,
@@ -736,14 +663,13 @@ impl Fmp {
                 // the defect this replaces.
                 if snap.rekey_claim == RekeyClaim::Mismatch {
                     // The sender is replacing a session that is not the one we
-                    // hold. Resend rather than reject: the initiator installed its
-                    // pending session at msg2 completion and will cut over on its
-                    // own timer, and the reject path sends nothing back, so
-                    // tearing down here strands the link in exactly the way this
-                    // defect does. Resending leaves both current sessions intact
-                    // and lets the initiator's resend/abandon machinery converge.
-                    return InboundDecision::ResendMsg2 {
-                        msg2: snap.existing_msg2.clone(),
+                    // hold. Answer rather than reject: the initiator has already
+                    // committed to its pending session, and the reject path sends
+                    // nothing back, so tearing down here strands the link. Sending
+                    // the stored msg2 again leaves both current sessions intact
+                    // and lets the initiator's own rekey machine converge.
+                    return InboundDecision::RepeatMsg2 {
+                        msg2: snap.stored_msg2.clone(),
                     };
                 }
 
@@ -755,20 +681,15 @@ impl Fmp {
                 // is `establish_outbound`, which sees only `has_existing_peer` and
                 // the address ordering. Declining here while the peer's outbound
                 // half swaps anyway leaves the two ends on different sessions with
-                // neither holding the other's — measured, and strictly worse than
-                // the behaviour this replaced.
+                // neither holding the other's.
                 //
-                // The hazard that suppression was reaching for is real but belongs
-                // to the executor: `replace_session` rewrites the session and both
-                // indices and touches nothing else, orphaning an in-flight rekey.
-                // The `SwapToInboundSession` arm therefore abandons that rekey as
-                // part of the swap, the same way the rekey-responder arm does when
-                // it loses the dual-rekey tie-break.
+                // The displaced rekey is the executor's to end: moving the session
+                // closes the link's rekey machine, which abandons any attempt in
+                // flight and releases every index it held.
                 if snap.rekey_claim == RekeyClaim::None && snap.different_link && snap.has_session {
                     // `cross_connection_winner(our, peer, this_is_outbound=false)`:
                     // the smaller node prefers its outbound, so our *inbound*
-                    // wins iff we are the larger node (the exact negation of the
-                    // smaller-NodeAddr `<` test the dual-init tie-break uses).
+                    // wins iff we are the larger node.
                     let our_inbound_wins = snap.our_node_addr >= peer;
                     return InboundDecision::CrossConnect {
                         peer,
@@ -776,41 +697,17 @@ impl Fmp {
                     };
                 }
 
-                // Rekey responder gate: the sender named the session we hold.
-                //
-                // Nothing here consults the local rekey config. `rekey.enabled`
-                // means "initiate rekeys" and nothing else: reading it here made
-                // the responder decline a rekey the sender had already committed
-                // to, so an asymmetric setting left the two ends on different
-                // sessions with the link carrying nothing until the link-dead
-                // timer. The sender's declaration matching the session we hold is
-                // the authoritative signal, and it is a property of the wire, not
-                // of our config.
+                // The sender named the session we hold. Nothing here consults the
+                // local configuration or a rekey of ours in flight: the sender's
+                // declaration is a property of the wire, and the peer's rekey
+                // machine settles a crossing of two rekeys by its own tie-break.
                 if snap.rekey_claim == RekeyClaim::Matches && snap.has_session {
-                    // Widened dual-init tie-break: both the still-in-progress and
-                    // the already-pending states resolve by the smaller NodeAddr.
-                    if snap.rekey_in_progress || snap.pending_new_session {
-                        if snap.our_node_addr < peer {
-                            // We win — keep our session, drop their msg3.
-                            return InboundDecision::Reject {
-                                reason: InboundReject::DualRekeyWon,
-                            };
-                        }
-                        // We lose — abandon ours, then respond as responder.
-                        return InboundDecision::RekeyRespond {
-                            peer,
-                            abandon_first: true,
-                        };
-                    }
-                    return InboundDecision::RekeyRespond {
-                        peer,
-                        abandon_first: false,
-                    };
+                    return InboundDecision::PeerRekey { peer };
                 }
 
                 // Not a cross-connection, not a rekey → duplicate handshake.
-                InboundDecision::ResendMsg2 {
-                    msg2: snap.existing_msg2.clone(),
+                InboundDecision::RepeatMsg2 {
+                    msg2: snap.stored_msg2.clone(),
                 }
             }
         }
@@ -822,18 +719,11 @@ impl Fmp {
     ///
     /// No existing same-identity peer is a net-new promote. One whose epoch on
     /// record differs from the msg2's has restarted, and is replaced whatever
-    /// the tie-break. An existing peer set up by an earlier dial of ours is
-    /// left for this one, whichever address is smaller: the peer's answer to
-    /// a later dial supersedes the earlier one. On a link too young to rekey
-    /// a responder answers a fresh msg1 from a peer it holds only by
-    /// replacing that peering with it (FRC-1201 Section 5.7, rule 3.3); on an
-    /// older link it answers it as a rekey, which our first frame under the
-    /// new session completes. The order the answers arrive in stands for the
-    /// order the peer gave them, and nothing the dialer holds tells the two
-    /// apart: a msg2 for the earlier dial that arrives after the later one's
-    /// moves this node to the session the peer discarded. Otherwise this is a
-    /// cross-connection resolved by the (pre-evaluated) tie-break: swap on a
-    /// win, keep on a loss.
+    /// the tie-break. Otherwise this is a cross-connection resolved by the
+    /// (pre-evaluated) tie-break: swap on a win, keep on a loss. That holds
+    /// for a second dial of a peer whose link an earlier dial of ours set up
+    /// too: the peer answers a fresh dial on a new leg, never as a rekey, and
+    /// resolves the dial's msg3 by the same address order at its end.
     pub fn establish_outbound(
         &self,
         snap: &OutboundSnapshot,
@@ -845,29 +735,11 @@ impl Fmp {
         if epochs_differ(snap.existing_peer_epoch, epoch) {
             return OutboundDecision::RestartThenPromote;
         }
-        if snap.own_dial || snap.our_outbound_wins {
+        if snap.our_outbound_wins {
             OutboundDecision::CrossConnectionSwap
         } else {
             OutboundDecision::CrossConnectionKeep
         }
-    }
-
-    /// Classify one initiator-side rekey `msg2` completion: the static-key
-    /// continuity gate. Pure: reads only `snap`, mutates nothing.
-    ///
-    /// A rekey may only replace the session of the peer that already holds the
-    /// link, so the identity learned from `msg2` must derive to the established
-    /// peer's node address. Anything else is
-    /// [`Reject`](RekeyMsg2Decision::Reject) — the shell drops the `msg2`, keeps
-    /// the rekey cycle and keeps the current session. A match is
-    /// [`Install`](RekeyMsg2Decision::Install), the unchanged legitimate path.
-    pub fn rekey_outbound(&self, snap: &RekeyMsg2Snapshot) -> RekeyMsg2Decision {
-        if snap.learned_peer != snap.established_peer {
-            return RekeyMsg2Decision::Reject {
-                reason: RekeyMsg2Reject::StaticMismatch,
-            };
-        }
-        RekeyMsg2Decision::Install
     }
 
     /// Classify one initiator-side *initial* `msg2` completion: the dial-time

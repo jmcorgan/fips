@@ -19,7 +19,7 @@ profile; outside `rekey/` this module has no cryptography.
 - `quorum.rs`: `LinkQuorum`, the distinct-link count that must report a
   broken path before verified coordinates are demoted.
 - `rekey/`: the session's profile of the shared rekey machine
-  (`proto::rekey`) over Noise XK. Hidden from the docs; the root crate's
+  (`proto::rekey`) over Noise XX. Hidden from the docs; the root crate's
   session table holds one machine per session, from its first handshake.
   Its README describes it.
 - `wire.rs`: the session message types (`SessionSetup`, `SessionAck`,
@@ -35,7 +35,7 @@ profile; outside `rekey/` this module has no cryptography.
   handshake and its key rotation are run by the shared machine one level
   up, `proto/rekey/`, which holds keys and takes a clock's instants; the
   session profile that
-  binds it to Noise XK sits in `rekey/` here with the same exemption, and
+  binds it to Noise XX sits in `rekey/` here with the same exemption, and
   `core.rs` keeps the rule.
 - **The session wire is protocol** and does not change on the deployed
   lines.

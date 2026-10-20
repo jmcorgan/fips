@@ -7,10 +7,9 @@
 //! return, and in the compile-time tie below that pins it to `ring`.
 
 pub use fips_core::noise::{
-    CipherState, EPOCH_ENCRYPTED_SIZE, EPOCH_SIZE, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE,
-    HANDSHAKE_MSG3_SIZE, HandshakeProgress, HandshakeRole, MAX_MESSAGE_SIZE, Message2Rollback,
-    NoiseError, NoisePattern, NoiseSession, PUBKEY_SIZE, REPLAY_WINDOW_SIZE, ReplayWindow,
-    TAG_SIZE,
+    CipherState, EPOCH_ENCRYPTED_SIZE, EPOCH_SIZE, Fork, HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE,
+    HANDSHAKE_MSG3_SIZE, HandshakeProgress, HandshakeRole, MAX_MESSAGE_SIZE, NoiseError,
+    NoisePattern, NoiseSession, PUBKEY_SIZE, REPLAY_WINDOW_SIZE, ReplayWindow, TAG_SIZE,
 };
 pub(crate) use fips_core::noise::{clear_slot, take_cleared};
 

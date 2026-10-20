@@ -11,16 +11,16 @@ use crate::node::diag::HsLineCounts;
 use crate::node::session::{ThreadJitter, with_tags};
 use crate::noise::NoiseSession;
 use crate::proto::bloom::BloomFilter;
-use crate::proto::fmp::{NegotiationPayload, NodeProfile, RekeyMsg2Decision, RekeyMsg2Reject};
+use crate::proto::fmp::{NegotiationPayload, NodeProfile};
 use crate::proto::mmp::MmpPeerState;
 use crate::proto::stp::{ParentDeclaration, TreeCoordinate};
 use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use crate::{Ipv6Address, NodeAddr, PeerIdentity};
-use fips_core::proto::fmp::rekey::ik::{LinkKeys, setup_record};
+use fips_core::proto::fmp::rekey::{LinkKeys, LinkLocal};
 use fips_core::proto::rekey::{
     Bond, Close, Completed, CycleView, Env, Identity, Ids, IndexLease, Input, PeerKey, Record,
-    Role, SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
+    SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
 };
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
@@ -78,6 +78,7 @@ fn link_machine(
         return Err(ours);
     };
     let ids = Ids::new(ours, theirs.as_u32(), transport);
+    let local = LinkLocal::for_call(caps.local, caps.profile, Some(theirs.as_u32()));
     let mut scratch = Vec::new();
     Ok(with_tags(|tags| {
         let mut env = Env {
@@ -86,7 +87,7 @@ fn link_machine(
             tags,
             workers: caps.workers,
             jitter: &mut ThreadJitter,
-            local: caps.local,
+            local: &local,
             scratch: &mut scratch,
         };
         LinkRekey::established(
@@ -100,6 +101,17 @@ fn link_machine(
             &mut env,
         )
     }))
+}
+
+/// This node's keys `keys` and node profile `profile` for one call into the
+/// link machine `rekey`: a rekey's msg3 declares the session it replaces by
+/// the index the peer receives the current session on.
+fn link_local(
+    rekey: &LinkRekey,
+    keys: &fips_core::proto::rekey::NodeKeys,
+    profile: NodeProfile,
+) -> LinkLocal {
+    LinkLocal::for_call(keys, profile, rekey.theirs(Slot::Current))
 }
 
 /// What link setup tells a new link's rekey machine: key-epoch bit 0, the
@@ -313,10 +325,6 @@ pub struct ActivePeer {
     /// Wire-format msg2 for resend on duplicate msg1 (responder only).
     /// Kept for the life of the peering: nothing clears it.
     handshake_msg2: Option<Vec<u8>>,
-    /// Digest of the ephemeral in the link-setup msg1 the peering was
-    /// promoted from, by which the silent-session record counts a session
-    /// once however a copy's header was rewritten.
-    setup_ephemeral: Option<EphemeralDigest>,
 
     // === Rekey (Key Rotation) ===
     /// The link's rekey machine: its epochs and their keys, indices and
@@ -329,12 +337,6 @@ pub struct ActivePeer {
     /// Repeated handshake lines logged for this peer, by kind, so a peer
     /// repeating one handshake outcome logs it a bounded number of times.
     hs_lines: HsLineCounts,
-    /// Whether this peering has given any evidence that its peer is present
-    /// now: an authenticated frame on its session, or, for a peering this
-    /// node initiated, the msg2 that answered our fresh ephemeral. A
-    /// responder promotion is not such evidence, because the msg1 it was
-    /// promoted from carries nothing fresh and may be a replayed capture.
-    heard: bool,
 
     // === Published active-send-state (two-tier boundary) ===
     /// The send-critical subset read (and, on roam/responder-cutover, written)
@@ -368,10 +370,8 @@ impl ActivePeer {
             last_heartbeat_sent: None,
             last_heartbeat_attempt: None,
             handshake_msg2: None,
-            setup_ephemeral: None,
             rekey: None,
             hs_lines: HsLineCounts::default(),
-            heard: true,
             send: PeerSendState::new(link_id, authenticated_at),
         }
     }
@@ -465,10 +465,8 @@ impl ActivePeer {
             last_heartbeat_sent: None,
             last_heartbeat_attempt: None,
             handshake_msg2: None,
-            setup_ephemeral: None,
             rekey: Some(rekey),
             hs_lines: HsLineCounts::default(),
-            heard: is_initiator,
             send,
         };
         Ok((peer, out))
@@ -491,7 +489,7 @@ impl ActivePeer {
         transport_id: TransportId,
         current_addr: TransportAddr,
         link_stats: LinkStats,
-        is_initiator: bool,
+        _is_initiator: bool,
         mmp_config: &MmpConfig,
         remote_epoch: Option<[u8; 8]>,
     ) -> Self {
@@ -505,6 +503,7 @@ impl ActivePeer {
             params: super::test_link_params(),
             record: Record::new(),
             workers: false,
+            profile: NodeProfile::Full,
         };
         let bond = PeerKey::from_xonly(&noise_session.remote_static_xonly());
         let (rekey, _) = link_machine(
@@ -524,9 +523,7 @@ impl ActivePeer {
             mmp_config.mode,
             mmp_config.log_interval_secs,
             mmp_config.owd_window_size,
-            is_initiator,
         ));
-        peer.heard = is_initiator;
         peer.rekey = Some(rekey);
         peer
     }
@@ -1179,6 +1176,7 @@ impl ActivePeer {
 
     /// When the current Noise session was established; `None` without a
     /// session.
+    #[cfg(test)]
     pub(crate) fn session_established_at(&self) -> Option<PeerInstant> {
         self.rekey.as_ref()?.started(Slot::Current)
     }
@@ -1232,26 +1230,6 @@ impl ActivePeer {
     pub(crate) fn test_backdate_drain_started(&mut self, age: Duration) {
         if let Some(rekey) = self.rekey.as_mut() {
             rekey.backdate_drain(age);
-        }
-    }
-
-    /// Test-only seam: backdate the pending session's install time so a test
-    /// can make the responder hold read as passed. Shifts only the machine's
-    /// stamp; compiled out of release builds.
-    #[cfg(test)]
-    pub(crate) fn backdate_pending(&mut self, age: Duration) {
-        if let Some(rekey) = self.rekey.as_mut() {
-            rekey.backdate_pending(age);
-        }
-    }
-
-    /// Test-only seam: backdate the last peer-initiated rekey so a test can
-    /// move past the rekey dampening window without waiting it out. Shifts
-    /// only the machine's stamp; compiled out of release builds.
-    #[cfg(test)]
-    pub(crate) fn backdate_dampener(&mut self, age: Duration) {
-        if let Some(rekey) = self.rekey.as_mut() {
-            rekey.backdate_dampening(age);
         }
     }
 
@@ -1384,13 +1362,25 @@ impl ActivePeer {
             .is_some_and(|rekey| rekey.dampened(peer_now()))
     }
 
+    /// Whether `declared`, the index a peer's rekey msg3 names as the one it
+    /// receives the session it replaces on, is this node's index of a
+    /// session the link's rekey machine holds: the current one, or the
+    /// previous one while the machine still holds it. After a cutover the
+    /// peer may not have heard of yet (its msg3 lost, the cutover taken
+    /// after the delay), the peer's own rekey still names the session that
+    /// is previous here, and the machine settles which completion stands.
+    pub(crate) fn declares_own_session(&self, declared: SessionIndex) -> bool {
+        [Slot::Current, Slot::Previous]
+            .into_iter()
+            .any(|slot| self.index(slot) == Some(declared))
+    }
+
     /// Get the pending new session's our_index.
     pub(crate) fn pending_our_index(&self) -> Option<SessionIndex> {
         self.index(Slot::Pending)
     }
 
     /// Get the pending new session's their_index.
-    #[cfg(test)]
     pub(crate) fn pending_their_index(&self) -> Option<SessionIndex> {
         self.rekey
             .as_ref()?
@@ -1415,7 +1405,9 @@ impl ActivePeer {
 
     /// Which side of the rekey handshake produced the pending session; `None`
     /// when no pending session is held.
-    pub(crate) fn pending_role(&self) -> Option<Role> {
+    #[cfg(test)]
+    pub(crate) fn pending_role(&self) -> Option<fips_core::proto::rekey::Role> {
+        use fips_core::proto::rekey::Role;
         match self.rekey.as_ref()?.view().cycle {
             CycleView::PendI(_) => Some(Role::Initiator),
             CycleView::PendR => Some(Role::Responder),
@@ -1423,76 +1415,81 @@ impl ActivePeer {
         }
     }
 
-    /// The digest of the msg1 whose answer armed the pending session, and
-    /// the msg2 that answered it, when this node holds it as the rekey
-    /// responder; `None` otherwise.
-    pub(crate) fn rekey_answer(&self) -> Option<(Msg1Digest, Vec<u8>)> {
-        let (msg1, msg2) = self.rekey.as_ref()?.rekey_answer()?;
-        Some((msg1.into(), msg2.clone()))
-    }
-
-    /// Record `msg1`, the framed link-setup msg1 this peering was promoted
-    /// from, and `msg2`, the msg2 that answered it: a resend of the msg1
-    /// draws the msg2 again while the session is too young to rekey, and a
-    /// copy of it, under any header, is refused once the session is old
-    /// enough. Nothing is recorded for a msg1 too short to frame one.
-    pub(crate) fn note_setup(&mut self, msg1: &[u8], msg2: &[u8]) {
-        if let Some(rekey) = self.rekey.as_mut()
-            && let Some(record) = setup_record(msg1, Some(msg2))
-        {
-            rekey.note_setup(record);
-        }
-    }
-
-    /// Record the ephemeral digest of the link-setup msg1 this peering was
-    /// promoted from (`None` if the msg1 was too short to carry one).
-    pub(crate) fn note_setup_ephemeral(&mut self, ephemeral: Option<EphemeralDigest>) {
-        self.setup_ephemeral = ephemeral;
-    }
-
-    /// The ephemeral digest of the link-setup msg1 this peering was promoted
-    /// from, or `None` for a peering this node dialled.
-    pub(crate) fn setup_ephemeral(&self) -> Option<EphemeralDigest> {
-        self.setup_ephemeral
-    }
-
-    /// How long the pending session has been held since it was installed;
-    /// `None` when no pending session is held.
-    pub(crate) fn pending_age(&self) -> Option<Duration> {
-        self.rekey.as_ref()?.started(Slot::Pending).map(since)
-    }
-
     /// Step this peer's link rekey machine with `input` at `now`, lending
-    /// it the node's index allocator `indices`, its keys `local` and
-    /// whether a decrypt-worker pool exists, and return what the node must
-    /// carry out, front to back. Empty for a peer without a session. Its
-    /// index bindings are made on the transport the peer is reached over
-    /// now.
+    /// it the node's index allocator `indices`, its keys `local`, its node
+    /// profile `profile` and whether a decrypt-worker pool exists, and
+    /// return what the node must carry out, front to back. Empty for a peer
+    /// without a session. Its index bindings are made on the transport the
+    /// peer is reached over now.
     pub(crate) fn step_link(
         &mut self,
         now: PeerInstant,
         input: Input<'_, LinkProfile>,
         indices: &mut crate::utils::index::IndexAllocator,
         local: &fips_core::proto::rekey::NodeKeys,
+        profile: NodeProfile,
         workers: bool,
     ) -> LinkOutputs {
+        self.step_link_with(now, input, indices, local, profile, workers)
+            .0
+    }
+
+    /// Step this peer's link rekey machine with a msg2 `bytes` as the reply
+    /// to its own rekey, as [`step_link`](Self::step_link) steps it. Also
+    /// returns whether the msg2 read but authenticated a key other than the
+    /// peer's: the machine refuses that msg2 as it refuses one that does not
+    /// read, and the caller counts the two apart.
+    pub(crate) fn step_link_reply(
+        &mut self,
+        now: PeerInstant,
+        bytes: &[u8],
+        indices: &mut crate::utils::index::IndexAllocator,
+        local: &fips_core::proto::rekey::NodeKeys,
+        profile: NodeProfile,
+        workers: bool,
+    ) -> (LinkOutputs, bool) {
+        let input = Input::Reply { bytes, route: () };
+        let (out, replied) = self.step_link_with(now, input, indices, local, profile, workers);
+        let mismatch = replied.is_some()
+            && out.iter().any(|o| {
+                matches!(
+                    o,
+                    LinkOutput::Reject(fips_core::proto::rekey::Reason::ReplyUnauthenticated)
+                )
+            });
+        (out, mismatch)
+    }
+
+    /// Step the link rekey machine with `input`, returning its outputs and
+    /// the key a msg2 read during the call authenticated.
+    fn step_link_with(
+        &mut self,
+        now: PeerInstant,
+        input: Input<'_, LinkProfile>,
+        indices: &mut crate::utils::index::IndexAllocator,
+        local: &fips_core::proto::rekey::NodeKeys,
+        profile: NodeProfile,
+        workers: bool,
+    ) -> (LinkOutputs, Option<PeerKey>) {
         let transport = self.bound_transport();
         let Some(rekey) = self.rekey.as_mut() else {
-            return LinkOutputs::new();
+            return (LinkOutputs::new(), None);
         };
+        let local = link_local(rekey, local, profile);
         let mut scratch = Vec::new();
-        with_tags(|tags| {
+        let out = with_tags(|tags| {
             let mut env = Env {
                 indices,
                 transport,
                 tags,
                 workers,
                 jitter: &mut ThreadJitter,
-                local,
+                local: &local,
                 scratch: &mut scratch,
             };
             rekey.step(now, input, &mut env)
-        })
+        });
+        (out, local.replied())
     }
 
     /// Test-only: start this node's own rekey at `now` as a trigger that has
@@ -1510,6 +1507,7 @@ impl ActivePeer {
         let Some(rekey) = self.rekey.as_mut() else {
             return LinkOutputs::new();
         };
+        let local = link_local(rekey, local, NodeProfile::Full);
         let mut scratch = Vec::new();
         with_tags(|tags| {
             let mut env = Env {
@@ -1518,7 +1516,7 @@ impl ActivePeer {
                 tags,
                 workers: false,
                 jitter: &mut ThreadJitter,
-                local,
+                local: &local,
                 scratch: &mut scratch,
             };
             rekey.start_now(now, &mut env)
@@ -1590,21 +1588,16 @@ impl ActivePeer {
 
     /// End the link's rekey machine as the peer is removed, returning the
     /// outputs that unbind, revoke and release every index it held (its
-    /// sessions' and its own rekey handshake's), and the peer's startup
-    /// epoch with the replay record the machine kept, for the node to hand
-    /// to a later link with the peer at that epoch. Empty outputs and no
-    /// record for a peer without a session.
-    pub(crate) fn close(&mut self) -> (LinkOutputs, Option<([u8; 8], Record)>) {
+    /// sessions' and its own rekey handshake's). Empty for a peer without a
+    /// session.
+    pub(crate) fn close(&mut self) -> LinkOutputs {
         // The reason only labels an own rekey handshake the machine
         // abandons, which the node counts nowhere.
         let Some(rekey) = self.rekey.take() else {
-            return (LinkOutputs::new(), None);
+            return LinkOutputs::new();
         };
-        let (out, carry) = rekey.close(fips_core::proto::rekey::Close::Admin);
-        (
-            out,
-            carry.map(|c| (c.peer_epoch.unwrap_or_default(), c.record)),
-        )
+        let (out, _) = rekey.close(fips_core::proto::rekey::Close::Admin);
+        out
     }
 }
 

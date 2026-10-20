@@ -3,7 +3,8 @@
 End-to-end (FSP) session state for the node: one `SessionEntry` per remote
 endpoint, from the first message of its handshake to its removal, holding
 the session's rekey machine (`fips_core::proto::rekey::Rekey` on the
-profile `FspProfile`). The machine runs the first handshake: the shell
+profile `FspProfile`, Noise XX on this line). The machine runs the first
+handshake: the shell
 opens it with `SessionEntry::opened` when this node wants a session, with
 `SessionEntry::answering` for the first setup naming an address, and with
 `SessionEntry::open` (the machine's `Open`) on a session the peer's setups
@@ -21,6 +22,13 @@ unheard. Who the peer is stays the claimed address until a completion
 bonds its key (`identity`, `peer_key`), and the shell caches, uses and
 reports a peer key only from there: the control socket shows an unproved
 session with no `npub` and `identity: "unproven"` (`identity_status`).
+Each call into the machine gets the profile's per-call keys
+(`SessionLocal`), marked as the session's first handshake while the
+machine holds no epoch, so the first handshake's ack and msg3 carry the
+negotiation payload and a rekey's carry none. `step_reply` also says
+whether the ack read under a key the session is not bonded to, which the
+machine refuses as it refuses an unreadable ack; the ack handler counts
+the two apart.
 
 Once established, the machine owns the current, pending and previous key
 epochs, seals every frame, runs every inbound frame through its rows
@@ -71,12 +79,13 @@ Two rules about epochs hold here, and a change must keep them:
   under. `seal_frame` and `reserve_send` build the whole message from the
   machine's seal result: the key and counter, the header's key-epoch bit
   (whatever the caller's flags say of it), the inner-header timestamp
-  counted from that epoch's base, and the spin bit. No send path builds
-  an established FSP header or inner header itself.
-- The session MMP receiver and spin state measure one epoch, the current
-  one, named by its tag (`mmp_epoch`). After every machine call the entry
-  restarts them if the current epoch changed (a cutover, or a return to the
-  drained epoch after an assumed cutover), and `epoch_mmp(tag)` hands them
+  counted from that epoch's base. No send path builds an established FSP
+  header or inner header itself. This line has no spin bit, so the inner
+  header's flags are always clear.
+- The session MMP receiver measures one epoch, the current one, named by
+  its tag (`mmp_epoch`). After every machine call the entry
+  restarts it if the current epoch changed (a cutover, or a return to the
+  drained epoch after an assumed cutover), and `epoch_mmp(tag)` hands it
   out only for frames and reports authenticated under that epoch, so what
   the peer sealed under the epoch a cutover retired is delivered but never
   recorded. Path MTU state,

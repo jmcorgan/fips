@@ -311,8 +311,6 @@ enum Trigger {
     RekeyCheck,
     /// The tick's rekey msg1 resend, its first rung due.
     RekeyResend,
-    /// The tick's rekey msg3 resend, with every resend due.
-    RekeyMsg3Resend,
     /// The tick's handshake timers, at this time.
     PeerTimers(u64),
     /// The executor's send of the msg1 armed on this outbound link.
@@ -732,64 +730,10 @@ async fn msg1_resend_to_dead_outbound_leg_recovers_after_background_connect() {
     stop_all(&mut node).await;
 }
 
-/// Run a same-epoch rekey msg1 for a peer whose established TCP link is gone
-/// (or, with `dead` false, still connected). Returns the measurement and
-/// whether a pending session was stored.
-async fn rekey_reply(dead: bool) -> (Reply, bool) {
-    let mut bh = Blackhole::open(false);
-    let (mut node, sender, sender_addr, far_end) = peer_on_tcp(&bh).await;
-    let _far_end = if dead {
-        kill_link(&node, &mut bh, far_end).await;
-        None
-    } else {
-        Some(far_end)
-    };
-    node.get_peer_mut(&sender_addr)
-        .unwrap()
-        .test_backdate_session_established(Duration::from_secs(31));
-
-    // With the link gone, the peer has come back on a new connection and
-    // sends a rekey msg1 at the same epoch; with it alive, the msg1 comes on
-    // the link. The rekey msg2 goes to the established link's address.
-    let from = if dead {
-        elsewhere()
-    } else {
-        bh.transport_addr()
-    };
-    let data = craft_msg1(&node, &sender, 0x02);
-    let r = timed_process(
-        &mut node,
-        ReceivedPacket::new(TransportId::new(TCP_ID), from, data),
-    )
-    .await;
-    let pending = node
-        .get_peer(&sender_addr)
-        .is_some_and(|p| p.pending_new_session().is_some());
-    stop_all(&mut node).await;
-    (r, pending)
-}
-
-/// A rekey msg2 to a peer whose established TCP link has closed fails at
-/// once without dialing; with the link alive the pending session is stored.
-/// What a refused msg2 does to the pending is asserted by
-/// `a_rekey_message_the_transport_refuses_counts_as_lost_and_its_cycle_holds`.
-#[tokio::test]
-async fn rekey_msg2_to_closed_tcp_link_returns_without_dialing() {
-    let (r, pending) = rekey_reply(false).await;
-    println!("rekey control link alive: {r:?}, pending session {pending}");
-    assert_no_dial("rekey control", &r);
-    assert!(pending, "control should store the rekey session");
-
-    let (r, _) = rekey_reply(true).await;
-    println!("rekey dead    link closed: {r:?}");
-    assert_no_dial("rekey msg2 to a closed link", &r);
-}
-
 /// A rekey message the transport refuses to send is lost, as one the network
 /// drops would be, and the cycle it belongs to holds: the initiator's
 /// attempt starts and keeps its msg1 for the next rung, toward an inbound
-/// peer and toward one this node dialed, and the responder holds the pending
-/// session its msg2 answered, which a resend of the msg1 draws again.
+/// peer and toward one this node dialed.
 #[tokio::test]
 async fn a_rekey_message_the_transport_refuses_counts_as_lost_and_its_cycle_holds() {
     for outbound in [false, true] {
@@ -800,12 +744,6 @@ async fn a_rekey_message_the_transport_refuses_counts_as_lost_and_its_cycle_hold
             "outbound {outbound}: a rekey msg1 the transport refused must leave the attempt in flight"
         );
     }
-    let (r, pending) = rekey_reply(true).await;
-    println!("refused rekey msg2: {r:?}, pending session {pending}");
-    assert!(
-        pending,
-        "a rekey msg2 the transport refused must leave the pending held"
-    );
 }
 
 /// Run the node's real rx loop, inject `poisoned` TCP msg1 frames whose reply
@@ -1093,12 +1031,8 @@ enum ReplySite {
     RekeyMsg3,
     /// The tick's resend of a rekey msg1 to an inbound peer.
     RekeyMsg1Resend,
-    /// The tick's resend of a rekey msg3 to an inbound peer.
-    RekeyMsg3Resend,
     /// The tick's resend of a rekey msg1 to a peer this node dialed.
     RekeyMsg1ResendOutbound,
-    /// The tick's resend of a rekey msg3 to a peer this node dialed.
-    RekeyMsg3ResendOutbound,
     /// The executor's send of the msg1 armed by an outbound dial.
     StoredMsg1,
     /// An anonymous dial's inline msg1 send once its connection is up.
@@ -1119,7 +1053,6 @@ impl ReplySite {
                 | ReplySite::StartHandshake
                 | ReplySite::LinkMessage
                 | ReplySite::RekeyMsg1ResendOutbound
-                | ReplySite::RekeyMsg3ResendOutbound
         )
     }
 
@@ -1127,10 +1060,7 @@ impl ReplySite {
     fn sends(self) -> u8 {
         match self {
             ReplySite::DuplicateMsg1 | ReplySite::ResendMsg2 => PHASE_MSG2,
-            ReplySite::Msg3
-            | ReplySite::RekeyMsg3
-            | ReplySite::RekeyMsg3Resend
-            | ReplySite::RekeyMsg3ResendOutbound => PHASE_MSG3,
+            ReplySite::Msg3 | ReplySite::RekeyMsg3 => PHASE_MSG3,
             ReplySite::RekeyMsg1Resend
             | ReplySite::RekeyMsg1ResendOutbound
             | ReplySite::StoredMsg1
@@ -1161,7 +1091,7 @@ async fn rekey_msg2(
     link: &TransportAddr,
 ) -> ReceivedPacket {
     age_past_rekey(node, sender_addr);
-    node.check_rekey().await;
+    node.poll_link_rekeys().await;
     let msg1 = frame_of(far_end, PHASE_MSG1)
         .await
         .expect("the rekey msg1 went out on the connection");
@@ -1249,7 +1179,7 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> Armed {
                 make_link_outbound(&mut node, &sender_addr);
             }
             age_past_rekey(&mut node, &sender_addr);
-            node.check_rekey().await;
+            node.poll_link_rekeys().await;
             assert!(
                 node.get_peer(&sender_addr)
                     .is_some_and(|p| p.rekey_in_progress()),
@@ -1260,24 +1190,6 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> Armed {
                 "the rekey msg1 went out on the connection"
             );
             (node, far_end, Trigger::RekeyResend)
-        }
-        ReplySite::RekeyMsg3Resend | ReplySite::RekeyMsg3ResendOutbound => {
-            let (mut node, sender, sender_addr, mut far_end) = peer_on_tcp(bh).await;
-            if row == ReplySite::RekeyMsg3ResendOutbound {
-                make_link_outbound(&mut node, &sender_addr);
-            }
-            let packet = rekey_msg2(&mut node, &sender, &sender_addr, &mut far_end, &link).await;
-            node.process_packet(packet).await;
-            assert!(
-                frame_of(&mut far_end, PHASE_MSG3).await.is_some(),
-                "the rekey msg3 went out on the connection"
-            );
-            assert!(
-                node.get_peer(&sender_addr)
-                    .is_some_and(|p| p.rekey_msg3_payload().is_some()),
-                "the rekey msg3 is retained for resending"
-            );
-            (node, far_end, Trigger::RekeyMsg3Resend)
         }
         ReplySite::StoredMsg1 => {
             let (mut node, _tx, _) = node_with_udp_and_tcp(CONNECT_TIMEOUT_MS).await;
@@ -1371,9 +1283,7 @@ async fn every_rx_loop_handshake_send_to_dead_tcp_link_is_bounded() {
         ReplySite::Msg3,
         ReplySite::RekeyMsg3,
         ReplySite::RekeyMsg1Resend,
-        ReplySite::RekeyMsg3Resend,
         ReplySite::RekeyMsg1ResendOutbound,
-        ReplySite::RekeyMsg3ResendOutbound,
         ReplySite::StoredMsg1,
         ReplySite::StartHandshake,
         ReplySite::LinkMessage,
@@ -1401,66 +1311,6 @@ async fn every_rx_loop_handshake_send_to_dead_tcp_link_is_bounded() {
         }
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
-}
-
-/// A rekey msg1 copy that arrives over UDP from an address unrelated to the
-/// peer is never answered at its source. While the peer's established TCP
-/// connection is up the copy is off that link and refused outright; with the
-/// connection gone it is not answered either, since a connectionless source
-/// address is whatever the sender wrote.
-#[tokio::test]
-async fn a_rekey_msg1_copy_over_udp_is_never_answered_at_its_source() {
-    for dead in [false, true] {
-        let mut bh = Blackhole::open(false);
-        let (mut node, sender, sender_addr, far_end) = peer_on_tcp(&bh).await;
-        let mut far_end = if dead {
-            kill_link(&node, &mut bh, far_end).await;
-            None
-        } else {
-            Some(far_end)
-        };
-        node.get_peer_mut(&sender_addr)
-            .unwrap()
-            .test_backdate_session_established(Duration::from_secs(31));
-
-        let source = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let from = TransportAddr::from_string(&source.local_addr().unwrap().to_string());
-        let data = craft_msg1(&node, &sender, 0x31);
-        let r = timed_process(
-            &mut node,
-            ReceivedPacket::new(TransportId::new(UDP_ID), from, data),
-        )
-        .await;
-        let mut buf = [0u8; 2048];
-        let at_source = timeout(Duration::from_millis(300), source.recv_from(&mut buf))
-            .await
-            .is_ok();
-        let on_link = read_maybe(far_end.as_mut())
-            .await
-            .is_some_and(|f| CommonPrefix::parse(&f).is_some_and(|p| p.phase == PHASE_MSG2));
-        let pending = node
-            .get_peer(&sender_addr)
-            .is_some_and(|p| p.pending_new_session().is_some());
-        stop_all(&mut node).await;
-        println!(
-            "udp copy     link dead {dead}: {r:?}, msg2 on link {on_link}, at source {at_source}, pending {pending}"
-        );
-
-        assert_no_dial("rekey msg1 copy over UDP", &r);
-        assert!(!at_source, "a msg2 was sent to the copy's UDP source");
-        assert!(
-            !on_link,
-            "a msg2 went out on the established link for a copy off it"
-        );
-        if dead {
-            assert!(
-                pending,
-                "an answer the transport could not send counts as lost: the pending is held"
-            );
-        } else {
-            assert!(!pending, "a copy off a reachable link arms no pending");
-        }
-    }
 }
 
 /// Run one send toward an outbound TCP peer whose current address an
@@ -1522,158 +1372,6 @@ async fn send_to_moved_outbound_peer_does_not_connect_to_its_moved_address() {
             "the {what} started a connect toward the peer's moved address"
         );
     }
-}
-
-/// A second TCP transport on the node, as a node with two TCP listeners has.
-const TCP2_ID: u32 = 3;
-
-/// Add a second, started TCP transport to `node`. Its frames go to a channel
-/// of their own, which the caller keeps alive.
-async fn add_second_tcp(node: &mut Node) -> PacketRx {
-    let (tx, rx) = packet_channel(64);
-    let cfg = TcpConfig {
-        bind_addr: Some("127.0.0.1:0".to_string()),
-        mtu: Some(1400),
-        connect_timeout_ms: Some(CONNECT_TIMEOUT_MS),
-        ..Default::default()
-    };
-    let mut t = TcpTransport::new(TransportId::new(TCP2_ID), None, cfg, tx);
-    t.start_async().await.unwrap();
-    node.transports
-        .insert(TransportId::new(TCP2_ID), TransportHandle::Tcp(t));
-    rx
-}
-
-/// A real TCP client connected to the listener of transport `tid`, and its
-/// address as that transport's connection pool holds it.
-async fn client_on(node: &Node, tid: TransportId) -> (tokio::net::TcpStream, TransportAddr) {
-    let transport = node.transports.get(&tid).expect("no such transport");
-    let listen = transport.local_addr().expect("TCP listener bound");
-    let client = tokio::net::TcpStream::connect(listen).await.unwrap();
-    let from = TransportAddr::from_string(&client.local_addr().unwrap().to_string());
-    let start = Instant::now();
-    while transport.connection_state(&from) != ConnectionState::Connected {
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "the client's connection never entered the pool"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    (client, from)
-}
-
-/// A same-epoch rekey msg1 from a TCP peer whose established connection has
-/// gone is answered on the connection it arrived on when that connection is
-/// on the established link's transport. Arriving on another TCP transport it
-/// is not answered: the new session's index would be registered under a
-/// transport the peer's frames are not looked up on, and that the
-/// retirement paths do not remove it from.
-#[tokio::test]
-async fn a_rekey_msg1_is_answered_on_its_connection_only_on_the_established_transport() {
-    for other in [false, true] {
-        let mut bh = Blackhole::open(false);
-        let (mut node, sender, sender_addr, far_end) = peer_on_tcp(&bh).await;
-        kill_link(&node, &mut bh, far_end).await;
-        node.get_peer_mut(&sender_addr)
-            .unwrap()
-            .test_backdate_session_established(Duration::from_secs(31));
-        let (arrival, _rx) = if other {
-            (
-                TransportId::new(TCP2_ID),
-                Some(add_second_tcp(&mut node).await),
-            )
-        } else {
-            (TransportId::new(TCP_ID), None)
-        };
-
-        let (mut client, from) = client_on(&node, arrival).await;
-        let data = craft_msg1(&node, &sender, 0x41);
-        let r = timed_process(&mut node, ReceivedPacket::new(arrival, from, data)).await;
-        let answered = client_gets_msg2(&mut client).await;
-        let pending = node
-            .get_peer(&sender_addr)
-            .is_some_and(|p| p.pending_new_session().is_some());
-        let indexed = node.peers_by_index.keys().any(|(t, _)| *t == arrival);
-        stop_all(&mut node).await;
-        println!(
-            "redial       other transport {other}: {r:?}, answered {answered}, pending {pending}, indexed there {indexed}"
-        );
-
-        assert_no_dial("rekey msg1 on a new connection", &r);
-        if other {
-            assert!(!answered, "a msg2 went out on another transport");
-            assert!(
-                pending,
-                "an answer the transport could not send counts as lost: the pending is held"
-            );
-            assert!(!indexed, "an index was registered on another transport");
-        } else {
-            assert!(answered, "the msg1's own connection got no msg2");
-            assert!(pending, "the answered rekey stores its session");
-            assert!(indexed, "the new index is registered on the transport");
-        }
-    }
-}
-
-/// A rekey msg1 answered on its own connection, because the established
-/// connection has gone, logs the established link it could not use, and the
-/// rekey answer records that the msg1 did not arrive on that link.
-#[tokio::test]
-async fn a_rekey_msg1_answered_on_its_own_connection_logs_the_established_link() {
-    use crate::testutil::{capture_logs_scoped, log_field};
-
-    let mut bh = Blackhole::open(false);
-    let (mut node, sender, sender_addr, far_end) = peer_on_tcp(&bh).await;
-    let link = bh.transport_addr();
-    kill_link(&node, &mut bh, far_end).await;
-    node.get_peer_mut(&sender_addr)
-        .unwrap()
-        .test_backdate_session_established(Duration::from_secs(31));
-    let tcp_id = TransportId::new(TCP_ID);
-    let (mut client, from) = client_on(&node, tcp_id).await;
-    let data = craft_msg1(&node, &sender, 0x41);
-
-    let (logs, guard) = capture_logs_scoped();
-    let r = timed_process(&mut node, ReceivedPacket::new(tcp_id, from.clone(), data)).await;
-    drop(guard);
-    let answered = client_gets_msg2(&mut client).await;
-    stop_all(&mut node).await;
-    assert_no_dial("rekey msg1 on a new connection", &r);
-    assert!(answered, "the msg1's own connection got no msg2");
-
-    let field = |line: &str, name: &str| {
-        log_field(line, name)
-            .unwrap_or_else(|| panic!("no field {name} on {line}"))
-            .to_string()
-    };
-    let fallback = logs
-        .line("Established link not connected, answered on the msg1's connection")
-        .unwrap_or_else(|| panic!("no fallback line in {:#?}", logs.lines()));
-    assert_eq!(
-        field(&fallback, "transport_id"),
-        "transport:2",
-        "{fallback}"
-    );
-    assert_eq!(
-        field(&fallback, "remote_addr"),
-        from.to_string(),
-        "{fallback}"
-    );
-    assert_eq!(field(&fallback, "link_tid"), "transport:2", "{fallback}");
-    assert_eq!(
-        field(&fallback, "link_addr"),
-        link.to_string(),
-        "{fallback}"
-    );
-
-    let answer = logs
-        .line("Sent rekey msg2 response")
-        .unwrap_or_else(|| panic!("no rekey answer line in {:#?}", logs.lines()));
-    assert_eq!(field(&answer, "same_path"), "false", "{answer}");
-    assert_eq!(field(&answer, "transport_id"), "transport:2", "{answer}");
-    assert_eq!(field(&answer, "remote_addr"), from.to_string(), "{answer}");
-    assert_eq!(field(&answer, "link_tid"), "transport:2", "{answer}");
-    assert_eq!(field(&answer, "link_addr"), link.to_string(), "{answer}");
 }
 
 /// `may_dial` allows a connect only toward the address an outbound link was

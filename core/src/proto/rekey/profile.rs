@@ -166,7 +166,7 @@ pub trait SessionKeys {
     fn copy(&self, floor: Option<u64>) -> Self::RecvCopy;
 }
 
-/// An IK msg1 read at node level as the peer (`fmp::rekey::ik::read_msg1`).
+/// An IK msg1 read at node level as the peer (master's link profile).
 pub trait Msg1Read<P: Profile>: Debug {
     /// The startup epoch the msg1 carries.
     fn epoch(&self) -> [u8; 8];
@@ -185,7 +185,7 @@ pub trait Msg1Read<P: Profile>: Debug {
     ) -> Result<(Completed<P>, Wire), HsError>;
 }
 
-/// The completion a leg table hands over (next only).
+/// The completion a leg table hands over (next only; `fmp::rekey::read_final`).
 pub trait DoneRead<P: Profile>: Debug {
     /// The startup epoch the completion carries.
     fn epoch(&self) -> [u8; 8];

@@ -16,7 +16,7 @@ use super::rekey_parity::{
     age_link, cutover, deliver, heartbeat, rekey_config, rekey_to_pending, trigger_age,
 };
 use super::spanning_tree::{
-    cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node_with_config,
 };
 use super::*;
 
@@ -83,10 +83,31 @@ pub(super) fn audit(node: &Node, step: &str) {
     let _ = delegated;
 }
 
+/// Carry out what `tn`'s decrypt workers report of the frames dispatched to
+/// them, as the receive loop does, waiting briefly for each. A no-op
+/// without a worker pool. The initiator of a link rekey hears the peer under
+/// the new session only through this when a worker holds that session.
+async fn worker_frames(tn: &mut TestNode) {
+    #[cfg(unix)]
+    if tn.node.supervisor.decrypt_workers.is_some()
+        && let Some(mut rx) = tn.node.decrypt_fallback_rx.take()
+    {
+        while let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            tn.node.process_decrypt_worker_event(event).await;
+        }
+        tn.node.decrypt_fallback_rx = Some(rx);
+    }
+    #[cfg(not(unix))]
+    let _ = tn;
+}
+
 /// Every step of two rekeys each way leaves each node's index map equal to
 /// its link machines' bindings and its allocator equal to the leases held:
-/// link setup, a rekey handshake in flight, the responder's pending, the
-/// initiator's pending, the cutover, the adoption, a second cutover while
+/// link setup, a rekey handshake in flight, the responder's leg, the
+/// initiator's pending, the responder's pending, the cutover after its
+/// delay, the adoption, a second cutover while
 /// the first session still drains, both drains ending, and the peer's
 /// removal.
 #[tokio::test]
@@ -139,10 +160,13 @@ async fn steps(workers: bool) {
             "precondition: round {round}: node 0 started a rekey"
         );
         audit(&nodes[0].node, "a rekey handshake in flight");
-        assert_eq!(deliver(&mut nodes[1]).await, 1, "precondition: the msg1");
-        audit(&nodes[1].node, "the responder's pending");
+        // Behind any frame the worker's report of the previous round drew.
+        assert!(deliver(&mut nodes[1]).await >= 1, "precondition: the msg1");
+        audit(&nodes[1].node, "the responder's leg");
         assert_eq!(deliver(&mut nodes[0]).await, 1, "precondition: the msg2");
         audit(&nodes[0].node, "the initiator's pending");
+        assert_eq!(deliver(&mut nodes[1]).await, 1, "precondition: the msg3");
+        audit(&nodes[1].node, "the responder's pending");
         if round == 1 {
             assert!(
                 nodes[0].node.get_peer(&addr1).unwrap().is_draining(),
@@ -164,6 +188,7 @@ async fn steps(workers: bool) {
         );
         audit(&nodes[1].node, "the responder's adoption");
         deliver(&mut nodes[0]).await;
+        worker_frames(&mut nodes[0]).await;
         audit(&nodes[0].node, "the adoption's prompt");
     }
 

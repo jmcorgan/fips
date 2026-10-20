@@ -16,8 +16,7 @@ use crate::node::session::{
     SealFailure, SessionClock, SessionEntry, SessionInstant, session_params,
 };
 use crate::node::{Node, NodeError};
-use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, HandshakeState};
-use crate::proto::fmp::NegotiationPayload;
+use crate::noise::{HANDSHAKE_MSG1_SIZE, HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE};
 #[cfg(unix)]
 use crate::proto::fmp::wire::{ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_established_header};
 use crate::proto::framing::FIPS_OVERHEAD;
@@ -1020,8 +1019,33 @@ impl Node {
             return;
         };
         let opening = !entry.is_established();
-        let out = entry.step_reply(&ack.handshake_payload, ack.src_coords.clone(), now, &local);
+        let (mut out, mismatch) =
+            entry.step_reply(&ack.handshake_payload, ack.src_coords.clone(), now, &local);
         let established = opening && entry.is_established();
+        if mismatch {
+            // The ack read, but under a key other than the one the session
+            // is bound to. It is counted apart from an ack that does not
+            // read: either a stale npub-to-address mapping is being retried
+            // or somebody is answering this node's handshakes under their
+            // own key. The source address is an envelope field, so the
+            // attempt is kept for the peer's own ack either way.
+            out.retain(|o| !matches!(o, Output::Reject(Reason::ReplyUnauthenticated)));
+            if opening {
+                debug!(
+                    src = %self.peer_display_name(src_addr),
+                    "Responder identity mismatch in SessionAck, keeping the initiation"
+                );
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::AckIdentityMismatch));
+            } else {
+                warn!(
+                    src = %self.peer_display_name(src_addr),
+                    "FSP rekey: responder static key differs from the established peer key, keeping the rekey"
+                );
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::RekeyKeyMismatch));
+            }
+        }
         if established {
             let warmup = self.config().node.session.coords_warmup_packets;
             let mmp = self.config().node.session_mmp.clone();
@@ -1056,10 +1080,10 @@ impl Node {
         }
         self.flush_pending_packets(src_addr).await;
         self.flush_pending_native(src_addr).await;
-        info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XK)");
+        info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XX)");
     }
 
-    /// Handle an incoming SessionMsg3 (Noise XK msg3).
+    /// Handle an incoming SessionMsg3 (Noise XX msg3).
     ///
     /// The initiator reveals their encrypted static key. The responder
     /// processes msg3, learns the initiator's identity, and transitions
@@ -1140,7 +1164,7 @@ impl Node {
                     debug!(
                         src = %self.peer_display_name(src_addr),
                         reason = "no-candidate-matched",
-                        "Failed to process Noise XK msg3 against any candidate, keeping them"
+                        "Failed to process Noise XX msg3 against any candidate, keeping them"
                     );
                 }
                 _ => {}
@@ -1166,7 +1190,7 @@ impl Node {
         }
         self.flush_pending_packets(src_addr).await;
         self.flush_pending_native(src_addr).await;
-        info!(src = %self.peer_display_name(src_addr), "Session established (responder, XK)");
+        info!(src = %self.peer_display_name(src_addr), "Session established (responder, XX)");
     }
 
     // === Session-layer MMP report handlers ===
@@ -2245,7 +2269,7 @@ impl Node {
     /// `dest_pubkey`.
     ///
     /// The session's machine starts this node's first attempt at once: a
-    /// Noise XK msg1 in a SessionSetup, routed toward the destination and
+    /// Noise XX msg1 in a SessionSetup, routed toward the destination and
     /// resent on the machine's ladder. A session the peer's setups opened
     /// gets this node's attempt beside its candidates, so a setup that
     /// arrived first, forged or genuine, never holds this node's own

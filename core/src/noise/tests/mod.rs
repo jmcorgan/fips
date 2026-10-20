@@ -611,64 +611,6 @@ fn test_session_replay_protection() {
     assert!(receiver.check_replay(counter).is_err());
 }
 
-/// Drive an XX handshake to the point where the responder is waiting for
-/// msg3, and return the initiator's genuine msg3 with the responder.
-fn responder_awaiting_msg3() -> (HandshakeState, Vec<u8>) {
-    let mut initiator = HandshakeState::new_initiator(generate_keypair());
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_responder(generate_keypair());
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_message_1().unwrap();
-    responder.read_message_1(&msg1).unwrap();
-    let msg2 = responder.write_message_2().unwrap();
-    initiator.read_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_message_3().unwrap();
-    (responder, msg3)
-}
-
-#[test]
-fn test_a_failed_rolling_back_msg3_read_still_reads_the_genuine_msg3() {
-    let (mut responder, msg3) = responder_awaiting_msg3();
-
-    // Fails at the first AEAD, after the nonce has advanced.
-    assert!(
-        responder
-            .try_read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE])
-            .is_err()
-    );
-    // Fails at the epoch AEAD, after the static was learned and the se DH
-    // mixed into the key.
-    let mut tampered = msg3.clone();
-    let last = tampered.len() - 1;
-    tampered[last] ^= 0x01;
-    assert!(responder.try_read_message_3(&tampered).is_err());
-    assert!(
-        responder.remote_static().is_none(),
-        "a failed read must not leave the static it decrypted behind"
-    );
-    assert!(!responder.is_complete());
-
-    responder
-        .try_read_message_3(&msg3)
-        .expect("the genuine msg3 must still read after two failed reads");
-    assert!(responder.is_complete());
-    assert!(responder.into_session().is_ok());
-}
-
-#[test]
-fn test_a_failed_plain_msg3_read_cannot_read_the_genuine_msg3() {
-    // The control for the rolling-back read: without the rollback, the
-    // failed read leaves a handshake the genuine msg3 no longer opens.
-    let (mut responder, msg3) = responder_awaiting_msg3();
-    assert!(
-        responder
-            .read_message_3(&[0u8; HANDSHAKE_MSG3_SIZE])
-            .is_err()
-    );
-    assert!(responder.read_message_3(&msg3).is_err());
-}
-
 /// The `zeroize` features of `sha2` and `hmac` are on, so the SHA-256 state
 /// that hashes each Diffie-Hellman result, and the two SHA-256 cores inside
 /// the HMAC that HKDF runs on, are cleared when dropped. Without `sha2`'s

@@ -39,13 +39,13 @@ async fn pump_until_quiet(nodes: &mut [TestNode]) {
 
 /// A two-node pair caught mid FMP rekey, with node 1's msg2 held back from
 /// node 0. Built by [`rekey_pair_with_held_msg2`].
-struct HeldMsg2Pair {
-    nodes: Vec<TestNode>,
-    node0_addr: NodeAddr,
-    node1_addr: NodeAddr,
-    node0_idx_before: Option<SessionIndex>,
-    node1_idx_before: Option<SessionIndex>,
-    held_msg2: ReceivedPacket,
+pub(super) struct HeldMsg2Pair {
+    pub(super) nodes: Vec<TestNode>,
+    pub(super) node0_addr: NodeAddr,
+    pub(super) node1_addr: NodeAddr,
+    pub(super) node0_idx_before: Option<SessionIndex>,
+    pub(super) node1_idx_before: Option<SessionIndex>,
+    pub(super) held_msg2: ReceivedPacket,
 }
 
 /// Build a two-node pair with aged link sessions, start node 0's FMP rekey,
@@ -58,11 +58,9 @@ async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
 
     const REKEY_AFTER_SECS: u64 = 60;
     let mut cfg0 = crate::config::Config::new();
-    cfg0.node.rekey.enabled = true;
     cfg0.node.rekey.after_secs = REKEY_AFTER_SECS;
     cfg0.node.rekey.after_messages = u64::MAX;
     let mut cfg1 = crate::config::Config::new();
-    cfg1.node.rekey.enabled = true;
     cfg1.node.rekey.after_secs = u64::MAX;
     cfg1.node.rekey.after_messages = u64::MAX;
 
@@ -76,7 +74,7 @@ async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
     let node0_idx_before = nodes[0].node.get_peer(&node1_addr).unwrap().our_index();
     let node1_idx_before = nodes[1].node.get_peer(&node0_addr).unwrap().our_index();
 
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     assert!(
         nodes[0]
             .node
@@ -300,7 +298,7 @@ async fn a_flipped_frame_on_the_pending_index_that_fails_logs_that_the_trial_ran
 
     let line = expect_line(&logs, "Decryption failed");
     assert_eq!(field(&line, "trial"), "run-index", "{line}");
-    assert_eq!(field(&line, "slot"), "pending-responder", "{line}");
+    assert_eq!(field(&line, "slot"), "pending", "{line}");
     assert_eq!(field(&line, "kbit_frame"), "true", "{line}");
     assert_eq!(
         lines_with(&logs, "Decryption failed").len(),
@@ -382,6 +380,7 @@ async fn corrupt_frames_on_the_current_and_draining_sessions_log_their_slots() {
 
     // After node 0's cutover the old index is the draining previous one.
     nodes[0].node.handle_msg2(held_msg2).await;
+    super::rekey_parity::pass_cutover_delay();
     nodes[0].node.poll_link_rekeys().await;
     let new_tag = {
         let p0 = nodes[0].node.get_peer(&node1_addr).unwrap();
@@ -686,6 +685,7 @@ async fn both_ends_log_the_same_new_session_tag_and_their_kbit_through_a_rekey()
             .unwrap(),
     );
     nodes[0].node.handle_msg2(held_msg2).await;
+    super::rekey_parity::pass_cutover_delay();
     nodes[0].node.poll_link_rekeys().await;
     nodes[0]
         .node
@@ -739,15 +739,13 @@ async fn both_ends_log_the_same_new_session_tag_and_their_kbit_through_a_rekey()
     cleanup_nodes(&mut nodes).await;
 }
 
-/// Cut node 0 over on its own tick while node 1 stays on the old session.
-///
-/// Node 1 never reads node 0's msg3, so node 0's msg3 resends would run out
-/// before any reap; until they do, they hold the link-dead reap off. The
-/// retained msg3 is cleared here to stand for their end.
-async fn node0_cut_over() -> HeldMsg2Pair {
+/// Cut node 0 over on its own tick after the cutover delay while node 1
+/// stays on the old session.
+pub(super) async fn node0_cut_over() -> HeldMsg2Pair {
     let mut pair = rekey_pair_with_held_msg2().await;
     let held = pair.held_msg2.clone();
     pair.nodes[0].node.handle_msg2(held).await;
+    super::rekey_parity::pass_cutover_delay();
     pair.nodes[0].node.poll_link_rekeys().await;
     let p0 = pair.nodes[0].node.get_peer(&pair.node1_addr).unwrap();
     assert_eq!(
@@ -755,7 +753,6 @@ async fn node0_cut_over() -> HeldMsg2Pair {
         pair.node0_idx_before,
         "node 0 must cut over"
     );
-    p0.clear_rekey_msg3_payload();
     pair
 }
 

@@ -1,7 +1,7 @@
 //! End-to-end session state.
 //!
 //! One `SessionEntry` per remote endpoint, from the first message of its
-//! Noise XK handshake (SessionSetup, SessionAck, SessionMsg3, carried inside
+//! Noise XX handshake (SessionSetup, SessionAck, SessionMsg3, carried inside
 //! SessionDatagram envelopes through the mesh) to its removal. The entry's
 //! rekey machine runs that first handshake, then holds the session's keys
 //! and rotates them.
@@ -19,10 +19,10 @@ use crate::proto::stp::TreeCoordinate;
 use crate::time::WallStamp;
 use fips_core::noise::aead::AeadKey;
 use fips_core::noise::{MAX_MESSAGE_SIZE, NoiseError, TAG_SIZE};
-use fips_core::proto::fsp::rekey::FspProfile;
+use fips_core::proto::fsp::rekey::{FspProfile, SessionLocal};
 use fips_core::proto::rekey::{
     Config, CycleView, Env, EpochTag, FrameHint, Identity, Input, JitterSource, MAX_AFTER,
-    NodeKeys, Output, Outputs, Params, PeerKey, Profile, Rekey, Role, SealRefusal, Sealed,
+    NodeKeys, Output, Outputs, Params, PeerKey, Profile, Reason, Rekey, Role, SealRefusal, Sealed,
     TagSource,
 };
 use fips_core::time::{Clock, Instant};
@@ -170,8 +170,11 @@ pub(crate) fn session_params(node: &crate::config::NodeConfig) -> Params {
 
 /// Run `f` with the environment a session call borrows: no session
 /// indices, no transport, the process's epoch tags, no decrypt workers, the
-/// thread's jitter and this node's keys `local`.
-fn with_env<R>(local: &NodeKeys, f: impl FnOnce(&mut Env<'_, FspProfile<OsEntropy>>) -> R) -> R {
+/// thread's jitter and this node's keys for the call, `local`.
+fn with_env<R>(
+    local: &SessionLocal,
+    f: impl FnOnce(&mut Env<'_, FspProfile<OsEntropy>>) -> R,
+) -> R {
     let mut scratch = Vec::new();
     with_tags(|tags| {
         let mut env = Env {
@@ -207,7 +210,7 @@ pub(crate) fn keyed(
     peer_epoch: [u8; 8],
     now: SessionInstant,
 ) -> SessionRekey {
-    use fips_core::proto::fsp::rekey::xk::SessionKeys;
+    use fips_core::proto::fsp::rekey::SessionKeys;
     use fips_core::proto::rekey::{Bond, Completed, Ids, Record, SetupFacts};
     let bond = Bond::Key(peer_key(remote));
     let done = Completed::<FspProfile<OsEntropy>> {
@@ -229,7 +232,8 @@ pub(crate) fn keyed(
     };
     // An unindexed profile with no decrypt workers makes no binding and no
     // delegation, so there are no outputs to execute.
-    let (machine, _) = with_env(local, |env| {
+    let local = SessionLocal::for_call(local, false);
+    let (machine, _) = with_env(&local, |env| {
         SessionRekey::established(params, bond, me, first, Ids::unindexed(()), facts, now, env)
     });
     machine
@@ -324,7 +328,7 @@ pub(crate) struct SessionEntry {
     /// reset on CoordsRequired receipt.
     coords_warmup_remaining: u8,
     /// Whether this node was the initiator of the handshake that
-    /// established the session, for the spin bit role in session-layer MMP.
+    /// established the session.
     initiator: bool,
     /// Largest on-the-wire frame this node has sent toward the remote since
     /// the last accepted path-MTU decrease or release, in bytes.
@@ -337,8 +341,7 @@ pub(crate) struct SessionEntry {
     max_sent_wire_len: u16,
     /// Session-layer MMP state. Initialized on Established transition.
     mmp: Option<MmpSessionState>,
-    /// The epoch whose frames the MMP receiver and spin state measure: the
-    /// current one, from the moment MMP starts and again at each cutover.
+    /// The epoch whose frames the MMP receiver measures: the current one, from the moment MMP starts and again at each cutover.
     /// A frame or report authenticated under any other epoch is not
     /// recorded, since its counters and timestamps belong to that epoch.
     mmp_epoch: Option<EpochTag>,
@@ -391,7 +394,8 @@ impl SessionEntry {
         now: SessionInstant,
     ) -> (Self, SessionOutputs) {
         let peer = peer_key(peer);
-        let (machine, out) = with_env(local, |env| {
+        let local = SessionLocal::for_call(local, true);
+        let (machine, out) = with_env(&local, |env| {
             SessionRekey::opening_outbound(params, peer, me, now, (), env)
         });
         (Self::new(remote_addr, machine, now), out)
@@ -420,7 +424,8 @@ impl SessionEntry {
             route,
             only: (),
         };
-        let (machine, out) = with_env(local, |env| {
+        let local = SessionLocal::for_call(local, true);
+        let (machine, out) = with_env(&local, |env| {
             SessionRekey::opening_inbound(params, claimed, me, now, setup, (), env)
         });
         (Self::new(claimed, machine, now), out)
@@ -532,7 +537,7 @@ impl SessionEntry {
     }
 
     /// Settle the entry's own state when its first handshake has just
-    /// completed at `now`: the spin role of the handshake that completed,
+    /// completed at `now`: which end started the handshake that completed,
     /// `warmup` coordinate-carrying packets, session MMP from `mmp`, and the
     /// idle timer.
     pub(crate) fn establish(&mut self, warmup: u8, mmp: &SessionMmpConfig, now: SessionInstant) {
@@ -658,12 +663,6 @@ impl SessionEntry {
         self.mmp.as_mut()
     }
 
-    /// The spin bit to send under the epoch `tag`: the MMP spin state's when
-    /// it measures that epoch, otherwise clear.
-    fn spin_bit(&self, tag: EpochTag) -> bool {
-        self.mmp_epoch == Some(tag) && self.mmp.as_ref().is_some_and(|m| m.spin_bit.tx_bit())
-    }
-
     /// The current epoch's tag, once the session is established.
     pub(crate) fn current_tag(&self) -> Option<EpochTag> {
         self.machine.view().current.map(|cur| cur.tag)
@@ -751,9 +750,8 @@ impl SessionEntry {
     /// Seal one session message of `msg_type` carrying `body` under the
     /// current epoch at `now`. The epoch fixes everything about it but the
     /// message: the key and counter, the header's key-epoch bit (whatever
-    /// `flags` says of it), the inner-header timestamp, counted from its
-    /// base, and the spin bit, from the MMP state measuring it. `flags`
-    /// gives the header's other bits.
+    /// `flags` says of it) and the inner-header timestamp, counted from its
+    /// base. `flags` gives the header's other bits.
     ///
     /// A message too large for one frame is refused before a counter is
     /// reserved, so the refusal costs no counter.
@@ -815,7 +813,7 @@ impl SessionEntry {
     /// The inner-header timestamp, the header and the plaintext of one
     /// message sealed as `sealed`: every field an epoch fixes is taken from
     /// the epoch `sealed` names, so no send path can mix one epoch's key
-    /// with another's key-epoch bit, timestamp base or spin state.
+    /// with another's key-epoch bit or timestamp base.
     fn frame<S>(
         &self,
         sealed: &Sealed<S>,
@@ -824,8 +822,7 @@ impl SessionEntry {
         body: &[u8],
     ) -> (u32, [u8; FSP_HEADER_SIZE], Vec<u8>) {
         let timestamp = sealed.elapsed.as_millis() as u32;
-        let spin_bit = self.spin_bit(sealed.tag);
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
+        let inner_flags = FspInnerFlags::new().to_byte();
         let plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, body);
         let k = if sealed.k { FSP_FLAG_K } else { 0 };
         let flags = (flags & !FSP_FLAG_K) | k;
@@ -857,15 +854,24 @@ impl SessionEntry {
 
     /// Take a SessionAck's Noise msg2 `bytes`, which carried the
     /// responder's coordinates `route`, through the machine at `now` as the
-    /// reply to its own attempt, first handshake or rekey.
+    /// reply to its own attempt, first handshake or rekey. Also returns
+    /// whether the ack read but authenticated a key the session is not
+    /// bonded to: the machine refuses that ack as it refuses one that does
+    /// not read, and the caller counts the two apart.
     pub(crate) fn step_reply(
         &mut self,
         bytes: &[u8],
         route: TreeCoordinate,
         now: SessionInstant,
         local: &NodeKeys,
-    ) -> SessionOutputs {
-        self.step(now, Input::Reply { bytes, route }, local)
+    ) -> (SessionOutputs, bool) {
+        let local = self.local(local);
+        let out = self.step_with(now, Input::Reply { bytes, route }, &local);
+        let mismatch = local.replied().is_some()
+            && out
+                .iter()
+                .any(|o| matches!(o, Output::Reject(Reason::ReplyUnauthenticated)));
+        (out, mismatch)
     }
 
     /// Take a SessionMsg3's Noise msg3 `bytes` through the machine at `now`,
@@ -879,6 +885,12 @@ impl SessionEntry {
         self.step(now, Input::Final { bytes, only: () }, local)
     }
 
+    /// This node's keys `keys` for one call into the machine, marked as the
+    /// session's first handshake while the machine holds no epoch.
+    fn local(&self, keys: &NodeKeys) -> SessionLocal {
+        SessionLocal::for_call(keys, self.machine.view().current.is_none())
+    }
+
     /// Step the machine with `input` at `now`, then follow its current
     /// epoch with the session MMP.
     fn step(
@@ -886,6 +898,18 @@ impl SessionEntry {
         now: SessionInstant,
         input: Input<'_, FspProfile<OsEntropy>>,
         local: &NodeKeys,
+    ) -> SessionOutputs {
+        let local = self.local(local);
+        self.step_with(now, input, &local)
+    }
+
+    /// Step the machine with `input` at `now` under the call's keys
+    /// `local`, then follow its current epoch with the session MMP.
+    fn step_with(
+        &mut self,
+        now: SessionInstant,
+        input: Input<'_, FspProfile<OsEntropy>>,
+        local: &SessionLocal,
     ) -> SessionOutputs {
         let machine = &mut self.machine;
         let out = with_env(local, |env| machine.step(now, input, env));
@@ -953,8 +977,9 @@ impl SessionEntry {
             .as_ref()
             .and_then(|m| m.metrics.srtt_ms())
             .map(|ms| Duration::from_micros((ms * 1000.0) as u64));
+        let local = self.local(local);
         let m = &mut self.machine;
-        let out = with_env(local, |env| {
+        let out = with_env(&local, |env| {
             let path = Input::PathFacts {
                 reachable,
                 srtt,
@@ -1000,8 +1025,8 @@ impl SessionEntry {
         })
     }
 
-    /// Restart the session MMP receiver and spin state when the machine's
-    /// current epoch has changed (a cutover, or a return to the drained
+    /// Restart the session MMP receiver when the machine's current epoch has
+    /// changed (a cutover, or a return to the drained
     /// epoch), so they measure the current epoch alone.
     fn follow_epoch(&mut self) {
         let tag = self.current_tag();
@@ -1031,10 +1056,25 @@ impl SessionEntry {
         }
     }
 
+    /// The current epoch's session, once the session is established.
+    #[cfg(test)]
+    pub(crate) fn current_session(&self) -> Option<&crate::noise::NoiseSession> {
+        use fips_core::proto::fsp::rekey::SessionKeys;
+        self.keys()?
+            .keys(fips_core::proto::rekey::Slot::Current)
+            .map(SessionKeys::session)
+    }
+
+    /// The machine's next deadline or start instant, if it has one.
+    #[cfg(test)]
+    pub(crate) fn next_wake(&self) -> Option<SessionInstant> {
+        self.machine.next_wake()
+    }
+
     /// The pending new session (completed rekey, not yet cut over).
     #[cfg(test)]
     pub(crate) fn pending_new_session(&self) -> Option<&crate::noise::NoiseSession> {
-        use fips_core::proto::fsp::rekey::xk::SessionKeys;
+        use fips_core::proto::fsp::rekey::SessionKeys;
         self.keys()?
             .keys(fips_core::proto::rekey::Slot::Pending)
             .map(SessionKeys::session)
@@ -1107,11 +1147,9 @@ impl SessionEntry {
         keypair: secp256k1::Keypair,
         now: SessionInstant,
     ) -> Self {
-        let mut stranger = crate::noise::HandshakeState::new_xk_initiator(
-            crate::Identity::generate().keypair(),
-            keypair.public_key(),
-        );
-        let msg1 = stranger.write_xk_message_1().expect("a msg1");
+        let mut stranger =
+            crate::noise::HandshakeState::new_initiator(crate::Identity::generate().keypair());
+        let msg1 = stranger.write_message_1().expect("a msg1");
         let me = NodeAddr::from_pubkey(&keypair.x_only_public_key().0);
         let local = NodeKeys::new(keypair, [0; 8]);
         let params = session_params(&crate::config::NodeConfig::default());

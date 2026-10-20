@@ -39,12 +39,12 @@ moves in from the root crate one module at a time. So far it holds:
   machines of every layer (link, session, spanning tree, bloom filters,
   routing, lookups, metrics, probes). The root crate reaches it as
   `crate::proto` and re-exports its public types at its crate root.
-  `proto::rekey`, the key-rotation machine both layers will share, and
-  its two production profiles, `proto::fmp::rekey` (Noise IK) and
-  `proto::fsp::rekey` (Noise XK), are hidden from the docs. The root
+  `proto::rekey`, the key-rotation machine both layers share, and its
+  two production profiles, `proto::fmp::rekey` and `proto::fsp::rekey`
+  (both Noise XX on this line), are hidden from the docs. The root
   crate's session table holds every session in a machine on the session
-  profile, from its first handshake on; the link layer does not use the
-  machine yet.
+  profile, from its first handshake on, and each active peer holds its
+  link's sessions in a machine on the link profile.
 
 ## What belongs here
 
@@ -270,13 +270,12 @@ The first lints the library with only the features its
 `[dependencies]` ask for. The second also type-checks the tests, and
 in doing so gives the library the dev-dependencies' features, so code
 that needs `secp256k1`'s `rand` or `std` passes it; the first does
-not. The third lints the slow test suites the `slow-tests` feature
-gates (the models of the deployed releases and the guard-switch
-meta-test). Every platform's ordinary test run skips them; GitHub CI's
-Linux job runs them on every push, and local CI with `--slow-tests`. Run
-all four before sending a change here. The repository guards in
-`testing/` (atomics, comment references, log strings) scan `core/src/`
-as well as `src/`.
+not. The third lints the slow test suite the `slow-tests` feature gates
+(the guard-switch meta-test). Every platform's ordinary test run skips
+it; GitHub CI's Linux job runs it on every push, and local CI with
+`--slow-tests`. Run all four before sending a change here. The
+repository guards in `testing/` (atomics, comment references, log
+strings) scan `core/src/` as well as `src/`.
 
 These checks run on the host, where `std` exists, so they cannot catch
 a dependency that links it. A separate build of the library for two

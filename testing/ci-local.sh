@@ -17,12 +17,11 @@
 #                        llvm-ar. When asked for, a missing prerequisite fails
 #                        the run. FIPS_CI_BAREMETAL=1 in the environment turns
 #                        it on too. GitHub CI runs it on every push.
-#   --slow-tests         Also run fips-core's slow test suites (the models of
-#                        the deployed releases and the guard-switch
-#                        meta-test) in the core's own test run. Off by
-#                        default: they take minutes, and GitHub CI's Linux job
-#                        runs them on every push. FIPS_CI_SLOW_TESTS=1 in the
-#                        environment turns it on too.
+#   --slow-tests         Also run fips-core's slow test suite (the
+#                        guard-switch meta-test) in the core's own test run.
+#                        Off by default: it takes minutes, and GitHub CI's
+#                        Linux job runs it on every push. FIPS_CI_SLOW_TESTS=1
+#                        in the environment turns it on too.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -758,7 +757,7 @@ run_build() {
         return 1
     fi
 
-    # The slow test suites are linted on every run, though they run only with
+    # The slow test suite is linted on every run, though it runs only with
     # --slow-tests. Mirrored in .github/workflows/ci.yml.
     info "cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings"
     if cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings 2>&1; then
@@ -877,7 +876,7 @@ run_tests() {
     # The no_std core's tests under the core's own feature resolution, so a
     # test whose result depends on a feature only the root crate enables runs
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
-    # always runs the slow suites here; locally they need --slow-tests.
+    # always runs the slow suite here; locally it needs --slow-tests.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
         core_test+=(--features slow-tests)

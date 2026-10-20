@@ -352,23 +352,20 @@ fn a_new_epoch_msg3_from_an_idle_existing_peer_restarts_it_during_the_back_off()
 #[test]
 fn a_duplicate_msg3_from_an_existing_peer_still_draws_the_stored_msg2_during_the_back_off() {
     let mut snap = existing_snapshot();
-    snap.existing_msg2 = Some(vec![0x5E; 4]);
+    snap.stored_msg2 = Some(vec![0x5E; 4]);
     assert!(matches!(
         classify(&snap, Some(EPOCH)),
-        InboundDecision::ResendMsg2 { msg2: Some(_) }
+        InboundDecision::RepeatMsg2 { msg2: Some(_) }
     ));
 }
 
 #[test]
-fn a_rekey_of_an_existing_peers_session_is_answered_during_the_back_off() {
+fn a_rekey_of_an_existing_peers_session_goes_to_its_machine_during_the_back_off() {
     let mut snap = existing_snapshot();
     snap.rekey_claim = RekeyClaim::Matches;
     assert!(matches!(
         classify(&snap, Some(EPOCH)),
-        InboundDecision::RekeyRespond {
-            abandon_first: false,
-            ..
-        }
+        InboundDecision::PeerRekey { .. }
     ));
 }
 

@@ -222,13 +222,14 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
 
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let link_id_a = node_a.allocate_link_id();
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_lease_a = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = SessionIndex::new(our_lease_a.index());
     // Mirror the production dial path: the seam seeds the outbound leg's
     // control machine, which owns the handshake crypto.
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_lease_a)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(addr_b.clone()),
         )

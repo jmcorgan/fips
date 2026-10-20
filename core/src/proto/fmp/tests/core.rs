@@ -1,14 +1,10 @@
 //! Tests for the sans-IO FMP connection-lifecycle decision core.
 
-use super::util::{
-    establish_snapshot, peer_snapshot, rekey_resend_snapshot, resend_snapshot, stale_snapshot,
-    wire_outcome,
-};
+use super::util::{establish_snapshot, resend_snapshot, stale_snapshot, wire_outcome};
 use crate::proto::fmp::{
     ConnAction, DialMsg2Decision, DialMsg2Reject, DialMsg2Snapshot,
     EPOCH_RESTART_MIN_INTERVAL_SECS, Fmp, InboundDecision, InboundReject, NegotiationPayload,
-    NodeProfile, OutboundDecision, OutboundSnapshot, RekeyCfg, RekeyClaim, RekeyMsg2Decision,
-    RekeyMsg2Reject, RekeyMsg2Snapshot, cross_connection_winner,
+    NodeProfile, OutboundDecision, OutboundSnapshot, RekeyClaim, cross_connection_winner,
 };
 use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
@@ -105,10 +101,6 @@ fn resend_backoff_exponent_uses_count_plus_one() {
         _ => panic!("expected ResendMsg1"),
     }
 }
-
-// --- rekey decision (synthetic clock: elapsed_secs/counter fed directly) ---
-
-// --- rekey msg1 retransmission decision ---
 
 // ===========================================================================
 // XX inbound establish classification (`establish_inbound`).
@@ -259,105 +251,34 @@ fn establish_same_link_fresh_is_duplicate() {
     let mut snap = establish_snapshot(0x05);
     snap.different_link = false;
     snap.rekey_claim = RekeyClaim::None;
-    snap.existing_msg2 = Some(vec![0xaa, 0xbb]);
+    snap.stored_msg2 = Some(vec![0xaa, 0xbb]);
     let wire = wire_outcome(0x02, SAME_EPOCH);
     match fmp.establish_inbound(&snap, &wire) {
-        InboundDecision::ResendMsg2 { msg2 } => assert_eq!(msg2, Some(vec![0xaa, 0xbb])),
-        other => panic!("expected ResendMsg2, got {other:?}"),
+        InboundDecision::RepeatMsg2 { msg2 } => assert_eq!(msg2, Some(vec![0xaa, 0xbb])),
+        other => panic!("expected RepeatMsg2, got {other:?}"),
     }
 }
 
-/// Aged, same-epoch session with no dual-init in flight -> rekey
-/// responder, no prior abandon.
+/// A same-epoch msg3 declaring the session we hold goes to the peer's rekey
+/// machine, whichever of the two addresses is smaller.
 ///
-/// The snapshot carries no local rekey-trigger config, and deliberately: the
-/// sender's declaration is the whole input. A responder that consulted its own
-/// `rekey.enabled` here would decline a rekey the sender has already committed
-/// to, leaving the two ends on different sessions whenever the setting is
-/// asymmetric. The two-ended proof of that lives in `node/tests/handshake.rs`;
-/// this pins the decision itself.
+/// The decision takes no rekey state of ours and no local rekey-trigger
+/// config, deliberately: the sender's declaration is the whole input. A rekey
+/// of ours in flight is the peer's machine's to weigh against this one (its
+/// tie-break), and a responder that consulted its own configuration would
+/// decline a rekey the sender has already committed to.
 #[test]
-fn establish_aged_rekey_responds_without_abandon() {
+fn establish_declared_rekey_goes_to_the_peers_machine_whichever_address_is_smaller() {
     let fmp = Fmp::new();
-    let mut snap = establish_snapshot(0x05);
-    snap.rekey_claim = RekeyClaim::Matches;
-    let wire = wire_outcome(0x02, SAME_EPOCH);
-    match fmp.establish_inbound(&snap, &wire) {
-        InboundDecision::RekeyRespond {
-            peer,
-            abandon_first,
-        } => {
-            assert_eq!(peer, make_node_addr(0x02));
-            assert!(!abandon_first);
+    for (ours, theirs) in [(0x05, 0x02), (0x02, 0x09)] {
+        let mut snap = establish_snapshot(ours);
+        snap.rekey_claim = RekeyClaim::Matches;
+        let wire = wire_outcome(theirs, SAME_EPOCH);
+        match fmp.establish_inbound(&snap, &wire) {
+            InboundDecision::PeerRekey { peer } => assert_eq!(peer, make_node_addr(theirs)),
+            other => panic!("ours={ours:#x} theirs={theirs:#x}: expected PeerRekey, got {other:?}"),
         }
-        other => panic!("expected RekeyRespond, got {other:?}"),
     }
-}
-
-/// Dual-init in the `rekey_in_progress` state, we are the SMALLER node ->
-/// tie-break win, drop their msg3.
-#[test]
-fn establish_dual_init_in_progress_smaller_wins() {
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot(0x02); // our addr 0x02 (smaller)
-    snap.rekey_claim = RekeyClaim::Matches;
-    snap.rekey_in_progress = true;
-    let wire = wire_outcome(0x09, SAME_EPOCH); // peer 0x09
-    assert!(matches!(
-        fmp.establish_inbound(&snap, &wire),
-        InboundDecision::Reject {
-            reason: InboundReject::DualRekeyWon
-        }
-    ));
-}
-
-/// Dual-init in the `rekey_in_progress` state, we are the LARGER node ->
-/// tie-break loss, abandon ours then respond.
-#[test]
-fn establish_dual_init_in_progress_larger_loses() {
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot(0x09); // our addr 0x09 (larger)
-    snap.rekey_claim = RekeyClaim::Matches;
-    snap.rekey_in_progress = true;
-    let wire = wire_outcome(0x02, SAME_EPOCH); // peer 0x02
-    match fmp.establish_inbound(&snap, &wire) {
-        InboundDecision::RekeyRespond { abandon_first, .. } => assert!(abandon_first),
-        other => panic!("expected RekeyRespond{{abandon_first:true}}, got {other:?}"),
-    }
-}
-
-/// XX-widened dual-init: the `pending_new_session` state (which IK never
-/// reached). As the LARGER node we lose -> abandon ours then respond,
-/// re-installing pending.
-#[test]
-fn establish_dual_init_pending_state_larger_loses() {
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot(0x09); // our addr 0x09 (larger)
-    snap.rekey_claim = RekeyClaim::Matches;
-    snap.rekey_in_progress = false;
-    snap.pending_new_session = true; // the widened window
-    let wire = wire_outcome(0x02, SAME_EPOCH);
-    match fmp.establish_inbound(&snap, &wire) {
-        InboundDecision::RekeyRespond { abandon_first, .. } => assert!(abandon_first),
-        other => panic!("expected RekeyRespond{{abandon_first:true}}, got {other:?}"),
-    }
-}
-
-/// XX-widened dual-init `pending_new_session` state as the SMALLER node ->
-/// tie-break win, drop their msg3.
-#[test]
-fn establish_dual_init_pending_state_smaller_wins() {
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot(0x02); // our addr 0x02 (smaller)
-    snap.rekey_claim = RekeyClaim::Matches;
-    snap.pending_new_session = true;
-    let wire = wire_outcome(0x09, SAME_EPOCH);
-    assert!(matches!(
-        fmp.establish_inbound(&snap, &wire),
-        InboundDecision::Reject {
-            reason: InboundReject::DualRekeyWon
-        }
-    ));
 }
 
 /// The sender's declaration partitions cross-connection from rekey, and it does
@@ -383,14 +304,14 @@ fn establish_declaration_partitions_cross_connection_and_rekey() {
     declared.rekey_claim = RekeyClaim::Matches;
     assert!(matches!(
         fmp.establish_inbound(&declared, &wire),
-        InboundDecision::RekeyRespond { .. }
+        InboundDecision::PeerRekey { .. }
     ));
 }
 
-/// A marker naming a session we do not hold resends msg2 rather than rejecting.
-/// The initiator has already installed its pending session and will cut over on
-/// its own timer; the reject path sends nothing back, so tearing down here would
-/// strand the link in exactly the way this defect does.
+/// A marker naming a session we do not hold sends the stored msg2 again rather
+/// than rejecting. The initiator has already committed to its pending session;
+/// the reject path sends nothing back, so tearing down here would strand the
+/// link.
 #[test]
 fn establish_mismatched_marker_resends_rather_than_rejecting() {
     let fmp = Fmp::new();
@@ -401,43 +322,32 @@ fn establish_mismatched_marker_resends_rather_than_rejecting() {
     snap.rekey_claim = RekeyClaim::Mismatch;
     assert!(matches!(
         fmp.establish_inbound(&snap, &wire),
-        InboundDecision::ResendMsg2 { .. }
+        InboundDecision::RepeatMsg2 { .. }
     ));
 }
 
 /// A fresh dial crossing our own in-flight rekey still resolves by the
-/// cross-connection tie-break, unchanged by the rekey.
+/// cross-connection tie-break.
 ///
 /// This decision is one half of a two-sided tie-break: the peer's outbound half
 /// (`establish_outbound`) reads only whether it has an existing peer and the
 /// address ordering, and cannot see our rekey. Declining the swap here on
-/// account of our own state therefore desynchronizes the pair — the peer swaps,
-/// we do not, and neither end holds the other's session. Measured on both trees:
-/// declining leaves all four indices distinct with no pending session anywhere.
-///
-/// The orphaned-rekey hazard is real and is handled where the swap happens, by
-/// abandoning the rekey as part of it, rather than by refusing to swap.
+/// account of our own state would desynchronize the pair — the peer swaps, we
+/// do not, and neither end holds the other's session. The decision therefore
+/// takes no rekey state at all; moving the session closes the link's rekey
+/// machine, which abandons the displaced rekey.
 #[test]
 fn establish_undeclared_during_our_rekey_still_cross_connects() {
     let fmp = Fmp::new();
     let wire = wire_outcome(0x02, SAME_EPOCH);
-
-    for (in_progress, pending) in [(true, false), (false, true), (false, false)] {
-        let mut snap = establish_snapshot(0x09); // our 0x09 > peer 0x02
-        snap.different_link = true;
-        snap.rekey_claim = RekeyClaim::None;
-        snap.rekey_in_progress = in_progress;
-        snap.pending_new_session = pending;
-        match fmp.establish_inbound(&snap, &wire) {
-            InboundDecision::CrossConnect {
-                our_inbound_wins, ..
-            } => assert!(
-                our_inbound_wins,
-                "the larger node's inbound wins regardless of our rekey state \
-                 (in_progress={in_progress} pending={pending})"
-            ),
-            other => panic!("in_progress={in_progress} pending={pending}: got {other:?}"),
-        }
+    let mut snap = establish_snapshot(0x09); // our 0x09 > peer 0x02
+    snap.different_link = true;
+    snap.rekey_claim = RekeyClaim::None;
+    match fmp.establish_inbound(&snap, &wire) {
+        InboundDecision::CrossConnect {
+            our_inbound_wins, ..
+        } => assert!(our_inbound_wins, "the larger node's inbound wins"),
+        other => panic!("got {other:?}"),
     }
 }
 
@@ -451,7 +361,7 @@ fn establish_mismatched_claim_on_the_same_link_is_duplicate() {
     let wire = wire_outcome(0x02, SAME_EPOCH);
     assert!(matches!(
         fmp.establish_inbound(&snap, &wire),
-        InboundDecision::ResendMsg2 { .. }
+        InboundDecision::RepeatMsg2 { .. }
     ));
 }
 
@@ -466,7 +376,7 @@ fn establish_matching_claim_without_a_session_is_duplicate() {
     let wire = wire_outcome(0x02, SAME_EPOCH);
     assert!(matches!(
         fmp.establish_inbound(&snap, &wire),
-        InboundDecision::ResendMsg2 { .. }
+        InboundDecision::RepeatMsg2 { .. }
     ));
 }
 
@@ -482,7 +392,6 @@ fn establish_outbound_no_existing_peer_promotes() {
         has_existing_peer: false,
         existing_peer_epoch: None,
         our_outbound_wins: true,
-        own_dial: false,
     };
     assert_eq!(
         fmp.establish_outbound(&snap, None),
@@ -497,7 +406,6 @@ fn establish_outbound_cross_connection_win_swaps() {
         has_existing_peer: true,
         existing_peer_epoch: None,
         our_outbound_wins: true,
-        own_dial: false,
     };
     assert_eq!(
         fmp.establish_outbound(&snap, None),
@@ -512,41 +420,10 @@ fn establish_outbound_cross_connection_loss_keeps() {
         has_existing_peer: true,
         existing_peer_epoch: None,
         our_outbound_wins: false,
-        own_dial: false,
     };
     assert_eq!(
         fmp.establish_outbound(&snap, None),
         OutboundDecision::CrossConnectionKeep
-    );
-}
-
-// ===========================================================================
-// rekey_outbound — initiator rekey msg2 static-continuity classification
-// ===========================================================================
-
-#[test]
-fn rekey_outbound_matching_static_installs() {
-    let fmp = Fmp::new();
-    let peer = make_node_addr(1);
-    let snap = RekeyMsg2Snapshot {
-        established_peer: peer,
-        learned_peer: peer,
-    };
-    assert_eq!(fmp.rekey_outbound(&snap), RekeyMsg2Decision::Install);
-}
-
-#[test]
-fn rekey_outbound_foreign_static_rejects() {
-    let fmp = Fmp::new();
-    let snap = RekeyMsg2Snapshot {
-        established_peer: make_node_addr(1),
-        learned_peer: make_node_addr(2),
-    };
-    assert_eq!(
-        fmp.rekey_outbound(&snap),
-        RekeyMsg2Decision::Reject {
-            reason: RekeyMsg2Reject::StaticMismatch
-        }
     );
 }
 

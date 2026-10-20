@@ -20,39 +20,6 @@ const NEXT: &str = "proto::rekey::tests::next::";
 const SIM: &str = "proto::rekey::tests::sim::";
 const EXPLORE: &str = "proto::rekey::tests::explore::";
 const REGRESS: &str = "proto::rekey::tests::regress::";
-const LINK: &str = "proto::rekey::tests::legacy::fmp::";
-const SESSION: &str = "proto::rekey::tests::legacy::fsp::";
-
-/// The interop traces against the deployed releases' models.
-const LINK_TRACES: (&str, &str) = (LINK, "link_traces_hold_against_every_deployed_release");
-/// See [`LINK_TRACES`].
-const REKEY_TRACES: (&str, &str) = (
-    SESSION,
-    "session_rekey_traces_hold_against_every_deployed_release",
-);
-/// See [`LINK_TRACES`].
-const FIRST_TRACES: (&str, &str) = (
-    SESSION,
-    "session_first_handshake_traces_hold_against_every_deployed_release",
-);
-/// The seeded lossy runs against the deployed releases and between new
-/// nodes on the production profiles.
-const LOSSY_LINKS: (&str, &str) = (
-    LINK,
-    "lossy_link_runs_converge_against_every_deployed_release",
-);
-/// See [`LOSSY_LINKS`].
-const LOSSY_SESSIONS: (&str, &str) = (
-    SESSION,
-    "lossy_session_runs_converge_against_every_deployed_release",
-);
-
-/// The bounded explorer against the deployed releases' models and between
-/// new nodes on the production profiles.
-const LEGACY_EXPLORE: (&str, &str) = (
-    "proto::rekey::tests::legacy::explore::",
-    "every_explored_interleaving_against_each_deployed_release_heals",
-);
 
 /// One row: the switches turned on together, and the tests (prefix, name)
 /// that must each fail with them on.
@@ -72,6 +39,14 @@ const ROWS: &[Row] = &[
         &[
             (FSP, "completion_with_another_static_installs_nothing"),
             (NEXT, "impostor_reply_never_reports_a_restart"),
+            (
+                "proto::fmp::rekey::xx::tests::",
+                "xx_rekey_reply_from_another_key_keeps_the_attempt",
+            ),
+            (
+                "proto::fsp::rekey::xx::tests::",
+                "xx_reply_from_another_key_keeps_the_attempt",
+            ),
         ],
     ),
     (
@@ -96,7 +71,6 @@ const ROWS: &[Row] = &[
                 REGRESS,
                 "scripted_schedules_lose_no_frame_beyond_their_bounds_and_converge",
             ),
-            REKEY_TRACES,
         ],
     ),
     (
@@ -110,7 +84,6 @@ const ROWS: &[Row] = &[
                 REGRESS,
                 "scripted_schedules_lose_no_frame_beyond_their_bounds_and_converge",
             ),
-            LEGACY_EXPLORE,
         ],
     ),
     (
@@ -156,14 +129,10 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::LargerKeepsOwn],
-        &[
-            (
-                FMP,
-                "larger_node_with_an_attempt_abandons_it_and_answers_a_fresh_eligible_msg1",
-            ),
-            LINK_TRACES,
-            LOSSY_LINKS,
-        ],
+        &[(
+            FMP,
+            "larger_node_with_an_attempt_abandons_it_and_answers_a_fresh_eligible_msg1",
+        )],
     ),
     (
         &[Fault::KeepCandidatesAtCutover],
@@ -181,13 +150,10 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::LargerDropsAtAssumed],
-        &[
-            (
-                FSP,
-                "assumed_cutover_at_the_larger_node_keeps_an_acknowledged_setup",
-            ),
-            REKEY_TRACES,
-        ],
+        &[(
+            FSP,
+            "assumed_cutover_at_the_larger_node_keeps_an_acknowledged_setup",
+        )],
     ),
     (
         &[Fault::StartWhileFin],
@@ -240,13 +206,10 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::F4DropsAll],
-        &[
-            (
-                FSP,
-                "deployed_rekey_acknowledged_before_the_first_handshake_is_confirmed_completes_at_the_larger_node",
-            ),
-            FIRST_TRACES,
-        ],
+        &[(
+            FSP,
+            "deployed_rekey_acknowledged_before_the_first_handshake_is_confirmed_completes_at_the_larger_node",
+        )],
     ),
     (
         &[Fault::F4KeepsAtBoth, Fault::S10Fin],
@@ -257,20 +220,14 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::S10Fin],
-        &[
-            (
-                FSP,
-                "fsp_ack_from_a_restarted_peer_cuts_over_at_msg3_and_retains_it",
-            ),
-            FIRST_TRACES,
-        ],
+        &[(
+            FSP,
+            "fsp_ack_from_a_restarted_peer_cuts_over_at_msg3_and_retains_it",
+        )],
     ),
     (
         &[Fault::S10PendI],
-        &[
-            (FSP, "every_xk_setup_cell_takes_its_rows_action"),
-            REKEY_TRACES,
-        ],
+        &[(FSP, "every_xk_setup_cell_takes_its_rows_action")],
     ),
     (
         &[Fault::RestartDropsCandidates],
@@ -296,10 +253,7 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::NoKeptBackoff],
-        &[
-            (FSP, "hs_rtt_ignores_a_reply_to_a_resent_message"),
-            REKEY_TRACES,
-        ],
+        &[(FSP, "hs_rtt_ignores_a_reply_to_a_resent_message")],
     ),
     (
         &[Fault::LateProbe],
@@ -334,23 +288,17 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::KeepaliveLate],
-        &[
-            (
-                "proto::rekey::ladder::tests::",
-                "probe_ladder_fills_every_gap_longer_than_the_keepalive_gap_before_its_deadline",
-            ),
-            REKEY_TRACES,
-        ],
+        &[(
+            "proto::rekey::ladder::tests::",
+            "probe_ladder_fills_every_gap_longer_than_the_keepalive_gap_before_its_deadline",
+        )],
     ),
     (
         &[Fault::NoHoldBack],
-        &[
-            (
-                FSP,
-                "the_smaller_node_refuses_a_crossing_setup_while_its_attempt_is_young_and_the_larger_holds_back_early_resends",
-            ),
-            FIRST_TRACES,
-        ],
+        &[(
+            FSP,
+            "the_smaller_node_refuses_a_crossing_setup_while_its_attempt_is_young_and_the_larger_holds_back_early_resends",
+        )],
     ),
     (
         &[Fault::RefusalEndsTrial],
@@ -361,13 +309,10 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::ConfirmWithoutCheck],
-        &[
-            (
-                "proto::rekey::params::tests::",
-                "derived_values_match_their_derivations_at_the_defaults",
-            ),
-            REKEY_TRACES,
-        ],
+        &[(
+            "proto::rekey::params::tests::",
+            "derived_values_match_their_derivations_at_the_defaults",
+        )],
     ),
     (
         &[Fault::BaseAtCreation],
@@ -385,10 +330,7 @@ const ROWS: &[Row] = &[
     ),
     (
         &[Fault::EvictEstablished],
-        &[
-            (FSP, "every_xk_setup_cell_takes_its_rows_action"),
-            REKEY_TRACES,
-        ],
+        &[(FSP, "every_xk_setup_cell_takes_its_rows_action")],
     ),
     (
         &[Fault::CandidateVeto],
@@ -480,19 +422,14 @@ const ROWS: &[Row] = &[
                 REGRESS,
                 "scripted_schedules_lose_no_frame_beyond_their_bounds_and_converge",
             ),
-            REKEY_TRACES,
-            LEGACY_EXPLORE,
         ],
     ),
     (
         &[Fault::KFromOwn],
-        &[
-            (
-                FMP,
-                "initiator_epoch_takes_the_inverse_of_the_peers_observed_k_not_of_its_own",
-            ),
-            LINK_TRACES,
-        ],
+        &[(
+            FMP,
+            "initiator_epoch_takes_the_inverse_of_the_peers_observed_k_not_of_its_own",
+        )],
     ),
     (
         &[Fault::DeadlinePerRung],
@@ -505,7 +442,6 @@ const ROWS: &[Row] = &[
                 SIM,
                 "faulty_runs_hold_every_oracle_and_converge_once_healed",
             ),
-            LOSSY_SESSIONS,
         ],
     ),
     (
@@ -542,7 +478,6 @@ const ROWS: &[Row] = &[
                 REGRESS,
                 "scripted_schedules_lose_no_frame_beyond_their_bounds_and_converge",
             ),
-            LINK_TRACES,
         ],
     ),
     (

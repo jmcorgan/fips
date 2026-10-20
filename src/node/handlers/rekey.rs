@@ -1,9 +1,11 @@
 //! The executors of the link and end-to-end session rekey machines.
 //!
 //! Each link's rekey machine decides its link's rekeys: it is polled on the
-//! tick, starts and resends this node's rekeys, answers the peer's msg1,
-//! completes on its msg2, cuts over and ends the drain, and the outputs it
-//! returns there or from a msg1, msg2 or frame are carried out here.
+//! tick, starts this node's rekeys and resends their msg1 and msg3,
+//! completes them on the peer's msg2, takes the peer's rekeys that an
+//! inbound leg completed, cuts over and ends the drain, and the outputs it
+//! returns there or from a msg2, a completed leg or a frame are carried out
+//! here.
 //!
 //! Each session's rekey machine runs its first handshake and decides its own
 //! rekeys: it is polled on the tick, and the outputs it returns there or
@@ -22,7 +24,7 @@ use crate::transport::TransportId;
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{
     Abandon, Config, DEPLOYED_SESSION_FLOOR, EpochTag, Input, MAX_AFTER, MsgKind, NodeKeys, Params,
-    Purpose, Reason, RecordStore, RecvCopy, Role, Slot, msg1_span,
+    Purpose, Reason, RecvCopy, Role, Slot, msg1_span,
 };
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,7 +124,7 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
         warn!(
             after_secs = node.rekey.after_secs,
             used_secs = floor.as_secs(),
-            "Link rekeys start no sooner than the jitter plus the 30 s link age at which a peer answers them"
+            "Link rekeys start no sooner than the jitter plus the 30 s link age floor"
         );
     }
     let triggered = Config {
@@ -141,30 +143,14 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
     })
 }
 
-/// The node's store of closed links' replay records, keeping twice as
-/// many as the node may hold peers (twice the default peer cap when the
-/// cap is off), so a peering re-formed with the same peer epoch while its
-/// entry is kept recognises the msg1s the closed link saw.
-pub(in crate::node) fn link_records(limits: &crate::config::LimitsConfig) -> RecordStore {
-    let cap = match limits.max_peers {
-        0 => crate::config::LimitsConfig::default().max_peers,
-        n => n,
-    };
-    RecordStore::new(cap.saturating_mul(2))
-}
-
 /// What carrying out a link machine's outputs found, for the caller's own
 /// counting and logging.
 #[derive(Debug, Default)]
 pub(in crate::node) struct LinkReport {
-    /// The step bound a new pending session's index: the machine answered
-    /// the peer's msg1, or completed this node's own rekey on its msg2.
+    /// The step bound a new pending session's index: the machine took the
+    /// peer's rekey an inbound leg completed, or completed this node's own
+    /// rekey on its msg2.
     pub(in crate::node) pending: bool,
-    /// The machine asked for the restart gates on the msg1 it was given.
-    pub(in crate::node) replace: bool,
-    /// The msg2s the machine asked to send in answer to the msg1 it was
-    /// given, in order, for the caller to route as the msg1 arrived.
-    pub(in crate::node) replies: Vec<Vec<u8>>,
     /// The slot a frame authenticated under and where its plaintext is.
     pub(in crate::node) delivered: Option<(Slot, Range<usize>)>,
     /// Why the input changed nothing (or only what its row names), in order.
@@ -196,7 +182,8 @@ impl Node {
     }
 
     /// Step `node_addr`'s link rekey machine with `input` now, lending it
-    /// the node's index allocator and keys and the decrypt-worker fact.
+    /// the node's index allocator, keys and profile and the decrypt-worker
+    /// fact.
     /// `None` when no such peer is held.
     pub(in crate::node) fn step_link(
         &mut self,
@@ -204,6 +191,7 @@ impl Node {
         input: Input<'_, LinkProfile>,
     ) -> Option<LinkOutputs> {
         let local = self.session_node_keys();
+        let profile = self.node_profile();
         let workers = self.link_workers();
         let peer = self.peers.get_mut(node_addr)?;
         Some(peer.step_link(
@@ -211,6 +199,30 @@ impl Node {
             input,
             &mut self.index_allocator,
             &local,
+            profile,
+            workers,
+        ))
+    }
+
+    /// Step `node_addr`'s link rekey machine with the msg2 `bytes` as the
+    /// reply to its own rekey, as [`Node::step_link`] steps it. Also returns
+    /// whether the msg2 read but authenticated a key other than the peer's.
+    /// `None` when no such peer is held.
+    pub(in crate::node) fn step_link_reply(
+        &mut self,
+        node_addr: &NodeAddr,
+        bytes: &[u8],
+    ) -> Option<(LinkOutputs, bool)> {
+        let local = self.session_node_keys();
+        let profile = self.node_profile();
+        let workers = self.link_workers();
+        let peer = self.peers.get_mut(node_addr)?;
+        Some(peer.step_link_reply(
+            peer_now(),
+            bytes,
+            &mut self.index_allocator,
+            &local,
+            profile,
             workers,
         ))
     }
@@ -226,10 +238,9 @@ impl Node {
 
     /// Carry out the outputs a step of `node_addr`'s link rekey machine
     /// returned, front to back, and report what the caller still has to
-    /// act on: the msg2s answering a msg1, which go where the msg1 came
-    /// from, a frame's delivery, the rejects, and a request for the restart
-    /// gates. A send the transport refuses is loss: the machine is never
-    /// told, and its deadlines bound what the loss costs.
+    /// act on: a new pending session, a frame's delivery and the rejects. A
+    /// send the transport refuses is loss: the machine is never told, and
+    /// its deadlines bound what the loss costs.
     pub(in crate::node) async fn run_link_step(
         &mut self,
         node_addr: &NodeAddr,
@@ -249,9 +260,9 @@ impl Node {
         for output in out {
             match output {
                 LinkOutput::Send { msg, kind, .. } => match kind {
-                    MsgKind::Msg1 => self.send_link_msg1(node_addr, &msg, started).await,
-                    MsgKind::Msg2 => report.replies.push(msg),
-                    MsgKind::Setup | MsgKind::Ack | MsgKind::Msg3 => {
+                    MsgKind::Setup => self.send_link_msg1(node_addr, &msg, started).await,
+                    MsgKind::Msg3 => self.send_link_msg3(node_addr, &msg).await,
+                    MsgKind::Msg1 | MsgKind::Msg2 | MsgKind::Ack => {
                         debug_assert!(false, "a link machine sent {kind:?}");
                     }
                 },
@@ -273,7 +284,6 @@ impl Node {
                 LinkOutput::PeerRestarted { epoch, .. } => {
                     self.reset_restarted(node_addr, epoch).await;
                 }
-                LinkOutput::ReplaceRequested { .. } => report.replace = true,
                 LinkOutput::Reject(reason) => report.rejects.push(reason),
                 LinkOutput::Abandoned(cause) => self.log_link_abandon(node_addr, cause),
                 LinkOutput::Teardown(why) => {
@@ -286,17 +296,13 @@ impl Node {
                     report.removed = true;
                     return report;
                 }
-                // A msg1 this node answered may be the peer's redial after it
-                // dropped the old peering and this node's filter with it,
-                // which the record of the filter last sent cannot show, so
-                // the filter goes again on the session the peer now holds.
-                LinkOutput::Rekeyed {
-                    role: Role::Responder,
-                } => self.bloom_state.mark_update_needed(*node_addr),
-                LinkOutput::Rekeyed {
-                    role: Role::Initiator,
-                } => {}
-                LinkOutput::Reverted { .. } => {}
+                // A peer's redial is a fresh link setup on this line, never
+                // answered as a rekey, so a cutover carries nothing other
+                // layers resend. A link machine reads no msg1 and so never
+                // asks for the restart gates.
+                LinkOutput::Rekeyed { .. }
+                | LinkOutput::Reverted { .. }
+                | LinkOutput::ReplaceRequested { .. } => {}
                 LinkOutput::Bind { purpose, .. } => {
                     report.pending |= purpose == Purpose::Pending;
                     self.run_link_outputs(node_addr, vec![output]);
@@ -418,6 +424,45 @@ impl Node {
         }
     }
 
+    /// Send `node_addr`'s rekey msg3, framed by the profile, on its link,
+    /// without dialing: the first copy after the peer's msg2, or a resend
+    /// from the machine's ladder until the peer is heard under the new
+    /// session. A copy the transport refuses is lost, as one the network
+    /// drops would be.
+    async fn send_link_msg3(&mut self, node_addr: &NodeAddr, msg3: &[u8]) {
+        let Some(peer) = self.peers.get(node_addr) else {
+            return;
+        };
+        let (Some(transport_id), Some(remote_addr)) =
+            (peer.transport_id(), peer.current_addr().cloned())
+        else {
+            return;
+        };
+        let link_id = peer.link_id();
+        let Some(transport) = self.transports.get(&transport_id) else {
+            return;
+        };
+        match self
+            .send_nowait(transport, link_id, &remote_addr, msg3)
+            .await
+        {
+            Ok(_) => trace!(
+                peer = %self.peer_display_name(node_addr),
+                "Sent rekey msg3"
+            ),
+            Err(e) if e.is_transient() => debug!(
+                peer = %self.peer_display_name(node_addr),
+                error = %e,
+                "Deferred rekey msg3: the transport is between interfaces"
+            ),
+            Err(e) => debug!(
+                peer = %self.peer_display_name(node_addr),
+                error = %e,
+                "Failed to send rekey msg3"
+            ),
+        }
+    }
+
     /// Seal the link prompt (a heartbeat) under `node_addr`'s session `tag`
     /// and send it on the link, without dialing. A prompt the machine
     /// refuses to seal, or the transport refuses to send, is logged and
@@ -441,8 +486,6 @@ impl Node {
                     refusal = ?e,
                     "Link rekey prompt not sealed"
                 );
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -965,8 +1008,6 @@ impl Node {
                     error = ?e,
                     "FSP rekey prompt not sealed"
                 );
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                 return;
             }
         };
@@ -998,8 +1039,6 @@ impl Node {
                 error = %e,
                 "FSP rekey prompt not sent, counted as lost"
             );
-            self.stats_mut()
-                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
         }
         if prompt.measured

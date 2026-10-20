@@ -2,8 +2,8 @@
 //! was forked from.
 
 use super::*;
-use crate::noise::PUBKEY_SIZE;
 use crate::noise::handshake::SymmetricState;
+use crate::noise::{HANDSHAKE_MSG2_SIZE, HANDSHAKE_MSG3_SIZE, PUBKEY_SIZE};
 use crate::testutil::{TestEntropy, make_keypair};
 use alloc::format;
 use alloc::vec;
@@ -11,16 +11,38 @@ use alloc::vec::Vec;
 
 type Hs = HandshakeState<TestEntropy>;
 
-/// The three reads a caller makes on a message nothing has authenticated.
+/// The reads a caller makes on a message nothing has authenticated: XX
+/// msg2 at the initiator and XX msg3 at the responder, each bare or with a
+/// negotiation payload after it.
 #[derive(Clone, Copy, Debug)]
 enum Read {
-    /// IK message 2, at the initiator.
+    /// XX message 2, at the initiator.
     Msg2,
-    /// XK message 2, at the initiator.
-    Xk2,
-    /// XK message 3, at the responder.
-    Xk3,
+    /// XX message 2 with a negotiation payload, at the initiator.
+    Msg2Payload,
+    /// XX message 3, at the responder.
+    Msg3,
+    /// XX message 3 with a negotiation payload, at the responder.
+    Msg3Payload,
 }
+
+impl Read {
+    /// Every read.
+    const ALL: [Read; 4] = [Read::Msg2, Read::Msg2Payload, Read::Msg3, Read::Msg3Payload];
+
+    /// Whether the message carries a payload.
+    fn payload(self) -> bool {
+        matches!(self, Read::Msg2Payload | Read::Msg3Payload)
+    }
+
+    /// Whether the message is a msg2.
+    fn msg2(self) -> bool {
+        matches!(self, Read::Msg2 | Read::Msg2Payload)
+    }
+}
+
+/// The negotiation payload the tests send.
+const PAYLOAD: &[u8] = b"negotiation payload";
 
 /// Every field of `hs` as bytes, so two states compare equal only when
 /// every field does.
@@ -71,44 +93,30 @@ fn fingerprint(hs: &Hs) -> Vec<u8> {
 /// A handshake waiting for `read`'s message, the genuine message, and a
 /// message of the same kind written for a different handshake.
 fn waiting(read: Read) -> (Hs, Vec<u8>, Vec<u8>) {
-    let pair = |read: Read| -> (Hs, Vec<u8>) {
-        let initiator_keys = make_keypair();
-        let responder_keys = make_keypair();
-        let responder_pub = responder_keys.public_key();
-        let (mut initiator, mut responder) = match read {
-            Read::Msg2 => (
-                Hs::new_initiator(initiator_keys, responder_pub),
-                Hs::new_responder(responder_keys),
-            ),
-            Read::Xk2 | Read::Xk3 => (
-                Hs::new_xk_initiator(initiator_keys, responder_pub),
-                Hs::new_xk_responder(responder_keys),
-            ),
-        };
+    let seal = |hs: &mut Hs, mut msg: Vec<u8>| -> Vec<u8> {
+        if read.payload() {
+            msg.extend(hs.encrypt_payload(PAYLOAD).expect("the payload seals"));
+        }
+        msg
+    };
+    let pair = || -> (Hs, Vec<u8>) {
+        let mut initiator = Hs::new_initiator(make_keypair());
+        let mut responder = Hs::new_responder(make_keypair());
         initiator.set_local_epoch([1; 8]);
         responder.set_local_epoch([2; 8]);
-        match read {
-            Read::Msg2 => {
-                let msg1 = initiator.write_message_1().unwrap();
-                responder.read_message_1(&msg1).unwrap();
-                (initiator, responder.write_message_2().unwrap())
-            }
-            Read::Xk2 => {
-                let msg1 = initiator.write_xk_message_1().unwrap();
-                responder.read_xk_message_1(&msg1).unwrap();
-                (initiator, responder.write_xk_message_2().unwrap())
-            }
-            Read::Xk3 => {
-                let msg1 = initiator.write_xk_message_1().unwrap();
-                responder.read_xk_message_1(&msg1).unwrap();
-                let msg2 = responder.write_xk_message_2().unwrap();
-                initiator.read_xk_message_2(&msg2).unwrap();
-                (responder, initiator.write_xk_message_3().unwrap())
-            }
+        let msg1 = initiator.write_message_1().unwrap();
+        responder.read_message_1(&msg1).unwrap();
+        let msg2 = responder.write_message_2().unwrap();
+        let msg2 = seal(&mut responder, msg2);
+        if read.msg2() {
+            return (initiator, msg2);
         }
+        let (mut initiator, _) = initiator.fork_msg2(&msg2).unwrap();
+        let msg3 = initiator.write_message_3().unwrap();
+        (responder, seal(&mut initiator, msg3))
     };
-    let (hs, genuine) = pair(read);
-    let (_, stranger) = pair(read);
+    let (hs, genuine) = pair();
+    let (_, stranger) = pair();
     (hs, genuine, stranger)
 }
 
@@ -117,21 +125,32 @@ fn waiting(read: Read) -> (Hs, Vec<u8>, Vec<u8>) {
 /// Takes the handshake mutably, as a caller holding it in its slot does, so
 /// that a read able to change it in place would still compile here and be
 /// caught by the comparison.
-fn read_on_fork(read: Read, hs: &mut Hs, msg: &[u8]) -> Result<Hs, NoiseError> {
-    match read {
-        Read::Msg2 => hs.fork_msg2(msg),
-        Read::Xk2 => hs.fork_xk2(msg),
-        Read::Xk3 => hs.fork_xk3(msg),
+fn read_on_fork(read: Read, hs: &mut Hs, msg: &[u8]) -> Result<ForkRead<TestEntropy>, NoiseError> {
+    if read.msg2() {
+        hs.fork_msg2(msg)
+    } else {
+        hs.fork_msg3(msg)
     }
 }
 
-/// Read `msg` on `hs` itself, as the reads under the forks do.
-fn read_in_place(read: Read, hs: &mut Hs, msg: &[u8]) -> Result<(), NoiseError> {
-    match read {
-        Read::Msg2 => hs.read_message_2(msg),
-        Read::Xk2 => hs.read_xk_message_2(msg),
-        Read::Xk3 => hs.read_xk_message_3(msg),
+/// Read `msg` and any payload after it on `hs` itself, as the reads under
+/// the forks do.
+fn read_in_place(read: Read, hs: &mut Hs, msg: &[u8]) -> Result<Option<Vec<u8>>, NoiseError> {
+    let base = if read.msg2() {
+        HANDSHAKE_MSG2_SIZE
+    } else {
+        HANDSHAKE_MSG3_SIZE
+    };
+    let (head, rest) = msg.split_at(base.min(msg.len()));
+    if read.msg2() {
+        hs.read_message_2(head)?;
+    } else {
+        hs.read_message_3(head)?;
     }
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    hs.decrypt_payload(rest).map(Some)
 }
 
 /// The same message with byte `at` flipped.
@@ -143,7 +162,7 @@ fn flipped(msg: &[u8], at: usize) -> Vec<u8> {
 
 #[test]
 fn every_read_on_garbage_leaves_the_handshake_byte_identical() {
-    for read in [Read::Msg2, Read::Xk2, Read::Xk3] {
+    for read in Read::ALL {
         let (mut hs, genuine, stranger) = waiting(read);
         let before = fingerprint(&hs);
         let reference = hs.fork();
@@ -155,7 +174,9 @@ fn every_read_on_garbage_leaves_the_handshake_byte_identical() {
 
         // Byte 1 rather than byte 0 of an ephemeral: byte 0 is its parity,
         // which the x-only DH ignores and no AEAD binds, so a msg2 with it
-        // flipped still reads.
+        // flipped still reads. The last byte is the payload's tag when
+        // there is a payload, so that message fails after the base message
+        // has read, the deepest a read gets before failing.
         let last = genuine.len() - 1;
         let garbage = [
             Vec::new(),
@@ -187,15 +208,56 @@ fn every_read_on_garbage_leaves_the_handshake_byte_identical() {
         assert!(read_in_place(read, &mut spoiled, &genuine).is_err());
 
         // After every failure the genuine message reads, to exactly the state
-        // an untouched handshake reaches by reading it in place.
+        // an untouched handshake reaches by reading it in place, and hands
+        // back the payload it carried.
         let mut expected = reference;
-        read_in_place(read, &mut expected, &genuine).expect("the untouched copy reads");
-        let committed = read_on_fork(read, &mut hs, &genuine).expect("the genuine message reads");
+        let want = read_in_place(read, &mut expected, &genuine).expect("the untouched copy reads");
+        let (committed, payload) =
+            read_on_fork(read, &mut hs, &genuine).expect("the genuine message reads");
         assert_eq!(fingerprint(&committed), fingerprint(&expected), "{read:?}");
+        assert_eq!(payload, want, "{read:?}");
+        assert_eq!(
+            payload.as_deref(),
+            read.payload().then_some(PAYLOAD),
+            "{read:?}: the payload comes back decrypted"
+        );
         assert_eq!(
             fingerprint(&hs),
             before,
             "{read:?}: a success also reads on the fork"
         );
     }
+}
+
+/// A fork that read msg2 and its payload writes a msg3 the responder reads,
+/// payload and all, and the two ends agree on the handshake hash; a fork
+/// that read msg2 but not its payload writes one the responder cannot read.
+#[test]
+fn a_msg2_payload_read_on_the_fork_keeps_msg3_readable() {
+    let mut initiator = Hs::new_initiator(make_keypair());
+    let mut responder = Hs::new_responder(make_keypair());
+    initiator.set_local_epoch([1; 8]);
+    responder.set_local_epoch([2; 8]);
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let mut msg2 = responder.write_message_2().unwrap();
+    msg2.extend(responder.encrypt_payload(PAYLOAD).unwrap());
+
+    let mut skipped = initiator.fork();
+    skipped
+        .read_message_2(&msg2[..HANDSHAKE_MSG2_SIZE])
+        .unwrap();
+    let stale = skipped.write_message_3().unwrap();
+    assert!(
+        responder.fork().read_message_3(&stale).is_err(),
+        "a msg3 written past an unread payload is one nonce behind"
+    );
+
+    let (mut fork, payload) = initiator.fork_msg2(&msg2).expect("msg2 reads");
+    assert_eq!(payload.as_deref(), Some(PAYLOAD));
+    let mut msg3 = fork.write_message_3().unwrap();
+    msg3.extend(fork.encrypt_payload(PAYLOAD).unwrap());
+    let (done, payload) = responder.fork_msg3(&msg3).expect("msg3 reads");
+    assert_eq!(payload.as_deref(), Some(PAYLOAD));
+    assert_eq!(done.handshake_hash(), fork.handshake_hash());
 }

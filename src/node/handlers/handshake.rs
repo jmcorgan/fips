@@ -7,7 +7,6 @@
 
 use crate::NodeAddr;
 use crate::PeerIdentity;
-use crate::identity::OsEntropy;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::{self, HsLine, OrNone, Shown, Withheld};
@@ -15,20 +14,21 @@ use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
 use crate::peer::machine::{
-    CrossConnOutcome, DialMsg2Step, HandshakeCrypto, Msg3Error, PeerAction, PeerEvent, PeerMachine,
-    TimerKind,
+    CrossConnOutcome, DialMsg2Step, HandshakeCrypto, LinkFinal, Msg3Error, PeerAction, PeerEvent,
+    PeerMachine, TimerKind,
 };
-use crate::peer::{ActivePeer, RekeyMsg2Step};
+use crate::peer::{ActivePeer, LinkCaps, LinkOutputs};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
     DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
     EPOCH_RESTART_MIN_INTERVAL_SECS, EstablishSnapshot, InboundDecision, InboundReject, Msg1Digest,
-    NegotiationPayload, OutboundSnapshot, PromotionResult, RekeyClaim, RekeyMsg2Reject,
-    RekeyMsg2Snapshot, WireOutcome, cross_connection_winner, decide_fmp_negotiation,
+    NegotiationPayload, NodeProfile, OutboundSnapshot, PromotionResult, RekeyClaim, WireOutcome,
+    cross_connection_winner, decide_fmp_negotiation,
 };
 use crate::time::HostClock;
-use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError};
+use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
 use crate::utils::index::SessionIndex;
+use fips_core::proto::rekey::{IndexLease, Input, Intent, Reason, Record, allocate};
 use fips_core::time::Clock as _;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -42,15 +42,13 @@ impl Node {
     fn outbound_snapshot(&self, peer_addr: &NodeAddr) -> OutboundSnapshot {
         let existing = self.peers.get(peer_addr);
         OutboundSnapshot {
-            has_existing_peer: self.peers.contains_key(peer_addr),
+            has_existing_peer: existing.is_some(),
+            existing_peer_epoch: existing.and_then(|p| p.remote_epoch()),
             our_outbound_wins: cross_connection_winner(
                 self.identity().node_addr(),
                 peer_addr,
                 true,
             ),
-            own_dial: existing
-                .and_then(|p| self.links.get(&p.link_id()))
-                .is_some_and(|link| link.direction() == LinkDirection::Outbound),
         }
     }
 
@@ -477,16 +475,19 @@ impl Node {
         // in handle_msg3 after the peer's static key + signature have been
         // verified, before promote_connection is called.
 
-        // Allocate our session index
-        let our_index = match self.index_allocator.allocate() {
-            Ok(idx) => idx,
-            Err(e) => {
-                warn!(error = %e, "Failed to allocate session index for inbound");
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                return;
-            }
+        // Allocate our session index. The leg's machine holds the lease on it
+        // from here, and every exit of the leg hands the lease on or releases
+        // it.
+        let Some(our_lease) = allocate(&mut self.index_allocator) else {
+            warn!(
+                error = %crate::utils::index::IndexError::Exhausted,
+                "Failed to allocate session index for inbound"
+            );
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            return;
         };
+        let our_index = SessionIndex::new(our_lease.index());
 
         machine.set_conn_their_index(header.sender_idx);
 
@@ -517,7 +518,7 @@ impl Node {
         // point observes a handshake in flight without a machine. `handle_msg3`
         // steps this same machine; every teardown path disposes it along with
         // the Noise handles it carries.
-        machine.park_inbound_msg2_sent(our_index);
+        machine.park_inbound_msg2_sent(our_lease);
         // Store the framed msg2 on the surviving carrier for duplicate-msg1
         // resend while the handshake is still pending, and the msg1 it answers,
         // which tells that resend apart from a new attempt. An inbound leg
@@ -545,7 +546,7 @@ impl Node {
                     );
                 }
                 Err(e) => {
-                    if !self.msg2_failed(link_id, our_index, &e) {
+                    if !self.msg2_failed(link_id, &e) {
                         return;
                     }
                 }
@@ -559,8 +560,8 @@ impl Node {
             .insert((packet.transport_id, our_index.as_u32()), link_id);
     }
 
-    /// Apply the msg2-send-failure rule to the inbound leg on `link`, which
-    /// owns `our_index`. Returns whether the leg was kept.
+    /// Apply the msg2-send-failure rule to the inbound leg on `link`. Returns
+    /// whether the leg was kept.
     ///
     /// A transient refusal is not a failed handshake. The interface under the
     /// transport is absent or mid-rebind and the binder is already working to
@@ -573,14 +574,9 @@ impl Node {
     /// other abandoned handshake.
     ///
     /// A terminal error disposes the leg (handing its address back to any
-    /// link it displaced), frees the index, removes the machine and records
-    /// the reject.
-    pub(in crate::node) fn msg2_failed(
-        &mut self,
-        link: LinkId,
-        our_index: SessionIndex,
-        error: &TransportError,
-    ) -> bool {
+    /// link it displaced), releases the lease on its index, removes the
+    /// machine and records the reject.
+    pub(in crate::node) fn msg2_failed(&mut self, link: LinkId, error: &TransportError) -> bool {
         if error.is_transient() {
             debug!(
                 link_id = %link,
@@ -591,12 +587,19 @@ impl Node {
         }
         warn!(link_id = %link, error = %error, "Failed to send msg2");
         // Disposing the machine drops the Noise handles it carries.
-        self.remove_link(&link);
-        let _ = self.index_allocator.free(our_index);
-        self.remove_peer_machine(link);
+        self.drop_leg(link);
         self.stats_mut()
             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
         false
+    }
+
+    /// Dispose the handshake leg on `link`: its link (handing its address
+    /// back to any link it displaced), and its machine with the Noise handles
+    /// it carries and the lease on the index the leg drew, which goes back to
+    /// the allocator.
+    pub(in crate::node) fn drop_leg(&mut self, link: LinkId) {
+        self.remove_link(&link);
+        self.remove_peer_machine(link);
     }
 
     /// Whether `msg1` is a different attempt from the one the pending inbound
@@ -610,265 +613,11 @@ impl Node {
             .is_some_and(|answered| answered != msg1)
     }
 
-    /// Hand `packet`'s msg1, read as `wire`, a same-epoch msg1 from the held
-    /// peer `peer`, to that peer's link rekey machine, and carry out what it
-    /// asks for: answer it into a new pending session, resend a stored
-    /// answer, or refuse it, each counted and logged. Returns whether the
-    /// msg1 goes on to the restart gates as a replacement: the machine asked
-    /// for them (a fresh dial on a link too young to rekey), or the peer has
-    /// no machine to ask.
-    async fn msg1_to_link(
-        &mut self,
-        peer: &NodeAddr,
-        packet: &ReceivedPacket,
-        wire: &WireOutcome,
-    ) -> bool {
-        if !self.peers.get(peer).is_some_and(|p| p.has_session()) {
-            return true;
-        }
-        let local = self.session_node_keys();
-        let Some(tok) = read_msg1::<OsEntropy>(&local, &packet.data) else {
-            // The control machine's read authenticated this msg1, so only one
-            // that carries no startup epoch fails the machine's.
-            debug!(
-                peer = %self.peer_display_name(peer),
-                remote_addr = %packet.remote_addr,
-                "Same-epoch msg1 carries no startup epoch, dropping"
-            );
-            self.stats_mut()
-                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            return false;
-        };
-        // On this peer's link, by its transport and current address or by an
-        // `addr_to_link` entry for its link, such as a hostname-keyed dial
-        // address beside a numeric current address.
-        let on_link = self.peers.get(peer).is_some_and(|p| {
-            (p.transport_id() == Some(packet.transport_id)
-                && p.current_addr() == Some(&packet.remote_addr))
-                || self
-                    .addr_to_link
-                    .get(&(packet.transport_id, packet.remote_addr.clone()))
-                    == Some(&p.link_id())
-        });
-        let arrival = Arrival {
-            on_link,
-            reachable: self.link_reachable(peer).await,
-        };
-        let path = Msg1Path::new(
-            packet.transport_id,
-            &packet.remote_addr,
-            self.established_link(peer),
-        );
-        let held = self.peers.get(peer).and_then(|p| p.rekey_answer());
-        let held_dg = OrNone(held.as_ref().map(|(msg1, _)| diag::msg1_tag(msg1)));
-        let pending_age_s = OrNone(
-            self.peers
-                .get(peer)
-                .and_then(|p| p.pending_age())
-                .map(|d| d.as_secs()),
-        );
-        let age_s = OrNone(
-            self.peers
-                .get(peer)
-                .and_then(|p| p.session_established_at())
-                .map(|t| crate::peer::since(t).as_secs()),
-        );
-        let msg1_dg = diag::msg1_tag(&wire.msg1_digest);
-        let msg1_sidx = wire.their_index;
-        // The receiver index of the stored msg2 a resent setup msg1 is
-        // answered with is the sender index of the msg1 it answers.
-        let stored_ridx = self
-            .peers
-            .get(peer)
-            .and_then(|p| p.handshake_msg2())
-            .and_then(Msg2Header::parse)
-            .map(|h| h.receiver_idx);
-        let answers_it = OrNone(stored_ridx.map(|r| r == wire.their_index));
-        let stored_ridx = OrNone(stored_ridx);
-        let Some(out) = self.step_link(peer, Input::PeerMsg1 { tok, arrival }) else {
-            return false;
-        };
-        let report = self.run_link_step(peer, out).await;
-        for reason in &report.rejects {
-            let shown = match reason {
-                Reason::PendingHeld => self.shown(peer, HsLine::Pending),
-                Reason::AnsweredBefore => self.shown(peer, HsLine::Answered),
-                Reason::OffLink => self.shown(peer, HsLine::OffLink),
-                // Never suppressed: an integration check counts the
-                // tie-break line to detect a dual-initiation loop, which
-                // holds one session and so would never restart a
-                // per-session count.
-                _ => true,
-            };
-            if shown {
-                match reason {
-                    Reason::PendingHeld => debug!(
-                        peer = %self.peer_display_name(peer),
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        same_path = path.same_path(),
-                        msg1_dg = %msg1_dg,
-                        held_dg = %held_dg,
-                        pending_age_s = %pending_age_s,
-                        "Rekey msg1 received but already have pending session, dropping"
-                    ),
-                    Reason::DualInitWon => debug!(
-                        peer = %self.peer_display_name(peer),
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        same_path = path.same_path(),
-                        msg1_dg = %msg1_dg,
-                        "Dual rekey initiation: we win (smaller addr), dropping their msg1"
-                    ),
-                    Reason::AnsweredBefore => debug!(
-                        peer = %self.peer_display_name(peer),
-                        remote_addr = %packet.remote_addr,
-                        transport_id = %packet.transport_id,
-                        same_path = path.same_path(),
-                        msg1_dg = %msg1_dg,
-                        "Rekey msg1 answered in an ended cycle, dropping the copy"
-                    ),
-                    Reason::OffLink => debug!(
-                        peer = %self.peer_display_name(peer),
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        same_path = path.same_path(),
-                        msg1_dg = %msg1_dg,
-                        "Same-epoch msg1 off the established link while that link is up, dropping"
-                    ),
-                    Reason::IndexExhausted => warn!(
-                        peer = %self.peer_display_name(peer),
-                        error = %IndexError::Exhausted,
-                        "Failed to allocate index for rekey"
-                    ),
-                    other => debug!(
-                        peer = %self.peer_display_name(peer),
-                        remote_addr = %packet.remote_addr,
-                        reason = ?other,
-                        "Rekey msg1 refused"
-                    ),
-                }
-            }
-            self.stats_mut()
-                .record_reject(RejectReason::Handshake(msg1_refusal(*reason)));
-        }
-        for msg2 in &report.replies {
-            let sent = self.answer_msg1(peer, packet, msg2).await;
-            if report.pending {
-                match sent {
-                    Ok(_) => debug!(
-                        peer = %self.peer_display_name(peer),
-                        new_our_index = %OrNone(
-                            self.peers.get(peer).and_then(|p| p.pending_our_index())
-                        ),
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        link_tid = %path.link_tid(),
-                        link_addr = %path.link_addr(),
-                        same_path = path.same_path(),
-                        age_s = %age_s,
-                        msg1_sidx = %msg1_sidx,
-                        msg1_dg = %msg1_dg,
-                        epoch = %OrNone(
-                            self.peers
-                                .get(peer)
-                                .and_then(|p| p.pending_new_session())
-                                .map(diag::epoch_tag)
-                        ),
-                        kbit_ours = %OrNone(self.peers.get(peer).map(|p| p.current_k_bit())),
-                        "Sent rekey msg2 response"
-                    ),
-                    // The pending stays held: a msg2 the transport refused is
-                    // lost, and the peer's resend of its msg1 draws it again.
-                    Err(e) => {
-                        warn!(
-                            peer = %self.peer_display_name(peer),
-                            error = %e,
-                            transport_id = %packet.transport_id,
-                            remote_addr = %packet.remote_addr,
-                            link_tid = %path.link_tid(),
-                            link_addr = %path.link_addr(),
-                            same_path = path.same_path(),
-                            msg1_sidx = %msg1_sidx,
-                            msg1_dg = %msg1_dg,
-                            "Failed to send rekey msg2"
-                        );
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                    }
-                }
-            } else if held.as_ref().is_some_and(|(_, answer)| answer == msg2) {
-                // A resend of the msg1 that armed the pending we hold: our
-                // msg2 was lost, so the same answer goes again.
-                match sent {
-                    Ok(_) if self.shown(peer, HsLine::RekeyResend) => debug!(
-                        peer = %self.peer_display_name(peer),
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        same_path = path.same_path(),
-                        "Resent rekey msg2 for a resent msg1"
-                    ),
-                    Err(e) if self.shown(peer, HsLine::RekeyResendFailed) => debug!(
-                        peer = %self.peer_display_name(peer),
-                        error = %e,
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        same_path = path.same_path(),
-                        "Failed to resend rekey msg2"
-                    ),
-                    _ => {}
-                }
-            } else {
-                // A resend of the msg1 the peering was promoted from, on a
-                // link too young to rekey: the stored msg2 goes again.
-                match sent {
-                    Ok(_) if self.shown(peer, HsLine::Resend) => debug!(
-                        peer = %self.peer_display_name(peer),
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        link_tid = %path.link_tid(),
-                        link_addr = %path.link_addr(),
-                        same_path = path.same_path(),
-                        msg1_sidx = %msg1_sidx,
-                        msg1_dg = %msg1_dg,
-                        age_s = %age_s,
-                        stored_ridx = %stored_ridx,
-                        answers_it = %answers_it,
-                        "Resent msg2 for duplicate msg1 (same epoch)"
-                    ),
-                    Err(e) if self.shown(peer, HsLine::ResendFailed) => debug!(
-                        peer = %self.peer_display_name(peer),
-                        error = %e,
-                        transport_id = %packet.transport_id,
-                        remote_addr = %packet.remote_addr,
-                        link_tid = %path.link_tid(),
-                        link_addr = %path.link_addr(),
-                        same_path = path.same_path(),
-                        msg1_sidx = %msg1_sidx,
-                        msg1_dg = %msg1_dg,
-                        age_s = %age_s,
-                        stored_ridx = %stored_ridx,
-                        answers_it = %answers_it,
-                        "Failed to resend msg2"
-                    ),
-                    _ => {}
-                }
-            }
-        }
-        report.replace
-    }
-
     /// Hand `packet`'s msg2, which names `peer`'s index, to that peer's link
     /// rekey machine: it completes the own rekey whose attempt the index
     /// names, or changes nothing, each counted and logged.
     async fn msg2_to_link(&mut self, peer: &NodeAddr, packet: &ReceivedPacket) {
-        let Some(out) = self.step_link(
-            peer,
-            Input::Reply {
-                bytes: &packet.data,
-                route: (),
-            },
-        ) else {
+        let Some((out, mismatch)) = self.step_link_reply(peer, &packet.data) else {
             return;
         };
         let report = self.run_link_step(peer, out).await;
@@ -877,13 +626,29 @@ impl Node {
             debug!(
                 peer = %self.peer_display_name(peer),
                 new_our_index = %OrNone(p.and_then(|p| p.pending_our_index())),
+                new_their_index = %OrNone(p.and_then(|p| p.pending_their_index())),
                 epoch = %OrNone(p.and_then(|p| p.pending_new_session()).map(diag::epoch_tag)),
                 kbit_ours = %OrNone(p.map(|p| p.current_k_bit())),
-                "Rekey completed (initiator), pending K-bit cutover"
+                "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
             );
         }
         for reason in report.rejects {
             match reason {
+                // The msg2 read under a static other than the peer's: under
+                // XX any keyed node that saw the cleartext rekey msg1 can
+                // answer it. The machine keeps the attempt for the peer's own
+                // msg2, and the current session is untouched. Counted apart
+                // from routine noise: a sustained rate means an on-path party
+                // is forging rekey msg2.
+                Reason::ReplyUnauthenticated if mismatch => {
+                    warn!(
+                        peer = %self.peer_display_name(peer),
+                        "rekey-msg2 initiator: learned static is not the established peer, keeping current session"
+                    );
+                    self.stats_mut().record_reject(RejectReason::Handshake(
+                        HandshakeReject::RekeyStaticMismatch,
+                    ));
+                }
                 // Nothing authenticated this msg2 before the read, and the
                 // index it names travels in cleartext in our msg1, so it may
                 // be a forgery: the machine keeps the attempt, its resends
@@ -913,6 +678,75 @@ impl Node {
                         peer = %self.peer_display_name(peer),
                         reason = ?other,
                         "Rekey msg2 processing failed"
+                    );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                }
+            }
+        }
+    }
+
+    /// Hand the peer's rekey that an inbound leg completed, `fin`, to
+    /// `peer`'s link rekey machine as a rekey of its session. The machine
+    /// decides: it holds the new session as pending under the leg's index,
+    /// or refuses it (a rekey of its own that wins the tie-break, a key other
+    /// than the peer's) and releases the index. Each outcome is logged and
+    /// counted.
+    async fn peer_rekey_to_link(&mut self, peer: &NodeAddr, fin: LinkFinal) {
+        if !self.peers.get(peer).is_some_and(ActivePeer::has_session) {
+            if let Some(lease) = fin.into_lease() {
+                let _ = self
+                    .index_allocator
+                    .free(SessionIndex::new(lease.release()));
+            }
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
+            return;
+        }
+        let their_index = fin.theirs();
+        let input = Input::PeerDone {
+            tok: fin.into_rekey(),
+            intent: Intent::Rekey,
+        };
+        let Some(out) = self.step_link(peer, input) else {
+            return;
+        };
+        let report = self.run_link_step(peer, out).await;
+        if report.pending {
+            let held = self.peers.get(peer);
+            debug!(
+                peer = %self.peer_display_name(peer),
+                our_addr = %self.identity().node_addr(),
+                new_our_index = %OrNone(held.and_then(|p| p.pending_our_index())),
+                new_their_index = %their_index,
+                epoch = %OrNone(held.and_then(|p| p.pending_new_session()).map(diag::epoch_tag)),
+                kbit_ours = %OrNone(held.map(|p| p.current_k_bit())),
+                "rekey-msg3 responder: pending session set, awaiting K-bit cutover"
+            );
+        }
+        for reason in report.rejects {
+            match reason {
+                // Both ends started a rekey and this node's wins the
+                // tie-break: the peer's completion is released, and the
+                // peer takes ours.
+                Reason::TieBreakKept => debug!(
+                    peer = %self.peer_display_name(peer),
+                    "Dual rekey initiation: we win (smaller addr), keeping ours and releasing the peer's"
+                ),
+                Reason::KeyMismatch => {
+                    warn!(
+                        peer = %self.peer_display_name(peer),
+                        "Link rekey msg3 authenticated a key other than the peer's, releasing it"
+                    );
+                    self.stats_mut().record_reject(RejectReason::Handshake(
+                        HandshakeReject::RekeyStaticMismatch,
+                    ));
+                }
+                other => {
+                    debug!(
+                        peer = %self.peer_display_name(peer),
+                        reason = ?other,
+                        "Link rekey msg3 refused by the link's rekey machine"
                     );
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -1174,25 +1008,11 @@ impl Node {
         {
             self.pending_outbound.remove(&key);
             // Drop the machine persisted at dial — this leg never promotes,
-            // and its pending connection is dropped with it.
+            // and its pending connection and the lease on the index it drew
+            // at msg1 preparation go with it, never the `receiver_idx` the
+            // msg2 header supplied.
             self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
-            // `our_index` is the index WE allocated at msg1 preparation, read
-            // back off the machine above before any disposal — never the
-            // `receiver_idx` the msg2 header supplied. Note what makes that
-            // true: `link_id` came from `pending_outbound[(tid,
-            // header.receiver_idx)]`, an attacker-chosen KEY, and on the rekey
-            // path that same map names a PROMOTED peer's link, whose machine
-            // carries the peer's live session index rather than a rekey index.
-            // What keeps this arm off that state is the leg gate above
-            // (`peer_machines.get(&link_id).is_none_or(|m| m.leg().is_none())`):
-            // every sub-branch under it returns, so only a leg with a live
-            // handshake carrier — a fresh dial — reaches here. If that gate is
-            // ever relaxed, this free returns a live peer's current index to
-            // the pool.
-            if let Some(idx) = our_index {
-                let _ = self.index_allocator.free(idx);
-            }
             // Put the dial back on the retry schedule. The disposal above takes
             // this leg out of both reapers, so the stuck-leg sweep that normally
             // reaches `note_handshake_timeout` never runs for it, and that
@@ -1233,9 +1053,6 @@ impl Node {
             self.pending_outbound.remove(&key);
             self.remove_peer_machine(link_id);
             self.remove_link(&link_id);
-            if let Some(idx) = our_index {
-                let _ = self.index_allocator.free(idx);
-            }
             // Put the dial back on the retry schedule. The disposal above takes
             // this leg out of the stuck-leg sweep — `has_pending_leg` reads false
             // for it from here on, so the reap that normally reaches
@@ -1313,10 +1130,9 @@ impl Node {
         // This ensures both nodes use the same Noise handshake (the winner's
         // outbound = the loser's inbound).
         //
-        // If the peer was promoted via an earlier dial of ours instead, the
-        // peer's answer to this later dial supersedes the earlier one (a
-        // replacement on a link too young to rekey, a rekey on an older one),
-        // so this node swaps at either address.
+        // The same holds when the peer was promoted via an earlier dial of
+        // ours: the peer answers this later dial on a fresh leg and resolves
+        // its msg3 by the same address order.
         // The machine is the sole computation site of the establish decision:
         // the shell builds the outbound snapshot, steps the machine once here,
         // and routes on the returned decision — a cross-connection resolves as
@@ -1329,7 +1145,6 @@ impl Node {
         // lookup; the `pending_outbound` lifecycle stays shell-side — the
         // machine never touches it.
         let out_snap = self.outbound_snapshot(&peer_node_addr);
-        let own_dial = out_snap.has_existing_peer && out_snap.own_dial;
         let actions = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => {
                 machine.crystallize_identity(peer_identity);
@@ -1429,6 +1244,7 @@ impl Node {
                 let me = *self.identity().node_addr();
                 let params = crate::node::handlers::rekey::link_params(&self.config().node);
                 let workers = self.link_workers();
+                let profile = self.node_profile();
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
@@ -1441,8 +1257,9 @@ impl Node {
                         local: &local,
                         me,
                         params,
-                        record: fips_core::proto::rekey::Record::new(),
+                        record: Record::new(),
                         workers,
+                        profile,
                     };
                     let out = peer.move_session(
                         outbound_session,
@@ -1469,12 +1286,7 @@ impl Node {
                         msg1_sidx = %outbound_our_index,
                         msg1_dg = %OrNone(sent_msg1_digest.as_ref().map(diag::msg1_tag)),
                         epoch = %epoch,
-                        "{}",
-                        if own_dial {
-                            "Second dial answered: swapped to its session (the answer supersedes our earlier dial's)"
-                        } else {
-                            "Cross-connection: swapped to outbound session (our outbound wins)"
-                        }
+                        "Cross-connection: swapped to outbound session (our outbound wins)"
                     );
 
                     cross_conn_outcome = Some(CrossConnOutcome::Swap {
@@ -1615,9 +1427,20 @@ impl Node {
         let link_id = match self.pending_inbound.remove(&key) {
             Some(id) => id,
             None => {
-                // No pending inbound handshake matches this msg3. The live
-                // rekey-responder path completes via pending_inbound above, so
-                // a miss here is an unknown connection.
+                // A link rekey's initiator resends its msg3 until it hears the
+                // peer under the new session, so copies keep arriving after
+                // the leg handed the first to the peer's link rekey machine,
+                // which binds the leg's index for the peer. Such a copy changes
+                // nothing and is not counted against the peer.
+                if let Some(peer) = self.peers_by_index.get(&key).copied() {
+                    debug!(
+                        peer = %self.peer_display_name(&peer),
+                        receiver_idx = %header.receiver_idx,
+                        "Rekey msg3 copy for a rekey the link's machine already holds, dropping"
+                    );
+                    return;
+                }
+                // No pending inbound handshake matches this msg3.
                 debug!(
                     receiver_idx = %header.receiver_idx,
                     "No pending inbound or rekey state for msg3"
@@ -1634,173 +1457,117 @@ impl Node {
             let machine = match self.peer_machines.get_mut(&link_id) {
                 Some(m) => m,
                 None => {
-                    // The pending-inbound entry outlived its machine. `key` was
-                    // written by us at msg1 (`pending_inbound` has one insertion
-                    // site, and the index it carries came straight from
-                    // `index_allocator.allocate()`), so the index named here is
-                    // ours to reclaim — UNLESS this entry is stale enough that
-                    // the index has already been freed and re-drawn for something
-                    // live, in which case freeing it would tear down an unrelated
-                    // session. No path to this arm has been found; the check
-                    // below is unconditional defence-in-depth, not a fix for a
-                    // demonstrated state. Leaving one index leaked on a
-                    // should-not-happen path is strictly better than a remote
-                    // teardown primitive, since `receiver_idx` is a wire field
-                    // the sender chooses.
+                    // The pending-inbound entry outlived its machine. No path
+                    // to this arm has been found. The lease on the leg's index
+                    // lived on the machine, so it went with it, and nothing
+                    // here owns an index to release: the receiver index is a
+                    // wire field the sender chooses, and freeing it could tear
+                    // down an unrelated session that holds it now.
                     //
-                    // The link goes regardless: it has no machine on either
-                    // branch, its pending-inbound key is already gone, and
-                    // `LinkId`s come from a monotonic counter
-                    // (`allocate_link_id`) so a stale value can never name a
-                    // different live connection. `remove_link` drops the
-                    // `addr_to_link` reverse entry only if it still points here,
-                    // so a newer leg on the same address is untouched, and hands
-                    // it back to the link this leg displaced at msg1 if that
-                    // link is still live.
+                    // The link goes: it has no machine, its pending-inbound
+                    // key is already gone, and `LinkId`s come from a monotonic
+                    // counter (`allocate_link_id`) so a stale value can never
+                    // name a different live connection. `remove_link` drops the
+                    // `addr_to_link` reverse entry only if it still points
+                    // here, so a newer leg on the same address is untouched,
+                    // and hands it back to the link this leg displaced at msg1
+                    // if that link is still live.
                     debug!(
                         link_id = %link_id,
+                        receiver_idx = %header.receiver_idx,
                         "No pending connection for msg3"
                     );
                     self.remove_link(&link_id);
-                    let orphan_index = header.receiver_idx;
-                    if self.session_index_is_claimed(orphan_index) {
-                        warn!(
-                            link_id = %link_id,
-                            receiver_idx = %orphan_index,
-                            "Orphaned pending-inbound entry names an index claimed by live \
-                             state; leaving it allocated"
-                        );
-                    } else {
-                        let _ = self.index_allocator.free(orphan_index);
-                    }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
                 }
             };
 
-            // Process msg3 — learns initiator's identity and epoch
-            let noise_msg3 = &packet.data[header.noise_msg3_offset..];
-            let received_negotiation =
-                match machine.complete_handshake_msg3(noise_msg3, packet.timestamp_ms) {
-                    Ok(neg) => neg,
-                    Err(Msg3Error::Unreadable(e)) => {
-                        // The leg is untouched; put its pending-inbound entry
-                        // back so the genuine msg3, or the initiator's resend,
-                        // still finds it. Debug, not warn: anyone who saw
-                        // msg2's cleartext header can send these.
-                        debug!(
-                            link_id = %link_id,
-                            error = %e,
-                            "Unreadable msg3, keeping the pending leg"
-                        );
-                        self.pending_inbound.insert(key, link_id);
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                        return;
-                    }
-                    Err(e @ Msg3Error::Failed(_)) => {
-                        warn!(
-                            link_id = %link_id,
-                            error = %e,
-                            "Msg3 processing failed"
-                        );
-                        // Clean up. Capture the index before disposing the
-                        // machine (and the Noise handles it carries); reading
-                        // it after the disposal would always return None and
-                        // leak the allocated index.
-                        let our_idx_to_free =
-                            self.peer_machines.get(&link_id).and_then(|m| m.our_index());
-                        self.remove_link(&link_id);
-                        self.remove_peer_machine(link_id);
-                        if let Some(idx) = our_idx_to_free {
-                            let _ = self.index_allocator.free(idx);
-                        }
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                        return;
-                    }
-                };
+            // Read msg3 on a fork of the leg's handshake: it learns the
+            // initiator's identity, epoch and negotiation payload.
+            match machine.read_final(&packet.data, packet.timestamp_ms) {
+                Ok(()) => {}
+                Err(Msg3Error::Unreadable) => {
+                    // The leg and its lease are untouched; put its
+                    // pending-inbound entry back so the genuine msg3, or the
+                    // initiator's resend, still finds it. Debug, not warn:
+                    // anyone who saw msg2's cleartext header can send these.
+                    debug!(link_id = %link_id, "Unreadable msg3, keeping the pending leg");
+                    self.pending_inbound.insert(key, link_id);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
+                }
+                Err(e @ Msg3Error::Failed(_)) => {
+                    warn!(
+                        link_id = %link_id,
+                        error = %e,
+                        "Msg3 processing failed"
+                    );
+                    self.drop_leg(link_id);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
+                }
+            }
+            let Some(read) = machine.final_read() else {
+                debug_assert!(false, "a msg3 that read leaves its read on the leg");
+                self.drop_leg(link_id);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                return;
+            };
+            let peer_identity = PeerIdentity::from_pubkey_full(*read.remote());
+            let remote_epoch = Some(read.epoch());
+            let negotiated = read.negotiate(our_profile);
+            // The sender's rekey declaration. A present-but-malformed marker
+            // is a hard failure: reading it as "not a rekey" would be exactly
+            // the silent fall-through this field exists to remove.
+            let declared = read.declared();
 
             // Process peer's FMP negotiation payload from msg3
-            if let Some(neg_bytes) = &received_negotiation {
-                match process_fmp_negotiation(our_profile, machine, neg_bytes) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
-                        // Capture the msg1-allocated index before disposing the
-                        // machine that carries it; a read placed after the
-                        // disposal yields None and the free is silently skipped.
-                        // This arm sits ahead of the inbound ACL gate, so any
-                        // peer able to complete a Noise msg3 reaches it without
-                        // being authorized.
-                        let our_idx_to_free =
-                            self.peer_machines.get(&link_id).and_then(|m| m.our_index());
-                        self.remove_link(&link_id);
-                        self.remove_peer_machine(link_id);
-                        if let Some(idx) = our_idx_to_free {
-                            let _ = self.index_allocator.free(idx);
-                        }
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                        return;
-                    }
+            match negotiated {
+                Ok(Some(their_profile)) => {
+                    machine.set_conn_peer_profile(their_profile);
+                    debug!(
+                        link_id = %link_id,
+                        our_profile = %our_profile,
+                        peer_profile = %their_profile,
+                        "FMP negotiation complete"
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(link_id = %link_id, our_profile = %our_profile, error = %e, "FMP negotiation failed");
+                    // This arm sits ahead of the inbound ACL gate, so any
+                    // peer able to complete a Noise msg3 reaches it without
+                    // being authorized; the leg's lease goes back with it.
+                    self.drop_leg(link_id);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    return;
                 }
             }
 
-            // Learn peer identity from msg3
-            let peer_identity = match machine.conn_expected_identity() {
-                Some(id) => *id,
-                None => {
-                    warn!("Identity not learned from msg3");
-                    // Same capture-before-dispose shape as the negotiation arm
-                    // above. Defensive: `complete_handshake_msg3` sets the
-                    // identity on success, and no path reaching here with `None`
-                    // has been constructed, so this free is by symmetry with its
-                    // siblings rather than by test.
-                    let our_idx_to_free =
-                        self.peer_machines.get(&link_id).and_then(|m| m.our_index());
-                    self.remove_link(&link_id);
-                    self.remove_peer_machine(link_id);
-                    if let Some(idx) = our_idx_to_free {
-                        let _ = self.index_allocator.free(idx);
-                    }
+            let declared_rekey_of = match declared {
+                Ok(claim) => claim,
+                Err(e) => {
+                    warn!(link_id = %link_id, error = %e, "Malformed rekey marker in msg3");
+                    // This arm is reachable before the ACL gate, so leaking
+                    // the leg's index would let any peer that can complete a
+                    // msg3 grow the allocator set one entry per malformed
+                    // marker; the lease goes back with the leg.
+                    self.drop_leg(link_id);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
                 }
             };
 
-            let our_index = machine.our_index();
-            let remote_epoch = machine.conn_remote_epoch();
-
-            // The sender's rekey declaration. Decoded again here rather than
-            // threaded out of `process_fmp_negotiation` so the msg2 path is
-            // untouched; the payload is a few bytes. A present-but-malformed
-            // marker is a hard failure: reading it as "not a rekey" would be
-            // exactly the silent fall-through this field exists to remove.
-            let declared_rekey_of = match &received_negotiation {
-                Some(bytes) => match NegotiationPayload::decode(bytes).and_then(|p| p.rekey_of()) {
-                    Ok(claim) => claim,
-                    Err(e) => {
-                        warn!(link_id = %link_id, error = %e, "Malformed rekey marker in msg3");
-                        // The msg1-allocated index rides the machine, so capture
-                        // it before disposal or it is orphaned. This arm is
-                        // reachable before the ACL gate, so leaving it to leak
-                        // would let any peer that can complete a msg3 grow the
-                        // allocator set one entry per malformed marker.
-                        self.remove_link(&link_id);
-                        self.remove_peer_machine(link_id);
-                        if let Some(idx) = our_index {
-                            let _ = self.index_allocator.free(idx);
-                        }
-                        self.stats_mut()
-                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                        return;
-                    }
-                },
-                None => None,
-            };
+            // `pending_inbound` is keyed by the index the leg drew at msg1, so
+            // the msg3's receiver index is the leg's own.
+            let our_index = header.receiver_idx;
 
             (peer_identity, our_index, remote_epoch, declared_rekey_of)
         };
@@ -1829,10 +1596,13 @@ impl Node {
             // msg2. Reason `Other` is used instead of `SecurityViolation`
             // to avoid naming the ACL mechanism on the wire.
             let reject_info = match self.peer_machines.get_mut(&link_id) {
-                Some(machine) => match (machine.conn_their_index(), machine.take_session()) {
-                    (Some(idx), Some(session)) => Some((idx, session)),
-                    _ => None,
-                },
+                Some(machine) => {
+                    machine.settle_setup();
+                    match (machine.conn_their_index(), machine.take_session()) {
+                        (Some(idx), Some(session)) => Some((idx, session)),
+                        _ => None,
+                    }
+                }
                 None => None,
             };
             if let Some((their_idx, mut session)) = reject_info {
@@ -1848,16 +1618,10 @@ impl Node {
                     )
                     .await;
             }
-            self.remove_link(&link_id);
-            self.remove_peer_machine(link_id);
-            // The msg1-allocated index, captured above before any disposal and
-            // carried across the `Disconnect` send (`SessionIndex` is `Copy`).
-            // The free deliberately follows the send: the reject signal is built
-            // from state on the machine and is this arm's user-visible
+            // The leg's lease is released after the send: the reject signal is
+            // built from state on the machine and is this arm's user-visible
             // behaviour.
-            if let Some(idx) = our_index {
-                let _ = self.index_allocator.free(idx);
-            }
+            self.drop_leg(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1865,12 +1629,7 @@ impl Node {
 
         if peer_node_addr == *self.identity().node_addr() {
             debug!(link_id = %link_id, "Received msg3 from self, dropping");
-            self.remove_link(&link_id);
-            self.remove_peer_machine(link_id);
-            // Same msg1-allocated index, same capture point above.
-            if let Some(idx) = our_index {
-                let _ = self.index_allocator.free(idx);
-            }
+            self.drop_leg(link_id);
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return;
@@ -1886,8 +1645,6 @@ impl Node {
         // cross-connection paths). Over-cap inbound rejections surface as
         // NodeError::MaxPeersExceeded in the Err arm below and are logged at
         // debug rather than warn (expected policy rejection, not a fault).
-        let our_index = our_index.unwrap_or(header.receiver_idx);
-
         // Identity-based restart/rekey/cross-connection classification.
         //
         // Now that we know the initiator's identity from msg3, classify this
@@ -1906,14 +1663,14 @@ impl Node {
         // cross-connection, leaving the two ends on different session indices.
         let our_node_addr = *self.identity().node_addr();
 
-        // Resolve the sender's declaration against the session we hold. Matched
-        // ONLY against the peer this handshake authenticated as, never through a
-        // global index map — otherwise one peer could name another's index and
-        // steer a decision about that peer's session.
+        // Resolve the sender's declaration against the sessions we hold.
+        // Matched ONLY against the peer this handshake authenticated as, never
+        // through a global index map — otherwise one peer could name another's
+        // index and steer a decision about that peer's session.
         let rekey_claim = match declared_rekey_of {
             None => RekeyClaim::None,
-            Some(declared) => match self.peers.get(&peer_node_addr).and_then(|p| p.our_index()) {
-                Some(ours) if ours == declared => RekeyClaim::Matches,
+            Some(declared) => match self.peers.get(&peer_node_addr) {
+                Some(peer) if peer.declares_own_session(declared) => RekeyClaim::Matches,
                 _ => RekeyClaim::Mismatch,
             },
         };
@@ -1930,9 +1687,7 @@ impl Node {
                 has_existing_peer: true,
                 existing_peer_epoch: existing_peer.remote_epoch(),
                 has_session: existing_peer.has_session(),
-                pending_new_session: existing_peer.pending_new_session().is_some(),
-                rekey_in_progress: existing_peer.rekey_in_progress(),
-                existing_msg2: existing_peer.handshake_msg2().map(|m| m.to_vec()),
+                stored_msg2: existing_peer.handshake_msg2().map(|m| m.to_vec()),
                 different_link: existing_peer.link_id() != link_id,
                 rekey_claim,
                 our_node_addr,
@@ -1947,9 +1702,7 @@ impl Node {
                 has_existing_peer: false,
                 existing_peer_epoch: None,
                 has_session: false,
-                pending_new_session: false,
-                rekey_in_progress: false,
-                existing_msg2: None,
+                stored_msg2: None,
                 different_link: false,
                 rekey_claim,
                 our_node_addr,
@@ -1960,45 +1713,30 @@ impl Node {
             },
         };
 
-        // Capture the snapshot fields the tie-break breadcrumb reads before the
-        // snapshot moves into the single classification call below.
-        let rekey_in_progress = snap.rekey_in_progress;
-        let pending_new_session = snap.pending_new_session;
-
         // Single inbound classification site. The leg's PERSISTENT machine — born
         // at msg1, parked `SentMsg2` — evaluates `establish_inbound` once and
         // returns both the decision (for the driver to route on) and the arm's
-        // action stream. The terminal tie-break/duplicate arms carry their
-        // `FreeIndex` (returning the msg1-allocated inbound index) as a machine
-        // action; the driver owns only the link/map removal and the reject
-        // bookkeeping, since the machine cannot remove itself from the map.
+        // action stream. The terminal reject/duplicate arms carry their
+        // `FreeIndex` (releasing the lease the leg drew at msg1) as a machine
+        // action; a declared rekey leaves the leg's read, with the lease, for
+        // the peer's link rekey machine. The driver owns only the link/map
+        // removal and the reject bookkeeping, since the machine cannot remove
+        // itself from the map.
         let (decision, actions) = match self.peer_machines.get_mut(&link_id) {
             // Disjoint field borrow: `self.peer_machines` (the map entry) and
             // `self.index_allocator` (the capability) are separate fields.
-            Some(machine) => machine.inbound_msg3(
-                wire,
-                snap,
-                our_index,
-                packet.timestamp_ms,
-                &mut self.index_allocator,
-            ),
+            Some(machine) => {
+                machine.inbound_msg3(wire, snap, packet.timestamp_ms, &mut self.index_allocator)
+            }
             None => {
-                // Every inbound leg's machine is born at msg1, so a miss here
-                // means a teardown path dropped the machine but left the leg
-                // behind. Recover with a fresh machine seeded the way msg1 would
-                // have left it, so the classification below behaves identically.
+                // The machine was read a few lines above and nothing between
+                // removes it. Were it gone, the lease on the leg's index went
+                // with it, and an index named by the wire is never freed.
                 debug_assert!(false, "peer machine present for every pending inbound leg");
-                let mut machine =
-                    PeerMachine::inbound_msg2_sent(link_id, our_index, packet.timestamp_ms);
-                let result = machine.inbound_msg3(
-                    wire,
-                    snap,
-                    our_index,
-                    packet.timestamp_ms,
-                    &mut self.index_allocator,
-                );
-                self.peer_machines.insert(link_id, machine);
-                result
+                self.remove_link(&link_id);
+                self.stats_mut()
+                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                return;
             }
         };
 
@@ -2068,33 +1806,30 @@ impl Node {
                 self.stats_mut()
                     .record_reject(RejectReason::Handshake(HandshakeReject::SilentBackoff));
             }
-            InboundDecision::Reject {
-                reason: InboundReject::DualRekeyWon,
-            } => {
-                // Dual-init rekey tie-break: we win (smaller addr), drop their msg3.
-                info!(
-                    peer = %self.peer_display_name(&peer_node_addr),
-                    our_addr = %our_node_addr,
-                    their_addr = %peer_node_addr,
-                    rekey_in_progress = rekey_in_progress,
-                    pending_new_session = pending_new_session,
-                    "rekey-msg3 tie-break: we win (smaller addr), drop their msg3"
-                );
-                // We keep our in-progress rekey and drop their msg3. The machine's
-                // returned `FreeIndex` returns the msg1-allocated inbound index
-                // rather than orphaning it; the driver owns only the link/map
-                // removal and the reject record.
+            InboundDecision::PeerRekey { peer } => {
+                // The peer's msg3 declares a rekey of the link we hold with it:
+                // the leg's read, with the lease on its index, goes to the
+                // peer's link rekey machine, which decides whether it takes
+                // it. The leg itself is done; its link goes without closing a
+                // transport connection, handing the peer's address back to the
+                // peer's link.
+                let fin = self
+                    .peer_machines
+                    .get_mut(&link_id)
+                    .and_then(PeerMachine::take_final);
                 self.execute_peer_actions(link_id, &ambient, actions).await;
-                debug_assert!(
-                    !self.index_allocator.is_allocated(our_index),
-                    "inbound index freed exactly once via the machine action"
-                );
                 self.remove_link(&link_id);
                 self.remove_peer_machine(link_id);
-                self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                match fin {
+                    Some(fin) => self.peer_rekey_to_link(&peer, fin).await,
+                    None => {
+                        debug_assert!(false, "a declared rekey leaves its read on the leg");
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    }
+                }
             }
-            InboundDecision::ResendMsg2 { msg2 } => {
+            InboundDecision::RepeatMsg2 { msg2 } => {
                 // Not a rekey — duplicate handshake from same epoch. Resend the
                 // stored msg2 bytes as-is (a driver mechanism: replaying the
                 // stored frame, not rebuilding it), leaving the active peer
@@ -2131,8 +1866,7 @@ impl Node {
             }
             decision @ (InboundDecision::RestartThenPromote { .. }
             | InboundDecision::Promote
-            | InboundDecision::CrossConnect { .. }
-            | InboundDecision::RekeyRespond { .. }) => {
+            | InboundDecision::CrossConnect { .. }) => {
                 // Preserve the epoch-mismatch restart breadcrumb — it fires before
                 // the machine's teardown actions run, matching the pre-refactor
                 // order (breadcrumb → remove_active_peer → note_link_dead → promote).
@@ -2155,14 +1889,13 @@ impl Node {
                 //   `[InvalidateSendState, ReportLost, PromoteToActive]` for
                 //     `RestartThenPromote` (the two teardown actions map to
                 //     `remove_active_peer` / `note_link_dead`, in that order);
-                //   `[SwapToInboundSession]` for a simultaneous-init cross-connection;
-                //   `[RekeyRespondTrigger]` for a rekey-responder tie-break.
+                //   `[ResolveInboundCrossConnection]` for a simultaneous-init cross-connection.
                 // On a promote the machine survives and crystallizes in place via
-                // the executor's `PromotionResolved` feedback; on the other arms the
+                // the executor's `PromotionResolved` feedback; on the other arm the
                 // executor's teardown disposes it with the leg. The relocated
                 // session-swap / promote / teardown bodies live in the executor's
-                // `SwapToInboundSession` / `RekeyRespondTrigger` / `PromoteToActive`
-                // / `InvalidateSendState` / `ReportLost` arms.
+                // `ResolveInboundCrossConnection` / `PromoteToActive` /
+                // `InvalidateSendState` / `ReportLost` arms.
                 self.execute_peer_actions(link_id, &ambient, actions).await;
             }
         }
@@ -2189,16 +1922,8 @@ impl Node {
                 link_id = %link_id,
                 "Leaf node rejecting additional peer (single-peer enforcement)"
             );
-            // Detach the Noise handles from the machine and free the index the
-            // handshake allocated, then dispose of the machine itself.
-            if let Some(idx) = self.peer_machines.get_mut(&link_id).and_then(|machine| {
-                // Freeing stays conditional on a handshake actually being
-                // attached, as it was when the index lived on the leg.
-                machine.take_leg()?;
-                machine.our_index()
-            }) {
-                let _ = self.index_allocator.free(idx);
-            }
+            // Dispose of the machine with the Noise handles it carries and the
+            // lease on the index the handshake allocated.
             self.remove_link(&link_id);
             self.remove_peer_machine(link_id);
             return Err(NodeError::MaxPeersExceeded { max: 1 });
@@ -2298,7 +2023,7 @@ impl Node {
 
             if this_wins {
                 // This connection wins, replace the existing peer
-                let Some(old_peer) = self.peers.remove(&peer_node_addr) else {
+                let Some(mut old_peer) = self.peers.remove(&peer_node_addr) else {
                     return Err(NodeError::PeerNotFound(peer_node_addr));
                 };
                 let loser_link_id = old_peer.link_id();
@@ -2524,11 +2249,12 @@ impl Node {
     /// `noise_session`: its link rekey machine takes the session as its first
     /// epoch, under `our_index` (the lease link setup took) and the peer's
     /// `their_index`, bound on `transport_id`, and is offered to the decrypt
-    /// workers when a pool runs. Returns the peer and the machine's outputs
-    /// (the binding of `our_index` and any offer), to execute once the peer
-    /// is in the table. A session that authenticated another key than
-    /// `verified_identity`'s, which a completed handshake never has, frees
-    /// the index and fails the promotion.
+    /// workers when a pool runs. `our_profile` and `peer_profile` are the two
+    /// ends' negotiated node profiles. Returns the peer and the machine's
+    /// outputs (the binding of `our_index` and any offer), to execute once
+    /// the peer is in the table. A session that authenticated another key
+    /// than `verified_identity`'s, which a completed handshake never has,
+    /// frees the index and fails the promotion.
     #[allow(clippy::too_many_arguments)]
     fn keyed_peer(
         &mut self,
@@ -2536,30 +2262,29 @@ impl Node {
         verified_identity: PeerIdentity,
         current_time_ms: u64,
         noise_session: crate::noise::NoiseSession,
-        our_index: fips_core::proto::rekey::IndexLease,
+        our_index: IndexLease,
         their_index: SessionIndex,
         transport_id: TransportId,
         current_addr: crate::transport::TransportAddr,
         link_stats: crate::transport::LinkStats,
         is_outbound: bool,
         remote_epoch: Option<[u8; 8]>,
+        our_profile: NodeProfile,
+        peer_profile: NodeProfile,
     ) -> Result<(ActivePeer, LinkOutputs), NodeError> {
         let local = self.session_node_keys();
         let me = *self.identity().node_addr();
         let mmp = self.config().node.mmp.clone();
         let params = crate::node::handlers::rekey::link_params(&self.config().node);
-        let record = self.link_records.take(
-            verified_identity.node_addr(),
-            remote_epoch.unwrap_or_default(),
-        );
         let workers = self.link_workers();
         let mut caps = LinkCaps {
             indices: &mut self.index_allocator,
             local: &local,
             me,
             params,
-            record,
+            record: Record::new(),
             workers,
+            profile: our_profile,
         };
         ActivePeer::with_session(
             verified_identity,
@@ -2574,6 +2299,8 @@ impl Node {
             is_outbound,
             &mmp,
             remote_epoch,
+            our_profile,
+            peer_profile,
             &mut caps,
         )
         .map_err(|lease| {

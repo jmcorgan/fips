@@ -771,3 +771,85 @@ async fn crossed_tcp_handshake_converges_when_the_losing_connection_closes_after
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// A link rekey's leg on the connection an established peer runs on, whose
+/// msg3 never comes, expires without closing that connection: the leg
+/// shares it with the peer, and closing it would take the peer's link down
+/// with the leg.
+#[tokio::test]
+async fn leg_expiry_emits_no_close() {
+    use crate::proto::fmp::wire::PHASE_MSG1;
+
+    let mut cfg = Config::new();
+    cfg.node.rekey.after_secs = 60;
+    cfg.node.rekey.after_messages = u64::MAX;
+    let mut nodes = vec![
+        make_test_node_tcp_with(cfg.clone()).await,
+        make_test_node_tcp_with(cfg).await,
+    ];
+    initiate_handshake(&mut nodes, 0, 1).await;
+    drain_all_packets(&mut nodes, false).await;
+    let addr0 = *nodes[0].node.node_addr();
+    let addr1 = *nodes[1].node.node_addr();
+    let conn = nodes[1]
+        .node
+        .get_peer(&addr0)
+        .expect("precondition: node 1 holds node 0")
+        .current_addr()
+        .cloned()
+        .expect("precondition: node 1 reaches node 0 over a connection");
+
+    nodes[0]
+        .node
+        .get_peer_mut(&addr1)
+        .unwrap()
+        .test_backdate_session_established(Duration::from_secs(
+            60 + crate::node::REKEY_JITTER_SECS as u64 + 1,
+        ));
+    nodes[0].node.poll_link_rekeys().await;
+    let mut held = Vec::new();
+    let msg1 = next_of_phase(&mut nodes[1], &mut held, PHASE_MSG1, Duration::from_secs(2))
+        .await
+        .expect("precondition: node 0's rekey msg1 reaches node 1");
+    assert_eq!(
+        msg1.remote_addr, conn,
+        "precondition: the rekey msg1 arrives on the peer's connection"
+    );
+    nodes[1].node.handle_msg1(msg1).await;
+    assert_eq!(
+        nodes[1].node.pending_inbound.len(),
+        1,
+        "precondition: node 1 answered on a leg"
+    );
+
+    let timeout_ms = nodes[1]
+        .node
+        .config()
+        .node
+        .rate_limit
+        .handshake_timeout_secs
+        * 1000;
+    nodes[1]
+        .node
+        .check_timeouts_at(Node::now_ms() + timeout_ms + 1_000)
+        .await;
+    assert!(
+        nodes[1].node.pending_inbound.is_empty(),
+        "precondition: the leg expired"
+    );
+    let tid = nodes[1].transport_id;
+    assert_eq!(
+        nodes[1]
+            .node
+            .transports
+            .get(&tid)
+            .unwrap()
+            .connection_state(&conn),
+        ConnectionState::Connected,
+        "the leg's expiry leaves the peer's connection open"
+    );
+    assert!(nodes[1].node.get_peer(&addr0).is_some(), "the peer is kept");
+    super::link_index_audit::audit(&nodes[1].node, "a leg's expiry");
+
+    cleanup_nodes(&mut nodes).await;
+}

@@ -1729,7 +1729,8 @@ async fn drive_to_msg3(
     let peer_identity = PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full());
 
     let link_id = initiator.node.allocate_link_id();
-    let our_index = initiator.node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut initiator.node.index_allocator).unwrap();
+    let our_index = SessionIndex::new(our_lease.index());
     // Mirror the production dial path: the seam seeds the identified outbound
     // leg's control machine at dial, and the promote feedback later
     // crystallizes that same machine in place.
@@ -1737,7 +1738,7 @@ async fn drive_to_msg3(
         .node
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id, peer_identity, now_ms)
-                .with_our_index(our_index)
+                .with_our_index(our_lease)
                 .with_transport_id(initiator.transport_id)
                 .with_source_addr(responder.addr.clone()),
         )
@@ -1791,7 +1792,7 @@ async fn drive_to_msg3(
     recv_phase(&mut responder.packet_rx, 3, "msg3").await
 }
 
-/// Drive a **real** rekey: the initiator's own `check_rekey` builds the rekey
+/// Drive a **real** rekey: the initiator's own link machine builds the rekey
 /// msg1, and the msg3 that returns carries the rekey marker.
 ///
 /// A bare second handshake will not substitute. It declares no rekey — because
@@ -1811,7 +1812,7 @@ async fn drive_to_msg3(
 /// build. Thirty clears the bound and still leaves the 120s backdate these tests
 /// use a margin of 75s against the worst draw.
 async fn drive_rekey_to_msg3(initiator: &mut HsNode, responder: &mut HsNode) -> ReceivedPacket {
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
 
     let msg1_pkt = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
     responder.node.handle_msg1(msg1_pkt).await;
@@ -1820,275 +1821,6 @@ async fn drive_rekey_to_msg3(initiator: &mut HsNode, responder: &mut HsNode) -> 
     initiator.node.handle_msg2(msg2_pkt).await;
 
     recv_phase(&mut responder.packet_rx, 3, "rekey msg3").await
-}
-
-#[tokio::test]
-async fn test_msg3_dual_rekey_won_frees_index() {
-    // Both ends carry the rekey config so each can fire its own trigger; the
-    // classifier itself reads no config, only the sender's declaration.
-    let make_config = || {
-        let mut c = Config::new();
-        c.node.rekey.enabled = true;
-        c.node.rekey.after_secs = 30;
-        c
-    };
-
-    let mut initiator = make_hs_node(make_config()).await;
-    // The DualRekeyWon tie-break is won by the numerically smaller node addr,
-    // so the responder (whose handle_msg3 we exercise) must be the smaller.
-    let mut responder = loop {
-        let cand = make_hs_node(make_config()).await;
-        if cand.node.node_addr() < initiator.node.node_addr() {
-            break cand;
-        }
-    };
-
-    // First handshake: the responder promotes the initiator to a healthy active
-    // peer holding exactly one allocated session index.
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-    assert_eq!(responder.node.peer_count(), 1);
-    let baseline = responder.node.index_allocator.count();
-    assert_eq!(baseline, 1, "responder holds exactly the peer's index");
-
-    // Mark a rekey of our own in progress so the peer's declared rekey meets it
-    // as a dual initiation, which the smaller node addr wins. Age both ends so
-    // the initiator's own trigger fires and produces a real, marked rekey msg3 —
-    // a bare handshake declares no rekey and would never reach this arm.
-    let peer_addr =
-        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-    initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(120));
-    {
-        let peer = responder.node.get_peer_mut(&peer_addr).unwrap();
-        peer.test_backdate_session_established(std::time::Duration::from_secs(120));
-        peer.set_rekey_in_progress();
-    }
-
-    // The rekey's msg1 allocates a fresh index on the responder, then its msg3
-    // lands on the DualRekeyWon reject arm.
-    let msg3b = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        baseline + 1,
-        "second msg1 allocated a fresh index"
-    );
-    responder.node.handle_msg3(msg3b).await;
-
-    // The rejected msg3 must return its index and leave the active peer intact.
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        baseline,
-        "DualRekeyWon must free the msg1-allocated index"
-    );
-    assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
-    // The rejected leg's msg1-born machine goes with the leg; only the
-    // established peer's machine remains.
-    let peer_link = responder.node.get_peer(&peer_addr).unwrap().link_id();
-    assert_eq!(responder.node.peer_machines.len(), 1);
-    assert_eq!(
-        link_at(&responder, &initiator.addr),
-        Some(peer_link),
-        "the rejected leg must hand the peer's address key back to the peer's link"
-    );
-    assert!(responder.node.peer_machines.contains_key(&peer_link));
-    #[cfg(debug_assertions)]
-    responder.node.debug_assert_peer_maps_coherent();
-    assert!(
-        responder
-            .node
-            .get_peer(&peer_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_none(),
-        "reject arm must not store rekey-responder state"
-    );
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
-/// Complete a Noise XX handshake between two identities and return the
-/// initiator's session, standing in for the fresh keys a cross-connection swap
-/// installs.
-fn replacement_session(ours: &Identity, theirs: &Identity) -> crate::noise::NoiseSession {
-    use crate::noise::HandshakeState;
-
-    let mut initiator = HandshakeState::new_initiator(ours.keypair());
-    let mut responder = HandshakeState::new_responder(theirs.keypair());
-    initiator.set_local_epoch([0x11; 8]);
-    responder.set_local_epoch([0x22; 8]);
-
-    let msg1 = initiator.write_message_1().unwrap();
-    responder.read_message_1(&msg1).unwrap();
-    let msg2 = responder.write_message_2().unwrap();
-    initiator.read_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_message_3().unwrap();
-    responder.read_message_3(&msg3).unwrap();
-
-    initiator.into_session().unwrap()
-}
-
-#[tokio::test]
-async fn test_msg3_resend_msg2_frees_index() {
-    // A declared rekey naming keys the responder no longer holds. Production
-    // reaches this when a cross-connection swap replaces the responder's keys
-    // for the peer while the peer's rekey is in flight: the msg3 marker then
-    // resolves to a mismatch, which is unambiguously a rekey and not a crossing
-    // dial, and the classifier sends it to the duplicate arm. The shell must
-    // then free the msg1-allocated index and leave the existing session alone.
-    //
-    // A bare second handshake will not reach this arm: it declares no rekey, and
-    // an undeclared msg3 on a different link is a cross-connection, on which
-    // every assertion below also holds — so routing through it would exercise
-    // something else entirely while passing.
-    //
-    // The responder's own `rekey.enabled` is deliberately NOT the lever here.
-    // That flag governs whether this node initiates rekeys and has no say in
-    // whether it accepts one; using it to reach this arm is the divergence
-    // `test_asymmetric_rekey_config_converges` exists to forbid.
-    let mut init_config = Config::new();
-    init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 30;
-    let config = Config::new();
-
-    let mut initiator = make_hs_node(init_config).await;
-    let mut responder = make_hs_node(config).await;
-
-    // First handshake establishes the active peer.
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-    assert_eq!(responder.node.peer_count(), 1);
-    let baseline = responder.node.index_allocator.count();
-    assert_eq!(baseline, 1, "responder holds exactly the peer's index");
-
-    let peer_addr =
-        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-    // Age the initiator's session past the whole jitter band so its own rekey
-    // trigger fires and the msg3 that arrives carries a matching marker.
-    initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(120));
-
-    // The rekey's msg1 allocates a fresh index; its msg3 then frees it on the
-    // duplicate arm.
-    let msg3b = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        baseline + 1,
-        "the rekey msg1 allocated a fresh index"
-    );
-
-    // The index the msg3 marker declares: the responder's index as the
-    // initiator knows it.
-    let declared = initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .their_index()
-        .expect("initiator holds the responder's index");
-
-    // While the rekey is in flight, replace the responder's keys for the peer
-    // exactly as the outbound cross-connection swap does: a fresh index and
-    // session on the peer, the index map moved to the new index, the old index
-    // freed, and the peer's control machine told of the swap.
-    let fresh_index = responder.node.index_allocator.allocate().unwrap();
-    let session = replacement_session(responder.node.identity(), initiator.node.identity());
-    let (old_index, their_index, transport_id, link) = {
-        let peer = responder.node.get_peer_mut(&peer_addr).unwrap();
-        let their_index = peer
-            .their_index()
-            .expect("responder holds the peer's index");
-        let old_index = peer.replace_session(session, fresh_index, their_index);
-        (
-            old_index.expect("responder held an index before the swap"),
-            their_index,
-            peer.transport_id().expect("peer has a transport"),
-            peer.link_id(),
-        )
-    };
-    responder
-        .node
-        .peers_by_index
-        .remove(&(transport_id, old_index.as_u32()));
-    let _ = responder.node.index_allocator.free(old_index);
-    responder
-        .node
-        .peers_by_index
-        .insert((transport_id, fresh_index.as_u32()), peer_addr);
-    let acts = responder.node.peer_machines.get_mut(&link).unwrap().step(
-        crate::peer::machine::PeerEvent::CrossConnResolved {
-            outcome: crate::peer::machine::CrossConnOutcome::Swap {
-                our_index: fresh_index,
-                their_index,
-            },
-        },
-        Node::now_ms(),
-        &mut responder.node.index_allocator,
-    );
-    assert!(
-        acts.is_empty(),
-        "cross-connection resolution is a pure observation"
-    );
-
-    assert_ne!(
-        responder.node.get_peer(&peer_addr).unwrap().our_index(),
-        Some(declared),
-        "the responder must no longer hold the keys the msg3 declares, or this \
-         reaches the rekey-responder arm"
-    );
-
-    let before = responder.node.get_peer(&peer_addr).unwrap();
-    let session_before = (before.our_index(), before.their_index());
-
-    responder.node.handle_msg3(msg3b).await;
-
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        baseline,
-        "ResendMsg2 must free the msg1-allocated index"
-    );
-    assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
-    let after = responder.node.get_peer(&peer_addr).unwrap();
-    assert_eq!(
-        (after.our_index(), after.their_index()),
-        session_before,
-        "the duplicate arm must leave the session alone; changed indices mean \
-         the cross-connection arm ran instead"
-    );
-    // The duplicate leg's msg1-born machine goes with the leg; only the
-    // established peer's machine remains.
-    let peer_link = responder.node.get_peer(&peer_addr).unwrap().link_id();
-    assert_eq!(responder.node.peer_machines.len(), 1);
-    assert_eq!(
-        link_at(&responder, &initiator.addr),
-        Some(peer_link),
-        "the duplicate leg must hand the peer's address key back to the peer's link"
-    );
-    assert!(responder.node.peer_machines.contains_key(&peer_link));
-    #[cfg(debug_assertions)]
-    responder.node.debug_assert_peer_maps_coherent();
-    assert!(
-        responder
-            .node
-            .get_peer(&peer_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_none(),
-        "duplicate-handshake arm must not store rekey-responder state"
-    );
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
 }
 
 // ===========================================================================
@@ -2150,7 +1882,11 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
         .get(&leg_link)
         .expect("machine survives promotion");
     assert_eq!(machine.state(), PeerState::Established { addr: peer_addr });
-    assert_eq!(machine.our_index(), peer_index);
+    assert_eq!(
+        machine.our_index(),
+        None,
+        "the leg's lease moved to the link's rekey machine"
+    );
     #[cfg(debug_assertions)]
     responder.node.debug_assert_peer_maps_coherent();
 
@@ -2176,20 +1912,30 @@ async fn test_inbound_machine_born_at_msg1_and_crystallized_at_promote() {
     stop_hs(&mut responder).await;
 }
 
+/// A msg3 whose base message reads but whose negotiation payload does not
+/// decrypt is read on a fork of the leg's handshake like any other msg3, so
+/// it completes nothing and leaves the leg, its machine and its index for
+/// the genuine msg3, as an unreadable base msg3 does
+/// (`an_unreadable_msg3_leaves_the_pending_leg_for_the_genuine_msg3`).
 #[tokio::test]
-async fn test_msg3_crypto_fail_disposes_leg_machine() {
+async fn a_msg3_whose_negotiation_payload_does_not_decrypt_leaves_the_leg_for_the_genuine_msg3() {
     let mut initiator = make_hs_node(Config::new()).await;
     let mut responder = make_hs_node(Config::new()).await;
 
-    let mut msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
     assert_eq!(responder.node.peer_machines.len(), 1, "msg1-born machine");
     assert_eq!(responder.node.index_allocator.count(), 1);
+    let leg = responder.node.connections().next().unwrap().1.link_id();
+    let index = responder
+        .node
+        .peer_machines
+        .get(&leg)
+        .and_then(|m| m.our_index())
+        .unwrap();
+    let activity = responder.node.connection_last_activity(leg);
 
-    // Corrupt the last byte so `complete_handshake_msg3` fails. It lands in
-    // the negotiation payload, after a base read that succeeds, so this is
-    // the authenticated-but-bad msg3 that still tears the leg down; an
-    // unreadable base msg3 keeps it (see
-    // `an_unreadable_msg3_leaves_the_pending_leg_for_the_genuine_msg3`).
+    // Corrupt the last byte: it lands in the negotiation payload, after a
+    // base read that succeeds.
     let offset = crate::proto::fmp::wire::Msg3Header::parse(&msg3.data)
         .unwrap()
         .noise_msg3_offset;
@@ -2197,26 +1943,25 @@ async fn test_msg3_crypto_fail_disposes_leg_machine() {
         msg3.data.len() - offset > crate::noise::HANDSHAKE_MSG3_SIZE,
         "msg3 carries a negotiation payload after the base message"
     );
-    let last = msg3.data.len() - 1;
-    msg3.data[last] ^= 0xFF;
-    responder.node.handle_msg3(msg3).await;
+    let mut bad = msg3.clone();
+    let last = bad.data.len() - 1;
+    bad.data[last] ^= 0xFF;
+    responder.node.handle_msg3(bad).await;
 
     assert_eq!(responder.node.peer_count(), 0, "no promotion");
-    assert!(
-        responder.node.connections().next().is_none(),
-        "leg torn down"
-    );
-    assert!(
-        responder.node.peer_machines.is_empty(),
-        "crypto-fail teardown disposes the leg's machine"
-    );
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        0,
-        "msg1-allocated index returned"
-    );
+    assert_leg_pending(&responder, leg, index, activity);
     #[cfg(debug_assertions)]
     responder.node.debug_assert_peer_maps_coherent();
+
+    responder.node.handle_msg3(msg3).await;
+    let peer_addr =
+        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let peer = responder
+        .node
+        .get_peer(&peer_addr)
+        .expect("the genuine msg3 must still promote the leg");
+    assert_eq!(peer.link_id(), leg);
+    assert_eq!(peer.our_index(), Some(index));
 
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;
@@ -2229,10 +1974,8 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
     // trigger; the responder's copy only lets it run its own cadence, since the
     // classifier reads no config.
     let mut init_config = Config::new();
-    init_config.node.rekey.enabled = true;
     init_config.node.rekey.after_secs = 30;
     let mut config = Config::new();
-    config.node.rekey.enabled = true;
     config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(init_config).await;
@@ -2283,360 +2026,6 @@ async fn test_msg3_rekey_respond_disposes_leg_machine() {
     stop_hs(&mut responder).await;
 }
 
-/// A rekey triggered by message count on a *young* session is still a rekey,
-/// and both ends must come out of it holding the same session.
-///
-/// This is the defect the marker exists to remove. The rekey trigger is
-/// `elapsed >= after_secs || counter >= after_messages`, so the count disjunct
-/// fires on a session of any age — while the discriminator it replaced asked
-/// only how old the session was, and read anything young as a fresh
-/// cross-connection. The two ends then resolved onto different sessions, and a
-/// link whose ends disagree decrypts one direction and drops the other.
-///
-/// Driven entirely off the count disjunct: `after_secs` is set far out of reach,
-/// so nothing here depends on the rekey jitter draw.
-#[tokio::test]
-async fn test_count_triggered_rekey_on_young_session_converges() {
-    let make_config = || {
-        let mut c = Config::new();
-        c.node.rekey.enabled = true;
-        // Unreachable by age, so only the message counter can fire the trigger.
-        c.node.rekey.after_secs = 3600;
-        c.node.rekey.after_messages = 4;
-        c
-    };
-
-    let mut initiator = make_hs_node(make_config()).await;
-    let mut responder = make_hs_node(make_config()).await;
-
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-
-    let initiator_addr =
-        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-
-    // Carry the session past the message threshold, leaving its age at zero.
-    // Encrypting on the session is what the trigger actually counts, so this
-    // moves the real counter rather than a stand-in for it.
-    for _ in 0..5 {
-        initiator
-            .node
-            .get_peer_mut(&responder_addr)
-            .unwrap()
-            .noise_session_mut()
-            .unwrap()
-            .encrypt(b"traffic")
-            .expect("encrypt under the established session");
-    }
-
-    let rekey_msg3 = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
-    responder.node.handle_msg3(rekey_msg3).await;
-
-    assert!(
-        responder
-            .node
-            .get_peer(&initiator_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_some(),
-        "the responder read a real rekey as something else: no pending session"
-    );
-
-    // Both ends cut over to the session they just negotiated.
-    initiator.node.check_rekey().await;
-    responder.node.check_rekey().await;
-
-    let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
-    let on_responder = responder.node.get_peer(&initiator_addr).unwrap();
-    assert_eq!(
-        on_initiator.their_index(),
-        on_responder.our_index(),
-        "after the rekey the ends hold different sessions: traffic drops one way"
-    );
-    assert_eq!(
-        on_responder.their_index(),
-        on_initiator.our_index(),
-        "after the rekey the ends hold different sessions: traffic drops one way"
-    );
-    assert!(
-        on_initiator.our_index().is_some() && on_initiator.their_index().is_some(),
-        "both indices must be set, or the equality above passes on None == None"
-    );
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
-/// An asymmetric `rekey.enabled` must not split the link: the two ends still
-/// come out of the peer's rekey holding the same session.
-///
-/// `rekey.enabled` says whether this node INITIATES rekeys. It says nothing
-/// about whether it accepts one, and it cannot: by the time a rekey msg3
-/// arrives the sender has already committed to the new session, and the
-/// declaration on the wire is the only authoritative signal about what the msg3
-/// is. A responder that read its own trigger config as permission to decline
-/// would keep the old session while the peer sends on the new one, and the link
-/// would carry nothing in either direction until the link-dead timer.
-///
-/// Every assertion here spans BOTH nodes, comparing each end's send index
-/// against the index the other end receives on. The divergent outcome leaves
-/// each node internally consistent, so a one-sided check cannot see it — which
-/// is exactly how the defect survived: `test_msg3_resend_msg2_frees_index`
-/// drove a declared rekey into a rekey-disabled responder and asserted only the
-/// responder's own state, so it passed on full divergence.
-#[tokio::test]
-async fn test_asymmetric_rekey_config_converges() {
-    let mut init_config = Config::new();
-    init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 30;
-    // The responder never initiates a rekey of its own. It must still accept the
-    // peer's, and must still cut over to it.
-    let mut resp_config = Config::new();
-    resp_config.node.rekey.enabled = false;
-
-    let mut initiator = make_hs_node(init_config).await;
-    let mut responder = make_hs_node(resp_config).await;
-
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-    assert_eq!(responder.node.peer_count(), 1);
-
-    let initiator_addr =
-        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-
-    // Age the initiator's session well past the jitter band ([-15, +15] around
-    // `after_secs`) so its own trigger fires and the msg3 that arrives carries a
-    // matching marker.
-    initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(120));
-
-    let rekey_msg3 = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
-    responder.node.handle_msg3(rekey_msg3).await;
-
-    assert!(
-        responder
-            .node
-            .get_peer(&initiator_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_some(),
-        "the responder declined the peer's rekey on account of its own trigger \
-         config: no pending session"
-    );
-
-    // The initiator cuts over on its own cadence and starts sending on the new
-    // session. Cross-node, before either cutover reaches the responder: the
-    // session the initiator now sends on has to be the one the responder is
-    // holding ready, and vice versa.
-    initiator.node.check_rekey().await;
-    {
-        let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
-        let on_responder = responder.node.get_peer(&initiator_addr).unwrap();
-        assert_eq!(
-            on_initiator.their_index(),
-            on_responder.pending_our_index(),
-            "the initiator sends on an index the responder is not standing by to \
-             receive on"
-        );
-        assert_eq!(
-            on_responder.pending_their_index(),
-            on_initiator.our_index(),
-            "the responder is standing by to send on an index the initiator does \
-             not receive on"
-        );
-        assert!(
-            on_initiator.our_index().is_some() && on_initiator.their_index().is_some(),
-            "both indices must be set, or the equalities above pass on None == None"
-        );
-    }
-
-    // The responder runs no rekey cadence at all here, so it cuts over the way a
-    // responder always does: on the peer's first frame carrying the flipped
-    // K-bit, which the data plane turns into exactly this call.
-    responder
-        .node
-        .get_peer_mut(&initiator_addr)
-        .unwrap()
-        .handle_peer_kbit_flip();
-
-    let on_initiator = initiator.node.get_peer(&responder_addr).unwrap();
-    let on_responder = responder.node.get_peer(&initiator_addr).unwrap();
-    assert_eq!(
-        on_initiator.their_index(),
-        on_responder.our_index(),
-        "after the rekey the ends hold different sessions: traffic drops one way"
-    );
-    assert_eq!(
-        on_responder.their_index(),
-        on_initiator.our_index(),
-        "after the rekey the ends hold different sessions: traffic drops one way"
-    );
-    assert!(
-        on_responder.our_index().is_some() && on_responder.their_index().is_some(),
-        "both indices must be set, or the equalities above pass on None == None"
-    );
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
-/// A node that never initiates a rekey still finishes the drain of one it
-/// accepted: the demoted session and its index come back.
-///
-/// Accepting a peer's rekey demotes our live session into the drain slot and
-/// keeps its index registered, so the frames still in flight on it decrypt. The
-/// drain arm of the rekey cadence is the only thing that ever releases either.
-/// Skipping the whole cadence on a node with `rekey.enabled = false` therefore
-/// pins one session and one index per accepted rekey, for the life of the peer —
-/// which is a leak that grows with every rekey the peer initiates.
-///
-/// Asserted against the peer's real state and the real allocator, not a log
-/// line: the previous session, the drain flag, the index-to-peer map and the
-/// allocator's live count all have to come back to where they started.
-#[tokio::test]
-async fn test_non_initiating_responder_completes_rekey_drain() {
-    let mut init_config = Config::new();
-    init_config.node.rekey.enabled = true;
-    init_config.node.rekey.after_secs = 30;
-    let mut resp_config = Config::new();
-    resp_config.node.rekey.enabled = false;
-
-    let mut initiator = make_hs_node(init_config).await;
-    let mut responder = make_hs_node(resp_config).await;
-
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-    assert_eq!(responder.node.peer_count(), 1);
-    let baseline = responder.node.index_allocator.count();
-    assert_eq!(baseline, 1, "responder holds exactly the peer's index");
-
-    let initiator_addr =
-        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-
-    initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(120));
-
-    // The peer's rekey completes and the responder accepts it, exactly as
-    // `test_asymmetric_rekey_config_converges` establishes it must.
-    let rekey_msg3 = drive_rekey_to_msg3(&mut initiator, &mut responder).await;
-    responder.node.handle_msg3(rekey_msg3).await;
-
-    let (old_index, transport) = {
-        let peer = responder.node.get_peer(&initiator_addr).unwrap();
-        assert!(
-            peer.pending_new_session().is_some(),
-            "the responder did not accept the rekey, so there is no drain to test"
-        );
-        (peer.our_index().unwrap(), peer.transport_id().unwrap())
-    };
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        baseline + 1,
-        "the accepted rekey holds a second index"
-    );
-
-    // The responder cuts over on the peer's first frame on the new epoch, which
-    // demotes the session it was using into the drain slot.
-    responder
-        .node
-        .get_peer_mut(&initiator_addr)
-        .unwrap()
-        .handle_peer_kbit_flip();
-
-    {
-        let peer = responder.node.get_peer(&initiator_addr).unwrap();
-        assert!(peer.is_draining(), "the cutover must start a drain window");
-        assert!(
-            peer.previous_session().is_some(),
-            "the demoted session is kept for in-flight frames"
-        );
-        assert_eq!(peer.previous_our_index(), Some(old_index));
-        assert_ne!(
-            peer.our_index(),
-            Some(old_index),
-            "the live session must have moved off the drained index"
-        );
-    }
-    assert!(
-        responder
-            .node
-            .peers_by_index
-            .contains_key(&(transport, old_index.as_u32())),
-        "the drained index stays routable while the window is open"
-    );
-
-    // Mid-window the cadence must leave it alone, or the assertion below would
-    // pass on an arm that fires unconditionally.
-    responder.node.check_rekey().await;
-    assert!(
-        responder
-            .node
-            .get_peer(&initiator_addr)
-            .unwrap()
-            .previous_session()
-            .is_some(),
-        "the drain completed before its window expired"
-    );
-
-    // Window expires. This is the only path that releases the demoted session,
-    // and a node that does not initiate rekeys still has to run it.
-    //
-    // Backdate by three times the 10s drain window rather than by minutes: the
-    // backdate cannot reach past the monotonic clock's epoch, so a margin larger
-    // than the machine's uptime is unrepresentable, and a freshly booted CI
-    // runner is exactly that machine.
-    responder
-        .node
-        .get_peer_mut(&initiator_addr)
-        .unwrap()
-        .test_backdate_drain_start(std::time::Duration::from_secs(30));
-    responder.node.check_rekey().await;
-
-    let peer = responder.node.get_peer(&initiator_addr).unwrap();
-    assert!(
-        peer.previous_session().is_none(),
-        "the demoted session is pinned forever on a node that never initiates"
-    );
-    assert!(!peer.is_draining(), "the drain window must be closed");
-    assert_eq!(peer.previous_our_index(), None);
-    assert!(
-        !peer.rekey_in_progress(),
-        "a node that does not initiate must not have started a rekey of its own"
-    );
-    assert!(
-        peer.has_session() && peer.our_index().is_some(),
-        "the live session must survive the drain"
-    );
-    assert!(
-        !responder
-            .node
-            .peers_by_index
-            .contains_key(&(transport, old_index.as_u32())),
-        "the drained index is still routable, so it was never released"
-    );
-    assert_eq!(
-        responder.node.index_allocator.count(),
-        baseline,
-        "the drained index never came back to the allocator"
-    );
-    assert_eq!(responder.node.peer_count(), 1, "active peer untouched");
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
 /// A fresh dial crossing our own in-flight rekey leaves BOTH ends on the same
 /// session, and leaks nothing on the way.
 ///
@@ -2654,7 +2043,6 @@ async fn test_non_initiating_responder_completes_rekey_drain() {
 async fn test_fresh_dial_crossing_our_rekey_converges() {
     let make_config = || {
         let mut c = Config::new();
-        c.node.rekey.enabled = true;
         c.node.rekey.after_secs = 30;
         c
     };
@@ -2688,7 +2076,7 @@ async fn test_fresh_dial_crossing_our_rekey_converges() {
         .get_peer_mut(&peer_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
-    responder.node.check_rekey().await;
+    responder.node.poll_link_rekeys().await;
 
     assert!(
         responder
@@ -2991,173 +2379,6 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
 // continuity gate is what stops that session from taking the peer's slot.
 // ===========================================================================
 
-/// Establish initiator↔responder, start a real rekey on the initiator, then
-/// let a third node answer the rekey msg1 with a valid XX msg2 built from its
-/// OWN static. The initiator must reject it, keep the established session live
-/// and usable, and keep the rekey cycle so the real responder's msg2, arriving
-/// second, still completes it.
-#[tokio::test]
-async fn test_rekey_msg2_foreign_static_rejected() {
-    let mut rekey_config = Config::new();
-    rekey_config.node.rekey.enabled = true;
-    rekey_config.node.rekey.after_secs = 30;
-
-    let mut initiator = make_hs_node(rekey_config).await;
-    let mut responder = make_hs_node(Config::new()).await;
-    let mut attacker = make_hs_node(Config::new()).await;
-
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-    let initiator_addr =
-        *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
-    let attacker_addr =
-        *PeerIdentity::from_pubkey_full(attacker.node.identity().pubkey_full()).node_addr();
-
-    // Establish the link both ways.
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-    assert_eq!(initiator.node.peer_count(), 1);
-    assert_eq!(responder.node.peer_count(), 1);
-
-    // Record what the established session must still look like afterwards.
-    let session_hash = *initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .noise_session()
-        .unwrap()
-        .handshake_hash();
-    let peer_link = initiator.node.get_peer(&responder_addr).unwrap().link_id();
-
-    // Age the session past the (jittered) rekey threshold and let the real
-    // cadence fire, so the rekey msg1 and its index are produced exactly as in
-    // production.
-    initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(120));
-    let baseline = initiator.node.index_allocator.count();
-    initiator.node.check_rekey().await;
-    let rekey_index = initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .rekey_our_index()
-        .expect("cadence started a rekey");
-    assert_eq!(
-        initiator.node.index_allocator.count(),
-        baseline + 1,
-        "rekey allocated its own index"
-    );
-
-    // The attacker observes the cleartext rekey msg1 on path and answers it
-    // first, under its own static. The real responder gets the same msg1 and
-    // answers it second.
-    let rekey_msg1 = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
-    attacker.node.handle_msg1(rekey_msg1.clone()).await;
-    let forged_msg2 = recv_phase(&mut initiator.packet_rx, 2, "forged rekey msg2").await;
-    initiator.node.handle_msg2(forged_msg2).await;
-
-    // The impostor never becomes (or displaces) a peer.
-    assert_eq!(initiator.node.peer_count(), 1, "peer set unchanged");
-    assert!(
-        initiator.node.get_peer(&attacker_addr).is_none(),
-        "impostor must not enter the peer set"
-    );
-    let peer = initiator.node.get_peer(&responder_addr).expect("kept");
-    assert!(
-        peer.pending_new_session().is_none(),
-        "a foreign static must not be installed as the pending session"
-    );
-    assert!(peer.rekey_in_progress(), "the rejected rekey cycle is kept");
-    assert_eq!(peer.link_id(), peer_link, "the peer keeps its link");
-
-    // The established session is byte-for-byte the one we started with, still
-    // bound to the real responder.
-    assert_eq!(
-        peer.noise_session().unwrap().handshake_hash(),
-        &session_hash,
-        "the established session was not replaced"
-    );
-    assert_eq!(
-        peer.noise_session().unwrap().remote_static_xonly(),
-        responder.node.identity().pubkey(),
-        "the established session stays bound to the real peer"
-    );
-
-    // The rekey keeps its index and its msg2 dispatch entry, so the real
-    // responder's msg2 can still reach the cycle.
-    assert_eq!(
-        initiator.node.index_allocator.count(),
-        baseline + 1,
-        "the kept rekey cycle keeps its index"
-    );
-    assert!(
-        initiator
-            .node
-            .pending_outbound
-            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
-        "the kept rekey cycle keeps its dispatch entry"
-    );
-    #[cfg(debug_assertions)]
-    initiator.node.debug_assert_peer_maps_coherent();
-
-    // The real responder's msg2 completes the kept cycle.
-    responder.node.handle_msg1(rekey_msg1).await;
-    let genuine_msg2 = recv_phase(&mut initiator.packet_rx, 2, "genuine rekey msg2").await;
-    initiator.node.handle_msg2(genuine_msg2).await;
-    let peer = initiator.node.get_peer(&responder_addr).expect("kept");
-    assert_eq!(
-        peer.pending_new_session()
-            .expect("the genuine msg2 installs the pending session")
-            .remote_static_xonly(),
-        responder.node.identity().pubkey(),
-        "the pending session is bound to the real peer"
-    );
-    assert!(
-        !initiator
-            .node
-            .pending_outbound
-            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
-        "the completed rekey's dispatch entry is gone"
-    );
-    #[cfg(debug_assertions)]
-    initiator.node.debug_assert_peer_maps_coherent();
-
-    // ...and it is still usable: the initiator encrypts under the surviving
-    // session and the real responder decrypts it.
-    let probe = b"link still live after the rejected rekey";
-    let counter = initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .noise_session()
-        .unwrap()
-        .current_send_counter();
-    let ciphertext = initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .noise_session_mut()
-        .unwrap()
-        .encrypt(probe)
-        .expect("encrypt under the surviving session");
-    let plaintext = responder
-        .node
-        .get_peer_mut(&initiator_addr)
-        .unwrap()
-        .noise_session_mut()
-        .unwrap()
-        .decrypt_with_replay_check(&ciphertext, counter)
-        .expect("the peer still decrypts under the original session");
-    assert_eq!(plaintext, probe);
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-    stop_hs(&mut attacker).await;
-}
-
 /// The forged rekey msg2 is charged to `rekey_static_mismatch`, not to the
 /// undifferentiated `bad_state` bucket.
 ///
@@ -3171,7 +2392,6 @@ async fn test_rekey_msg2_foreign_static_rejected() {
 #[tokio::test]
 async fn test_forged_rekey_msg2_is_counted_as_rekey_static_mismatch_not_bad_state() {
     let mut rekey_config = Config::new();
-    rekey_config.node.rekey.enabled = true;
     rekey_config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(rekey_config).await;
@@ -3203,7 +2423,7 @@ async fn test_forged_rekey_msg2_is_counted_as_rekey_static_mismatch_not_bad_stat
         .get_peer_mut(&responder_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
     assert!(
         initiator
             .node
@@ -3262,7 +2482,6 @@ async fn test_rekey_msg2_that_fails_to_authenticate_keeps_the_cycle() {
     use crate::proto::fmp::wire::build_msg2;
 
     let mut rekey_config = Config::new();
-    rekey_config.node.rekey.enabled = true;
     rekey_config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(rekey_config).await;
@@ -3287,7 +2506,7 @@ async fn test_rekey_msg2_that_fails_to_authenticate_keeps_the_cycle() {
         .get_peer_mut(&responder_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
     let rekey_index = initiator
         .node
         .get_peer(&responder_addr)
@@ -3325,7 +2544,7 @@ async fn test_rekey_msg2_that_fails_to_authenticate_keeps_the_cycle() {
     assert!(
         initiator
             .node
-            .pending_outbound
+            .peers_by_index
             .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
         "the kept rekey cycle keeps its dispatch entry"
     );
@@ -3369,7 +2588,6 @@ async fn test_rekey_msg2_with_a_corrupt_negotiation_payload_keeps_the_cycle() {
     use crate::proto::fmp::wire::Msg2Header;
 
     let mut rekey_config = Config::new();
-    rekey_config.node.rekey.enabled = true;
     rekey_config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(rekey_config).await;
@@ -3389,7 +2607,7 @@ async fn test_rekey_msg2_with_a_corrupt_negotiation_payload_keeps_the_cycle() {
         .get_peer_mut(&responder_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
     let rekey_index = initiator
         .node
         .get_peer(&responder_addr)
@@ -3430,7 +2648,7 @@ async fn test_rekey_msg2_with_a_corrupt_negotiation_payload_keeps_the_cycle() {
     assert!(
         initiator
             .node
-            .pending_outbound
+            .peers_by_index
             .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
         "the kept rekey cycle keeps its dispatch entry"
     );
@@ -3460,7 +2678,6 @@ async fn test_rekey_msg2_with_a_corrupt_negotiation_payload_keeps_the_cycle() {
 #[tokio::test]
 async fn test_rekey_msg2_matching_static_installs() {
     let mut rekey_config = Config::new();
-    rekey_config.node.rekey.enabled = true;
     rekey_config.node.rekey.after_secs = 30;
 
     let mut initiator = make_hs_node(rekey_config).await;
@@ -3478,7 +2695,7 @@ async fn test_rekey_msg2_matching_static_installs() {
         .get_peer_mut(&responder_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
     let rekey_index = initiator
         .node
         .get_peer(&responder_addr)
@@ -3952,20 +3169,21 @@ fn answer_with_msg3(
     noise_msg3
 }
 
-/// S3/T1 — the orphaned pending-inbound arm frees the index it can only read
-/// off the wire, and disposes the link with it.
+/// S3/T1 — the orphaned pending-inbound arm frees nothing, and disposes the
+/// link.
 ///
 /// The planted state is a `pending_inbound` entry whose link has lost its
 /// machine. It is produced through `remove_peer_machine`, the disposal
-/// choke-point, so the peer's timer store goes with it exactly as a real
-/// teardown would leave things.
+/// choke-point, which releases the lease on the leg's index with the
+/// machine, so the arm has no index of its own left to free and frees
+/// nothing by the value the msg3 names.
 ///
 /// `unknown_connection` is this arm's own counter, which separates it from
 /// every `bad_state` arm. It does NOT separate it from the
-/// `pending_inbound`-miss arm above, which records the same counter — the
-/// `is_allocated` transition is what does, since that arm has no index to free.
+/// `pending_inbound`-miss arm above, which records the same counter; the
+/// link's removal is what does.
 #[tokio::test]
-async fn test_msg3_orphaned_pending_inbound_frees_index() {
+async fn test_msg3_orphaned_pending_inbound_frees_nothing_and_disposes_its_link() {
     use crate::proto::fmp::wire::build_msg3;
 
     let mut node_b = make_node();
@@ -3997,8 +3215,8 @@ async fn test_msg3_orphaned_pending_inbound_frees_index() {
 
     let baseline = node_b.index_allocator.count();
     assert!(
-        node_b.index_allocator.is_allocated(our_index_b),
-        "control: the leg allocated an index"
+        !node_b.index_allocator.is_allocated(our_index_b),
+        "control: the machine's removal released the lease on the leg's index"
     );
     assert!(
         node_b.links.contains_key(&link_id_b),
@@ -4014,14 +3232,10 @@ async fn test_msg3_orphaned_pending_inbound_frees_index() {
         ))
         .await;
 
-    assert!(
-        !node_b.index_allocator.is_allocated(our_index_b),
-        "the orphaned pending-inbound arm must return the index it allocated"
-    );
     assert_eq!(
         node_b.index_allocator.count(),
-        baseline - 1,
-        "and must free exactly one"
+        baseline,
+        "the orphaned pending-inbound arm frees nothing"
     );
     assert!(
         !node_b.links.contains_key(&link_id_b),
@@ -4034,12 +3248,57 @@ async fn test_msg3_orphaned_pending_inbound_frees_index() {
     );
 }
 
+/// A msg3 naming an index this node holds for something other than the leg
+/// the msg3 reaches frees nothing: the index is a wire field the sender
+/// chooses, and only a lease, never a value read off the wire, releases an
+/// index. The planted orphan names an index leased to an owner no registry
+/// shows, the shape the deployed ownership scan freed.
+#[tokio::test]
+async fn wire_index_is_never_freed() {
+    use crate::proto::fmp::wire::build_msg3;
+
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let held = fips_core::proto::rekey::allocate(&mut node.index_allocator)
+        .expect("an index for the stand-in owner");
+    let idx = SessionIndex::new(held.index());
+    let dead_link = LinkId::new(4242);
+    assert!(!node.peer_machines.contains_key(&dead_link));
+    node.pending_inbound
+        .insert((transport_id, idx.as_u32()), dead_link);
+
+    let baseline = node.index_allocator.count();
+    node.handle_msg3(ReceivedPacket::with_timestamp(
+        transport_id,
+        TransportAddr::from_string("127.0.0.1:5000"),
+        build_msg3(
+            SessionIndex::new(7),
+            idx,
+            &[0u8; crate::noise::HANDSHAKE_MSG3_SIZE],
+        ),
+        1200,
+    ))
+    .await;
+
+    assert!(
+        node.index_allocator.is_allocated(idx),
+        "an index named by a msg3 header must never be freed by value"
+    );
+    assert_eq!(
+        node.index_allocator.count(),
+        baseline,
+        "nothing at all was freed"
+    );
+    let _ = node.index_allocator.free(SessionIndex::new(held.release()));
+}
+
 /// S3/T2a — a hostile msg3 naming a PROMOTED peer's index must not free it.
 ///
 /// `receiver_idx` is chosen by the sender. Freeing it the way the other arms
 /// free would turn a slow leak into a remote session-teardown primitive: name
 /// an index belonging to an unrelated live session and the node hands it back
-/// to the allocator. The ownership check is what stops that.
+/// to the allocator. The orphan arm frees nothing by value, which is what
+/// stops that.
 #[tokio::test]
 async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
     use crate::proto::fmp::wire::build_msg3;
@@ -4125,12 +3384,8 @@ async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
 }
 
 /// S3/T2b — the same hostile shape against a victim `peers_by_index` cannot
-/// see: a live PENDING INBOUND leg, whose index exists only on its machine.
-///
-/// T2a alone proves only the predicate's first limb, since a promoted peer
-/// short-circuits it. This is the population that motivates the rest of the
-/// scan: deleting the `peer_machines` limb must red this test and leave T2a
-/// green.
+/// see: a live PENDING INBOUND leg, whose index exists only as the lease on
+/// its machine.
 #[tokio::test]
 async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
     use crate::proto::fmp::wire::build_msg3;
@@ -4193,30 +3448,19 @@ async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
 /// S3/T2c — the same hostile shape delivered on a DIFFERENT transport from the
 /// one the victim's index is registered under.
 ///
-/// This is the discriminating test for the one regression the ownership check
-/// has: re-scoping `session_index_is_claimed` to the transport the msg3 arrived
-/// on. `index_allocator` is a single node-global `HashSet<u32>` while every
-/// registry it is checked against is keyed `(TransportId, u32)`, so a
-/// transport-filtered scan reports "unclaimed" for an index that is very much
-/// claimed, on another transport — and the arm hands a live session's index
-/// back to the allocator, which is exactly the teardown primitive the check
-/// exists to prevent.
-///
-/// The victim has to be chosen with care, and T2a's victim will not do. A
-/// promoted peer's `our_index` also sits on that peer's surviving `PeerMachine`,
-/// and the `peer_machines` limb has no transport in its key to filter by, so it
-/// masks the mutation and the test reports green either way. An in-flight
-/// REKEY index is the one live index held by no machine: it lives in
-/// `pending_outbound` under the peer's transport and on the `ActivePeer`, both
-/// of which a transport-scoped scan filters out. The two controls below pin
-/// that.
+/// `index_allocator` is a single node-global `HashSet<u32>` while every
+/// registry is keyed `(TransportId, u32)`, so a cleanup that looked the index
+/// up on the transport the msg3 arrived on would find nothing there and hand
+/// a live session's index back to the allocator. The victim is an in-flight
+/// REKEY index, the one live index held by no `PeerMachine`: it is bound in
+/// `peers_by_index` under the peer's transport and held by the peer's link
+/// rekey machine. The two controls below pin that.
 #[tokio::test]
 async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
     use crate::proto::fmp::wire::build_msg3;
 
     let make_config = || {
         let mut c = Config::new();
-        c.node.rekey.enabled = true;
         c.node.rekey.after_secs = 30;
         c
     };
@@ -4238,26 +3482,25 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
         .get_peer_mut(&responder_addr)
         .unwrap()
         .test_backdate_session_established(std::time::Duration::from_secs(120));
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
 
     let victim_idx = initiator
         .node
         .get_peer(&responder_addr)
         .unwrap()
         .rekey_our_index()
-        .expect("check_rekey started a cycle and allocated its index");
+        .expect("the poll started a cycle and allocated its index");
 
     // Control 1: the victim is registered under the peer's OWN transport only.
     assert!(
         initiator
             .node
-            .pending_outbound
+            .peers_by_index
             .contains_key(&(initiator.transport_id, victim_idx.as_u32())),
         "control: the rekey index is registered under the peer's transport"
     );
-    // Control 2: no machine holds it. This is what makes the test able to see a
-    // transport-scoped scan at all — the `peer_machines` limb is unfiltered, so
-    // a machine-held victim would mask the regression.
+    // Control 2: no handshake machine holds it; only the peer's link rekey
+    // machine does.
     assert!(
         !initiator
             .node
@@ -4307,100 +3550,11 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
     assert!(
         initiator
             .node
-            .pending_outbound
+            .peers_by_index
             .contains_key(&(initiator.transport_id, victim_idx.as_u32())),
         "the in-flight rekey's dispatch entry survives"
     );
     assert_eq!(initiator.node.peer_count(), 1, "the victim peer survives");
-}
-
-/// S3/T2d — the `ActivePeer` limb of the ownership scan, pinned directly.
-///
-/// **The state below is fabricated and is not reachable in production.** Every
-/// `self.peers` insertion goes through `ActivePeer::with_session` with a
-/// concrete `TransportId` and an unconditional `peers_by_index` insert beside
-/// it, so today a promoted peer's `our_index` is always answerable from the
-/// maps and from its surviving machine. T2a and T2b ride those two limbs, and
-/// deleting the `peers` scan entirely leaves the whole suite green — which is
-/// the reason this test exists rather than a reason it should not.
-///
-/// The limb is defence-in-depth against holders the transport-keyed maps cannot
-/// answer for: `remove_active_peer` gates its index frees on `if let Some(tid)`,
-/// and the `peers_by_index` insert for a rekeying peer's `pending_our_index` is
-/// gated the same way, so an index can in principle be held by an `ActivePeer`
-/// and by nothing else. This calls the predicate directly rather than dressing
-/// that state up as an arrival, because pretending it is reachable would be the
-/// worse dishonesty.
-#[tokio::test]
-async fn test_session_index_is_claimed_answers_from_the_peer_when_maps_cannot() {
-    use crate::proto::fmp::wire::build_msg3;
-
-    let mut node_b = make_node();
-    let node_a = make_node();
-    let transport_id = TransportId::new(1);
-    let remote_addr = TransportAddr::from_string("127.0.0.1:5000");
-    let sender_idx = SessionIndex::new(7);
-
-    let (link_id_b, our_index_b, mut conn_a) = park_inbound_leg(
-        &mut node_b,
-        node_a.identity().keypair(),
-        node_a.startup_epoch(),
-        transport_id,
-        &remote_addr,
-        sender_idx,
-    )
-    .await;
-    let noise_msg3 = answer_with_msg3(&node_b, link_id_b, &mut conn_a, None);
-
-    node_b
-        .handle_msg3(ReceivedPacket::with_timestamp(
-            transport_id,
-            remote_addr,
-            build_msg3(sender_idx, our_index_b, &noise_msg3),
-            1200,
-        ))
-        .await;
-    assert_eq!(node_b.peer_count(), 1, "control: the peer promoted");
-
-    let peer_addr = *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();
-    let victim_idx = node_b
-        .get_peer(&peer_addr)
-        .unwrap()
-        .our_index()
-        .expect("a promoted peer holds a session index");
-    let victim_link = node_b.get_peer(&peer_addr).unwrap().link_id();
-
-    assert!(
-        node_b.session_index_is_claimed(victim_idx),
-        "control: with every registry intact the index reads as claimed"
-    );
-
-    // Strip the two limbs that answer today, leaving the `ActivePeer` as the
-    // only holder. Fabricated, per the doc comment above.
-    node_b
-        .peers_by_index
-        .remove(&(transport_id, victim_idx.as_u32()));
-    node_b.remove_peer_machine(victim_link);
-    assert!(
-        !node_b
-            .peers_by_index
-            .keys()
-            .any(|(_, i)| *i == victim_idx.as_u32()),
-        "control: no transport-keyed registry names the index any more"
-    );
-    assert!(
-        !node_b
-            .peer_machines
-            .values()
-            .any(|m| m.our_index() == Some(victim_idx)),
-        "control: no machine names it either"
-    );
-
-    assert!(
-        node_b.session_index_is_claimed(victim_idx),
-        "the peer itself still holds the index, so the orphan arm must not \
-         free it"
-    );
 }
 
 /// S4 — the msg3 FMP-negotiation reject arm must free the msg1-allocated index.
@@ -4698,133 +3852,6 @@ async fn test_outbound_msg2_acl_reject_reschedules_dial() {
     stop_hs(&mut responder).await;
 }
 
-/// S8 — abandoning a rekey cycle must return the rekey index AND clear the
-/// `pending_outbound` entry seeded with it.
-///
-/// `handshake_max_resends = 0` fires the abandon on the first
-/// `resend_pending_rekeys` call, because the classifier tests
-/// `resend_count >= max_resends` BEFORE it consults the resend-due predicate.
-/// That takes the wall clock out of the path entirely: the rekey deadline is
-/// seeded from `SystemTime::now()`, so a synthetic `now_ms` can never make the
-/// msg1 look due and the budget would never be spent.
-///
-/// The rekey msg2 is deliberately never delivered — that is what makes this the
-/// abandon path.
-///
-/// No assertion is made on `peers_by_index` for the rekey index: nothing
-/// inserts there until the rekey msg2 install, so it would be inert here.
-#[tokio::test]
-async fn test_abandon_rekey_frees_index_and_pending_outbound() {
-    let make_config = || {
-        let mut c = Config::new();
-        c.node.rekey.enabled = true;
-        c.node.rekey.after_secs = 30;
-        c.node.rate_limit.handshake_max_resends = 0;
-        c
-    };
-
-    let mut initiator = make_hs_node(make_config()).await;
-    let mut responder = make_hs_node(make_config()).await;
-
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-
-    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
-    responder.node.handle_msg3(msg3).await;
-    assert_eq!(initiator.node.peer_count(), 1);
-
-    let session_idx = initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .our_index()
-        .expect("the established peer holds a session index");
-
-    // Age the session past the (jittered) trigger and let the real cadence fire
-    // so the rekey index and its pending_outbound entry are produced exactly as
-    // in production.
-    initiator
-        .node
-        .get_peer_mut(&responder_addr)
-        .unwrap()
-        .test_backdate_session_established(std::time::Duration::from_secs(120));
-    initiator.node.check_rekey().await;
-
-    let rekey_idx = initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .rekey_our_index()
-        .expect("check_rekey started a cycle and allocated its index");
-    let baseline = initiator.node.index_allocator.count();
-    assert!(
-        initiator.node.index_allocator.is_allocated(rekey_idx),
-        "control: the rekey allocated an index"
-    );
-    assert!(
-        initiator
-            .node
-            .pending_outbound
-            .contains_key(&(initiator.transport_id, rekey_idx.as_u32())),
-        "control: the rekey registered its index for msg2 dispatch"
-    );
-
-    // The rekey msg2 never arrives; the first poll spends the (zero) budget.
-    initiator.node.resend_pending_rekeys(2000).await;
-
-    assert!(
-        !initiator
-            .node
-            .get_peer(&responder_addr)
-            .unwrap()
-            .rekey_in_progress(),
-        "control: the abandon actually fired"
-    );
-    assert!(
-        initiator
-            .node
-            .get_peer(&responder_addr)
-            .unwrap()
-            .rekey_our_index()
-            .is_none()
-    );
-
-    assert!(
-        !initiator.node.index_allocator.is_allocated(rekey_idx),
-        "the abandoned cycle must return its index"
-    );
-    assert_eq!(
-        initiator.node.index_allocator.count(),
-        baseline - 1,
-        "and must free exactly one"
-    );
-    assert!(
-        !initiator
-            .node
-            .pending_outbound
-            .contains_key(&(initiator.transport_id, rekey_idx.as_u32())),
-        "the abandoned cycle must clear its msg2 dispatch entry"
-    );
-
-    // The limb that catches a fix binding the wrong index: the live session must
-    // be untouched.
-    assert_eq!(initiator.node.peer_count(), 1, "the session survives");
-    assert!(
-        initiator.node.index_allocator.is_allocated(session_idx),
-        "the established session's own index must not be freed"
-    );
-    assert!(
-        initiator
-            .node
-            .peers_by_index
-            .contains_key(&(initiator.transport_id, session_idx.as_u32())),
-        "the established session stays registered for dispatch"
-    );
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
 // ===========================================================================
 // The responder's `addr_to_link` key for an established peer's address must
 // keep naming the peer's link once a msg1-born leg that took the key over is
@@ -4845,7 +3872,6 @@ fn link_at(node: &HsNode, addr: &TransportAddr) -> Option<LinkId> {
 /// Rekey config for a node that both fires and answers rekeys.
 fn rekey_config() -> Config {
     let mut c = Config::new();
-    c.node.rekey.enabled = true;
     c.node.rekey.after_secs = 30;
     c
 }
@@ -4875,7 +3901,7 @@ async fn park_rekey_leg(
     let peer_link = responder.node.get_peer(&peer_addr).unwrap().link_id();
     assert_eq!(link_at(responder, &initiator.addr), Some(peer_link));
 
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
     let msg1 = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
     responder.node.handle_msg1(msg1).await;
     let leg = link_at(responder, &initiator.addr).expect("the rekey leg holds the key");
@@ -4919,78 +3945,6 @@ async fn a_completed_rekey_leaves_the_peer_address_naming_the_peer_link_and_tear
 
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;
-}
-
-/// The two `RekeyRespondTrigger` exits that find no session to install are
-/// defensive and unreachable through `handle_msg3`, so they are driven through
-/// the executor directly against a real rekey leg.
-async fn rekey_respond_without_session(drop_machine: bool) {
-    let mut initiator = make_hs_node(rekey_config()).await;
-    let mut responder = make_hs_node(rekey_config()).await;
-    let (peer_addr, peer_link, leg) = park_rekey_leg(&mut initiator, &mut responder).await;
-    let leg_index = responder
-        .node
-        .peer_machines
-        .get(&leg)
-        .and_then(|m| m.our_index())
-        .expect("the rekey leg holds its index");
-    if drop_machine {
-        responder.node.remove_peer_machine(leg);
-    }
-
-    let ambient = crate::node::dataplane::PeerActionCtx {
-        verified_identity: PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()),
-        transport_id: responder.transport_id,
-        remote_addr: initiator.addr.clone(),
-        our_index: Some(leg_index),
-        their_index: Some(SessionIndex::new(0x5151)),
-        now_ms: Node::now_ms(),
-        is_outbound: false,
-        pending_outbound_key: None,
-    };
-    responder
-        .node
-        .execute_peer_actions(
-            leg,
-            &ambient,
-            vec![crate::peer::machine::PeerAction::RekeyRespondTrigger {
-                peer: peer_addr,
-                our_index: leg_index,
-                abandon_first: false,
-            }],
-        )
-        .await;
-
-    assert!(!responder.node.links.contains_key(&leg), "the leg is gone");
-    assert!(
-        responder
-            .node
-            .get_peer(&peer_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_none(),
-        "the exit installed nothing"
-    );
-    assert_eq!(
-        link_at(&responder, &initiator.addr),
-        Some(peer_link),
-        "the disposed rekey leg must hand the key back to the peer's link"
-    );
-    #[cfg(debug_assertions)]
-    responder.node.debug_assert_peer_maps_coherent();
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
-#[tokio::test]
-async fn a_rekey_responder_exit_without_a_session_leaves_the_peer_address_naming_the_peer_link() {
-    rekey_respond_without_session(false).await;
-}
-
-#[tokio::test]
-async fn a_rekey_responder_exit_without_a_machine_leaves_the_peer_address_naming_the_peer_link() {
-    rekey_respond_without_session(true).await;
 }
 
 #[tokio::test]
@@ -5221,69 +4175,6 @@ async fn an_unreadable_msg3_leaves_the_pending_leg_for_the_genuine_msg3() {
     stop_hs(&mut responder).await;
 }
 
-#[tokio::test]
-async fn an_unreadable_rekey_msg3_leaves_the_rekey_leg_for_the_resent_msg3() {
-    let mut initiator = make_hs_node(rekey_config()).await;
-    let mut responder = make_hs_node(rekey_config()).await;
-    let (peer_addr, _peer_link, leg) = park_rekey_leg(&mut initiator, &mut responder).await;
-    let index = responder
-        .node
-        .peer_machines
-        .get(&leg)
-        .and_then(|m| m.our_index())
-        .unwrap();
-    let activity = responder.node.connection_last_activity(leg);
-
-    let msg2 = recv_phase(&mut initiator.packet_rx, 2, "rekey msg2").await;
-    initiator.node.handle_msg2(msg2).await;
-    let msg3 = recv_phase(&mut responder.packet_rx, 3, "rekey msg3").await;
-
-    responder.node.handle_msg3(unreadable_msg3(&msg3)).await;
-    assert_leg_pending(&responder, leg, index, activity);
-    assert!(
-        responder
-            .node
-            .get_peer(&peer_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_none()
-    );
-    #[cfg(debug_assertions)]
-    responder.node.debug_assert_peer_maps_coherent();
-
-    // The initiator's own msg3 resend, not the held original, completes it.
-    drop(msg3);
-    let responder_addr =
-        *PeerIdentity::from_pubkey_full(responder.node.identity().pubkey_full()).node_addr();
-    let resend_at = initiator
-        .node
-        .get_peer(&responder_addr)
-        .unwrap()
-        .rekey_msg3_next_resend_ms();
-    initiator
-        .node
-        .resend_pending_fmp_rekey_msg3(resend_at)
-        .await;
-    let resent = recv_phase(&mut responder.packet_rx, 3, "resent rekey msg3").await;
-    responder.node.handle_msg3(resent).await;
-    assert!(
-        responder
-            .node
-            .get_peer(&peer_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_some(),
-        "the resent msg3 must complete the rekey on the kept leg"
-    );
-    assert!(
-        !responder.node.links.contains_key(&leg),
-        "the leg is consumed"
-    );
-
-    stop_hs(&mut initiator).await;
-    stop_hs(&mut responder).await;
-}
-
 // ===========================================================================
 // A msg1 that differs from the one a pending inbound leg answered gets its own
 // leg. XX msg2 is bound to the initiator's ephemeral in msg1, so answering a
@@ -5426,7 +4317,7 @@ async fn a_stale_leg_at_a_peer_address_does_not_block_the_peer_rekey() {
     assert_ne!(stale_leg, peer_link);
 
     // The peer's rekey msg1 gets its own leg.
-    initiator.node.check_rekey().await;
+    initiator.node.poll_link_rekeys().await;
     let msg1 = recv_phase(&mut responder.packet_rx, 1, "rekey msg1").await;
     responder.node.handle_msg1(msg1).await;
     let rekey_leg = link_at(&responder, &initiator.addr).unwrap();
@@ -5514,9 +4405,10 @@ fn seed_peer(
     addr: &TransportAddr,
 ) -> (NodeAddr, LinkId, SessionIndex) {
     let link = node.allocate_link_id();
-    let index = node.index_allocator.allocate().unwrap();
+    let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let index = SessionIndex::new(lease.index());
     let identity = seed_completed_connection_with(node, link, 1_000, |seed| {
-        seed.with_our_index(index)
+        seed.with_our_index(lease)
             .with_their_index(SessionIndex::new(42))
             .with_transport_id(transport_id)
             .with_source_addr(addr.clone())
@@ -5672,18 +4564,18 @@ async fn a_transient_msg2_failure_from_an_established_peer_address_leaves_the_fr
 }
 
 // ===========================================================================
-// A rekey msg1 send refused because the interface under the transport is
-// absent or mid-rebind is not charged to the peer as a reject; a terminal
-// refusal still is. Either way the cycle does not start and is retried when
-// rekey next comes due.
+// A rekey msg1 send the transport refuses is loss, whether the interface
+// under the transport is absent or mid-rebind or the refusal is terminal:
+// the link's rekey machine is never told, its cycle holds and resends, its
+// deadline bounds what the loss costs, and nothing is charged to the peer.
 // ===========================================================================
 
 /// Establish a peer on a rekey-enabled node whose one transport refuses every
-/// send, age the session past the rekey trigger, and run the rekey check.
+/// send, age the session past the rekey trigger, and run the rekey poll.
 /// With `transient` the transport is Ethernet on an absent interface
 /// (`InterfaceUnavailable`); otherwise it is a UDP transport that was never
-/// started (`NotStarted`, terminal). Returns how many `BadState` rejects the
-/// refused rekey msg1 recorded.
+/// started (`NotStarted`, terminal). Asserts the cycle holds, and returns how
+/// many `BadState` rejects the refused rekey msg1 recorded.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn rekey_rejects(transient: bool) -> u64 {
     use crate::config::UdpConfig;
@@ -5708,11 +4600,11 @@ async fn rekey_rejects(transient: bool) -> u64 {
         .test_backdate_session_established(std::time::Duration::from_secs(120));
     let rejects_before = node.stats().handshake.bad_state;
 
-    node.check_rekey().await;
+    node.poll_link_rekeys().await;
 
     assert!(
-        !node.get_peer(&peer_addr).unwrap().rekey_in_progress(),
-        "a refused rekey msg1 must leave no rekey cycle running"
+        node.get_peer(&peer_addr).unwrap().rekey_in_progress(),
+        "a refused rekey msg1 is loss, and the rekey cycle holds for its resends"
     );
     #[cfg(debug_assertions)]
     node.debug_assert_peer_maps_coherent();
@@ -5729,13 +4621,17 @@ async fn a_transient_rekey_msg1_send_failure_is_not_charged_to_the_peer() {
     );
 }
 
+/// A terminal refusal is loss too, under the link rekey machine's rule that
+/// replaced the shell's, which ended the cycle and counted a reject: the
+/// machine is never told of a send, so it cannot tell the two refusals apart
+/// from a datagram the network dropped.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
-async fn a_terminal_rekey_msg1_send_failure_is_recorded_as_a_reject() {
+async fn a_terminal_rekey_msg1_send_failure_counts_as_lost_and_charges_nothing() {
     assert_eq!(
         rekey_rejects(false).await,
-        1,
-        "a terminal send failure is still counted"
+        0,
+        "a terminal send failure is loss, not the peer's misbehaviour"
     );
 }
 

@@ -11,11 +11,12 @@ or an end-to-end session (FSP); the profile type `P` says which, and the
 transitions are written once for both.
 
 The module is `#[doc(hidden)]`. Its production profiles sit with the
-layers they bind: FMP over Noise IK in `proto/fmp/rekey/` (with the
-node-level read of a peer's IK msg1) and FSP over Noise XK in
-`proto/fsp/rekey/`; the root crate names only their aliases `FmpProfile`
-and `FspProfile`. The root crate's session table holds each session in a
-machine on `FspProfile` from its first handshake on: the shell opens it
+layers they bind, both over Noise XX on this line: FMP in
+`proto/fmp/rekey/` (with the node-level read of an inbound leg's msg3)
+and FSP in `proto/fsp/rekey/`; the root crate names only their aliases
+`FmpProfile` and `FspProfile` and the pattern-neutral names those
+modules re-export. The root crate's session table holds each session in
+a machine on `FspProfile` from its first handshake on: the shell opens it
 with `opening_outbound` when this node wants a session, with
 `opening_inbound` for the first setup naming an address, and with `Open`
 on a session the peer's setups opened; the machine takes every setup,
@@ -25,20 +26,23 @@ its candidates, the crossing decided at msg3, its retained msg3 and its
 teardown) and every rekey of a session, its start, its handshake, its
 cutover and its drain, are decided by the rows below, the silence
 trigger and restart detection by the peer's startup epoch included. Each
-active link peer holds a machine on `FmpProfile` from promotion on, and
-the root crate hands it every rekey msg1 (read first by
-`fmp::rekey::ik::read_msg1`), msg2 and slow-path frame of the link through
-`step` and polls it on the shell's tick, so every link rekey (its start,
-its msg1 resends, the answer, the cutover, the adoption, the drain and a
-restart its msg2 reveals) is decided by the rows below. A frame a decrypt
-worker opened and handed back to the node (every frame but bulk session
-data) reaches the machine as a worker report, so the key-epoch bit it
-sees from the peer and the evidence that the peer moved count those
-frames too.
-The machine's own tests run on the stub profiles in `tests/`;
-`tests/legacy/` runs it on the production profiles against models of the
-deployed releases, and runs the session and link nodes this release ships
-(the machine polled on the shell's tick) against them as well.
+active link peer holds a machine on `FmpProfile` from promotion on. The
+machine starts the link's own rekeys and takes their msg2, routed by
+index; a peer's rekey is answered by the node's inbound leg, whose msg3
+`fmp::rekey::read_final` reads, and reaches the machine as
+`Input::PeerDone` when it declares the session the machine holds. The
+machine also takes every slow-path frame of the link and is polled on
+the shell's tick, so every link rekey (its start, the delayed cutover
+and its retained msg3, the adoption, the tie-break against a crossing
+rekey, the drain and a restart its msg2 reveals) is decided by the rows
+below. A frame a decrypt worker opened and handed back to the node
+(every frame but bulk session data) reaches the machine as a worker
+report, so the key-epoch bit it sees from the peer and the evidence that
+the peer moved count those frames too.
+The machine's own tests run on the stub profiles in `tests/`; the
+production profiles' tests in `proto/fmp/rekey/tests/` and
+`proto/fsp/rekey/tests/` run whole rekeys (and, for FSP, first
+handshakes) between two machines on each.
 
 ## Files
 

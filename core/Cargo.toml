@@ -59,10 +59,9 @@ ring = ["dep:ring"]
 # enables this feature from its `[dev-dependencies]` only. Never enable it
 # outside tests.
 test-hooks = []
-# The slow rekey test suites: the models of the deployed 0.5.x releases
-# (`proto/rekey/tests/legacy`) and the guard-switch meta-test
+# The slow rekey test suite: the guard-switch meta-test
 # (`proto/rekey/tests/faults.rs`), which re-runs other tests under every fault
-# switch. Off by default so every platform's test run skips them; GitHub CI's
+# switch. Off by default so every platform's test run skips it; GitHub CI's
 # Linux job and local CI with --slow-tests turn it on, and the core's clippy
 # passes lint the code it gates either way.
 slow-tests = []

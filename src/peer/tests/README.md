@@ -18,7 +18,8 @@ Unit tests for the modules in `src/peer/`, kept out of the source files.
   and replay counters, rekey jitter and msg1 resends, the pending, current
   and previous sessions across a cutover (held in the peer's link rekey
   machine, so every session a test peer holds authenticates one peer key,
-  and its indices are leased outside any allocator), the replay window and
+  and its indices are leased outside any allocator), the K-bit the
+  responder's adoption takes from the initiator's frame, the replay window and
   the inner-header timestamp each cutover restarts, the withheld handshake
   diagnostics, and that the rekey dampening, the pending hold and the drain
   run on the peer clock, which `crate::time::advance` moves.

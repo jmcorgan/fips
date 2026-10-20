@@ -935,16 +935,17 @@ impl Node {
         machine.set_dial_origin(origin);
         machine.set_leg(HandshakeCrypto::new());
 
-        // Allocate a session index for this handshake
-        let our_index = match self.index_allocator.allocate() {
-            Ok(idx) => idx,
-            Err(e) => {
-                // Clean up the link we just created
-                self.links.remove(&link_id);
-                self.addr_to_link.remove(&(transport_id, remote_addr));
-                return Err(NodeError::IndexAllocationFailed(e.to_string()));
-            }
+        // Allocate a session index for this handshake, as the lease the
+        // promoted link's rekey machine takes over.
+        let Some(our_lease) = fips_core::proto::rekey::allocate(&mut self.index_allocator) else {
+            // Clean up the link we just created
+            self.links.remove(&link_id);
+            self.addr_to_link.remove(&(transport_id, remote_addr));
+            return Err(NodeError::IndexAllocationFailed(
+                crate::utils::index::IndexError::Exhausted.to_string(),
+            ));
         };
+        let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
 
         // Start the Noise handshake and get message 1
         let our_keypair = self.identity().keypair();
@@ -953,7 +954,9 @@ impl Node {
                 Ok(msg) => msg,
                 Err(e) => {
                     // Clean up the index and link
-                    let _ = self.index_allocator.free(our_index);
+                    let _ = self
+                        .index_allocator
+                        .free(crate::utils::index::SessionIndex::new(our_lease.release()));
                     self.links.remove(&link_id);
                     self.addr_to_link.remove(&(transport_id, remote_addr));
                     return Err(NodeError::HandshakeFailed(e.to_string()));
@@ -961,7 +964,7 @@ impl Node {
             };
 
         // Set index and transport info on the surviving carrier
-        machine.set_conn_our_index(our_index);
+        machine.set_conn_our_index(our_lease);
         machine.set_conn_transport_id(transport_id);
         machine.set_conn_source_addr(remote_addr.clone());
 

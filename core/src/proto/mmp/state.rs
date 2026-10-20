@@ -152,15 +152,9 @@ impl MmpSessionState {
     }
 
     /// Reset counter-dependent state for rekey cutover.
-    ///
-    /// The spin bit state restarts too, keeping its role: it compares the
-    /// new session's counters, which start again at zero, so a responder
-    /// that kept the old session's highest counter would stop reflecting
-    /// the bit until the new counters passed it.
     pub fn reset_for_rekey(&mut self, now_ms: u64) {
         self.receiver.reset_for_rekey(now_ms);
         self.metrics.reset_for_rekey();
-        self.spin_bit.restart();
     }
 
     /// Current operating mode.

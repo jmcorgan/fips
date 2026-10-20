@@ -59,7 +59,7 @@ fn test_npub_cache_matches_identity_with_session() {
     // `with_session` builds its own struct literal, so it needs its
     // own check that the cache is populated from the same identity.
     let identity = make_peer_identity();
-    let (session, _peer_session) = ik_session_pair();
+    let (session, _peer_session) = xx_session_pair();
 
     let peer = ActivePeer::with_test_session(
         identity,
@@ -260,7 +260,7 @@ fn test_rekey_jitter_in_range() {
     // Every newly constructed peer's jitter must lie in the
     // symmetric range [-REKEY_JITTER_SECS, +REKEY_JITTER_SECS].
     for _ in 0..100 {
-        let peer = peer_with_current(ik_session_pair().1);
+        let peer = peer_with_current(xx_session_pair().1);
         let j = peer.rekey_jitter_secs();
         assert!(
             (-REKEY_JITTER_SECS..=REKEY_JITTER_SECS).contains(&j),
@@ -281,7 +281,7 @@ fn test_rekey_jitter_mean_near_zero() {
     let mut sum: i64 = 0;
     let n: i64 = 200;
     for _ in 0..n {
-        let peer = peer_with_current(ik_session_pair().1);
+        let peer = peer_with_current(xx_session_pair().1);
         sum += peer.rekey_jitter_secs();
     }
     let mean = sum / n;
@@ -312,14 +312,11 @@ const EPOCH_A: [u8; 8] = [0xA1, 0xB2, 0xC3, 0xD4, 0x11, 0x22, 0x33, 0x44];
 /// The startup epoch of the second node of [`PAIR`].
 const EPOCH_B: [u8; 8] = [0xD4, 0xC3, 0xB2, 0xA1, 0x44, 0x33, 0x22, 0x11];
 
-/// Complete an IK handshake between the two nodes of [`PAIR`] and return the
+/// Complete an XX handshake between the two nodes of [`PAIR`] and return the
 /// (initiator, responder) session pair.
-fn ik_session_pair() -> (NoiseSession, NoiseSession) {
+fn xx_session_pair() -> (NoiseSession, NoiseSession) {
     let (initiator_id, responder_id) = &*PAIR;
-    let mut initiator = crate::noise::HandshakeState::new_initiator(
-        initiator_id.keypair(),
-        responder_id.pubkey_full(),
-    );
+    let mut initiator = crate::noise::HandshakeState::new_initiator(initiator_id.keypair());
     initiator.set_local_epoch(EPOCH_A);
     let mut responder = crate::noise::HandshakeState::new_responder(responder_id.keypair());
     responder.set_local_epoch(EPOCH_B);
@@ -328,6 +325,8 @@ fn ik_session_pair() -> (NoiseSession, NoiseSession) {
     responder.read_message_1(&msg1).unwrap();
     let msg2 = responder.write_message_2().unwrap();
     initiator.read_message_2(&msg2).unwrap();
+    let msg3 = initiator.write_message_3().unwrap();
+    responder.read_message_3(&msg3).unwrap();
 
     (
         initiator.into_session().unwrap(),
@@ -355,9 +354,10 @@ fn peer_with_current(current_recv: NoiseSession) -> ActivePeer {
 }
 
 /// One end of a test link: its peer entry for the other end, its node's
-/// keys and its node's index allocator.
+/// identity and keys and its node's index allocator.
 struct End {
     peer: ActivePeer,
+    id: Identity,
     keys: fips_core::proto::rekey::NodeKeys,
     alloc: crate::utils::index::IndexAllocator,
 }
@@ -367,9 +367,14 @@ impl End {
     /// node would beside the network: a cutover's shell resets and the
     /// release of retired indices. Returns the outputs.
     fn step(&mut self, input: fips_core::proto::rekey::Input<'_, LinkProfile>) -> LinkOutputs {
-        let out = self
-            .peer
-            .step_link(peer_now(), input, &mut self.alloc, &self.keys, false);
+        let out = self.peer.step_link(
+            peer_now(),
+            input,
+            &mut self.alloc,
+            &self.keys,
+            NodeProfile::Full,
+            false,
+        );
         self.carry(&out);
         out
     }
@@ -442,7 +447,7 @@ fn installed(out: &LinkOutputs) -> bool {
 /// The two ends of a test link [`LINK_AGE`] old, `a` the first node of
 /// [`PAIR`] and `b` the second, each knowing the other's startup epoch.
 fn ends() -> (End, End) {
-    let (a_session, b_session) = ik_session_pair();
+    let (a_session, b_session) = xx_session_pair();
     let (a_id, b_id) = &*PAIR;
     let end = |id: &Identity, peer: &Identity, session, ours, theirs, epoch, peer_epoch| End {
         peer: ActivePeer::with_test_session(
@@ -459,6 +464,7 @@ fn ends() -> (End, End) {
             &MmpConfig::default(),
             Some(peer_epoch),
         ),
+        id: id.clone(),
         keys: fips_core::proto::rekey::NodeKeys::new(id.keypair(), epoch),
         alloc: crate::utils::index::IndexAllocator::new(),
     };
@@ -476,34 +482,50 @@ fn ends() -> (End, End) {
 /// which a msg1 is answered as a rekey.
 const LINK_AGE: Duration = Duration::from_secs(40);
 
-/// Run a rekey `from` starts to `to` as far as `from` holding its pending
-/// session: its msg1, `to`'s answer into a responder pending, and the msg2
-/// that completes `from`'s attempt.
+/// Run an XX rekey `from` starts to `to` as far as both holding the pending
+/// session: its msg1, `to`'s leg answer with a leased index, the msg2 that
+/// completes `from`'s attempt and sends msg3, and the msg3, read on the
+/// leg's handshake and handed to `to`'s machine as a rekey.
 fn rekey_to_pending(from: &mut End, to: &mut End) {
-    use fips_core::proto::rekey::{Arrival, Input, MsgKind};
+    use crate::proto::fmp::wire::{Msg1Header, build_msg2};
+    use fips_core::proto::fmp::rekey::read_final;
+    use fips_core::proto::rekey::{Input, Intent, MsgKind, Role, allocate};
     let out = from
         .peer
         .start_rekey_now(peer_now(), &mut from.alloc, &from.keys);
-    let msg1 = sent(&out, MsgKind::Msg1);
-    let tok =
-        fips_core::proto::fmp::rekey::ik::read_msg1::<crate::identity::OsEntropy>(&to.keys, &msg1)
-            .expect("the msg1 reads");
-    let arrival = Arrival {
-        on_link: true,
-        reachable: true,
-    };
-    let out = to.step(Input::PeerMsg1 { tok, arrival });
-    let msg2 = sent(&out, MsgKind::Msg2);
-    from.step(Input::Reply {
+    let msg1 = sent(&out, MsgKind::Setup);
+    let header = Msg1Header::parse(&msg1).expect("a framed msg1");
+    let mut leg = crate::noise::HandshakeState::new_responder(to.id.keypair());
+    leg.set_local_epoch(to.keys.epoch());
+    leg.read_message_1(&msg1[header.noise_msg1_offset..])
+        .expect("the msg1 reads");
+    let mut noise_msg2 = leg.write_message_2().expect("the msg2 builds");
+    let payload = crate::proto::fmp::NegotiationPayload::fmp(1, 1, NodeProfile::Full).encode();
+    noise_msg2.extend(leg.encrypt_payload(&payload).expect("the payload seals"));
+    let lease = allocate(&mut to.alloc).expect("an index for the leg");
+    let msg2 = build_msg2(
+        SessionIndex::new(lease.index()),
+        header.sender_idx,
+        &noise_msg2,
+    );
+    let out = from.step(Input::Reply {
         bytes: &msg2,
         route: (),
+    });
+    let msg3 = sent(&out, MsgKind::Msg3);
+    let fin = read_final(&leg, &msg3, Some(lease)).expect("the msg3 reads");
+    to.step(Input::PeerDone {
+        tok: fin.into_rekey(),
+        intent: Intent::Rekey,
     });
     assert_eq!(from.peer.pending_role(), Some(Role::Initiator));
     assert_eq!(to.peer.pending_role(), Some(Role::Responder));
 }
 
-/// The cutover of the initiator's pending at its next poll.
+/// The cutover of the initiator's pending at its first poll after the
+/// cutover delay, which the test clock is advanced past.
 fn initiator_cutover(end: &mut End) {
+    crate::time::advance(fips_core::proto::rekey::Config::fmp().delay);
     let out = end.step(fips_core::proto::rekey::Input::Poll);
     assert!(
         installed(&out),
@@ -533,10 +555,10 @@ fn heard_back(responder: &mut End, initiator: &mut End) {
     );
 }
 
-/// Count `n` pending-refusal lines on `peer` this session.
-fn count_pending_lines(peer: &mut ActivePeer, n: u32) {
+/// Count `n` msg2-resend lines on `peer` this session.
+fn count_resend_lines(peer: &mut ActivePeer, n: u32) {
     for _ in 0..n {
-        peer.hs_lines_mut().count(HsLine::Pending);
+        peer.hs_lines_mut().count(HsLine::Resend);
     }
 }
 
@@ -546,20 +568,20 @@ fn count_pending_lines(peer: &mut ActivePeer, n: u32) {
 fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_count() {
     let (mut a, mut b) = ends();
 
-    count_pending_lines(&mut b.peer, 5);
+    count_resend_lines(&mut b.peer, 5);
     rekey_to_pending(&mut a, &mut b);
     initiator_cutover(&mut a);
     responder_adoption(&mut a, &mut b);
-    assert_eq!(b.peer.hs_lines_mut().count(HsLine::Pending), 1);
+    assert_eq!(b.peer.hs_lines_mut().count(HsLine::Resend), 1);
 
-    count_pending_lines(&mut b.peer, 3);
+    count_resend_lines(&mut b.peer, 3);
     // a answers once its session is old enough to rekey again.
     crate::time::advance(crate::peer::test_link_params().config().session_age);
     rekey_to_pending(&mut b, &mut a);
     initiator_cutover(&mut b);
 
-    count_pending_lines(&mut b.peer, 6);
-    let (_s, next_recv) = ik_session_pair();
+    count_resend_lines(&mut b.peer, 6);
+    let (_s, next_recv) = xx_session_pair();
     let mut caps = crate::peer::LinkCaps {
         indices: &mut b.alloc,
         local: &b.keys,
@@ -567,6 +589,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
         params: crate::peer::test_link_params(),
         record: Record::new(),
         workers: false,
+        profile: NodeProfile::Full,
     };
     let _ = b
         .peer
@@ -578,7 +601,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
         .hs_lines_mut()
         .take_carried()
         .expect("lines withheld");
-    assert_eq!(carried.of(HsLine::Pending), 6);
+    assert_eq!(carried.of(HsLine::Resend), 6);
     assert_eq!(b.peer.hs_lines().unreported(), None);
 }
 
@@ -721,7 +744,7 @@ fn each_cutover_restarts_the_inner_header_timestamp_at_the_new_session() {
 /// The last failing index is the one most recently recorded.
 #[test]
 fn the_last_failed_index_is_the_most_recent_one_recorded() {
-    let (_cur_send, cur_recv) = ik_session_pair();
+    let (_cur_send, cur_recv) = xx_session_pair();
     let mut peer = peer_with_current(cur_recv);
     assert_eq!(peer.last_failed(), None);
     peer.record_failed(SessionIndex::new(5));
@@ -742,7 +765,7 @@ fn an_index_names_the_slot_of_the_session_it_belongs_to() {
 
     rekey_to_pending(&mut a, &mut b);
     let answered = b.peer.pending_our_index().expect("b holds a pending");
-    assert_eq!(Slot::of(&b.peer, answered), Slot::PendingResponder);
+    assert_eq!(Slot::of(&b.peer, answered), Slot::Pending);
     initiator_cutover(&mut a);
     responder_adoption(&mut a, &mut b);
     assert_eq!(Slot::of(&b.peer, answered), Slot::Current);
@@ -752,9 +775,9 @@ fn an_index_names_the_slot_of_the_session_it_belongs_to() {
     b.step(fips_core::proto::rekey::Input::Poll);
     rekey_to_pending(&mut b, &mut a);
     let made = b.peer.pending_our_index().expect("b holds its own pending");
-    assert_eq!(Slot::of(&b.peer, made), Slot::PendingInitiator);
+    assert_eq!(Slot::of(&b.peer, made), Slot::Pending);
     assert_eq!(Slot::Unknown.to_string(), "none");
-    assert_eq!(Slot::PendingInitiator.to_string(), "pending-initiator");
+    assert_eq!(Slot::Pending.to_string(), "pending");
 }
 
 /// A link frame the current session opened is refused when it arrives
@@ -801,7 +824,6 @@ fn a_peer_is_unheard_until_its_first_frame_and_stays_heard_across_both_cutovers(
         let name = if initiator { "initiator" } else { "responder" };
         let (mut a, mut b) = ends();
         for end in [&mut a, &mut b] {
-            end.peer.heard = false;
             end.peer.send.heard = false;
             assert!(!end.peer.heard(), "{name}: a promoted peer starts unheard");
             end.peer.touch(2000);
@@ -817,5 +839,29 @@ fn a_peer_is_unheard_until_its_first_frame_and_stays_heard_across_both_cutovers(
         end.step(Input::Poll);
         assert!(!end.peer.is_draining(), "{name}: the drain runs");
         assert!(end.peer.heard(), "{name}: the drain keeps the peer heard");
+    }
+}
+
+/// The responder's adoption of the pending session takes the K-bit of the
+/// initiator's frame that adopts it, whichever K-bit the responder held, and
+/// the pending session becomes current under the index the responder's leg
+/// drew.
+#[test]
+fn adopting_the_pending_takes_the_frames_kbit() {
+    for (ours, frame) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (mut a, mut b) = ends();
+        b.peer.force_kbit(ours);
+        a.peer.force_kbit(!frame);
+        rekey_to_pending(&mut a, &mut b);
+        initiator_cutover(&mut a);
+        assert_eq!(
+            a.peer.current_k_bit(),
+            frame,
+            "precondition: the initiator seals at {frame} after its cutover"
+        );
+        let pending = b.peer.pending_our_index();
+        responder_adoption(&mut a, &mut b);
+        assert_eq!(b.peer.current_k_bit(), frame, "ours {ours}, frame {frame}");
+        assert_eq!(b.peer.our_index(), pending, "ours {ours}, frame {frame}");
     }
 }

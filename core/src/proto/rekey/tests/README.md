@@ -92,13 +92,6 @@ sleep.
   nothing and panic nowhere) and then healed to O1. A machine cannot be
   cloned (its leases are linear), so each state is rebuilt by replaying
   its path. Depths are 5 or 6; the scenarios run on threads of their own.
-- `legacy/`: executable models of the deployed releases v0.5.0 to
-  v0.5.3, the interop simulation of new nodes on the production
-  profiles against them, the same for the session node this release
-  ships (the machine polled on the shell's tick), and the bounded
-  explorer over the same pairs; its README describes it. It exists on master
-  only: next's merge of the production profiles replaces it. Compiled only
-  with the crate's `slow-tests` feature.
 - `regress.rs`: scripted schedules of historical defects and adversarial
   traces, each run with a zero O2 bound and each asserting that it reached
   the state it targets, so a schedule that drifts tests nothing loudly.
