@@ -94,8 +94,9 @@ sleep.
   its path. Depths are 5 or 6; the scenarios run on threads of their own.
 - `legacy/`: executable models of the deployed releases v0.5.0 to
   v0.5.3, the interop simulation of new nodes on the production
-  profiles against them, and the bounded explorer over the same pairs;
-  its README describes it. It exists on master
+  profiles against them, the same for the session node this release
+  ships (the machine polled on the shell's tick), and the bounded
+  explorer over the same pairs; its README describes it. It exists on master
   only: next's merge of the production profiles replaces it.
 - `regress.rs`: scripted schedules of historical defects and adversarial
   traces, each run with a zero O2 bound and each asserting that it reached

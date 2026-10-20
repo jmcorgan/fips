@@ -162,7 +162,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, sessions: &[serde_json:
     let mut lines: Vec<Line> = vec![
         helpers::section_header("Identity"),
         helpers::kv_line("Name", helpers::str_field(session, "display_name")),
+        // A daemon omits `npub` until a handshake proves the peer's key;
+        // `identity` says which, and an older daemon sends neither.
         helpers::kv_line("Npub", helpers::str_field(session, "npub")),
+        helpers::kv_line("Identity", helpers::str_field(session, "identity")),
         helpers::kv_line("Remote Addr", helpers::str_field(session, "remote_addr")),
         Line::from(""),
         helpers::section_header("Session"),

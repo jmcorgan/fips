@@ -1794,6 +1794,31 @@ fn first_rekey_after_answering_the_first_handshake_waits_for_the_measured_rtt() 
 }
 
 #[test]
+fn rekey_setup_first_resend_waits_twice_the_session_rtt_up_to_the_rung_cap() {
+    // The handshake round trip is tens of milliseconds, so only the
+    // session SRTT can lift the 1 s floor; a 20 s SRTT hits the 9 s cap,
+    // which leaves room for a second rung inside the attempt.
+    for (srtt, first) in [(3, 6_000), (20, 9_000)] {
+        let (mut a, _b) = session();
+        a.step(
+            10,
+            Input::PathFacts {
+                reachable: true,
+                srtt: Some(Duration::from_secs(srtt)),
+                only: (),
+            },
+        );
+        let evs = a.poll(T);
+        assert!(matches!(evs[..], [Ev::Send(MsgKind::Setup, ..)]), "{evs:?}");
+        assert_eq!(
+            a.m().next_wake(),
+            Some(TestInstant(T + first)),
+            "srtt {srtt} s"
+        );
+    }
+}
+
+#[test]
 fn fsp_completion_with_a_changed_epoch_reports_a_restart() {
     // The larger node holds a session; the smaller peer restarts and opens
     // toward it again.

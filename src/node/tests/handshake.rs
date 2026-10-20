@@ -3215,7 +3215,7 @@ async fn a_worker_bounce_on_the_current_session_marks_the_peering_heard() {
 /// built from a real XK handshake, as if it ran over the mesh rather than over
 /// any link peering between the two.
 fn install_end_to_end_session(node: &mut Node, initiator: &Node) {
-    use crate::node::session::{EndToEndState, SessionEntry};
+    use crate::node::session::SessionEntry;
     use crate::noise::HandshakeState;
 
     let mut ini = HandshakeState::new_xk_initiator(
@@ -3232,13 +3232,8 @@ fn install_end_to_end_session(node: &mut Node, initiator: &Node) {
     let m3 = ini.write_xk_message_3().unwrap();
     resp.read_xk_message_3(&m3).unwrap();
     let session = resp.into_session().unwrap();
-    let mut entry = SessionEntry::new(
-        node_addr_of(initiator),
-        initiator.identity().pubkey_full(),
-        EndToEndState::Established(session),
-        Node::session_now(),
-        false,
-    );
+    let mut entry =
+        SessionEntry::keyed(node_addr_of(initiator), session, Node::session_now(), false);
     entry.touch(Node::session_now());
     node.sessions.insert(node_addr_of(initiator), entry);
 }

@@ -6,20 +6,23 @@
 //! inner-header codec — migrated out of the async node shell (`protocol::session`
 //! + `node::session_wire`) per the wire-migrates-with-subsystem policy.
 //!
-//! The crypto-owning `SessionEntry` session state machine stays shell-side in
-//! `node::session`, so `proto::fsp` carries no `proto -> noise` dependency and
-//! no crypto. It imports the shared [`crate::proto::Error`] and the
-//! address-only coordinate helpers downward from `crate::proto::stp`.
+//! The `SessionEntry` session state machine stays shell-side in
+//! `node::session`; the keys it holds live in a rekey machine on this
+//! layer's profile in `rekey/`, the one part of this module that names
+//! Noise. The rest of `proto::fsp` carries no crypto. It imports the shared
+//! [`crate::proto::Error`] and the address-only coordinate helpers downward
+//! from `crate::proto::stp`.
 //!
-//! - `core.rs` — the stateless [`Fsp`] anchor + [`FspAction`]: the pure rekey
-//!   choreography (`poll_rekey`/`poll_rekey_msg3_resends`), the initial-handshake
-//!   msg3 resend decision (`poll_initial_msg3_resends`), the post-decrypt
-//!   `classify_epoch`, the initiation tie-break, and the pure MTU-clamp /
-//!   bounded-queue / ECN transforms. No clock/crypto/I/O/tracing.
-//! - `limits.rs` — the session-rekey timing constants.
+//! - `core.rs` — the stateless [`Fsp`] anchor + [`FspAction`]: the
+//!   coordinate and path-MTU reactions and the pure MTU-clamp /
+//!   bounded-queue / ECN transforms. No clock/crypto/I/O/tracing. The first
+//!   handshake and every rekey, cutover and drain belong to the session
+//!   rekey machine.
+//! - `limits.rs` — the deployed drain and dampening constants the link
+//!   layer's rekey still reads.
 //! - `rekey/` — the session profile of the shared rekey machine (Noise XK),
-//!   the one part of this module that holds keys; hidden, with no caller
-//!   yet.
+//!   the one part of this module that holds keys; hidden. The root crate's
+//!   session table holds one machine per session, from its first handshake.
 //! - `quorum.rs` — the distinct-link quorum that gates demoting verified
 //!   coordinates on `PathBroken`. Clock injected.
 //! - `wire.rs` — the FSP session wire codec and message types. Clock-free,
@@ -35,11 +38,7 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
-pub use core::{
-    DecryptSlot, EpochReaction, Fsp, FspAction, InitialMsg3ResendSnapshot, RekeyCfg,
-    RekeyMsg3ResendSnapshot, SessionSnapshot, cutover_timer_elapsed, initiation_winner,
-    mark_ipv6_ecn_ce, push_bounded_pending, should_apply_path_mtu,
-};
+pub use core::{Fsp, FspAction, mark_ipv6_ecn_ce, push_bounded_pending, should_apply_path_mtu};
 pub use wire::{
     FspInnerFlags, SessionAck, SessionFlags, SessionMessageType, SessionMsg3, SessionSetup,
 };

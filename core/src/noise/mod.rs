@@ -20,6 +20,7 @@ mod session;
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub use cipher::open;
+pub use cipher::seal;
 pub use cipher::{
     CipherState, HandshakeProgress, HandshakeRole, MAX_MESSAGE_SIZE, NoiseError, NoisePattern,
     REPLAY_WINDOW_SIZE, XK_HANDSHAKE_MSG1_SIZE, XK_HANDSHAKE_MSG2_SIZE, XK_HANDSHAKE_MSG3_SIZE,

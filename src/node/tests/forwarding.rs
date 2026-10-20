@@ -2180,17 +2180,13 @@ async fn a_session_completes_through_a_transit_with_both_sides_drained_under_a_d
             .get_session(&node0)
             .is_some_and(|e| e.is_established())
     );
-    let interval_ms = nodes[0]
-        .node
-        .config()
-        .node
-        .rate_limit
-        .handshake_resend_interval_ms;
+    // The initiator's session machine resends its retained msg3 at its
+    // first rung, 1 s after the session was set up.
     nodes[0]
         .node
-        .resend_pending_session_handshakes(crate::node::session::session_after(
+        .poll_session_rekeys(crate::node::session::session_after(
             Node::session_now(),
-            interval_ms + 1,
+            1_001,
         ))
         .await;
     for _ in 0..6 {

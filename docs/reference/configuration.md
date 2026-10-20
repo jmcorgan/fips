@@ -182,10 +182,10 @@ Handshake rate limiting protects against DoS on the Noise IK handshake path.
 |-----------|------|---------|-------------|
 | `node.rate_limit.handshake_burst` | u32 | `100` | Token bucket burst capacity |
 | `node.rate_limit.handshake_rate` | f64 | `10.0` | Tokens per second refill rate |
-| `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout |
-| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial handshake message resend interval |
-| `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults) |
-| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt |
+| `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout, and how long a session's first SessionSetup is resent before the attempt is given up. Plus one tick (`node.tick_interval_secs`), it is also how long the node that started a session rekey waits to hear the peer under the new keys before deciding without it (31 s at the defaults) |
+| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial link handshake message resend interval. Not used for session handshakes: a session's first SessionSetup and its first SessionMsg3 are resent at 1, 3, 7, 15 and 31 s (the SessionSetup only while `handshake_timeout_secs` lasts), the last message of a session rekey at 1, 3, 7 and 15 s, and the first message of a session rekey first after twice the measured round trip (at least 1 s, and at most `handshake_timeout_secs` less one tick, divided by three: 9 s at the defaults) and then at doubling intervals until `handshake_timeout_secs` |
+| `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Link handshake resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults). Not used for session handshakes |
+| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt: of a link handshake message, and of a session's first SessionSetup and first SessionMsg3. Does not limit the first message of a session rekey, which is resent until `handshake_timeout_secs`. For the last message of a session rekey, resends due at or after the wait above are not sent |
 | `node.rate_limit.established_handshake_burst` | u32 | derived | Burst capacity of the established-link bucket. Derived default is `node.limits.max_peers` (128) |
 | `node.rate_limit.established_handshake_rate` | f64 | derived | Refill rate of that bucket. Derived default is `(max_peers / max(node.rekey.after_secs, 1)) * (1 + handshake_max_resends)`, floored at 1.0/s — 6.4/s at shipped defaults |
 | `node.rate_limit.session_setup_burst` | u32 | `64` | Per-link-peer burst for inbound session-setup messages that would open a new session |
@@ -213,16 +213,17 @@ derived from `max_peers`, `node.rekey.after_secs` and `handshake_max_resends`,
 exactly as `established_handshake_*` is, so a stranger flood cannot suppress
 rekey traffic sharing the link.
 
-At the defaults one neighbour can force at most
-`session_setup_rate * handshake_timeout_secs` half-open responder candidates
-(480) and `session_setup_rate` acks per second (16): a responder sends one ack
-per admitted setup and does not resend it on a timer. The
+At the defaults one neighbour can force at most `session_setup_rate` times
+the 40 s a held setup lives half-open setups (640), of which each address
+holds at most two per link peer, and `session_setup_rate` acks per second
+(16): a responder sends one ack per admitted setup, answers a byte-identical
+resent setup with the same ack, and does not resend it on a timer. The
 node-wide ceiling is still that times the peer count, since the limiter bounds
 each neighbour rather than the aggregate. A legitimate peer whose traffic
 reaches this node over the *same* link as an attacker's shares that
 attacker's stranger bucket, so establishment behind a flooded neighbour is
-refused until the bucket refills; the initiator's own resend schedule (1s, 2s,
-4s, 8s, 16s) covers a short drain.
+refused until the bucket refills; the initiator's own resend schedule (at 1,
+3, 7 and 15 s) covers a short drain.
 
 ### Retry / Backoff (`node.retry.*`)
 
@@ -530,9 +531,30 @@ stays set for all subsequent hops to the destination.
 Sets when periodic Noise rekey starts, for forward secrecy. Both FMP
 (link-layer IK) and FSP (session-layer XK) sessions perform fresh Diffie-Hellman
 key exchanges after a time or message count threshold, whichever comes first.
-A 10-second drain window keeps the old session active for decryption during
-cutover. A node always answers its peers' rekeys, and starts its own when
-either threshold below is reached. The `node.rekey.enabled` key was removed
+After a cutover the old keys still decrypt for a while: on a link for a
+fixed 10 seconds; on a session for 10 seconds after the first message
+showing the peer has moved to the new keys, and never more than 120 seconds
+after the cutover. The node that started a session rekey keeps sending
+under the old keys until it hears the peer under the new ones, or until the
+handshake timeout plus one tick has passed. A node always answers its peers' rekeys, and starts its own when
+either threshold below is reached. A session starts no rekey of its own
+within 10 seconds of a cutover or within 30 seconds of completing a rekey
+its peer started, and never while its own rekey is in flight or waiting for
+the peer; a rekey setup from the peer, which authenticates nothing until
+its last handshake message, holds none of this back. A session resends a
+rekey setup that has had no answer, first after twice the measured round
+trip (at least 1 second, at most a third of the handshake timeout less one
+tick), then at doubling intervals, and gives the rekey up if no answer came
+within the handshake timeout; the next waits a backoff of one tick, doubled
+for each rekey given up in a row (at most 120 seconds at the defaults),
+plus up to 15 seconds. A session also starts a rekey, under the same holds
+and whatever the thresholds, once it has sent data and heard nothing from
+the peer under the current keys for 30 seconds, doubling that wait while
+the silence lasts, up to `node.rekey.after_secs`; this finds a peer that
+restarted or dropped the session.
+For sessions, a value above the largest the rekey timers take (4294967295
+seconds, 2^62 messages) is taken as that largest value, which never falls
+due. The `node.rekey.enabled` key was removed
 in v0.6.0; a config that still sets it loads, the key is ignored, and the
 daemon logs a warning naming it.
 

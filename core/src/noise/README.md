@@ -16,8 +16,10 @@ host's entropy source as a type parameter, for its ephemeral keys; the
 root fixes it with the alias
 `fips::noise::HandshakeState = HandshakeState<OsEntropy>`, so its
 callers are unchanged. The root also reaches `take_cleared` and
-`clear_slot` (hidden from the docs here) and, from its tests only,
-`open`, which is behind the `test-hooks` feature.
+`clear_slot` (hidden from the docs here), `seal`, with which its session
+send paths seal a frame on a counter and key the session's rekey machine
+reserved, and, from its tests only, `open`, which is behind the
+`test-hooks` feature.
 
 ## Files
 

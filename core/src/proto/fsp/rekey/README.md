@@ -3,10 +3,15 @@
 The session layer's binding of the shared rekey machine (`proto::rekey`):
 the profile that makes it rotate an FSP session's keys, and run its first
 handshake, over Noise XK, exactly as deployed nodes do on the wire.
-Hidden from the docs and not yet called; the root crate will reach it only
-through the alias `FspProfile`. This directory is the one part of
-`proto/fsp/` that holds keys, under the exemption that module's README
-states.
+Hidden from the docs. The root crate reaches it only through the alias
+`FspProfile`: each session in its session table is a machine on this
+profile from its first handshake on. The machine runs that handshake (its
+own attempt, the peer's setups held as candidates, the crossing decided at
+msg3, the retained msg3), then seals the session's frames, opens them by
+trial, starts its own rekeys, takes every setup, ack and msg3 of a rekey,
+and decides every cutover and drain.
+This directory is the one part of `proto/fsp/` that holds keys, under
+the exemption that module's README states.
 
 ## Files
 

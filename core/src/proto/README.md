@@ -41,8 +41,9 @@ rest) at its own crate root.
 - `rekey/`: the key-rotation state machine one link peer or one session
   runs, shared by the link and session layers. Each layer binds it to its
   handshake pattern in a `rekey/` subdirectory of its own (`fmp/rekey/`,
-  `fsp/rekey/`). Hidden from the docs and not yet called; see its
-  README.
+  `fsp/rekey/`). Hidden from the docs. The root crate's session table
+  holds each session in one, from its first handshake on, while the link
+  layer does not use it yet; see its README.
 - `routing/`: next-hop selection and routing error signals.
 - `stp/`: the spanning tree.
 

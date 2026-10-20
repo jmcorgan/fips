@@ -96,8 +96,9 @@ impl<const AAD: usize> SessionKeys for NoiseKeys<AAD> {
         };
         match self.session.open_unmarked(body, hint.counter, aad) {
             Ok(plaintext) => {
-                out.clear();
-                out.extend_from_slice(&plaintext);
+                // The open already made a buffer of its own; taking it saves
+                // a copy of every frame on the inline session path.
+                *out = plaintext;
                 true
             }
             Err(_) => false,

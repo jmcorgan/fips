@@ -214,6 +214,8 @@ impl<P: Profile, I: Instant> Epoch<P, I> {
 #[derive(Debug)]
 pub(super) struct Drain<P: Profile, I> {
     pub(super) ep: Epoch<P, I>,
+    /// The cutover plus the ceiling, or the first evidence the peer moved
+    /// plus the drain window, whichever is earlier.
     pub(super) deadline: I,
     /// The deadline is the short one, after evidence the peer moved.
     pub(super) evidenced: bool,

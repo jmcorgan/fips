@@ -29,7 +29,7 @@
 
 use super::*;
 use crate::config::SessionMmpConfig;
-use crate::node::session::{EndToEndState, SessionEntry};
+use crate::node::session::SessionEntry;
 use crate::noise::HandshakeState;
 use crate::peer::ActivePeer;
 use crate::proto::mmp::{MmpMode, ReceiverReport};
@@ -88,10 +88,9 @@ fn insert_session(node: &mut Node, mode: MmpMode) -> NodeAddr {
     let remote = crate::Identity::generate();
     let remote_addr = *remote.node_addr();
     let session = make_noise_session(node.identity(), &remote);
-    let mut entry = SessionEntry::new(
+    let mut entry = SessionEntry::keyed(
         remote_addr,
-        remote.pubkey_full(),
-        EndToEndState::Established(session),
+        session,
         crate::node::session::session_at(1000),
         true,
     );

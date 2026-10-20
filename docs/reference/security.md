@@ -155,17 +155,16 @@ two triggers, configurable under `node.rekey.*`:
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `enabled` | `true` | Master switch. |
 | `after_secs` | `120` | Time-based rekey threshold. |
 | `after_messages` | `65536` | Message-count rekey threshold. |
 
 In addition to the configurable triggers, the daemon retains the old
-session keys for a fixed **10-second drain window** after each
-cutover (compile-time constant `DRAIN_WINDOW_SECS` in
-`src/node/handlers/rekey.rs`). Rekey rotates the Noise key schedule
-and the session indices; old session keys are kept in
-`previous_session` for the drain window so in-flight packets
-encrypted under the old keys still decrypt.
+keys after each cutover so in-flight packets encrypted under them still
+decrypt. A link keeps them for a fixed **10-second drain window**. A
+session keeps them for 10 seconds after the first message showing the
+peer has moved to the new keys, and at most 120 seconds after the
+cutover; messages under the old keys do not extend that. Rekey rotates
+the Noise key schedule and, on a link, the session indices.
 
 ## Replay Window
 

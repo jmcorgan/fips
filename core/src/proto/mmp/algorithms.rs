@@ -301,6 +301,12 @@ impl SpinBitState {
         }
     }
 
+    /// Start again as a fresh state with the same role, for a session
+    /// whose counters start again.
+    pub fn restart(&mut self) {
+        *self = Self::new(self.is_initiator);
+    }
+
     /// Check if this is the spin bit initiator.
     pub fn is_initiator(&self) -> bool {
         self.is_initiator

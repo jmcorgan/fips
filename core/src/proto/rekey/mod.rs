@@ -56,6 +56,8 @@ mod cycle;
 mod epoch;
 #[cfg(test)]
 mod faults;
+#[cfg(any(test, feature = "test-hooks"))]
+mod hooks;
 pub(crate) mod keys;
 mod ladder;
 mod lease;
@@ -69,6 +71,8 @@ mod resolve;
 
 pub use cycle::Wait;
 pub use epoch::{Ids, Purpose, RecvHome, Role, Slot};
+#[cfg(any(test, feature = "test-hooks"))]
+pub use hooks::{code_idents, code_text, lost_items};
 pub use keys::{NodeKeys, NoiseKeys, RecvCopy, SendCopy};
 pub use lease::{EpochTag, IndexLease, IndexSource, TagSource, allocate, leaked};
 pub use machine::Rekey;
@@ -445,6 +449,8 @@ pub struct EpochView<'a, P: Profile, I> {
     pub role: Role,
     /// When it became current (or was made, for a pending epoch).
     pub started: I,
+    /// Its inner-header timestamp base; `None` until fixed.
+    pub base: Option<I>,
     /// Where its receive half lives.
     pub recv: RecvHome,
     /// Its per-epoch state.

@@ -30,6 +30,7 @@ mod explore;
 mod fmp;
 mod fsp;
 pub(crate) mod new;
+mod ship;
 
 /// The entropy every endpoint of a simulation draws from, seeded per run.
 pub(crate) type E = SeededEntropy;

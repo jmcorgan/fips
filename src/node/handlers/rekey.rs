@@ -1,29 +1,31 @@
-//! Periodic rekey (key rotation) for FMP link sessions.
+//! Periodic rekey (key rotation) for FMP link sessions, and the executor of
+//! the end-to-end session rekey machines.
 //!
 //! Checks all active peers on each tick for:
 //! 1. Rekey trigger (time elapsed or send counter exceeded)
 //! 2. Drain window expiry (clean up previous session after cutover)
 //! 3. Initiator-side cutover (first send after handshake completion)
 //! 4. Retirement of a responder's pending session the initiator never adopted
+//!
+//! Each session's rekey machine runs its first handshake and decides its own
+//! rekeys: it is polled on the tick, and the outputs it returns there or
+//! from a session handshake message or frame are carried out here.
 
 use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::{self, OrNone};
-use crate::node::handlers::timeout::resend_deadline;
-use crate::node::session::{SessionInstant, age_ms};
+use crate::node::reject::{RejectReason, SessionReject};
+use crate::node::session::{SessionInstant, SessionOutput, SessionOutputs};
 use crate::noise::HandshakeState;
 use crate::peer::machine::PeerEvent;
 use crate::proto::fmp::wire::build_msg1;
 use crate::proto::fmp::{ConnAction, LifecycleView, PeerSnapshot, RekeyCfg, RekeyResendSnapshot};
-use crate::proto::fsp::{
-    FspAction, RekeyMsg3ResendSnapshot, SessionSetup, SessionSnapshot, cutover_timer_elapsed,
-};
+use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
-use crate::time::WallStamp;
+use crate::proto::stp::{TreeCoordinate, coords_wire_size, encode_coords};
 use crate::transport::{TransportAddr, TransportId};
-use fips_core::time::Instant;
-use std::time::Duration;
+use fips_core::proto::rekey::{EpochTag, MsgKind, NodeKeys};
 use tracing::{debug, info, trace, warn};
 
 /// Keep previous session alive for this long after cutover.
@@ -650,364 +652,417 @@ impl Node {
             .collect()
     }
 
-    /// Retransmit FSP rekey msg3 until the responder is confirmed on the
-    /// new epoch.
-    ///
-    /// Called from the tick loop. The rekey initiator retains its msg3
-    /// wire payload after the first send (`handle_session_ack`); this
-    /// driver resends it on the handshake resend interval (with backoff)
-    /// while the payload is still retained.
-    ///
-    /// This is a **liveness-only** mechanism. Overlapping-epoch
-    /// trial-decrypt makes the rekey transition safe regardless of
-    /// cutover skew; retransmission only guarantees the responder
-    /// eventually derives the new session. Its lifetime is tied to the
-    /// responder *receiving* msg3 — the retained payload is cleared when
-    /// an inbound peer frame authenticates against `pending` or
-    /// post-cutover `current` — decoupled from the initiator's own
-    /// cutover. The initiator may cut over on its liveness timer while
-    /// the responder still lacks the new session; retransmission
-    /// continues, and overlapping-epoch decrypt keeps both directions
-    /// working meanwhile.
-    ///
-    /// After `handshake_max_resends` attempts with no confirmed progress,
-    /// the rekey cycle is abandoned cleanly (`abandon_rekey`): the
-    /// pending session is dropped and the next cycle retries fresh. This
-    /// is safe — an abandoned cycle never leaves a divergent unsafe
-    /// state.
-    pub(in crate::node) async fn resend_pending_session_msg3(&mut self, now: SessionInstant) {
+    /// Poll every session's rekey machine at `now`, and carry out what each
+    /// asks for: its first setup's resends and its retained msg3's, the
+    /// end of an unanswered first attempt or of a session whose candidates
+    /// all expired, its rekey msg3 resends with their probes, its keepalives
+    /// and prompt repeats, and the cutover, revert and drain end it reports.
+    pub(in crate::node) async fn poll_session_rekeys(&mut self, now: SessionInstant) {
         if self.sessions.is_empty() {
             return;
         }
+        let local = self.session_node_keys();
+        let addrs: Vec<NodeAddr> = self.sessions.keys().copied().collect();
+        for addr in addrs {
+            self.poll_session(&addr, now, &local).await;
+        }
+    }
 
-        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
-        let max_resends = self.config().node.rate_limit.handshake_max_resends;
-        let ttl = self.config().node.session.default_ttl;
-        let my_addr = *self.node_addr();
+    /// Poll `addr`'s session rekey machine at `now` if one of its deadlines
+    /// or start instants has already come, before a SessionSetup is admitted
+    /// and stepped into it. The 1 s tick can process a deadline up to a
+    /// second late, and a setup judged in that second meets a state the
+    /// deadline has ended: the smaller node, its completed rekey past its
+    /// confirmation deadline or its final msg3 rung, would refuse the setup
+    /// to keep a completed handshake the deadline gives up. A deployed peer
+    /// sends its rekey setup once, so the refusal costs the rotation it
+    /// starts. A start instant that has come starts this node's own rekey
+    /// before the setup is judged, as a shell polling at the machine's next
+    /// wake would have done before the setup arrived; the poll is all of the
+    /// machine's due work or none of it, so it cannot take the deadlines
+    /// alone.
+    pub(in crate::node) async fn poll_overdue(&mut self, addr: &NodeAddr, now: SessionInstant) {
+        if self.sessions.get(addr).is_some_and(|e| e.wake_due(now)) {
+            let local = self.session_node_keys();
+            self.poll_session(addr, now, &local).await;
+        }
+    }
 
-        // The shell snapshots each session retaining a msg3 payload (resend-due
-        // predicate resolved here); the core classifies abandon-vs-resend,
-        // abandons first.
-        let candidates = self.rekey_msg3_resend_snapshots(now);
-        for action in self.fsp.poll_rekey_msg3_resends(candidates, max_resends) {
-            match action {
-                FspAction::AbandonRekey { addr } => {
-                    if let Some(entry) = self.sessions.get_mut(&addr) {
-                        entry.abandon_rekey();
-                    }
-                    debug!(
-                        peer = %self.peer_display_name(&addr),
-                        "FSP rekey aborted: msg3 unconfirmed after max retransmissions, abandoning cycle"
+    /// Poll `addr`'s session rekey machine at `now` and carry out what it
+    /// asks for, telling it first whether a next hop toward the peer exists.
+    async fn poll_session(&mut self, addr: &NodeAddr, now: SessionInstant, local: &NodeKeys) {
+        let reachable = self.find_next_hop(addr).is_some();
+        let Some(entry) = self.sessions.get_mut(addr) else {
+            return;
+        };
+        let opening = !entry.is_established();
+        let out = entry.poll_rekey(now, reachable, local);
+        self.run_session_outputs(addr, out, opening).await;
+    }
+
+    /// Carry out the outputs of `addr`'s session rekey machine, front to
+    /// back; `opening` says the session's first handshake was still open
+    /// when the call that produced them began. A send the transport refuses
+    /// is loss: the machine is never told, and its deadlines bound what the
+    /// loss costs.
+    pub(in crate::node) async fn run_session_outputs(
+        &mut self,
+        addr: &NodeAddr,
+        out: SessionOutputs,
+        opening: bool,
+    ) {
+        self.run_session_outputs_answering(addr, out, opening, None)
+            .await;
+    }
+
+    /// Carry out the outputs of `addr`'s session rekey machine as
+    /// [`Node::run_session_outputs`] does, where a SessionAck answers a
+    /// setup that carried the initiator's coordinates `answering`.
+    pub(in crate::node) async fn run_session_outputs_answering(
+        &mut self,
+        addr: &NodeAddr,
+        out: SessionOutputs,
+        opening: bool,
+        answering: Option<&TreeCoordinate>,
+    ) {
+        for output in out {
+            self.run_session_output(addr, output, opening, answering)
+                .await;
+        }
+    }
+
+    /// Carry out one output of `addr`'s session rekey machine, from a call
+    /// that began with the first handshake open when `opening`; a
+    /// SessionAck carries `answering` as the initiator's coordinates.
+    async fn run_session_output(
+        &mut self,
+        addr: &NodeAddr,
+        output: SessionOutput,
+        opening: bool,
+        answering: Option<&TreeCoordinate>,
+    ) {
+        use fips_core::proto::rekey::{Abandon, EvidenceKind, Output, Reason, Role};
+        match output {
+            Output::Send { msg, kind, .. } => {
+                if opening
+                    && kind == MsgKind::Setup
+                    && let Some(entry) = self.sessions.get_mut(addr)
+                {
+                    entry.note_setup_sent();
+                }
+                // A send the transport refuses is loss, which the
+                // machine's resends and deadlines recover.
+                let _ = self.send_rekey_message(addr, msg, kind, answering).await;
+            }
+            Output::Prompt { tag } => self.send_session_prompt(addr, tag).await,
+            // The handler that completed the first handshake logs the
+            // session's establishment, after the packets held for it go.
+            Output::Installed {
+                evidence: EvidenceKind::First,
+                ..
+            } => {}
+            Output::Installed {
+                tag,
+                role,
+                evidence,
+            } => {
+                // The wording is the one operators' log searches and the
+                // rekey and interop suites count cutovers by.
+                let peer = self.peer_display_name(addr);
+                match role {
+                    Role::Initiator => debug!(
+                        %peer,
+                        epoch = tag.get(),
+                        ?evidence,
+                        "FSP rekey cutover complete (initiator), new session keys current"
+                    ),
+                    Role::Responder => debug!(
+                        %peer,
+                        epoch = tag.get(),
+                        ?evidence,
+                        "FSP rekey cutover complete (responder), new session keys current"
+                    ),
+                }
+            }
+            Output::Retired { tag } => {
+                trace!(
+                    peer = %self.peer_display_name(addr),
+                    epoch = tag.get(),
+                    "FSP session keys erased"
+                );
+            }
+            Output::Reverted { tag } => {
+                info!(
+                    peer = %self.peer_display_name(addr),
+                    epoch = tag.get(),
+                    "FSP peer heard under the previous keys after an assumed cutover, new keys back to waiting"
+                );
+            }
+            Output::Abandoned(Abandon::Unanswered) if opening => {
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    "Session setup got no answer within the handshake timeout"
+                );
+            }
+            Output::Abandoned(Abandon::Yielded) if opening => {
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    "Simultaneous session initiation: our attempt gave way to the peer's completed one"
+                );
+            }
+            Output::Abandoned(Abandon::Unanswered) => {
+                self.stats_mut().session.rekey_unanswered += 1;
+                info!(
+                    peer = %self.peer_display_name(addr),
+                    "FSP rekey we initiated got no answer within the handshake timeout, session retained"
+                );
+            }
+            Output::Abandoned(Abandon::Yielded) => {
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::RekeyYielded));
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    "FSP rekey we initiated yielded to the peer's completed rekey"
+                );
+            }
+            Output::Abandoned(why) => {
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    ?why,
+                    "FSP rekey given up"
+                );
+            }
+            Output::Reject(Reason::CandidateExpired) if opening => {
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    "Session setup answered for the peer expired without msg3"
+                );
+            }
+            Output::Reject(Reason::KeyMismatch) if opening => {
+                // A session the peer's setups opened is bonded to the address
+                // they claimed: a msg3 authenticating a key that address is
+                // not derived from proves only that its candidate was forged,
+                // and only it goes. A forger reaches this once per candidate,
+                // so it logs at debug.
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::AddrMismatch));
+                debug!(
+                    src = %self.peer_display_name(addr),
+                    reason = "addr-mismatch",
+                    "SessionMsg3 source address does not match the authenticated static key, dropping its candidate"
+                );
+            }
+            Output::Reject(Reason::CandidateExpired) => {
+                self.stats_mut().session.rekey_expired += 1;
+                info!(
+                    peer = %self.peer_display_name(addr),
+                    "FSP rekey setup answered for the peer expired without msg3, session retained"
+                );
+            }
+            Output::Reject(reason) => {
+                if let Some(counted) = session_reject(reason, opening) {
+                    self.stats_mut()
+                        .record_reject(RejectReason::Session(counted));
+                }
+                if reason == Reason::KeyMismatch {
+                    warn!(
+                        peer = %self.peer_display_name(addr),
+                        "FSP rekey: initiator static key differs from the established peer key"
                     );
                 }
-                FspAction::ResendSessionMsg3 { addr } => {
-                    let payload = match self
-                        .sessions
-                        .get(&addr)
-                        .and_then(|e| e.rekey_msg3_payload())
-                    {
-                        Some(p) => p.to_vec(),
-                        None => continue,
-                    };
-                    let mut datagram = SessionDatagram::new(my_addr, addr, payload).with_ttl(ttl);
-                    let sent = match self.send_session_datagram(&mut datagram).await {
-                        Ok(_) => true,
-                        Err(e) => {
-                            debug!(
-                                peer = %self.peer_display_name(&addr),
-                                error = %e,
-                                "FSP rekey msg3 retransmission failed"
-                            );
-                            false
-                        }
-                    };
-
-                    if sent && let Some(entry) = self.sessions.get_mut(&addr) {
-                        let count = entry.rekey_msg3_resend_count() + 1;
-                        let next = resend_deadline(now, interval_ms, backoff, count);
-                        entry.record_rekey_msg3_resend(next);
-                        trace!(
-                            peer = %self.peer_display_name(&addr),
-                            resend = count,
-                            "Resent FSP rekey msg3"
-                        );
-                    }
-                }
-                #[allow(unreachable_patterns)]
-                _ => {}
+                trace!(
+                    peer = %self.peer_display_name(addr),
+                    ?reason,
+                    "FSP rekey input changed nothing"
+                );
             }
+            // The rekey that reported the restart has already repaired the
+            // session: the old keys are retired and the session MMP is
+            // per epoch, so only the count and the log are left to do.
+            Output::PeerRestarted { epoch, .. } => {
+                self.stats_mut().session.peer_restarted += 1;
+                info!(
+                    peer = %self.peer_display_name(addr),
+                    epoch = %hex::encode(epoch),
+                    "FSP peer restarted, session rekeyed under its new startup epoch"
+                );
+            }
+            Output::Teardown(why) => {
+                let name = self.peer_display_name(addr);
+                if let Some(entry) = self.sessions.get(addr)
+                    && let Some(mmp) = entry.mmp()
+                {
+                    Self::log_session_mmp_teardown(&name, mmp);
+                }
+                self.sessions.remove(addr);
+                self.pending_tun_packets.remove(addr);
+                self.path_mtu_lookup_release(addr);
+                if opening {
+                    info!(dest = %name, ?why, "Session handshake timed out, removing");
+                } else {
+                    info!(dest = %name, ?why, "FSP session closed by its rekey machine");
+                }
+            }
+            // A session cutover carries nothing other layers resend, a
+            // frame's delivery is the receive path's, and a session machine
+            // holds no index, worker copy or link-setup msg1.
+            Output::Rekeyed { .. }
+            | Output::Deliver { .. }
+            | Output::Bind { .. }
+            | Output::Unbind { .. }
+            | Output::Delegate { .. }
+            | Output::Revoke { .. }
+            | Output::Release(_)
+            | Output::ReplaceRequested { .. } => {}
         }
     }
 
-    /// Snapshot every session retaining a rekey-msg3 payload for the
-    /// retransmission decision, pre-evaluating the resend-due predicate against
-    /// `now` so the core reads no clock.
-    fn rekey_msg3_resend_snapshots(&self, now: SessionInstant) -> Vec<RekeyMsg3ResendSnapshot> {
-        self.sessions
-            .iter()
-            .filter(|(_, entry)| entry.rekey_msg3_payload().is_some())
-            .map(|(node_addr, entry)| RekeyMsg3ResendSnapshot {
-                addr: *node_addr,
-                resend_count: entry.rekey_msg3_resend_count(),
-                resend_due: entry.rekey_msg3_next_resend().is_some_and(|at| now >= at),
-            })
-            .collect()
+    /// Send the session handshake message `msg` the rekey machine of `addr`
+    /// asked for, wrapped in its session message with the coordinates of
+    /// now: a SessionSetup toward the coordinates cached for `addr` (a direct
+    /// peer's announced ones on a miss, as the dial does), a SessionAck
+    /// toward the setup's own coordinates `answering`, a SessionMsg3 bare.
+    /// Returns whether it left, for the one caller that keeps a session
+    /// only if its first setup did.
+    pub(in crate::node) async fn send_rekey_message(
+        &mut self,
+        addr: &NodeAddr,
+        msg: Vec<u8>,
+        kind: MsgKind,
+        answering: Option<&TreeCoordinate>,
+    ) -> Result<(), crate::node::NodeError> {
+        let our_coords = self.tree_state.my_coords().clone();
+        let payload = match kind {
+            MsgKind::Msg3 => SessionMsg3::new(msg).encode(),
+            MsgKind::Setup => {
+                // The wire needs non-empty destination coordinates, and on a
+                // cache miss our own would be filed under the destination's
+                // address by every node on the path. Routing never refreshes
+                // a direct peer's cache entry, so fall back to the
+                // coordinates a direct peer announced. Only a destination
+                // that is neither cached nor an announced direct peer gets
+                // ours, as a first setup always has; the destination answers
+                // with its own.
+                let dest_coords = self
+                    .cached_dest_coords(addr)
+                    .or_else(|| self.tree_state.peer_coords(addr).cloned())
+                    .unwrap_or_else(|| our_coords.clone());
+                SessionSetup::new(our_coords, dest_coords)
+                    .with_handshake(msg)
+                    .encode()
+            }
+            MsgKind::Ack => {
+                let Some(dest_coords) = answering.cloned() else {
+                    debug!(
+                        peer = %self.peer_display_name(addr),
+                        "FSP SessionAck with no setup to answer, dropping"
+                    );
+                    return Ok(());
+                };
+                SessionAck::new(our_coords, dest_coords)
+                    .with_handshake(msg)
+                    .encode()
+            }
+            MsgKind::Msg1 | MsgKind::Msg2 => {
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    ?kind,
+                    "FSP session machine asked for a link handshake message, dropping"
+                );
+                return Ok(());
+            }
+        };
+        let my_addr = *self.node_addr();
+        let mut datagram = SessionDatagram::new(my_addr, *addr, payload)
+            .with_ttl(self.config().node.session.default_ttl);
+        let sent = self.send_session_datagram(&mut datagram).await;
+        match &sent {
+            Ok(()) => {
+                trace!(peer = %self.peer_display_name(addr), ?kind, "Sent FSP handshake message")
+            }
+            Err(e) => debug!(
+                peer = %self.peer_display_name(addr),
+                ?kind,
+                error = %e,
+                "FSP handshake message not sent, counted as lost"
+            ),
+        }
+        sent
     }
 
-    /// Periodic session (FSP) rekey check. Called from the tick loop.
-    ///
-    /// For each established session:
-    /// - If the initiator holds a pending session past the liveness
-    ///   timer, perform the K-bit cutover (overlapping-epoch decrypt
-    ///   makes this safe on any schedule — see `FSP_CUTOVER_DELAY_MS`)
-    /// - If the drain window has expired, clean up the previous session
-    /// - If a responder-side handshake the peer never finished has aged
-    ///   out, abandon it (the handshake only — a completed rekey session
-    ///   is never discarded on a timer, see
-    ///   [`FspAction::AbandonHandshake`])
-    /// - If a handshake this node initiated got no SessionAck within the
-    ///   handshake timeout, drop it so the trigger can start a fresh one
-    ///   (see [`FspAction::ExpireInitiation`])
-    /// - If the rekey timer/counter fires, initiate a new XK handshake
-    ///
-    /// msg3 retransmission is handled separately by
-    /// `resend_pending_session_msg3`; its lifetime is tied to the
-    /// responder receiving msg3, not to this initiator's cutover.
-    pub(in crate::node) async fn check_session_rekey(&mut self) {
-        let cfg = crate::proto::fsp::RekeyCfg {
-            after_secs: self.config().node.rekey.after_secs,
-            after_messages: self.config().node.rekey.after_messages,
-        };
+    /// Seal and send the prompt the rekey machine of `addr` asked for under
+    /// the epoch `tag`: a CoordsWarmup, carrying the destination's cached
+    /// coordinates, or else the ones the peer's own handshake message
+    /// carried, or else the ones a direct peer announced.
+    async fn send_session_prompt(&mut self, addr: &NodeAddr, tag: EpochTag) {
         let now = Self::session_now();
-
-        // The shell snapshots each established session's rekey ages/flags
-        // (every clock read resolved here); the core decides
-        // cutover/drain/abandon/trigger with no clock, phase-grouped to
-        // preserve the pre-refactor execution order.
-        let snapshots = self.session_rekey_snapshots(now);
-        for action in self.fsp.poll_rekey(snapshots, &cfg) {
-            match action {
-                FspAction::CutOver { addr } => {
-                    if let Some(entry) = self.sessions.get_mut(&addr)
-                        && entry.cutover_to_new_session(now)
-                    {
-                        debug!(
-                            peer = %self.peer_display_name(&addr),
-                            "FSP rekey cutover complete (initiator), K-bit flipped"
-                        );
-                    }
-                }
-                FspAction::CompleteDrain { addr } => {
-                    if let Some(entry) = self.sessions.get_mut(&addr) {
-                        entry.complete_drain();
-                        trace!(
-                            peer = %self.peer_display_name(&addr),
-                            "FSP drain complete, previous session erased"
-                        );
-                    }
-                }
-                FspAction::AbandonHandshake { addr } => {
-                    // Cheap: no key material is lost, and the slot was
-                    // blocking re-establishment. A completed `pending`
-                    // beside it is left in place.
-                    let age_ms = self
-                        .sessions
-                        .get(&addr)
-                        .map(|entry| {
-                            entry
-                                .last_peer_rekey()
-                                .map_or_else(|| now.wall_ms(), |at| age_ms(now, at))
-                        })
-                        .unwrap_or(0);
-                    if let Some(entry) = self.sessions.get_mut(&addr) {
-                        entry.abandon_handshake();
-                        self.stats_mut().session.rekey_expired += 1;
-                        info!(
-                            peer = %self.peer_display_name(&addr),
-                            age_ms,
-                            "FSP rekey armed by peer expired without msg3, session retained"
-                        );
-                    }
-                }
-                FspAction::ExpireInitiation { addr } => {
-                    // The handshake only: the trigger starts a fresh rekey
-                    // on a later tick.
-                    let age_ms = self
-                        .sessions
-                        .get(&addr)
-                        .map(|entry| {
-                            entry
-                                .initiated()
-                                .map_or_else(|| now.wall_ms(), |at| age_ms(now, at))
-                        })
-                        .unwrap_or(0);
-                    if let Some(entry) = self.sessions.get_mut(&addr) {
-                        entry.abandon_handshake();
-                        self.stats_mut().session.rekey_unanswered += 1;
-                        info!(
-                            peer = %self.peer_display_name(&addr),
-                            age_ms,
-                            "FSP rekey we initiated got no answer within the handshake timeout, retrying, session retained"
-                        );
-                    }
-                }
-                FspAction::InitiateRekey { addr } => {
-                    self.initiate_session_rekey(&addr).await;
-                }
-                #[allow(unreachable_patterns)]
-                _ => {}
-            }
-        }
-    }
-
-    /// Snapshot every established session for the FSP rekey decision,
-    /// pre-computing its monotonic age and timer predicates so the pure core
-    /// applies the thresholds without reading a clock (see [`SessionSnapshot`]).
-    fn session_rekey_snapshots(&self, now: SessionInstant) -> Vec<SessionSnapshot> {
-        let drain = Duration::from_secs(crate::proto::fsp::limits::DRAIN_WINDOW_SECS);
-        let dampening = Duration::from_secs(crate::proto::fsp::limits::REKEY_DAMPENING_SECS);
-        // Bound for a responder-side handshake the peer armed and never
-        // finished, anchored on the peer's last accepted setup message, which
-        // is the only stamp that path writes. A *completed* rekey has no such
-        // bound and must not acquire one: see `FspAction::AbandonHandshake`.
-        //
-        // A handshake this node initiated has its own deadline, measured from
-        // the setup this node sent, and neither clock may stand in for the
-        // other: the peer's stamp says nothing about our setup, and ours
-        // says nothing about the peer's. Unlike the peer predicate, ours has
-        // no "stamp present" conjunct, deliberately: an initiator handshake
-        // armed without the stamp reads as expired, because dropping one
-        // costs a retry and keeping one stops rotation.
-        let stale_handshake =
-            Duration::from_secs(self.config().node.rate_limit.handshake_timeout_secs);
-        // Absolute ceiling on `previous`-slot retention, measured from the
-        // cutover. The sliding drain deadline is peer-progress-aware, so an
-        // authenticated peer that keeps sealing in the old epoch can hold the
-        // retired key indefinitely; this bounds that without shortening the
-        // grace a peer that lost msg3 legitimately needs. Resolved here rather
-        // than in the core, which reads no clock and no configuration.
-        let drain_max =
-            Duration::from_millis(drain_max_retention_ms(&self.config().node.rate_limit));
-        self.sessions
-            .iter()
-            .filter(|(_, entry)| entry.is_established())
-            .map(|(node_addr, entry)| SessionSnapshot {
-                addr: *node_addr,
-                has_pending: entry.pending_new_session().is_some(),
-                rekey_in_progress: entry.has_rekey_in_progress(),
-                is_rekey_initiator: entry.is_rekey_initiator(),
-                // An unstamped completion reads as long ago, as a zero stamp
-                // did.
-                cutover_timer_elapsed: cutover_timer_elapsed(
-                    entry
-                        .rekey_completed()
-                        .map_or(u64::MAX, |done| age_ms(now, done)),
-                    0,
-                ),
-                is_draining: entry.is_draining(),
-                drain_expired: entry.drain_expired(now, drain, drain_max),
-                has_rekey_msg3_payload: entry.rekey_msg3_payload().is_some(),
-                is_dampened: entry.is_rekey_dampened(now, dampening),
-                armed_handshake_expired: entry
-                    .last_peer_rekey()
-                    .is_some_and(|at| now.saturating_duration_since(at) > stale_handshake),
-                initiation_expired: entry
-                    .initiated()
-                    .is_none_or(|at| now.saturating_duration_since(at) > stale_handshake),
-                // Only established sessions are snapshotted, and establishing
-                // stamps the start; without one the age reads as above any
-                // rekey threshold, as a zero stamp did.
-                elapsed_secs: entry
-                    .session_start()
-                    .map_or(u64::MAX, |start| age_ms(now, start))
-                    / 1000,
-                counter: entry.send_counter(),
-                jitter_secs: entry.rekey_jitter_secs(),
-            })
-            .collect()
-    }
-
-    /// Initiate an FSP session rekey.
-    ///
-    /// Creates a new XK handshake as initiator, sends SessionSetup msg1
-    /// through the mesh, and stores the handshake state on the existing entry,
-    /// stamping the deadline by which a SessionAck must complete it.
-    async fn initiate_session_rekey(&mut self, dest_addr: &NodeAddr) {
-        // Check route availability before paying crypto cost
-        if self.find_next_hop(dest_addr).is_none() {
-            trace!(
-                peer = %self.peer_display_name(dest_addr),
-                "FSP rekey skipped: no route to destination"
-            );
+        let Some(entry) = self.sessions.get_mut(addr) else {
             return;
-        }
-
-        let entry = match self.sessions.get(dest_addr) {
-            Some(e) => e,
-            None => return,
         };
-        let dest_pubkey = *entry.remote_pubkey();
-
-        // Create Noise XK initiator handshake
-        // This frame's own copy of the node's long-term private key; the
-        // handshake state keeps its own and clears that on drop.
-        let mut our_keypair = self.identity().keypair();
-        let mut handshake = HandshakeState::new_xk_initiator(our_keypair, dest_pubkey);
-        our_keypair.non_secure_erase();
-        handshake.set_local_epoch(self.startup_epoch());
-
-        let msg1 = match handshake.write_xk_message_1() {
-            Ok(m) => m,
+        let prompt = match entry.seal_prompt(now, tag) {
+            Ok(prompt) => prompt,
             Err(e) => {
-                warn!(
-                    peer = %self.peer_display_name(dest_addr),
-                    error = %e,
-                    "Failed to generate FSP rekey XK msg1"
+                debug!(
+                    peer = %self.peer_display_name(addr),
+                    error = ?e,
+                    "FSP rekey prompt not sealed"
                 );
                 return;
             }
         };
-
-        // Build SessionSetup with coordinates. The wire needs non-empty
-        // destination coordinates, and on a cache miss our own would be filed
-        // under the destination's address by every node on the path. A miss
-        // here means a direct peer, since we got past `find_next_hop`, and
-        // routing never refreshes a direct peer's cache entry, so fall back
-        // to the coordinates the peer announced to us. Only a peer that has
-        // not announced yet still gets ours, and that frame goes one hop, to
-        // the destination itself.
-        let our_coords = self.tree_state.my_coords().clone();
         let dest_coords = self
-            .cached_dest_coords(dest_addr)
-            .or_else(|| self.tree_state.peer_coords(dest_addr).cloned())
-            .unwrap_or_else(|| our_coords.clone());
-        let setup = SessionSetup::new(our_coords, dest_coords).with_handshake(msg1);
-        let setup_payload = setup.encode();
-
-        // Send through the mesh
+            .cached_dest_coords(addr)
+            .or_else(|| prompt.route.clone())
+            .or_else(|| self.tree_state.peer_coords(addr).cloned());
+        let Some(dest_coords) = dest_coords else {
+            debug!(
+                peer = %self.peer_display_name(addr),
+                "FSP rekey prompt has no destination coordinates, counted as lost"
+            );
+            return;
+        };
+        let my_coords = self.tree_state.my_coords().clone();
+        let coords_size = coords_wire_size(&my_coords) + coords_wire_size(&dest_coords);
+        let mut fsp_payload =
+            Vec::with_capacity(prompt.header.len() + coords_size + prompt.ciphertext.len());
+        fsp_payload.extend_from_slice(&prompt.header);
+        encode_coords(&my_coords, &mut fsp_payload);
+        encode_coords(&dest_coords, &mut fsp_payload);
+        fsp_payload.extend_from_slice(&prompt.ciphertext);
         let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, *dest_addr, setup_payload)
+        let mut datagram = SessionDatagram::new(my_addr, *addr, fsp_payload)
             .with_ttl(self.config().node.session.default_ttl);
-
         if let Err(e) = self.send_session_datagram(&mut datagram).await {
             debug!(
-                peer = %self.peer_display_name(dest_addr),
+                peer = %self.peer_display_name(addr),
                 error = %e,
-                "Failed to send FSP rekey SessionSetup"
+                "FSP rekey prompt not sent, counted as lost"
             );
             return;
         }
-
-        // Store rekey state on the existing session entry. The deadline is
-        // stamped only now, so it runs from the setup actually on the wire.
-        if let Some(entry) = self.sessions.get_mut(dest_addr) {
-            entry.begin_rekey(handshake, Self::session_now());
+        if prompt.measured
+            && let Some(entry) = self.sessions.get_mut(addr)
+            && let Some(mmp) = entry.mmp_mut()
+        {
+            mmp.sender
+                .record_sent(prompt.counter, prompt.timestamp, prompt.ciphertext.len());
         }
+        trace!(peer = %self.peer_display_name(addr), "Sent FSP rekey prompt");
+    }
+}
 
-        debug!(
-            peer = %self.peer_display_name(dest_addr),
-            "FSP rekey initiated, sent SessionSetup"
-        );
+/// The session reject counter a machine refusal is counted under, for the
+/// refusals one input alone can produce, from a call that began with the
+/// first handshake open when `opening`. A tie-break refusal is counted by
+/// the handler that knows which message met it, and the first handshake's
+/// refusals of setups count nothing, as its candidates' expiries do not.
+fn session_reject(reason: fips_core::proto::rekey::Reason, opening: bool) -> Option<SessionReject> {
+    use fips_core::proto::rekey::Reason;
+    match reason {
+        Reason::CandidatesFull if !opening => Some(SessionReject::RekeyHeld),
+        Reason::ReplyUnauthenticated => Some(SessionReject::AckHandshakeFailed),
+        Reason::UnknownAttempt | Reason::LateReply => Some(SessionReject::BadState),
+        Reason::KeyMismatch if !opening => Some(SessionReject::RekeyKeyMismatch),
+        _ => None,
     }
 }

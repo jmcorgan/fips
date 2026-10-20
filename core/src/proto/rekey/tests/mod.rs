@@ -30,6 +30,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("cycle.rs", include_str!("../cycle.rs")),
     ("epoch.rs", include_str!("../epoch.rs")),
     ("faults.rs", include_str!("../faults.rs")),
+    ("hooks.rs", include_str!("../hooks.rs")),
     ("keys.rs", include_str!("../keys.rs")),
     ("ladder.rs", include_str!("../ladder.rs")),
     ("lease.rs", include_str!("../lease.rs")),

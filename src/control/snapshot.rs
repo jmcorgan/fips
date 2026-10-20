@@ -723,7 +723,11 @@ pub(crate) struct SessionRow {
     pub state: &'static str,
     pub is_initiator: bool,
     pub last_activity_ms: u64,
-    pub npub: String,
+    /// The peer's npub, only once a handshake has proven its key.
+    pub npub: Option<String>,
+    /// Whether a handshake has proven the peer's key: `proven` or
+    /// `unproven`.
+    pub identity: &'static str,
     pub stats: SessionStats,
     /// Handshake resend count, emitted only while not established.
     pub resend_count: Option<u32>,

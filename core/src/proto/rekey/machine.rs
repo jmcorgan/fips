@@ -28,8 +28,8 @@ use super::reason::{Abandon, Close, Reason, Teardown};
 use super::record::{Digest, HeldAnswer, Record};
 use super::resolve::{Commit, Own, Verdict, resolve};
 use super::{
-    Arrival, Binding, Carry, CycleView, Env, EpochView, Identity, Input, Intent, MsgKind, Output,
-    Outputs, Route, SealRefusal, Sealed, SealedPrompt, SetupFacts, View, Wire,
+    Arrival, Binding, Carry, CycleView, Env, EpochView, Identity, Input, Intent, JitterSource,
+    MsgKind, Output, Outputs, Route, SealRefusal, Sealed, SealedPrompt, SetupFacts, View, Wire,
 };
 use crate::identity::NodeAddr;
 use crate::time::{Clock, Duration, Instant};
@@ -52,13 +52,13 @@ const PASSES: usize = 3;
 
 /// Facts that survive `Idle`, kept outside the cycle.
 #[derive(Debug)]
-struct Memory<I> {
+pub(super) struct Memory<I> {
     peer_epoch: Option<[u8; 8]>,
     /// The key-epoch bit on the peer's last authenticated current-epoch
     /// frame.
     peer_k: Option<bool>,
     /// The jitter drawn at the last install or cutover, whole seconds.
-    jitter: i32,
+    pub(super) jitter: i32,
     /// Dampening ends.
     damp: Option<I>,
     /// The abandon backoff ends.
@@ -115,16 +115,16 @@ impl<I> Memory<I> {
 /// through [`Rekey::seal`] and [`Rekey::seal_prompt`]; ended by
 /// [`Rekey::close`].
 pub struct Rekey<P: Profile, C: Clock> {
-    params: Params,
-    bond: Bond,
+    pub(super) params: Params,
+    pub(super) bond: Bond,
     me: NodeAddr,
     /// The current epoch; `None` while the first handshake is open.
-    cur: Option<Epoch<P, C::Instant>>,
-    drain: Option<Drain<P, C::Instant>>,
-    cycle: Cycle<P, C::Instant>,
+    pub(super) cur: Option<Epoch<P, C::Instant>>,
+    pub(super) drain: Option<Drain<P, C::Instant>>,
+    pub(super) cycle: Cycle<P, C::Instant>,
     cands: Candidates<P, C::Instant>,
-    record: Record,
-    mem: Memory<C::Instant>,
+    pub(super) record: Record,
+    pub(super) mem: Memory<C::Instant>,
     clock: PhantomData<fn() -> C>,
 }
 
@@ -205,6 +205,19 @@ enum Change<'a, P: Profile> {
     Poll,
 }
 
+/// Where a setup goes, before any handshake work is spent on it.
+enum Room<'a> {
+    /// Refused for this reason.
+    Refused(Reason),
+    /// A copy of a held candidate's setup, answered with this stored ack.
+    Copy(&'a Wire),
+    /// A new candidate beside the others.
+    Free,
+    /// A new candidate in the place of the candidate with this arrival
+    /// number.
+    Evict(u64),
+}
+
 /// The copy kind of an IK msg1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Copied {
@@ -243,7 +256,7 @@ fn since<I: Instant>(now: I, t: I) -> Duration {
 
 /// Discard an epoch: unbind and revoke its index with the transport
 /// recorded at the binding, release its lease, erase its keys.
-fn retire<P: Profile, I>(ep: Epoch<P, I>, out: &mut Outputs<P>) {
+pub(super) fn retire<P: Profile, I>(ep: Epoch<P, I>, out: &mut Outputs<P>) {
     let Epoch {
         tag,
         ids,
@@ -290,12 +303,17 @@ fn abandon<P: Profile, I>(a: Attempt<P, I>, cause: Abandon, out: &mut Outputs<P>
 
 /// A rekey jitter drawn from `[-j, +j]` whole seconds.
 fn jitter<P: Profile>(env: &mut Env<'_, P>, j: u16) -> i32 {
+    draw_jitter(env.jitter, j)
+}
+
+/// A rekey jitter drawn from `[-j, +j]` whole seconds out of `src`.
+pub(super) fn draw_jitter(src: &mut dyn JitterSource, j: u16) -> i32 {
     let bound = j.saturating_mul(2);
     #[cfg(test)]
     if fault!(GlobalJitter) {
         return i32::from(super::faults::global_jitter(bound)) - i32::from(j);
     }
-    i32::from(env.jitter.draw(bound)) - i32::from(j)
+    i32::from(src.draw(bound)) - i32::from(j)
 }
 
 /// The later of two optional instants.
@@ -570,7 +588,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     }
 
     /// The epoch in `slot`.
-    fn epoch(&self, slot: Slot) -> Option<&Epoch<P, C::Instant>> {
+    pub(super) fn epoch(&self, slot: Slot) -> Option<&Epoch<P, C::Instant>> {
         match slot {
             Slot::Current => self.cur.as_ref(),
             Slot::Previous => self.drain.as_ref().map(|d| &d.ep),
@@ -579,7 +597,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     }
 
     /// The epoch in `slot`, mutably.
-    fn epoch_mut(&mut self, slot: Slot) -> Option<&mut Epoch<P, C::Instant>> {
+    pub(super) fn epoch_mut(&mut self, slot: Slot) -> Option<&mut Epoch<P, C::Instant>> {
         match slot {
             Slot::Current => self.cur.as_mut(),
             Slot::Previous => self.drain.as_mut().map(|d| &mut d.ep),
@@ -716,15 +734,40 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         route: P::Route,
         env: &mut Env<'_, P>,
     ) -> Change<'static, P> {
-        if !P::valid(msg1) {
+        let evict = match self.setup_room(now, msg1, carrier) {
+            Room::Refused(reason) => return Change::Reject(reason),
+            Room::Copy(ack) => {
+                return Change::Resend {
+                    msg: ack.clone(),
+                    kind: MsgKind::Ack,
+                    route: Route::Established { fallback: false },
+                };
+            }
+            Room::Free => None,
+            Room::Evict(seq) => Some(seq),
+        };
+        let Ok((hs, ack)) = P::answer(env.local, msg1) else {
             return Change::Reject(Reason::SetupMalformed);
+        };
+        Change::Candidate {
+            hs: Box::new(hs),
+            msg1: msg1.to_vec(),
+            ack,
+            carrier,
+            route,
+            evict,
+        }
+    }
+
+    /// Where a setup `msg1` arriving over `carrier` at `now` goes, by the
+    /// rows S1-1, S1-2, S1-0, S1-3, S1-4 and S1-5 in that order, read
+    /// without the handshake work of answering it.
+    fn setup_room(&self, now: C::Instant, msg1: &[u8], carrier: P::Carrier) -> Room<'_> {
+        if !P::valid(msg1) {
+            return Room::Refused(Reason::SetupMalformed);
         }
         if let Some(c) = self.cands.find(msg1).filter(|_| !fault!(FreshAck)) {
-            return Change::Resend {
-                msg: c.ack.clone(),
-                kind: MsgKind::Ack,
-                route: Route::Established { fallback: false },
-            };
+            return Room::Copy(&c.ack);
         }
         let young = match &self.cycle {
             Cycle::Init(a) => self.cur.is_none() && since(now, a.first) < self.params.cfg.young,
@@ -739,29 +782,28 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             completed = completed && !pendi;
         }
         if self.smaller() && (completed || young) {
-            return Change::Reject(Reason::TieBreakKept);
+            return Room::Refused(Reason::TieBreakKept);
         }
-        let evict = if self.cands.room(carrier) {
-            None
+        if self.cands.room(carrier) {
+            Room::Free
         } else if self.cur.is_none() || fault!(EvictEstablished) {
             match self.cands.victim(carrier, now, self.params.cfg.young) {
-                Some(seq) => Some(seq),
-                None => return Change::Reject(Reason::CandidatesFull),
+                Some(seq) => Room::Evict(seq),
+                None => Room::Refused(Reason::CandidatesFull),
             }
         } else {
-            return Change::Reject(Reason::CandidatesFull);
-        };
-        let Ok((hs, ack)) = P::answer(env.local, msg1) else {
-            return Change::Reject(Reason::SetupMalformed);
-        };
-        Change::Candidate {
-            hs: Box::new(hs),
-            msg1: msg1.to_vec(),
-            ack,
-            carrier,
-            route,
-            evict,
+            Room::Refused(Reason::CandidatesFull)
         }
+    }
+
+    /// Whether a setup `msg1` arriving over `carrier` at `now` would be
+    /// held as a new candidate beside the ones already held: a setup the
+    /// machine neither answers from a held candidate, nor refuses, nor makes
+    /// room for by evicting one. The shell reads it before stepping such a
+    /// setup to charge the new candidate to its half-open share. Changes
+    /// nothing.
+    pub fn grows(&self, now: C::Instant, msg1: &[u8], carrier: P::Carrier) -> bool {
+        matches!(self.setup_room(now, msg1, carrier), Room::Free)
     }
 
     /// A msg3: the one dispatcher, trying every candidate newest first.
@@ -1233,7 +1275,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 .max(Duration::from_secs(1))
                 .max(self.mem.setup_rto.unwrap_or(Duration::ZERO))
                 .min(self.params.rung);
-            let (sched, _) = Schedule::doubling(first, u8::MAX, Some(cfg.handshake));
+            let sched = Schedule::doubling(first, u8::MAX, Some(cfg.handshake)).0;
             (sched, cfg.handshake)
         } else {
             (self.params.first, self.params.budget)
@@ -1370,13 +1412,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let Cycle::Init(a) = core::mem::replace(&mut self.cycle, Cycle::Idle) else {
             return;
         };
-        let rtt = since(now, a.first);
-        if !a.resent || fault!(KarnOff) {
-            self.mem.hs_rtt = Some(rtt);
-            self.mem.setup_rto = None;
-        } else if P::SETUP_RTT && !fault!(NoKeptBackoff) {
-            self.mem.setup_rto = Some(rtt.saturating_mul(2).min(self.params.rung));
-        }
+        self.sample(since(now, a.first), a.resent);
         let Attempt {
             hs,
             lease,
@@ -1385,6 +1421,37 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         } = a;
         drop(hs);
         let ReplyProof { done, fin } = proof;
+        self.answered(now, done, fin, route, lease, was, env, out);
+    }
+
+    /// Take a handshake round-trip sample of `rtt`, from an own attempt's
+    /// first send to its reply, by Karn's rule: a reply that followed a
+    /// resend is not sampled, and an FSP initiator then keeps a backed-off
+    /// first rung for its next rekey setup instead.
+    fn sample(&mut self, rtt: Duration, resent: bool) {
+        if !resent || fault!(KarnOff) {
+            self.mem.hs_rtt = Some(rtt);
+            self.mem.setup_rto = None;
+        } else if P::SETUP_RTT && !fault!(NoKeptBackoff) {
+            self.mem.setup_rto = Some(rtt.saturating_mul(2).min(self.params.rung));
+        }
+    }
+
+    /// An own attempt completed with `done` (and, for three messages, the
+    /// final message `fin` it wrote), the reply having carried `route`.
+    /// The attempt's index, if any, was bound on `was`.
+    #[allow(clippy::too_many_arguments)]
+    fn answered(
+        &mut self,
+        now: C::Instant,
+        done: Bonded<P>,
+        fin: Option<Wire>,
+        route: P::Route,
+        lease: Option<super::IndexLease>,
+        was: P::Transport,
+        env: &mut Env<'_, P>,
+        out: &mut Outputs<P>,
+    ) {
         let epoch = done.epoch();
         if let Some(f) = &fin {
             out.push(Output::Send {
@@ -1580,6 +1647,26 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let Some(cand) = self.cands.remove(seq) else {
             return;
         };
+        self.cands
+            .retain(|c| c.seq > seq && !fault!(AcceptDropsNewer));
+        self.accept(now, done, Some(cand.route), cand.born, restart, env, out);
+    }
+
+    /// Accept a peer's completed attempt `done`, whose setup arrived at
+    /// `born` carrying `route`, after the tie-break allowed it: yield the
+    /// cycle, sample the round trip, open dampening and cut over (or hold a
+    /// frame-driven responder's pending).
+    #[allow(clippy::too_many_arguments)]
+    fn accept(
+        &mut self,
+        now: C::Instant,
+        done: Bonded<P>,
+        route: Option<P::Route>,
+        born: C::Instant,
+        restart: bool,
+        env: &mut Env<'_, P>,
+        out: &mut Outputs<P>,
+    ) {
         match core::mem::replace(&mut self.cycle, Cycle::Idle) {
             Cycle::Idle => {
                 if let Some(cur) = self.cur.as_mut() {
@@ -1594,9 +1681,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 out.push(Output::Abandoned(Abandon::Superseded));
             }
         }
-        self.cands
-            .retain(|c| c.seq > seq && !fault!(AcceptDropsNewer));
-        let rtt = since(now, cand.born);
+        let rtt = since(now, born);
         if rtt < SAMPLE_LIMIT {
             self.mem.hs_rtt = Some(rtt);
             self.mem.setup_rto = None;
@@ -1610,13 +1695,13 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let ids = Ids::unindexed(env.transport);
         let Some(cur_k) = self.cur.as_ref().map(|c| c.k) else {
             let mut ep = Epoch::new(tag, done, ids, false, Role::Responder, now);
-            ep.route = Some(cand.route);
+            ep.route = route;
             self.install(now, ep, env, out);
             return;
         };
         let k = if restart { false } else { !cur_k };
         let mut ep = Epoch::new(tag, done, ids, k, Role::Responder, now);
-        ep.route = Some(cand.route);
+        ep.route = route;
         match P::RESPONDER_CUTOVER {
             ResponderCutover::AtProof => {
                 ep.base = Some(now);
@@ -2682,6 +2767,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 k: ep.k,
                 role: ep.role,
                 started: ep.started,
+                base: ep.base,
                 recv: ep.recv,
                 ext: &ep.ext,
             }

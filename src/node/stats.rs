@@ -41,41 +41,40 @@ pub struct SessionStats {
     /// the key the session was established with. The rekey is
     /// abandoned and the existing session is left intact.
     pub rekey_key_mismatch: u64,
-    /// A setup message naming an already-established peer armed a
-    /// responder-side handshake alongside the running session and a
-    /// SessionAck was sent. The message carries no authenticator, so this
-    /// counts genuine peer restarts and forged setups alike; its rate is
-    /// the signal that something is spraying setup messages, which the
+    /// A setup message naming an already-established peer was held as a
+    /// rekey candidate beside the running session and a SessionAck was
+    /// sent. The message carries no authenticator, so this counts genuine
+    /// peer rekeys and restarts and forged setups alike; its rate is the
+    /// signal that something is spraying setup messages, which the
     /// per-message DEBUG line cannot carry safely at line rate.
     pub rekey_armed: u64,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight and our address sorted smaller, so the
-    /// tie-break dropped their msg1 and kept us as initiator.
+    /// A msg3 completed a peer's rekey while our own completed rekey of
+    /// that session waited for the peer under its keys, and our address
+    /// sorted smaller, so the tie-break kept ours and dropped the peer's.
     pub rekey_tiebreak: u64,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight and our address sorted larger, so we
-    /// abandoned our own rekey and answered as responder. A sustained
-    /// rate here means local key rotation is being suppressed.
+    /// A msg3 completed a peer's rekey while our own rekey of that session
+    /// was still in flight, so ours was given up. The msg3 authenticated
+    /// the session's peer. A completed rekey of ours that was waiting for
+    /// the peer and gave way is counted by `pending_replaced` instead.
     pub rekey_yielded: u64,
-    /// A setup message named an established peer while a handshake that
-    /// peer armed was still waiting for its msg3, so the message was dropped
-    /// and the handshake kept. A genuine retry lands here when the peer
-    /// abandoned a rekey this node answered; a sustained rate means setups
-    /// are being sprayed at the session.
+    /// A setup message named an established peer whose session already
+    /// holds as many rekey candidates as it may, overall or from that link
+    /// peer, so the message was dropped and no candidate was evicted. A
+    /// sustained rate means setups are being sprayed at the session.
     pub rekey_held: u64,
-    /// A setup message named an established peer that already holds a
-    /// completed rekey awaiting cut-over, so the message was dropped
-    /// rather than arming a second handshake.
+    /// A setup message named an established peer while our own completed
+    /// rekey waited for the peer under its keys and our address sorted
+    /// smaller, so the message was refused rather than answered: a peer
+    /// on an earlier release commits to the keys on the answer.
     pub rekey_pending: u64,
-    /// A responder-side handshake armed by a peer's setup message passed
-    /// the handshake timeout without a msg3 and was discarded. The
-    /// established session is retained.
+    /// A rekey candidate held for a peer's setup message reached the end of
+    /// its 40 s lifetime without a msg3 and was discarded. The established
+    /// session is retained.
     pub rekey_expired: u64,
     /// A rekey this node initiated got no readable SessionAck within the
-    /// handshake timeout, and its handshake was discarded so the trigger
-    /// can retry. The established session is retained. A sustained rate
-    /// means setups or acks to that peer are being lost, or the peer holds
-    /// a stuck handshake of its own and wins the tie-break.
+    /// handshake timeout and was given up, so the trigger can retry after
+    /// a backoff. The established session is retained. A sustained rate
+    /// means setups or acks to that peer are being lost.
     pub rekey_unanswered: u64,
     /// A completed rekey session still waiting for the peer's cut-over was
     /// replaced by a newer one, completed from a msg3 carrying the same
@@ -83,6 +82,14 @@ pub struct SessionStats {
     /// already have adopted, so a sustained rate means one side keeps
     /// rekeying while the other never appears on the new epoch.
     pub pending_replaced: u64,
+    /// A rekey of an established session completed with a peer whose
+    /// startup epoch had changed since the session was set up: the peer
+    /// restarted and lost the session. The old keys were discarded, the
+    /// session continues under the new ones, and a node that started the
+    /// rekey moved to them at once. A rekey this node starts after 30 s of
+    /// sending data with nothing heard from the peer is how a peer that
+    /// restarted and stays silent is found.
+    pub peer_restarted: u64,
     /// An inbound SessionAck failed the XK msg2 read against a session we
     /// are initiating. The entry is kept and the handshake rolled back,
     /// since the message authenticates nothing; a sustained rate is either
@@ -122,6 +129,7 @@ impl SessionStats {
             rekey_expired: self.rekey_expired,
             rekey_unanswered: self.rekey_unanswered,
             pending_replaced: self.pending_replaced,
+            peer_restarted: self.peer_restarted,
             ack_handshake_failed: self.ack_handshake_failed,
             setup_rate_limited: self.setup_rate_limited,
             table_full: self.table_full,
@@ -468,6 +476,7 @@ pub struct SessionStatsSnapshot {
     pub rekey_expired: u64,
     pub rekey_unanswered: u64,
     pub pending_replaced: u64,
+    pub peer_restarted: u64,
     pub ack_handshake_failed: u64,
     pub setup_rate_limited: u64,
     pub table_full: u64,

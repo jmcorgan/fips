@@ -25,7 +25,7 @@
 //! whatever the deployed peer does, unless that peer's own defect splits
 //! the link.
 //!
-//! The depth is 3 by default (about 14 s on a 13-core host in a debug
+//! The depth is 3 by default (about 16 s on a 12-core host in a debug
 //! build); `FIPS_LEGACY_DEPTH` asks for more.
 
 use alloc::boxed::Box;
@@ -293,7 +293,9 @@ fn links(depth: usize) -> Vec<Scenario> {
 /// The session scenarios: against each release, a rekey the new node
 /// starts (it the smaller), one the deployed node starts (the new node the
 /// larger), both starting in the same tick, and a first handshake opened
-/// by both ends; and the same between two new nodes.
+/// by both ends; and the same between two new nodes. Each rekey scenario
+/// runs again with the node this release ships (the machine polled on the
+/// shell's tick only) in place of the new node, and between two of them.
 fn sessions(depth: usize) -> Vec<Scenario> {
     let mut out = Vec::new();
     for rel in Rel::ALL {
@@ -301,10 +303,20 @@ fn sessions(depth: usize) -> Vec<Scenario> {
             split: false,
             stall: rel == Rel::V050,
         };
-        for (what, new_jitter, old_jitter, new_smaller, crossing) in [
-            ("new node starts", 0, 15, true, false),
-            ("deployed node starts", 30, -15, false, false),
-            ("both start", 0, -15, true, true),
+        for (what, new_jitter, old_jitter, new_smaller, crossing, shipped) in [
+            ("new node starts", 0, 15, true, false, false),
+            ("deployed node starts", 30, -15, false, false, false),
+            ("both start", 0, -15, true, true, false),
+            ("shipped node starts", 0, 15, true, false, true),
+            (
+                "deployed node starts with a shipped node",
+                30,
+                -15,
+                false,
+                false,
+                true,
+            ),
+            ("both start, one shipped", 0, -15, true, true, true),
         ] {
             let s = fsp::Setup {
                 rel,
@@ -313,6 +325,7 @@ fn sessions(depth: usize) -> Vec<Scenario> {
                 old_jitter,
                 established: true,
                 old_messages: None,
+                shipped,
             };
             out.push(Scenario {
                 name: format!("session, {what}, against {rel:?}"),
@@ -328,7 +341,7 @@ fn sessions(depth: usize) -> Vec<Scenario> {
                 new: [true, false],
             });
         }
-        for new_smaller in [true, false] {
+        for (new_smaller, shipped) in [(true, false), (false, false), (true, true), (false, true)] {
             let s = fsp::Setup {
                 rel,
                 new_smaller,
@@ -336,10 +349,12 @@ fn sessions(depth: usize) -> Vec<Scenario> {
                 old_jitter: 15,
                 established: false,
                 old_messages: None,
+                shipped,
             };
             out.push(Scenario {
                 name: format!(
-                    "first handshake, both open, new node {}, against {rel:?}",
+                    "first handshake, both open, {} node {}, against {rel:?}",
+                    if shipped { "shipped" } else { "new" },
                     if new_smaller { "smaller" } else { "larger" }
                 ),
                 start: Box::new(move || {
@@ -360,29 +375,39 @@ fn sessions(depth: usize) -> Vec<Scenario> {
         split: false,
         stall: false,
     };
-    for (what, jitter) in [("one starts", [0, 30]), ("both start", [15, 15])] {
+    for (what, jitter, shipped) in [
+        ("one starts", [0, 30], false),
+        ("both start", [15, 15], false),
+        ("one starts, both shipped", [0, 30], true),
+        ("both start, both shipped", [15, 15], true),
+    ] {
         out.push(Scenario {
             name: format!("session between new nodes, {what}"),
-            start: Box::new(move || prime(fsp::new_session(23, jitter, true), 100_000)),
+            start: Box::new(move || prime(fsp::new_session(23, jitter, true, shipped), 100_000)),
             depth,
             allow,
             new: [true, true],
         });
     }
-    out.push(Scenario {
-        name: String::from("first handshake between new nodes, both open"),
-        start: Box::new(|| {
-            let mut duo = fsp::new_session(29, [0, 30], false);
-            duo.run_until(1_000);
-            duo.act(0, |end, now, out| end.open(now, out));
-            duo.act(1, |end, now, out| end.open(now, out));
-            duo.hold();
-            duo
-        }),
-        depth,
-        allow,
-        new: [false, false],
-    });
+    for shipped in [false, true] {
+        out.push(Scenario {
+            name: format!(
+                "first handshake between {} nodes, both open",
+                if shipped { "shipped" } else { "new" }
+            ),
+            start: Box::new(move || {
+                let mut duo = fsp::new_session(29, [0, 30], false, shipped);
+                duo.run_until(1_000);
+                duo.act(0, |end, now, out| end.open(now, out));
+                duo.act(1, |end, now, out| end.open(now, out));
+                duo.hold();
+                duo
+            }),
+            depth,
+            allow,
+            new: [false, false],
+        });
+    }
     out
 }
 

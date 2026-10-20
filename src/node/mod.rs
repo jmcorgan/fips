@@ -1777,9 +1777,8 @@ impl Node {
         if let Some(peer) = self.peers.get(addr) {
             return peer.short_npub().to_string();
         }
-        if let Some(entry) = self.sessions.get(addr) {
-            let (xonly, _) = entry.remote_pubkey().x_only_public_key();
-            return PeerIdentity::from_pubkey(xonly).short_npub();
+        if let Some(key) = self.sessions.get(addr).and_then(SessionEntry::peer_key) {
+            return PeerIdentity::from_pubkey(key).short_npub();
         }
         addr.short_hex()
     }
@@ -2721,7 +2720,6 @@ impl Node {
                 } else {
                     "unknown"
                 };
-                let (xonly, _parity) = entry.remote_pubkey().x_only_public_key();
                 let (pkts_tx, pkts_rx, bytes_tx, bytes_rx) = entry.traffic_counters();
 
                 let resend_count = (!entry.is_established()).then(|| entry.resend_count());
@@ -2745,7 +2743,10 @@ impl Node {
                     state,
                     is_initiator: entry.is_initiator(),
                     last_activity_ms: entry.last_activity().wall_ms(),
-                    npub: crate::identity::encode_npub(&xonly),
+                    npub: entry
+                        .peer_key()
+                        .map(|key| crate::identity::encode_npub(&key)),
+                    identity: entry.identity_status(),
                     stats: snap::SessionStats {
                         packets_sent: pkts_tx,
                         packets_recv: pkts_rx,

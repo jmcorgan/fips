@@ -132,8 +132,8 @@ pub struct TagSource {
 
 impl TagSource {
     /// A counter that starts at tag 0.
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self { next: 0 }
     }
 
     /// The next tag. The counter saturates rather than wrapping, which a

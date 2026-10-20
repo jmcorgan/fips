@@ -10,13 +10,26 @@ as an instant of the host's clock. One machine serves a link peer (FMP)
 or an end-to-end session (FSP); the profile type `P` says which, and the
 transitions are written once for both.
 
-The module is `#[doc(hidden)]` and has no callers yet. Its production
-profiles sit with the layers they bind: FMP over Noise IK in
-`proto/fmp/rekey/` (with the node-level read of a peer's IK msg1) and FSP
-over Noise XK in `proto/fsp/rekey/`; the root crate will name only their
-aliases `FmpProfile` and `FspProfile`. The machine's own tests run on the
-stub profiles in `tests/`; `tests/legacy/` runs it on the production
-profiles against models of the deployed releases.
+The module is `#[doc(hidden)]`. Its production profiles sit with the
+layers they bind: FMP over Noise IK in `proto/fmp/rekey/` (with the
+node-level read of a peer's IK msg1) and FSP over Noise XK in
+`proto/fsp/rekey/`; the root crate names only their aliases `FmpProfile`
+and `FspProfile`. The root crate's session table holds each session in a
+machine on `FspProfile` from its first handshake on: the shell opens it
+with `opening_outbound` when this node wants a session, with
+`opening_inbound` for the first setup naming an address, and with `Open`
+on a session the peer's setups opened; the machine takes every setup,
+ack, msg3 and inbound frame through `step`, seals the session's frames,
+and is polled on the shell's tick. So the first handshake (its resends,
+its candidates, the crossing decided at msg3, its retained msg3 and its
+teardown) and every rekey of a session, its start, its handshake, its
+cutover and its drain, are decided by the rows below, the silence
+trigger and restart detection by the peer's startup epoch included. The
+link layer does not use the machine yet. The machine's own tests run on
+the stub profiles in `tests/`; `tests/legacy/` runs it on the production
+profiles against models of the deployed releases, and runs the session
+node this release ships (the machine polled on the shell's tick) against
+them as well.
 
 ## Files
 
@@ -30,6 +43,13 @@ profiles against models of the deployed releases.
 - `cycle.rs`: the cycle enum and its states: an own attempt, an own
   completed attempt (`PendI`, with its `Wait`), a peer's completed
   attempt (`PendR`, which records its arming msg1 on every exit).
+- `hooks.rs`: built only for tests and behind `test-hooks`: what the
+  root crate's session tests read (an epoch's keys, the send counter,
+  the jitter) and `quiet`, which stops the time and message triggers as
+  the largest configured thresholds would; and the source reader
+  (`code_text`, `code_idents`, `lost_items`) both crates' tests use to
+  scan their code, comments and literals left out, for the names of
+  deleted session rekey rules. None is reachable from `step`.
 - `epoch.rs`: `Epoch` (a boxed session and what is derived from it),
   `Drain`, `Ids` (an epoch's indices), `Slot`, `Role`, `RecvHome`,
   `Purpose`, and the trial open of one epoch's key.
@@ -44,7 +64,7 @@ profiles against models of the deployed releases.
   schedule's fixed room is counted, and `Params::inert` reports it.
 - `params.rs`: `Config`, `Params::new` (which refuses settings under
   which a timer fires on every poll or never, and a time trigger below
-  the jitter plus the link-age floor) and every derived value.
+  the jitter plus the link-age floor), and every derived value.
 - `lease.rs`: `IndexLease` (a linear session index), `allocate`, the
   leak counter, `EpochTag` and `TagSource`.
 - `record.rs`: the IK replay record and the answer a responder pending
@@ -115,8 +135,8 @@ moves its retained msg3, ladder and all, into the new current epoch) can
 leave one at or before `now` uncollected, so the pass repeats over the
 deadlines it has not yet processed until none is due.
 Then an empty first handshake and an exhausted send counter end the
-machine. The start pass starts an own rekey when it is due and offers
-any epoch a worker does not hold.
+machine. The start pass starts an own rekey when it is due (a silence
+start for a session only) and offers any epoch a worker does not hold.
 
 `next_wake` names the earliest instant a poll has work: every stored
 deadline, and the instant each start condition next holds. A counter
@@ -124,6 +144,17 @@ trigger that is already met counts from the floor, dampening or backoff
 that holds it, and an exhausted counter makes the wake an instant
 already past, so a shell that arms one timer at `next_wake` loses no
 work against one that polls every second.
+
+Either shell loses no work only if it processes due work before it steps
+a session setup. A shell that polls on a tick can take a setup up to a
+tick after a deadline has passed, and a setup stepped then is judged
+against the state that deadline ends: the smaller node refuses a setup
+while its completed rekey waits, though the confirmation deadline has
+given that rekey up, and a deployed peer sends its rekey setup once. So
+before stepping a setup, the shell polls the machine whenever
+`next_wake` is at or before the setup's instant. The poll also starts an
+own rekey whose start instant has come, the order a shell with a timer
+at `next_wake` produces.
 
 ## The transitions, by input
 

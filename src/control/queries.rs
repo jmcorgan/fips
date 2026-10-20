@@ -769,9 +769,12 @@ pub fn show_sessions(node: &Node) -> Value {
                 "last_activity_ms": entry.last_activity().wall_ms(),
             });
 
-            // Derive npub from session's remote public key
-            let (xonly, _parity) = entry.remote_pubkey().x_only_public_key();
-            session_json["npub"] = json!(encode_npub(&xonly));
+            // Only a key a handshake proved is reported: an unproved
+            // session gets no npub rather than a guessed one.
+            if let Some(key) = entry.peer_key() {
+                session_json["npub"] = json!(encode_npub(&key));
+            }
+            session_json["identity"] = json!(entry.identity_status());
 
             // Traffic counters
             let (pkts_tx, pkts_rx, bytes_tx, bytes_rx) = entry.traffic_counters();
@@ -849,7 +852,10 @@ pub(crate) fn show_sessions_from_handle(handle: &super::read_handle::ControlRead
                 "last_activity_ms": session.last_activity_ms,
             });
 
-            session_json["npub"] = json!(session.npub);
+            if let Some(npub) = &session.npub {
+                session_json["npub"] = json!(npub);
+            }
+            session_json["identity"] = json!(session.identity);
 
             session_json["stats"] = json!({
                 "packets_sent": session.stats.packets_sent,

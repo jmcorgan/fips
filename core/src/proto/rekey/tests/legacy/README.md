@@ -32,15 +32,25 @@ deletes this directory.
 - `new.rs`: the new nodes: the machine on `FmpIk` and on `FspXk` behind a
   shell that executes the outputs as the root crate's shell will (sends,
   prompts sealed at once, the index map from `Bind` and `Unbind`, leases
-  returned on `Release`), frames every message with the deployed codecs,
-  and for a link keeps the deployed 10 s heartbeat and 30 s link-dead
-  reap on `view().last_rx`.
+  returned on `Release`, and for a session a poll before a setup whenever
+  a deadline or start instant of the machine has come), frames every
+  message with the
+  deployed codecs, and for a link keeps the deployed 10 s heartbeat and
+  30 s link-dead reap on `view().last_rx`.
 - `fmp.rs`: `FmpPeer`, a deployed node's link to one peer, and the link
   traces.
-- `fsp.rs`: `FspPeer`, a deployed node's session entry for one peer, and
+- `ship.rs`: `ShipFsp`, the session node this release ships: the machine
+  on `FspXk` at the session defaults, opened for a first handshake as the
+  root crate's session handlers open it, taking every setup, ack, msg3 and
+  frame of a session and starting its own rekeys, polled on the shell's
+  tick, and before a setup whenever a deadline or start instant of the
+  machine has come.
+- `fsp.rs`: `FspPeer`, a deployed node's session entry for one peer
+  (which can restart, losing it and drawing a new startup epoch), and
   the session traces.
 - `explore.rs`: the bounded exhaustive explorer over a `Duo`, against
-  every release and between two new nodes.
+  every release and between two new nodes, the session rekeys and first
+  handshakes also with the shipped node.
 
 ## The models
 
@@ -88,14 +98,27 @@ frames; a silent one, as in session MMP mode Minimal, sends none).
   matter, simultaneous initiation, restarts, and first handshakes opened
   by either end or both) against every release in each role they involve,
   with the schedules that hold the machine's guards to their interop
-  consequences.
+  consequences. Every first-handshake case runs twice: with the new node,
+  polled at its next wake, and with the shipped node, polled on the tick.
   Each case states its outcome and bound; the failure message names the
   case and release and prints the run's notes.
 - `fmp::lossy_link_runs_converge_against_every_deployed_release` and
   `fsp::lossy_session_runs_converge_against_every_deployed_release`:
   seeded runs at 15 % loss each way for 600 s against every release and
   between two new nodes (the production profiles against themselves),
-  healed and required to converge.
+  healed and required to converge; some session runs use the shipped node
+  in place of the new one, against a release or against another shipped
+  node.
+- The session rekey traces also run with the shipped node in place of the
+  new one (`fsp::shipped_traces`): S-1 with and without a silent
+  responder, S-2 with the responder sending and silent, S-3 against 0.5.0
+  and 0.5.2 with the responder sending and silent
+  (`fsp::shipped_slow_acks`), S-4 at both addresses, S-5 with and
+  without msg3 loss, S-6, S-7, the crossings of 7.6 at both addresses,
+  case D, an old-epoch frame delayed past the cutover, and strangers'
+  setups that must neither stop rotation nor evict a deployed
+  initiator's candidate. Each states its bound against what a deployed
+  initiator would lose.
 
 - `explore::every_explored_interleaving_against_each_deployed_release_heals`:
   from the first handshake message of a rekey started by the new node, by
@@ -103,13 +126,15 @@ frames; a silent one, as in session MMP mode Minimal, sends none).
   ends at either address order, every sequence of up to 3 events
   (deliver any packet in flight, copy a handshake message once, seal one
   data frame at either end, advance to the next tick or wake), against
-  every release and between two new nodes. The ends cannot be cloned, so
+  every release and between two new nodes; each session rekey scenario
+  and each first handshake runs again with the shipped node in place of
+  the new one, and between two shipped nodes. The ends cannot be cloned, so
   each path is replayed from its start and paths are not de-duplicated.
   After each event no new link node's index map drifts; at each frontier
   path the heal must converge (or end as the release forces: the 0.5.0
   link split, the 0.5.0 session's stopped rotation) with no lease leaked,
   and no data frame a new node sealed in a rekey may be refused once
-  delivered. The depth is 3 by default (about 14 s on 13 cores in a debug
+  delivered. The depth is 3 by default (about 16 s on 12 cores in a debug
   build); `FIPS_LEGACY_DEPTH` sets another.
 
 Several guard switches of `../../faults.rs` name these tests in the

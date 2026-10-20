@@ -140,11 +140,33 @@ and SessionMsg3:
    static key and encrypted epoch. Both parties derive identical symmetric
    session keys and the session is established.
 
+The initiator is established once its msg3 leaves, and sends the packets it
+queued at once; the responder only once the msg3 arrives. So the initiator
+keeps its msg3 and resends it at 1, 3, 7, 15 and 31 seconds
+(`node.rate_limit.handshake_max_resends` copies at the default of five)
+until any frame from the responder authenticates under the new keys, and
+the responder sends a CoordsWarmup under them as soon as it has the msg3,
+which ends the resends even when it has no data to send. If the last copy
+goes unheard, the initiator starts a rekey at once to repair the session.
+The initiator's own SessionSetup is resent at 1, 3, 7 and 15 seconds and
+the attempt ends at the handshake timeout (`handshake_timeout_secs`, 30 s
+by default). The responder sends one SessionAck per setup it holds and
+answers a byte-identical resent setup with that same ack, never on a timer
+of its own, so a lost ack is recovered by the initiator's resent setup.
+
 Each side's epoch (an 8-byte random value generated at startup) is
-exchanged encrypted in msg2 and msg3. On subsequent handshakes, an epoch
-mismatch indicates the peer has restarted, triggering session
-re-establishment — similar to IKEv2's INITIAL_CONTACT notification for
-peer restart detection (RFC 7296 §2.4).
+exchanged encrypted in msg2 and msg3. When a rekey of an established
+session completes with a peer epoch other than the one the session
+recorded, the peer has restarted and lost the session: the old keys are
+discarded at once instead of drained, the node that started the rekey
+moves to the new keys at its msg3 (resending it until the peer is heard)
+instead of waiting to hear the peer under them, and the restart is counted
+(`peer_restarted`) and logged. The session itself is kept. This is similar
+to IKEv2's INITIAL_CONTACT notification for peer restart detection (RFC
+7296 §2.4). A restarted peer that sends nothing is found by the silence
+rule: a node that has sent data and heard nothing from the peer under the
+session's current keys for 30 seconds starts a rekey, which the restarted
+peer answers as a new session.
 
 Packets that trigger session establishment are queued (with bounded buffer)
 while a session or a coordinate lookup is in progress for the destination,
@@ -182,34 +204,45 @@ the forward path (e.g., after tree reconvergence).
 
 ### Simultaneous Initiation
 
-When both nodes send a SessionSetup to each other at the same time
-("crossing hellos"), the handshake initiated by the node with the smaller
-address wins, as in IKEv2's simultaneous initiation (RFC 7296 §2.8). A
-SessionSetup proves nothing about its sender until its msg3 arrives, so
-the rule is applied in a way a forged setup cannot use to block the
-address owner's session:
+A SessionSetup proves nothing about its sender until its msg3 arrives, so
+no setup, forged or genuine, cancels, pauses or holds back a node's own
+handshake. Each setup a node answers is held as a half-open candidate with
+its own handshake and SessionAck, beside the node's own attempt if it has
+one, and a node that wants a session with an address whose setups it holds
+starts its own attempt at once. The decision between crossing handshakes
+("crossing hellos") is taken when a msg3 authenticates, by one rule both
+ends apply alike: a node whose own setup is still unanswered gives way to
+the peer's completed handshake, and between two completed handshakes the
+one initiated by the node with the smaller address wins, as in IKEv2's
+simultaneous initiation (RFC 7296 §2.8).
 
-- The winner (smaller address) drops the peer's setup while its own setup
-  is less than 5 s old, since the peer will answer it. If its own setup
-  has gone unanswered for 5 s, it gives up its own leg and answers the
-  peer's setup instead.
-- The loser (larger address) answers the peer's setup and keeps its own
-  initiator leg beside it, with its resends paused. The resends resume
-  once the peer's setup has been held for 5 s with nothing completed, or
-  at once if no half-open setup from the peer is left.
+- The node with the smaller address refuses a crossing setup, answering
+  nothing, while its own setup is less than 5 s old, since the peer will
+  answer it; after that the setup is a candidate like any other. It also
+  refuses a new setup while its first msg3, or its last completed rekey,
+  still waits for the peer: earlier releases commit to a handshake on its
+  SessionAck, so an ack this node would not complete is never sent.
+- The node with the larger address answers a crossing setup and keeps its
+  own attempt beside it, holding back its own setup resends inside the
+  attempt's first 5 s while it holds a candidate, so a smaller peer on an
+  earlier release that has already established on its answer does not take
+  a resend for a rekey.
 
-Each setup a node answers is held as a half-open responder setup with its
-own handshake and SessionAck, up to four per address. If the loser's own
-leg completes first, it keeps the winner's half-open setups beside its
-session, and a msg3 completing one of them replaces its session, so both
-sides end on the same handshake. The winner, once established, keeps none.
+A node that established on its own handshake keeps the candidates it holds
+until it hears the peer under the new keys, so the peer's msg3 still meets
+them; once it has heard the peer, it drops those born before it
+established. A setup that arrives while a node's first msg3 waits for the
+peer is never answered with that msg3.
 
-Each half-open setup expires on its own deadline, a handshake timeout
-(30 s by default) after it was admitted, including those the loser keeps
-beside an established session. With four held, a new setup replaces the
-oldest one that is at least 5 s old, preferring one that arrived over the
-same link peer, and is refused if none is that old. A forged setup
-therefore cannot be evicted before it is 5 s old.
+A node holds at most four candidates per address, at most two of them
+from setups that arrived over one link peer. Each expires 40 s after its
+setup arrived, and a session holding neither a candidate nor its own
+attempt is removed. While the session is being set up, a new setup over a
+link peer at its share replaces that link peer's oldest candidate that is
+at least 5 s old, and is refused if none is that old, and a link peer's
+only candidate is never replaced. A forged setup therefore cannot be
+evicted before it is 5 s old, and cannot evict the only setup another link
+peer brought.
 
 ### Data Transfer
 

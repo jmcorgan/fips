@@ -557,7 +557,7 @@ pub(crate) struct NewFsp {
     tags: TagSource,
     pub(crate) jitter: Jit,
     scratch: Vec<u8>,
-    notes: Vec<String>,
+    pub(super) notes: Vec<String>,
     pub(crate) params: Params,
     /// The session SRTT the shell reports, if its MMP measures one.
     pub(crate) srtt: Option<Duration>,
@@ -653,7 +653,7 @@ impl NewFsp {
     }
 
     /// Run `f` with the machine and an `Env` over this shell.
-    fn with<R>(
+    pub(super) fn with<R>(
         &mut self,
         f: impl FnOnce(&mut Option<Rekey<Xk, TestClock>>, &mut Env<'_, Xk>) -> R,
     ) -> R {
@@ -719,7 +719,7 @@ impl NewFsp {
     }
 
     /// Execute outputs front to back, as the shell does.
-    fn run(&mut self, now: u64, outputs: Vec<Output<Xk>>, out: &mut Vec<Out>) {
+    pub(super) fn run(&mut self, now: u64, outputs: Vec<Output<Xk>>, out: &mut Vec<Out>) {
         let mut teardown = false;
         for o in outputs {
             match o {
@@ -791,6 +791,13 @@ impl End for NewFsp {
         let route = coords(peer_addr);
         match pkt {
             Pkt::Setup(msg1) => {
+                // As the shell does: a setup is judged only after every
+                // deadline and start instant already due, so it never meets
+                // a confirmation deadline or a final msg3 rung that has
+                // passed.
+                if self.wake().is_some_and(|w| w <= now) {
+                    self.tick(now, out);
+                }
                 if self.m.is_none() {
                     let me = self.local_addr();
                     let params = self.params;

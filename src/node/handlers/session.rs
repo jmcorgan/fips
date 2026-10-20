@@ -13,13 +13,10 @@ use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{
-    CandidateAdmission, EndToEndState, EpochSlot, HALF_OPEN_MIN_AGE, ResponderCandidate,
-    SessionClock, SessionEntry, SessionInstant,
+    SealFailure, SessionClock, SessionEntry, SessionInstant, session_params,
 };
 use crate::node::{Node, NodeError};
-use crate::noise::{
-    HandshakeState, XK_HANDSHAKE_MSG1_SIZE, XK_HANDSHAKE_MSG2_SIZE, XK_HANDSHAKE_MSG3_SIZE,
-};
+use crate::noise::{XK_HANDSHAKE_MSG1_SIZE, XK_HANDSHAKE_MSG2_SIZE, XK_HANDSHAKE_MSG3_SIZE};
 #[cfg(unix)]
 use crate::proto::fmp::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, FLAG_SP, build_established_header,
@@ -29,12 +26,11 @@ use crate::proto::fsp::quorum::QuorumVerdict;
 use crate::proto::fsp::wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
     FSP_PHASE_MSG1, FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,
-    FspCommonPrefix, FspEncryptedHeader, build_fsp_header, fsp_prepend_inner_header,
-    fsp_strip_inner_header, parse_encrypted_coords,
+    FspCommonPrefix, FspEncryptedHeader, fsp_strip_inner_header, parse_encrypted_coords,
 };
 use crate::proto::fsp::{
-    DecryptSlot, EpochReaction, FspAction, FspInnerFlags, SessionAck, SessionMessageType,
-    SessionMsg3, SessionSetup, mark_ipv6_ecn_ce,
+    FspAction, FspInnerFlags, SessionAck, SessionMessageType, SessionMsg3, SessionSetup,
+    mark_ipv6_ecn_ce,
 };
 #[cfg(unix)]
 use crate::proto::link::LinkMessageType;
@@ -49,13 +45,11 @@ use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTER
 use crate::proto::probe::LookupOutcomeKind;
 use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken, RoutingSignalType};
 use crate::proto::stp::{coords_wire_size, encode_coords};
-use crate::time::deadline;
 #[cfg(unix)]
 use crate::transport::TransportHandle;
+use fips_core::proto::rekey::{EpochTag, NodeKeys, Output, Params, Reason, Role};
 use fips_core::time::Clock as _;
-use fips_core::time::Instant;
 use secp256k1::PublicKey;
-use std::time::Duration;
 use tracing::{debug, info, trace, warn};
 
 /// Minimum interval between path-MTU releases driven by `PathBroken` for one
@@ -93,8 +87,8 @@ fn link_wire_len(encoded_len: usize) -> usize {
 /// Two means a reconnect storm, where every peer that had a session
 /// initiates at once after a restart or a healed partition, still fits in
 /// half the table; a tighter share bites four times sooner and is felt by
-/// a hub before it is felt by an attacker. Half-open entries are reaped
-/// after `handshake_timeout_secs` while established ones survive
+/// a hub before it is felt by an attacker. Half-open entries end with their
+/// last candidate, 40 s after its setup, while established ones survive
 /// `idle_timeout_secs`, so they turn over faster than the share suggests.
 /// Lowering the divisor raises the share, which lets a handshake flood
 /// crowd out peers that complete; raising it refuses legitimate initiators
@@ -381,9 +375,9 @@ struct PipelinedSend<'a> {
     dest_addr: &'a NodeAddr,
     payload: &'a [u8],
     now: SessionInstant,
-    timestamp: u32,
     fsp_flags: u8,
-    inner_plaintext: &'a [u8],
+    /// The DataPacket body, port header included, before the inner header.
+    body: &'a [u8],
     my_coords: Option<&'a crate::proto::stp::TreeCoordinate>,
     dest_coords: Option<&'a crate::proto::stp::TreeCoordinate>,
 }
@@ -546,8 +540,6 @@ impl Node {
             }
         }
 
-        let ciphertext = &payload[ciphertext_offset..];
-
         // Look up session entry — must be Established to decrypt
         {
             let entry = match self.sessions.get(src_addr) {
@@ -574,8 +566,8 @@ impl Node {
 
         // The received K-bit is only an ordering hint for the
         // trial-decrypt cascade — it picks which key epoch to try first.
-        // Correctness never depends on it; promotion is driven by which
-        // slot actually authenticates the frame, not by the header bit.
+        // Correctness never depends on it: the epoch is the one whose key
+        // authenticates the frame.
         let received_k_bit = header.flags & FSP_FLAG_K != 0;
 
         let mut entry = match self.sessions.remove(src_addr) {
@@ -584,97 +576,54 @@ impl Node {
         };
 
         let now = Self::session_now();
+        let local = self.session_node_keys();
 
-        // Overlapping-epoch trial-decrypt: try current, pending and
-        // previous so any epoch the peer might have sealed this frame in
-        // can be decrypted. This makes rekey correctness independent of
-        // cutover timing — no ordering and no reordering can cause a
-        // decrypt failure. A successful `previous`-slot decrypt also
-        // refreshes the drain deadline so the old epoch is retained as
-        // long as the peer keeps using it.
-        let (plaintext, slot) = match entry.fsp_trial_decrypt(
-            ciphertext,
+        // The session's rekey machine tries every key it holds on the
+        // unmodified frame, runs the row of the epoch that authenticated it
+        // (a frame under the pending epoch is the cutover; one under the
+        // current epoch is the peer heard there; one under the previous
+        // epoch counts for nothing but itself), and writes the plaintext
+        // into the frame's own buffer for delivery.
+        let mut frame = payload.to_vec();
+        let out = entry.step_frame(
+            &mut frame,
+            ciphertext_offset,
             header.counter,
-            &header.header_bytes,
             received_k_bit,
             now,
-        ) {
-            Some(result) => result,
-            None => {
-                // Every live slot failed — a genuine drop. The upper
-                // layer retransmits.
-                debug!(
-                    src = %self.peer_display_name(src_addr),
-                    counter = header.counter,
-                    "Session AEAD decryption failed (all epochs)"
-                );
-                self.sessions.insert(*src_addr, entry);
-                return;
-            }
-        };
-
-        // A frame that authenticates on this session, in any epoch slot,
-        // proves the peer completed the handshake, so a msg3 still held for
-        // resend has arrived. Only an established initiator holds one; for
-        // every other entry this is a no-op.
-        entry.clear_handshake_payload();
-
-        // React to the epoch the frame decrypted against. The shell opened
-        // the frame; the core classifies the post-decrypt reaction over the
-        // plain-data slot + session flags, and the shell applies the
-        // `SessionEntry` mutation.
-        let decrypt_slot = match slot {
-            EpochSlot::Current => DecryptSlot::Current,
-            EpochSlot::Pending => DecryptSlot::Pending,
-            EpochSlot::Previous => DecryptSlot::Previous,
-        };
-        match self.fsp.classify_epoch(
-            decrypt_slot,
-            entry.rekey_msg3_payload().is_some(),
-            entry.pending_new_session().is_some(),
-        ) {
-            EpochReaction::PromoteConfirming => {
-                // A frame that authenticates against `pending` is itself the
-                // cutover signal — proof the peer derived the new session and
-                // moved to it. The peer received msg3, so confirm it on the new
-                // epoch (stop retransmitting) before `handle_peer_kbit_flip`
-                // consumes the pending session, then promote.
-                info!(
-                    peer = %self.peer_display_name(src_addr),
-                    "Peer FSP new-epoch frame authenticated, FSP rekey cutover complete, promoting new session"
-                );
-                entry.confirm_peer_new_epoch();
-                entry.handle_peer_kbit_flip(now);
-            }
-            EpochReaction::Promote => {
-                // Promote now: current → previous, pending → current, flip the
-                // K-bit. The header K-bit is only a hint; the authenticated
-                // decrypt is the gating event.
-                info!(
-                    peer = %self.peer_display_name(src_addr),
-                    "Peer FSP new-epoch frame authenticated, FSP rekey cutover complete, promoting new session"
-                );
-                entry.handle_peer_kbit_flip(now);
-            }
-            EpochReaction::ConfirmResponder => {
-                // We are the rekey initiator that already cut over on its own
-                // timer: `current` is now the new epoch, so a frame decrypting
-                // against it confirms the responder reached it. Stop
-                // retransmitting msg3.
-                entry.confirm_peer_new_epoch();
-            }
-            EpochReaction::None => {
-                // Steady-state `current`, or an old-epoch `previous` straggler:
-                // `fsp_trial_decrypt` already refreshed the drain deadline so
-                // the `previous` slot is not retired while the peer keeps using
-                // it — no further state change, just deliver.
+            &local,
+        );
+        let mut delivered = None;
+        let mut rest_out = Vec::with_capacity(out.len());
+        for output in out {
+            match output {
+                Output::Deliver { range, tag, .. } => delivered = Some((range, tag)),
+                Output::Reject(reason @ (Reason::FrameUnauthenticated | Reason::Replay)) => {
+                    // Every held epoch refused it — a genuine drop. The
+                    // upper layer retransmits.
+                    debug!(
+                        src = %self.peer_display_name(src_addr),
+                        counter = header.counter,
+                        ?reason,
+                        "Session AEAD decryption failed (all epochs)"
+                    );
+                }
+                other => rest_out.push(other),
             }
         }
 
         self.sessions.insert(*src_addr, entry);
+        self.run_session_outputs(src_addr, rest_out, false).await;
+
+        let Some((range, tag)) = delivered else {
+            return;
+        };
+        let Some(plaintext) = frame.get(range) else {
+            return;
+        };
 
         // Strip FSP inner header (6 bytes)
-        let (timestamp, msg_type, inner_flags_byte, rest) = match fsp_strip_inner_header(&plaintext)
+        let (timestamp, msg_type, inner_flags_byte, rest) = match fsp_strip_inner_header(plaintext)
         {
             Some(parts) => parts,
             None => {
@@ -683,9 +632,12 @@ impl Node {
             }
         };
 
-        // MMP per-message recording on RX path
+        // MMP per-message recording on RX path, for the epoch MMP measures
+        // only: a frame the peer sealed under the epoch a cutover retired
+        // carries that epoch's counter and timestamp, and recording it would
+        // count every later frame of the new epoch as reordered.
         if let Some(entry) = self.sessions.get_mut(src_addr)
-            && let Some(mmp) = entry.mmp_mut()
+            && let Some(mmp) = entry.epoch_mmp(tag)
         {
             let now_ms = crate::time::mono_ms();
             mmp.receiver
@@ -780,10 +732,8 @@ impl Node {
                         // timer and the pending-outbound flush at the end of
                         // this function are this message's bookkeeping and are
                         // owed whether or not it had anywhere to go.
-                        if let Some(peer_key) = self
-                            .sessions
-                            .get(src_addr)
-                            .map(|session| session.remote_pubkey().x_only_public_key().0)
+                        if let Some(peer_key) =
+                            self.sessions.get(src_addr).and_then(SessionEntry::peer_key)
                         {
                             let outcome = self
                                 .native_deliver(*src_addr, peer_key, src_port, dst_port, payload);
@@ -803,7 +753,7 @@ impl Node {
                 self.handle_session_sender_report(src_addr, rest);
             }
             Some(SessionMessageType::ReceiverReport) => {
-                self.handle_session_receiver_report(src_addr, rest);
+                self.handle_session_receiver_report(src_addr, tag, rest);
             }
             Some(SessionMessageType::PathMtuNotification) => {
                 self.handle_session_path_mtu_notification(src_addr, rest);
@@ -861,13 +811,32 @@ impl Node {
             return;
         }
 
+        // Catch the named session's machine up first. The 1 s tick can
+        // process a deadline or start instant up to a second late, and a
+        // setup admitted or judged in that second meets a table and a state
+        // the overdue poll is about to change: the poll can end the session,
+        // so the setup would open a new entry the admission below never
+        // charged, and it can end a completed rekey of this node's, which the
+        // smaller node would otherwise keep by refusing the setup. Start
+        // instants are polled too, so the setup can meet a rekey of this
+        // node's that the poll has just started; a shell that polls at the
+        // machine's next wake starts it at that instant, before the setup
+        // arrives, so this is the order the machine is built for. The poll
+        // runs ahead of the limiter because it is no step of the setup: it
+        // does only work already due, sends nothing for the setup, and leaves
+        // nothing due until the machine's next instant, so a flood of setups
+        // naming the address polls it no more often than a timer would.
+        let now = Self::session_now();
+        self.poll_overdue(src_addr, now).await;
+
         // Meter the setup before anything is spent on it. This sits ahead of
-        // every `send_session_datagram` call in the handler — the duplicate
-        // ack resend, the rekey ack and the fresh-setup ack alike — so a
-        // refused msg1 emits nothing at all, which is what bounds the ack
-        // amplification. It also precedes both responder handshake
-        // constructions, so a refusal costs no crypto. Moving it below the
-        // existing-entry lookup would leave the duplicate resend unmetered.
+        // every step of the setup into a session machine, so of every ack it
+        // asks for (the stored ack a resent setup draws, and a new
+        // candidate's alike): a refused msg1 emits nothing at all, which is
+        // what bounds the ack amplification. It also precedes every responder
+        // handshake construction, so a refusal costs no crypto. Moving it
+        // below the existing-entry lookup would leave the stored-ack resend
+        // unmetered.
         //
         // The class is read from the session table but the *key* is the link
         // peer: `src_addr` is chosen by the sender, so keying on it would be
@@ -880,9 +849,9 @@ impl Node {
         // is Stranger for an existing entry still being set up too, and
         // refusing those would break in-flight legitimate handshakes and
         // the duplicate-ack resend. A setup joining such an entry as a new
-        // responder candidate is checked against the half-open share below,
-        // once the duplicate and tie-break arms have had it, so that refusal
-        // comes after the limiter and costs the link peer a token. Same shape as the pending-destination cap
+        // candidate is checked against the half-open share below, once its
+        // machine has said it would hold it, so that refusal comes after the
+        // limiter and costs the link peer a token. Same shape as the pending-destination cap
         // in `queue_pending_packet`. Refuse rather than evict: msg1 is
         // unauthenticated here, so evicting would hand a stranger a teardown
         // primitive it does not have.
@@ -914,341 +883,112 @@ impl Node {
             return;
         }
 
-        // A SessionSetup naming an established peer is handled apart from the
-        // handshake paths below: it may only arm a rekey beside the session.
-        if let Some(existing) = self.sessions.get(src_addr)
-            && existing.is_established()
+        // Every setup naming the address is its session machine's: one
+        // naming an established peer is a rekey setup, any other a first
+        // handshake's, and either way the machine holds it as a candidate
+        // and asks for its SessionAck, answers a resent setup with the ack it
+        // already sent, or refuses it. It changes nothing else: a setup,
+        // forged or genuine, never holds back or cancels this node's own
+        // attempt, and only an authenticated msg3 completes a candidate. No
+        // setup is ever answered with a msg3 this node retains: while its
+        // first msg3 waits for the peer, the smaller node refuses the setup
+        // and the larger holds it as a candidate.
+        let local = self.session_node_keys();
+        let Some(entry) = self.sessions.get(src_addr) else {
+            self.open_inbound_session(src_addr, link_peer, &setup, &local, now)
+                .await;
+            return;
+        };
+        let established = entry.is_established();
+        // A setup that would add a candidate to a session still being set
+        // up takes one more place of the half-open share; a copy of a held
+        // setup, a refused one and one replacing an evicted candidate take
+        // none.
+        if !established
+            && entry.grows(now, &setup.handshake_payload, *link_peer)
+            && !self.admit_half_open_candidate(src_addr)
         {
-            // A SessionSetup naming an already-established peer is
-            // unauthenticated: msg1 is a bare ephemeral and the source
-            // address is an envelope field, so anyone able to reach us
-            // can claim it. It may therefore only arm a handshake
-            // alongside the running session, never replace it. The new
-            // keys are adopted in `handle_session_msg3` and only when the
-            // authenticated static key matches the key this session was
-            // opened with, and the cut-over waits for a frame that
-            // authenticates against the pending epoch. Every exit below
-            // returns, so an established entry never reaches the
-            // re-establishment path that replaces it.
-            //
-            // This node initiated the session and still holds its msg3,
-            // because nothing has been heard from the peer on it. A setup
-            // from the peer then most likely means our msg3 has not reached
-            // it: the peer is holding our handshake as a responder and,
-            // having traffic of its own, has initiated beside it. Arming a
-            // rekey for that setup would hold a handshake the peer never
-            // completes (it establishes on our msg3 and refuses the ack),
-            // and the held handshake would refuse the peer's genuine rekeys
-            // until it timed out. Our msg3 completes the session the peer is
-            // waiting on instead, and goes to the peer, not to an address
-            // the setup chose.
-            if let Some(msg3) = existing.handshake_payload().map(<[u8]>::to_vec) {
+            return;
+        }
+        let entry = self.sessions.get_mut(src_addr).unwrap();
+        let held = entry.candidate_count();
+        let out = entry.step_setup(
+            &setup.handshake_payload,
+            *link_peer,
+            setup.src_coords.clone(),
+            now,
+            &local,
+        );
+        let armed = entry.candidate_count() > held;
+        let refused = out
+            .iter()
+            .any(|o| matches!(o, Output::Reject(Reason::TieBreakKept)));
+        if established {
+            if armed {
+                self.stats_mut().session.rekey_armed += 1;
                 debug!(
                     src = %self.peer_display_name(src_addr),
-                    reason = "msg3-unconfirmed",
-                    "SessionSetup from a peer our msg3 has not reached, resending msg3 instead of arming a rekey"
+                    "FSP rekey: answered the peer's setup, awaiting msg3"
                 );
-                let my_addr = *self.node_addr();
-                let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3)
-                    .with_ttl(self.config().node.session.default_ttl);
-                if let Err(e) = self.send_session_datagram(&mut datagram).await {
-                    debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to resend session msg3");
-                }
-                return;
             }
-            let rekey_in_progress = existing.has_rekey_in_progress();
-            // A completed rekey outranks a fresh setup message while the
-            // cut-over it is waiting for can still arrive. Once it has
-            // waited a full idle timeout for a peer that never appeared
-            // on the new epoch, it stops vetoing: a peer that restarted,
-            // or one whose own cycle lapsed, would otherwise be refused
-            // for as long as our own sends kept the session from idling
-            // out. The pending keys survive both outcomes of this test:
-            // the veto returns without touching them, and the
-            // fall-through only arms a handshake beside them. Adopting
-            // them is still an authenticated msg3's job alone. No arm
-            // below drops one either.
-            let pending_outranks = existing.pending_new_session().is_some()
-                && !existing.pending_stale(
-                    Self::session_now(),
-                    Duration::from_millis(self.config().node.session.idle_timeout_secs * 1000),
-                );
-
-            // A handshake the peer armed is held until its msg3 or its
-            // timeout. Once the peer has read our SessionAck it holds the
-            // new keys, so this handshake is the only one its msg3 can
-            // complete, and discarding it for an unauthenticated setup
-            // splits the session's epochs. A genuine retry that meets a
-            // stale handshake here completes one handshake timeout
-            // later, once the handshake has expired.
-            if rekey_in_progress && !existing.is_rekey_initiator() {
+            if refused {
+                // The smaller node's own rekey has completed, or its msg3
+                // is still resent, and waits for the peer under its keys: a
+                // deployed peer commits on an ack, so the setup is refused
+                // rather than answered.
                 debug!(
                     src = %self.peer_display_name(src_addr),
-                    "FSP rekey msg1 received while the peer's handshake awaits msg3, dropping"
-                );
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::RekeyHeld));
-                return;
-            }
-
-            // Dual-initiation detection: both sides sent SessionSetup
-            // simultaneously. Apply tie-breaker — smaller NodeAddr
-            // wins as initiator (same as initial session setup).
-            if rekey_in_progress {
-                if crate::proto::fsp::initiation_winner(self.identity().node_addr(), src_addr) {
-                    // We win as initiator — drop their msg1.
-                    debug!(
-                        src = %self.peer_display_name(src_addr),
-                        "Dual FSP rekey initiation: we win (smaller addr), dropping their msg1"
-                    );
-                    self.stats_mut()
-                        .record_reject(RejectReason::Session(SessionReject::RekeyTiebreak));
-                    return;
-                }
-                // We lose — abandon our armed handshake, become
-                // responder below.
-                //
-                // `abandon_handshake`, not `abandon_rekey`, although the
-                // arm above leaves only handshakes this node initiated,
-                // and an initiator handshake never sits beside a pending
-                // session (see the SessionAck handler). Only the handshake
-                // is ours to discard, and discarding it costs nothing:
-                // the peer has not answered it, so it holds no key
-                // material either endpoint is using.
-                debug!(
-                    src = %self.peer_display_name(src_addr),
-                    "Dual FSP rekey initiation: we lose (larger addr), abandoning ours"
-                );
-                let entry = self.sessions.get_mut(src_addr).unwrap();
-                entry.abandon_handshake();
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::RekeyYielded));
-            } else if pending_outranks {
-                // Guard: already have a pending session waiting for K-bit cutover
-                debug!(
-                    src = %self.peer_display_name(src_addr),
-                    "FSP rekey msg1 received but already have pending session, dropping"
+                    "FSP setup refused: our own completed handshake waits for the peer"
                 );
                 self.stats_mut()
                     .record_reject(RejectReason::Session(SessionReject::RekeyPending));
-                return;
             }
-            // This frame's own copy of the node's long-term private key;
-            // the handshake state keeps its own and clears that on drop.
-            let mut our_keypair = self.identity().keypair();
-            let mut handshake = HandshakeState::new_xk_responder(our_keypair);
-            our_keypair.non_secure_erase();
-            handshake.set_local_epoch(self.startup_epoch());
-
-            if let Err(e) = handshake.read_xk_message_1(&setup.handshake_payload) {
-                debug!(
-                    src = %self.peer_display_name(src_addr),
-                    error = %e,
-                    "Failed to process rekey XK msg1"
-                );
-                return;
-            }
-
-            // Generate msg2
-            let msg2 = match handshake.write_xk_message_2() {
-                Ok(m) => m,
-                Err(e) => {
-                    debug!(
-                        src = %self.peer_display_name(src_addr),
-                        error = %e,
-                        "Failed to generate rekey XK msg2"
-                    );
-                    return;
-                }
-            };
-
-            // Build and send SessionAck
-            let our_coords = self.tree_state.my_coords().clone();
-            let ack = SessionAck::new(our_coords, setup.src_coords).with_handshake(msg2);
-            let ack_payload = ack.encode();
-            let my_addr = *self.node_addr();
-            let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack_payload)
-                .with_ttl(self.config().node.session.default_ttl);
-
-            if let Err(e) = self.send_session_datagram(&mut datagram).await {
-                debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send rekey SessionAck");
-                return;
-            }
-
-            // Store rekey state on the existing entry
-            let now = Self::session_now();
-            let entry = self.sessions.get_mut(src_addr).unwrap();
-            entry.set_rekey_state(handshake, false);
-            entry.record_peer_rekey(now);
-            self.stats_mut().session.rekey_armed += 1;
-
+        } else if refused {
             debug!(
                 src = %self.peer_display_name(src_addr),
-                "FSP rekey: processed peer's msg1, sent msg2, awaiting msg3"
+                reason = "tie-break-won",
+                "Simultaneous session initiation: our setup is young and the smaller, refusing theirs"
             );
-            return;
+        } else if armed {
+            debug!(src = %self.peer_display_name(src_addr), "SessionSetup held, SessionAck sent, awaiting msg3");
         }
+        self.run_session_outputs_answering(src_addr, out, !established, Some(&setup.src_coords))
+            .await;
+    }
 
-        // An entry still being set up holds this node's own initiator leg,
-        // responder candidates, or both. A setup is unauthenticated, so none
-        // of them may silence another setup naming the same address: the
-        // owner's own setup is answered beside a forger's, each with its own
-        // ack, and the first leg to complete establishes the session.
-        let now = Self::session_now();
-        let mut admission = CandidateAdmission::Room;
-        let mut lost_tie_break = false;
-        let mut yield_leg = false;
-        if let Some(existing) = self.sessions.get(src_addr) {
-            // A resend of a setup a candidate answered draws that
-            // candidate's own ack, unchanged.
-            if let Some(ack) = existing.candidate_ack(&setup.handshake_payload) {
-                debug!(src = %self.peer_display_name(src_addr), "Duplicate SessionSetup, resending SessionAck");
-                let my_addr = *self.node_addr();
-                let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack.to_vec())
-                    .with_ttl(self.config().node.session.default_ttl);
-                if let Err(e) = self.send_session_datagram(&mut datagram).await {
-                    debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to resend SessionAck");
-                }
-                return;
-            }
-            if existing.has_initiator_leg() {
-                // Simultaneous initiation: smaller NodeAddr wins as initiator.
-                // The winner drops the peer's setup while its own is young,
-                // since the peer will answer ours. Once ours has gone
-                // unanswered for the minimum age it yields: a forger holding
-                // the peer's candidates young keeps our setup refused there,
-                // and the peer's own initiation is then the only way the
-                // pair completes. Yielding gives up our own leg. Kept beside
-                // the peer's setup it could still complete, from an ack to a
-                // resend of ours that the peer answered as the loser, and
-                // each side would then establish as the initiator of a
-                // different handshake.
-                let we_win =
-                    crate::proto::fsp::initiation_winner(self.identity().node_addr(), src_addr);
-                let unanswered = now.saturating_duration_since(existing.created_at());
-                let unanswered_ms = unanswered.as_millis() as u64;
-                if we_win && unanswered < HALF_OPEN_MIN_AGE {
-                    debug!(
-                        src = %self.peer_display_name(src_addr),
-                        reason = "tie-break-won",
-                        "Simultaneous session initiation: we win (smaller addr), dropping their setup"
-                    );
-                    return;
-                }
-                if we_win {
-                    debug!(
-                        src = %self.peer_display_name(src_addr),
-                        unanswered_ms,
-                        "Simultaneous session initiation: we win but our setup is unanswered, answering theirs instead"
-                    );
-                    yield_leg = true;
-                } else {
-                    // We lose: answer theirs and keep ours beside it, with its
-                    // resends paused. If their setup was forged, ours is still
-                    // there to complete when the real peer answers it.
-                    debug!(
-                        src = %self.peer_display_name(src_addr),
-                        "Simultaneous session initiation: we lose, answering theirs beside ours"
-                    );
-                    lost_tie_break = true;
-                }
-            }
-            admission = existing.candidate_admission(link_peer, now);
-            if admission == CandidateAdmission::Refuse {
-                debug!(
-                    src = %self.peer_display_name(src_addr),
-                    link_peer = %self.peer_display_name(link_peer),
-                    reason = "candidates-young",
-                    "Every responder candidate for this address is younger than the minimum age, refusing the setup"
-                );
-                return;
-            }
-            if admission == CandidateAdmission::Room && !self.admit_half_open_candidate(src_addr) {
-                return;
-            }
-        }
-
-        // Create XK responder handshake and process msg1
-        // This frame's own copy of the node's long-term private key; the
-        // handshake state keeps its own and clears that on drop.
-        let mut our_keypair = self.identity().keypair();
-        let mut handshake = HandshakeState::new_xk_responder(our_keypair);
-        our_keypair.non_secure_erase();
-        handshake.set_local_epoch(self.startup_epoch());
-
-        if let Err(e) = handshake.read_xk_message_1(&setup.handshake_payload) {
-            debug!(error = %e, "Failed to process Noise XK msg1 in SessionSetup");
-            return;
-        }
-
-        // XK: responder does NOT learn initiator's identity until msg3
-        // Use a placeholder pubkey from src_addr for the session entry.
-        // The real pubkey will be registered when msg3 arrives.
-
-        // Generate msg2
-        let msg2 = match handshake.write_xk_message_2() {
-            Ok(m) => m,
-            Err(e) => {
-                debug!(error = %e, "Failed to generate Noise XK msg2 for SessionAck");
-                return;
-            }
-        };
-
-        // Build and send SessionAck (include initiator's coords for return-path warming)
-        let our_coords = self.tree_state.my_coords().clone();
-        let ack = SessionAck::new(our_coords, setup.src_coords).with_handshake(msg2);
-        let ack_payload = ack.encode();
-        let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, *src_addr, ack_payload.clone())
-            .with_ttl(self.config().node.session.default_ttl);
-
-        // Route the ack back to the initiator
-        if let Err(e) = self.send_session_datagram(&mut datagram).await {
-            debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send SessionAck");
-            return;
-        }
-
-        // Hold the handshake as a responder candidate with its own ack. The
-        // ack is sent once per admitted setup and has no timer of its own: a
-        // lost ack is recovered by the initiator's own setup resend, which
-        // the duplicate arm above answers with this same ack. A timer would
-        // send several acks per forged setup toward the address it named.
-        let candidate = ResponderCandidate::new(
-            handshake,
-            setup.handshake_payload.clone(),
-            ack_payload,
+    /// Open a session for the first setup naming `src_addr`, which arrived
+    /// over `link_peer`: the machine holds it as a candidate and asks for its
+    /// SessionAck. The admission caps were checked before. Nothing the setup
+    /// says is proven, so the session names only the claimed address until
+    /// a msg3 completes the candidate.
+    async fn open_inbound_session(
+        &mut self,
+        src_addr: &NodeAddr,
+        link_peer: &NodeAddr,
+        setup: &SessionSetup,
+        local: &NodeKeys,
+        now: SessionInstant,
+    ) {
+        let (entry, out) = SessionEntry::answering(
+            *src_addr,
+            &setup.handshake_payload,
             *link_peer,
+            setup.src_coords.clone(),
+            self.session_params(),
+            local,
+            *self.node_addr(),
             now,
         );
-        if let Some(entry) = self.sessions.get_mut(src_addr) {
-            if lost_tie_break {
-                entry.pause_initiator();
-            }
-            if yield_leg {
-                entry.drop_initiator_leg();
-            }
-            entry.add_candidate(candidate, admission);
-        } else {
-            // Use a placeholder pubkey since we don't know the initiator's
-            // identity yet; it is replaced in handle_session_msg3.
-            // `keypair()` hands back a copy of the long-term private key, so
-            // the temporary is bound and erased rather than left to the
-            // statement end.
-            let mut our_keypair = self.identity().keypair();
-            let placeholder_pubkey = our_keypair.public_key();
-            our_keypair.non_secure_erase();
-            let mut entry = SessionEntry::new(
-                *src_addr,
-                placeholder_pubkey,
-                EndToEndState::Responding,
-                now,
-                false,
-            );
-            entry.add_candidate(candidate, CandidateAdmission::Room);
-            self.sessions.insert(*src_addr, entry);
+        if entry.candidate_count() == 0 {
+            // The machine refused the setup and asked for its own teardown:
+            // there is no session to keep.
+            debug!(src = %self.peer_display_name(src_addr), ?out, "SessionSetup refused, no session opened");
+            return;
         }
-
-        debug!(src = %self.peer_display_name(src_addr), "SessionSetup processed (XK), SessionAck sent, awaiting msg3");
+        self.sessions.insert(*src_addr, entry);
+        debug!(src = %self.peer_display_name(src_addr), "SessionSetup opened a session, SessionAck sent, awaiting msg3");
+        self.run_session_outputs_answering(src_addr, out, true, Some(&setup.src_coords))
+            .await;
     }
 
     /// Handle an incoming SessionAck (Noise XK msg2).
@@ -1272,257 +1012,45 @@ impl Node {
             return;
         }
 
-        // Remove the entry to take ownership of the handshake state
-        let mut entry = match self.sessions.remove(src_addr) {
-            Some(e) => e,
-            None => {
-                debug!(src = %self.peer_display_name(src_addr), "SessionAck for unknown session");
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::UnknownSession));
-                return;
-            }
-        };
-
-        // Rekey path: entry is Established with rekey_state
-        //
-        // `abandon_rekey` below, not `abandon_handshake` as in the responder
-        // arm of `handle_session_msg3`, and the difference rests on an
-        // invariant rather than on a different judgement: an entry with
-        // `rekey_initiator` set holds no pending session, so the two calls
-        // are the same action here. Arming as initiator has one caller,
-        // `initiate_session_rekey` through `begin_rekey`, and
-        // `set_rekey_state` arms only responder handshakes;
-        // `check_session_rekey` never reaches `initiate_session_rekey` for
-        // an entry holding a pending session; and `set_pending_session`
-        // clears `rekey_state`, so a completed initiator cycle leaves at
-        // most one of the two set. If that ever stops holding, these three
-        // sites become instances of the epoch discard the responder arm was
-        // fixed for.
-        if entry.is_established() && entry.has_rekey_in_progress() && entry.is_rekey_initiator() {
-            // Process XK msg2, for the same reason and in the same way as the
-            // primary arm below. Nothing here has been authenticated: the
-            // only tie to our rekey is the datagram's source address, which
-            // the sender chooses. Abandoning would let anyone able to name
-            // the session end the cycle, so the read runs on a fork, the
-            // handshake stays as it was and can still read the genuine ack,
-            // and the refusal is counted. The fork matters because
-            // `read_xk_message_2` mixes the sender's ephemeral in before it
-            // authenticates. Nothing restamps the deadline, which runs from
-            // the setup this node sent, so an unreadable ack cannot hold the
-            // rekey open.
-            let read = match entry.rekey_state() {
-                Some(hs) => hs.fork_xk2(&ack.handshake_payload),
-                None => {
-                    self.sessions.insert(*src_addr, entry);
-                    return;
-                }
-            };
-            let mut handshake = match read {
-                Ok(hs) => hs,
-                Err(e) => {
-                    debug!(error = %e, "Failed to process rekey XK msg2, keeping the rekey");
-                    self.sessions.insert(*src_addr, entry);
-                    self.stats_mut()
-                        .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
-                    return;
-                }
-            };
-            // The read authenticated, so the fork replaces the handshake.
-            entry.clear_rekey_state();
-
-            // The three abandons below stay abandons. Each follows a msg2
-            // that already authenticated, so they are local failures rather
-            // than possible forgeries.
-
-            // Generate XK msg3
-            let msg3 = match handshake.write_xk_message_3() {
-                Ok(m) => m,
-                Err(e) => {
-                    debug!(error = %e, "Failed to generate rekey XK msg3");
-                    entry.abandon_rekey();
-                    self.sessions.insert(*src_addr, entry);
-                    return;
-                }
-            };
-
-            // Send SessionMsg3
-            let msg3_wire = SessionMsg3::new(msg3);
-            let msg3_payload = msg3_wire.encode();
-            let my_addr = *self.node_addr();
-            let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload.clone())
-                .with_ttl(self.config().node.session.default_ttl);
-
-            if let Err(e) = self.send_session_datagram(&mut datagram).await {
-                debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send rekey SessionMsg3");
-                entry.abandon_rekey();
-                self.sessions.insert(*src_addr, entry);
-                return;
-            }
-
-            // Complete handshake → store as pending new session
-            let session = match handshake.into_session() {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!(error = %e, "Failed to create session from rekey XK");
-                    entry.abandon_rekey();
-                    self.sessions.insert(*src_addr, entry);
-                    return;
-                }
-            };
-
-            // Retain msg3 for retransmission (liveness): a single msg3
-            // loss must not leave the responder without the new session.
-            // Retransmission runs until the responder is confirmed on the
-            // new epoch — an authenticated peer frame against `pending` or
-            // post-cutover `current` — decoupled from this initiator's own
-            // cutover. The initiator may cut over on its liveness timer
-            // before the responder receives msg3; overlapping-epoch
-            // decrypt keeps both directions safe meanwhile.
-            let now = Self::session_now();
-            let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-            entry.set_pending_session(session);
-            entry.set_rekey_completed(now);
-            entry.set_rekey_msg3_payload(
-                msg3_payload,
-                deadline(now, Duration::from_millis(resend_interval)),
-            );
-            self.sessions.insert(*src_addr, entry);
-
-            debug!(
-                src = %self.peer_display_name(src_addr),
-                "FSP rekey: completed XK as initiator, msg3 sent, pending cutover"
-            );
-            return;
-        }
-
-        // Must hold our initiator leg — check before take to avoid poisoning.
-        // Responder candidates beside it are not this message's business.
-        if !entry.has_initiator_leg() {
-            debug!(src = %self.peer_display_name(src_addr), "SessionAck but session not in Initiating state");
-            self.sessions.insert(*src_addr, entry);
-            self.stats_mut()
-                .record_reject(RejectReason::Session(SessionReject::BadState));
-            return;
-        }
-        // Process XK msg2: read_xk_message_2 (extracts responder's epoch)
-        //
-        // Nothing here has been authenticated: the only thing tying this
-        // message to the initiation is the datagram's source address, an
-        // envelope field the sender chooses. Dropping the entry would let
-        // anyone able to reach us cancel any initiation in flight, so the
-        // read runs on a fork and the entry goes back with its handshake as
-        // it was and the stored msg1 still scheduled for resend. The fork is
-        // what makes the reinsert worth anything: `read_xk_message_2` mixes
-        // the sender's ephemeral in before it authenticates, so a handshake
-        // read in place could never read the genuine msg2 afterwards. A real
-        // peer's corrupt ack is covered by the same path — the responder
-        // resends its stored msg2, and the handshake sweep reaps the entry on
-        // its original deadline if none arrives. `touch()` is deliberately
-        // not called, so a spray cannot push that deadline out.
-        let read = match entry.state() {
-            EndToEndState::Initiating(hs) => hs.fork_xk2(&ack.handshake_payload),
-            _ => unreachable!("checked is_initiating above"),
-        };
-        let mut handshake = match read {
-            Ok(hs) => hs,
-            Err(e) => {
-                debug!(error = %e, "Failed to process Noise XK msg2 in SessionAck");
-                self.sessions.insert(*src_addr, entry);
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
-                return;
-            }
-        };
-        // The read authenticated, so the fork replaces the initiating state.
-        drop(entry.take_state());
-
-        // The three drops below stay drops of our leg. Each is downstream of
-        // a msg2 that already authenticated, so they are local failures
-        // rather than possible forgeries, and a handshake left at
-        // `Message2Done` cannot be re-driven from a resent msg1 anyway. Any
-        // responder candidates beside it are kept for their own msg3.
-
-        // Generate XK msg3: write_xk_message_3 (sends encrypted static + epoch)
-        let msg3 = match handshake.write_xk_message_3() {
-            Ok(m) => m,
-            Err(e) => {
-                debug!(error = %e, "Failed to generate Noise XK msg3");
-                self.keep_candidates_only(src_addr, entry);
-                return;
-            }
-        };
-
-        // Send SessionMsg3 (phase 0x3)
-        let msg3_wire = SessionMsg3::new(msg3);
-        let msg3_payload = msg3_wire.encode();
-        let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, *src_addr, msg3_payload.clone())
-            .with_ttl(self.config().node.session.default_ttl);
-
-        if let Err(e) = self.send_session_datagram(&mut datagram).await {
-            debug!(error = %e, dest = %self.peer_display_name(src_addr), "Failed to send SessionMsg3");
-            self.keep_candidates_only(src_addr, entry);
-            return;
-        }
-
-        // Complete the handshake: into_session()
-        let session = match handshake.into_session() {
-            Ok(s) => s,
-            Err(e) => {
-                debug!(error = %e, "Failed to create session after XK msg3");
-                self.keep_candidates_only(src_addr, entry);
-                return;
-            }
-        };
-
-        // A node that lost the initiation tie-break keeps the peer's
-        // candidates beside the session its own leg completed, and a msg3
-        // completing one replaces that session. The peer won the tie-break,
-        // and once established, as initiator or responder, it takes no other
-        // handshake for this address, so it completes one of these
-        // candidates only after settling on it. This covers an ack the peer
-        // sent before it initiated beside the candidate it held for our leg:
-        // arriving after our leg paused, it completes our leg here while the
-        // peer completes its own, and without the switch each side would be
-        // the initiator of a different handshake. The winner drops its
-        // candidates. Kept candidates expire on their own deadline.
-        let we_win = crate::proto::fsp::initiation_winner(self.identity().node_addr(), src_addr);
-        let kept = if we_win {
-            Vec::new()
-        } else {
-            entry.take_candidates()
-        };
+        // The reply to this node's own attempt, first handshake or rekey, is
+        // the session machine's. Nothing in it is authenticated until it
+        // reads on a fork of the attempt's handshake and bonds to the key
+        // this node dialed, so a forged or corrupt ack changes nothing: the
+        // attempt keeps its handshake, its schedule and its deadline, which
+        // runs from the setup this node sent.
+        let local = self.session_node_keys();
         let now = Self::session_now();
-        let now_ms = Self::now_ms();
-        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        entry.set_state(EndToEndState::Established(session));
-        entry.restore_candidates(kept);
-        entry.set_coords_warmup_remaining(self.config().node.session.coords_warmup_packets);
-        entry.mark_established(now);
-        entry.init_mmp(&self.config().node.session_mmp);
-        // Keep msg3 for resend. This end is established once msg3 leaves, the
-        // responder only once it arrives, and nothing else repairs a lost
-        // msg3: the responder sends one SessionAck per setup and does not
-        // resend it, and a second ack, drawn by a resent setup, is refused
-        // here once this end is established. A setup the responder sends
-        // while it waits draws this msg3 again (the established arm of
-        // `handle_session_setup`). `resend_pending_session_handshakes`
-        // resends it until a frame from the peer authenticates on this
-        // session or the resend budget is spent. The rekey arm keeps its
-        // msg3 for the same reason.
-        entry.set_handshake_payload(
-            msg3_payload,
-            deadline(now, Duration::from_millis(resend_interval)),
-        );
-        entry.touch(now);
-        self.sessions.insert(*src_addr, entry);
+        let Some(entry) = self.sessions.get_mut(src_addr) else {
+            debug!(src = %self.peer_display_name(src_addr), "SessionAck for unknown session");
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::UnknownSession));
+            return;
+        };
+        let opening = !entry.is_established();
+        let out = entry.step_reply(&ack.handshake_payload, ack.src_coords.clone(), now, &local);
+        let established = opening && entry.is_established();
+        if established {
+            let warmup = self.config().node.session.coords_warmup_packets;
+            let mmp = self.config().node.session_mmp.clone();
+            if let Some(entry) = self.sessions.get_mut(src_addr) {
+                entry.establish(warmup, &mmp, now);
+            }
+        }
+        // The msg3 goes out before the packets held for the session: the
+        // machine retains it and resends it until any frame from the peer
+        // authenticates, since the responder is established only once it
+        // arrives.
+        self.run_session_outputs(src_addr, out, opening).await;
+        if !established {
+            return;
+        }
         // Not charged to a link peer: this node started the handshake, and
         // msg2 has authenticated, so the write happens once per session.
         if self
             .insert_coord_hint(
                 *src_addr,
                 ack.src_coords.clone(),
-                now_ms,
+                Self::now_ms(),
                 Funding::Uncharged,
             )
             .is_none()
@@ -1533,45 +1061,9 @@ impl Node {
                 "SessionAck coordinate hint refused"
             );
         }
-
-        // Flush any queued outbound packets for this destination
         self.flush_pending_packets(src_addr).await;
         self.flush_pending_native(src_addr).await;
-
         info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XK)");
-    }
-
-    /// Put `entry` back holding only its responder candidates, after its
-    /// initiator leg failed locally; drop it if it holds none and no open
-    /// hold.
-    fn keep_candidates_only(&mut self, src_addr: &NodeAddr, mut entry: SessionEntry) {
-        if entry.has_candidates() || self.hold_open(&entry) {
-            entry.drop_initiator_leg();
-            self.sessions.insert(*src_addr, entry);
-        }
-    }
-
-    /// Put `entry` back if it is established or still holds a handshake leg
-    /// or an open hold; drop it if not. An open hold is kept with no leg left
-    /// so that a forger dropping its own last candidate with a msg3 does not
-    /// restart the hold: its next setup joins this entry, `opened_at` and
-    /// all. An established entry reaches here when a msg3 failed against a
-    /// candidate kept beside the session, and the session stays.
-    fn keep_entry_if_live(&mut self, src_addr: &NodeAddr, entry: SessionEntry) {
-        if entry.is_established()
-            || entry.has_candidates()
-            || entry.has_initiator_leg()
-            || self.hold_open(&entry)
-        {
-            self.sessions.insert(*src_addr, entry);
-        }
-    }
-
-    /// Whether `entry`'s responder hold is younger than the handshake
-    /// timeout.
-    fn hold_open(&self, entry: &SessionEntry) -> bool {
-        let timeout = Duration::from_secs(self.config().node.rate_limit.handshake_timeout_secs);
-        entry.responder_hold_open(Self::session_now(), timeout)
     }
 
     /// Handle an incoming SessionMsg3 (Noise XK msg3).
@@ -1597,250 +1089,90 @@ impl Node {
             return;
         }
 
-        // Remove the entry to take ownership of the handshake state
-        let mut entry = match self.sessions.remove(src_addr) {
-            Some(e) => e,
-            None => {
-                debug!(src = %self.peer_display_name(src_addr), "SessionMsg3 for unknown session");
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::UnknownSession));
-                return;
-            }
+        // Every candidate, first-handshake or rekey, is the session
+        // machine's: one dispatcher tries the msg3 against each, newest
+        // first, and the first that reads it and bonds completes it. Nothing
+        // here has been authenticated until a read succeeds, so a msg3 none
+        // of them reads changes nothing, and `touch()` is deliberately not
+        // called, so a spray cannot push the session's deadlines out.
+        let local = self.session_node_keys();
+        let now = Self::session_now();
+        let Some(entry) = self.sessions.get_mut(src_addr) else {
+            debug!(src = %self.peer_display_name(src_addr), "SessionMsg3 for unknown session");
+            self.stats_mut()
+                .record_reject(RejectReason::Session(SessionReject::UnknownSession));
+            return;
         };
-
-        // Rekey path: entry is Established with rekey_state (responder side)
-        //
-        // Nothing in a msg3 is authenticated until the read has both
-        // succeeded and produced a static key matching this session's peer,
-        // so a failure here proves nothing about the sender and must not cost
-        // the entry anything it would miss. An unreadable msg3 therefore
-        // costs nothing at all: the read runs on a fork, and the handshake
-        // stays as it was for the genuine msg3. Every later failure follows a
-        // read that
-        // authenticated its sender and abandons only the handshake. A
-        // `pending_new_session` beside the handshake is the epoch the real
-        // peer may already have cut over to, and dropping it kills the
-        // reverse direction on two unauthenticated messages: a forged msg1 to
-        // arm the handshake, then any garbage msg3. `abandon_handshake` keeps
-        // it; `abandon_rekey` does not.
-        //
-        // What `abandon_handshake` leaves behind, and why each is safe here:
-        // `rekey_completed_ms` must survive, since `pending_stale` reads it
-        // and a zeroed stamp reads as freshly completed. A stranded
-        // `rekey_msg3_payload` belongs to an initiator cycle and clears
-        // itself once `resend_pending_session_msg3` exhausts its budget.
-        // `peer_new_epoch_confirmed` only stops that retransmission, and
-        // `rekey_initiator` is false throughout this arm by its own gate.
-        if entry.is_established() && entry.has_rekey_in_progress() && !entry.is_rekey_initiator() {
-            // Process XK msg3. The only tie between this msg3 and the
-            // handshake is the datagram's source address, which the sender
-            // chooses, and the peer that read our SessionAck may already hold
-            // the new keys. Abandoning here would let anyone able to name the
-            // session discard the handshake the peer's genuine msg3 needs,
-            // splitting the session's epochs. So the read runs on a fork and
-            // the handshake stays as it was, because the read advances the
-            // cipher nonce before it authenticates. Nothing touches the
-            // deadline, which runs from the peer's setup, so a spray cannot
-            // hold the handshake open.
-            let read = match entry.rekey_state() {
-                Some(hs) => hs.fork_xk3(&msg3.handshake_payload),
-                None => {
-                    self.sessions.insert(*src_addr, entry);
-                    return;
+        let opening = !entry.is_established();
+        let completed = entry.has_pending();
+        let out = entry.step_final(&msg3.handshake_payload, now, &local);
+        let established = opening && entry.is_established();
+        let peer_key = entry.peer_key();
+        let answered = out.iter().any(|o| {
+            matches!(
+                o,
+                Output::Installed {
+                    role: Role::Responder,
+                    ..
                 }
-            };
-            let handshake = match read {
-                Ok(hs) => hs,
-                Err(e) => {
+            )
+        });
+        if completed && answered {
+            // A completed rekey of this node's own, still waiting for the
+            // peer, gave way to the peer's: only a msg3 carrying the
+            // session's own peer key does this, and the keys it displaced
+            // may have been in use.
+            self.stats_mut().session.pending_replaced += 1;
+            warn!(
+                src = %self.peer_display_name(src_addr),
+                "FSP rekey: newly completed session replaced one still awaiting cutover"
+            );
+        }
+        for o in &out {
+            match o {
+                Output::Reject(Reason::TieBreakKept) if !opening => {
+                    self.stats_mut()
+                        .record_reject(RejectReason::Session(SessionReject::RekeyTiebreak));
+                }
+                Output::Reject(Reason::FinalNoAttempt) => {
                     debug!(
                         src = %self.peer_display_name(src_addr),
-                        error = %e,
-                        "Failed to process rekey XK msg3, keeping the handshake"
+                        reason = "no-candidate",
+                        "SessionMsg3 but session holds no candidate"
                     );
-                    self.sessions.insert(*src_addr, entry);
-                    return;
+                    self.stats_mut()
+                        .record_reject(RejectReason::Session(SessionReject::BadState));
                 }
-            };
-            // The read authenticated, so the fork replaces the handshake.
-            entry.clear_rekey_state();
-
-            // The rekey must come from the peer the session was established
-            // with. Compare x-only keys: the stored key's parity may be a
-            // synthesized even parity (npubs carry no parity), while the
-            // handshake learns the true point.
-            let rekey_pubkey = match handshake.remote_static() {
-                Some(pk) => *pk,
-                None => {
-                    // Not independently exercised by any test: a successful
-                    // `read_xk_message_3` always sets the remote static, so
-                    // reaching this needs fault injection into
-                    // `HandshakeState`. Changed with its three siblings so
-                    // the arm has one rule rather than three plus an
-                    // exception.
-                    debug!("No remote static key after processing rekey XK msg3");
-                    entry.abandon_handshake();
-                    self.sessions.insert(*src_addr, entry);
-                    return;
+                Output::Reject(Reason::FinalUnauthenticated) => {
+                    debug!(
+                        src = %self.peer_display_name(src_addr),
+                        reason = "no-candidate-matched",
+                        "Failed to process Noise XK msg3 against any candidate, keeping them"
+                    );
                 }
-            };
-            if rekey_pubkey.x_only_public_key().0 != entry.remote_pubkey().x_only_public_key().0 {
-                warn!(
-                    src = %self.peer_display_name(src_addr),
-                    "FSP rekey: initiator static key differs from the established peer key"
-                );
-                entry.abandon_handshake();
-                self.sessions.insert(*src_addr, entry);
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::RekeyKeyMismatch));
-                return;
+                _ => {}
             }
-
-            // Complete the handshake → store as pending new session
-            let session = match handshake.into_session() {
-                Ok(s) => s,
-                Err(e) => {
-                    // Also not independently exercised, for the same reason
-                    // as the missing-static arm above: a handshake that read
-                    // msg3 successfully always converts.
-                    debug!(error = %e, "Failed to create session from rekey XK msg3");
-                    entry.abandon_handshake();
-                    self.sessions.insert(*src_addr, entry);
-                    return;
-                }
-            };
-
-            // A pending session already held for this peer is superseded
-            // here rather than by any timer: only a msg3 carrying the
-            // session's own peer key can replace the epoch that peer moved
-            // to. The keys it displaces may still be in use, so the event is
-            // counted and logged rather than silent.
-            let superseded = entry.pending_new_session().is_some();
-            entry.set_pending_session(session);
-            entry.set_rekey_completed(Self::session_now());
-            self.sessions.insert(*src_addr, entry);
-            if superseded {
-                self.stats_mut().session.pending_replaced += 1;
-                warn!(
-                    src = %self.peer_display_name(src_addr),
-                    "FSP rekey: newly completed session replaced one still awaiting cutover"
-                );
+        }
+        if established {
+            // The claimed address was checked against the key the msg3
+            // authenticated: the machine's bond for a session a setup opened
+            // is that address, so a msg3 under another node's key completes
+            // nothing.
+            if let Some(key) = peer_key {
+                self.register_identity(*src_addr, key.public_key(secp256k1::Parity::Even));
             }
-
-            debug!(
-                src = %self.peer_display_name(src_addr),
-                "FSP rekey: completed XK as responder, pending cutover"
-            );
+            let warmup = self.config().node.session.coords_warmup_packets;
+            let mmp = self.config().node.session_mmp.clone();
+            if let Some(entry) = self.sessions.get_mut(src_addr) {
+                entry.establish(warmup, &mmp, now);
+            }
+        }
+        self.run_session_outputs(src_addr, out, opening).await;
+        if !established {
             return;
         }
-
-        // Must hold responder candidates. An initiator leg beside them is
-        // not this message's business.
-        if !entry.has_candidates() {
-            debug!(
-                src = %self.peer_display_name(src_addr),
-                reason = "no-candidate",
-                "SessionMsg3 but session holds no responder candidate"
-            );
-            self.sessions.insert(*src_addr, entry);
-            self.stats_mut()
-                .record_reject(RejectReason::Session(SessionReject::BadState));
-            return;
-        }
-
-        // Process XK msg3 (extracts the initiator's static key and epoch)
-        // against each candidate in turn, on a fork of its handshake. A
-        // candidate the msg3 was not written for fails at the AEAD on the
-        // encrypted static, before any DH, and its handshake stays as it was.
-        //
-        // Nothing here has been authenticated until a read succeeds: the
-        // only tie to a half-open candidate is the datagram's source
-        // address, which the sender chooses, and the initiator considers the
-        // session established once it has sent msg3. Dropping a candidate
-        // on a failed read would let anyone able to name the initiator
-        // discard the handshake its genuine msg3 and resends need. `touch()`
-        // is deliberately not called, so a spray cannot push the handshake
-        // sweep's deadline out.
-        let read = entry.candidates().iter().enumerate().find_map(|(i, c)| {
-            c.handshake()
-                .fork_xk3(&msg3.handshake_payload)
-                .ok()
-                .map(|hs| (i, hs))
-        });
-        let Some((index, handshake)) = read else {
-            debug!(
-                src = %self.peer_display_name(src_addr),
-                candidates = entry.candidates().len(),
-                reason = "no-candidate-matched",
-                "Failed to process Noise XK msg3 against any candidate, keeping them"
-            );
-            self.sessions.insert(*src_addr, entry);
-            return;
-        };
-        // The read authenticated, so the fork replaces its candidate.
-        entry.remove_candidate(index);
-
-        // Extract the initiator's static public key (now available after msg3)
-        let remote_pubkey = match handshake.remote_static() {
-            Some(pk) => *pk,
-            None => {
-                debug!("No remote static key after processing XK msg3");
-                self.keep_entry_if_live(src_addr, entry);
-                return;
-            }
-        };
-
-        // The claimed source address must be derivable from the key we just
-        // authenticated, or the peer is opening a session under another
-        // node's address. That proves only this candidate forged, so only it
-        // goes: the address's owner may hold another candidate here. A forger
-        // completing its own candidate reaches this once per candidate, so it
-        // logs at debug.
-        let derived_addr = NodeAddr::from_pubkey(&remote_pubkey.x_only_public_key().0);
-        if derived_addr != *src_addr {
-            debug!(
-                src = %self.peer_display_name(src_addr),
-                derived = %derived_addr,
-                reason = "addr-mismatch",
-                "SessionMsg3 source address does not match the authenticated static key, dropping its candidate"
-            );
-            self.stats_mut()
-                .record_reject(RejectReason::Session(SessionReject::AddrMismatch));
-            self.keep_entry_if_live(src_addr, entry);
-            return;
-        }
-
-        // Register the initiator's identity for future TUN → session routing
-        self.register_identity(*src_addr, remote_pubkey);
-
-        // Complete the handshake
-        let session = match handshake.into_session() {
-            Ok(s) => s,
-            Err(e) => {
-                debug!(error = %e, "Failed to create session from XK handshake");
-                self.keep_entry_if_live(src_addr, entry);
-                return;
-            }
-        };
-
-        let now = Self::session_now();
-        // Replace the placeholder pubkey with the real one
-        let mut new_entry = SessionEntry::new(
-            *src_addr,
-            remote_pubkey,
-            EndToEndState::Established(session),
-            now,
-            false,
-        );
-        new_entry.set_coords_warmup_remaining(self.config().node.session.coords_warmup_packets);
-        new_entry.mark_established(now);
-        new_entry.init_mmp(&self.config().node.session_mmp);
-        new_entry.touch(now);
-        self.sessions.insert(*src_addr, new_entry);
-
-        // Flush any pending packets
         self.flush_pending_packets(src_addr).await;
         self.flush_pending_native(src_addr).await;
-
         info!(src = %self.peer_display_name(src_addr), "Session established (responder, XK)");
     }
 
@@ -1894,10 +1226,8 @@ impl Node {
                     let session_name = self.peer_aliases.get(&dest).cloned().unwrap_or_else(|| {
                         self.sessions
                             .get(&dest)
-                            .map(|entry| {
-                                let (xonly, _) = entry.remote_pubkey().x_only_public_key();
-                                crate::PeerIdentity::from_pubkey(xonly).short_npub()
-                            })
+                            .and_then(SessionEntry::peer_key)
+                            .map(|xonly| crate::PeerIdentity::from_pubkey(xonly).short_npub())
                             .unwrap_or_default()
                     });
                     if let Some(mmp) = self.sessions.get_mut(&dest).and_then(|e| e.mmp_mut()) {
@@ -2082,11 +1412,15 @@ impl Node {
         );
     }
 
-    /// Handle an incoming session-layer ReceiverReport (msg_type 0x12).
+    /// Handle an incoming session-layer ReceiverReport (msg_type 0x12),
+    /// authenticated under the epoch `tag`.
     ///
     /// The peer is telling us about what they received from us. We feed
     /// this to our metrics to compute RTT, loss rate, and trend indicators.
-    fn handle_session_receiver_report(&mut self, src_addr: &NodeAddr, body: &[u8]) {
+    /// A report sealed under the epoch a cutover retired describes this
+    /// node's frames of that epoch, and is dropped rather than judged
+    /// against the new epoch's metrics.
+    fn handle_session_receiver_report(&mut self, src_addr: &NodeAddr, tag: EpochTag, body: &[u8]) {
         let session_rr = match SessionReceiverReport::decode(body) {
             Ok(rr) => rr,
             Err(e) => {
@@ -2112,7 +1446,8 @@ impl Node {
 
         let our_timestamp_ms = entry.session_timestamp(now);
 
-        let Some(mmp) = entry.mmp_mut() else {
+        let Some(mmp) = entry.epoch_mmp(tag) else {
+            trace!(src = %peer_name, "SessionReceiverReport under a retired epoch, dropped");
             return;
         };
 
@@ -2570,14 +1905,14 @@ impl Node {
     /// A lookup's answer is verified against the target's cached key, so a
     /// lookup for a destination whose identity has been evicted runs to its
     /// timeout and drops the packets queued for it as unreachable. A session
-    /// already holds the key: the one this node initiated to, or the one the
-    /// responder handshake authenticated.
+    /// whose handshake completed holds the key it authenticated; one still
+    /// being set up has proven no key, and nothing it holds is cached.
     fn cache_session_identity(&mut self, dest: &NodeAddr) {
         if self.has_cached_identity(dest) {
             return;
         }
-        if let Some(pubkey) = self.sessions.get(dest).map(|e| *e.remote_pubkey()) {
-            self.register_identity(*dest, pubkey);
+        if let Some(key) = self.sessions.get(dest).and_then(SessionEntry::peer_key) {
+            self.register_identity(*dest, key.public_key(secp256k1::Parity::Even));
         }
     }
 
@@ -2843,16 +2178,11 @@ impl Node {
 
     // === Session Initiation (Send Path) ===
 
-    /// Initiate an end-to-end session with a remote node.
-    ///
-    /// Creates a Noise XK handshake as initiator, wraps msg1 in a
-    /// SessionSetup, encapsulates in a SessionDatagram, and routes
-    /// toward the destination.
     /// Whether a session for `addr` may be created, given the table cap.
     ///
     /// Returns true when an entry already exists, since admitting it cannot
-    /// grow the table; a responder candidate joining that entry is checked
-    /// against the half-open share by the setup handler, through
+    /// grow the table; a candidate joining that entry is checked against the
+    /// half-open share by the setup handler, through
     /// `admit_half_open_candidate`. Counts its own refusals, so the two
     /// reasons are distinguishable without turning on debug logging.
     pub(in crate::node) fn admit_new_session(&mut self, addr: &NodeAddr) -> bool {
@@ -2873,28 +2203,29 @@ impl Node {
             return false;
         }
 
-        // A new entry opens with one responder candidate, which counts
-        // toward the half-open share.
+        // A new entry opens with one candidate, which counts toward the
+        // half-open share.
         self.admit_half_open_candidate(addr)
     }
 
-    /// Whether one more responder candidate fits the half-open share of the
-    /// session table. Candidates count individually, whether they open an
-    /// entry or join one, so the share bounds their memory.
+    /// Whether one more candidate fits the half-open share of the session
+    /// table. Candidates of sessions still being set up count individually,
+    /// whether they open an entry or join one, so the share bounds their
+    /// memory.
     pub(in crate::node) fn admit_half_open_candidate(&mut self, addr: &NodeAddr) -> bool {
         let max_sessions = self.config().node.limits.max_sessions;
         if max_sessions == 0 {
             return true;
         }
-        // Half-open candidates are unauthenticated and are reaped after
-        // `handshake_timeout_secs`, so they are the cheap half of the table
-        // to fill. Holding them to a share keeps room for peers that
-        // complete. An entry holds at most `MAX_HALF_OPEN_RESPONDERS`, so
-        // below that many times the share in entries the scan cannot reach
-        // it. At least one, or a table capped at one would admit no inbound
-        // session at all rather than one.
+        // Half-open candidates are unauthenticated and expire 40 s after
+        // their setup, so they are the cheap half of the table to fill.
+        // Holding them to a share keeps room for peers that complete. An
+        // entry holds at most `MAX_CANDIDATES`, so below that many times the
+        // share in entries the scan cannot reach it. At least one, or a table
+        // capped at one would admit no inbound session at all rather than
+        // one.
         let half_open_share = (max_sessions / HALF_OPEN_SHARE_DIVISOR).max(1);
-        if self.sessions.len() * crate::node::session::MAX_HALF_OPEN_RESPONDERS < half_open_share {
+        if self.sessions.len() * crate::node::session::MAX_CANDIDATES < half_open_share {
             return true;
         }
         let half_open: usize = self
@@ -2908,7 +2239,7 @@ impl Node {
                 half_open = half_open,
                 half_open_share = half_open_share,
                 reason = "half-open-full",
-                "Half-open session share exhausted, refusing a responder candidate"
+                "Half-open session share exhausted, refusing a candidate"
             );
             self.stats_mut()
                 .record_reject(RejectReason::Session(SessionReject::HalfOpenFull));
@@ -2917,69 +2248,73 @@ impl Node {
         true
     }
 
+    /// Open an end-to-end session with `dest_addr`, whose static key is
+    /// `dest_pubkey`.
+    ///
+    /// The session's machine starts this node's first attempt at once: a
+    /// Noise XK msg1 in a SessionSetup, routed toward the destination and
+    /// resent on the machine's ladder. A session the peer's setups opened
+    /// gets this node's attempt beside its candidates, so a setup that
+    /// arrived first, forged or genuine, never holds this node's own
+    /// handshake back. Nothing is done for a session already established or
+    /// with this node's attempt in flight. With no route to the destination,
+    /// or when the first setup of a new session fails to send, nothing is
+    /// kept and the caller is told, so it can ask discovery for a route; a
+    /// later send the transport refuses is loss, which the machine's resends
+    /// recover.
     pub(in crate::node) async fn initiate_session(
         &mut self,
         dest_addr: NodeAddr,
         dest_pubkey: PublicKey,
     ) -> Result<(), NodeError> {
-        // Check for existing session. An entry holding only responder
-        // candidates does not stop this node initiating: the initiator leg
-        // goes beside them, and the first leg to complete establishes.
         if let Some(existing) = self.sessions.get(&dest_addr)
-            && (existing.is_established() || existing.has_initiator_leg())
+            && (existing.is_established() || existing.is_initiating())
         {
             return Ok(());
         }
-
-        // Create Noise XK initiator handshake
-        // This frame's own copy of the node's long-term private key; the
-        // handshake state keeps its own and clears that on drop.
-        let mut our_keypair = self.identity().keypair();
-        let mut handshake = HandshakeState::new_xk_initiator(our_keypair, dest_pubkey);
-        our_keypair.non_secure_erase();
-        handshake.set_local_epoch(self.startup_epoch());
-        let msg1 = handshake
-            .write_xk_message_1()
-            .map_err(|e| NodeError::SendFailed {
+        if self.find_next_hop(&dest_addr).is_none() {
+            return Err(NodeError::SendFailed {
                 node_addr: dest_addr,
-                reason: format!("Noise XK msg1 generation failed: {}", e),
-            })?;
-
-        // Build SessionSetup with coordinates
-        let our_coords = self.tree_state.my_coords().clone();
-        let dest_coords = self.get_dest_coords(&dest_addr);
-        let setup = SessionSetup::new(our_coords, dest_coords).with_handshake(msg1);
-        let setup_payload = setup.encode();
-
-        // Wrap in SessionDatagram
-        let my_addr = *self.node_addr();
-        let mut datagram = SessionDatagram::new(my_addr, dest_addr, setup_payload.clone())
-            .with_ttl(self.config().node.session.default_ttl);
-
-        // Route toward destination
-        self.send_session_datagram(&mut datagram).await?;
+                reason: "no route to destination".into(),
+            });
+        }
 
         // Register destination identity for TUN → session routing
         self.register_identity(dest_addr, dest_pubkey);
 
-        // Store session entry with handshake payload for potential resend
         let now = Self::session_now();
-        let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let next_resend = deadline(now, Duration::from_millis(resend_interval));
+        let local = self.session_node_keys();
         if let Some(entry) = self.sessions.get_mut(&dest_addr) {
-            entry.attach_initiator(handshake, dest_pubkey, setup_payload, now, next_resend);
+            let out = entry.open(&dest_pubkey, now, &local);
+            self.run_session_outputs(&dest_addr, out, true).await;
         } else {
-            let mut entry = SessionEntry::new(
+            let (entry, out) = SessionEntry::opened(
                 dest_addr,
-                dest_pubkey,
-                EndToEndState::Initiating(handshake),
+                &dest_pubkey,
+                self.session_params(),
+                &local,
+                *self.node_addr(),
                 now,
-                true,
             );
-            entry.set_handshake_payload(setup_payload, next_resend);
             self.sessions.insert(dest_addr, entry);
+            // A session is kept only if its first setup left: one that never
+            // did is not opened, as when no route is known, so the caller
+            // can ask discovery and a retransmit tries again.
+            for output in out {
+                if let Output::Send { msg, kind, .. } = output {
+                    if let Some(entry) = self.sessions.get_mut(&dest_addr) {
+                        entry.note_setup_sent();
+                    }
+                    if let Err(e) = self.send_rekey_message(&dest_addr, msg, kind, None).await {
+                        self.sessions.remove(&dest_addr);
+                        return Err(e);
+                    }
+                } else {
+                    self.run_session_outputs(&dest_addr, vec![output], true)
+                        .await;
+                }
+            }
         }
-
         debug!(dest = %self.peer_display_name(&dest_addr), "Session initiation started");
         Ok(())
     }
@@ -3011,8 +2346,6 @@ impl Node {
                 reason: "no session".into(),
             })?;
         let wants_coords = entry.coords_warmup_remaining() > 0;
-        let timestamp = entry.session_timestamp(now);
-        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
         if !entry.is_established() {
             return Err(NodeError::SendFailed {
                 node_addr: *dest_addr,
@@ -3026,11 +2359,7 @@ impl Node {
         port_payload.extend_from_slice(&dst_port.to_le_bytes());
         port_payload.extend_from_slice(payload);
 
-        // Build inner plaintext (doesn't depend on counter)
         let msg_type = SessionMessageType::DataPacket.to_byte(); // 0x10
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
-        let inner_plaintext =
-            fsp_prepend_inner_header(timestamp, msg_type, inner_flags, &port_payload);
 
         // With no coordinates cached for the destination, send without CP
         // and leave the warmup budget unspent: our own coordinates in the
@@ -3070,13 +2399,10 @@ impl Node {
             entry.set_coords_warmup_remaining(entry.coords_warmup_remaining() - 1);
         }
 
-        // Build FSP flags (CP flag if coords, K-bit for key epoch)
-        let mut flags = if include_coords { FSP_FLAG_CP } else { 0 };
-        if let Some(entry) = self.sessions.get(dest_addr)
-            && entry.current_k_bit()
-        {
-            flags |= FSP_FLAG_K;
-        }
+        // FSP flags: CP if coords ride along. The key-epoch bit, like the
+        // timestamp and the spin bit, comes from the epoch the frame is
+        // sealed under.
+        let flags = if include_coords { FSP_FLAG_CP } else { 0 };
 
         // ── Pipelined FSP+FMP fast path (unix + UDP) ──
         // Both AEAD layers + the sendmmsg syscall run on the encrypt
@@ -3090,9 +2416,8 @@ impl Node {
                 dest_addr,
                 payload,
                 now,
-                timestamp,
                 fsp_flags: flags,
-                inner_plaintext: &inner_plaintext,
+                body: &port_payload,
                 my_coords: my_coords.as_ref(),
                 dest_coords: dest_coords.as_ref(),
             })
@@ -3102,6 +2427,7 @@ impl Node {
         }
 
         // Borrow session for counter + encryption (after potential standalone send)
+        let local = self.session_node_keys();
         let entry = self
             .sessions
             .get_mut(dest_addr)
@@ -3109,37 +2435,21 @@ impl Node {
                 node_addr: *dest_addr,
                 reason: "no session".into(),
             })?;
-        let session = match entry.state_mut() {
-            EndToEndState::Established(s) => s,
-            _ => {
-                return Err(NodeError::SendFailed {
-                    node_addr: *dest_addr,
-                    reason: "session not established".into(),
-                });
-            }
-        };
-        let counter = session.current_send_counter();
-
-        // Build 12-byte FSP header (used as AAD for AEAD)
-        let payload_len = inner_plaintext.len() as u16;
-        let header = build_fsp_header(counter, flags, payload_len);
-
-        // Encrypt with AAD binding to the FSP header
-        let ciphertext = session
-            .encrypt_with_aad(&inner_plaintext, &header)
-            .map_err(|e| NodeError::SendFailed {
-                node_addr: *dest_addr,
-                reason: format!("session encrypt failed: {}", e),
-            })?;
+        // Seal under the current epoch, with the 12-byte FSP header built on
+        // the reserved counter as the AAD.
+        let frame = entry
+            .seal_frame(now, flags, msg_type, &port_payload)
+            .map_err(|e| seal_error(*dest_addr, e))?;
+        entry.data_sent(now, &local);
 
         // Assemble: header(12) + [coords] + ciphertext
-        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + ciphertext.len() + 200);
-        fsp_payload.extend_from_slice(&header);
+        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + frame.ciphertext.len() + 200);
+        fsp_payload.extend_from_slice(&frame.header);
         if let (Some(src), Some(dst)) = (&my_coords, &dest_coords) {
             encode_coords(src, &mut fsp_payload);
             encode_coords(dst, &mut fsp_payload);
         }
-        fsp_payload.extend_from_slice(&ciphertext);
+        fsp_payload.extend_from_slice(&frame.ciphertext);
 
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
@@ -3151,7 +2461,8 @@ impl Node {
         if let Some(entry) = self.sessions.get_mut(dest_addr) {
             entry.record_sent(payload.len());
             if let Some(mmp) = entry.mmp_mut() {
-                mmp.sender.record_sent(counter, timestamp, ciphertext.len());
+                mmp.sender
+                    .record_sent(frame.counter, frame.timestamp, frame.ciphertext.len());
             }
             entry.touch(now);
         }
@@ -3289,8 +2600,10 @@ impl Node {
         };
         let stats = udp.stats().clone();
 
-        // FSP cipher + counter — separate session from next-hop FMP session.
-        let (fsp_counter, fsp_cipher) = {
+        // The FSP message, counter and cipher, each fixed by the current
+        // epoch — a separate session from the next-hop FMP session.
+        let local = self.session_node_keys();
+        let fsp = {
             let entry = self
                 .sessions
                 .get_mut(dest_addr)
@@ -3301,33 +2614,31 @@ impl Node {
             if let Some(mmp) = entry.mmp_mut() {
                 mmp.path_mtu.seed_source_mtu(path_mtu);
             }
-            let session = match entry.state_mut() {
-                EndToEndState::Established(s) => s,
-                _ => {
+            match entry.reserve_send(
+                send.now,
+                send.fsp_flags,
+                SessionMessageType::DataPacket.to_byte(),
+                send.body,
+            ) {
+                Ok(Some(reserved)) => {
+                    entry.data_sent(send.now, &local);
+                    reserved
+                }
+                Ok(None) => return Ok(false),
+                Err(SealFailure::NotEstablished) => {
                     return Err(NodeError::SendFailed {
                         node_addr: *dest_addr,
                         reason: "session not established".into(),
                     });
                 }
-            };
-            let Some(fsp_cipher) = session.send_cipher_clone() else {
-                return Ok(false);
-            };
-            let counter = session
-                .take_send_counter()
-                .map_err(|e| NodeError::SendFailed {
-                    node_addr: *dest_addr,
-                    reason: format!("session counter reservation failed: {}", e),
-                })?;
-            (counter, fsp_cipher)
+                Err(SealFailure::Noise(e)) => {
+                    return Err(NodeError::SendFailed {
+                        node_addr: *dest_addr,
+                        reason: format!("session counter reservation failed: {}", e),
+                    });
+                }
+            }
         };
-
-        // FSP header (the AAD for the inner AEAD seal).
-        let fsp_header = build_fsp_header(
-            fsp_counter,
-            send.fsp_flags,
-            send.inner_plaintext.len() as u16,
-        );
 
         let coords_size = match (send.my_coords, send.dest_coords) {
             (Some(src), Some(dst)) => coords_wire_size(src) + coords_wire_size(dst),
@@ -3336,10 +2647,8 @@ impl Node {
         // FMP inner = [link-ts u64][SessionDatagram-encoded after msg_type] + [FSP-encrypted blob]
         // SessionDatagram-encoded includes: [0x00 type][ttl][mtu][src][dest][fsp_payload]
         // fsp_payload = [fsp_header][coords][fsp_plaintext][16-byte FSP tag]
-        let link_plaintext_len = SESSION_DATAGRAM_HEADER_SIZE
-            + FSP_HEADER_SIZE
-            + coords_size
-            + send.inner_plaintext.len();
+        let link_plaintext_len =
+            SESSION_DATAGRAM_HEADER_SIZE + FSP_HEADER_SIZE + coords_size + fsp.plaintext.len();
         let fmp_inner_len = 4 + link_plaintext_len + crate::noise::TAG_SIZE;
 
         // FMP counter + header (the AAD for the outer AEAD seal).
@@ -3379,13 +2688,13 @@ impl Node {
         wire_buf.extend_from_slice(dest_addr.as_bytes());
         // FSP layer (worker seals on `inner_plaintext` portion):
         let fsp_aad_offset = wire_buf.len();
-        wire_buf.extend_from_slice(&fsp_header);
+        wire_buf.extend_from_slice(&fsp.header);
         if let (Some(src), Some(dst)) = (send.my_coords, send.dest_coords) {
             encode_coords(src, &mut wire_buf);
             encode_coords(dst, &mut wire_buf);
         }
         let fsp_plaintext_offset = wire_buf.len();
-        wire_buf.extend_from_slice(send.inner_plaintext);
+        wire_buf.extend_from_slice(&fsp.plaintext);
 
         // Stats update — predict size exactly (ChaCha20-Poly1305 tag
         // is constant 16 bytes).
@@ -3406,9 +2715,9 @@ impl Node {
             entry.record_sent_wire_len(wire_capacity);
             if let Some(mmp) = entry.mmp_mut() {
                 mmp.sender.record_sent(
-                    fsp_counter,
-                    send.timestamp,
-                    send.inner_plaintext.len() + crate::noise::TAG_SIZE,
+                    fsp.counter,
+                    fsp.timestamp,
+                    fsp.plaintext.len() + crate::noise::TAG_SIZE,
                 );
             }
             entry.touch(send.now);
@@ -3419,8 +2728,8 @@ impl Node {
             counter: fmp_counter,
             wire_buf,
             fsp_seal: Some(crate::node::encrypt_worker::FspSealJob {
-                cipher: fsp_cipher,
-                counter: fsp_counter,
+                cipher: fsp.key,
+                counter: fsp.counter,
                 aad_offset: fsp_aad_offset,
                 plaintext_offset: fsp_plaintext_offset,
             }),
@@ -3503,7 +2812,8 @@ impl Node {
     /// Similar to `send_session_data()` but:
     /// - Takes an explicit `msg_type` byte (0x11, 0x12, 0x13, etc.)
     /// - Never includes COORDS_PRESENT (reports are lightweight)
-    /// - Reads spin bit from MMP state for the inner header
+    /// - Takes the key-epoch bit, the timestamp and the spin bit from the
+    ///   epoch it is sealed under, as every send path does
     /// - Records the send in MMP sender state
     pub(in crate::node) async fn send_session_msg(
         &mut self,
@@ -3513,21 +2823,6 @@ impl Node {
     ) -> Result<(), NodeError> {
         let now = Self::session_now();
 
-        // Read spin bit and session timestamp from entry
-        let entry = self
-            .sessions
-            .get(dest_addr)
-            .ok_or_else(|| NodeError::SendFailed {
-                node_addr: *dest_addr,
-                reason: "no session".into(),
-            })?;
-        let timestamp = entry.session_timestamp(now);
-        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
-
-        // Build inner flags with spin bit
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
-
-        // Get mutable access for encryption
         let entry = self
             .sessions
             .get_mut(dest_addr)
@@ -3536,40 +2831,16 @@ impl Node {
                 reason: "no session".into(),
             })?;
 
-        // Read K-bit before mutable borrow of session state
-        let k_flags = if entry.current_k_bit() { FSP_FLAG_K } else { 0 };
-
-        let session = match entry.state_mut() {
-            EndToEndState::Established(s) => s,
-            _ => {
-                return Err(NodeError::SendFailed {
-                    node_addr: *dest_addr,
-                    reason: "session not established".into(),
-                });
-            }
-        };
-
-        let counter = session.current_send_counter();
-
-        // FSP inner header + plaintext
-        let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, payload);
-
-        // Build 12-byte FSP header (K-bit for key epoch, no CP for reports)
-        let payload_len = inner_plaintext.len() as u16;
-        let header = build_fsp_header(counter, k_flags, payload_len);
-
-        // Encrypt with AAD
-        let ciphertext = session
-            .encrypt_with_aad(&inner_plaintext, &header)
-            .map_err(|e| NodeError::SendFailed {
-                node_addr: *dest_addr,
-                reason: format!("session encrypt failed: {}", e),
-            })?;
+        // Seal under the current epoch with no CP flag, the 12-byte FSP
+        // header built on the reserved counter as the AAD.
+        let frame = entry
+            .seal_frame(now, 0, msg_type, payload)
+            .map_err(|e| seal_error(*dest_addr, e))?;
 
         // Assemble: header(12) + ciphertext (no coords)
-        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + ciphertext.len());
-        fsp_payload.extend_from_slice(&header);
-        fsp_payload.extend_from_slice(&ciphertext);
+        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + frame.ciphertext.len());
+        fsp_payload.extend_from_slice(&frame.header);
+        fsp_payload.extend_from_slice(&frame.ciphertext);
 
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
@@ -3581,7 +2852,8 @@ impl Node {
         if let Some(entry) = self.sessions.get_mut(dest_addr)
             && let Some(mmp) = entry.mmp_mut()
         {
-            mmp.sender.record_sent(counter, timestamp, ciphertext.len());
+            mmp.sender
+                .record_sent(frame.counter, frame.timestamp, frame.ciphertext.len());
         }
 
         Ok(())
@@ -3611,18 +2883,6 @@ impl Node {
         };
         let my_coords = self.tree_state.my_coords().clone();
 
-        // Read session metadata
-        let entry = self
-            .sessions
-            .get(dest_addr)
-            .ok_or_else(|| NodeError::SendFailed {
-                node_addr: *dest_addr,
-                reason: "no session".into(),
-            })?;
-        let timestamp = entry.session_timestamp(now);
-        let spin_bit = entry.mmp().is_some_and(|m| m.spin_bit.tx_bit());
-
-        // Get mutable access for encryption
         let entry = self
             .sessions
             .get_mut(dest_addr)
@@ -3630,42 +2890,22 @@ impl Node {
                 node_addr: *dest_addr,
                 reason: "no session".into(),
             })?;
-        let session = match entry.state_mut() {
-            EndToEndState::Established(s) => s,
-            _ => {
-                return Err(NodeError::SendFailed {
-                    node_addr: *dest_addr,
-                    reason: "session not established".into(),
-                });
-            }
-        };
-
-        let counter = session.current_send_counter();
-
-        // FSP inner header only, no body payload
+        // FSP inner header only, no body payload, sealed under the current
+        // epoch with the CP flag; the key-epoch bit is that epoch's, as on
+        // every other message.
         let msg_type = SessionMessageType::CoordsWarmup.to_byte();
-        let inner_flags = FspInnerFlags { spin_bit }.to_byte();
-        let inner_plaintext = fsp_prepend_inner_header(timestamp, msg_type, inner_flags, &[]);
-
-        // Build FSP header with CP flag
-        let payload_len = inner_plaintext.len() as u16;
-        let header = build_fsp_header(counter, FSP_FLAG_CP, payload_len);
-
-        // Encrypt with AAD
-        let ciphertext = session
-            .encrypt_with_aad(&inner_plaintext, &header)
-            .map_err(|e| NodeError::SendFailed {
-                node_addr: *dest_addr,
-                reason: format!("session encrypt failed: {}", e),
-            })?;
+        let frame = entry
+            .seal_frame(now, FSP_FLAG_CP, msg_type, &[])
+            .map_err(|e| seal_error(*dest_addr, e))?;
 
         // Assemble: header(12) + coords + ciphertext
         let coords_size = coords_wire_size(&my_coords) + coords_wire_size(&dest_coords);
-        let mut fsp_payload = Vec::with_capacity(FSP_HEADER_SIZE + coords_size + ciphertext.len());
-        fsp_payload.extend_from_slice(&header);
+        let mut fsp_payload =
+            Vec::with_capacity(FSP_HEADER_SIZE + coords_size + frame.ciphertext.len());
+        fsp_payload.extend_from_slice(&frame.header);
         encode_coords(&my_coords, &mut fsp_payload);
         encode_coords(&dest_coords, &mut fsp_payload);
-        fsp_payload.extend_from_slice(&ciphertext);
+        fsp_payload.extend_from_slice(&frame.ciphertext);
 
         let my_addr = *self.node_addr();
         let mut datagram = SessionDatagram::new(my_addr, *dest_addr, fsp_payload)
@@ -3677,7 +2917,8 @@ impl Node {
         if let Some(entry) = self.sessions.get_mut(dest_addr)
             && let Some(mmp) = entry.mmp_mut()
         {
-            mmp.sender.record_sent(counter, timestamp, ciphertext.len());
+            mmp.sender
+                .record_sent(frame.counter, frame.timestamp, frame.ciphertext.len());
         }
 
         debug!(dest = %self.peer_display_name(dest_addr), "Sent standalone CoordsWarmup");
@@ -3750,25 +2991,6 @@ impl Node {
         self.coord_cache.get(dest, Self::now_ms()).cloned()
     }
 
-    /// Look up destination coordinates from available caches.
-    ///
-    /// Returns our own coordinates as a fallback (the SessionSetup will
-    /// carry src_coords for return path routing; empty dest_coords
-    /// would fail wire encoding since TreeCoordinate requires ≥1 entry).
-    pub(in crate::node) fn get_dest_coords(
-        &self,
-        dest: &NodeAddr,
-    ) -> crate::proto::stp::TreeCoordinate {
-        if let Some(coords) = self.cached_dest_coords(dest) {
-            return coords;
-        }
-        // Fallback: use our own coordinates. The SessionSetup dest_coords
-        // field cannot be empty (wire format requires ≥1 entry). Using our
-        // own coords is safe — transit routers will still cache them, and
-        // the destination will return its actual coords in the SessionAck.
-        self.tree_state.my_coords().clone()
-    }
-
     /// Current Unix time in milliseconds.
     pub(in crate::node) fn now_ms() -> u64 {
         crate::time::wall_ms()
@@ -3777,6 +2999,17 @@ impl Node {
     /// Now on the session table's clock, [`SessionClock`].
     pub(crate) fn session_now() -> SessionInstant {
         SessionClock::default().now()
+    }
+
+    /// The parameters of this node's session rekey machines.
+    pub(in crate::node) fn session_params(&self) -> Params {
+        session_params(&self.config().node)
+    }
+
+    /// This node's static keypair and startup epoch, as the session rekey
+    /// machines take them. The copy erases itself when dropped.
+    pub(in crate::node) fn session_node_keys(&self) -> NodeKeys {
+        NodeKeys::new(self.identity().keypair(), self.startup_epoch())
     }
 
     /// The time the session-setup limiter is charged at: the host's
@@ -3837,12 +3070,10 @@ impl Node {
             // establishment or timeout settles the flow, and a retransmit goes
             // through once it is established.
             //
-            // An entry holding only responder candidates was opened by a
-            // setup nobody has proven, possibly forged. Once it has had the
-            // minimum age to complete, this node initiates itself rather
-            // than wait for the reap.
-            let initiate = entry.responder_hold_expired(Self::session_now());
-            if initiate {
+            // A session holding only the peer's setups was opened by setups
+            // nobody has proven, possibly forged, so this node starts its own
+            // attempt beside them at once.
+            if !entry.is_initiating() {
                 self.initiate_behind_candidates(dest_addr, dest_pubkey)
                     .await;
             }
@@ -3922,8 +3153,9 @@ impl Node {
         Outcome::Queued
     }
 
-    /// Start this node's own session to `dest_addr` beside the responder
-    /// candidates an entry holds, keeping them for a late msg3.
+    /// Start this node's own attempt toward `dest_addr` beside the
+    /// candidates a session the peer's setups opened holds, keeping them for
+    /// a late msg3.
     ///
     /// With no route to the destination the initiation fails, and discovery
     /// is asked for one, as when no entry exists: otherwise every packet
@@ -3937,10 +3169,10 @@ impl Node {
     ) {
         debug!(
             dest = %self.peer_display_name(&dest_addr),
-            "Responder candidates have not completed, initiating our own session"
+            "Session holds only the peer's setups, initiating our own beside them"
         );
         if let Err(e) = self.initiate_session(dest_addr, dest_pubkey).await {
-            debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to initiate a session behind responder candidates, trying discovery");
+            debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to initiate a session beside the peer's setups, trying discovery");
             self.maybe_initiate_lookup(&dest_addr).await;
         }
     }
@@ -4077,10 +3309,10 @@ impl Node {
 
         // Skip if a session already exists or this node is already
         // initiating one; its establishment or timeout settles the held
-        // packets. Responder candidates alone do not count, as in
+        // packets. The peer's setups alone do not count, as in
         // `initiate_session`.
         if let Some(existing) = self.sessions.get(&dest_addr)
-            && (existing.is_established() || existing.has_initiator_leg())
+            && (existing.is_established() || existing.is_initiating())
         {
             return;
         }
@@ -4147,4 +3379,14 @@ impl Mesh for Node {
     fn icmp(&mut self) -> IcmpContext<'_> {
         self.host_icmp()
     }
+}
+
+/// The send failure a refused session seal is reported as, worded as the
+/// session's own encrypt refusals have always been.
+fn seal_error(node_addr: NodeAddr, failure: SealFailure) -> NodeError {
+    let reason = match failure {
+        SealFailure::NotEstablished => "session not established".into(),
+        SealFailure::Noise(e) => format!("session encrypt failed: {}", e),
+    };
+    NodeError::SendFailed { node_addr, reason }
 }

@@ -282,26 +282,27 @@ pub enum SessionReject {
     /// Tracked via
     /// [`SessionStats::rekey_key_mismatch`](crate::node::stats::SessionStats).
     RekeyKeyMismatch,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight, and our address sorted smaller, so the
-    /// tie-break kept us as initiator and their msg1 was dropped. Tracked
-    /// via [`SessionStats::rekey_tiebreak`](crate::node::stats::SessionStats).
+    /// A msg3 completed an established peer's rekey while our own completed
+    /// rekey of that session waited for the peer, and our address sorted
+    /// smaller, so the tie-break kept ours and the peer's was dropped.
+    /// Tracked via
+    /// [`SessionStats::rekey_tiebreak`](crate::node::stats::SessionStats).
     RekeyTiebreak,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight, and our address sorted larger, so we
-    /// abandoned our rekey and answered as responder. The message carries
-    /// no authenticator, so a sustained rate here means local key rotation
-    /// is being suppressed. Tracked via
+    /// A msg3 completed an established peer's rekey while our own rekey of
+    /// that session was still in flight, so ours was given up. The msg3
+    /// authenticated the peer. A completed rekey of ours that was waiting
+    /// for the peer and gave way is counted as a replaced pending session
+    /// instead. Tracked via
     /// [`SessionStats::rekey_yielded`](crate::node::stats::SessionStats).
     RekeyYielded,
-    /// A setup message named an established peer while a handshake that
-    /// peer armed was still waiting for its msg3, so the message was dropped
-    /// and the handshake kept. Tracked via
+    /// A setup message named an established peer whose session holds as
+    /// many rekey candidates as it may, overall or from that link peer, so
+    /// the message was dropped; no candidate is evicted. Tracked via
     /// [`SessionStats::rekey_held`](crate::node::stats::SessionStats).
     RekeyHeld,
-    /// A setup message named an established peer that already holds a
-    /// completed rekey awaiting cut-over, so the message was dropped
-    /// rather than arming a second handshake. Tracked via
+    /// A setup message named an established peer while our own completed
+    /// rekey waited for the peer and our address sorted smaller, so the
+    /// message was refused rather than answered. Tracked via
     /// [`SessionStats::rekey_pending`](crate::node::stats::SessionStats).
     RekeyPending,
     /// An inbound SessionAck naming a session we are initiating failed the

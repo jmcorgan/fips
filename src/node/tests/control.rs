@@ -898,3 +898,84 @@ async fn show_transports_off_loop_reports_counters_that_moved_since_the_last_tic
         t.stop().await.ok();
     }
 }
+
+/// Render `show_sessions` on the loop, then publish a tick and render it
+/// again from the snapshot the control socket serves.
+fn show_sessions_both_renders(node: &mut Node) -> [(&'static str, serde_json::Value); 2] {
+    let on_loop = crate::control::queries::show_sessions(node);
+    node.record_stats_history();
+    let off_loop = crate::control::queries::show_sessions_from_handle(&node.control_read_handle());
+    [("on-loop", on_loop), ("snapshot", off_loop)]
+}
+
+/// The `show_sessions` row of the session with `addr`.
+fn session_row<'a>(sessions: &'a serde_json::Value, addr: &NodeAddr) -> &'a serde_json::Value {
+    let addr_hex = hex::encode(addr.as_bytes());
+    sessions["sessions"]
+        .as_array()
+        .expect("show_sessions returns a sessions array")
+        .iter()
+        .find(|row| row["remote_addr"] == addr_hex.as_str())
+        .unwrap_or_else(|| panic!("show_sessions lists no session with {addr_hex}: {sessions}"))
+}
+
+/// A session whose peer no handshake has proven is reported with no `npub`
+/// and with `identity: "unproven"`, on both renderings: one a setup claiming
+/// an address opened, which used to report this node's own key, and one this
+/// node opened, which used to report the key it dialed even though nothing
+/// had answered for it. An established session reports its peer's key and
+/// `identity: "proven"`.
+#[test]
+fn unproved_inbound_session_is_shown_without_npub_and_with_a_status() {
+    use crate::node::session::{SessionEntry, session_at};
+
+    let mut node = make_node();
+    let keypair = node.identity().keypair();
+
+    let claimed = *Identity::generate().node_addr();
+    node.sessions.insert(
+        claimed,
+        SessionEntry::answering_for_test(claimed, keypair, session_at(1000)),
+    );
+
+    let dialed = Identity::generate();
+    let dialed_addr = *dialed.node_addr();
+    node.register_identity(dialed_addr, dialed.pubkey_full());
+    node.sessions.insert(
+        dialed_addr,
+        SessionEntry::opened_for_test(&dialed.pubkey_full(), keypair, session_at(1000)),
+    );
+
+    let proven = Identity::generate();
+    let proven_addr = *proven.node_addr();
+    let session = super::session::make_noise_session(node.identity(), &proven);
+    node.sessions.insert(
+        proven_addr,
+        SessionEntry::keyed(proven_addr, session, session_at(1000), true),
+    );
+
+    for (render, sessions) in show_sessions_both_renders(&mut node) {
+        for (what, addr) in [("inbound", claimed), ("outbound", dialed_addr)] {
+            let row = session_row(&sessions, &addr);
+            assert_eq!(
+                row.get("npub"),
+                None,
+                "{render} render, unproved {what} session must carry no npub"
+            );
+            assert_eq!(
+                row["identity"], "unproven",
+                "{render} render, unproved {what} session status"
+            );
+        }
+        let row = session_row(&sessions, &proven_addr);
+        assert_eq!(
+            row["npub"],
+            proven.npub().as_str(),
+            "{render} render, established session reports its peer's key"
+        );
+        assert_eq!(
+            row["identity"], "proven",
+            "{render} render, established session status"
+        );
+    }
+}

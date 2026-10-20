@@ -120,10 +120,10 @@ pub struct RateLimitConfig {
     /// Per-link-peer refill rate for those messages, in tokens per second
     /// (`node.rate_limit.session_setup_rate`).
     ///
-    /// 16/s caps one neighbour's forced half-open occupancy at
-    /// `rate * handshake_timeout_secs` (480 responder candidates at
-    /// defaults) and its ack amplification at `rate` (16 acks/s): a
-    /// responder sends one ack per admitted setup and does not resend it.
+    /// 16/s caps one neighbour's forced half-open occupancy at `rate`
+    /// times the 40 s a held setup lives (640 held setups at defaults) and
+    /// its ack amplification at `rate` (16 acks/s): a responder sends one
+    /// ack per admitted setup and does not resend it on a timer.
     ///
     /// Setup messages naming a peer this node is already established with
     /// are metered on a separate per-link bucket, derived from

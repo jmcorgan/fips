@@ -54,8 +54,7 @@ pub(crate) enum Step {
     PollLanRendezvous,
     DrivePeerTimers,
     ResendPendingRekeys,
-    ResendPendingSessionHandshakes,
-    ResendPendingSessionMsg3,
+    PollSessionRekeys,
     PurgeIdleSessions,
     PurgeExpiredPathMtu,
     ProcessPendingRetries,
@@ -67,7 +66,6 @@ pub(crate) enum Step {
     CheckSessionMmpReports,
     CheckLinkHeartbeats,
     CheckRekey,
-    CheckSessionRekey,
     CheckPendingLookups,
     PollProbes,
     PollTransportDiscovery,
@@ -94,8 +92,7 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::PollLanRendezvous,
     Step::DrivePeerTimers,
     Step::ResendPendingRekeys,
-    Step::ResendPendingSessionHandshakes,
-    Step::ResendPendingSessionMsg3,
+    Step::PollSessionRekeys,
     Step::PurgeIdleSessions,
     Step::PurgeExpiredPathMtu,
     Step::ProcessPendingRetries,
@@ -107,7 +104,6 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::CheckSessionMmpReports,
     Step::CheckLinkHeartbeats,
     Step::CheckRekey,
-    Step::CheckSessionRekey,
     Step::CheckPendingLookups,
     Step::PollProbes,
     Step::PollTransportDiscovery,
@@ -129,8 +125,7 @@ impl Step {
             Step::PollLanRendezvous => "poll_lan_rendezvous",
             Step::DrivePeerTimers => "drive_peer_timers",
             Step::ResendPendingRekeys => "resend_pending_rekeys",
-            Step::ResendPendingSessionHandshakes => "resend_pending_session_handshakes",
-            Step::ResendPendingSessionMsg3 => "resend_pending_session_msg3",
+            Step::PollSessionRekeys => "poll_session_rekeys",
             Step::PurgeIdleSessions => "purge_idle_sessions",
             Step::PurgeExpiredPathMtu => "purge_expired_path_mtu",
             Step::ProcessPendingRetries => "process_pending_retries",
@@ -142,7 +137,6 @@ impl Step {
             Step::CheckSessionMmpReports => "check_session_mmp_reports",
             Step::CheckLinkHeartbeats => "check_link_heartbeats",
             Step::CheckRekey => "check_rekey",
-            Step::CheckSessionRekey => "check_session_rekey",
             Step::CheckPendingLookups => "check_pending_lookups",
             Step::PollProbes => "poll_probes",
             Step::PollTransportDiscovery => "poll_transport_discovery",
@@ -385,9 +379,9 @@ mod tests {
     #[test]
     fn emitted_row_count_matches_build() {
         let emitted = STEPS.iter().filter(|s| s.emitted()).count();
-        // 26 unconditional subsystem steps + the whole-tick span, plus the
+        // 24 unconditional subsystem steps + the whole-tick span, plus the
         // three conditionally-compiled steps where this build has them.
-        let mut expected = 27;
+        let mut expected = 25;
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             expected += 1;
         }

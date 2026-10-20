@@ -45,5 +45,3 @@ benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization 
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
 known-defect  fips-mesh  node::tests::session::a_link_msg1_captured_before_the_peering_was_re_formed_does_not_arm_a_pending  src/node/tests/session.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
-known-defect  fips-mesh  node::tests::session::forged_setups_at_both_ends_once_per_handshake_timeout_do_not_stop_the_pairs_rotation  src/node/tests/session.rs
-known-defect  fips-mesh  node::tests::session::a_forged_setup_at_the_larger_address_leaves_its_own_rekey_in_flight_to_complete  src/node/tests/session.rs

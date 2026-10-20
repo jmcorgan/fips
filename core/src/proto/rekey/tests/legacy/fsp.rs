@@ -14,11 +14,13 @@
 //! (`v0.5.0:src/node/dataplane/rx_loop.rs:450-476`): handshake resends and
 //! the half-open reap, rekey msg3 resends, the idle purge, the rekey check.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::new::{Jit, NewFsp, is_packet, session_data};
+use super::ship::ShipFsp;
 use super::{Class, Duo, E, End, Expect, Got, Out, Pkt, Rel, Rule, all, boxed};
 use crate::identity::NodeAddr;
 use crate::noise::{HandshakeState, NoiseSession};
@@ -913,6 +915,14 @@ impl End for FspPeer {
         self.label.clone()
     }
 
+    /// Every session state is lost and a new startup epoch drawn: the next
+    /// setup it sends or answers carries the new epoch.
+    fn restart(&mut self, epoch: [u8; 8]) {
+        self.local = NodeKeys::new(self.local.keypair(), epoch);
+        self.entry = None;
+        self.notes.push(String::from("restarted"));
+    }
+
     /// A session to the peer is wanted: a first attempt, replacing a
     /// half-open responder before v0.5.3 (`v0.5.2:src/node/handlers/session.rs:2245-2300`),
     /// or attached beside the candidates at v0.5.3
@@ -973,6 +983,36 @@ pub(crate) struct Setup {
     pub(crate) established: bool,
     /// The deployed node's rekey message trigger, when not the default.
     pub(crate) old_messages: Option<u64>,
+    /// The new node is the one this release ships: the machine polled on
+    /// the shell's tick.
+    pub(crate) shipped: bool,
+}
+
+/// The new node of a session set up at 0 with `session`, shipped or not.
+fn new_end(
+    label: &str,
+    shipped: bool,
+    local: NodeKeys,
+    peer: PeerKey,
+    peer_epoch: [u8; 8],
+    session: NoiseSession,
+    jitter: u16,
+) -> Box<dyn End> {
+    let n = NewFsp::established(
+        label,
+        local,
+        peer,
+        peer_epoch,
+        session,
+        0,
+        Params::fsp(),
+        Jit::Fixed(jitter),
+    );
+    if shipped {
+        boxed(ShipFsp::new(n))
+    } else {
+        boxed(n)
+    }
 }
 
 /// A session between a new node (node 0) and a deployed one (node 1).
@@ -989,6 +1029,11 @@ pub(crate) fn session(s: &Setup, seed: u64) -> Duo {
             Params::fsp(),
             Jit::Fixed(s.new_jitter),
         );
+        let new: Box<dyn End> = if s.shipped {
+            boxed(ShipFsp::new(new))
+        } else {
+            boxed(new)
+        };
         let mut old = FspPeer::new(
             &format!("{:?}", s.rel),
             s.rel,
@@ -999,7 +1044,7 @@ pub(crate) fn session(s: &Setup, seed: u64) -> Duo {
         if let Some(m) = s.old_messages {
             old.after_messages = m;
         }
-        return Duo::new(boxed(new), boxed(old), 0);
+        return Duo::new(new, boxed(old), 0);
     }
     let mut hi = HandshakeState::<E>::new_xk_initiator(nk.keypair(), pinned(&opub).expect("a key"));
     hi.set_local_epoch(nk.epoch());
@@ -1011,15 +1056,14 @@ pub(crate) fn session(s: &Setup, seed: u64) -> Duo {
         .expect("reads");
     hr.read_xk_message_3(&hi.write_xk_message_3().expect("msg3"))
         .expect("reads");
-    let new = NewFsp::established(
+    let new = new_end(
         &format!("new({:?})", s.rel),
+        s.shipped,
         nk,
         opub,
         [0x22; 8],
         hi.into_session().expect("done"),
-        0,
-        Params::fsp(),
-        Jit::Fixed(s.new_jitter),
+        s.new_jitter,
     );
     let mut old = FspPeer::established(
         &format!("{:?}", s.rel),
@@ -1033,12 +1077,13 @@ pub(crate) fn session(s: &Setup, seed: u64) -> Duo {
     if let Some(m) = s.old_messages {
         old.after_messages = m;
     }
-    Duo::new(boxed(new), boxed(old), 0)
+    Duo::new(new, boxed(old), 0)
 }
 
 /// A session between two new nodes, set up at 0 or opened by both: the
-/// production profile against itself.
-pub(crate) fn new_session(seed: u64, jitter: [u16; 2], established: bool) -> Duo {
+/// production profile against itself. With `shipped`, both are the node
+/// this release ships.
+pub(crate) fn new_session(seed: u64, jitter: [u16; 2], established: bool, shipped: bool) -> Duo {
     seed_entropy(seed);
     let (ak, bk) = keys(seed, true);
     let apub = PeerKey::from_xonly(&ak.keypair().x_only_public_key().0);
@@ -1046,6 +1091,9 @@ pub(crate) fn new_session(seed: u64, jitter: [u16; 2], established: bool) -> Duo
     if !established {
         let a = NewFsp::new("new a", ak, bpub, Params::fsp(), Jit::Fixed(jitter[0]));
         let b = NewFsp::new("new b", bk, apub, Params::fsp(), Jit::Fixed(jitter[1]));
+        if shipped {
+            return Duo::new(boxed(ShipFsp::new(a)), boxed(ShipFsp::new(b)), 0);
+        }
         return Duo::new(boxed(a), boxed(b), 0);
     }
     let mut hi = HandshakeState::<E>::new_xk_initiator(ak.keypair(), pinned(&bpub).expect("a key"));
@@ -1058,27 +1106,25 @@ pub(crate) fn new_session(seed: u64, jitter: [u16; 2], established: bool) -> Duo
         .expect("reads");
     hr.read_xk_message_3(&hi.write_xk_message_3().expect("msg3"))
         .expect("reads");
-    let a = NewFsp::established(
+    let a = new_end(
         "new a",
+        shipped,
         ak,
         bpub,
         [0x22; 8],
         hi.into_session().expect("done"),
-        0,
-        Params::fsp(),
-        Jit::Fixed(jitter[0]),
+        jitter[0],
     );
-    let b = NewFsp::established(
+    let b = new_end(
         "new b",
+        shipped,
         bk,
         apub,
         [0x11; 8],
         hr.into_session().expect("done"),
-        0,
-        Params::fsp(),
-        Jit::Fixed(jitter[1]),
+        jitter[1],
     );
-    Duo::new(boxed(a), boxed(b), 0)
+    Duo::new(a, b, 0)
 }
 
 /// A session trace.
@@ -1099,6 +1145,8 @@ pub(crate) struct Trace {
     /// Scripted setups from third parties to the new node: instant and
     /// stranger.
     strangers: Vec<(u64, u8)>,
+    /// The deployed node restarts at this instant.
+    restart: Option<u64>,
     run: u64,
     expect: Expect,
 }
@@ -1117,6 +1165,7 @@ impl Trace {
                 old_jitter: 15,
                 established: true,
                 old_messages: None,
+                shipped: false,
             },
             rules: Vec::new(),
             period: [Some(1_000), Some(1_000)],
@@ -1125,6 +1174,7 @@ impl Trace {
             phase: [0, 500],
             opens: Vec::new(),
             strangers: Vec::new(),
+            restart: None,
             run: 260_000,
             expect: Expect::lossless(),
         }
@@ -1161,6 +1211,13 @@ impl Trace {
         self
     }
 
+    /// The new node is the one this release ships: the machine polled on
+    /// the shell's tick.
+    fn shipped(mut self) -> Self {
+        self.setup.shipped = true;
+        self
+    }
+
     /// No session yet: the trace opens it.
     fn opening(mut self) -> Self {
         self.setup.established = false;
@@ -1186,24 +1243,41 @@ impl Trace {
     }
 }
 
+/// A scripted action of a session trace.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Act {
+    /// The end opens the session.
+    Open,
+    /// A third party's setup reaches the new node.
+    Stranger(u8),
+    /// The deployed node restarts.
+    Restart,
+}
+
 /// Run one session trace and check it.
 fn run(t: Trace, seed: u64) -> Result<(), String> {
-    let name = format!("{} against {:?}", t.name, t.setup.rel);
+    let name = if t.setup.shipped && !t.name.starts_with("shipped") {
+        format!("shipped node, {} against {:?}", t.name, t.setup.rel)
+    } else {
+        format!("{} against {:?}", t.name, t.setup.rel)
+    };
     let mut duo = session(&t.setup, seed);
     duo.rules = t.rules;
     duo.period = t.period;
     duo.hush = t.hush;
     duo.lat = t.lat;
     duo.phase = t.phase;
-    let mut acts: Vec<(u64, usize, Option<u8>)> =
-        t.opens.iter().map(|&(at, x)| (at, x, None)).collect();
-    acts.extend(t.strangers.iter().map(|&(at, n)| (at, 0, Some(n))));
+    let mut acts: Vec<(u64, usize, Act)> =
+        t.opens.iter().map(|&(at, x)| (at, x, Act::Open)).collect();
+    acts.extend(t.strangers.iter().map(|&(at, n)| (at, 0, Act::Stranger(n))));
+    acts.extend(t.restart.map(|at| (at, 1, Act::Restart)));
     acts.sort_unstable();
-    for (at, x, stranger) in acts {
+    for (at, x, act) in acts {
         duo.run_until(at);
-        match stranger {
-            Some(n) => duo.act(x, |end, now, out| end.stranger(now, n, out)),
-            None => duo.act(x, |end, now, out| end.open(now, out)),
+        match act {
+            Act::Stranger(n) => duo.act(x, |end, now, out| end.stranger(now, n, out)),
+            Act::Open => duo.act(x, |end, now, out| end.open(now, out)),
+            Act::Restart => duo.act(x, |end, _, _| end.restart([0x33; 8])),
         }
     }
     duo.run_until(t.run);
@@ -1444,7 +1518,365 @@ fn session_rekey_traces_hold_against_every_deployed_release() {
         t.lat = [750, 750];
         cases.push(t);
     }
+    cases.extend(shipped_traces());
+    cases.extend(shipped_slow_acks());
     all(cases.into_iter().map(|t| run(t, 11)).collect());
+}
+
+/// S-3 for the node this release ships: a 0.5.0 to 0.5.2 responder at the
+/// larger address re-arms on a resent setup when the round trip (1.5 s)
+/// exceeds the first rung and no session SRTT is known. The first attempt
+/// fails, and Karn's kept backoff lets the next complete.
+fn shipped_slow_acks() -> Vec<Trace> {
+    let mut cases = Vec::new();
+    for rel in [Rel::V050, Rel::V052] {
+        // The responder sending: the shipped node sees it stay on the old
+        // epoch, retires at its deadline and repairs at once, with its first
+        // rung backed off; nothing is lost.
+        let mut t = Trace::new("shipped node, slow ack re-arms the responder", rel)
+            .shipped()
+            .until(330_000)
+            .expect(Expect::lossless().must(1, "yielded rekey to a setup").must(
+                0,
+                "Installed { tag: EpochTag(2), role: Initiator, evidence: Frame }",
+            ));
+        t.lat = [750, 750];
+        cases.push(t);
+        // The responder silent is swept over round trips and tick phases
+        // in its own test below.
+    }
+    cases
+}
+
+/// S-3 with the responder silent, swept over the round trip and both ends'
+/// tick phases. A 0.5.0 to 0.5.2 responder at the larger address re-arms on
+/// the resent setup and drops the msg3 of the first attempt, so the new
+/// node's assumed cutover at its confirmation deadline is wrong. The
+/// responder's own rekey, held by its dampening until 30 s after that
+/// re-arm, sends its setup at the responder's first tick after the
+/// dampening ends, so the setup reaches the new node at or after the new
+/// node's confirmation deadline and within a tick of it. The shell polls
+/// the machine before it takes a setup whenever a deadline is due, so the
+/// setup is judged after that deadline: it is answered, and the new node
+/// cuts over at its msg3. The new node's frames are lost from the assumed
+/// cutover to that msg3, at most the round trip plus the responder's tick,
+/// in whole data frames: 3 s at a 900 ms one-way latency, which is why the
+/// bound is not a flat 2 s. Judged against the passed deadline, the setup
+/// was refused at the smaller address, the responder's only copy was lost,
+/// and the frames stayed lost until the new node's silence rule repaired
+/// the session and that repair was assumed a confirmation window later,
+/// about 60 s.
+#[test]
+fn slow_ack_against_a_silent_responder_loses_at_most_a_round_trip_and_a_tick_at_every_phase() {
+    let mut cases = Vec::new();
+    for rel in [Rel::V050, Rel::V052] {
+        for lat in [600u64, 750, 900] {
+            let bound = (2 * lat + 1_000).div_ceil(1_000) * 1_000;
+            for p0 in [0, 500] {
+                for p1 in [0, 250, 500, 750] {
+                    let mut t = Trace::new("slow ack re-arms a silent responder", rel)
+                        .shipped()
+                        .silent_old()
+                        .until(330_000)
+                        .expect(
+                            Expect::lossless()
+                                .outage(0, bound)
+                                .must(0, "Assumed")
+                                .must(1, "completed rekey as initiator"),
+                        );
+                    t.lat = [lat, lat];
+                    t.phase = [p0, p1];
+                    cases.push((t, lat, [p0, p1]));
+                }
+            }
+        }
+        // The new node polled at its next wake: the responder's setup
+        // arrives at the very instant of the confirmation deadline.
+        let mut t = Trace::new("slow ack re-arms a silent responder", rel)
+            .silent_old()
+            .until(330_000)
+            .expect(
+                Expect::lossless()
+                    .outage(0, 3_000)
+                    .must(0, "Assumed")
+                    .must(1, "completed rekey as initiator"),
+            );
+        t.lat = [750, 750];
+        t.phase = [0, 750];
+        cases.push((t, 750, [0, 750]));
+    }
+    all(cases
+        .into_iter()
+        .map(|(t, lat, phase)| {
+            run(t, 11).map_err(|e| format!("latency {lat} ms, tick phases {phase:?}: {e}"))
+        })
+        .collect());
+}
+
+/// The session rekey traces of the node this release ships against each
+/// release: the machine takes every setup, ack, msg3 and frame and starts
+/// its own rekeys, scheduled or after silence, polled on the shell's tick.
+/// Each states what it costs against what the deployed initiator (a 2 s
+/// timer cutover) would have lost.
+fn shipped_traces() -> Vec<Trace> {
+    let mut cases = Vec::new();
+    for rel in Rel::ALL {
+        // S-1: the responder promotes on the probe, and its next frame is
+        // the evidence.
+        cases.push(
+            Trace::new("shipped node initiates", rel).shipped().expect(
+                installs("Installed { tag: EpochTag(1), role: Initiator, evidence: Frame }")
+                    .must(1, "promoted"),
+            ),
+        );
+        // S-1 with a silent responder: assumed at the deadline, the
+        // keepalives under the old epoch keeping the responder's drain
+        // alive through a pause in the shipped node's own data.
+        let mut t = Trace::new("shipped node, silent responder, initiator idle", rel)
+            .shipped()
+            .silent_old()
+            .rule(Rule::first(0, Class::Prompt, 111_000, 1))
+            .expect(installs(
+                "Installed { tag: EpochTag(1), role: Initiator, evidence: Assumed }",
+            ));
+        t.hush[0] = Some((106_000, 125_000));
+        cases.push(t);
+        // S-2, responder sending: retired at the deadline with a repair
+        // due, which starts at once; the responder's armed copy has
+        // expired, so it arms the repair. Nothing is lost, where a deployed
+        // initiator lost its frames until a later rekey.
+        cases.push(
+            Trace::new("shipped node, every msg3 lost, responder sending", rel)
+                .shipped()
+                .rule(Rule::drop(0, Class::Msg3, 100_000, 140_000))
+                .expect(
+                    Expect::lossless()
+                        .must(0, "Retired { tag: EpochTag(1) }")
+                        .must(1, "armed rekey expired")
+                        .never(1, "RekeyHeld")
+                        .must(
+                            0,
+                            "Installed { tag: EpochTag(2), role: Initiator, evidence: Frame }",
+                        ),
+                ),
+        );
+        // S-2, responder silent: the assumed cutover at 137 s is wrong, and
+        // the shipped node's frames are lost until its silence rule, 30 s
+        // later, starts a repair, which the responder answers (yielding the
+        // attempt it started at 136.5 s, which the shipped node refused
+        // while it waited for evidence) and which is assumed at its own
+        // deadline: 62 s,
+        // against every release, as for the new node (12.1 item 2). A
+        // deployed initiator (the 0.5.3 model) loses 108 s here against every
+        // release, from its 2 s timer cutover.
+        cases.push(
+            Trace::new("shipped node, every msg3 lost, responder silent", rel)
+                .shipped()
+                .silent_old()
+                .rule(Rule::drop(0, Class::Msg3, 100_000, 140_000))
+                .until(330_000)
+                .expect(Expect::lossless().outage(0, 62_000).must(0, "Assumed")),
+        );
+        // S-4: the setup is resent at 1 s. A 0.5.0 to 0.5.2 responder at
+        // the larger address re-arms on the copy and answers it, and the
+        // rekey completes at once. At the smaller address it drops the copy
+        // at its tie-break, and 0.5.3 drops it as held, so the attempt ends
+        // at its 30 s deadline, the responder's armed copy expires with it,
+        // and the next attempt completes. Nothing is lost either way.
+        for larger in [false, true] {
+            let mut t = Trace::new("shipped node, ack lost", rel)
+                .shipped()
+                .rule(Rule::first(1, Class::Ack, 100_000, 1))
+                .until(330_000);
+            if larger {
+                t = t.larger();
+            }
+            let expect = Expect::lossless().must(1, "promoted");
+            t = t.expect(match (rel, larger) {
+                (Rel::V053, _) => expect
+                    .must(1, "dropped setup RekeyHeld")
+                    .must(0, "Abandoned(Unanswered)"),
+                (_, true) => expect
+                    .must(1, "dropped setup RekeyTiebreak")
+                    .must(0, "Abandoned(Unanswered)"),
+                (_, false) => expect
+                    .must(1, "yielded rekey to a setup")
+                    .never(0, "Abandoned(Unanswered)"),
+            });
+            cases.push(t);
+        }
+        // S-7: the responder holds the pending and keeps the old epoch, the
+        // shipped node retires at its deadline and its next attempts are
+        // refused behind the pending until it is stale; nothing is lost.
+        cases.push(
+            Trace::new("shipped node, every probe lost, responder sending", rel)
+                .shipped()
+                .rule(Rule::drop(0, Class::Probe, 100_000, 140_000))
+                .until(400_000)
+                .expect(
+                    Expect::lossless()
+                        .must(1, "dropped setup RekeyPending")
+                        .must(0, "Retired { tag: EpochTag(1) }"),
+                ),
+        );
+        // S-5: the shipped node holds the deployed node's setup as a
+        // candidate, cuts over at its msg3 and prompts; the initiator
+        // promotes on the prompt.
+        cases.push(
+            Trace::new("deployed node initiates toward a shipped node", rel)
+                .shipped()
+                .old_first()
+                .expect(installs(
+                    "Installed { tag: EpochTag(1), role: Responder, evidence: Proof }",
+                )),
+        );
+        // S-5 with the first three msg3 copies lost: the candidate waits
+        // for the 7 s copy; the initiator's frames after its 2 s timer are
+        // lost only until then.
+        cases.push(
+            Trace::new(
+                "deployed node initiates toward a shipped node, first three msg3 copies lost",
+                rel,
+            )
+            .shipped()
+            .old_first()
+            .rule(Rule::first(1, Class::Msg3, 100_000, 3))
+            .expect(
+                installs("Installed { tag: EpochTag(1), role: Responder, evidence: Proof }")
+                    .outage(1, 6_000),
+            ),
+        );
+        // S-6: every copy of the deployed initiator's msg3 lost; it cuts
+        // over on its timer to keys the shipped node never completed, and
+        // its frames are lost until the shipped node's own trigger, at
+        // 135 s, as between two deployed nodes.
+        cases.push(
+            Trace::new("every msg3 of a deployed initiator lost, shipped node", rel)
+                .shipped()
+                .old_first()
+                .rule(Rule::drop(1, Class::Msg3, 100_000, 170_000))
+                .until(330_000)
+                .expect(Expect::lossless().outage(1, 36_000).outage(0, 2_000)),
+        );
+        // 7.6 case A: the deployed node, larger, yields at the shipped
+        // node's setup; the shipped node acknowledges the deployed node's
+        // setup too, and the cutover on its peer's frame drops that
+        // candidate.
+        cases.push(
+            Trace::new("crossing rekeys, shipped node smaller", rel)
+                .shipped()
+                .crossing()
+                .expect(Expect::lossless().must(1, "yielded rekey to a setup").must(
+                    0,
+                    "Installed { tag: EpochTag(1), role: Initiator, evidence: Frame }",
+                )),
+        );
+        // 7.6 case B: the shipped node, larger, acknowledges the deployed
+        // node's setup beside its own attempt and yields at its msg3.
+        cases.push(
+            Trace::new("crossing rekeys, shipped node larger", rel)
+                .shipped()
+                .crossing()
+                .larger()
+                .expect(
+                    Expect::lossless()
+                        .must(1, "dropped setup RekeyTiebreak")
+                        .must(0, "Abandoned(Yielded)")
+                        .must(
+                            0,
+                            "Installed { tag: EpochTag(1), role: Responder, evidence: Proof }",
+                        ),
+                ),
+        );
+        // 7.6 case D: the shipped node, smaller, has completed when the
+        // deployed node's setup arrives, and refuses it (S1-0); at its
+        // deadline it retires on the peer staying and repairs, and the
+        // larger deployed node yields its own to that setup.
+        cases.push(
+            Trace::new("setup meets a completed rekey at a shipped node", rel)
+                .shipped()
+                .rule(Rule::drop(0, Class::Msg3, 100_000, 140_000))
+                .rule(Rule::delay(1, Class::Ack, 100_000, 106_000, 900))
+                .until(330_000)
+                .expect(
+                    Expect::lossless()
+                        .must(1, "initiated rekey")
+                        .must(0, "Reject(TieBreakKept)")
+                        .must(1, "yielded rekey to a setup"),
+                ),
+        );
+        // The deployed node restarts at 40 s and, holding no session, sends
+        // nothing. The shipped node keeps sending; 30 s after it last heard
+        // the peer its silence rule starts a rekey, which the restarted node
+        // answers as a first handshake. The ack carries the new startup
+        // epoch, so the shipped node cuts over at its msg3, retiring the old
+        // epoch, and reports the restart. Its frames are lost from the
+        // restart to that cutover, 30 s; with no silence start they were
+        // lost until its scheduled rekey at 105 s, and then until the peer's
+        // first frame under the new keys.
+        let mut t = Trace::new(
+            "deployed node restarts, shipped node's silence reveals it",
+            rel,
+        )
+        .shipped()
+        .expect(
+            installs("Installed { tag: EpochTag(1), role: Initiator, evidence: Restart }")
+                .outage(0, 30_000)
+                .must(0, "PeerRestarted"),
+        );
+        t.restart = Some(40_000);
+        cases.push(t);
+        // The deployed node restarts at 100 s and opens a session at
+        // 100.5 s. Its setup is a candidate beside the running session, and
+        // its msg3, carrying the new startup epoch, completes it: the old
+        // epoch is retired and the restart reported. Only the shipped
+        // node's frames sent between the restart and that msg3 are lost.
+        let mut t = Trace::new(
+            "deployed node restarts and opens toward a shipped node",
+            rel,
+        )
+        .shipped()
+        .expect(
+            installs("Installed { tag: EpochTag(1), role: Responder, evidence: Proof }")
+                .outage(0, 1_000)
+                .must(0, "PeerRestarted"),
+        );
+        t.restart = Some(100_000);
+        t.opens = alloc::vec![(100_500, 1)];
+        cases.push(t);
+        // A frame the responder sealed under the old epoch delayed past
+        // the cutover still opens in the drain.
+        cases.push(
+            Trace::new("old-epoch frame delayed past a shipped node's cutover", rel)
+                .shipped()
+                .rule(Rule::delay(1, Class::Data, 104_500, 105_000, 2_000))
+                .expect(
+                    installs("Installed { tag: EpochTag(1), role: Initiator, evidence: Frame }")
+                        .delivers_previous(0),
+                ),
+        );
+    }
+    // Strangers' setups naming the deployed peer neither stop the shipped
+    // node's rotation nor evict the deployed initiator's candidate: its
+    // first msg3 copies lost, the candidate outlives a burst of setups that
+    // fills its link's quota and the table, and the next copy completes it.
+    // Before the machine took setups, each such setup armed a handshake
+    // that vetoed the node's own rekey and refused the peer's.
+    let mut t = Trace::new(
+        "shipped node keeps a rekey candidate through strangers' setups",
+        Rel::V053,
+    )
+    .shipped()
+    .old_first()
+    .rule(Rule::first(1, Class::Msg3, 100_000, 3))
+    .expect(
+        installs("Installed { tag: EpochTag(1), role: Responder, evidence: Proof }")
+            .outage(1, 7_000)
+            .must(0, "Reject(CandidatesFull)"),
+    );
+    t.strangers = alloc::vec![(112_000, 0), (112_000, 7), (112_000, 8), (112_000, 9)];
+    cases.push(t);
+    cases
 }
 
 /// The first-handshake traces a new node runs against each release: either
@@ -1452,9 +1884,23 @@ fn session_rekey_traces_hold_against_every_deployed_release() {
 /// rekey while the first-handshake msg3 is unconfirmed at both addresses,
 /// and a 0.5.0 to 0.5.2 peer
 /// that lost the first msg3 and replaced its half-open entry with its own
-/// attempt, against the releases each names.
+/// attempt, against the releases each names. Each runs with the new node
+/// polled at its next wake and as the node this release ships, polled on
+/// the shell's tick.
 #[test]
 fn session_first_handshake_traces_hold_against_every_deployed_release() {
+    let mut cases = Vec::new();
+    for t in first_handshake_traces() {
+        cases.push(t);
+    }
+    for t in first_handshake_traces() {
+        cases.push(t.shipped());
+    }
+    all(cases.into_iter().map(|t| run(t, 13)).collect());
+}
+
+/// The cases of the first-handshake traces, for the new node.
+fn first_handshake_traces() -> Vec<Trace> {
     let mut cases = Vec::new();
     for rel in Rel::ALL {
         // The new node opens; any release answers.
@@ -1568,11 +2014,12 @@ fn session_first_handshake_traces_hold_against_every_deployed_release() {
             cases.push(t);
         }
     }
-    all(cases.into_iter().map(|t| run(t, 13)).collect());
+    cases
 }
 
 /// Seeded lossy runs of a new node against every release, and between two
-/// new nodes (the production profile against itself): sessions opened by
+/// new nodes (the production profile against itself), the node this release
+/// ships in place of the new node in some of each: sessions opened by
 /// either end or set up before the run, each end's trigger first, the
 /// deployed end sending or silent from 100 s. Whatever the loss did, nothing
 /// panics, and once it stops the session converges (against 0.5.0 and
@@ -1596,6 +2043,11 @@ fn lossy_session_runs_converge_against_every_deployed_release() {
             if seed % 5 == 4 {
                 t = t.opening();
                 t.opens = alloc::vec![(1_000, 0), (1_000 + 400 * (seed % 3), 1)];
+                if seed >= 5 {
+                    t = t.shipped();
+                }
+            } else if seed % 5 == 3 {
+                t = t.shipped();
             }
             let name = format!("lossy session run {seed} against {rel:?}");
             let mut duo = session(&t.setup, 300 + seed);
@@ -1619,10 +2071,11 @@ fn lossy_session_runs_converge_against_every_deployed_release() {
             results.push(expect.check(&name, &mut duo, 300_000));
         }
     }
-    for seed in 0..6u64 {
+    for seed in 0..10u64 {
         let jitter = [[0, 30], [30, 0], [15, 15]][(seed % 3) as usize];
-        let established = seed < 4;
-        let mut duo = new_session(700 + seed, jitter, established).seeded(800 + seed, 150);
+        let established = !(4..6).contains(&seed) && seed < 8;
+        let shipped = seed >= 6;
+        let mut duo = new_session(700 + seed, jitter, established, shipped).seeded(800 + seed, 150);
         if seed % 3 == 1 {
             duo.hush[1] = Some((100_000, 400_000));
         }
