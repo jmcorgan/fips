@@ -5,9 +5,7 @@ use super::*;
 #[tokio::test]
 async fn test_two_node_handshake_udp() {
     use crate::config::UdpConfig;
-    use crate::proto::fmp::wire::{
-        build_encrypted, build_established_header, build_msg1, prepend_inner_header,
-    };
+    use crate::proto::fmp::wire::{build_msg1, prepend_inner_header};
     use crate::transport::udp::UdpTransport;
     use tokio::time::{Duration, timeout};
 
@@ -55,12 +53,13 @@ async fn test_two_node_handshake_udp() {
     let link_id_a = node_a.allocate_link_id();
 
     // Allocate session index for A's outbound
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
 
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -172,12 +171,12 @@ async fn test_two_node_handshake_udp() {
     let inner_a = prepend_inner_header(0, msg_a);
     let peer_b = node_a.get_peer_mut(&peer_b_node_addr).unwrap();
     let their_index_b = peer_b.their_index().expect("A should know B's index");
-    let session_a = peer_b.noise_session_mut().unwrap();
-    let counter_a = session_a.current_send_counter();
-    let header_a = build_established_header(their_index_b, counter_a, 0, inner_a.len() as u16);
-    let ciphertext_a = session_a.encrypt_with_aad(&inner_a, &header_a).unwrap();
-
-    let wire_encrypted = build_encrypted(&header_a, &ciphertext_a);
+    let wire_encrypted = peer_b.seal_test_frame(
+        fips_core::proto::rekey::Slot::Current,
+        their_index_b,
+        0,
+        &inner_a,
+    );
     let transport = node_a.transports.get(&transport_id_a).unwrap();
     transport
         .send(&remote_addr_b, &wire_encrypted)
@@ -199,12 +198,12 @@ async fn test_two_node_handshake_udp() {
     let inner_b = prepend_inner_header(0, msg_b);
     let peer_a = node_b.get_peer_mut(&peer_a_node_addr).unwrap();
     let their_index_a = peer_a.their_index().expect("B should know A's index");
-    let session_b = peer_a.noise_session_mut().unwrap();
-    let counter_b = session_b.current_send_counter();
-    let header_b = build_established_header(their_index_a, counter_b, 0, inner_b.len() as u16);
-    let ciphertext_b = session_b.encrypt_with_aad(&inner_b, &header_b).unwrap();
-
-    let wire_encrypted_b = build_encrypted(&header_b, &ciphertext_b);
+    let wire_encrypted_b = peer_a.seal_test_frame(
+        fips_core::proto::rekey::Slot::Current,
+        their_index_a,
+        0,
+        &inner_b,
+    );
     let transport = node_b.transports.get(&transport_id_b).unwrap();
     transport
         .send(&remote_addr_a, &wire_encrypted_b)
@@ -289,11 +288,12 @@ async fn test_run_rx_loop_handshake() {
 
     let link_id_a = node_a.allocate_link_id();
 
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -484,11 +484,12 @@ async fn test_cross_connection_both_initiate() {
 
     // Node A initiates to Node B
     let link_id_a_out = node_a.allocate_link_id();
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a_out, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -521,11 +522,12 @@ async fn test_cross_connection_both_initiate() {
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
-    let our_index_b = node_b.index_allocator.allocate().unwrap();
+    let our_index_b_lease = fips_core::proto::rekey::allocate(&mut node_b.index_allocator).unwrap();
+    let our_index_b = crate::utils::index::SessionIndex::new(our_index_b_lease.index());
     node_b
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_b_out, peer_a_identity, 1000)
-                .with_our_index(our_index_b)
+                .with_our_index(our_index_b_lease)
                 .with_transport_id(transport_id_b)
                 .with_source_addr(remote_addr_a.clone()),
         )
@@ -650,6 +652,12 @@ async fn test_cross_connection_both_initiate() {
     assert!(peer_b_on_a.has_session(), "Peer B on A should have session");
     assert!(peer_a_on_b.has_session(), "Peer A on B should have session");
 
+    // The winner's swap retired its inbound session's index and bound the
+    // outbound one; the loser freed its outbound index. Each node's index
+    // map and allocator hold exactly the sessions its peer keeps.
+    super::link_index_audit::audit(&node_a, "the cross-connection resolution at A");
+    super::link_index_audit::audit(&node_b, "the cross-connection resolution at B");
+
     // Clean up transports
     for (_, t) in node_a.transports.iter_mut() {
         t.stop().await.ok();
@@ -677,10 +685,11 @@ async fn test_stale_connection_cleanup() {
     let link_id = node.allocate_link_id();
 
     // Allocate session index and set transport info
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     node.seed_handshake_machine(
         HandshakeSeed::outbound(link_id, peer_identity, past_time_ms)
-            .with_our_index(our_index)
+            .with_our_index(our_lease)
             .with_transport_id(transport_id)
             .with_source_addr(remote_addr.clone()),
     )
@@ -761,10 +770,11 @@ async fn test_failed_connection_cleanup() {
         .unwrap_or(0);
     let link_id = node.allocate_link_id();
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     node.seed_handshake_machine(
         HandshakeSeed::outbound(link_id, peer_identity, now_ms)
-            .with_our_index(our_index)
+            .with_our_index(our_lease)
             .with_transport_id(transport_id)
             .with_source_addr(remote_addr.clone()),
     )
@@ -845,12 +855,13 @@ async fn test_msg1_stored_for_resend() {
     let link_id = node.allocate_link_id();
     let mut conn = outbound_leg(link_id, peer_identity, now_ms);
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
         .unwrap();
-    conn.set_conn_our_index(our_index);
+    let _ = conn.set_conn_our_index(our_lease);
     conn.set_conn_transport_id(transport_id);
     conn.set_conn_source_addr(remote_addr.clone());
 
@@ -876,7 +887,8 @@ async fn test_resend_scheduling() {
     let link_id = node.allocate_link_id();
     let mut conn = outbound_leg(link_id, peer_identity, now_ms);
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
@@ -918,7 +930,7 @@ async fn test_resend_scheduling() {
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
     machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
-    machine.set_conn_our_index(our_index);
+    let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
@@ -960,7 +972,8 @@ async fn test_handshake_timeout_drive() {
     let dial_ms = 1000u64;
     let link_id = node.allocate_link_id();
     let mut conn = outbound_leg(link_id, peer_identity, dial_ms);
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let _ = conn
         .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
@@ -994,7 +1007,7 @@ async fn test_handshake_timeout_drive() {
         dial_ms,
         &mut node.index_allocator,
     );
-    machine.set_conn_our_index(our_index);
+    let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
@@ -1944,13 +1957,11 @@ fn install_peering_at_a_different_epoch(
     source_addr: &TransportAddr,
     idle_secs: u64,
 ) -> LinkId {
-    use crate::peer::ActivePeer;
-
     let identity = PeerIdentity::from_pubkey_full(initiator.identity().pubkey_full());
     let node_addr = *identity.node_addr();
     let link_id = node.allocate_link_id();
     let authenticated_at = Node::now_ms().saturating_sub(idle_secs * 1000);
-    let mut peer = ActivePeer::new(identity, link_id, authenticated_at);
+    let mut peer = keyed_peer(node, initiator.identity(), link_id, authenticated_at);
     peer.set_current_addr(transport_id, source_addr.clone());
     // Anything but the epoch the initiator's msg1 carries, so the msg1 reads
     // as a restart.
@@ -2431,11 +2442,12 @@ mod dead_encrypt_worker {
         let peer_b = *peer_b_identity.node_addr();
         let peer_a = *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();
         let link_id = node_a.allocate_link_id();
-        let our_index = node_a.index_allocator.allocate().unwrap();
+        let our_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+        let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
         node_a
             .seed_handshake_machine(
                 HandshakeSeed::outbound(link_id, peer_b_identity, 1000)
-                    .with_our_index(our_index)
+                    .with_our_index(our_lease)
                     .with_transport_id(tid)
                     .with_source_addr(remote_addr_b.clone()),
             )
@@ -2891,7 +2903,7 @@ async fn a_replay_with_a_changed_sender_idx_is_dropped_before_teardown() {
     );
     let phantom = peering_link(&node, &initiator_addr);
     let links = node.link_count();
-    let bad_state = node.stats().handshake.bad_state;
+    let answered_before = node.stats().handshake.answered_before;
 
     // The same capture under a new sender index, so the resend check does
     // not recognise it, from another address the replayer holds.
@@ -2921,9 +2933,10 @@ async fn a_replay_with_a_changed_sender_idx_is_dropped_before_teardown() {
         "the dropped copy must leave no link behind, so no msg2 went out"
     );
     assert_eq!(
-        node.stats().handshake.bad_state - bad_state,
+        node.stats().handshake.answered_before - answered_before,
         1,
-        "the drop must be counted"
+        "the drop must be counted: the peering's link recorded the capture \
+         it was promoted from, so the copy is refused as answered before"
     );
 }
 
@@ -3036,8 +3049,13 @@ async fn the_genuine_msg1_still_replaces_a_phantom_after_the_ephemeral_is_stored
     );
 }
 
+/// The initiator's msg1 that meets a phantom promoted just before it is
+/// refused, and the phantom's link records it, so its resend is refused as
+/// answered before too; the initiator's next dial, with a fresh msg1,
+/// replaces the phantom once it has had the minimum age.
 #[tokio::test]
-async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_replaces_it_at_its_resend() {
+async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_is_refused_with_its_resend_and_its_next_dial_replaces_the_phantom()
+ {
     let mut node = make_node();
     let initiator = make_node();
     let initiator_addr = node_addr_of(&initiator);
@@ -3066,9 +3084,11 @@ async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_replaces_it_at
         "a second msg1 inside the minimum age must not replace the peering"
     );
 
-    // Its first resend, the same bytes a second later, replaces the phantom.
+    // Its first resend, the same bytes a second later, is a copy of a msg1
+    // the link refused.
+    let answered_before = node.stats().handshake.answered_before;
     assert!(
-        promotes(
+        !promotes(
             &mut node,
             &initiator_addr,
             &genuine_addr(),
@@ -3076,7 +3096,26 @@ async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_replaces_it_at
             start + 100 + 1_000,
         )
         .await,
-        "the genuine msg1's resend must replace a phantom that has had the \
+        "a resend of the refused msg1 must not replace the phantom"
+    );
+    assert_eq!(
+        node.stats().handshake.answered_before,
+        answered_before + 1,
+        "the resend is refused as answered before"
+    );
+
+    // The initiator's next dial carries a fresh msg1.
+    let next = genuine_msg1(&initiator, &node);
+    assert!(
+        promotes(
+            &mut node,
+            &initiator_addr,
+            &genuine_addr(),
+            next,
+            start + 100 + 2_000,
+        )
+        .await,
+        "the initiator's next msg1 must replace a phantom that has had the \
          minimum age and was never heard from"
     );
     assert_eq!(
@@ -3401,6 +3440,7 @@ mod heard {
 
     use super::super::spanning_tree::{
         TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node,
+        process_available_packets,
     };
     use super::*;
     use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG2};
@@ -3612,54 +3652,128 @@ mod heard {
     async fn two_msg1s_in_one_tick_from_the_smaller_address_leave_a_working_peering() {
         two_msg1s_in_one_tick_leave_a_working_peering(false).await;
     }
+
+    /// A dialer sends the responder two link-setup msg1s at once, the second
+    /// reaching it after the peering the first promoted is old enough to be
+    /// replaced, and before any frame of that peering. The responder replaces
+    /// the peering with the second dial, so the dialer must move to the
+    /// second dial's session too, and both ends must then hold a peering
+    /// that has decrypted the other's frames.
+    async fn a_second_msg1_after_the_replaceable_age_leaves_a_working_peering(dialer_larger: bool) {
+        use crate::node::handlers::handshake::UNHEARD_PEERING_MIN_AGE_MS;
+
+        let (mut nodes, d, r) = ordered_pair(dialer_larger).await;
+        let d_addr = node_addr_of(&nodes[d].node);
+        let r_addr = node_addr_of(&nodes[r].node);
+        initiate_handshake(&mut nodes, d, r).await;
+        initiate_handshake(&mut nodes, d, r).await;
+        let mut first = nodes[r]
+            .packet_rx
+            .try_recv()
+            .expect("precondition: the first msg1 is queued at the responder");
+        let mut second = nodes[r]
+            .packet_rx
+            .try_recv()
+            .expect("precondition: the second msg1 is queued at the responder");
+
+        // The first msg1 arrives 1.5 s before the second.
+        let now = Node::now_ms();
+        first.timestamp_ms = now - (UNHEARD_PEERING_MIN_AGE_MS + 500);
+        nodes[r].node.handle_msg1(first).await;
+        let first_link = peering_link(&nodes[r].node, &d_addr)
+            .expect("precondition: the first msg1 promoted the dialer");
+
+        // The dialer completes its first dial on the first msg2 and sends
+        // under it; every frame it sends waits at the responder until after
+        // the second msg1.
+        process_available_packets(std::slice::from_mut(&mut nodes[d])).await;
+        let before = nodes[d]
+            .node
+            .get_peer(&r_addr)
+            .map(|p| p.link_stats().packets_recv)
+            .expect("precondition: the dialer promoted the responder on the first msg2");
+
+        second.timestamp_ms = now;
+        nodes[r].node.handle_msg1(second).await;
+        assert!(
+            peering_link(&nodes[r].node, &d_addr).is_some_and(|l| l != first_link),
+            "precondition: the second msg1 replaced the unheard peering"
+        );
+        drain_all_packets(&mut nodes, false).await;
+
+        let at_r = nodes[r]
+            .node
+            .get_peer(&d_addr)
+            .map(|p| (p.is_heard(), p.link_stats().packets_recv));
+        let at_d = nodes[d]
+            .node
+            .get_peer(&r_addr)
+            .map(|p| p.link_stats().packets_recv);
+        assert!(
+            at_r.is_some_and(|(heard, n)| heard && n > 0),
+            "the responder must have decrypted the dialer's frames on the \
+             peering that replaced the first; (heard, frames) {at_r:?}"
+        );
+        assert!(
+            at_d.is_some_and(|n| n > before),
+            "the dialer must have decrypted the responder's frames sent after \
+             the replacement; frames {at_d:?}, {before} before it"
+        );
+        cleanup_nodes(&mut nodes).await;
+    }
+
+    #[tokio::test]
+    async fn a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering()
+     {
+        a_second_msg1_after_the_replaceable_age_leaves_a_working_peering(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_second_msg1_after_the_replaceable_age_from_the_smaller_address_leaves_a_working_peering()
+     {
+        a_second_msg1_after_the_replaceable_age_leaves_a_working_peering(false).await;
+    }
 }
 
-/// Each refusal the msg1 classification decides is counted on a counter of
-/// its own, and the split conserves the old total: one input of each refusal
-/// that used to record `BadState` moves the new counters by exactly as much,
-/// in all, as it used to move `bad_state` alone, leaves `bad_state` itself
-/// unmoved, and the silent back-off stays outside both.
+/// Each refusal of a msg1, by the classification or by the peer's link rekey
+/// machine, is counted on a counter of its own, and the split conserves the
+/// old total: one input of each refusal that used to record `BadState` moves
+/// the new counters by exactly as much, in all, as it used to move
+/// `bad_state` alone, leaves `bad_state` itself unmoved, and the silent
+/// back-off stays outside both.
 #[test]
 fn msg1_refusals_each_land_on_their_own_counter_and_conserve_the_old_bad_state_total() {
-    use crate::node::handlers::handshake::msg1_reject;
+    use crate::node::handlers::handshake::{msg1_refusal, msg1_reject};
     use crate::node::reject::HandshakeReject;
     use crate::node::stats::HandshakeStats;
     use crate::proto::fmp::InboundReject;
+    use fips_core::proto::rekey::Reason;
     use std::collections::HashSet;
 
-    let formerly_bad_state = [
-        InboundReject::AtMaxPeers,
-        InboundReject::PendingSession,
-        InboundReject::DualRekeyWon,
-        InboundReject::AnsweredBefore,
-        InboundReject::OffLink,
-    ];
     // A refusal added to the classification stops this compiling until it is
-    // placed in one of the two groups above or below.
-    for reason in formerly_bad_state
-        .iter()
-        .chain([&InboundReject::SilentBackoff])
-    {
+    // placed here.
+    for reason in [&InboundReject::AtMaxPeers, &InboundReject::SilentBackoff] {
         match reason {
-            InboundReject::AtMaxPeers
-            | InboundReject::PendingSession
-            | InboundReject::DualRekeyWon
-            | InboundReject::AnsweredBefore
-            | InboundReject::OffLink
-            | InboundReject::SilentBackoff => {}
+            InboundReject::AtMaxPeers | InboundReject::SilentBackoff => {}
         }
     }
+    let formerly_bad_state = [
+        msg1_reject(&InboundReject::AtMaxPeers),
+        msg1_refusal(Reason::PendingHeld),
+        msg1_refusal(Reason::DualInitWon),
+        msg1_refusal(Reason::AnsweredBefore),
+        msg1_refusal(Reason::OffLink),
+    ];
 
     let mut stats = HandshakeStats::default();
     let mut counters = HashSet::new();
-    for reason in &formerly_bad_state {
-        let counted = msg1_reject(reason);
+    for counted in formerly_bad_state {
         assert_ne!(
             counted,
             HandshakeReject::BadState,
-            "{reason:?} must leave bad_state"
+            "{counted:?} must leave bad_state"
         );
-        assert!(counters.insert(counted), "{reason:?} shares a counter");
+        assert!(counters.insert(counted), "{counted:?} shares a counter");
         stats.record_reject(counted);
     }
     stats.record_reject(msg1_reject(&InboundReject::SilentBackoff));

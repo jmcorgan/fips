@@ -50,6 +50,43 @@ fn insert_link_peer(node: &mut Node, mode: MmpMode) -> NodeAddr {
     addr
 }
 
+/// A keyed peer whose address `wanted` accepts, carrying link MMP in mode
+/// Full but no RTT yet, its session aged so a crafted ReceiverReport yields a
+/// positive first RTT sample. A session's timestamp base exists only with its
+/// keys, so the peer holds a session with the node. Returns the peer and its
+/// NodeAddr.
+fn aged_keyed_peer(node: &Node, wanted: impl Fn(&NodeAddr) -> bool) -> (ActivePeer, NodeAddr) {
+    let remote = loop {
+        let id = crate::Identity::generate();
+        if wanted(id.node_addr()) {
+            break id;
+        }
+    };
+    let identity = crate::PeerIdentity::from_pubkey_full(remote.pubkey_full());
+    let addr = *identity.node_addr();
+    let session = make_noise_session(node.identity(), &remote);
+    let mut peer = ActivePeer::with_test_session(
+        identity,
+        LinkId::new(1),
+        0,
+        session,
+        crate::utils::index::SessionIndex::new(1),
+        crate::utils::index::SessionIndex::new(2),
+        crate::transport::TransportId::new(1),
+        crate::transport::TransportAddr::from_string("127.0.0.1:1"),
+        crate::transport::LinkStats::new(),
+        true,
+        &crate::config::MmpConfig {
+            mode: MmpMode::Full,
+            ..crate::config::MmpConfig::default()
+        },
+        None,
+    );
+    // Age the session so a crafted ReceiverReport yields a positive RTT.
+    peer.test_backdate_session_start(std::time::Duration::from_secs(10));
+    (peer, addr)
+}
+
 /// Arm both sender and receiver link-MMP intervals so a report would be built.
 fn arm_link_mmp(node: &mut Node, addr: &NodeAddr) {
     let mmp = node.get_peer_mut(addr).unwrap().mmp_mut().unwrap();
@@ -327,17 +364,7 @@ async fn session_backoff_all_reports_fail_records_single_failure() {
 /// it becomes eligible. Returns the peer's NodeAddr.
 fn setup_smaller_root_peer(node: &mut Node) -> NodeAddr {
     let my_addr = *node.node_addr();
-    let (identity, addr) = loop {
-        let id = make_peer_identity();
-        let a = *id.node_addr();
-        if a < my_addr {
-            break (id, a);
-        }
-    };
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 0);
-    peer.test_init_mmp(MmpMode::Full);
-    // Age the session so a crafted ReceiverReport yields a positive RTT.
-    peer.test_backdate_session_start(std::time::Duration::from_secs(10));
+    let (peer, addr) = aged_keyed_peer(node, |a| *a < my_addr);
     node.peers.insert(addr, peer);
 
     // Register the peer as a self-root in the tree at its (smaller) address.
@@ -442,16 +469,7 @@ async fn non_first_receiver_report_does_not_retrigger_tree() {
 /// RTT sample. The caller registers the peer's tree position.
 fn insert_larger_unmeasured_peer(node: &mut Node) -> NodeAddr {
     let my_addr = *node.node_addr();
-    let (identity, addr) = loop {
-        let id = make_peer_identity();
-        let a = *id.node_addr();
-        if a > my_addr {
-            break (id, a);
-        }
-    };
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 0);
-    peer.test_init_mmp(MmpMode::Full);
-    peer.test_backdate_session_start(std::time::Duration::from_secs(10));
+    let (peer, addr) = aged_keyed_peer(node, |a| *a > my_addr);
     node.peers.insert(addr, peer);
     addr
 }

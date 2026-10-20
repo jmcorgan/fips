@@ -24,32 +24,58 @@ and is polled on the shell's tick. So the first handshake (its resends,
 its candidates, the crossing decided at msg3, its retained msg3 and its
 teardown) and every rekey of a session, its start, its handshake, its
 cutover and its drain, are decided by the rows below, the silence
-trigger and restart detection by the peer's startup epoch included. The
-link layer does not use the machine yet. The machine's own tests run on
-the stub profiles in `tests/`; `tests/legacy/` runs it on the production
-profiles against models of the deployed releases, and runs the session
-node this release ships (the machine polled on the shell's tick) against
-them as well.
+trigger and restart detection by the peer's startup epoch included. Each
+active link peer holds a machine on `FmpProfile` from promotion on, and
+the root crate hands it every rekey msg1 (read first by
+`fmp::rekey::ik::read_msg1`), msg2 and slow-path frame of the link through
+`step` and polls it on the shell's tick, so every link rekey (its start,
+its msg1 resends, the answer, the cutover, the adoption, the drain and a
+restart its msg2 reveals) is decided by the rows below. A frame a decrypt
+worker opened and handed back to the node (every frame but bulk session
+data) reaches the machine as a worker report, so the key-epoch bit it
+sees from the peer and the evidence that the peer moved count those
+frames too.
+The machine's own tests run on the stub profiles in `tests/`;
+`tests/legacy/` runs it on the production profiles against models of the
+deployed releases, and runs the session and link nodes this release ships
+(the machine polled on the shell's tick) against them as well.
 
 ## Files
 
 - `mod.rs`: the public interface: `Input`, `Output`, `Env` (what a call
   borrows from the shell), `SetupFacts` and `Carry` (what a machine is
-  built from and hands back), `View` and the seal results; and the
+  built from and hands back, and the conversion from one to the other a
+  cross-connection move makes), `View` and the seal results; and the
   re-exports. It holds the module-wide `deny` of wildcard match arms.
 - `machine.rs`: `Rekey` itself: `step` as `judge` then `apply`, the poll,
   `next_wake`, `seal`, `seal_prompt`, `view`, `bindings` and `close`, and
   every transition below.
+- `access.rs`: the read-only accessors the link shell reads (an epoch's
+  keys, tag, indices and stamps, the key-epoch bit, the send counter, the
+  jitter, the drain's end, the last cutover, the held answer), and the
+  one move the shell still makes outside `step`: taking the link setup's
+  record (its msg1 and answer) in front of the record the machine was
+  built with, once the link is promoted. None carries a rule or is
+  reachable from a row. A decrypt worker's acceptance is an input to
+  `step`, a promoted link's machine is built with the peer's startup
+  epoch in `SetupFacts` and offers its first epoch to the workers itself,
+  and a cross-connection move closes the machine and builds a new one
+  from the `Carry` (`SetupFacts::from`).
 - `cycle.rs`: the cycle enum and its states: an own attempt, an own
   completed attempt (`PendI`, with its `Wait`), a peer's completed
   attempt (`PendR`, which records its arming msg1 on every exit).
-- `hooks.rs`: built only for tests and behind `test-hooks`: what the
-  root crate's session tests read (an epoch's keys, the send counter,
-  the jitter) and `quiet`, which stops the time and message triggers as
-  the largest configured thresholds would; and the source reader
-  (`code_text`, `code_idents`, `lost_items`) both crates' tests use to
-  scan their code, comments and literals left out, for the names of
-  deleted session rekey rules. None is reachable from `step`.
+- `hooks.rs`: built only for tests and behind `test-hooks`: `quiet`,
+  which stops the time and message triggers as the largest configured
+  thresholds would; the link shell's test seams, which move a machine's
+  stamps back in time, force the key-epoch bit and the peer's startup
+  epoch, start an own rekey without its trigger, offer the current epoch
+  to a worker pool started after promotion, read dampening, reserve a
+  counter under any slot to forge a peer's frame, and read the observed
+  key-epoch bit and the record a cross-connection move carries; and the
+  source reader (`code_text`, `code_idents`, `lost_items`) both crates'
+  tests use to scan their code, comments and literals left out, for the
+  names of deleted rekey rules of both layers. None is reachable from
+  `step`.
 - `epoch.rs`: `Epoch` (a boxed session and what is derived from it),
   `Drain`, `Ids` (an epoch's indices), `Slot`, `Role`, `RecvHome`,
   `Purpose`, and the trial open of one epoch's key.
@@ -65,10 +91,20 @@ them as well.
 - `params.rs`: `Config`, `Params::new` (which refuses settings under
   which a timer fires on every poll or never, and a time trigger below
   the jitter plus the link-age floor), and every derived value.
+  `msg1_span` gives the offset of the last msg1 resend, which the link
+  shell's silence bounds allow for.
 - `lease.rs`: `IndexLease` (a linear session index), `allocate`, the
-  leak counter, `EpochTag` and `TagSource`.
-- `record.rs`: the IK replay record and the answer a responder pending
-  holds.
+  leak counter, `EpochTag` and `TagSource`. `IndexLease::for_test`, a
+  lease no allocator handed out, exists only for tests and behind
+  `test-hooks`.
+- `record.rs`: the IK replay record, the answer a responder pending
+  holds, and `RecordStore`, the bounded store in which the link shell
+  files the ephemerals of a closed machine's record under the peer's
+  address and startup epoch and from which it hands them to the next
+  machine built for the peer at that epoch. The setup msg1 and its msg2
+  are never filed: they belong to the link they set up, so a copy of an
+  earlier link's setup msg1 is a msg1 answered before on the next link,
+  whichever node dialled it.
 - `reason.rs`: `Reason`, `Abandon`, `Teardown` and `Close`, with who each
   is attributed to and whether input that did not authenticate can cause
   it.
@@ -259,6 +295,8 @@ at `next_wake` produces.
 - **Every guard can be switched off.** A new enforcement gets a switch in
   `faults.rs` and a row in the meta-test of `tests/faults.rs` naming the
   tests that must fail without it; a switch with no row fails that test.
+  The meta-test runs only with the crate's `slow-tests` feature, so run
+  `cargo test -p fips-core --features slow-tests` after adding a switch.
 
 The unit tests drive the machine on stub profiles; the README in `tests/`
 describes them.

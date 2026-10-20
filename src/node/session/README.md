@@ -58,6 +58,9 @@ the session. The entry keeps no handshake or rekey state of its own.
   prompt seal, the query the half-open share of the session table is
   charged by (`grows`), and the session clock aliases. Test builds add
   constructors of an established, an opened and an answering session.
+  The process-wide epoch tag source and the thread-RNG jitter source here
+  serve the link rekey machines too (`with_tags`, `ThreadJitter`), so no
+  epoch tag repeats across the two layers.
   The handlers that send and receive session messages, and the executor
   of the machine's outputs (`run_session_outputs` in
   `handlers/rekey.rs`), live under `src/node/handlers/`, not here.
@@ -82,17 +85,9 @@ Two rules about epochs hold here, and a change must keep them:
 - `tests.rs`: unit tests for `mod.rs`, declared from it as
   `#[cfg(test)] #[path = "tests.rs"] mod overlapping_epoch_tests;` so they stay
   a child module that can reach private items and keep their test names.
-  One of them scans the code of every non-test source file of the root
-  crate for a name of the deployed session rekey shell (its snapshots,
-  resend sweeps, trial decrypt, first-handshake hold and tie-break, rekey
-  predicates and resend slots, and the transitional entry points), and
-  this directory and `handlers/session.rs` also for the predicates, state
-  moves and constants the link layer's deployed rekey still uses and for
-  any policy value (`Policy`, `policy`, `DEPLOYED`). Code is read through
-  fips-core's `rekey::code_idents`, so comments and literals are not
-  scanned, and the scan fails if that reader blanked a line opening an
-  item. A session rule belongs in the machine; a test that
-  fails here has found a second copy of one in the shell.
+  The scan that keeps the deployed session rekey shell out of this
+  directory, and out of the rest of the root crate, is
+  `node/tests/survivors.rs`, which covers both layers' shells.
 
 Unit tests go in `tests.rs`, never in an inline `mod tests` block in
 `mod.rs`.

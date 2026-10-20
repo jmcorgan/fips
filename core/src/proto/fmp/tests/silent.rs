@@ -1,7 +1,6 @@
 //! The silent-session record, and where its refusal enters the inbound msg1
 //! classification.
 
-use super::offlink::aged_snapshot;
 use super::util::{establish_snapshot, wire_outcome};
 use crate::proto::fmp::silent::{
     ActiveBackoff, SILENT_BACKOFF_BASE_MS, SILENT_BACKOFF_CAP_MS, SILENT_SESSION_LIMIT,
@@ -268,10 +267,19 @@ fn backoff() -> Option<ActiveBackoff> {
     })
 }
 
-/// An existing peer at [`EPOCH`] on a session too young to rekey.
+/// An existing peer at [`EPOCH`].
+fn held_snapshot() -> EstablishSnapshot {
+    let mut snap = establish_snapshot();
+    snap.has_existing_peer = true;
+    snap.existing_peer_epoch = Some(EPOCH);
+    snap
+}
+
+/// An existing peer at [`EPOCH`] whose link machine judged a msg1 a fresh
+/// dial on a link too young to rekey, and asked for the restart gates.
 fn young_snapshot() -> EstablishSnapshot {
-    let mut snap = aged_snapshot();
-    snap.existing_session_age_secs = 5;
+    let mut snap = held_snapshot();
+    snap.replace = true;
     snap
 }
 
@@ -331,41 +339,15 @@ fn a_new_epoch_msg1_is_promoted_during_the_back_off() {
 }
 
 #[test]
-fn a_resend_of_the_setup_msg1_still_draws_the_stored_msg2_during_the_back_off() {
-    let mut snap = young_snapshot();
+fn a_held_peers_same_epoch_msg1_goes_to_its_link_machine_whatever_the_back_off() {
+    // The link machine answers a resend of the setup msg1, refuses a copy
+    // of an answered one with its own reason and answers a rekey, during
+    // the back-off as at any other time: the refusal waits for its request.
+    let mut snap = held_snapshot();
     snap.silent_backoff = backoff();
-    snap.setup_match = true;
-    snap.existing_msg2 = Some(vec![0x5E; 4]);
     assert!(matches!(
         classify(&snap, EPOCH),
-        InboundDecision::ResendMsg2 { msg2: Some(_) }
-    ));
-}
-
-#[test]
-fn a_copy_of_an_answered_msg1_keeps_its_own_reason_during_the_back_off() {
-    let mut snap = young_snapshot();
-    snap.silent_backoff = backoff();
-    snap.msg1_answered_before = true;
-    assert!(matches!(
-        classify(&snap, EPOCH),
-        InboundDecision::Reject {
-            reason: InboundReject::AnsweredBefore
-        }
-    ));
-}
-
-#[test]
-fn an_aged_session_is_classified_for_rekey_as_before_during_the_back_off() {
-    let mut snap = aged_snapshot();
-    snap.silent_backoff = backoff();
-    snap.msg1_on_link = true;
-    assert!(matches!(
-        classify(&snap, EPOCH),
-        InboundDecision::RekeyRespond {
-            abandon_first: false,
-            ..
-        }
+        InboundDecision::Rekey { .. }
     ));
 }
 

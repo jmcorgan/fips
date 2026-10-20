@@ -26,7 +26,7 @@ use super::spanning_tree::{
 };
 use super::*;
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1};
-use crate::proto::fmp::{Msg1Digest, RekeyRole};
+use fips_core::proto::rekey::Role;
 
 /// How far back a silent peer's last authenticated frame is stamped: past
 /// the 15 s liveness interval.
@@ -222,6 +222,7 @@ async fn after_our_rekey_cutover_a_peer_silent_for_16_s_that_redials_completes_i
                 .get_peer(&a_addr)
                 .unwrap()
                 .session_established_at()
+                .unwrap()
         ) < Duration::from_secs(30),
         "precondition: B's session is under 30 s after the cutover"
     );
@@ -324,7 +325,7 @@ async fn a_copy_of_an_adopted_rekey_msg1_on_a_young_session_is_refused_even_from
     let b_addr = addr(&nodes, b);
     age_link(&mut nodes, a, b, trigger_age());
 
-    nodes[a].node.check_rekey().await;
+    nodes[a].node.poll_link_rekeys().await;
     let msg1 = nodes[b]
         .packet_rx
         .try_recv()
@@ -365,12 +366,8 @@ async fn a_copy_of_an_adopted_rekey_msg1_on_a_young_session_is_refused_even_from
             "precondition: A's first frame on the new session promoted B's pending"
         );
         assert!(
-            crate::peer::since(p.session_established_at()) < Duration::from_secs(30),
+            crate::peer::since(p.session_established_at().unwrap()) < Duration::from_secs(30),
             "precondition: B's session is under 30 s after the adoption"
-        );
-        assert!(
-            p.answered_before(&Msg1Digest::of(&copy)),
-            "precondition: B records the adopted msg1 as answered"
         );
     }
     assert!(
@@ -619,10 +616,9 @@ async fn after_our_initiator_cutover_an_off_path_msg1_and_an_earlier_link_msg1_3
         "the msg1s must leave no connection behind at B"
     );
 
-    // Whatever reached A (nothing, or stale answers it drops) is processed,
-    // then B's first frame on the new session promotes A's pending.
-    deliver(&mut nodes[a]).await;
-    heartbeat(&mut nodes[b], &a_addr).await;
+    // What reached A is processed: B's cutover prompt, its first frame on
+    // the new session, promotes A's pending, and any stale answer is
+    // dropped. A's prompt at the adoption then reaches B.
     deliver(&mut nodes[a]).await;
     {
         let p = nodes[a].node.get_peer(&b_addr).expect("A keeps B");
@@ -631,6 +627,7 @@ async fn after_our_initiator_cutover_an_off_path_msg1_and_an_earlier_link_msg1_3
             "B's frame on the new session must promote A's pending"
         );
     }
+    deliver(&mut nodes[b]).await;
     heartbeat_decrypts(&mut nodes, a, b, "A to B after the cutover").await;
     cleanup_nodes(&mut nodes).await;
 }
@@ -723,12 +720,16 @@ async fn after_cycle(last: LastCycle, b_dialled: bool, age: Option<Duration>) ->
             cutover(&mut nodes[b], &a_addr).await;
             heartbeat(&mut nodes[b], &a_addr).await;
             deliver(&mut nodes[a]).await;
+            // The prompt A sends at its adoption reaches B.
+            deliver(&mut nodes[b]).await;
         }
         LastCycle::OurAdoption => {
             rekey_to_pending(&mut nodes, a, b).await;
             cutover(&mut nodes[a], &b_addr).await;
             heartbeat(&mut nodes[a], &b_addr).await;
             deliver(&mut nodes[b]).await;
+            // The prompt B sends at its adoption reaches A.
+            deliver(&mut nodes[a]).await;
         }
     }
     for (x, peer) in [(a, b_addr), (b, a_addr)] {
@@ -784,7 +785,7 @@ async fn peer_rekeys(c: &mut AfterCycle) -> ReceivedPacket {
         p.test_backdate_drain_started(Duration::from_secs(12));
         p.backdate_dampener(Duration::from_secs(31));
     }
-    c.nodes[a].node.check_rekey().await;
+    c.nodes[a].node.poll_link_rekeys().await;
     let p = c.nodes[a].node.get_peer(&c.b_addr).unwrap();
     assert!(
         p.rekey_in_progress() && !p.is_draining(),
@@ -825,34 +826,45 @@ fn maps_index(tn: &TestNode, peer: &NodeAddr, index: SessionIndex) -> bool {
 }
 
 /// B has just handled A's rekey msg1, which it must have answered: check B
-/// armed a responder pending, retired its expired drain and freed its index,
-/// sent exactly the msg2, and then adopted the session on A's first frame.
-/// Returns what went wrong.
+/// armed a responder pending and left its drain, though past its end, to the
+/// tick or the cutover that ends it, so it maps its previous, current and
+/// pending indices, sent exactly the msg2, and then adopted the session on
+/// A's first frame, the cutover retiring the drain first. Returns what went
+/// wrong.
 async fn answered_and_adopted(c: &mut AfterCycle, refused_before: u64) -> Vec<String> {
     let (a, b, label) = (c.a, c.b, c.label.clone());
     let mut found = Vec::new();
     let pending = {
         let p = c.nodes[b].node.get_peer(&c.a_addr).unwrap();
-        if p.pending_role() != Some(RekeyRole::Responder) {
+        if p.pending_role() != Some(Role::Responder) {
             found.push(format!(
                 "{label}: B holds pending role {:?}, not a responder pending",
                 p.pending_role()
             ));
         }
-        if p.is_draining() {
-            found.push(format!("{label}: B is still draining after arming"));
+        if !p.is_draining() {
+            found.push(format!("{label}: B ended its drain when it answered"));
         }
         p.pending_our_index()
     };
-    if maps_index(&c.nodes[b], &c.a_addr, c.p0) {
-        found.push(format!("{label}: B still maps the drained session's index"));
+    if !maps_index(&c.nodes[b], &c.a_addr, c.p0) {
+        found.push(format!(
+            "{label}: B unmapped the drained session's index when it answered"
+        ));
+    }
+    let entries = index_entries(&c.nodes[b], &c.a_addr);
+    if entries != 3 {
+        found.push(format!(
+            "{label}: B maps {entries} indices to A after answering, not its previous, current \
+             and pending"
+        ));
     }
     if refused(&c.nodes[b]) != refused_before {
         found.push(format!("{label}: B counted the rekey msg1 as refused"));
     }
     let queued = deliver(&mut c.nodes[a]).await;
     let a_role = c.nodes[a].node.get_peer(&c.b_addr).unwrap().pending_role();
-    if queued != 1 || a_role != Some(RekeyRole::Initiator) {
+    if queued != 1 || a_role != Some(Role::Initiator) {
         found.push(format!(
             "{label}: {queued} packet(s) reached A, leaving it with pending role {a_role:?}"
         ));
@@ -897,9 +909,10 @@ fn cycle_cases() -> [(LastCycle, bool); 4] {
 }
 
 /// On a link far older than 30 s, A rekeys 12 s after B's last cutover or
-/// adoption. B must answer it as a rekey, retiring the drain that has
-/// passed but that no tick has completed, and adopt the new session on A's
-/// first frame, leaving only its current and previous indices mapped.
+/// adoption. B must answer it as a rekey, leaving the drain that has passed
+/// but that no tick has completed to end on its own, and adopt the new
+/// session on A's first frame, whose cutover retires that drain first,
+/// leaving only its current and previous indices mapped.
 #[tokio::test]
 async fn a_peers_rekey_msg1_12_s_after_our_last_cutover_on_a_link_older_than_30_s_is_answered_adopted_and_leaks_no_index()
  {
@@ -957,11 +970,12 @@ async fn a_peers_rekey_msg1_inside_10_s_of_our_last_cutover_is_dropped_and_leave
 }
 
 /// A's rekey msg1, dropped under 10 s after B's last cutover or adoption, is
-/// resent once B's session and drain read 12 s. The resend must be answered
-/// and adopted: the dropped copy left nothing in B's record of answered
-/// msg1s.
+/// resent once B's session and drain read 12 s. B recorded the msg1 it
+/// dropped, so the resend is refused as answered before: B arms nothing and
+/// answers nothing. A's attempt ends at its deadline, and its next attempt
+/// carries a fresh msg1, which B answers as the 12 s case above does.
 #[tokio::test]
-async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_answered_and_adopted_when_resent_after_10_s()
+async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_refused_again_when_resent_after_10_s()
  {
     let mut found = Vec::new();
     for (last, b_dialled) in cycle_cases() {
@@ -982,9 +996,26 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_answered_and_a
             p.test_backdate_session_established(Duration::from_secs(12));
             p.test_backdate_drain_started(Duration::from_secs(12));
         }
-        let refused_before = refused(&c.nodes[c.b]);
+        let answered_before = c.nodes[c.b].node.stats().handshake.answered_before;
         msg1_at(&mut c.nodes[c.b], &source, bytes).await;
-        found.extend(answered_and_adopted(&mut c, refused_before).await);
+        let label = &c.label;
+        if c.nodes[c.b]
+            .node
+            .get_peer(&c.a_addr)
+            .unwrap()
+            .pending_new_session()
+            .is_some()
+        {
+            found.push(format!("{label}: B armed a pending on the resend"));
+        }
+        if !c.nodes[c.a].packet_rx.is_empty() {
+            found.push(format!("{label}: B answered the resend"));
+        }
+        if c.nodes[c.b].node.stats().handshake.answered_before != answered_before + 1 {
+            found.push(format!(
+                "{label}: B did not refuse the resend as answered before"
+            ));
+        }
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));

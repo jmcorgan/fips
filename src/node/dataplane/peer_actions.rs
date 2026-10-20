@@ -16,25 +16,24 @@
 //! `send_stored_msg1`, driven from `initiate_connection`), the
 //! connection-oriented dial (`OpenTransport` performs the non-blocking
 //! `transport.connect`; `TransportConnected` drives the connect-resolution msg1
-//! send from `poll_pending_connects`), the rekey cadence (`check_rekey` →
-//! `route_rekey_cadence` → `RekeyConsume`, driving the `SwapSendState` and
-//! `CompleteDrain` arms), and the liveness reap (`route_link_dead` →
-//! `LinkDeadSuspected`, driving `InvalidateSendState` → `remove_active_peer`).
+//! send from `poll_pending_connects`), and the liveness reap (`route_link_dead`
+//! → `LinkDeadSuspected`, driving `InvalidateSendState` → `remove_active_peer`).
+//! A link's rekeys do not pass through here: the active peer's link rekey
+//! machine holds them, and its outputs run through `run_link_outputs`.
 //!
-//! The genuine inert stubs remaining are `SendRekey`, `SendLinkMessage`, and
-//! the connected-UDP arms. `RegisterDecryptSession` is a deliberate no-op —
+//! The genuine inert stubs remaining are `SendLinkMessage` and the
+//! connected-UDP arms. `RegisterDecryptSession` is a deliberate no-op —
 //! see its arm for the note.
 //!
 //! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
 //! store (`peer_timers`). The `HandshakeRetransmit` and `HandshakeTimeout`
 //! deadlines are read and fired by `drive_peer_timers` (the handshake resend +
-//! reap home). The rekey/liveness kinds are still SHADOW — driven by their own
-//! shell drivers — so populating them stays behavior-neutral.
+//! reap home). The liveness kind is still SHADOW — driven by its own shell
+//! driver — so populating it stays behavior-neutral.
 
 use crate::PeerIdentity;
 use crate::identity::NodeAddr;
 use crate::node::Node;
-use crate::node::diag::{self, OrNone};
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::peer::machine::{LostKind, PeerAction, PeerEvent};
 use crate::proto::fmp::PromotionResult;
@@ -42,7 +41,7 @@ use crate::proto::fmp::wire::build_msg2;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use std::collections::VecDeque;
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 /// Ambient shell facts a [`PeerAction`] executor needs that the machine's
 /// runtime-agnostic action payloads deliberately omit (verified identity,
@@ -257,10 +256,6 @@ impl Node {
                         .await;
                     }
                 }
-                PeerAction::SendRekey { .. } => {
-                    // Rekey msg2 framing (`build_msg2(our_new_index, …)`,
-                    // `handshake.rs:365`) + send. Rekey fold is not yet wired.
-                }
                 PeerAction::SendLinkMessage { .. } => {
                     // Encrypt + send a link-control frame (heartbeat / filter
                     // / tree / disconnect). Data-plane-owned; not yet wired.
@@ -274,30 +269,11 @@ impl Node {
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
-                            // The decrypt-worker registration relocated
-                            // OUT of `promote_connection` into THIS single executor
-                            // arm — the one live caller of `promote_connection` (both
-                            // the inbound `handle_msg1` and outbound `handle_msg2`
-                            // net-new establish paths reach it here). Register iff the
-                            // promotion actually created or replaced a peer
-                            // (`Promoted | CrossConnectionWon`), NEVER on
-                            // `CrossConnectionLost`. Run synchronously right after
-                            // `promote_connection` returns, before feeding
-                            // `PromotionResolved` and before any await — the exact
-                            // synchronous point (and Promoted/Won gating) of the
-                            // pre-refactor in-`promote_connection` call. No-op when
-                            // the worker pool isn't spawned (`register_...` early-
-                            // returns), so the direct `promote_connection` test
-                            // callers (which bypass this executor) are unaffected.
-                            #[cfg(unix)]
-                            match result {
-                                PromotionResult::Promoted(node_addr)
-                                | PromotionResult::CrossConnectionWon { node_addr, .. } => {
-                                    self.register_decrypt_worker_session(&node_addr);
-                                }
-                                PromotionResult::CrossConnectionLost { .. } => {}
-                            }
-
+                            // A promotion that created or replaced a peer
+                            // has already offered its session to the decrypt
+                            // workers: the link's rekey machine is built
+                            // knowing whether a pool runs, and its offer is
+                            // carried out with its index binding.
                             // Feed the outcome back into the machine and fold the
                             // follow-up actions (RegisterDecryptSession — now a
                             // redundant no-op, see its arm — and the cross-conn index
@@ -462,99 +438,14 @@ impl Node {
                          handler and must never reach the executor"
                     );
                 }
-                PeerAction::SwapSendState => {
-                    // Initiator cutover: the live authoritative rekey-cadence
-                    // path, routed here from `check_rekey` via
-                    // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the
-                    // inline body survives only as `cutover_peer_inline`, a
-                    // debug-assert release fallback. `addr` is resolved
-                    // from the ambient verified identity (as `InvalidateSendState`
-                    // does). The decrypt re-register folds HERE, gated on
-                    // `did_cutover` — the generic `RegisterDecryptSession` arm stays a
-                    // no-op so a promote never double-registers.
-                    let node_addr = *ambient.verified_identity.node_addr();
-                    let did_cutover = if let Some(peer) = self.peers.get_mut(&node_addr) {
-                        if let Some(_old_our_index) = peer.cutover_to_new_session() {
-                            let epoch = OrNone(peer.noise_session().map(diag::epoch_tag));
-                            let kbit_ours = peer.current_k_bit();
-                            // New index was pre-registered in peers_by_index
-                            // during msg2 handling (handshake.rs).
-                            debug_assert!(
-                                peer.transport_id().is_some()
-                                    && peer.our_index().is_some()
-                                    && self.peers_by_index.contains_key(&(
-                                        peer.transport_id().unwrap(),
-                                        peer.our_index().unwrap().as_u32()
-                                    )),
-                                "peers_by_index should contain pre-registered new index after cutover"
-                            );
-                            debug!(
-                                // Pin the target to the pre-refactor module: this
-                                // cutover log relocated from handlers/rekey.rs into
-                                // the executor, but operators (and the test harness)
-                                // filter it under fips::node::handlers::rekey. Keeping
-                                // the target preserves the observable log contract.
-                                target: "fips::node::handlers::rekey",
-                                peer = %self.peer_display_name(&node_addr),
-                                epoch = %epoch,
-                                kbit_ours,
-                                "Rekey cutover complete (initiator), K-bit flipped"
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    // Re-register the new session with the decrypt worker — the
-                    // cache_key (transport_id, our_index) just changed, so the
-                    // old worker entry is stale and every packet on the new
-                    // session would miss the worker's HashMap lookup.
-                    #[cfg(unix)]
-                    if did_cutover {
-                        self.register_decrypt_worker_session(&node_addr);
-                    }
-                    #[cfg(not(unix))]
-                    let _ = did_cutover;
-                }
-                PeerAction::CompleteDrain { peer: node_addr } => {
-                    // Initiator drain completion: the live authoritative
-                    // rekey-cadence path, routed here from `check_rekey` via
-                    // `route_rekey_cadence` → `PeerEvent::RekeyConsume`; the
-                    // inline body survives only as `drain_peer_inline`, a
-                    // debug-assert release fallback. Extract the real previous
-                    // index + transport_id under the peer borrow, drop the
-                    // borrow, then run the cache_key cleanup (which takes
-                    // &mut self for unregister_decrypt_worker_session).
-                    let drained = self.peers.get_mut(&node_addr).and_then(|peer| {
-                        peer.complete_drain().map(|idx| (idx, peer.transport_id()))
-                    });
-                    if let Some((old_our_index, transport_id)) = drained {
-                        if let Some(tid) = transport_id {
-                            let cache_key = (tid, old_our_index.as_u32());
-                            self.peers_by_index.remove(&cache_key);
-                            #[cfg(unix)]
-                            self.unregister_decrypt_worker_session(cache_key);
-                        }
-                        let _ = self.index_allocator.free(old_our_index);
-                        trace!(
-                            // Pin to the pre-refactor module (see the cutover log
-                            // above) so the relocated drain log stays visible under
-                            // the operator's fips::node::handlers::rekey filter.
-                            target: "fips::node::handlers::rekey",
-                            peer = %self.peer_display_name(&node_addr),
-                            old_index = %old_our_index,
-                            "Drain complete, previous session erased"
-                        );
-                    }
-                }
                 PeerAction::InvalidateSendState => {
                     // The FULL teardown. `remove_active_peer`
-                    // (`dispatch.rs:107`) frees the four index slots
-                    // (current/rekey/pending/previous), drops `peers_by_index`,
-                    // unregisters the decrypt worker, removes the FSP `sessions`
-                    // entry and `pending_tun_packets`. The machine emits NO
+                    // (`dispatch.rs:107`) closes the peer's link rekey machine,
+                    // whose outputs free every index its sessions hold (current,
+                    // pending, previous), drop their `peers_by_index` entries
+                    // and unregister their decrypt workers, frees the rekey
+                    // handshake's index, and removes the FSP `sessions` entry
+                    // and `pending_tun_packets`. The machine emits NO
                     // `FreeIndex` for those slots, so there is no double-free.
                     let gone = *ambient.verified_identity.node_addr();
                     let held = self.peer_link(&gone);
@@ -564,10 +455,10 @@ impl Node {
                 PeerAction::RegisterDecryptSession { index } => {
                     let _ = index;
                     // No-op by design. The decrypt-worker
-                    // registration relocated into the `PromoteToActive` Ok arm above, gated on
-                    // the returned `PromotionResult`, so it runs once per live
-                    // promote (Promoted/Won) at the pre-refactor synchronous point.
-                    // This machine-emitted action is now redundant with that arm;
+                    // registration is the link rekey machine's offer, made when
+                    // the promotion builds it and carried out with its index
+                    // binding, so it runs once per live promote (Promoted/Won).
+                    // This machine-emitted action is redundant with that offer;
                     // kept as an inert no-op (rather than removing the emission) so
                     // the machine's action sequence and its unit tests stay
                     // unchanged. The keyed-by-NodeAddr register does not need the
@@ -590,9 +481,9 @@ impl Node {
                 PeerAction::SetTimer { kind, at_ms } => {
                     // Populate the per-peer timer store (overwrite = reschedule).
                     // The `HandshakeRetransmit` and `HandshakeTimeout` deadlines
-                    // are read + fired by `drive_peer_timers`. Rekey/liveness kinds
-                    // are still SHADOW here — they keep their own shell drivers —
-                    // so populating them stays behavior-neutral.
+                    // are read + fired by `drive_peer_timers`. The liveness kind
+                    // is still SHADOW here — it keeps its own shell driver — so
+                    // populating it stays behavior-neutral.
                     self.peer_timers
                         .entry(link)
                         .or_default()

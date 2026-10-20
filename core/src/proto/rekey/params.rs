@@ -24,6 +24,25 @@ const ELICIT_REPEATS: u8 = 2;
 /// Rekey msg3 resends of a next-only delayed cutover: 1, 3, 7 and 15 s.
 const DELAY_RESENDS: u8 = 4;
 
+/// The offset of the last first-message resend of a doubling ladder with
+/// `resends` rungs from one second, whether or not it falls inside the
+/// attempt budget: 31 s at the default five. The budget of an IK msg1
+/// attempt is the smaller of this span plus one check and the handshake
+/// timeout, so a link shell that defers its link-dead reap while an attempt
+/// is in flight bounds the silence it tolerates during a rekey by this span
+/// plus two checks.
+pub fn msg1_span(resends: u8) -> Duration {
+    Schedule::doubling(RUNG, resends, None)
+        .0
+        .last_send()
+        .map_or(Duration::ZERO, Duration::from_millis)
+}
+
+/// The session age, measured from its last cutover, below which a 0.5.0
+/// to 0.5.2 peer takes a same-epoch msg1 for a fresh dial rather than a
+/// rekey. A link's own rekeys wait one check past it.
+pub const DEPLOYED_SESSION_FLOOR: Duration = Duration::from_secs(30);
+
 /// The largest time trigger accepted, in seconds. A larger value is the
 /// configuration idiom for switching the time trigger off, which rekey no
 /// longer has.
@@ -90,12 +109,14 @@ pub struct Config {
 impl Config {
     /// The defaults for a link (FMP).
     pub const fn fmp() -> Self {
+        let check = Duration::from_secs(1);
+        let link_age = Duration::from_secs(30);
         Self {
             after: Duration::from_secs(120),
             jitter: 15,
             messages: 1 << 16,
             handshake: Duration::from_secs(30),
-            check: Duration::from_secs(1),
+            check,
             drain: Duration::from_secs(10),
             retention: Duration::from_secs(120),
             hold: Duration::from_secs(120),
@@ -103,10 +124,10 @@ impl Config {
             dampening: Duration::from_secs(30),
             ttl: Duration::from_secs(40),
             young: Duration::from_secs(5),
-            link_age: Duration::from_secs(30),
+            link_age,
             session_age: Duration::from_secs(10),
-            floor_link: Duration::from_secs(31),
-            floor_session: Duration::from_secs(31),
+            floor_link: link_age.saturating_add(check),
+            floor_session: DEPLOYED_SESSION_FLOOR.saturating_add(check),
             floor_cutover: Duration::ZERO,
             silence: Duration::from_secs(30),
             resends: 5,
@@ -124,6 +145,23 @@ impl Config {
             floor_session: Duration::ZERO,
             floor_cutover: Duration::from_secs(10),
             ..Self::fmp()
+        }
+    }
+
+    /// This configuration with the pending hold a link responder needs:
+    /// the longest of the drain ceiling, the time a peer that lost the
+    /// answer to its rekey takes to try again (its msg1 resend span, the
+    /// handshake timeout and the dampening window), and `silence`, the
+    /// longest the link shell lets a kept link go unheard. A hold shorter
+    /// than any of them can retire a session the initiator still adopts:
+    /// 120 s at the defaults (FRC-1201 §7.6).
+    pub fn with_hold(self, silence: Duration) -> Self {
+        let retry = msg1_span(self.resends)
+            .saturating_add(self.handshake)
+            .saturating_add(self.dampening);
+        Self {
+            hold: self.retention.max(retry).max(silence),
+            ..self
         }
     }
 }
@@ -225,11 +263,7 @@ impl Params {
         let rung = Duration::from_secs(rung_secs);
         let gap = cfg.drain.saturating_sub(Duration::from_secs(2)) / 2;
 
-        let (full, _) = Schedule::doubling(RUNG, cfg.resends, None);
-        let exhausted = full
-            .last_send()
-            .map_or(Duration::ZERO, Duration::from_millis)
-            .saturating_add(cfg.check);
+        let exhausted = msg1_span(cfg.resends).saturating_add(cfg.check);
         let budget = exhausted.min(cfg.handshake);
         let (first, first_inert) = Schedule::doubling(RUNG, cfg.resends, Some(budget));
         let (fin, _) = Schedule::doubling(RUNG, cfg.resends, None);

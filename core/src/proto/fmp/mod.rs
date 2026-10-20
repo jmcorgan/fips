@@ -4,10 +4,10 @@
 //! connection lifecycle, migrated out of the async node shell. The async I/O
 //! adapters remain in `node::handlers::{timeout,rekey}`.
 //!
-//! This covers the four tick-poll maintain/teardown drivers (handshake
-//! timeout/teardown, msg1 resend, rekey cutover/drain/trigger, rekey-msg1
-//! resend) plus the inbound-msg1 classification decision
-//! ([`Fmp::establish_inbound`]). Handshake message bytes are opaque blobs
+//! This covers the two tick-poll maintain/teardown drivers (handshake
+//! timeout/teardown and msg1 resend) plus the inbound-msg1 classification
+//! decision ([`Fmp::establish_inbound`]); link rekeys are decided by each
+//! link's rekey machine on the `rekey/` profile. Handshake message bytes are opaque blobs
 //! throughout — the Noise wire construction and `promote_connection` effects,
 //! the outbound `handle_msg2` classification, and the born-on-next
 //! `handle_msg3` leaf stay in `node/`.
@@ -17,7 +17,7 @@
 //!   the [`cross_connection_winner`] tie-break helper.
 //! - `limits.rs` — the pure connection-retry backoff math.
 //! - `rekey/` — the link profile of the shared rekey machine (Noise IK) and
-//!   the node-level msg1 read; hidden, with no caller yet.
+//!   the node-level msg1 read; hidden from the docs.
 //! - `silent.rs` — [`SilentSessions`], the per-identity record of link
 //!   sessions that ended without an authenticated frame, and the msg1
 //!   refusal it drives.
@@ -43,10 +43,8 @@ pub mod wire;
 mod tests;
 
 pub use core::{
-    AnsweredMsg1s, ConnAction, ConnSnapshot, EphemeralDigest, EstablishSnapshot, EstablishView,
-    InboundDecision, InboundReject, LifecycleView, Msg1Arrival, Msg1Digest, OutboundDecision,
-    OutboundSnapshot, PeerSnapshot, REKEY_MIN_CUTOVER_AGE_SECS, RekeyAnswer, RekeyCfg,
-    RekeyResendSnapshot, RekeyRole, WireOutcome,
+    ConnAction, ConnSnapshot, EphemeralDigest, EstablishSnapshot, EstablishView, InboundDecision,
+    InboundReject, LifecycleView, Msg1Digest, OutboundDecision, OutboundSnapshot, WireOutcome,
 };
 pub use core::{PromotionResult, cross_connection_winner};
 pub use limits::backoff_ms;

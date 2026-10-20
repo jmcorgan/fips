@@ -83,18 +83,18 @@ pub(crate) fn age_ms(now: SessionInstant, earlier: SessionInstant) -> u64 {
 // trigger has always used.
 const _: () = assert!(Config::fsp().jitter as i64 == crate::node::REKEY_JITTER_SECS);
 
-/// The epoch tags of every session machine in the process, so no tag is
-/// reused while the process runs.
+/// The epoch tags of every session and link machine in the process, so no
+/// tag is reused while the process runs.
 static TAGS: Mutex<TagSource> = Mutex::new(TagSource::new());
 
 /// Run `f` with the process's epoch tag source.
-fn with_tags<R>(f: impl FnOnce(&mut TagSource) -> R) -> R {
+pub(crate) fn with_tags<R>(f: impl FnOnce(&mut TagSource) -> R) -> R {
     let mut tags = TAGS.lock().unwrap_or_else(PoisonError::into_inner);
     f(&mut tags)
 }
 
 /// Rekey jitter drawn from the thread's random generator.
-struct ThreadJitter;
+pub(crate) struct ThreadJitter;
 
 impl JitterSource for ThreadJitter {
     /// A value drawn uniformly from `[0, bound]`.
@@ -220,7 +220,7 @@ pub(crate) fn keyed(
         .check(done)
         .expect("a test session bonds to the key it authenticated");
     let facts = SetupFacts {
-        peer_epoch,
+        peer_epoch: Some(peer_epoch),
         k: false,
         link_since: now,
         started: now,

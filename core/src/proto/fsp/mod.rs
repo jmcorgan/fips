@@ -18,8 +18,6 @@
 //!   bounded-queue / ECN transforms. No clock/crypto/I/O/tracing. The first
 //!   handshake and every rekey, cutover and drain belong to the session
 //!   rekey machine.
-//! - `limits.rs` — the deployed drain and dampening constants the link
-//!   layer's rekey still reads.
 //! - `rekey/` — the session profile of the shared rekey machine (Noise XK),
 //!   the one part of this module that holds keys; hidden. The root crate's
 //!   session table holds one machine per session, from its first handshake.
@@ -29,7 +27,6 @@
 //!   crypto-free.
 
 pub mod core;
-pub mod limits;
 pub mod quorum;
 #[doc(hidden)]
 pub mod rekey;

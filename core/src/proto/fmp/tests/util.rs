@@ -1,48 +1,11 @@
 //! Shared test helpers for the FMP connection-lifecycle unit tests.
 
 use crate::identity::PeerIdentity;
-use crate::proto::fmp::{
-    ConnSnapshot, EstablishSnapshot, Msg1Digest, PeerSnapshot, RekeyResendSnapshot, WireOutcome,
-};
-use crate::testutil::{make_keypair, make_node_addr};
+use crate::proto::fmp::{ConnSnapshot, EstablishSnapshot, Msg1Digest, WireOutcome};
+use crate::testutil::make_keypair;
 use crate::transport::LinkId;
 use crate::utils::index::SessionIndex;
 use alloc::vec::Vec;
-
-/// Build a `RekeyResendSnapshot` for the given peer byte, prior retransmission
-/// count, due-flag, and opaque msg1 bytes.
-pub(super) fn rekey_resend_snapshot(
-    peer_byte: u8,
-    resend_count: u32,
-    needs_resend: bool,
-    msg1: Vec<u8>,
-) -> RekeyResendSnapshot {
-    RekeyResendSnapshot {
-        peer: make_node_addr(peer_byte),
-        resend_count,
-        needs_resend,
-        msg1,
-    }
-}
-
-/// Build a quiescent `PeerSnapshot` for `addr`, with no
-/// pending cutover, no drain, no dampening, zero ages/counter/jitter. Tests set
-/// only the fields the case exercises.
-pub(super) fn peer_snapshot(addr_byte: u8) -> PeerSnapshot {
-    PeerSnapshot {
-        addr: make_node_addr(addr_byte),
-        has_pending: false,
-        rekey_in_progress: false,
-        is_draining: false,
-        drain_expired: false,
-        is_dampened: false,
-        elapsed_secs: 0,
-        counter: 0,
-        jitter_secs: 0,
-        pending_role: None,
-        pending_expired: false,
-    }
-}
 
 /// Build a `ConnSnapshot` for the teardown path with the given link, direction,
 /// and retry target. Fields the teardown decision ignores are left at their
@@ -75,26 +38,14 @@ pub(super) fn resend_snapshot(link: LinkId, resend_count: u32, msg1: Vec<u8>) ->
 }
 
 /// Build a quiescent `EstablishSnapshot` for a net-new inbound msg1: no existing
-/// peer, not at cap, our node addr fixed. Tests override only the
-/// fields the case exercises.
+/// peer, not at cap. Tests override only the fields the case exercises.
 pub(super) fn establish_snapshot() -> EstablishSnapshot {
     EstablishSnapshot {
         has_existing_peer: false,
         existing_peer_epoch: None,
-        existing_session_age_secs: 0,
-        existing_link_age_secs: 0,
-        has_session: false,
-        pending_new_session: false,
-        rekey_in_progress: false,
-        held_answer: None,
-        msg1_answered_before: false,
-        msg1_on_link: false,
-        link_reachable: false,
-        setup_match: false,
-        existing_msg2: None,
+        replace: false,
         at_max_peers: false,
         has_pending_outbound_to_peer: false,
-        our_node_addr: make_node_addr(0x10),
         silent_backoff: None,
     }
 }

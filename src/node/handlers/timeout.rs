@@ -4,9 +4,7 @@
 use crate::node::Node;
 use crate::node::session::SessionInstant;
 use crate::peer::machine::TimerKind;
-use crate::proto::fmp::{
-    ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
-};
+use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
 use crate::transport::LinkId;
 use fips_core::time::Instant;
 use std::time::Duration;
@@ -38,16 +36,6 @@ impl LifecycleView for Node {
                 msg1: Vec::new(),
             })
             .collect()
-    }
-
-    fn rekey_peers(&self) -> Vec<PeerSnapshot> {
-        // The snapshot builder lives in `rekey` beside its drain/dampening
-        // constants; the read-seam unifies here.
-        self.rekey_peer_snapshots()
-    }
-
-    fn rekey_resend_candidates(&self, now_ms: u64) -> Vec<RekeyResendSnapshot> {
-        self.rekey_resend_snapshots(now_ms)
     }
 }
 
@@ -145,18 +133,21 @@ impl Node {
         };
         // Read the transport ID and session index off the surviving carrier
         // before disposing the machine (the leg no longer projects them).
-        let (transport_id, our_index) = match self.peer_machines.get(&link_id) {
-            Some(machine) => (machine.conn_transport_id(), machine.our_index()),
+        let (transport_id, our_index) = match self.peer_machines.get_mut(&link_id) {
+            Some(machine) => (machine.conn_transport_id(), machine.take_our_index()),
             None => (None, None),
         };
         self.remove_peer_machine(link_id);
 
         // Free session index and pending_outbound if allocated
-        if let Some(idx) = our_index {
+        if let Some(lease) = our_index {
+            let idx = lease.release();
             if let Some(tid) = transport_id {
-                self.pending_outbound.remove(&(tid, idx.as_u32()));
+                self.pending_outbound.remove(&(tid, idx));
             }
-            let _ = self.index_allocator.free(idx);
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(idx));
         }
 
         // Tear down the transport connection, not just the node-side state.

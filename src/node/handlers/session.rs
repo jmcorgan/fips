@@ -2520,8 +2520,8 @@ impl Node {
             }
         }
 
-        // Extract next-hop info + FMP cipher in one peers/sessions borrow scope.
-        let (their_index, transport_id, remote_addr, timestamp_ms, fmp_flags, fmp_cipher) = {
+        // Extract next-hop info in one peers/sessions borrow scope.
+        let (their_index, transport_id, remote_addr, timestamp_ms, fmp_flags) = {
             let peer = self
                 .peers
                 .get_mut(&next_hop_addr)
@@ -2547,22 +2547,18 @@ impl Node {
             if peer.current_k_bit() {
                 fmp_flags |= FLAG_KEY_EPOCH;
             }
-            let session = peer
-                .noise_session_mut()
-                .ok_or_else(|| NodeError::SendFailed {
+            if !peer.has_session() {
+                return Err(NodeError::SendFailed {
                     node_addr: next_hop_addr,
                     reason: "no noise session".into(),
-                })?;
-            let Some(fmp_cipher) = session.send_cipher_clone() else {
-                return Ok(false);
-            };
+                });
+            }
             (
                 their_index,
                 transport_id,
                 remote_addr,
                 timestamp_ms,
                 fmp_flags,
-                fmp_cipher,
             )
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2651,24 +2647,27 @@ impl Node {
             SESSION_DATAGRAM_HEADER_SIZE + FSP_HEADER_SIZE + coords_size + fsp.plaintext.len();
         let fmp_inner_len = 4 + link_plaintext_len + crate::noise::TAG_SIZE;
 
-        // FMP counter + header (the AAD for the outer AEAD seal).
-        let fmp_counter = {
+        // FMP counter + header (the AAD for the outer AEAD seal), with the
+        // send key, from the link's rekey machine, which fixes them for the
+        // session `their_index`, the K-bit and the timestamp were read from.
+        let (fmp_counter, fmp_cipher) = {
             let peer = self
                 .peers
                 .get_mut(&next_hop_addr)
                 .ok_or(NodeError::PeerNotFound(next_hop_addr))?;
-            let session = peer
-                .noise_session_mut()
-                .ok_or_else(|| NodeError::SendFailed {
-                    node_addr: next_hop_addr,
-                    reason: "no noise session".into(),
-                })?;
-            session
-                .take_send_counter()
+            let sealed = peer
+                .seal(crate::peer::peer_now())
                 .map_err(|e| NodeError::SendFailed {
                     node_addr: next_hop_addr,
-                    reason: format!("counter reservation failed: {}", e),
-                })?
+                    reason: format!(
+                        "counter reservation failed: {}",
+                        crate::node::link_seal_error(e)
+                    ),
+                })?;
+            let Some(fmp_cipher) = sealed.key.key().cloned() else {
+                return Ok(false);
+            };
+            (sealed.counter, fmp_cipher)
         };
         let fmp_header =
             build_established_header(their_index, fmp_counter, fmp_flags, fmp_inner_len as u16);

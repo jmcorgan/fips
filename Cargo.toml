@@ -42,6 +42,12 @@ path = "src/lib.rs"
 members = [".", "core"]
 default-members = [".", "core"]
 
+# fips-core's rekey simulations, explorer and model runs are CPU-bound and run
+# more than twice as fast optimized. Only the core is optimized; overflow
+# checks and debug assertions stay on, as in every dev and test build.
+[profile.dev.package.fips-core]
+opt-level = 2
+
 [features]
 default = []
 # Tick-body profiler (`src/instr`). Off by default: enabling it edits 26 call

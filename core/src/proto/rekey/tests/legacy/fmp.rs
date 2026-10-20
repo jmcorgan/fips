@@ -780,6 +780,7 @@ impl End for FmpPeer {
 }
 
 /// How a link trace starts: which node is new, and the jitter each draws.
+#[derive(Clone)]
 pub(crate) struct Setup {
     /// The deployed release of the other node.
     pub(crate) rel: Rel,
@@ -795,6 +796,8 @@ pub(crate) struct Setup {
     /// two ends' parities fell out of step before (a cross-connection
     /// move carries the replaced epoch's K), the deployed end being at 0.
     pub(crate) new_k: bool,
+    /// The new node's rekey message trigger, when not the default.
+    pub(crate) new_messages: Option<u64>,
 }
 
 /// Two node keys whose addresses order as `new_smaller` asks: the new node's
@@ -811,6 +814,24 @@ fn keys(seed: u64, new_smaller: bool) -> (NodeKeys, NodeKeys) {
 /// A link between a new node and a deployed one, set up at time 0 by a
 /// link handshake the new node initiated.
 pub(crate) fn link(s: &Setup, seed: u64) -> (super::Duo, usize) {
+    link_with(s, seed, false)
+}
+
+/// A link between the link node this release ships and a deployed one, set
+/// up at time 0 by a link handshake the shipped node initiated.
+pub(crate) fn shipped_link(s: &Setup, seed: u64) -> (super::Duo, usize) {
+    link_with(s, seed, true)
+}
+
+/// The link parameters of the node this release ships: the link defaults.
+pub(crate) fn shipped_params() -> Params {
+    Params::fmp()
+}
+
+/// A link between a new node, or with `shipped` the node this release
+/// ships, and a deployed one, set up at time 0 by a link handshake the new
+/// node initiated.
+fn link_with(s: &Setup, seed: u64, shipped: bool) -> (super::Duo, usize) {
     seed_entropy(seed);
     let (nk, ok) = keys(seed, s.new_smaller);
     let npub = PeerKey::from_xonly(&nk.keypair().x_only_public_key().0);
@@ -840,6 +861,15 @@ pub(crate) fn link(s: &Setup, seed: u64) -> (super::Duo, usize) {
         hr.into_session().expect("done"),
     );
     let record = setup_record(&m1, None).expect("a record");
+    let mut cfg = if shipped {
+        *shipped_params().config()
+    } else {
+        crate::proto::rekey::Config::fmp()
+    };
+    if let Some(messages) = s.new_messages {
+        cfg.messages = messages;
+    }
+    let params = Params::new(cfg).expect("the trace's link parameters are valid");
     let new = NewFmp::established(
         &format!("new({:?})", s.rel),
         nk,
@@ -852,9 +882,14 @@ pub(crate) fn link(s: &Setup, seed: u64) -> (super::Duo, usize) {
         record,
         s.new_k,
         0,
-        Params::fmp(),
+        params,
         Jit::Fixed(s.new_jitter),
     );
+    let new: alloc::boxed::Box<dyn End> = if shipped {
+        alloc::boxed::Box::new(super::ship::ShipFmp::new(new))
+    } else {
+        boxed(new)
+    };
     let old_lease = olease.release();
     let old = FmpPeer::established(
         &format!("{:?}", s.rel),
@@ -871,9 +906,9 @@ pub(crate) fn link(s: &Setup, seed: u64) -> (super::Duo, usize) {
         alloc::vec![s.old_jitter],
     );
     let (a, b, x) = if s.new_first {
-        (boxed(new), boxed(old), 0)
+        (new, boxed(old), 0)
     } else {
-        (boxed(old), boxed(new), 1)
+        (boxed(old), new, 1)
     };
     (super::Duo::new(a, b, 0), x)
 }
@@ -881,6 +916,17 @@ pub(crate) fn link(s: &Setup, seed: u64) -> (super::Duo, usize) {
 /// A link between two new nodes, set up at time 0 by a link handshake the
 /// first initiated: the production profile against itself.
 pub(crate) fn new_link(seed: u64, jitter: [u16; 2]) -> super::Duo {
+    pair_with(seed, jitter, false)
+}
+
+/// A link between two of the link nodes this release ships, set up at time
+/// 0 by a link handshake the first initiated.
+pub(crate) fn shipped_pair(seed: u64, jitter: [u16; 2]) -> super::Duo {
+    pair_with(seed, jitter, true)
+}
+
+/// A link between two new nodes, or with `shipped` two shipped ones.
+fn pair_with(seed: u64, jitter: [u16; 2], shipped: bool) -> super::Duo {
     seed_entropy(seed);
     let (ak, bk) = keys(seed, true);
     let apub = PeerKey::from_xonly(&ak.keypair().x_only_public_key().0);
@@ -909,6 +955,11 @@ pub(crate) fn new_link(seed: u64, jitter: [u16; 2]) -> super::Duo {
         hi.into_session().expect("done"),
         hr.into_session().expect("done"),
     );
+    let params = if shipped {
+        shipped_params()
+    } else {
+        Params::fmp()
+    };
     let a = NewFmp::established(
         "new a",
         ak,
@@ -921,7 +972,7 @@ pub(crate) fn new_link(seed: u64, jitter: [u16; 2]) -> super::Duo {
         setup_record(&m1, None).expect("a record"),
         false,
         0,
-        Params::fmp(),
+        params,
         Jit::Fixed(jitter[0]),
     );
     let b = NewFmp::established(
@@ -936,10 +987,18 @@ pub(crate) fn new_link(seed: u64, jitter: [u16; 2]) -> super::Duo {
         setup_record(&m1, Some(&m2)).expect("a record"),
         false,
         0,
-        Params::fmp(),
+        params,
         Jit::Fixed(jitter[1]),
     );
-    super::Duo::new(boxed(a), boxed(b), 0)
+    if shipped {
+        super::Duo::new(
+            alloc::boxed::Box::new(super::ship::ShipFmp::new(a)),
+            alloc::boxed::Box::new(super::ship::ShipFmp::new(b)),
+            0,
+        )
+    } else {
+        super::Duo::new(boxed(a), boxed(b), 0)
+    }
 }
 
 /// A trace: its name, how it starts, its faults, how long it runs before
@@ -953,12 +1012,14 @@ struct Trace {
     /// The deployed node restarts at this instant, before the new node's
     /// rekey.
     restart: Option<u64>,
+    /// The link node this release ships stands in for the new node.
+    shipped: bool,
 }
 
 /// Run one trace and check it, with the new node's index conservation.
 fn run(t: Trace, seed: u64) -> Result<(), String> {
     let name = format!("{} against {:?}", t.name, t.setup.rel);
-    let (mut duo, x) = link(&t.setup, seed);
+    let (mut duo, x) = link_with(&t.setup, seed, t.shipped);
     duo.rules = t.rules;
     if let Some(at) = t.restart {
         duo.run_until(at);
@@ -989,14 +1050,25 @@ fn trace(name: &'static str, rel: Rel, f: impl FnOnce(&mut Trace)) -> Trace {
             old_jitter: 15,
             new_smaller: true,
             new_k: false,
+            new_messages: None,
         },
         rules: Vec::new(),
         run: 200_000,
         expect: Expect::lossless(),
         restart: None,
+        shipped: false,
     };
     f(&mut t);
     t
+}
+
+/// A trace against `rel` with the link node this release ships in place of
+/// the new node, set up as [`trace`] sets it up; `f` adjusts it.
+fn shipped(name: &'static str, rel: Rel, f: impl FnOnce(&mut Trace)) -> Trace {
+    trace(name, rel, |t| {
+        t.shipped = true;
+        f(t);
+    })
 }
 
 /// The link traces a new node runs against each release: a rekey started
@@ -1139,13 +1211,191 @@ fn link_traces_hold_against_every_deployed_release() {
     all(cases.into_iter().map(|t| run(t, 7)).collect());
 }
 
+/// The link traces of the node this release ships against each release: a
+/// rekey started by either end with no loss, a lost msg2, a lost cutover
+/// prompt, every frame it sends lost past the drain window, every msg2 lost
+/// against a deployed initiator, the dual initiation in both address
+/// orders, a restart the rekey reveals, and the K parity mismatch against
+/// v0.5.2. Its msg1 is resent at 1, 3, 7 and 15 s, its attempt ends at 30 s
+/// and the next waits out the back-off, it prompts the peer at a cutover
+/// and at 1 and 3 s until the peer is heard, its new epoch takes the
+/// inverse of the K last seen from the peer, it keeps the previous epoch
+/// until the peer is seen to move, counting its frames for liveness, and a
+/// restart cutover retires the old epoch, as the new node's do.
+#[test]
+fn shipped_link_traces_hold_against_every_deployed_release() {
+    let mut cases = Vec::new();
+    for rel in Rel::ALL {
+        // A 0.5.0 or 0.5.1 responder cuts over on its own tick, and its
+        // first frame under the new epoch reaches the shipped node before
+        // its own tick does.
+        cases.push(shipped("shipped node initiates", rel, |t| {
+            t.expect = Expect::lossless()
+                .must(
+                    0,
+                    match rel {
+                        Rel::V050 => {
+                            "Installed { tag: EpochTag(1), role: Initiator, evidence: Frame }"
+                        }
+                        Rel::V052 | Rel::V053 => {
+                            "Installed { tag: EpochTag(1), role: Initiator, evidence: Proof }"
+                        }
+                    },
+                )
+                .must(1, "switched");
+        }));
+        cases.push(shipped("msg2 lost", rel, |t| {
+            t.rules = alloc::vec![Rule::first(1, Class::Msg2, 100_000, 1)];
+            t.run = 330_000;
+            t.expect = match rel {
+                Rel::V053 => Expect::lossless().must(1, "resent held msg2"),
+                // Every resend is refused behind the pending; the attempt
+                // ends at 30 s and the next, after the back-off, is refused
+                // too, until the pending is retired at 120 s and an attempt
+                // completes. Data stays on the old epoch.
+                Rel::V052 => Expect::lossless()
+                    .must(1, "refused PendingSession")
+                    .must(0, "Abandoned(Unanswered)")
+                    .must(1, "retired unadopted pending")
+                    .must(1, "switched"),
+                Rel::V050 => Expect::lossless()
+                    .outage(0, 32_000)
+                    .outage(1, 41_000)
+                    .split()
+                    .must(0, "link dead"),
+            };
+        }));
+        // The cutover prompt is lost: the elicit rung adopts, and nothing
+        // is lost.
+        cases.push(shipped("cutover prompt lost", rel, |t| {
+            t.rules = alloc::vec![Rule::first(0, Class::Prompt, 100_000, 1)];
+            t.expect = Expect::lossless().never(0, "link dead").must(1, "switched");
+        }));
+        // Every frame the shipped node sends from just before its rekey
+        // to 19 s after its cutover is lost. A 0.5.2 or 0.5.3 peer holds
+        // the new epoch as pending and seals under the old one throughout;
+        // nothing shows it moved, so the shipped node keeps the old epoch
+        // past the drain window and delivers those frames until the peer
+        // adopts on its first frame after the loss. A 0.5.0 or 0.5.1 peer
+        // cuts over on its own tick and is heard under the new epoch.
+        cases.push(shipped(
+            "every frame lost past the drain window",
+            rel,
+            |t| {
+                t.rules = [Class::Prompt, Class::Data, Class::Ctl]
+                    .into_iter()
+                    .map(|c| Rule::drop(0, c, 100_000, 125_000))
+                    .collect();
+                let expect = Expect::lossless().never(0, "link dead").must(1, "switched");
+                t.expect = match rel {
+                    Rel::V050 => expect,
+                    Rel::V052 | Rel::V053 => expect.delivers_previous(0),
+                };
+            },
+        ));
+        cases.push(shipped("deployed node initiates", rel, |t| {
+            t.setup.new_jitter = LATE;
+            t.setup.old_jitter = -15;
+            t.expect = Expect::lossless().must(1, "initiated").must(
+                0,
+                "Installed { tag: EpochTag(1), role: Responder, evidence: Frame }",
+            );
+        }));
+        cases.push(shipped(
+            "deployed node initiates, first msg2 lost",
+            rel,
+            |t| {
+                t.setup.new_jitter = LATE;
+                t.setup.old_jitter = -15;
+                t.rules = alloc::vec![Rule::first(0, Class::Msg2, 100_000, 1)];
+                t.expect = Expect::lossless().must(
+                    0,
+                    "Installed { tag: EpochTag(1), role: Responder, evidence: Frame }",
+                );
+            },
+        ));
+        cases.push(shipped(
+            "every msg2 lost against a deployed initiator",
+            rel,
+            |t| {
+                t.setup.new_jitter = LATE;
+                t.setup.old_jitter = -15;
+                t.rules = alloc::vec![Rule::drop(0, Class::Msg2, 100_000, 140_000)];
+                t.run = 400_000;
+                t.expect = Expect::lossless()
+                    .must(1, "abandoned attempt")
+                    .must(0, "Retired { tag: EpochTag(1) }");
+            },
+        ));
+        // The shipped node polls on its tick, half a second after the
+        // deployed node's, so the two msg1s cross only when the deployed
+        // node's is still in flight at the shipped node's start: it is held
+        // back a second.
+        for new_smaller in [true, false] {
+            cases.push(shipped("dual initiation", rel, |t| {
+                t.setup.new_first = false;
+                t.setup.old_jitter = -15;
+                t.setup.new_smaller = new_smaller;
+                t.rules = alloc::vec![Rule::delay(0, Class::Msg1, 100_000, 110_000, 1_000)];
+                // The smaller shipped node keeps its attempt; the deployed
+                // node abandons its own and answers, and the answer
+                // completes the shipped attempt before the deployed msg1
+                // arrives, which then meets the pending.
+                t.expect = if new_smaller {
+                    Expect::lossless()
+                        .must(0, "abandoned attempt")
+                        .must(1, "Reject(PendingHeld)")
+                } else {
+                    Expect::lossless()
+                        .must(1, "Abandoned(Yielded)")
+                        .must(0, "refused DualRekeyWon")
+                };
+            }));
+        }
+        // The shipped node's message trigger is due from its first frame.
+        // Its own rekeys wait until the link is 31 s old and its session
+        // 31 s past the last cutover, so none reaches a deployed peer inside
+        // the 30 s in which that peer takes a msg1 for a fresh dial (0.5.0
+        // to 0.5.2 answer it with the setup msg2, 0.5.3 replaces the link).
+        cases.push(shipped("message-triggered rekeys", rel, |t| {
+            t.setup.new_messages = Some(1);
+            t.expect = Expect::lossless()
+                .must(1, "switched")
+                .never(1, "resent setup msg2")
+                .never(1, "promoted a fresh link")
+                .never(0, "Abandoned");
+        }));
+        cases.push(shipped("restart revealed by the rekey", rel, |t| {
+            t.restart = Some(100_000);
+            t.expect = Expect::lossless()
+                .outage(0, 6_000)
+                .must(0, "PeerRestarted")
+                .must(1, "promoted a fresh link");
+        }));
+    }
+    // With the parities out of step (the shipped end at 1, the deployed
+    // end at 0) the new epoch takes the inverse of the 0 last seen from the
+    // peer, so a v0.5.2 peer, which trials its pending only on a K that
+    // differs from its own, adopts it.
+    cases.push(shipped(
+        "K parity mismatch with a K-flip-only peer",
+        Rel::V052,
+        |t| {
+            t.setup.new_k = true;
+            t.expect = Expect::lossless().must(1, "switched k=true");
+        },
+    ));
+    all(cases.into_iter().map(|t| run(t, 7)).collect());
+}
+
 /// Seeded lossy runs of a new node against every release, in both roles of
 /// link setup and with each one's trigger first, and between two new nodes
-/// (the production profile against itself, crossing included): whatever the loss did,
-/// nothing panics, the new node's index map stays equal to its bindings and
-/// its pool, and once the loss stops the link converges, or, against a
-/// release whose own defects split a link (the 0.5.0 and 0.5.1 responder's
-/// self-cutover on a lost msg2), ends removed at one end.
+/// (the production profile against itself, crossing included), each again
+/// with the link node this release ships in place of the new one: whatever
+/// the loss did, nothing panics, the new node's index map stays equal to its
+/// bindings and its pool, and once the loss stops the link converges, or,
+/// against a release whose own defects split a link (the 0.5.0 and 0.5.1
+/// responder's self-cutover on a lost msg2), ends removed at one end.
 #[test]
 fn lossy_link_runs_converge_against_every_deployed_release() {
     let mut results = Vec::new();
@@ -1158,29 +1408,36 @@ fn lossy_link_runs_converge_against_every_deployed_release() {
                 old_jitter: if seed % 3 == 0 { 15 } else { -15 },
                 new_smaller: seed % 4 < 2,
                 new_k: false,
+                new_messages: None,
             };
-            let (duo, _) = link(&s, 100 + seed);
-            let mut duo = duo.seeded(200 + seed, 150);
-            duo.run_until(600_000);
-            let name = format!("lossy link run {seed} against {rel:?}");
-            let expect = if rel == Rel::V050 {
-                Expect::lossless()
-                    .outage(0, 600_000)
-                    .outage(1, 600_000)
-                    .maybe_split()
-            } else {
-                Expect::lossless().outage(0, 600_000).outage(1, 600_000)
-            };
-            results.push(expect.check(&name, &mut duo, 300_000));
+            for shipped in [false, true] {
+                let (duo, _) = link_with(&s, 100 + seed, shipped);
+                let mut duo = duo.seeded(200 + seed, 150);
+                duo.run_until(600_000);
+                let who = if shipped { "shipped" } else { "new" };
+                let name = format!("lossy link run {seed} of the {who} node against {rel:?}");
+                let expect = if rel == Rel::V050 {
+                    Expect::lossless()
+                        .outage(0, 600_000)
+                        .outage(1, 600_000)
+                        .maybe_split()
+                } else {
+                    Expect::lossless().outage(0, 600_000).outage(1, 600_000)
+                };
+                results.push(expect.check(&name, &mut duo, 300_000));
+            }
         }
     }
     for seed in 0..6u64 {
         let jitter = [[EARLY, LATE], [LATE, EARLY], [MID, MID]][(seed % 3) as usize];
-        let mut duo = new_link(500 + seed, jitter).seeded(600 + seed, 150);
-        duo.run_until(600_000);
-        let name = format!("lossy link run {seed} between new nodes");
-        let expect = Expect::lossless().outage(0, 600_000).outage(1, 600_000);
-        results.push(expect.check(&name, &mut duo, 300_000));
+        for shipped in [false, true] {
+            let mut duo = pair_with(500 + seed, jitter, shipped).seeded(600 + seed, 150);
+            duo.run_until(600_000);
+            let who = if shipped { "shipped" } else { "new" };
+            let name = format!("lossy link run {seed} between {who} nodes");
+            let expect = Expect::lossless().outage(0, 600_000).outage(1, 600_000);
+            results.push(expect.check(&name, &mut duo, 300_000));
+        }
     }
     all(results);
 }

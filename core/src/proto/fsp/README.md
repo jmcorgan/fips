@@ -16,8 +16,6 @@ profile; outside `rekey/` this module has no cryptography.
   ECN transforms. The first handshake, with its resends and the decision
   between crossing handshakes, and every rekey, with its handshake
   messages, cutovers and drains, are the rekey machine's.
-- `limits.rs`: the drain window and dampening constants the link layer's
-  deployed rekey still reads for its drain ceiling.
 - `quorum.rs`: `LinkQuorum`, the distinct-link count that must report a
   broken path before verified coordinates are demoted.
 - `rekey/`: the session's profile of the shared rekey machine

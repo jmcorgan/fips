@@ -51,6 +51,7 @@ macro_rules! fault {
     };
 }
 
+mod access;
 mod candidates;
 mod cycle;
 mod epoch;
@@ -76,14 +77,16 @@ pub use hooks::{code_idents, code_text, lost_items};
 pub use keys::{NodeKeys, NoiseKeys, RecvCopy, SendCopy};
 pub use lease::{EpochTag, IndexLease, IndexSource, TagSource, allocate, leaked};
 pub use machine::Rekey;
-pub use params::{Config, Inert, MAX_AFTER, Params, ParamsError};
+pub use params::{
+    Config, DEPLOYED_SESSION_FLOOR, Inert, MAX_AFTER, Params, ParamsError, msg1_span,
+};
 pub use profile::{
     Completed, DampenAt, DoneRead, FrameHint, HsError, InitiatorCutover, Layer, Leg, Msg1Read,
     Profile, Read, ResponderCutover, Select, SessionKeys,
 };
 pub use proof::{Authentic, Bond, Bonded, EvidenceKind, Fresh, PeerKey, Replayable};
 pub use reason::{Abandon, Attribution, Close, Reason, Teardown};
-pub use record::{Digest, RECORD_BOUND, Record};
+pub use record::{Digest, RECORD_BOUND, Record, RecordStore};
 pub use resolve::{Commit, Own, Verdict, resolve};
 
 use crate::identity::NodeAddr;
@@ -384,8 +387,10 @@ pub struct Env<'e, P: Profile> {
 /// What a machine built by [`Rekey::established`] cannot derive itself.
 #[derive(Debug)]
 pub struct SetupFacts<I> {
-    /// The peer's startup epoch, read in link setup.
-    pub peer_epoch: [u8; 8],
+    /// The peer's startup epoch, read in link setup; `None` when the setup
+    /// carried none, so the first rekey that shows one records it rather
+    /// than taking it for a restart.
+    pub peer_epoch: Option<[u8; 8]>,
     /// The first epoch's key-epoch bit.
     pub k: bool,
     /// When the link was promoted.
@@ -402,8 +407,8 @@ pub struct SetupFacts<I> {
 /// cross-connection move.
 #[derive(Debug)]
 pub struct Carry<I> {
-    /// The peer's startup epoch.
-    pub peer_epoch: [u8; 8],
+    /// The peer's startup epoch, if known.
+    pub peer_epoch: Option<[u8; 8]>,
     /// The current epoch's key-epoch bit.
     pub k: bool,
     /// When the current epoch started.
@@ -414,6 +419,24 @@ pub struct Carry<I> {
     pub peer_k: Option<bool>,
     /// The replay record.
     pub record: Record,
+}
+
+impl<I> From<Carry<I>> for SetupFacts<I> {
+    /// The facts a machine built after a cross-connection move starts
+    /// from: everything the closed machine handed back, so the moved
+    /// session keeps the replaced one's key-epoch bit and start (its rekey
+    /// age and timestamp base), the link's age, the peer's startup epoch,
+    /// the key-epoch bit last seen from the peer and the replay record.
+    fn from(carry: Carry<I>) -> Self {
+        Self {
+            peer_epoch: carry.peer_epoch,
+            k: carry.k,
+            link_since: carry.link_since,
+            started: carry.started,
+            peer_k: carry.peer_k,
+            record: carry.record,
+        }
+    }
 }
 
 /// Who the machine's peer is known to be.

@@ -211,6 +211,11 @@ New filter content is sent only on these events, never periodically:
 - The tree changes around this node: it switches parent or becomes
   root, or a peer starts or stops naming it as parent, which changes
   the set of tree peers whose filters are merged
+- This node answers a peer's link rekey and moves to its new session.
+  The rekey may be the peer dialling again after it dropped the old
+  peering, and this node's filter with it, so the filter is sent again
+  even when it has not changed. A rekey this node starts sends nothing
+  extra
 
 An announce to a newly promoted peer waits until that peer's first
 authenticated frame arrives. A peer that completes a handshake and then

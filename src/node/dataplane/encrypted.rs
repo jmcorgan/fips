@@ -1,16 +1,46 @@
 //! Encrypted frame handling (hot path).
 
 use crate::node::Node;
-use crate::node::diag::{self, KeyView, OrNone, Trial};
+use crate::node::diag::{KeyView, OrNone, Trial};
 use crate::node::reject::DataplaneReject;
-use crate::noise::NoiseError;
+use crate::noise::{NoiseError, TAG_SIZE};
 use crate::proto::fmp::wire::{
     EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, strip_inner_header,
 };
 use crate::proto::link::LinkMessageType;
 use crate::transport::{ReceivedPacket, TransportAddr, TransportId};
+use fips_core::proto::rekey::{FrameHint, Input, Reason, Slot};
 use std::time::Instant;
 use tracing::{debug, trace, warn};
+
+/// The error the deployed inline decrypt reported for a frame the link's
+/// rekey machine refused with `rejects`, for the decryption-failure line: a
+/// refused counter, a body too short for its tag, or a tag that did not
+/// verify.
+fn open_failure(rejects: &[Reason], header: &EncryptedHeader, frame: &[u8]) -> NoiseError {
+    if rejects.contains(&Reason::Replay) {
+        return NoiseError::ReplayDetected(header.counter);
+    }
+    let body = frame.len().saturating_sub(header.ciphertext_offset());
+    if body < TAG_SIZE {
+        NoiseError::MessageTooShort {
+            expected: TAG_SIZE,
+            got: body,
+        }
+    } else {
+        NoiseError::DecryptionFailed
+    }
+}
+
+/// What a link session's open needs from a frame's parsed header.
+fn frame_hint(header: &EncryptedHeader, k: bool) -> FrameHint {
+    FrameHint {
+        counter: header.counter,
+        k,
+        index: header.receiver_idx.as_u32(),
+        body: header.ciphertext_offset(),
+    }
+}
 
 /// Consecutive decryption failures at which a peer's warning is logged. The
 /// peer is kept; a broken session ends at the link-dead timeout.
@@ -26,10 +56,10 @@ const DECRYPT_FAILURE_THRESHOLD: u32 = 20;
 /// carries is not processed. A frame authenticated by a pending session is
 /// promoted to current before it is processed, so it is `Current`.
 ///
-/// The link-dead check reads the MMP receiver's last-received time, which the
-/// cutover clears, so previous-session frames no longer hold the link alive:
-/// after a cutover the link-dead timer runs from the cutover until a frame on
-/// the new session arrives. Peer `touch` and link statistics still see them.
+/// Previous-session frames still hold the link alive: the link-dead check
+/// reads the link machine's last frame under any session it holds as well as
+/// the MMP receiver's last-received time, which the cutover clears. Peer
+/// `touch` and link statistics see them too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node) enum LinkSlot {
     Current,
@@ -42,11 +72,11 @@ impl Node {
     /// This is the hot path for established sessions. We use O(1)
     /// index-based lookup to find the session, then decrypt.
     ///
-    /// Rekey cutover: when a frame that names the pending new session's
-    /// index, or carries a flipped K-bit, authenticates against that
-    /// session, we promote it to current, take the frame's K-bit, and demote
-    /// the old session to previous for a drain window. During drain, we try
-    /// the current session first, then fall back to the previous session.
+    /// A frame is opened under the one session its receiver index names:
+    /// by a decrypt worker when one holds that session, else by the link's
+    /// rekey machine. A frame that authenticates under the pending session
+    /// cuts over to it, and one under the previous session is delivered
+    /// while the drain holds it.
     pub(in crate::node) async fn handle_encrypted_frame(&mut self, packet: ReceivedPacket) {
         // Parse header (fail fast)
         let header = match EncryptedHeader::parse(&packet.data) {
@@ -90,147 +120,14 @@ impl Node {
         // Extract K-bit from flags
         let received_k_bit = header.flags & FLAG_KEY_EPOCH != 0;
 
-        // Pending-session trial: the peer may have cut over to the new
-        // session.
-        //
-        // A frame naming the pending session's receiver index was sealed for
-        // that session, so it is always tried there. The K-bit alone is not
-        // enough to select the trial: the two ends' bits can fall out of
-        // step (a peer restart revealed by our rekey, or a second-path dial
-        // the peer completes as a cross-connection swap), and then the
-        // peer's frames on the new session carry a K-bit equal to ours. A
-        // frame with a flipped K-bit is still tried too, as before.
-        //
-        // Neither signal is a reason to promote; only the trial is.
-        // Under jitter the FMP rekey interval shrinks and the two
-        // directions' rekeys interleave, so a node can hold a `pending`
-        // session from rekey N while the peer's observed K-bit flip
-        // actually belongs to rekey N+1. Promoting on the bare bit then
-        // installs the WRONG Noise session as current — the two endpoints
-        // diverge, every subsequent frame fails AEAD on the far side, the
-        // receiver starves, and the link is declared dead at the heartbeat
-        // timeout (routing failure, green crypto). This mirrors the FSP fix
-        // (node/session.rs / node/handlers/session.rs): the authenticated
-        // decrypt, not the header bit, is the cutover signal. Trial-decrypt
-        // the frame against `pending` first; only promote if it
-        // authenticates. On success the same frame is delivered via
-        // `process_authentic_fmp_plaintext` and we return — it must not
-        // fall through to a second decrypt, which would be rejected as a
-        // replay (the trial-decrypt already advanced `pending`'s window).
-        let trial = {
-            let Some(peer) = self.peers.get(&node_addr) else {
-                return;
-            };
-            let pending = peer.pending_new_session().is_some();
-            let kbit_differs = received_k_bit != peer.current_k_bit();
-            let try_pending =
-                pending && (kbit_differs || peer.pending_our_index() == Some(header.receiver_idx));
-            // Test-only: model a peer that tries the pending session only on
-            // a flipped K-bit.
-            #[cfg(test)]
-            let try_pending = try_pending && (!peer.old_gate() || kbit_differs);
-            // Carried to a failure line: the gate's own decision.
-            let trial = Trial::of(pending, try_pending, kbit_differs);
-
-            if try_pending {
-                let ciphertext = &packet.data[header.ciphertext_offset()..];
-                let display_name = self.peer_display_name(&node_addr);
-                let Some(peer) = self.peers.get_mut(&node_addr) else {
-                    return;
-                };
-                // Authenticate the frame against the pending session.
-                // Trial-decrypt mutates `pending`'s replay window only on
-                // success, so a failed trial leaves it untouched.
-                let pending_plaintext = peer.pending_new_session_mut().and_then(|pending| {
-                    pending
-                        .decrypt_with_replay_check_and_aad(
-                            ciphertext,
-                            header.counter,
-                            &header.header_bytes,
-                        )
-                        .ok()
-                });
-
-                if let Some(plaintext) = pending_plaintext {
-                    // The trial-decrypt already advanced the pending
-                    // session's replay window; `adopt_pending` moves that
-                    // same session object to `current`, so no re-decrypt,
-                    // and takes the K-bit from this authenticated frame.
-                    let did_flip = peer.adopt_pending(received_k_bit).is_some();
-                    debug!(
-                        peer = %display_name,
-                        epoch = %OrNone(peer.noise_session().map(diag::epoch_tag)),
-                        kbit_frame = received_k_bit,
-                        kbit_ours = peer.current_k_bit(),
-                        "Peer new-epoch frame authenticated, K-bit flip promoting new session"
-                    );
-                    if did_flip {
-                        // New index was pre-registered in peers_by_index
-                        // during msg1 handling (handshake.rs). Verify,
-                        // don't duplicate.
-                        debug_assert!(
-                            peer.transport_id().is_some()
-                                && peer.our_index().is_some()
-                                && self.peers_by_index.contains_key(&(
-                                    peer.transport_id().unwrap(),
-                                    peer.our_index().unwrap().as_u32()
-                                )),
-                            "peers_by_index should contain pre-registered new index after K-bit flip"
-                        );
-                    }
-                    // Re-register the (now-promoted) session with the
-                    // decrypt worker: cache_key = (transport_id, our_index)
-                    // changed at the flip, so the old worker entry is
-                    // stranded and every packet on the new session would
-                    // miss the worker's HashMap lookup. Without this,
-                    // throughput drops back to the inline-decrypt path
-                    // after each rekey.
-                    #[cfg(unix)]
-                    if did_flip {
-                        self.register_decrypt_worker_session(&node_addr);
-                    }
-
-                    // Deliver the frame we just authenticated via the
-                    // canonical post-decrypt path, then return — it must
-                    // not fall through to a second decrypt attempt.
-                    let ce_flag = header.flags & FLAG_CE != 0;
-                    let sp_flag = header.flags & FLAG_SP != 0;
-                    self.process_authentic_fmp_plaintext(
-                        &node_addr,
-                        LinkSlot::Current,
-                        packet.transport_id,
-                        &packet.remote_addr,
-                        packet.timestamp_ms,
-                        packet.data.len(),
-                        header.counter,
-                        ce_flag,
-                        sp_flag,
-                        &plaintext,
-                    )
-                    .await;
-                    return;
-                }
-                // Pending did NOT authenticate this frame: the flip belongs
-                // to a different rekey epoch (stale pending). Do not
-                // promote. Fall through to the normal current/previous
-                // decrypt; the genuine cutover is recognized when a frame
-                // that authenticates against `pending` arrives.
-            }
-            trial
-        };
-
         // ── Decrypt-worker fast path (unix) ─────────────────────────
-        // Once the session has been registered with a decrypt shard
-        // (at FMP-establishment in `promote_connection`), the worker
-        // owns the FMP recv cipher + replay window. Dispatch the
-        // packet and return; the worker will run AEAD off-task and
-        // bounce the plaintext back via `decrypt_fallback_tx` for
-        // rx_loop to do the post-decrypt side-effects.
-        //
-        // The in-line decrypt below is the **synchronous test-mode
-        // path** for unit tests that construct `Node` without
-        // `lifecycle::start_async`; in production every established
-        // session is dispatched to the worker.
+        // Once a session has been registered with a decrypt shard (at
+        // FMP-establishment in `promote_connection`, or at a cutover), the
+        // worker owns its FMP recv cipher + replay window. Dispatch the
+        // packet and return; the worker will run AEAD off-task and bounce
+        // the plaintext back via `decrypt_fallback_tx` for rx_loop to do the
+        // post-decrypt side-effects. A pending session is never registered,
+        // so a frame naming one is opened by the link's rekey machine below.
         #[cfg(unix)]
         {
             let cache_key = (packet.transport_id, header.receiver_idx.as_u32());
@@ -255,70 +152,78 @@ impl Node {
             }
         }
 
-        // Decrypt: try current session first, then previous (drain fallback)
-        let ciphertext = &packet.data[header.ciphertext_offset()..];
-        let (plaintext, slot) = {
-            let peer = self.peers.get_mut(&node_addr).unwrap();
-            let session = match peer.noise_session_mut() {
-                Some(s) => s,
-                None => {
-                    warn!(
-                        peer = %self.peer_display_name(&node_addr),
-                        "Peer in index map has no session"
-                    );
-                    return;
-                }
-            };
-
-            match session.decrypt_with_replay_check_and_aad(
-                ciphertext,
-                header.counter,
-                &header.header_bytes,
-            ) {
-                Ok(p) => {
-                    peer.reset_decrypt_failures();
-                    (p, LinkSlot::Current)
-                }
-                Err(e) => {
-                    // Current session failed — try previous session (drain window)
-                    if let Some(prev_session) = peer.previous_session_mut() {
-                        match prev_session.decrypt_with_replay_check_and_aad(
-                            ciphertext,
-                            header.counter,
-                            &header.header_bytes,
-                        ) {
-                            Ok(p) => {
-                                peer.reset_decrypt_failures();
-                                (p, LinkSlot::Previous)
-                            }
-                            Err(_) => {
-                                self.log_decrypt_failure(
-                                    &node_addr,
-                                    &header,
-                                    &e,
-                                    packet.transport_id,
-                                    &packet.remote_addr,
-                                    trial,
-                                );
-                                self.handle_decrypt_failure(&node_addr);
-                                return;
-                            }
-                        }
-                    } else {
-                        self.log_decrypt_failure(
-                            &node_addr,
-                            &header,
-                            &e,
-                            packet.transport_id,
-                            &packet.remote_addr,
-                            trial,
-                        );
-                        self.handle_decrypt_failure(&node_addr);
-                        return;
-                    }
-                }
-            }
+        // The link's rekey machine opens the frame under the session its
+        // receiver index names, and runs that session's row: a frame under
+        // the pending session cuts over to it, taking the frame's K-bit when
+        // the peer made it, and is delivered as the new current session's.
+        // The plaintext is written into the frame's own buffer.
+        if !self
+            .peers
+            .get(&node_addr)
+            .is_some_and(|peer| peer.has_session())
+        {
+            warn!(
+                peer = %self.peer_display_name(&node_addr),
+                "Peer in index map has no session"
+            );
+            return;
+        }
+        let mut packet = packet;
+        // Carried to a failure line: whether the frame named the pending.
+        let trial = Trial::of(
+            self.peers
+                .get(&node_addr)
+                .and_then(|peer| peer.pending_our_index()),
+            header.receiver_idx,
+        );
+        let hint = frame_hint(&header, received_k_bit);
+        let input = Input::Frame {
+            buf: &mut packet.data,
+            hint,
         };
+        let Some(out) = self.step_link(&node_addr, input) else {
+            return;
+        };
+        let report = self.run_link_step(&node_addr, out).await;
+        if report.removed {
+            return;
+        }
+        let Some((slot, range)) = report.delivered else {
+            let short = report.rejects.contains(&Reason::ShortPlaintext);
+            if short {
+                if let Some(peer) = self.peers.get_mut(&node_addr) {
+                    peer.reset_decrypt_failures();
+                }
+                debug!(
+                    peer = %self.peer_display_name(&node_addr),
+                    "Decrypted payload too short for inner header"
+                );
+                return;
+            }
+            let e = open_failure(&report.rejects, &header, &packet.data);
+            self.log_decrypt_failure(
+                &node_addr,
+                &header,
+                &e,
+                packet.transport_id,
+                &packet.remote_addr,
+                trial,
+            );
+            self.handle_decrypt_failure(&node_addr);
+            return;
+        };
+        if let Some(peer) = self.peers.get_mut(&node_addr) {
+            peer.reset_decrypt_failures();
+        }
+        let slot = match slot {
+            Slot::Current | Slot::Pending => LinkSlot::Current,
+            Slot::Previous => LinkSlot::Previous,
+        };
+        let plaintext = packet
+            .data
+            .get(range)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
 
         // === PACKET IS AUTHENTIC ===
 
@@ -622,6 +527,34 @@ impl Node {
             );
             return;
         }
+        // The link's rekey machine hears of the frame too: its key-epoch
+        // bit is the one the peer was last seen sending, and a frame under
+        // the current session shows the peer moved to it.
+        let held = if current {
+            Slot::Current
+        } else {
+            Slot::Previous
+        };
+        let tag = self
+            .peers
+            .get(&fallback.source_node_addr)
+            .and_then(|p| p.epoch_tag(held));
+        if let Some(tag) = tag {
+            let input = Input::WorkerFrame {
+                tag,
+                k: fallback.fmp_flags & FLAG_KEY_EPOCH != 0,
+                counter: fallback.fmp_counter,
+                only: (),
+            };
+            if let Some(out) = self.step_link(&fallback.source_node_addr, input)
+                && self
+                    .run_link_step(&fallback.source_node_addr, out)
+                    .await
+                    .removed
+            {
+                return;
+            }
+        }
         let slot = if current {
             LinkSlot::Current
         } else {
@@ -692,50 +625,19 @@ impl Node {
         }
     }
 
-    /// Hand a session's FMP recv cipher + replay window off to a shard
-    /// of the decrypt worker pool. Idempotent on rekey: re-registering
-    /// the same cache_key overwrites the worker's entry. Gates the
-    /// `decrypt_registered_sessions` insert on actual worker acceptance
-    /// so a `TrySendError::Full` on the per-worker channel doesn't
-    /// black-hole the session.
-    #[cfg(unix)]
-    pub(in crate::node) fn register_decrypt_worker_session(&mut self, node_addr: &crate::NodeAddr) {
-        let Some(workers) = self.supervisor.decrypt_workers.as_ref().cloned() else {
-            return;
-        };
-        let (cache_key, state) = {
-            let Some(peer) = self.peers.get(node_addr) else {
-                return;
-            };
-            let Some(transport_id) = peer.transport_id() else {
-                return;
-            };
-            let Some(our_index) = peer.our_index() else {
-                return;
-            };
-            let cache_key = (transport_id, our_index.as_u32());
-            let Some(state) = self.build_owned_session_state(node_addr) else {
-                return;
-            };
-            (cache_key, state)
-        };
-        if workers.register_session(cache_key, state) {
-            self.decrypt_registered_sessions.insert(cache_key);
-        }
-    }
-
-    /// Drop a session from the decrypt worker pool. Mirror of
-    /// `register_decrypt_worker_session`. Idempotent: safe to call on a
-    /// `cache_key` that isn't registered, and safe to call when the
-    /// worker pool is disabled (`FIPS_DECRYPT_WORKERS=0`).
+    /// Drop a session from the decrypt worker pool. Mirror of the
+    /// registration a link machine's `Delegate` output makes. Idempotent:
+    /// safe to call on a `cache_key` that isn't registered, and safe to call
+    /// when the worker pool is disabled (`FIPS_DECRYPT_WORKERS=0`).
     ///
-    /// Called from two sites that already iterate `peers_by_index`:
-    /// the rekey drain-completion block (after the drain window has
-    /// expired, the old `our_index` is unreachable to any in-flight
-    /// OLD-K packet) and `remove_active_peer` (terminal peer cleanup).
-    /// Without these callers, the per-worker `sessions` HashMap and
-    /// the Node's `decrypt_registered_sessions` set would grow
-    /// monotonically per rekey on long-lived peers.
+    /// Called for every `Revoke` a link machine emits, which it does for a
+    /// delegated session whenever it retires one: at the end of a drain
+    /// (after the drain window has expired, the old `our_index` is
+    /// unreachable to any in-flight OLD-K packet), at a cutover over a drain
+    /// still open, on a cross-connection replacement, and when the peer is
+    /// removed. Without these, the per-worker `sessions` HashMap and the
+    /// Node's `decrypt_registered_sessions` set would grow monotonically
+    /// per rekey on long-lived peers.
     #[cfg(unix)]
     pub(in crate::node) fn unregister_decrypt_worker_session(
         &mut self,
@@ -745,26 +647,6 @@ impl Node {
             workers.unregister_session(cache_key);
         }
         self.decrypt_registered_sessions.remove(&cache_key);
-    }
-
-    /// Snapshot the per-peer FMP recv cipher + replay window for the
-    /// decrypt worker. Returns `None` if the peer / session isn't
-    /// ready. After hand-off the worker is the sole FMP replay-window
-    /// authority for this session.
-    #[cfg(unix)]
-    fn build_owned_session_state(
-        &self,
-        node_addr: &crate::NodeAddr,
-    ) -> Option<crate::node::decrypt_worker::OwnedSessionState> {
-        let peer = self.peers.get(node_addr)?;
-        let fmp_session = peer.noise_session()?;
-        let fmp_cipher = fmp_session.recv_cipher_clone()?;
-        let fmp_replay = fmp_session.recv_replay_snapshot_owned();
-        Some(crate::node::decrypt_worker::OwnedSessionState {
-            fmp_cipher,
-            fmp_replay,
-            source_npub: None,
-        })
     }
 
     /// Whether `node_addr`'s current run of decryption failures has already

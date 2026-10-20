@@ -7,7 +7,9 @@ first handshakes with what v0.5.0 to v0.5.3 actually do. Everything here
 runs on real Noise handshakes and the real wire codecs, with a seeded
 entropy source, so a run replays byte for byte. It exists on master only:
 next does not speak the v1 wire, and its merge of the production profiles
-deletes this directory.
+deletes this directory. It is compiled only with the crate's `slow-tests`
+feature: GitHub CI's Linux job runs it on every push, local CI with
+`--slow-tests`, and `cargo test -p fips-core --features slow-tests` by hand.
 
 ## Files
 
@@ -24,7 +26,12 @@ deletes this directory.
   must or must not report, and the end state after a heal with the faults
   off (converged: both alive, nothing in flight, a frame each way
   accepted under the current epoch; or, where a deployed defect is the
-  accepted outcome, the link removed at one end or rotation stopped). It
+  accepted outcome, the link removed at one end or rotation stopped). A
+  rekey a new node started in the last 2 s of the heal cannot have
+  finished by its end, so the check lets it run on for up to 31 s first
+  and fails if a new node gives up an attempt or a pending meanwhile. A
+  run that ends on a whole second does not run the tick that falls at its
+  end, so that wait steps to a millisecond past each second. It
   also closes each new node and checks its index map, pool and lease
   count. For the explorer, `Duo::hold` keeps every packet in flight until
   it is delivered by id, and `release` loses what is left and restarts
@@ -39,7 +46,12 @@ deletes this directory.
   30 s link-dead reap on `view().last_rx`.
 - `fmp.rs`: `FmpPeer`, a deployed node's link to one peer, and the link
   traces.
-- `ship.rs`: `ShipFsp`, the session node this release ships: the machine
+- `ship.rs`: `ShipFmp`, the link node this release ships: the machine on
+  `FmpIk` at the link defaults, polled on the shell's tick only,
+  which reaps the link 30 s after the later of its last frame under any
+  epoch it holds and its last cutover, as the root crate's link-dead
+  check does;
+  and `ShipFsp`, the session node this release ships: the machine
   on `FspXk` at the session defaults, opened for a first handshake as the
   root crate's session handlers open it, taking every setup, ack, msg3 and
   frame of a session and starting its own rekeys, polled on the shell's
@@ -49,8 +61,8 @@ deletes this directory.
   (which can restart, losing it and drawing a new startup epoch), and
   the session traces.
 - `explore.rs`: the bounded exhaustive explorer over a `Duo`, against
-  every release and between two new nodes, the session rekeys and first
-  handshakes also with the shipped node.
+  every release and between two new nodes, the link and session rekeys and
+  the first handshakes also with the shipped nodes.
 
 ## The models
 
@@ -106,9 +118,22 @@ frames; a silent one, as in session MMP mode Minimal, sends none).
   `fsp::lossy_session_runs_converge_against_every_deployed_release`:
   seeded runs at 15 % loss each way for 600 s against every release and
   between two new nodes (the production profiles against themselves),
-  healed and required to converge; some session runs use the shipped node
-  in place of the new one, against a release or against another shipped
+  healed and required to converge; every link run runs again with the
+  shipped link node in place of the new one, and some session runs use the
+  shipped session node, against a release or against another shipped
   node.
+- `fmp::shipped_link_traces_hold_against_every_deployed_release`: the link
+  traces with the shipped link node in place of the new one: a rekey
+  either end starts, a lost msg2, a lost cutover prompt (the elicit rung
+  adopts), every frame of the shipped node lost from its rekey to past the
+  drain window (the drain waits for evidence and the peer's old-epoch
+  frames are delivered), every msg2 lost against a deployed
+  initiator, the crossing in both address orders, a restart the rekey
+  reveals, rekeys started on a message trigger due from the first frame
+  (none reaches a deployed peer inside its 30 s floors), and the K parity
+  mismatch against 0.5.2, which the shipped node now repairs as the new
+  node does, its new epoch taking the inverse of the peer's key-epoch
+  bit.
 - The session rekey traces also run with the shipped node in place of the
   new one (`fsp::shipped_traces`): S-1 with and without a silent
   responder, S-2 with the responder sending and silent, S-3 against 0.5.0
@@ -126,10 +151,11 @@ frames; a silent one, as in session MMP mode Minimal, sends none).
   ends at either address order, every sequence of up to 3 events
   (deliver any packet in flight, copy a handshake message once, seal one
   data frame at either end, advance to the next tick or wake), against
-  every release and between two new nodes; each session rekey scenario
-  and each first handshake runs again with the shipped node in place of
-  the new one, and between two shipped nodes. The ends cannot be cloned, so
-  each path is replayed from its start and paths are not de-duplicated.
+  every release and between two new nodes; each link and session rekey
+  scenario and each first handshake runs again with the shipped node in
+  place of the new one, and between two shipped nodes. The ends cannot be
+  cloned, so each path is replayed from its start and paths are not
+  de-duplicated.
   After each event no new link node's index map drifts; at each frontier
   path the heal must converge (or end as the release forces: the 0.5.0
   link split, the 0.5.0 session's stopped rotation) with no lease leaked,

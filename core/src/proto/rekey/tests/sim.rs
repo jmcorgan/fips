@@ -871,7 +871,7 @@ impl<P: Stub> World<P> {
             let bad = evs.iter().find(|e| {
                 matches!(
                     e,
-                    Ev::Installed(..) | Ev::Retired(..) | Ev::Rekeyed(..) | Ev::Reverted(..)
+                    Ev::Installed(..) | Ev::Rekeyed(..) | Ev::Reverted(..) | Ev::Retired(..)
                 )
             });
             if let Some(e) = bad {
@@ -2015,13 +2015,19 @@ fn faulty_runs_hold_every_oracle_and_converge_once_healed() {
     faulty_runs::<Xx>("xx", 0..FAULTY, false);
 }
 
-/// Check every clean run of `P` over `seeds`.
+/// Check every clean run of `P` over `seeds`, with data both ways and with
+/// none.
 fn clean_runs<P: Stub>(name: &str, seeds: core::ops::Range<u64>) {
+    clean_runs_with::<P>(name, seeds, &[[300, 700], [0, 0]]);
+}
+
+/// Check every clean run of `P` over `seeds` at each data gap of `gaps`.
+fn clean_runs_with<P: Stub>(name: &str, seeds: core::ops::Range<u64>, gaps: &[[u64; 2]]) {
     let p = params::<P>();
     for seed in seeds {
         let at_proof = P::RESPONDER_CUTOVER == crate::proto::rekey::ResponderCutover::AtProof
             && P::MESSAGES == 3;
-        for gap in [[300, 700], [0, 0]] {
+        for &gap in gaps {
             let unproven = at_proof && gap == [0, 0];
             let r = clean_run::<P>(seed, gap, true, false);
             let verdict = r.failure.clone().map_or_else(

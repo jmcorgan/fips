@@ -12,23 +12,22 @@ notes, not here.
 **What changed.** The methods of `fips::peer::ActivePeer` that read or
 change its Noise sessions, their indices, the K-bit epoch, the session
 time base, the stored link-setup msg2, the peer's startup epoch and the
-rekey cycle are now private to the crate. Of the session-slot methods,
-`with_session`, `has_session`, `noise_session`, `noise_session_mut`,
-`our_index`, `their_index`, `replace_session`, `session_start`,
-`session_elapsed_ms`, `set_handshake_msg2`, `handshake_msg2` and
-`remote_epoch` are affected. Of the rekey methods, every method from
-`session_established_at` to `record_rekey_msg1_resend` in v0.5 is
-affected: `session_established_at`, `link_established_at`,
-`rekey_jitter_secs`, `current_k_bit`, `rekey_in_progress`,
-`is_rekey_dampened`, `record_peer_rekey`, `pending_our_index`,
-`pending_their_index`, `previous_our_index`, `previous_session`,
-`previous_session_mut`, `pending_new_session`, `pending_new_session_mut`,
+rekey cycle are no longer public. These are now private to the crate:
+`with_session`, `has_session`, `noise_session`, `our_index`,
+`their_index`, `session_elapsed_ms`, `set_handshake_msg2`,
+`handshake_msg2`, `remote_epoch`, `session_established_at`,
+`link_established_at`, `rekey_jitter_secs`, `current_k_bit`,
+`rekey_in_progress`, `pending_our_index`, `pending_their_index`,
+`previous_our_index`, `previous_session`, `pending_new_session`,
+`is_draining` and `rekey_our_index`. These are gone, because the rekey
+state machine now holds the state they reached: `noise_session_mut`,
+`replace_session`, `session_start`, `is_rekey_dampened`,
+`record_peer_rekey`, `previous_session_mut`, `pending_new_session_mut`,
 `set_pending_session`, `cutover_to_new_session`, `handle_peer_kbit_flip`,
-`drain_expired`, `is_draining`, `complete_drain`, `abandon_rekey`,
-`set_rekey_state`, `rekey_our_index`, `awaits_msg2`,
-`complete_rekey_msg2`, `needs_msg1_resend`, `rekey_msg1` and
-`rekey_msg1_resend_count`. Four methods nothing called are gone
-outright: `set_their_index`, `clear_handshake_msg2`,
+`drain_expired`, `complete_drain`, `abandon_rekey`, `set_rekey_state`,
+`awaits_msg2`, `complete_rekey_msg2`, `needs_msg1_resend`, `rekey_msg1`
+and `rekey_msg1_resend_count`. Four methods nothing called are also
+gone: `set_their_index`, `clear_handshake_msg2`,
 `set_rekey_in_progress` and `set_msg1_next_resend`.
 
 **Why.** The node drives these through its own handshake and rekey

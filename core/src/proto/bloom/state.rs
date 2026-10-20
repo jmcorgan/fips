@@ -180,6 +180,14 @@ impl BloomState {
         self.last_sent_filters.get(peer_id)
     }
 
+    /// Forget the filter last sent to a peer that restarted, which holds
+    /// none of this node's filters any more. The debounce and the announce
+    /// delivery state are kept: the link, and its session's delivery
+    /// record, survive the restart.
+    pub fn forget_sent(&mut self, peer_id: &NodeAddr) {
+        self.last_sent_filters.remove(peer_id);
+    }
+
     /// Remove stored filter state for a peer that was removed.
     pub fn remove_peer_state(&mut self, peer_id: &NodeAddr) {
         self.last_sent_filters.remove(peer_id);

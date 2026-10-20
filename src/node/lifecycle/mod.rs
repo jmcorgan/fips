@@ -779,18 +779,22 @@ impl Node {
             .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms))
             .set_leg(HandshakeCrypto::new());
 
-        // Allocate a session index for this handshake
-        let our_index = match self.index_allocator.allocate() {
-            Ok(idx) => idx,
-            Err(e) => {
+        // Allocate a session index for this handshake, as the lease the
+        // promoted link's rekey machine takes over.
+        let our_lease = match fips_core::proto::rekey::allocate(&mut self.index_allocator) {
+            Some(lease) => lease,
+            None => {
                 // Clean up the link and dial-time machine we just created
                 self.links.remove(&link_id);
                 self.addr_to_link
                     .remove(&(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
-                return Err(NodeError::IndexAllocationFailed(e.to_string()));
+                return Err(NodeError::IndexAllocationFailed(
+                    crate::utils::index::IndexError::Exhausted.to_string(),
+                ));
             }
         };
+        let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
 
         // Start the Noise handshake and get message 1
         // This frame's own copy of the node's long-term private key; the
@@ -807,7 +811,9 @@ impl Node {
             Ok(msg) => msg,
             Err(e) => {
                 // Clean up the index, link, and dial-time machine
-                let _ = self.index_allocator.free(our_index);
+                let _ = self
+                    .index_allocator
+                    .free(crate::utils::index::SessionIndex::new(our_lease.release()));
                 self.links.remove(&link_id);
                 self.addr_to_link
                     .remove(&(transport_id, remote_addr.clone()));
@@ -859,7 +865,10 @@ impl Node {
         machine.set_conn_transport_id(transport_id);
         // Record our session index on the surviving carrier, the single index
         // home on the outbound path (the inbound path writes it at authorize).
-        machine.set_conn_our_index(our_index);
+        // A dial-time carrier holds no index before its msg1. One it held
+        // would stay allocated, as an overwritten index always has, and the
+        // dropped lease counts the leak.
+        let _ = machine.set_conn_our_index(our_lease);
         // Store the msg1 wire on the surviving carrier (the connection does not
         // hold the resend source); the retransmit driver reads it from here.
         machine.set_conn_handshake_msg1(wire_msg1, first_resend_at_ms);

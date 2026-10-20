@@ -53,14 +53,14 @@ const PASSES: usize = 3;
 /// Facts that survive `Idle`, kept outside the cycle.
 #[derive(Debug)]
 pub(super) struct Memory<I> {
-    peer_epoch: Option<[u8; 8]>,
+    pub(super) peer_epoch: Option<[u8; 8]>,
     /// The key-epoch bit on the peer's last authenticated current-epoch
     /// frame.
-    peer_k: Option<bool>,
+    pub(super) peer_k: Option<bool>,
     /// The jitter drawn at the last install or cutover, whole seconds.
     pub(super) jitter: i32,
     /// Dampening ends.
-    damp: Option<I>,
+    pub(super) damp: Option<I>,
     /// The abandon backoff ends.
     backoff: Option<I>,
     abandons: u8,
@@ -71,8 +71,8 @@ pub(super) struct Memory<I> {
     /// Data was sealed since the last current-epoch frame from the peer.
     sent_data: bool,
     silence: u8,
-    link_since: I,
-    last_cutover: Option<I>,
+    pub(super) link_since: I,
+    pub(super) last_cutover: Option<I>,
     hs_rtt: Option<Duration>,
     srtt: Option<Duration>,
     /// Karn's kept backoff for the rekey setup's first rung.
@@ -144,10 +144,11 @@ enum Change<'a, P: Profile> {
         reason: Reason,
         ephemeral: Option<Digest>,
     },
-    /// Ask the shell to apply the restart gates to a fresh msg1.
+    /// Ask the shell to apply the restart gates to a fresh msg1, recording
+    /// its ephemeral when one is given.
     Replace {
         tok: Authentic<P::Msg1, Replayable>,
-        ephemeral: Digest,
+        ephemeral: Option<Digest>,
     },
     /// Answer a fresh eligible msg1, yielding an unanswered own attempt.
     Respond {
@@ -343,7 +344,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let mut ep = Epoch::new(tag, first, ids, facts.k, Role::Initiator, facts.started);
         ep.base = Some(facts.started);
         let mut mem = Memory::new(facts.link_since);
-        mem.peer_epoch = Some(facts.peer_epoch);
+        mem.peer_epoch = facts.peer_epoch;
         mem.peer_k = facts.peer_k;
         mem.jitter = jitter(env, params.cfg.jitter);
         let _ = now;
@@ -367,7 +368,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 purpose: Purpose::Current,
             });
         }
-        machine.delegate(&ep, env, &mut out);
+        machine.delegate(&ep, env.workers, &mut out);
         machine.cur = Some(ep);
         (machine, out)
     }
@@ -869,7 +870,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let eligible = since(now, self.mem.link_since) >= cfg.link_age
             && since(now, cur.started) >= cfg.session_age;
         let digest = m.digest();
-        let ephemeral = m.ephemeral();
+        let key = m.ephemeral();
         let held = match &self.cycle {
             Cycle::PendR(p) => p.answer.as_ref(),
             Cycle::Idle | Cycle::Init(_) | Cycle::PendI(_) => None,
@@ -878,12 +879,12 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             Copied::Setup
         } else if held.is_some_and(|h| h.msg1 == digest) {
             Copied::Armed
-        } else if self.record.holds(&ephemeral) || held.is_some_and(|h| h.ephemeral == ephemeral) {
+        } else if self.record.holds(&key) || held.is_some_and(|h| h.ephemeral == key) {
             Copied::Seen
         } else {
             Copied::Fresh
         };
-        let fresh = (copy == Copied::Fresh).then_some(ephemeral);
+        let fresh = (copy == Copied::Fresh).then_some(key);
         if !eligible {
             return match copy {
                 Copied::Setup => match self.record.setup_answer() {
@@ -895,7 +896,10 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     None => Change::Reject(Reason::AnsweredBefore),
                 },
                 Copied::Armed | Copied::Seen => Change::Reject(Reason::AnsweredBefore),
-                Copied::Fresh => Change::Replace { tok, ephemeral },
+                Copied::Fresh => Change::Replace {
+                    tok,
+                    ephemeral: fresh,
+                },
             };
         }
         if !arrival.on_link && arrival.reachable {
@@ -931,7 +935,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 ) {
                     Verdict::YieldOwn if fault!(LargerKeepsOwn) => Change::Refuse {
                         reason: Reason::DualInitWon,
-                        ephemeral: Some(ephemeral),
+                        ephemeral: fresh,
                     },
                     Verdict::YieldOwn => Change::Respond {
                         tok,
@@ -940,7 +944,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     Verdict::KeepOwn | Verdict::Accept | Verdict::DiscardCompeting => {
                         Change::Refuse {
                             reason: Reason::DualInitWon,
-                            ephemeral: Some(ephemeral),
+                            ephemeral: fresh,
                         }
                     }
                 }
@@ -1122,7 +1126,9 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 out.push(Output::Reject(reason));
             }
             Change::Replace { tok, ephemeral } => {
-                self.record.push(ephemeral);
+                if let Some(e) = ephemeral {
+                    self.record.push(e);
+                }
                 out.push(Output::ReplaceRequested { tok });
             }
             Change::Respond { tok, yield_own } => self.respond(now, tok, yield_own, env, out),
@@ -1219,9 +1225,10 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     }
 
     /// Offer the receive half of `ep` to a decrypt worker when a pool
-    /// exists and the epoch has an index.
-    fn delegate(&self, ep: &Epoch<P, C::Instant>, env: &Env<'_, P>, out: &mut Outputs<P>) {
-        if !env.workers || ep.recv == RecvHome::Delegated {
+    /// exists (`workers`), no worker holds it yet and the epoch has an
+    /// index.
+    pub(super) fn delegate(&self, ep: &Epoch<P, C::Instant>, workers: bool, out: &mut Outputs<P>) {
+        if !workers || ep.recv == RecvHome::Delegated {
             return;
         }
         if let Some((transport, index)) = ep.ids.binding() {
@@ -1237,7 +1244,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
     }
 
     /// Start an own attempt.
-    fn start(&mut self, now: C::Instant, env: &mut Env<'_, P>, out: &mut Outputs<P>) {
+    pub(super) fn start(&mut self, now: C::Instant, env: &mut Env<'_, P>, out: &mut Outputs<P>) {
         let Bond::Key(peer) = self.bond else {
             return;
         };
@@ -1332,7 +1339,8 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             None
         };
         let m = tok.into_inner();
-        let (digest, ephemeral) = (m.digest(), m.ephemeral());
+        let digest = m.digest();
+        let ephemeral = m.ephemeral();
         let ours = lease.as_ref().map(super::IndexLease::index);
         let answered = m
             .answer(env.local, ours)
@@ -1619,7 +1627,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 purpose: Purpose::Current,
             });
         }
-        self.delegate(&ep, env, out);
+        self.delegate(&ep, env.workers, out);
         out.push(Output::Installed {
             tag: ep.tag,
             role: ep.role,
@@ -2077,7 +2085,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         if pend.restart || fault!(LinkAgeReset) {
             self.mem.link_since = now;
         }
-        self.delegate(&ep, env, out);
+        self.delegate(&ep, env.workers, out);
         out.push(Output::Installed {
             tag: ep.tag,
             role: ep.role,
@@ -2206,7 +2214,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     && ep.recv == RecvHome::Here
                     && !Self::offered(out, ep.tag)
                 {
-                    self.delegate(ep, env, out);
+                    self.delegate(ep, env.workers, out);
                     if fault!(DelegatedAtOffer)
                         && let Some(e) = self.epoch_mut(slot)
                     {
@@ -2856,7 +2864,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let record = core::mem::take(&mut self.record);
         let carry = self.cur.take().map(|cur| {
             let carry = Carry {
-                peer_epoch: self.mem.peer_epoch.unwrap_or_default(),
+                peer_epoch: self.mem.peer_epoch,
                 k: cur.k,
                 started: cur.started,
                 link_since: self.mem.link_since,

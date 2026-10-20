@@ -1267,8 +1267,8 @@ async fn rekey_cutover_preserves_data_plane() {
 
     // Drive the real rekey handshake (msg1/msg2/msg3 over loopback) to cutover.
     for _ in 0..6 {
-        nodes[0].node.check_rekey().await;
-        nodes[1].node.check_rekey().await;
+        nodes[0].node.poll_link_rekeys().await;
+        nodes[1].node.poll_link_rekeys().await;
         for _ in 0..3 {
             tokio::time::sleep(Duration::from_millis(5)).await;
             process_available_packets(&mut nodes).await;
@@ -1332,11 +1332,14 @@ pub(super) struct AgedLinkPair {
     pub(super) fips1: crate::Ipv6Address,
     pub(super) tun0_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     pub(super) tun1_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    /// The framed link-setup msg1 node 0 sent node 1, as node 1 received it.
+    pub(super) setup_msg1: Vec<u8>,
 }
 
 /// Build a two-node pair from `cfg0` and `cfg1`, peer node 0 to node 1 over
-/// FMP, open an FSP session from node 0, show that both directions decode,
-/// then backdate both link sessions by `age`.
+/// FMP, keeping a copy of node 0's link-setup msg1, open an FSP session from
+/// node 0, show that both directions decode, then backdate both link
+/// sessions by `age`.
 pub(super) async fn aged_link_pair(
     cfg0: crate::config::Config,
     cfg1: crate::config::Config,
@@ -1349,6 +1352,12 @@ pub(super) async fn aged_link_pair(
 
     // FMP peering + FSP session between the two loopback nodes.
     initiate_handshake(&mut nodes, 0, 1).await;
+    let msg1 = nodes[1]
+        .packet_rx
+        .try_recv()
+        .expect("node 0's link-setup msg1 must be queued at node 1");
+    let setup_msg1 = msg1.data.clone();
+    nodes[1].node.handle_msg1(msg1).await;
     drain_all_packets(&mut nodes, false).await;
     let node0_addr = *nodes[0].node.node_addr();
     let node1_addr = *nodes[1].node.node_addr();
@@ -1416,6 +1425,7 @@ pub(super) async fn aged_link_pair(
         fips1,
         tun0_rx,
         tun1_rx,
+        setup_msg1,
     }
 }
 
@@ -1468,12 +1478,13 @@ pub(super) async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
         fips1,
         tun0_rx,
         tun1_rx,
+        ..
     } = aged_link_pair(cfg0, cfg1, age).await;
     let node0_idx_before = nodes[0].node.get_peer(&node1_addr).unwrap().our_index();
     let node1_idx_before = nodes[1].node.get_peer(&node0_addr).unwrap().our_index();
 
     // node 0 starts the rekey; its msg1 lands in node 1's queue.
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     let rekey_idx = nodes[0]
         .node
         .get_peer(&node1_addr)
@@ -1535,20 +1546,20 @@ pub(super) async fn pump_until_quiet(nodes: &mut [TestNode]) {
     }
 }
 
-/// Drive node 0's rekey msg1 resend ladder on the synthetic clock from
-/// `base_ms`: at the default 1 s interval and 2x backoff, resends at +1, +3,
-/// +7, +15 and +31 s, then the abandon past the budget at +63 s. Each resend
-/// is delivered to node 1, and every msg2 node 1 sends back is lost. Returns
-/// the number of msg2s lost.
-async fn walk_ladder_losing_msg2s(nodes: &mut [TestNode], base_ms: u64) -> usize {
+/// Drive node 0's rekey msg1 resend ladder on the thread's monotonic clock:
+/// at the default settings, resends at +1, +3, +7 and +15 s from the first
+/// copy. Each resend is delivered to node 1, and every msg2 node 1 sends
+/// back is lost. Returns the number of msg2s lost. The attempt ends at
+/// +30 s, which the caller runs.
+async fn walk_ladder_losing_msg2s(nodes: &mut [TestNode]) -> usize {
     use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG2};
 
     let mut lost = 0;
-    for offset_s in [1u64, 3, 7, 15, 31, 63] {
-        nodes[0]
-            .node
-            .resend_rekeys_at(base_ms + offset_s * 1000)
-            .await;
+    let mut at = 0;
+    for offset_s in [1u64, 3, 7, 15] {
+        crate::time::advance(Duration::from_secs(offset_s - at));
+        at = offset_s;
+        nodes[0].node.poll_link_rekeys().await;
         process_available_packets(&mut nodes[1..]).await;
         while let Ok(packet) = nodes[0].packet_rx.try_recv() {
             assert_eq!(
@@ -1614,8 +1625,8 @@ async fn forged_rekey_msg2_does_not_split_the_link() {
 
     // Release the real msg2, then run one rekey tick on each node.
     nodes[0].node.handle_msg2(real_msg2).await;
-    nodes[0].node.check_rekey().await;
-    nodes[1].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
+    nodes[1].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
 
     let post_fwd = build_ipv6_packet(&fips0, &fips1, b"post-rekey 0 to 1");
@@ -1711,7 +1722,7 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
 
     // node 1 answered the rekey, so its tick must not commit to the new keys:
     // node 0 has not shown it holds them.
-    nodes[1].node.check_rekey().await;
+    nodes[1].node.poll_link_rekeys().await;
     let node1_peer = nodes[1].node.get_peer(&node0_addr).unwrap();
     assert_eq!(
         node1_peer.our_index(),
@@ -1725,25 +1736,45 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
     let node1_rejects_before = nodes[1].node.stats().handshake.rekey_pending;
 
     assert_eq!(
-        walk_ladder_losing_msg2s(&mut nodes, crate::time::mono_ms()).await,
-        5,
-        "node 1 must answer each of node 0's five resends"
+        walk_ladder_losing_msg2s(&mut nodes).await,
+        4,
+        "node 1 must answer each of node 0's four resends"
     );
+    let first_attempt = nodes[0]
+        .node
+        .get_peer(&node1_addr)
+        .unwrap()
+        .rekey_our_index();
+
+    // node 0 abandons the cycle at its deadline, 30 s after its first msg1,
+    // and starts no other in the same poll.
+    crate::time::advance(Duration::from_secs(15));
+    nodes[0].node.poll_link_rekeys().await;
     assert!(
         !nodes[0]
             .node
             .get_peer(&node1_addr)
             .unwrap()
             .rekey_in_progress(),
-        "node 0 must have abandoned the cycle at the resend budget"
+        "node 0 must have abandoned the cycle at its deadline"
     );
 
-    // node 0 was never dampened (it never received a msg1 from node 1), so
-    // its cadence fires again.
-    nodes[0].node.check_rekey().await;
+    // Never dampened (it never received a msg1 from node 1), node 0 starts
+    // a new one once the back-off of one tick plus up to 15 s has passed.
+    crate::time::advance(Duration::from_secs(16));
+    nodes[0].node.poll_link_rekeys().await;
+    let second_attempt = nodes[0]
+        .node
+        .get_peer(&node1_addr)
+        .unwrap()
+        .rekey_our_index();
+    assert!(
+        first_attempt.is_some() && second_attempt.is_some() && second_attempt != first_attempt,
+        "node 0 must have started another attempt after the back-off"
+    );
     pump_until_quiet(&mut nodes).await;
-    nodes[0].node.check_rekey().await;
-    nodes[1].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
+    nodes[1].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
     assert_eq!(
         nodes[1].node.stats().handshake.rekey_pending - node1_rejects_before,
@@ -1817,14 +1848,12 @@ async fn a_lost_rekey_msg2_is_not_followed_by_a_cutover_or_the_startup_msg2() {
 
     // The msg2 is lost, and node 1's rekey tick runs before node 0 resends.
     drop(held_msg2);
-    nodes[1].node.check_rekey().await;
+    nodes[1].node.poll_link_rekeys().await;
     let node1_idx_after_tick = nodes[1].node.get_peer(&node0_addr).unwrap().our_index();
 
     // node 0's first msg1 resend, delivered to node 1 only.
-    nodes[0]
-        .node
-        .resend_rekeys_at(crate::time::mono_ms() + 1000)
-        .await;
+    crate::time::advance(Duration::from_secs(1));
+    nodes[0].node.poll_link_rekeys().await;
     assert_eq!(
         process_available_packets(&mut nodes[1..]).await,
         1,
@@ -1856,12 +1885,13 @@ async fn a_lost_rekey_msg2_is_not_followed_by_a_cutover_or_the_startup_msg2() {
 /// A rekey responder whose msg2 was lost holds the pending session it
 /// answered with until the hold passes, then retires it: the pending slot and
 /// its role are emptied, its index is unregistered and freed, and the current
-/// session is untouched. The initiator's next msg1 is then answered and the
-/// rekey completes, with node 1 promoted by node 0's first new-epoch frame and
-/// data flowing both ways.
+/// session is untouched. The msg1 it refused while holding the pending stays
+/// refused; the initiator's next attempt is then answered and the rekey
+/// completes, with node 1 promoted by node 0's first new-epoch frame and data
+/// flowing both ways.
 #[tokio::test]
 async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
-    use crate::node::handlers::rekey::pending_hold;
+    use crate::node::handlers::rekey::link_params;
 
     let HeldMsg2Pair {
         mut nodes,
@@ -1879,7 +1909,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
 
     // 1. The msg2 is lost; node 1 holds the pending it answered with.
     drop(held_msg2);
-    nodes[1].node.check_rekey().await;
+    nodes[1].node.poll_link_rekeys().await;
     let node1_peer = nodes[1].node.get_peer(&node0_addr).unwrap();
     assert_eq!(
         node1_peer.our_index(),
@@ -1893,8 +1923,11 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
     // 2. node 0 walks its ladder to the abandon, losing node 1's answer to
     // every resend, and re-fires; node 1 refuses the re-fired msg1 while it
     // holds the pending.
-    walk_ladder_losing_msg2s(&mut nodes, crate::time::mono_ms()).await;
-    nodes[0].node.check_rekey().await;
+    walk_ladder_losing_msg2s(&mut nodes).await;
+    crate::time::advance(Duration::from_secs(15));
+    nodes[0].node.poll_link_rekeys().await;
+    crate::time::advance(Duration::from_secs(16));
+    nodes[0].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
     assert!(
         nodes[0]
@@ -1915,7 +1948,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
     );
 
     // 3. The hold passes.
-    let hold = pending_hold(&nodes[1].node.config().node);
+    let hold = link_params(&nodes[1].node.config().node).config().hold;
     nodes[1]
         .node
         .get_peer_mut(&node0_addr)
@@ -1923,7 +1956,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
         .backdate_pending(hold + Duration::from_secs(1));
 
     // 4. node 1's tick retires the pending.
-    nodes[1].node.check_rekey().await;
+    nodes[1].node.poll_link_rekeys().await;
     let node1_peer = nodes[1].node.get_peer(&node0_addr).unwrap();
     assert!(
         node1_peer.pending_new_session().is_none(),
@@ -1947,26 +1980,44 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
         "the retired pending index must be freed"
     );
 
-    // 5. node 0's next resend of the re-fired msg1 is answered now, and node 0
-    // reads the msg2.
-    nodes[0]
-        .node
-        .resend_rekeys_at(crate::time::mono_ms() + 1_000)
-        .await;
+    // 5. node 1 recorded the re-fired msg1 it refused, so node 0's next
+    // resend of it is refused as answered before. The attempt ends at its
+    // deadline, and the next one, after the back-off, carries a fresh msg1
+    // that node 1 answers; node 0 reads the msg2.
+    let answered_before = nodes[1].node.stats().handshake.answered_before;
+    crate::time::advance(Duration::from_secs(1));
+    nodes[0].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
-    assert!(
+    let pending0 = |nodes: &[TestNode]| {
         nodes[0]
             .node
             .get_peer(&node1_addr)
             .unwrap()
             .pending_new_session()
-            .is_some(),
-        "node 0 must have completed the re-fired rekey on node 1's answer"
+            .is_some()
+    };
+    assert!(
+        !pending0(&nodes) && nodes[1].node.stats().handshake.answered_before > answered_before,
+        "a resend of the msg1 node 1 refused must be refused again, as answered before"
+    );
+    let mut completed = false;
+    for _ in 0..60 {
+        crate::time::advance(Duration::from_secs(1));
+        nodes[0].node.poll_link_rekeys().await;
+        pump_until_quiet(&mut nodes).await;
+        if pending0(&nodes) {
+            completed = true;
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "node 0 must complete its next rekey, after the abandon, on node 1's answer"
     );
 
     // 6. node 0 cuts over; node 1 holds until node 0's first new-epoch frame.
-    nodes[0].node.check_rekey().await;
-    nodes[1].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
+    nodes[1].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
 
     let post_fwd = build_ipv6_packet(&fips0, &fips1, b"post-retire 0 to 1");
@@ -2038,10 +2089,8 @@ async fn a_resent_rekey_msg1_draws_the_held_msg2_and_the_rekey_completes() {
     let node1_rejects_before = nodes[1].node.stats().handshake.bad_state;
 
     // node 0's first resend, at +1 s, reaches node 1 only.
-    nodes[0]
-        .node
-        .resend_rekeys_at(crate::time::mono_ms() + 1_000)
-        .await;
+    crate::time::advance(Duration::from_secs(1));
+    nodes[0].node.poll_link_rekeys().await;
     assert_eq!(
         process_available_packets(&mut nodes[1..]).await,
         1,
@@ -2084,8 +2133,8 @@ async fn a_resent_rekey_msg1_draws_the_held_msg2_and_the_rekey_completes() {
     );
 
     // node 0 cuts over; node 1 promotes on node 0's first new-epoch frame.
-    nodes[0].node.check_rekey().await;
-    nodes[1].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
+    nodes[1].node.poll_link_rekeys().await;
     pump_until_quiet(&mut nodes).await;
     let post_fwd = build_ipv6_packet(&fips0, &fips1, b"post-resend 0 to 1");
     let post_rev = build_ipv6_packet(&fips1, &fips0, b"post-resend 1 to 0");
@@ -2139,10 +2188,8 @@ async fn a_held_rekey_msg2_is_resent_only_on_the_peers_established_link() {
 
     // Capture node 0's resend and deliver it to node 1 under the third node's
     // address, as a spoofed source would.
-    nodes[0]
-        .node
-        .resend_rekeys_at(crate::time::mono_ms() + 1_000)
-        .await;
+    crate::time::advance(Duration::from_secs(1));
+    nodes[0].node.poll_link_rekeys().await;
     let mut msg1 = nodes[1]
         .packet_rx
         .try_recv()
@@ -2237,7 +2284,7 @@ async fn frames_on_the_previous_link_session_do_not_feed_the_new_sessions_mmp() 
     // node 0 completes its rekey and cuts over on its own tick; nothing is
     // delivered to node 1, which stays on the old session.
     nodes[0].node.handle_msg2(held_msg2).await;
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     let peer = nodes[0].node.get_peer(&node1_addr).unwrap();
     assert_ne!(peer.our_index(), node0_idx_before, "node 0 must cut over");
     let mmp = peer.mmp().expect("node 0 must run link MMP");
@@ -2336,7 +2383,7 @@ async fn a_worker_decrypted_frame_on_the_previous_link_session_does_not_feed_mmp
         ..
     } = rekey_pair_with_held_msg2().await;
     nodes[0].node.handle_msg2(held_msg2).await;
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     let peer = nodes[0].node.get_peer(&node1_addr).unwrap();
     let previous_idx = peer.previous_our_index().expect("node 0 must be draining");
     assert_eq!(Some(previous_idx), node0_idx_before);
@@ -2510,7 +2557,7 @@ async fn replay_link_msg1(
                 .test_backdate_session_established(Duration::from_secs(31));
         }
         let node1_idx_before = nodes[1].node.get_peer(&node0_addr).unwrap().our_index();
-        nodes[0].node.check_rekey().await;
+        nodes[0].node.poll_link_rekeys().await;
         let msg1 = nodes[1]
             .packet_rx
             .try_recv()
@@ -2523,7 +2570,7 @@ async fn replay_link_msg1(
         captured.get_or_insert_with(|| msg1.data.clone());
         nodes[1].node.handle_msg1(msg1).await;
         pump_until_quiet(&mut nodes).await;
-        nodes[0].node.check_rekey().await;
+        nodes[0].node.poll_link_rekeys().await;
         let first = build_ipv6_packet(&fips0, &fips1, b"first frame on the new link epoch");
         nodes[0].node.handle_tun_outbound(first.clone()).await;
         pump_until_quiet(&mut nodes).await;
@@ -2583,7 +2630,7 @@ async fn replay_link_msg1(
                 .get_peer_mut(&node1_addr)
                 .unwrap()
                 .test_backdate_session_established(trigger_age);
-            nodes[0].node.check_rekey().await;
+            nodes[0].node.poll_link_rekeys().await;
             assert!(
                 nodes[0]
                     .node
@@ -2604,7 +2651,7 @@ async fn replay_link_msg1(
             let peer = nodes[1].node.get_peer_mut(&node0_addr).unwrap();
             peer.test_backdate_session_established(trigger_age);
             peer.backdate_dampener(Duration::from_secs(31));
-            nodes[1].node.check_rekey().await;
+            nodes[1].node.poll_link_rekeys().await;
             nodes[1]
                 .node
                 .get_peer(&node0_addr)
@@ -2735,7 +2782,7 @@ async fn a_rekey_msg2_answers_on_the_peers_established_link_when_the_msg1_source
     } = aged_link_pair(cfg0, cfg1, trigger_age).await;
     let mut third = vec![make_test_node().await];
 
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     let mut msg1 = nodes[1]
         .packet_rx
         .try_recv()
@@ -2818,7 +2865,7 @@ async fn a_rekey_answered_on_the_established_link_registers_its_index_on_that_tr
     let link_transport = nodes[1].transport_id;
     let other_transport = TransportId::new(link_transport.as_u32() + 1);
 
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     let mut msg1 = nodes[1]
         .packet_rx
         .try_recv()
@@ -2852,7 +2899,7 @@ async fn a_rekey_answered_on_the_established_link_registers_its_index_on_that_tr
     // node 0 completes and cuts over; its first new-epoch frame, on the link,
     // must find node 1's pending and promote it.
     pump_until_quiet(&mut nodes).await;
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     let first = build_ipv6_packet(&fips0, &fips1, b"first frame on the new link epoch");
     nodes[0].node.handle_tun_outbound(first.clone()).await;
     pump_until_quiet(&mut nodes).await;
@@ -2879,93 +2926,146 @@ async fn a_rekey_answered_on_the_established_link_registers_its_index_on_that_tr
     cleanup_nodes(&mut nodes).await;
 }
 
-/// The record of answered msg1s lives with the peer, so a msg1 captured before
-/// the peering was formed again, with the peer's epoch unchanged, is not
-/// recognized. This node restarting reaches the same state, as does a link
-/// torn down and re-formed. Kept as the record of that residual: it stays red
-/// until a msg1 carries something that ties it to one cycle, which is a wire
-/// change.
+/// A link msg1 this node answered is recognised after the peering is torn
+/// down and formed again with the peer's startup epoch unchanged: the node
+/// keeps each closed link's replay record under the peer's identity and
+/// epoch and hands it to the next link with that peer at that epoch, so a
+/// copy of the msg1 replayed against the new link draws no pending, and a
+/// copy of the earlier link's setup msg1 replayed while the new link is
+/// young counts as answered before and draws no msg2, whichever node dials
+/// the new link. Run twice: with the pending the msg1 armed still held when
+/// the link closes and node 0 dialling again, and with it adopted before
+/// the close and node 1 dialling.
 #[tokio::test]
-#[ignore = "residual: a link msg1 captured before the peering was re-formed in the same peer epoch still arms a responder pending; the answered-msg1 record does not survive the peering"]
-async fn a_link_msg1_captured_before_the_peering_was_re_formed_does_not_arm_a_pending() {
+async fn record_survives_re_peering_in_the_same_peer_epoch() {
+    use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG2};
     use crate::transport::ReceivedPacket;
 
     const REKEY_AFTER_SECS: u64 = 60;
     let trigger_age =
         Duration::from_secs(REKEY_AFTER_SECS + crate::node::REKEY_JITTER_SECS as u64 + 1);
-    let mut cfg0 = crate::config::Config::new();
-    cfg0.node.rekey.after_secs = REKEY_AFTER_SECS;
-    cfg0.node.rekey.after_messages = u64::MAX;
-    let mut cfg1 = crate::config::Config::new();
-    cfg1.node.rekey.after_secs = u64::MAX;
-    cfg1.node.rekey.after_messages = u64::MAX;
-    let AgedLinkPair {
-        mut nodes,
-        node0_addr,
-        node1_addr,
-        ..
-    } = aged_link_pair(cfg0, cfg1, trigger_age).await;
+    for (held_at_close, redialer) in [(true, 0), (false, 1)] {
+        let mut cfg0 = crate::config::Config::new();
+        cfg0.node.rekey.after_secs = REKEY_AFTER_SECS;
+        cfg0.node.rekey.after_messages = u64::MAX;
+        let mut cfg1 = crate::config::Config::new();
+        cfg1.node.rekey.after_secs = u64::MAX;
+        cfg1.node.rekey.after_messages = u64::MAX;
+        let AgedLinkPair {
+            mut nodes,
+            node0_addr,
+            node1_addr,
+            setup_msg1,
+            ..
+        } = aged_link_pair(cfg0, cfg1, trigger_age).await;
 
-    // node 1 answers node 0's rekey; a copy of the msg1 is kept.
-    nodes[0].node.check_rekey().await;
-    let msg1 = nodes[1]
-        .packet_rx
-        .try_recv()
-        .expect("node 0's rekey msg1 must be queued at node 1");
-    let captured = msg1.data.clone();
-    nodes[1].node.handle_msg1(msg1).await;
-    assert!(
+        // node 1 answers node 0's rekey; a copy of the msg1 is kept.
+        nodes[0].node.poll_link_rekeys().await;
+        let msg1 = nodes[1]
+            .packet_rx
+            .try_recv()
+            .expect("node 0's rekey msg1 must be queued at node 1");
+        let captured = msg1.data.clone();
+        nodes[1].node.handle_msg1(msg1).await;
+        assert!(
+            nodes[1]
+                .node
+                .get_peer(&node0_addr)
+                .unwrap()
+                .pending_new_session()
+                .is_some(),
+            "setup: node 1 must answer the genuine msg1"
+        );
+        if !held_at_close {
+            // node 0 completes and cuts over; its next frame has node 1
+            // adopt, which ends the cycle the msg1 armed.
+            pump_until_quiet(&mut nodes).await;
+            nodes[0].node.poll_link_rekeys().await;
+            nodes[0]
+                .node
+                .send_encrypted_link_message(
+                    &node1_addr,
+                    &[crate::proto::link::LinkMessageType::Heartbeat.to_byte()],
+                )
+                .await
+                .expect("heartbeat send");
+            pump_until_quiet(&mut nodes).await;
+            assert!(
+                nodes[1]
+                    .node
+                    .get_peer(&node0_addr)
+                    .unwrap()
+                    .pending_new_session()
+                    .is_none(),
+                "setup: node 1 must adopt the new session before the close"
+            );
+        }
+
+        // The peering is torn down and formed again; neither node restarts,
+        // so node 0's epoch, which the captured msg1 carries, is unchanged.
+        nodes[0].node.remove_active_peer(&node1_addr);
+        nodes[1].node.remove_active_peer(&node0_addr);
+        pump_until_quiet(&mut nodes).await;
+        initiate_handshake(&mut nodes, redialer, 1 - redialer).await;
+        drain_all_packets(&mut nodes, false).await;
+        assert!(
+            nodes[1].node.get_peer(&node0_addr).is_some(),
+            "setup: the peering must be formed again"
+        );
+        while nodes[0].packet_rx.try_recv().is_ok() {}
+
+        // The earlier link's setup msg1, replayed while the new link is
+        // young, is a msg1 answered before, not this link's setup msg1.
+        let answered = nodes[1].node.stats().handshake.answered_before;
+        let replay = ReceivedPacket::new(nodes[1].transport_id, nodes[0].addr.clone(), setup_msg1);
+        nodes[1].node.handle_msg1(replay).await;
+        let msg2s = std::iter::from_fn(|| nodes[0].packet_rx.try_recv().ok())
+            .filter(|p| CommonPrefix::parse(&p.data).is_some_and(|c| c.phase == PHASE_MSG2))
+            .count();
+        assert_eq!(
+            (msg2s, nodes[1].node.stats().handshake.answered_before),
+            (0, answered + 1),
+            "a copy of the earlier link's setup msg1 must draw no msg2 and count as answered \
+             before (node {redialer} dialled the new link)"
+        );
+
         nodes[1]
             .node
-            .get_peer(&node0_addr)
+            .get_peer_mut(&node0_addr)
             .unwrap()
-            .pending_new_session()
-            .is_some(),
-        "setup: node 1 must answer the genuine msg1"
-    );
+            .test_backdate_session_established(Duration::from_secs(31));
 
-    // The peering is torn down and formed again; neither node restarts, so
-    // node 0's epoch, which the captured msg1 carries, is unchanged.
-    nodes[0].node.remove_active_peer(&node1_addr);
-    nodes[1].node.remove_active_peer(&node0_addr);
-    pump_until_quiet(&mut nodes).await;
-    initiate_handshake(&mut nodes, 0, 1).await;
-    drain_all_packets(&mut nodes, false).await;
-    nodes[1]
-        .node
-        .get_peer_mut(&node0_addr)
-        .expect("setup: the peering must be formed again")
-        .test_backdate_session_established(Duration::from_secs(31));
+        let replay = ReceivedPacket::new(nodes[1].transport_id, nodes[0].addr.clone(), captured);
+        nodes[1].node.handle_msg1(replay).await;
+        assert!(
+            nodes[1]
+                .node
+                .get_peer(&node0_addr)
+                .unwrap()
+                .pending_new_session()
+                .is_none(),
+            "a copy of a msg1 answered before the peering was re-formed must not arm a pending \
+             (pending held at the close: {held_at_close}, node {redialer} dialled again)"
+        );
 
-    let replay = ReceivedPacket::new(nodes[1].transport_id, nodes[0].addr.clone(), captured);
-    nodes[1].node.handle_msg1(replay).await;
-    assert!(
-        nodes[1]
-            .node
-            .get_peer(&node0_addr)
-            .unwrap()
-            .pending_new_session()
-            .is_none(),
-        "a copy of a msg1 from before the peering was re-formed must not arm a pending"
-    );
-
-    cleanup_nodes(&mut nodes).await;
+        cleanup_nodes(&mut nodes).await;
+    }
 }
 
 /// The responder hold is the drain ceiling at stock settings, and a raised
 /// link-dead timeout or heartbeat interval raises it past that ceiling, taking
-/// the larger of the two rather than their sum.
+/// the larger of the two rather than their sum, as a raised handshake timeout
+/// does through the time a peer takes to retry.
 #[test]
 fn the_responder_hold_is_the_drain_ceiling_at_stock_settings_and_outlasts_a_raised_link_dead_timeout()
  {
-    use crate::node::handlers::rekey::{drain_max_retention_ms, pending_hold};
+    use crate::node::handlers::rekey::link_params;
+    use fips_core::proto::rekey::Config;
 
+    let hold = |node: &crate::config::NodeConfig| link_params(node).config().hold;
     let stock = crate::config::NodeConfig::default();
-    assert_eq!(pending_hold(&stock), Duration::from_secs(120));
-    assert_eq!(
-        pending_hold(&stock),
-        Duration::from_millis(drain_max_retention_ms(&stock.rate_limit))
-    );
+    assert_eq!(hold(&stock), Duration::from_secs(120));
+    assert_eq!(hold(&stock), Config::fmp().retention);
 
     // 31 s of msg1 ladder (1+2+4+8+16), three 1 s ticks, and 200 s of
     // link-dead timeout: 234 s.
@@ -2973,7 +3073,7 @@ fn the_responder_hold_is_the_drain_ceiling_at_stock_settings_and_outlasts_a_rais
         link_dead_timeout_secs: 200,
         ..Default::default()
     };
-    assert_eq!(pending_hold(&raised), Duration::from_secs(234));
+    assert_eq!(hold(&raised), Duration::from_secs(234));
 
     // The heartbeat term raised instead, link-dead at its default: the floor
     // takes the larger of the two, so 234 s again, not 264 s.
@@ -2981,7 +3081,14 @@ fn the_responder_hold_is_the_drain_ceiling_at_stock_settings_and_outlasts_a_rais
         heartbeat_interval_secs: 200,
         ..Default::default()
     };
-    assert_eq!(pending_hold(&raised), Duration::from_secs(234));
+    assert_eq!(hold(&raised), Duration::from_secs(234));
+
+    // A raised handshake timeout lengthens a peer's retry after a lost
+    // answer past the ceiling: 31 s of msg1 ladder, the 100 s timeout and
+    // 30 s of dampening, 161 s.
+    let mut raised = crate::config::NodeConfig::default();
+    raised.rate_limit.handshake_timeout_secs = 100;
+    assert_eq!(hold(&raised), Duration::from_secs(161));
 }
 
 #[tokio::test]

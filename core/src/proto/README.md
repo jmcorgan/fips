@@ -42,8 +42,10 @@ rest) at its own crate root.
   runs, shared by the link and session layers. Each layer binds it to its
   handshake pattern in a `rekey/` subdirectory of its own (`fmp/rekey/`,
   `fsp/rekey/`). Hidden from the docs. The root crate's session table
-  holds each session in one, from its first handshake on, while the link
-  layer does not use it yet; see its README.
+  holds each session in one, from its first handshake on, and each active
+  link peer holds its link's keys, indices and drain in one, which the
+  deployed link rekey decisions act on through state moves; see its
+  README.
 - `routing/`: next-hop selection and routing error signals.
 - `stp/`: the spanning tree.
 

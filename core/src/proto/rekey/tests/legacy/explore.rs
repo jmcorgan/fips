@@ -243,7 +243,9 @@ const MID: u16 = 15;
 /// The link scenarios: against each release, a rekey the new node starts
 /// (it the smaller), one the deployed node starts (the new node the larger)
 /// and both starting in the same second; and two new nodes, one starting
-/// and both.
+/// and both. Each runs again with the link node this release ships (the
+/// machine polled on the shell's tick) in
+/// place of the new node, and between two of them.
 fn links(depth: usize) -> Vec<Scenario> {
     let mut out = Vec::new();
     for rel in Rel::ALL {
@@ -263,11 +265,20 @@ fn links(depth: usize) -> Vec<Scenario> {
                 old_jitter,
                 new_smaller,
                 new_k: false,
+                new_messages: None,
             };
             let x = usize::from(!new_first);
+            let ship = s.clone();
             out.push(Scenario {
                 name: format!("link, {what}, against {rel:?}"),
                 start: Box::new(move || prime(fmp::link(&s, 11).0, 100_000)),
+                depth,
+                allow,
+                new: [x == 0, x == 1],
+            });
+            out.push(Scenario {
+                name: format!("shipped link, {what}, against {rel:?}"),
+                start: Box::new(move || prime(fmp::shipped_link(&ship, 11).0, 100_000)),
                 depth,
                 allow,
                 new: [x == 0, x == 1],
@@ -282,6 +293,13 @@ fn links(depth: usize) -> Vec<Scenario> {
         out.push(Scenario {
             name: format!("link between new nodes, {what}"),
             start: Box::new(move || prime(fmp::new_link(13, jitter), 100_000)),
+            depth,
+            allow,
+            new: [true, true],
+        });
+        out.push(Scenario {
+            name: format!("link between shipped nodes, {what}"),
+            start: Box::new(move || prime(fmp::shipped_pair(13, jitter), 100_000)),
             depth,
             allow,
             new: [true, true],

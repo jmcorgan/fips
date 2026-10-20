@@ -133,6 +133,25 @@ impl Node {
         }
     }
 
+    /// Free every session index `peer` holds as it leaves the node. Its link
+    /// rekey machine is closed and its outputs carried out, which unbind the
+    /// current, pending and previous sessions' indices and its own rekey
+    /// handshake's from `peers_by_index` by the transport recorded at each
+    /// binding, revoke them from the decrypt workers that hold them, and
+    /// free them. The machine's replay record is filed under the peer and
+    /// its startup epoch, for the next link with the peer at that epoch.
+    pub(in crate::node) fn release_peer_indices(
+        &mut self,
+        node_addr: &NodeAddr,
+        peer: &mut crate::peer::ActivePeer,
+    ) {
+        let (out, carried) = peer.close();
+        if let Some((epoch, record)) = carried {
+            self.link_records.file(*node_addr, epoch, record);
+        }
+        self.run_link_outputs(node_addr, out);
+    }
+
     /// Remove an active peer and clean up all associated state.
     ///
     /// Frees session index, removes link and address mappings. Used for
@@ -144,7 +163,7 @@ impl Node {
     /// selects an alternative or becomes root, and marks remaining peers
     /// for pending tree announce (delivered on next tick).
     pub(in crate::node) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
-        let peer = match self.peers.remove(node_addr) {
+        let mut peer = match self.peers.remove(node_addr) {
             Some(p) => p,
             None => {
                 debug!(peer = %self.peer_display_name(node_addr), "Peer already removed");
@@ -226,37 +245,7 @@ impl Node {
         let transport_id = peer.transport_id();
 
         // Free session indices (current, rekey, pending, previous)
-        if let Some(tid) = transport_id {
-            if let Some(idx) = peer.our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-            if let Some(idx) = peer.rekey_our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.pending_outbound.remove(&cache_key);
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-            if let Some(idx) = peer.pending_our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-            if let Some(idx) = peer.previous_our_index() {
-                let cache_key = (tid, idx.as_u32());
-                self.peers_by_index.remove(&cache_key);
-                #[cfg(unix)]
-                self.unregister_decrypt_worker_session(cache_key);
-                let _ = self.index_allocator.free(idx);
-            }
-        }
+        self.release_peer_indices(node_addr, &mut peer);
 
         // Remove link and address mapping
         self.remove_link(&link_id);

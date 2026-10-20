@@ -51,3 +51,51 @@ fn absorbing_an_older_record_of_the_same_peer_epoch_keeps_its_ephemerals_within_
     new.absorb(big);
     assert!(new.len() <= RECORD_BOUND + 1);
 }
+
+#[test]
+fn the_record_store_hands_a_record_back_only_for_its_peer_and_epoch_and_drops_the_least_recently_filed_past_its_bound()
+ {
+    let addr = |n: u8| NodeAddr::from_bytes([n; 16]);
+    let one = |n: u32| {
+        let mut r = Record::new();
+        r.push(d(n));
+        r
+    };
+    let mut store = RecordStore::new(2);
+    store.file(addr(1), [1; 8], Record::new());
+    assert!(store.is_empty(), "an empty record is not filed");
+    store.file(addr(1), [1; 8], one(1));
+    assert!(
+        store.take(&addr(1), [2; 8]).is_empty(),
+        "another epoch of the same peer is never handed this record"
+    );
+    assert!(
+        store.take(&addr(2), [1; 8]).is_empty(),
+        "another peer at the same epoch is never handed this record"
+    );
+    assert!(store.take(&addr(1), [1; 8]).holds(&d(1)));
+    assert!(store.is_empty(), "taking a record removes it");
+
+    // Past the bound the least recently filed goes; filing again under the
+    // same peer and epoch replaces and refreshes the entry.
+    store.file(addr(1), [1; 8], one(1));
+    store.file(addr(2), [1; 8], one(2));
+    store.file(addr(1), [1; 8], one(3));
+    store.file(addr(3), [1; 8], one(4));
+    assert_eq!(store.len(), 2);
+    assert!(store.take(&addr(2), [1; 8]).is_empty(), "the oldest went");
+    let kept = store.take(&addr(1), [1; 8]);
+    assert!(
+        kept.holds(&d(3)) && !kept.holds(&d(1)),
+        "the refiled record"
+    );
+    assert!(store.take(&addr(3), [1; 8]).holds(&d(4)));
+
+    // A record filed again under the same peer and epoch replaces the old
+    // one, whatever room is left.
+    let mut store = RecordStore::new(4);
+    store.file(addr(1), [1; 8], one(1));
+    store.file(addr(1), [1; 8], one(3));
+    assert_eq!(store.len(), 1);
+    assert!(store.take(&addr(1), [1; 8]).holds(&d(3)));
+}

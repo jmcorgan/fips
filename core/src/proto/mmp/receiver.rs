@@ -14,9 +14,10 @@ use super::{
 /// Grace period after rekey before resuming jitter calculation.
 ///
 /// During rekey cutover, frames from the old session may still arrive via the
-/// drain window (DRAIN_WINDOW_SECS = 10s). These carry large sender timestamps
-/// from the old session, producing enormous transit deltas that spike the EWMA
-/// jitter estimator. We suppress jitter updates for drain window + 5s margin.
+/// drain window (10 s once the peer is seen to move). These carry large
+/// sender timestamps from the old session, producing enormous transit deltas
+/// that spike the EWMA jitter estimator. We suppress jitter updates for drain
+/// window + 5s margin.
 const REKEY_JITTER_GRACE_SECS: u64 = 15;
 
 // ============================================================================

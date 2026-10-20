@@ -501,13 +501,13 @@ impl Node {
     pub(in crate::node) async fn check_link_heartbeats(&mut self) {
         let now = Instant::now();
         // Monotonic ms for the MMP receiver's injected-`u64` liveness clock; the
-        // Instant `now` is still used for the shell-owned heartbeat timing and
-        // the session-start fallback (both `ActivePeer` Instants).
+        // Instant `now` is still used for the shell-owned heartbeat timing. The
+        // session-start fallback is measured on the peer clock, which the
+        // receiver's milliseconds also read.
         let now_ms = crate::time::mono_ms();
         let heartbeat_interval = Duration::from_secs(self.config().node.heartbeat_interval_secs);
         let dead_timeout = Duration::from_secs(self.config().node.link_dead_timeout_secs);
         let dead_timeout_ms = dead_timeout.as_millis() as u64;
-        let max_resends = self.config().node.rate_limit.handshake_max_resends;
         let heartbeat_msg = [LinkMessageType::Heartbeat.to_byte()];
 
         // Build one liveness snapshot per peer, resolving every clock read and
@@ -519,21 +519,18 @@ impl Node {
             .iter()
             .map(|(node_addr, peer)| {
                 // Check liveness via the MMP receiver's last-received monotonic
-                // ms. Fall back to session_start (an `ActivePeer` Instant) for
-                // peers that never sent data, keeping that branch in Instant
-                // space so no monotonic-ms epoch conversion is needed.
-                let time_dead = silence(peer, now, now_ms)
-                    .is_some_and(|s| s.is_dead(dead_timeout, dead_timeout_ms));
+                // ms. Fall back to the session's age for peers that sent
+                // nothing since it started, kept as a `Duration` so no
+                // monotonic-ms epoch conversion is needed.
+                let time_dead =
+                    silence(peer, now_ms).is_some_and(|s| s.is_dead(dead_timeout, dead_timeout_ms));
 
-                // Suppress teardown while an FMP rekey is genuinely in flight
-                // with budget left: a rekey-handshake link is not silent. The
-                // msg1 resend cap guarantees this terminates (abandon on
-                // exhaustion or cutover on completion clears
-                // `rekey_in_progress`), so a truly dead link is reaped on the
-                // next cycle.
-                let rekey_active = peer.rekey_in_progress()
-                    && peer.rekey_msg1_resend_count() < max_resends
-                    && peer.rekey_msg1().is_some();
+                // Suppress teardown while this node's FMP rekey is in
+                // flight: a rekey-handshake link is not silent. Bounded by
+                // the attempt's 30 s deadline, and the back-off after an
+                // attempt given up keeps the next from starting until a
+                // check has run, so a dead link is still reaped.
+                let rekey_active = peer.rekey_in_progress();
 
                 // Check if heartbeat is due. Two gates, not one: a send that
                 // failed does not satisfy the interval, so a peer that has
@@ -578,7 +575,7 @@ impl Node {
                     // The same silence the decision read, with what the
                     // peer's sessions did since the last cutover.
                     let p = self.peers.get(&peer);
-                    let quiet = p.and_then(|p| silence(p, now, now_ms));
+                    let quiet = p.and_then(|p| silence(p, now_ms));
                     let basis = OrNone(quiet.as_ref().map(Silence::basis));
                     let basis_age_ms = OrNone(quiet.as_ref().map(Silence::age_ms));
                     let since_cutover_ms =
@@ -693,8 +690,7 @@ impl Node {
     /// Route a link-dead reap through the peer machine + executor. Two callers
     /// decide: the tick sweep's `plan_heartbeats` batch emits a `ReapPeer` for a
     /// peer that has gone quiet, and [`Self::reap_peers_on_transport`] withdraws
-    /// a transport's peers when its interface goes away. Mirrors
-    /// [`route_rekey_cadence`](Node::route_rekey_cadence): the shell has already
+    /// a transport's peers when its interface goes away. The shell has already
     /// decided by the time this runs, so the machine only CONSUMES the decision
     /// via [`PeerEvent::LinkDeadSuspected`]. The resulting executor arms
     /// (`InvalidateSendState` → `remove_active_peer`, `ReportLost` →
@@ -726,8 +722,7 @@ impl Node {
             .await;
     }
 
-    /// Ambient shell facts for the routed liveness reap. Mirrors
-    /// [`rekey_cadence_ctx`](Node::rekey_cadence_ctx). The executor reads only
+    /// Ambient shell facts for the routed liveness reap. The executor reads only
     /// `verified_identity` (`InvalidateSendState` → `remove_active_peer` resolves
     /// its `NodeAddr` from it, so it must equal `node_addr`). `ReportLost` →
     /// `note_link_dead` schedules the reconnect on the peering clock, not on
@@ -759,16 +754,21 @@ enum Silence {
     /// Time since the session started, for a peer the MMP receiver has
     /// recorded no frame from since then.
     SessionStart(Duration),
+    /// Monotonic ms since the link's rekey machine last heard the peer, when
+    /// that is more recent than either of the above: a frame under the
+    /// previous session while the drain holds it, which the MMP receiver
+    /// does not count.
+    LastHeard(u64),
 }
 
 impl Silence {
     /// Whether the silence has reached the link-dead timeout. Each basis
-    /// keeps its own comparison: milliseconds for the receiver's clock,
-    /// `Duration` for the session start, so no conversion is added to the
-    /// latter.
+    /// keeps its own comparison: milliseconds for the receiver's clock and
+    /// the machine's last frame read on it, `Duration` for the session
+    /// start, so no conversion is added to the latter.
     fn is_dead(&self, dead_timeout: Duration, dead_timeout_ms: u64) -> bool {
         match self {
-            Self::LastRecv(ms) => *ms >= dead_timeout_ms,
+            Self::LastRecv(ms) | Self::LastHeard(ms) => *ms >= dead_timeout_ms,
             Self::SessionStart(d) => *d >= dead_timeout,
         }
     }
@@ -778,25 +778,38 @@ impl Silence {
         match self {
             Self::LastRecv(_) => "last_recv",
             Self::SessionStart(_) => "session_start",
+            Self::LastHeard(_) => "last_heard",
         }
     }
 
     /// The silence in milliseconds, for display.
     fn age_ms(&self) -> u128 {
         match self {
-            Self::LastRecv(ms) => u128::from(*ms),
+            Self::LastRecv(ms) | Self::LastHeard(ms) => u128::from(*ms),
             Self::SessionStart(d) => d.as_millis(),
         }
     }
 }
 
-/// The silence of `peer` as of `now` and the monotonic `now_ms`; `None` for a
-/// peer without MMP state, which is never declared dead on time.
-fn silence(peer: &ActivePeer, now: Instant, now_ms: u64) -> Option<Silence> {
+/// The silence of `peer` as of the monotonic `now_ms`; `None` for a peer
+/// without MMP state, which is never declared dead on time.
+///
+/// The MMP receiver counts only frames under the current session, and a
+/// cutover resets it. Frames the peer still seals under the previous
+/// session while the drain holds it count for liveness too, so the link
+/// machine's last frame under any held session bounds the silence as well.
+fn silence(peer: &ActivePeer, now_ms: u64) -> Option<Silence> {
     let mmp = peer.mmp()?;
-    Some(match mmp.receiver.last_recv_ms() {
+    let own = match mmp.receiver.last_recv_ms() {
         Some(last_ms) => Silence::LastRecv(now_ms.saturating_sub(last_ms)),
-        None => Silence::SessionStart(now.duration_since(peer.session_start())),
+        None => Silence::SessionStart(peer.session_age()),
+    };
+    let heard = peer
+        .last_heard()
+        .map(|t| now_ms.saturating_sub(crate::time::mono_ms_at(t)));
+    Some(match heard {
+        Some(ms) if u128::from(ms) < own.age_ms() => Silence::LastHeard(ms),
+        _ => own,
     })
 }
 

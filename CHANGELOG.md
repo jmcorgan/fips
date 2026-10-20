@@ -297,6 +297,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Each link's rekeys are now decided by the link's rekey machine, which holds
+  its sessions: it starts this node's rekeys, resends their msg1, answers the
+  peer's, completes on its msg2, cuts over, ends the drain and retires a
+  pending session the peer never adopted. The timings and acceptance rules a
+  peer sees stay as they were, with these differences. A rekey msg1 or msg2
+  the transport fails to send now counts as lost, as one the network drops
+  would: the rekey starts or stays in flight and its msg1 goes again at the
+  next resend, and the node that answered keeps the session its msg2 armed, so
+  the peer's resend of the msg1 draws the same msg2. Before, a msg1 that
+  failed to send started no rekey, a resend that failed was not counted, and a
+  msg2 that failed to send stored no session.
+  `handshake_resend_interval_ms` and `handshake_resend_backoff` no longer
+  shape the msg1's resends, nor the inbound idle deadline of TCP and Tor
+  connections, which allows for them. A frame that names
+  the index of a pending session and does not authenticate under it is no
+  longer tried under the current and previous sessions. On links,
+  `node.rekey.after_secs` below 45 seconds (the 15 seconds of jitter plus the
+  30-second link age at which a peer answers a rekey) is taken as 45, with a
+  warning; the thresholds are read when the link comes up. The profiling
+  feature's tick steps `resend_pending_rekeys` and `check_rekey` are one step,
+  `poll_link_rekeys`. Decryption-failure lines report `trial` as `run-index`
+  when the frame named the pending session's index, `not-run-other-index` when
+  it named another, and `not-run-no-pending`; a late or duplicate rekey msg2
+  logs "Rekey msg2 for no attempt in flight, dropping". No message format
+  changes.
+
+- A link rekey that has had no answer is now given up 30 seconds after its
+  first msg1, the handshake timeout that ends every other handshake
+  attempt, instead of one tick after its last resend: at the default
+  settings the fifth resend, 31 seconds after the first copy, is no longer
+  sent, since an answer to it could arrive only within a tick of the rekey
+  being given up. The msg1 is resent at 1, 3, 7 and 15 seconds (as many of
+  those as `node.rate_limit.handshake_max_resends` allows); with fewer
+  resends configured the rekey is given up one tick after the last, and
+  with a shorter `node.rate_limit.handshake_timeout_secs` at that timeout.
+  The next rekey no longer starts in the tick that gave the last one up: it
+  waits one tick, doubled for each rekey given up in a row (at most 120
+  seconds at the defaults), plus up to 15 seconds at random, so a peer that
+  never answers no longer draws a new rekey every 32 seconds. A link whose
+  peer has gone silent is kept while this node's rekey is in flight, even
+  when the transport refuses every copy of its msg1, and removed at the
+  first link-dead check after the rekey is given up. No message format
+  changes.
+
+- A link now recognises a copy of a rekey msg1 by the msg1's ephemeral key,
+  which its encryption binds, rather than by its bytes, so a copy whose
+  unauthenticated sender index was rewritten is refused as answered before
+  instead of arming a pending session. It also remembers every msg1 it
+  refused (one that met its pending session, lost a simultaneous rekey,
+  arrived on another path, or asked to replace a young link), so a peer that
+  resends a msg1 this node refused is refused again; the peer's rekey ends at
+  its deadline and its next one, with a fresh msg1, is answered. The node
+  keeps a closed link's memory under the peer's identity and startup epoch,
+  for up to twice as many links as `node.limits.max_peers` (256 when that is
+  0), and hands it to the next link with that peer at that epoch, so a msg1
+  captured before a peering was torn down and formed again no longer arms a
+  pending session on the new link. A peer's first msg1 that meets a link
+  promoted from a replayed msg1 less than a second earlier is refused with
+  its resends, and its next dial replaces that link. This node's own link
+  rekeys, a message-triggered one included, now wait until the link is one
+  tick past 30 seconds old and one tick past 30 seconds since its last
+  cutover, so none reaches a 0.5.0 to 0.5.2 peer inside the 30 seconds in
+  which it takes a msg1 for a fresh dial. No message format changes.
+
+- A link rekey's initiator now sends a heartbeat under the new session at
+  its cutover, and again 1 and 3 seconds later until it hears the peer
+  under that session, and the responder sends one heartbeat back when it
+  adopts the new session. Before, nothing was sent at either step, so on an
+  idle link a responder adopted the new session only on the next
+  heartbeat, up to 10 seconds later, and the initiator heard the peer only
+  on the old session meanwhile. A peer sees at most four more heartbeats
+  per rekey. The initiator's new session now also takes the inverse of the
+  key-epoch bit last seen on the peer's frames, including frames a decrypt
+  worker opened, instead of the inverse of its own bit. When the two ends'
+  bits had fallen out of step (after a peer restart or a cross-connection
+  swap), the new session's frames carried the bit the peer already sealed
+  under, so a 0.5.0 to 0.5.2 peer, which tries its pending session only on
+  a frame whose bit differs from its own, never adopted it, and the link
+  split until one end removed it. No message format changes.
+
+- After a link rekey, the previous session is now kept until 10 seconds
+  after the peer is first heard under the new one, and at most 120 seconds
+  after the cutover, instead of exactly 10 seconds after the cutover, and
+  frames the peer still sends under it count for link liveness. Before, a
+  peer that had not yet moved to the new session had its frames dropped 10
+  seconds after the cutover and was removed at the link-dead timeout, 30
+  seconds after the cutover, while it was still sending. Answering the
+  peer's rekey no longer ends a drain still in progress; the cutover that
+  adopts the answer retires it first, so a link holds at most three
+  sessions at once. No message format changes.
+
+- When a node resolves a cross-connection by moving the peer onto its own
+  dial's session, its link rekey state now starts again on that session:
+  a rekey of its own still in flight is abandoned, a pending session it
+  answered and the previous session it was still draining are dropped,
+  and their session indices are freed at once, and the new session is
+  handed to the decrypt workers. Before, all of them were left in place,
+  holding their indices until they ended by their own timers, and the new
+  session was decrypted only on the node's own path. The moved session
+  keeps the replaced session's key-epoch bit and start, the link's age,
+  the key-epoch bit last seen from the peer and the record of the msg1s
+  the link answered or refused, as before. No message format changes.
+
 - The debug lines for handshake msg1 and msg2 handling, link promotion,
   cross-connection resolution and the rekey responder now say where a message
   came from and which handshake it belongs to. They carry the transport and
@@ -583,20 +686,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RekeyConfig::enabled` is gone.
 
 - **Source-breaking for consumers of the library crate**: `ActivePeer`'s
-  session-slot and rekey methods are private to the crate. The methods that
-  read or change its Noise sessions and their indices, the K-bit, the
-  session time base, the stored link-setup msg2, the peer's startup epoch
-  and the rekey cycle are no longer public, among them `with_session`,
-  `noise_session`, `our_index`, `replace_session`, `current_k_bit`,
-  `set_pending_session`, `cutover_to_new_session`, `abandon_rekey` and
-  `complete_rekey_msg2`; `set_their_index`, `clear_handshake_msg2`,
-  `set_rekey_in_progress` and `set_msg1_next_resend`, which nothing called,
-  are gone. Calling them from outside could leave a peer's sessions out of
-  step with the node's index tables, and keeping them private lets later
-  rekey work change them without another library break. The full list, and
-  what an embedder reads instead, is in
-  `docs/how-to/migrate-an-embedder-to-v0.6.md`. The daemon, the control
-  socket and the wire are unchanged.
+  session-slot and rekey methods are no longer public. The methods that read
+  or change its Noise sessions and their indices, the K-bit, the session
+  time base, the stored link-setup msg2, the peer's startup epoch and the
+  rekey cycle are private to the crate, among them `with_session`,
+  `noise_session`, `our_index` and `current_k_bit`. Others are gone,
+  among them `replace_session`, `set_pending_session`,
+  `cutover_to_new_session`, `abandon_rekey` and `complete_rekey_msg2`, as
+  are `set_their_index`, `clear_handshake_msg2`, `set_rekey_in_progress` and
+  `set_msg1_next_resend`, which nothing called. Calling them from outside
+  could leave a peer's sessions out of step with the node's index tables,
+  and keeping them private lets later rekey work change them without
+  another library break. The full lists, and what an embedder reads
+  instead, are in `docs/how-to/migrate-an-embedder-to-v0.6.md`. The daemon,
+  the control socket and the wire are unchanged.
 
 - **Source-breaking for consumers of the library crate**: `ActivePeer` no
   longer stores a connectivity state. `ActivePeer::connectivity`, `can_send`,
@@ -720,6 +823,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already logged them.
 
 #### Data plane and transports
+
+- A link rekey that completes while the session it replaced last time is
+  still draining no longer leaks that session's index. Both the node's own
+  cutover and a peer's first frame under the new keys moved the current
+  session into the drain over the one already there, without releasing its
+  index, which then stayed registered and allocated until the daemon
+  restarted, even after the peer was gone. The cutover now retires the
+  draining session first, as the node answering a rekey already did before
+  taking the new keys. Reaching it takes a rekey within 10 seconds of the
+  last one, which at the default settings means about 6,600 frames a second
+  on the link. Nothing on the wire changes.
+
+- A peer restart that this node's link rekey reveals (the restarted peer
+  answers the rekey as a new link) now resets everything the node held
+  about the peer's previous run, not only the end-to-end session with it.
+  The node used to keep the peer's spanning-tree declaration and filter,
+  so it refused the restarted peer's tree and filter announces as stale
+  until their sequence numbers, which began again with the restart,
+  passed the old ones, and it sent the peer nothing of its own, leaving
+  routing toward and through that peer wrong for that time. It now
+  forgets both, sends the peer its tree and filter again under the new
+  session, and also releases the path MTU clamp entry the closed
+  end-to-end session had tightened. The old link session is retired at
+  the cutover instead of drained, since the restarted peer can no longer
+  send under it. No message format changes.
+
+- A dial that completes for a node this node already holds through another
+  link, with a startup epoch in its msg2 other than the one on record, is
+  now treated as the peer's restart rather than as two crossed dials. The
+  address tie-break used to decide it whatever the epoch: when this node
+  had the larger address it kept the session of the process that had gone,
+  so the link carried nothing until the link-dead timeout removed it, and
+  when it had the smaller address it moved to the new session but kept the
+  epoch on record, its end-to-end session with the peer and the peer's
+  previous tree and filter state. It now removes the stale peer as an
+  inbound restart does and installs the peer from its own dial in either
+  case. No message format changes.
+
+- A peer that drops its side of a link and dials again now gets this
+  node's bloom filter on the new session. When the link was old enough to
+  rekey, this node answered the dial as a rekey and kept the record of the
+  filter it had last sent, which the peer had discarded with the old
+  peering, so it sent the peer no filter until its outgoing filter for the
+  peer changed or the spanning tree moved. Until then the peer sent no
+  lookups through this node and routed nothing by filter toward it. The
+  node now sends its filter again after every link rekey it answers. The
+  peer that started the rekey receives one extra FilterAnnounce per rekey,
+  and any resends of it the existing announce delivery rules make. No
+  message format changes.
+
+- A node that dials one peer over two paths at once no longer splits the
+  link when the second dial reaches the peer more than a second after the
+  first. The peer replaces the peering the first dial set up with the
+  second, which it does once that peering is a second old and has carried
+  no frame, and answers it; a dialer with the larger node address then kept
+  the first dial's session by the cross-connection rule, so neither end
+  could decrypt the other until the link-dead check removed the link. A
+  dialer whose second dial is answered while it holds the peer from its own
+  first dial now moves to the second dial's session at either address. The
+  address rule still decides a crossing with the peer's own dial. Two cases
+  still split the link. Where the two dials run over different transports,
+  the link splits as it did for the dialer with the smaller address. Where
+  the answer to the first dial reaches the dialer after the answer to the
+  second, which needs a first path slower than the second by more than a
+  second, the dialer moves to the first dial's session, which the peer has
+  discarded; before this change a dialer with the larger address kept the
+  right session there, and one with the smaller address did not. No
+  message format changes.
 
 - An end-to-end session no longer loses a direction of traffic when the
   last handshake message of a rekey is lost. The node that started a rekey

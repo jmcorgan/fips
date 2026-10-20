@@ -262,14 +262,19 @@ resolution:
 ```bash
 cargo clippy -p fips-core --lib -- -D warnings
 cargo clippy -p fips-core --all-targets -- -D warnings
-cargo test -p fips-core
+cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings
+cargo test -p fips-core --features slow-tests
 ```
 
 The first lints the library with only the features its
 `[dependencies]` ask for. The second also type-checks the tests, and
 in doing so gives the library the dev-dependencies' features, so code
 that needs `secp256k1`'s `rand` or `std` passes it; the first does
-not. Run all three before sending a change here. The repository guards in
+not. The third lints the slow test suites the `slow-tests` feature
+gates (the models of the deployed releases and the guard-switch
+meta-test). Every platform's ordinary test run skips them; GitHub CI's
+Linux job runs them on every push, and local CI with `--slow-tests`. Run
+all four before sending a change here. The repository guards in
 `testing/` (atomics, comment references, log strings) scan `core/src/`
 as well as `src/`.
 

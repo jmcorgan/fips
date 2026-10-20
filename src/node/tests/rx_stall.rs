@@ -223,7 +223,7 @@ enum Trigger {
     Packet(ReceivedPacket),
     /// The tick's rekey msg1 check.
     RekeyCheck,
-    /// The tick's rekey msg1 resend, with every resend due.
+    /// The tick's rekey msg1 resend, its first rung due.
     RekeyResend,
     /// The tick's handshake timers, at this time.
     PeerTimers(u64),
@@ -239,8 +239,12 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
     let t0 = Instant::now();
     match trigger {
         Trigger::Packet(packet) => node.process_packet(packet).await,
-        Trigger::RekeyCheck => node.check_rekey().await,
-        Trigger::RekeyResend => node.resend_rekeys_at(crate::time::mono_ms() + 60_000).await,
+        Trigger::RekeyCheck => node.poll_link_rekeys().await,
+        Trigger::RekeyResend => {
+            // Past the first resend rung of the msg1 ladder.
+            crate::time::advance(Duration::from_millis(1_500));
+            node.poll_link_rekeys().await
+        }
         Trigger::PeerTimers(now_ms) => node.drive_peer_timers(now_ms).await,
         Trigger::StoredMsg1(link, addr) => {
             node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::now_ms())
@@ -427,7 +431,8 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
     let target = PeerIdentity::from_pubkey_full(Identity::generate().pubkey_full());
     let link_id = node.allocate_link_id();
     let mut leg = outbound_leg(link_id, target, now_ms);
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let noise_msg1 = leg
         .start_handshake(node.identity().keypair(), node.startup_epoch(), now_ms)
         .unwrap();
@@ -457,7 +462,7 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
         &mut node.index_allocator,
     );
     machine.set_conn_handshake_msg1(wire.clone(), due_ms);
-    machine.set_conn_our_index(our_index);
+    let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(tcp_id);
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(leg.take_leg().unwrap());
@@ -523,7 +528,9 @@ async fn rekey_start(dead: bool, outbound: bool) -> RekeyStart {
 /// The tick's rekey msg1 to a TCP peer whose connection has closed fails at
 /// once without dialing. A background connect is started toward a peer this
 /// node dialed, and never toward an inbound peer's address. With the link
-/// alive the msg1 goes out and the cycle starts.
+/// alive the msg1 goes out and the cycle starts; what a refused copy does
+/// to the cycle is asserted by
+/// `a_rekey_message_the_transport_refuses_counts_as_lost_and_its_cycle_holds`.
 #[tokio::test]
 async fn rekey_msg1_to_dead_tcp_link_does_not_hold_tick() {
     let r = rekey_start(false, false).await;
@@ -537,7 +544,6 @@ async fn rekey_msg1_to_dead_tcp_link_does_not_hold_tick() {
     let r = rekey_start(true, false).await;
     println!("rekey msg1 dead inbound peer: {r:?}");
     assert_no_dial("rekey msg1 to a closed inbound link", &r.reply);
-    assert!(!r.started, "a failed rekey msg1 starts no cycle");
     assert_eq!(
         r.state,
         ConnectionState::None,
@@ -547,7 +553,6 @@ async fn rekey_msg1_to_dead_tcp_link_does_not_hold_tick() {
     let r = rekey_start(true, true).await;
     println!("rekey msg1 dead outbound peer: {r:?}");
     assert_no_dial("rekey msg1 to a closed outbound link", &r.reply);
-    assert!(!r.started, "a failed rekey msg1 starts no cycle");
     assert_eq!(
         r.state,
         ConnectionState::Connecting,
@@ -644,9 +649,10 @@ async fn rekey_reply(dead: bool) -> (Reply, bool) {
     (r, pending)
 }
 
-/// A rekey msg2 to a peer whose established TCP link has closed
-/// fails at once and stores no pending session; with the link alive the
-/// pending session is stored.
+/// A rekey msg2 to a peer whose established TCP link has closed fails at
+/// once without dialing; with the link alive the pending session is stored.
+/// What a refused msg2 does to the pending is asserted by
+/// `a_rekey_message_the_transport_refuses_counts_as_lost_and_its_cycle_holds`.
 #[tokio::test]
 async fn rekey_msg2_to_closed_tcp_link_returns_without_dialing() {
     let (r, pending) = rekey_reply(false).await;
@@ -654,10 +660,32 @@ async fn rekey_msg2_to_closed_tcp_link_returns_without_dialing() {
     assert_no_dial("rekey control", &r);
     assert!(pending, "control should store the rekey session");
 
-    let (r, pending) = rekey_reply(true).await;
-    println!("rekey dead    link closed: {r:?}, pending session {pending}");
+    let (r, _) = rekey_reply(true).await;
+    println!("rekey dead    link closed: {r:?}");
     assert_no_dial("rekey msg2 to a closed link", &r);
-    assert!(!pending, "a failed rekey msg2 send stores no session");
+}
+
+/// A rekey message the transport refuses to send is lost, as one the network
+/// drops would be, and the cycle it belongs to holds: the initiator's
+/// attempt starts and keeps its msg1 for the next rung, toward an inbound
+/// peer and toward one this node dialed, and the responder holds the pending
+/// session its msg2 answered, which a resend of the msg1 draws again.
+#[tokio::test]
+async fn a_rekey_message_the_transport_refuses_counts_as_lost_and_its_cycle_holds() {
+    for outbound in [false, true] {
+        let r = rekey_start(true, outbound).await;
+        println!("refused rekey msg1, outbound {outbound}: {r:?}");
+        assert!(
+            r.started,
+            "outbound {outbound}: a rekey msg1 the transport refused must leave the attempt in flight"
+        );
+    }
+    let (r, pending) = rekey_reply(true).await;
+    println!("refused rekey msg2: {r:?}, pending session {pending}");
+    assert!(
+        pending,
+        "a rekey msg2 the transport refused must leave the pending held"
+    );
 }
 
 /// Run the node's real rx loop, inject `poisoned` TCP msg1 frames whose reply
@@ -998,9 +1026,9 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> (Node, std::net::TcpStream,
         ReplySite::ResendMsg2 => {
             let (mut node, sender, sender_addr, far_end) = peer_on_tcp(bh).await;
             let data = craft_msg1(&node, &sender, 0x22);
-            node.get_peer_mut(&sender_addr)
-                .unwrap()
-                .note_setup(crate::proto::fmp::Msg1Digest::of(&data));
+            let peer = node.get_peer_mut(&sender_addr).unwrap();
+            let msg2 = peer.handshake_msg2().expect("a stored msg2").to_vec();
+            peer.note_setup(&data, &msg2);
             let packet = ReceivedPacket::new(tcp_id, elsewhere(), data);
             (node, far_end, Trigger::Packet(packet))
         }
@@ -1027,7 +1055,7 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> (Node, std::net::TcpStream,
         ReplySite::RekeyMsg1Resend => {
             let (mut node, _sender, sender_addr, mut far_end) = peer_on_tcp(bh).await;
             age_past_rekey(&mut node, &sender_addr);
-            node.check_rekey().await;
+            node.poll_link_rekeys().await;
             assert!(
                 node.get_peer(&sender_addr)
                     .is_some_and(|p| p.rekey_in_progress()),
@@ -1169,7 +1197,14 @@ async fn a_rekey_msg1_copy_over_udp_is_never_answered_at_its_source() {
             !on_link,
             "a msg2 went out on the established link for a copy off it"
         );
-        assert!(!pending, "an unanswered rekey msg1 stores no session");
+        if dead {
+            assert!(
+                pending,
+                "an answer the transport could not send counts as lost: the pending is held"
+            );
+        } else {
+            assert!(!pending, "a copy off a reachable link arms no pending");
+        }
     }
 }
 
@@ -1312,7 +1347,10 @@ async fn a_rekey_msg1_is_answered_on_its_connection_only_on_the_established_tran
         assert_no_dial("rekey msg1 on a new connection", &r);
         if other {
             assert!(!answered, "a msg2 went out on another transport");
-            assert!(!pending, "an unanswered rekey msg1 stores no session");
+            assert!(
+                pending,
+                "an answer the transport could not send counts as lost: the pending is held"
+            );
             assert!(!indexed, "an index was registered on another transport");
         } else {
             assert!(answered, "the msg1's own connection got no msg2");

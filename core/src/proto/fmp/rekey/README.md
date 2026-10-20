@@ -2,8 +2,13 @@
 
 The link layer's binding of the shared rekey machine (`proto::rekey`):
 the profile that makes it rotate an FMP link's keys over Noise IK, exactly
-as deployed nodes do on the wire. Hidden from the docs and not yet called;
-the root crate will reach it only through the alias `FmpProfile`.
+as deployed nodes do on the wire. Hidden from the docs; the root crate
+reaches it only through the alias `FmpProfile`. Each active peer holds its
+link's sessions in a machine on this profile, built at promotion from the
+link setup's session and index lease, and that machine decides the link's
+rekeys: the node reads a held peer's same-epoch msg1 with `read_msg1` and
+steps the machine with it, routes each rekey msg2 to it by index, and
+steps it with every frame its decrypt workers do not take.
 
 ## Files
 

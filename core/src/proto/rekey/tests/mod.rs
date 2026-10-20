@@ -4,14 +4,19 @@
 //! `tests/<module>.rs`, attached from that module.
 
 mod explore;
+// The `slow-tests` feature (see the crate's Cargo.toml) gates the
+// guard-switch meta-test and the models of the deployed releases.
+#[cfg(feature = "slow-tests")]
 mod faults;
 mod fmp;
 mod fsp;
+#[cfg(feature = "slow-tests")]
 mod legacy;
 mod next;
 mod regress;
 mod sim;
 pub(crate) mod stub;
+mod survivors;
 
 #[test]
 fn the_wildcard_arm_fence_is_declared_at_the_module_root() {
@@ -26,6 +31,7 @@ fn the_wildcard_arm_fence_is_declared_at_the_module_root() {
 /// Every source file of the machine, for the setter scan.
 const SOURCES: &[(&str, &str)] = &[
     ("mod.rs", include_str!("../mod.rs")),
+    ("access.rs", include_str!("../access.rs")),
     ("candidates.rs", include_str!("../candidates.rs")),
     ("cycle.rs", include_str!("../cycle.rs")),
     ("epoch.rs", include_str!("../epoch.rs")),

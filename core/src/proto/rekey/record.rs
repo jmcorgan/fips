@@ -9,12 +9,16 @@
 //! so a copy with a rewritten header still matches it.
 //!
 //! The record outlives a machine: `close` hands it back in the `Carry`, the
-//! shell files it under the peer's identity and epoch, and a later machine
-//! for the same peer epoch receives it again in its `SetupFacts`.
+//! shell files its ephemerals under the peer's identity and epoch, and a
+//! later machine for the same peer epoch receives them again in its
+//! `SetupFacts`. The setup msg1 and its msg2 stay with the link they set
+//! up: a later link has its own, and a copy of the earlier one is a msg1
+//! answered before, whichever side dialled either link.
 
 use alloc::collections::VecDeque;
 
 use super::Wire;
+use crate::identity::NodeAddr;
 
 /// How many msg1 ephemerals the record keeps, besides the setup msg1's.
 pub const RECORD_BOUND: usize = 256;
@@ -101,6 +105,70 @@ impl Record {
     /// Whether the record holds nothing.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// The node's store of the records of closed links, each filed under the
+/// peer's address and the startup epoch it held, so a later link with the
+/// same peer at the same epoch starts with what the closed one had seen.
+///
+/// An entry is consulted only for its own epoch, and a peer's change of
+/// epoch drops nothing: the bound alone ends an entry, the least recently
+/// filed going first. An entry evicted before its peer is linked again
+/// leaves that peering's msg1s unrecognised by the next link.
+#[derive(Clone, Debug, Default)]
+pub struct RecordStore {
+    /// How many records the store keeps.
+    bound: usize,
+    /// The records filed, least recently filed first.
+    entries: VecDeque<(NodeAddr, [u8; 8], Record)>,
+}
+
+impl RecordStore {
+    /// An empty store keeping at most `bound` records.
+    pub fn new(bound: usize) -> Self {
+        Self {
+            bound,
+            entries: VecDeque::new(),
+        }
+    }
+
+    /// File the ephemerals of `record`, closed with the link to `peer` at
+    /// its startup `epoch`, replacing any record filed under both, and
+    /// dropping the least recently filed record past the bound. The setup
+    /// msg1 and the msg2 that answered it are not filed, and a record with
+    /// no ephemeral is not filed at all.
+    pub fn file(&mut self, peer: NodeAddr, epoch: [u8; 8], record: Record) {
+        let mut kept = Record::new();
+        kept.absorb(record);
+        if kept.is_empty() {
+            return;
+        }
+        self.entries.retain(|(p, e, _)| (p, e) != (&peer, &epoch));
+        self.entries.push_back((peer, epoch, kept));
+        while self.entries.len() > self.bound {
+            self.entries.pop_front();
+        }
+    }
+
+    /// Take the record filed under `peer` at `epoch`, or an empty one.
+    pub fn take(&mut self, peer: &NodeAddr, epoch: [u8; 8]) -> Record {
+        self.entries
+            .iter()
+            .position(|(p, e, _)| p == peer && *e == epoch)
+            .and_then(|i| self.entries.remove(i))
+            .map(|(_, _, record)| record)
+            .unwrap_or_default()
+    }
+
+    /// The number of records filed.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the store holds no record.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

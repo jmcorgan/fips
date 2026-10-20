@@ -248,7 +248,7 @@ fn ik_replay_record_tells_setup_copies_rewritten_copies_and_fresh_msg1s_apart() 
     let record = setup_record(&setup1, Some(&setup2)).expect("a record");
     let bonded = Bond::Key(key(&ik)).check(done).expect("it bonds");
     let facts = SetupFacts {
-        peer_epoch: [0xa1; 8],
+        peer_epoch: Some([0xa1; 8]),
         k: false,
         link_since: TestInstant(0),
         started: TestInstant(0),

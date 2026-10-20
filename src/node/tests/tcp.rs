@@ -245,11 +245,10 @@ async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines(
     let mut config = Config::new();
     config.node.heartbeat_interval_secs = 1;
     config.node.link_dead_timeout_secs = 3;
-    config.node.rate_limit.handshake_resend_interval_ms = 100;
     config.node.rate_limit.handshake_max_resends = 1;
     let idle = inbound_idle_timeout(&config.node);
-    // 100 ms of ladder, three 1 s ticks, 3 s link-dead.
-    assert_eq!(idle, Duration::from_millis(6100));
+    // 1 s of msg1 ladder (one resend), three 1 s ticks, 3 s link-dead.
+    assert_eq!(idle, Duration::from_millis(7000));
     let mut nodes = vec![
         make_test_node_tcp_idle(config.clone(), Some(idle)).await,
         make_test_node_tcp_idle(config, Some(idle)).await,
@@ -664,20 +663,21 @@ async fn same_epoch_tcp_redial_completes_its_rekey_without_waiting_for_the_reape
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // node 0's rekey: the tick retries until the msg1 goes out.
+    // node 0's rekey starts on its tick. The first copy of its msg1 is lost
+    // with the closed connection, whose failed send starts a new one, and
+    // the resend at 1 s goes over that.
     let start = Instant::now();
-    while !nodes[0].node.get_peer(&addr1).unwrap().rekey_in_progress() {
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "node 0's rekey msg1 never went out"
-        );
-        nodes[0].node.check_rekey().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    nodes[0].node.poll_link_rekeys().await;
+    assert!(
+        nodes[0].node.get_peer(&addr1).unwrap().rekey_in_progress(),
+        "node 0's rekey started"
+    );
 
-    // The msg1 reaches node 1 on the new connection, the msg2 node 0.
-    for _ in 0..50 {
+    // The msg1 reaches node 1 on the new connection, the msg2 node 0, with
+    // node 0's tick running.
+    for _ in 0..150 {
         tokio::time::sleep(Duration::from_millis(20)).await;
+        nodes[0].node.poll_link_rekeys().await;
         process_available_packets(&mut nodes).await;
         if nodes[0]
             .node
@@ -707,7 +707,7 @@ async fn same_epoch_tcp_redial_completes_its_rekey_without_waiting_for_the_reape
 
     // node 0 cuts over; its first frame on the new session promotes node 1's
     // pending and moves node 1's link to the new connection.
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     nodes[0]
         .node
         .send_encrypted_link_message(&addr1, &[LinkMessageType::Heartbeat.to_byte()])

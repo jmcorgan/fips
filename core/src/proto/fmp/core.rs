@@ -2,8 +2,9 @@
 //!
 //! Pure, runtime-agnostic maintain/teardown decisions for the FMP peer
 //! connection lifecycle: handshake-connection timeout/teardown and outbound
-//! msg1 resend scheduling. The async I/O adapters in `node::handlers::timeout`
-//! build a [`LifecycleView`] over live node state (pre-computing every clock
+//! msg1 resend scheduling. Link rekeys are decided by each link's rekey
+//! machine (`proto::rekey`), not here. The async I/O adapters in
+//! `node::handlers::timeout` build a [`LifecycleView`] over live node state (pre-computing every clock
 //! read into plain `u64`/`bool` snapshot fields), call the `poll_*` decisions,
 //! and drive the returned [`ConnAction`]s — the actual sends, registry
 //! mutations, metrics, and logging. No I/O, no clock, no metrics, no logging
@@ -20,9 +21,8 @@
 use super::silent::{ActiveBackoff, epochs_differ};
 use super::state::Fmp;
 use crate::identity::{NodeAddr, PeerIdentity};
-use crate::transport::{LinkId, TransportAddr, TransportId};
+use crate::transport::LinkId;
 use crate::utils::index::SessionIndex;
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// Determine winner of cross-connection tie-breaker.
@@ -134,19 +134,6 @@ pub struct ConnSnapshot {
     pub msg1: Vec<u8>,
 }
 
-/// Which side of a link rekey handshake produced a pending session.
-///
-/// Only the side that initiated may commit to the new keys on its own
-/// schedule: it holds proof that the peer derived them. The responder
-/// learns that only when a frame sealed on the new epoch authenticates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RekeyRole {
-    /// This node sent the rekey msg1 and read the peer's msg2.
-    Initiator,
-    /// This node answered the peer's rekey msg1 with a msg2.
-    Responder,
-}
-
 /// A digest of one link handshake msg1 exactly as it arrived, header included.
 ///
 /// The initiator's resend ladder retransmits its stored msg1 bytes unchanged,
@@ -164,6 +151,20 @@ impl Msg1Digest {
     /// The first four bytes of the digest, the part the log lines carry.
     pub fn prefix(&self) -> [u8; 4] {
         [self.0[0], self.0[1], self.0[2], self.0[3]]
+    }
+}
+
+/// The same SHA-256 value as the digest a link's rekey machine records.
+impl From<Msg1Digest> for crate::proto::rekey::Digest {
+    fn from(d: Msg1Digest) -> Self {
+        Self(d.0)
+    }
+}
+
+/// The digest a link's rekey machine recorded, as the msg1 digest it is.
+impl From<crate::proto::rekey::Digest> for Msg1Digest {
+    fn from(d: crate::proto::rekey::Digest) -> Self {
+        Self(d.0)
     }
 }
 
@@ -188,157 +189,6 @@ impl EphemeralDigest {
     }
 }
 
-/// What this node sent when it answered a peer's rekey msg1 as the responder:
-/// the msg1 it answered, by digest, and the framed msg2 it sent back.
-///
-/// Kept with the pending session that answer armed, so a resend of that msg1
-/// draws the same msg2 again rather than a refusal while the pending is held.
-#[derive(Clone, Debug)]
-pub struct RekeyAnswer {
-    /// The msg1 that armed the pending session.
-    pub msg1: Msg1Digest,
-    /// The framed msg2 sent in answer, opaque to the core.
-    pub msg2: Vec<u8>,
-}
-
-/// How many msg1s of ended cycles one peer's [`AnsweredMsg1s`] remembers.
-///
-/// A msg1 is answered as a rekey only once [`REKEY_MIN_CUTOVER_AGE_SECS`]
-/// have passed since the last cutover, so answered cycles are at least 10 s
-/// apart and this covers at least 43 minutes of the peer's cycles. Only a
-/// peer whose message-count trigger fires every 10 s, on a busy link, cycles
-/// that fast; at the default 120 s interval it covers eight and a half hours.
-/// 32 bytes each, so 8 KiB per peer at most.
-pub const ENDED_MSG1_RECORD: usize = 256;
-
-/// The rekey msg1s this node answered as the link-rekey responder for one
-/// peer, by digest.
-///
-/// A link msg1 carries nothing that ties it to one cycle, so a copy taken off
-/// the wire still authenticates as the peer, in the peer's current epoch,
-/// after the cycle it started has ended. This record is how a copy is told
-/// from a fresh msg1. The answer that armed the pending session this node
-/// holds is kept whole, so a resend of that msg1 draws the same msg2. When
-/// the pending leaves (adopted, retired or abandoned) its digest moves to the
-/// ended list, and a msg1 matching an ended cycle is refused instead of arming
-/// a new pending.
-///
-/// The ended list also holds the link-setup msg1 the peering was promoted
-/// from. A copy of it is no more a rekey than a copy of an ended cycle's
-/// msg1, and once the session is old enough to rekey it would otherwise arm
-/// a pending.
-///
-/// Retention is bounded: the ended list keeps the last
-/// `ENDED_MSG1_RECORD` digests, so a msg1 from an older cycle of the same
-/// epoch is not recognized. The record lives with the peer, so it starts empty
-/// whenever the peering is established again while the peer's epoch stays the
-/// same, as after this node restarts or the link is torn down and re-formed.
-#[derive(Debug, Default)]
-pub struct AnsweredMsg1s {
-    held: Option<RekeyAnswer>,
-    ended: VecDeque<Msg1Digest>,
-}
-
-impl AnsweredMsg1s {
-    /// Record the answer that armed a new responder pending.
-    pub fn arm(&mut self, answer: RekeyAnswer) {
-        self.end();
-        self.held = Some(answer);
-    }
-
-    /// The pending the held answer armed has left: keep only its digest.
-    pub fn end(&mut self) {
-        if let Some(answer) = self.held.take() {
-            self.push_ended(answer.msg1);
-        }
-    }
-
-    /// Record the link-setup msg1 the peering was promoted from as ended.
-    pub fn end_setup(&mut self, msg1: Msg1Digest) {
-        self.push_ended(msg1);
-    }
-
-    /// Append `msg1` to the ended list, dropping the oldest at the bound.
-    fn push_ended(&mut self, msg1: Msg1Digest) {
-        if self.ended.len() == ENDED_MSG1_RECORD {
-            self.ended.pop_front();
-        }
-        self.ended.push_back(msg1);
-    }
-
-    /// The answer that armed the pending this node holds, if it holds one it
-    /// answered.
-    pub fn held(&self) -> Option<&RekeyAnswer> {
-        self.held.as_ref()
-    }
-
-    /// Whether `msg1` armed a cycle that has since ended.
-    pub fn ended(&self, msg1: &Msg1Digest) -> bool {
-        self.ended.contains(msg1)
-    }
-}
-
-/// A snapshot of one active peer's rekey-relevant state, taken by the shell.
-///
-/// Every clock read is resolved shell-side into a plain `u64`/`bool` before the
-/// snapshot reaches the core: `elapsed_secs` is the monotonic session age, and
-/// `drain_expired`/`is_dampened` are the pre-evaluated timer predicates. The
-/// core applies the rekey thresholds and jitter with **no** clock read — the
-/// deliberate master-side asymmetry with discovery (monotonic ages, not an
-/// absolute `now_ms`), so the rekey timing stays behavior-identical under a
-/// clock step.
-pub struct PeerSnapshot {
-    /// The peer's node address (cutover/drain/rekey target).
-    pub addr: NodeAddr,
-    /// A pending post-rekey session is held (cut over by the initiator,
-    /// promoted on the peer's first new-epoch frame by the responder).
-    pub has_pending: bool,
-    /// Which role installed the pending session; `Some` exactly when
-    /// `has_pending`.
-    pub pending_role: Option<RekeyRole>,
-    /// The pending session has been held past the responder hold
-    /// (pre-evaluated shell-side against the hold, as `drain_expired` is).
-    pub pending_expired: bool,
-    /// A rekey handshake is currently in flight.
-    pub rekey_in_progress: bool,
-    /// The peer is in its post-cutover drain window.
-    pub is_draining: bool,
-    /// The drain window has expired (pre-evaluated against the drain timer).
-    pub drain_expired: bool,
-    /// Local rekey initiation is dampened after a recently received peer rekey
-    /// msg1 (pre-evaluated against the dampening timer).
-    pub is_dampened: bool,
-    /// Monotonic session age in seconds (`session_established_at().elapsed()`).
-    pub elapsed_secs: u64,
-    /// Current Noise send counter (0 when there is no session).
-    pub counter: u64,
-    /// Per-session symmetric rekey jitter, added to the time threshold.
-    pub jitter_secs: i64,
-}
-
-/// A snapshot of one peer with a rekey handshake in flight, taken by the shell
-/// for the rekey-msg1 retransmission decision.
-pub struct RekeyResendSnapshot {
-    /// The peer's node address (abandon/resend target).
-    pub peer: NodeAddr,
-    /// How many rekey-msg1 retransmissions have already happened. Drives both
-    /// the abandon-vs-resend classification and the backoff exponent.
-    pub resend_count: u32,
-    /// The stored rekey msg1 is due for retransmission as of the shell's
-    /// `now_ms` (pre-evaluated against the resend timer).
-    pub needs_resend: bool,
-    /// The stored rekey msg1 wire bytes (an opaque blob).
-    pub msg1: Vec<u8>,
-}
-
-/// The rekey trigger thresholds, read shell-side from node config.
-pub struct RekeyCfg {
-    /// Rekey after this many seconds of session age (before jitter).
-    pub after_secs: u64,
-    /// Rekey after this many sent messages.
-    pub after_messages: u64,
-}
-
 /// The result of the shell-side Noise wire step (Phase B) for one inbound
 /// handshake msg1, handed to the establish decision core.
 ///
@@ -359,8 +209,8 @@ pub struct WireOutcome {
     /// The opaque Noise msg2 payload the responder produced (empty only if no
     /// msg2 is to be sent).
     pub msg2_payload: Vec<u8>,
-    /// Digest of the msg1 as it arrived, matched against the msg1 that armed
-    /// a held responder pending.
+    /// Digest of the msg1 as it arrived, which the promotion records as the
+    /// link-setup msg1.
     pub msg1_digest: Msg1Digest,
 }
 
@@ -368,101 +218,53 @@ pub struct WireOutcome {
 /// about the peer identified in a just-processed msg1, taken by the shell so the
 /// core decides without touching live `Node` state or reading a clock.
 ///
-/// Produced by the [`EstablishView`] read-seam. Every clock read
-/// (`existing_session_age_secs`, `existing_link_age_secs`) is resolved
-/// shell-side into a plain `u64`, the same monotonic-ages asymmetry the rekey
-/// snapshot uses.
+/// Produced by the [`EstablishView`] read-seam.
 pub struct EstablishSnapshot {
     /// The peer is already an active peer in the registry.
     pub has_existing_peer: bool,
     /// The existing active peer's captured remote startup epoch, if any.
     pub existing_peer_epoch: Option<[u8; 8]>,
-    /// Monotonic age in seconds of the existing peer's session
-    /// (`session_established_at().elapsed()`), resolved shell-side: the time
-    /// since the last rekey cutover or adoption, or since promotion when
-    /// there has been none. `0` when there is no existing peer.
-    pub existing_session_age_secs: u64,
-    /// Monotonic age in seconds of the existing peer's link
-    /// (`link_established_at().elapsed()`), resolved shell-side: the time
-    /// since promotion, or since a peer restart our rekey revealed. A rekey
-    /// cutover does not reset it. `0` when there is no existing peer.
-    pub existing_link_age_secs: u64,
-    /// The existing peer has an established Noise session.
-    pub has_session: bool,
-    /// The existing peer already holds a pending post-rekey session awaiting
-    /// K-bit cutover.
-    pub pending_new_session: bool,
-    /// The existing peer has a rekey handshake in flight.
-    pub rekey_in_progress: bool,
-    /// When the pending session is one this node answered as the rekey
-    /// responder, the answer that armed it. `None` with no pending, or with a
-    /// pending this node initiated.
-    pub held_answer: Option<RekeyAnswer>,
-    /// This msg1 armed a responder cycle of this peer's that has since ended,
-    /// or is the link-setup msg1 the peering was promoted from (pre-evaluated
-    /// shell-side against the peer's [`AnsweredMsg1s`]).
-    pub msg1_answered_before: bool,
-    /// The msg1 arrived on the existing peer's established link: its
-    /// transport and current address, or an address mapped to its link.
-    pub msg1_on_link: bool,
-    /// The existing peer's established link can still carry an answer: a
-    /// connectionless transport, or its connection still pooled.
-    pub link_reachable: bool,
-    /// This msg1 is the link-setup msg1 the peering was promoted from, the
-    /// one `existing_msg2` answers (pre-evaluated shell-side against the
-    /// digest stored beside that msg2).
-    pub setup_match: bool,
-    /// The existing peer's stored msg2 wire bytes (an opaque blob), resent on a
-    /// resend of the link-setup msg1. `None` when there is no existing peer or
-    /// it has no stored msg2.
-    pub existing_msg2: Option<Vec<u8>>,
+    /// The existing peer's link rekey machine judged this same-epoch msg1 a
+    /// fresh dial on a link too young to rekey, and asked for the restart
+    /// gates (FRC-1201 rule 3.3); or the existing peer has no machine to
+    /// ask. False on the first classification of a msg1.
+    pub replace: bool,
     /// Admitting this peer as a net-new identity would exceed `max_peers`
     /// (pre-evaluated `max_peers > 0 && peers.len() >= max_peers`).
     pub at_max_peers: bool,
     /// A pending outbound connection to this same peer identity already exists
     /// (a cross-connection in progress); bypasses the max-peers cap.
     pub has_pending_outbound_to_peer: bool,
-    /// This node's own address, for the dual-initiation tie-break.
-    pub our_node_addr: NodeAddr,
     /// The refusal in force for this identity after its sessions ended
     /// without an authenticated frame, read shell-side from its
     /// [`SilentSessions`](super::SilentSessions) record. `None` when none is.
     pub silent_backoff: Option<ActiveBackoff>,
 }
 
-/// Where an inbound msg1 arrived, and the shell's answer to whether the
-/// sending peer's established link can still carry a reply.
-///
-/// Reachability is resolved before the snapshot is taken because the
-/// transport pools sit behind async locks, which the snapshot cannot await.
-pub struct Msg1Arrival<'a> {
-    /// The transport the msg1 arrived on.
-    pub transport_id: TransportId,
-    /// The address the msg1 arrived from.
-    pub remote_addr: &'a TransportAddr,
-    /// The established link of the peer the msg1 claims to be from can
-    /// still carry a reply. False when there is no such peer or link.
-    pub link_reachable: bool,
-}
-
 /// A snapshot of the registry state the *outbound* establish decision reads
 /// about the peer whose msg2 just completed our handshake, taken by the shell.
 ///
-/// Both fields are pre-evaluated shell-side (the tie-break is a pure function of
+/// Every field is pre-evaluated shell-side (the tie-break is a pure function of
 /// the two node addresses, resolved into a plain `bool` here) so the core never
 /// touches live `Node` state or the root crate's `peer` tie-break helper.
 pub struct OutboundSnapshot {
     /// The peer identity is already a promoted active peer — i.e. this outbound
-    /// completion is a cross-connection (we also processed their msg1).
+    /// completion is a cross-connection (we also processed their msg1), or the
+    /// peer restarted.
     pub has_existing_peer: bool,
+    /// The startup epoch on record for the existing peer, if any.
+    pub existing_peer_epoch: Option<[u8; 8]>,
     /// Pre-evaluated cross-connection tie-break: our *outbound* connection wins
     /// (we are the smaller NodeAddr). Only meaningful when `has_existing_peer`.
     pub our_outbound_wins: bool,
+    /// The existing peer's link was set up by an earlier dial of ours, not by
+    /// the peer's msg1. Only meaningful when `has_existing_peer`.
+    pub own_dial: bool,
 }
 
 /// A registry/transport effect the async shell performs on the core's behalf.
 ///
-/// The maintain/teardown subset (`Teardown`..`ResendRekeyMsg1`) covers the
+/// The maintain/teardown subset (`Teardown`..`ResendMsg1`) covers the
 /// tick-poll half of the lifecycle. The establish-machine subset
 /// (`PromoteToActive`..) is the master-side IK handshake decision; the shell
 /// executes each, resolving the ambient identity/time/wire payload it needs.
@@ -484,33 +286,6 @@ pub enum ConnAction {
         bytes: Vec<u8>,
         next_resend_at_ms: u64,
     },
-    /// Perform the initiator-side K-bit cutover to `peer`'s pending session
-    /// (`cutover_to_new_session` + decrypt-worker re-registration).
-    Cutover { peer: NodeAddr },
-    /// Complete `peer`'s drain window: erase the previous session, free its
-    /// index, and unregister its decrypt-worker entry.
-    Drain { peer: NodeAddr },
-    /// Retire `peer`'s pending session that this node did not initiate and the
-    /// initiator never adopted: drop it, unregister its index from
-    /// `peers_by_index`, and free the index.
-    RetirePending { peer: NodeAddr },
-    /// Initiate a fresh outbound rekey to `peer` (`initiate_rekey`: allocates a
-    /// new index, builds and sends msg1, inserts `pending_outbound`). The msg1
-    /// construction is the establish leaf and stays shell-side; the action
-    /// carries only the target.
-    InitiateRekey { peer: NodeAddr },
-    /// Abandon `peer`'s in-flight rekey cycle (`abandon_rekey`): its msg1 went
-    /// unconfirmed past the retransmission budget.
-    AbandonRekey { peer: NodeAddr },
-    /// Retransmit `peer`'s stored rekey msg1 `bytes`, then (on a successful
-    /// send) record the retransmission and reschedule the next at
-    /// `next_resend_at_ms`. The shell resolves the transport + remote address;
-    /// `bytes` is an opaque blob.
-    ResendRekeyMsg1 {
-        peer: NodeAddr,
-        bytes: Vec<u8>,
-        next_resend_at_ms: u64,
-    },
 }
 
 /// Read-only view of FMP connection/peer state the lifecycle core needs.
@@ -528,16 +303,6 @@ pub trait LifecycleView {
     /// `timeout_ms`) or failed, as of `now_ms`. The shell resolves the
     /// timeout/failed predicate; the core decides retry-then-teardown.
     fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot>;
-
-    /// Snapshot every active peer with a session, pre-computing
-    /// its rekey-relevant ages and timer predicates (see [`PeerSnapshot`]). The
-    /// shell resolves every clock read here; the core applies the thresholds.
-    fn rekey_peers(&self) -> Vec<PeerSnapshot>;
-
-    /// Snapshot every peer with a rekey handshake in flight (and a stored
-    /// msg1), pre-evaluating the resend-due predicate against `now_ms`. The
-    /// core classifies abandon-vs-resend and computes the backoff.
-    fn rekey_resend_candidates(&self, now_ms: u64) -> Vec<RekeyResendSnapshot>;
 }
 
 /// The classification outcome for one inbound handshake msg1, decided purely
@@ -558,9 +323,10 @@ pub enum InboundDecision {
     /// index, opaque msg2 payload) is in the `WireOutcome` it still holds, so
     /// the variant carries nothing.
     Promote,
-    /// Same-epoch msg1 on a session that cannot rekey, that is not a resend of
-    /// the peering's link-setup msg1 and not a copy of an answered one: a
-    /// fresh attempt by a peer that has lost its side of the link. The shell
+    /// Same-epoch msg1 that the existing peer's link rekey machine judged a
+    /// fresh dial on a link too young to rekey (or a msg1 for a peer with no
+    /// machine): a fresh attempt by a peer that has lost its side of the
+    /// link. The shell
     /// tears the existing peer down and promotes this msg1 exactly as for
     /// [`RestartThenPromote`](InboundDecision::RestartThenPromote), under the
     /// same liveness and interval conditions, and drops it otherwise.
@@ -570,25 +336,11 @@ pub enum InboundDecision {
     /// authorize → … → promote sequence as [`Promote`](InboundDecision::Promote).
     /// `peer` is the teardown / reconnect target.
     RestartThenPromote { peer: NodeAddr },
-    /// Same-epoch rekey msg1 on an aged link, past the drain window of the last
-    /// cutover: respond as the rekey responder. The shell extracts the fresh
-    /// Noise session from the live connection, allocates a new index, sends the
-    /// rekey msg2, and stores the session as the peer's pending (post-rekey)
-    /// session. `abandon_first` is set only on the dual-initiation *loser*
-    /// path, where we first abandon our own in-flight rekey. `peer` is the
-    /// rekey target.
-    RekeyRespond { peer: NodeAddr, abandon_first: bool },
-    /// A resend of the rekey msg1 that armed the responder pending this node
-    /// holds: send `msg2`, the answer already given, again. The shell sends it
-    /// only on the peer's established link and never to the msg1's source
-    /// address, since a captured msg1 replayed from anywhere authenticates
-    /// the same as a resend. Nothing else changes; the pending stays held.
-    ResendRekeyMsg2 { peer: NodeAddr, msg2: Vec<u8> },
-    /// A resend of the msg1 the peering was promoted from, on a session that
-    /// cannot rekey: resend the stored msg2 that answered it. `msg2` is the
-    /// opaque stored bytes, always present when the setup digest matched,
-    /// since the two are stored and cleared together.
-    ResendMsg2 { msg2: Option<Vec<u8>> },
+    /// Same-epoch msg1 from a held peer: hand it to that peer's link rekey
+    /// machine, which answers it, refuses it, resends a stored answer, or
+    /// asks for the restart gates (then the shell classifies the msg1 again
+    /// with [`EstablishSnapshot::replace`] set). `peer` is the held peer.
+    Rekey { peer: NodeAddr },
     /// Drop this msg1 with a handshake reject and no promotion. The shell
     /// records one handshake reject counter per `reason`, apart from its
     /// generic state-machine counter; `reason` otherwise selects only the
@@ -606,22 +358,6 @@ pub enum InboundReject {
     /// At `max_peers` and this is a net-new identity with no pending outbound to
     /// bypass the cap: silent-drop before any msg2 build/send.
     AtMaxPeers,
-    /// The peer already holds a pending post-rekey session awaiting K-bit
-    /// cutover, and this msg1 is not the one that armed it; a second rekey
-    /// msg1 must not overwrite it.
-    PendingSession,
-    /// Dual rekey initiation and we are the tie-break *winner* (smaller
-    /// NodeAddr): drop the peer's msg1 and keep driving our own rekey.
-    DualRekeyWon,
-    /// The msg1 armed a rekey cycle with this peer that has already ended: a
-    /// copy, not a fresh request, and it must not arm a pending. Also refused
-    /// on a link or session too young to rekey, where it would otherwise
-    /// replace the session.
-    AnsweredBefore,
-    /// A same-epoch msg1 on a link and session old enough to rekey arrived off
-    /// the peer's established link while that link works: a second path, not
-    /// a rekey of this link.
-    OffLink,
     /// The identity's last sessions at this msg1's epoch, at least
     /// `SILENT_SESSION_LIMIT` in a
     /// row, ended without one authenticated frame, and the back-off they
@@ -645,32 +381,21 @@ pub enum OutboundDecision {
     /// No existing peer for this identity: promote the completed outbound
     /// connection to an active peer via the normal promotion path.
     Promote,
-    /// Cross-connection and our outbound wins (smaller NodeAddr): swap the peer
-    /// to the outbound session + indices, freeing the old inbound index.
+    /// Cross-connection and our outbound wins (smaller NodeAddr), or the
+    /// existing peer came from an earlier dial of ours, whose session the
+    /// peer's answer to this one supersedes: swap the peer to the outbound
+    /// session + indices, freeing the old index.
     CrossConnectionSwap,
     /// Cross-connection and our outbound loses (larger NodeAddr): keep the
     /// existing inbound session and original `their_index`, freeing the unused
     /// outbound index.
     CrossConnectionKeep,
+    /// The msg2 carries a startup epoch other than the existing peer's: the
+    /// peer restarted, so this is no cross-connection (FRC-1201 Section 5.5).
+    /// Tear the stale peer down as on a restart and promote the completed
+    /// outbound connection, without the tie-break.
+    RestartThenPromote,
 }
-
-/// Minimum link age (seconds) before a same-epoch msg1 from an established
-/// peer is treated as a rekey rather than a duplicate. Guards against
-/// misreading a simultaneous cross-connection msg1 as a rekey (both sides
-/// promote within a tick, so a genuine rekey cannot fire that fast). The age
-/// is the link's, from promotion or from a peer restart our rekey revealed;
-/// a rekey cutover does not restart it, since a crossing dial follows a
-/// promotion, not a rekey. The age separates only that simultaneous case; a
-/// second path the peer opens later is told by where its msg1 arrived.
-const REKEY_MIN_LINK_AGE_SECS: u64 = 30;
-
-/// Minimum time (seconds) since the last rekey cutover or adoption before a
-/// same-epoch msg1 from an established peer is treated as a rekey. A new
-/// cycle is not answered while the session that cutover replaced may still
-/// be draining: adopting it would overwrite the previous slot that session
-/// holds. Equal to the drain window, so the responder completing a drain as
-/// it arms a pending never retires a previous session early.
-pub const REKEY_MIN_CUTOVER_AGE_SECS: u64 = crate::proto::fsp::limits::DRAIN_WINDOW_SECS;
 
 /// Read-only view of the `Node` registry state the inbound establish decision
 /// needs about a peer whose msg1 has just been processed.
@@ -682,19 +407,9 @@ pub const REKEY_MIN_CUTOVER_AGE_SECS: u64 = crate::proto::fsp::limits::DRAIN_WIN
 /// unit-tested against hand-built snapshots.
 pub trait EstablishView {
     /// Snapshot the registry state relevant to classifying an inbound msg1 from
-    /// `peer_addr`: the existing peer's epoch/session/rekey state (with the
-    /// session and link ages resolved shell-side), the max-peers cap, and this
-    /// node's own address for the tie-break.
-    /// `msg1` is the digest of the msg1 being classified, checked against the
-    /// peer's record of answered msg1s. `arrival` is where it arrived and
-    /// whether the peer's established link is reachable, from which the
-    /// snapshot tells a msg1 on that link from one off it.
-    fn establish_snapshot(
-        &self,
-        peer_addr: &NodeAddr,
-        msg1: &Msg1Digest,
-        arrival: &Msg1Arrival<'_>,
-    ) -> EstablishSnapshot;
+    /// `peer_addr`: the existing peer's epoch, the max-peers cap, a pending
+    /// outbound dial to the identity, and its silent-session refusal.
+    fn establish_snapshot(&self, peer_addr: &NodeAddr) -> EstablishSnapshot;
 
     /// Snapshot the registry state relevant to classifying an outbound msg2
     /// completion for `peer_addr`: whether the identity is already an active
@@ -753,115 +468,16 @@ impl Fmp {
             .collect()
     }
 
-    /// Decide the per-tick rekey choreography for the peers the shell
-    /// snapshotted, in this priority:
-    ///
-    /// - **Cutover** takes precedence: a peer with a pending session this node
-    ///   initiated and no in-flight rekey cuts over and is considered for
-    ///   nothing else.
-    /// - A pending session this node answered is held, never cut over by the
-    ///   tick: the peer's first frame on the new epoch promotes it. Once its
-    ///   hold has passed it is retired.
-    /// - An expired drain window is completed, and — independently — the rekey
-    ///   trigger fires when the peer is neither mid-rekey, dampened, nor
-    ///   holding a pending session, and its jittered time threshold or send
-    ///   counter is reached. A draining peer can thus both drain and
-    ///   re-trigger in the same tick.
-    ///
-    /// Actions are returned phase-grouped (all cutovers, then all drains, then
-    /// all retirements, then all rekey initiations) to preserve the global
-    /// execution order across peers, which the shared `index_allocator`
-    /// observes: retirements free an index, so they run before initiations
-    /// allocate.
-    pub fn poll_rekey(&self, peers: Vec<PeerSnapshot>, cfg: &RekeyCfg) -> Vec<ConnAction> {
-        let mut cutovers = Vec::new();
-        let mut drains = Vec::new();
-        let mut retires = Vec::new();
-        let mut rekeys = Vec::new();
-        for p in peers {
-            let initiated = p.pending_role == Some(RekeyRole::Initiator);
-            // 1. Initiator-side cutover. A pending this node answered is promoted
-            //    by the peer's first frame on the new epoch, never by this tick.
-            if p.has_pending && !p.rekey_in_progress && initiated {
-                cutovers.push(ConnAction::Cutover { peer: p.addr });
-                continue;
-            }
-            // 1b. A pending the initiator never adopted is retired at its hold.
-            if p.has_pending && !initiated && p.pending_expired {
-                retires.push(ConnAction::RetirePending { peer: p.addr });
-            }
-            // 2. Drain window expiry (does not preclude a trigger below).
-            if p.is_draining && p.drain_expired {
-                drains.push(ConnAction::Drain { peer: p.addr });
-            }
-            // 3. Rekey trigger. A held pending vetoes it: a new cycle's msg2 would
-            //    overwrite the held slot.
-            if p.rekey_in_progress || p.is_dampened || p.has_pending {
-                continue;
-            }
-            let effective_after = cfg.after_secs.saturating_add_signed(p.jitter_secs);
-            if p.elapsed_secs >= effective_after || p.counter >= cfg.after_messages {
-                rekeys.push(ConnAction::InitiateRekey { peer: p.addr });
-            }
-        }
-        cutovers.extend(drains);
-        cutovers.extend(retires);
-        cutovers.extend(rekeys);
-        cutovers
-    }
-
-    /// Decide the rekey-msg1 retransmission choreography for the peers the
-    /// shell snapshotted as having a rekey in flight. A peer whose
-    /// retransmission count has reached `max_resends` has its cycle abandoned;
-    /// otherwise, if its msg1 is due, it is retransmitted with the next
-    /// deadline computed from the shared backoff. Pure over the snapshots.
-    ///
-    /// Actions are returned abandons-first (matching the pre-refactor
-    /// two-pass order), and the shell commits a retransmission's count++ and
-    /// reschedule only on a successful send.
-    pub fn poll_rekey_resends(
-        &self,
-        candidates: Vec<RekeyResendSnapshot>,
-        now_ms: u64,
-        interval_ms: u64,
-        backoff: f64,
-        max_resends: u32,
-    ) -> Vec<ConnAction> {
-        let mut abandons = Vec::new();
-        let mut resends = Vec::new();
-        for c in candidates {
-            if c.resend_count >= max_resends {
-                abandons.push(ConnAction::AbandonRekey { peer: c.peer });
-                continue;
-            }
-            if c.needs_resend {
-                resends.push(ConnAction::ResendRekeyMsg1 {
-                    peer: c.peer,
-                    next_resend_at_ms: next_resend_at_ms(
-                        now_ms,
-                        interval_ms,
-                        backoff,
-                        c.resend_count,
-                    ),
-                    bytes: c.msg1,
-                });
-            }
-        }
-        abandons.extend(resends);
-        abandons
-    }
-
     /// Classify one inbound handshake msg1 from the establish snapshot and the
     /// Noise wire outcome. Pure: reads only `snap` and `wire`, mutates nothing,
     /// consumes nothing. The returned [`InboundDecision`] tells the shell which
     /// effect sequence to drive.
     ///
-    /// Mirrors the pre-refactor `handle_msg1` post-crypto branch order exactly:
-    /// the early max-peers cap gate, then — for an existing same-identity peer —
-    /// the epoch-restart / rekey / duplicate classification, else a net-new
-    /// promote. The pre-refactor `possible_restart` flag is folded away: it was
-    /// forced true whenever `has_existing_peer` held, so gating the block on
-    /// `has_existing_peer` alone is behavior-identical.
+    /// The early max-peers cap gate, then, for an existing same-identity peer,
+    /// the epoch restart (FRC-1201 rule 2), the hand-off of a same-epoch msg1
+    /// to the peer's link machine (rules 3 and 4), or, once that machine has
+    /// asked for it, the restart gates of a replacement (rule 3.3); else a
+    /// net-new promote (rule 1).
     pub fn establish_inbound(
         &self,
         snap: &EstablishSnapshot,
@@ -876,102 +492,20 @@ impl Fmp {
         }
 
         if snap.has_existing_peer {
-            let peer_addr = *wire.peer_identity.node_addr();
+            let peer = *wire.peer_identity.node_addr();
             match (snap.existing_peer_epoch, wire.remote_epoch) {
+                // Epoch mismatch → peer restart (FRC-1201 rule 2).
                 (Some(existing), Some(new)) if existing != new => {
-                    // Epoch mismatch → peer restart.
-                    InboundDecision::RestartThenPromote { peer: peer_addr }
+                    InboundDecision::RestartThenPromote { peer }
                 }
-                _ => {
-                    // Same epoch (or no epoch captured on either side).
-                    let is_rekey = snap.has_session
-                        && snap.existing_link_age_secs >= REKEY_MIN_LINK_AGE_SECS
-                        && snap.existing_session_age_secs >= REKEY_MIN_CUTOVER_AGE_SECS;
-                    if !is_rekey {
-                        // The stored msg2 names the setup msg1's sender index
-                        // and completes no other handshake, so it answers only
-                        // a resend of that msg1. The setup msg1 is also in the
-                        // answered record, so it is matched first or its
-                        // resend would be refused. A copy of an answered rekey
-                        // msg1 is refused here as on an older session; any
-                        // other msg1 is a fresh dial from a peer that lost its
-                        // side of the link.
-                        if snap.setup_match {
-                            return InboundDecision::ResendMsg2 {
-                                msg2: snap.existing_msg2.clone(),
-                            };
-                        }
-                        if snap.msg1_answered_before {
-                            return InboundDecision::Reject {
-                                reason: InboundReject::AnsweredBefore,
-                            };
-                        }
-                        if silent_refusal(snap, wire) {
-                            return InboundDecision::Reject {
-                                reason: InboundReject::SilentBackoff,
-                            };
-                        }
-                        return InboundDecision::ReplaceThenPromote { peer: peer_addr };
-                    }
-                    if !snap.msg1_on_link && snap.link_reachable {
-                        // A peer that is already linked and dials a second
-                        // path sends a link-setup msg1 there. Answered as a
-                        // rekey, it arms a pending the dialer never adopts,
-                        // which then refuses the peer's genuine rekeys and
-                        // vetoes ours for the whole hold. Decided before the
-                        // held answer and the tie-break, so it neither
-                        // resends that answer nor abandons our own rekey.
-                        // With the established connection gone the msg1 is a
-                        // redial, and keeps the rekey path.
-                        return InboundDecision::Reject {
-                            reason: InboundReject::OffLink,
-                        };
-                    }
-                    if snap.pending_new_session {
-                        // A completed rekey is already pending cutover. A
-                        // resend of the msg1 this node answered to arm it
-                        // means the answer was lost: give it again. Any other
-                        // msg1 is refused.
-                        if let Some(answer) = &snap.held_answer
-                            && answer.msg1 == wire.msg1_digest
-                        {
-                            return InboundDecision::ResendRekeyMsg2 {
-                                peer: peer_addr,
-                                msg2: answer.msg2.clone(),
-                            };
-                        }
-                        return InboundDecision::Reject {
-                            reason: InboundReject::PendingSession,
-                        };
-                    }
-                    if snap.msg1_answered_before {
-                        // A copy of a msg1 whose cycle has ended: refuse it
-                        // before it can arm a pending, or, on a tie-break we
-                        // lose, abandon our own rekey.
-                        return InboundDecision::Reject {
-                            reason: InboundReject::AnsweredBefore,
-                        };
-                    }
-                    if snap.rekey_in_progress {
-                        // Dual initiation — smaller NodeAddr wins as initiator.
-                        // Our own rekey is the outbound/initiator side, so reuse
-                        // the shared tie-break with `this_is_outbound = true`.
-                        if cross_connection_winner(&snap.our_node_addr, &peer_addr, true) {
-                            return InboundDecision::Reject {
-                                reason: InboundReject::DualRekeyWon,
-                            };
-                        }
-                        // We lose → abandon ours, then respond as responder.
-                        return InboundDecision::RekeyRespond {
-                            peer: peer_addr,
-                            abandon_first: true,
-                        };
-                    }
-                    InboundDecision::RekeyRespond {
-                        peer: peer_addr,
-                        abandon_first: false,
-                    }
-                }
+                // Same epoch (or no epoch captured on either side): rules 3
+                // and 4 are the peer's link machine's, which asks for the
+                // restart gates only for a fresh dial on a young link.
+                _ if !snap.replace => InboundDecision::Rekey { peer },
+                _ if silent_refusal(snap, wire) => InboundDecision::Reject {
+                    reason: InboundReject::SilentBackoff,
+                },
+                _ => InboundDecision::ReplaceThenPromote { peer },
             }
         } else if silent_refusal(snap, wire) {
             InboundDecision::Reject {
@@ -983,17 +517,36 @@ impl Fmp {
         }
     }
 
-    /// Classify one outbound `handle_msg2` completion from the outbound snapshot.
-    /// Pure: reads only `snap`, mutates nothing.
+    /// Classify one outbound `handle_msg2` completion from the outbound snapshot
+    /// and `epoch`, the startup epoch the msg2 carried. Pure: reads only its
+    /// arguments, mutates nothing.
     ///
-    /// Mirrors the pre-refactor branch exactly: an existing same-identity peer
-    /// makes this a cross-connection resolved by the (pre-evaluated) tie-break —
-    /// swap on a win, keep on a loss — otherwise a net-new promote.
-    pub fn establish_outbound(&self, snap: &OutboundSnapshot) -> OutboundDecision {
+    /// No existing same-identity peer is a net-new promote. One whose epoch on
+    /// record differs from the msg2's has restarted, and is replaced whatever
+    /// the tie-break. An existing peer set up by an earlier dial of ours is
+    /// left for this one, whichever address is smaller: the peer's answer to
+    /// a later dial supersedes the earlier one. On a link too young to rekey
+    /// a responder answers a fresh msg1 from a peer it holds only by
+    /// replacing that peering with it (FRC-1201 Section 5.7, rule 3.3); on an
+    /// older link it answers it as a rekey, which our first frame under the
+    /// new session completes. The order the answers arrive in stands for the
+    /// order the peer gave them, and nothing the dialer holds tells the two
+    /// apart: a msg2 for the earlier dial that arrives after the later one's
+    /// moves this node to the session the peer discarded. Otherwise this is a
+    /// cross-connection resolved by the (pre-evaluated) tie-break: swap on a
+    /// win, keep on a loss.
+    pub fn establish_outbound(
+        &self,
+        snap: &OutboundSnapshot,
+        epoch: Option<[u8; 8]>,
+    ) -> OutboundDecision {
         if !snap.has_existing_peer {
             return OutboundDecision::Promote;
         }
-        if snap.our_outbound_wins {
+        if epochs_differ(snap.existing_peer_epoch, epoch) {
+            return OutboundDecision::RestartThenPromote;
+        }
+        if snap.own_dial || snap.our_outbound_wins {
             OutboundDecision::CrossConnectionSwap
         } else {
             OutboundDecision::CrossConnectionKeep

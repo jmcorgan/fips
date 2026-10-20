@@ -160,6 +160,65 @@ pub(super) async fn arm_pending(e: &mut Established, sender_index: u32) -> Vec<u
     x
 }
 
+/// Arm a responder pending on `e` with a rekey msg1 carrying `sender_index`
+/// from a handshake the test completes as the sender: the node's msg2 is
+/// read off the sender's socket and finishes it. Returns the sender's half
+/// of the pending session and the node's index for it, with which a frame
+/// the node adopts the pending on can be sealed.
+pub(super) async fn arm_pending_with_peer(
+    e: &mut Established,
+    sender_index: u32,
+) -> (NoiseSession, SessionIndex) {
+    use crate::proto::fmp::wire::Msg2Header;
+    let tid = TransportId::new(1);
+    let me = PeerIdentity::from_pubkey_full(e.node.identity().pubkey_full());
+    let mut conn = super::outbound_leg(LinkId::new(0x0BAD_C0DE), me, 2000);
+    let noise_msg1 = conn
+        .start_handshake(e.sender.keypair(), EPOCH, 2000)
+        .expect("the sender's msg1");
+    let x = build_msg1(SessionIndex::new(sender_index), &noise_msg1);
+    drain(&e.sock).await;
+    e.node.handle_msg1(packet(tid, &e.addr, x, 2000)).await;
+    let mut buf = [0u8; 2048];
+    let (n, _) = timeout(Duration::from_millis(500), e.sock.recv_from(&mut buf))
+        .await
+        .expect("the node answers the rekey msg1")
+        .expect("the msg2 is read");
+    let header = Msg2Header::parse(&buf[..n]).expect("the answer is a msg2");
+    conn.complete_handshake(&buf[header.noise_msg2_offset..n], 2000)
+        .expect("the node's msg2 completes the sender's handshake");
+    let session = conn.take_session().expect("the sender's session");
+    (session, header.sender_idx)
+}
+
+/// Deliver to `e`'s node a heartbeat the sender seals under `session`, its
+/// half of the node's session with index `index`, with key-epoch bit `k`.
+pub(super) async fn sender_frame(
+    e: &mut Established,
+    session: &mut NoiseSession,
+    index: SessionIndex,
+    k: bool,
+) {
+    use crate::proto::fmp::wire::{FLAG_KEY_EPOCH, build_encrypted, build_established_header};
+    let plaintext = [
+        0,
+        0,
+        0,
+        0,
+        crate::proto::link::LinkMessageType::Heartbeat.to_byte(),
+    ];
+    let counter = session.current_send_counter();
+    let flags = if k { FLAG_KEY_EPOCH } else { 0 };
+    let header = build_established_header(index, counter, flags, plaintext.len() as u16);
+    let ciphertext = session
+        .encrypt_with_aad(&plaintext, &header)
+        .expect("the sender seals");
+    let frame = build_encrypted(&header, &ciphertext);
+    e.node
+        .handle_encrypted_frame(packet(TransportId::new(1), &e.addr, frame, 2100))
+        .await;
+}
+
 /// A resend of the setup msg1 inside the rekey age is answered with the
 /// stored msg2, and the line says that msg2 answers it. A fresh msg1 at the
 /// same epoch is not answered with that msg2, which could not complete it.
@@ -344,7 +403,7 @@ async fn a_rekey_msg1_that_loses_the_dual_initiation_tie_break_logs_its_path() {
     node.get_peer_mut(&peer)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    arm_local_rekey(&mut node, &sender, &peer, tid);
+    arm_local_rekey(&mut node, &sender, &peer, tid).await;
 
     let theirs = craft_msg1_wire(&node, &sender, EPOCH, SessionIndex::new(0xAAAA), 2000);
     let logs = msg1_logged(&mut node, packet(tid, &addr, theirs.clone(), 2000)).await;
@@ -365,11 +424,23 @@ async fn a_msg1_from_an_ended_rekey_cycle_logs_its_path() {
     let mut e = established(31).await;
     let tid = TransportId::new(1);
     let x = arm_pending(&mut e, 0x0E01).await;
+    // The pending the copy armed passes its hold unadopted, and the link
+    // machine retires it at its next poll. Just past the 120 s hold: on
+    // Windows an `Instant` cannot go back past the host's boot, so a
+    // backdate longer than a fresh runner's uptime is silently a no-op.
     e.node
         .get_peer_mut(&e.peer)
         .unwrap()
-        .retire_pending()
-        .expect("the responder pending is retired");
+        .backdate_pending(Duration::from_secs(150));
+    e.node.poll_link_rekeys().await;
+    assert!(
+        e.node
+            .get_peer(&e.peer)
+            .unwrap()
+            .pending_new_session()
+            .is_none(),
+        "the responder pending is retired"
+    );
     let logs = msg1_logged(&mut e.node, packet(tid, &e.addr, x.clone(), 3000)).await;
 
     let line = expect_line(
@@ -551,11 +622,13 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
     let tid = TransportId::new(1);
     let target = PeerIdentity::from_pubkey_full(to.node.identity().pubkey_full());
     let link_id = from.node.allocate_link_id();
-    let our_index = from.node.index_allocator.allocate().unwrap();
+    let our_index_lease =
+        fips_core::proto::rekey::allocate(&mut from.node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_index_lease.index());
     from.node
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id, target, 1000)
-                .with_our_index(our_index)
+                .with_our_index(our_index_lease)
                 .with_transport_id(tid)
                 .with_source_addr(to.addr.clone()),
         )

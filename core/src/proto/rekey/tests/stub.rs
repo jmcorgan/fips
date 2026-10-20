@@ -1580,7 +1580,7 @@ pub(crate) fn pair_jittered<P: Stub>(
         let peer = done.remote;
         let bonded = Bond::Key(peer).check(done).expect("the setup bonds");
         let facts = SetupFacts {
-            peer_epoch,
+            peer_epoch: Some(peer_epoch),
             k: false,
             link_since: TestInstant(now),
             started: TestInstant(now),
@@ -1710,18 +1710,11 @@ pub(crate) fn rebuild<P: Stub>(
         &ei,
         &er,
         peer.key,
-        carry.peer_epoch,
+        carry.peer_epoch.unwrap_or_default(),
         Some(7),
     );
     let bonded = Bond::Key(peer.key).check(done).expect("bonds");
-    let facts = SetupFacts {
-        peer_epoch: carry.peer_epoch,
-        k: carry.k,
-        link_since: carry.link_since,
-        started: carry.started,
-        peer_k: carry.peer_k,
-        record: carry.record,
-    };
+    let facts = SetupFacts::from(carry);
     let me = node.local.addr();
     let key = peer.key;
     let (m, out) = node.with(|_, env| {

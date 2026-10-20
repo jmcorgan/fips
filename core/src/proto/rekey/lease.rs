@@ -73,6 +73,17 @@ impl IndexLease {
         self.index
     }
 
+    /// A lease on `index` that no allocator handed out, for a test of the
+    /// root crate that stands up a link with a known index. Built only for
+    /// tests and behind `test-hooks`, which the root crate enables from its
+    /// dev-dependencies only, so no production build can make a lease
+    /// except through [`allocate`].
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn for_test(index: u32) -> Self {
+        Self { index, live: true }
+    }
+
     /// Give the lease up and return the index, for the shell to free in the
     /// allocator it was drawn from.
     pub fn release(mut self) -> u32 {

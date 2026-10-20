@@ -53,7 +53,6 @@ pub(crate) enum Step {
     PollNostrRendezvous,
     PollLanRendezvous,
     DrivePeerTimers,
-    ResendPendingRekeys,
     PollSessionRekeys,
     PurgeIdleSessions,
     PurgeExpiredPathMtu,
@@ -65,7 +64,7 @@ pub(crate) enum Step {
     CheckMmpReports,
     CheckSessionMmpReports,
     CheckLinkHeartbeats,
-    CheckRekey,
+    PollLinkRekeys,
     CheckPendingLookups,
     PollProbes,
     PollTransportDiscovery,
@@ -91,7 +90,6 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::PollNostrRendezvous,
     Step::PollLanRendezvous,
     Step::DrivePeerTimers,
-    Step::ResendPendingRekeys,
     Step::PollSessionRekeys,
     Step::PurgeIdleSessions,
     Step::PurgeExpiredPathMtu,
@@ -103,7 +101,7 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::CheckMmpReports,
     Step::CheckSessionMmpReports,
     Step::CheckLinkHeartbeats,
-    Step::CheckRekey,
+    Step::PollLinkRekeys,
     Step::CheckPendingLookups,
     Step::PollProbes,
     Step::PollTransportDiscovery,
@@ -124,7 +122,6 @@ impl Step {
             Step::PollNostrRendezvous => "poll_nostr_rendezvous",
             Step::PollLanRendezvous => "poll_lan_rendezvous",
             Step::DrivePeerTimers => "drive_peer_timers",
-            Step::ResendPendingRekeys => "resend_pending_rekeys",
             Step::PollSessionRekeys => "poll_session_rekeys",
             Step::PurgeIdleSessions => "purge_idle_sessions",
             Step::PurgeExpiredPathMtu => "purge_expired_path_mtu",
@@ -136,7 +133,7 @@ impl Step {
             Step::CheckMmpReports => "check_mmp_reports",
             Step::CheckSessionMmpReports => "check_session_mmp_reports",
             Step::CheckLinkHeartbeats => "check_link_heartbeats",
-            Step::CheckRekey => "check_rekey",
+            Step::PollLinkRekeys => "poll_link_rekeys",
             Step::CheckPendingLookups => "check_pending_lookups",
             Step::PollProbes => "poll_probes",
             Step::PollTransportDiscovery => "poll_transport_discovery",
@@ -379,9 +376,9 @@ mod tests {
     #[test]
     fn emitted_row_count_matches_build() {
         let emitted = STEPS.iter().filter(|s| s.emitted()).count();
-        // 24 unconditional subsystem steps + the whole-tick span, plus the
+        // 23 unconditional subsystem steps + the whole-tick span, plus the
         // three conditionally-compiled steps where this build has them.
-        let mut expected = 25;
+        let mut expected = 24;
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             expected += 1;
         }
@@ -398,12 +395,12 @@ mod tests {
     fn record_accumulates_count_max_and_total() {
         let _guard = serial();
         reset();
-        record(Domain::Tick, Step::CheckRekey, Duration::from_nanos(10));
-        record(Domain::Tick, Step::CheckRekey, Duration::from_nanos(30));
-        let (count, max, total) = take_step(Domain::Tick, Step::CheckRekey);
+        record(Domain::Tick, Step::PollLinkRekeys, Duration::from_nanos(10));
+        record(Domain::Tick, Step::PollLinkRekeys, Duration::from_nanos(30));
+        let (count, max, total) = take_step(Domain::Tick, Step::PollLinkRekeys);
         assert_eq!((count, max, total), (2, 30, 40));
         // Taking clears the slot.
-        assert_eq!(take_step(Domain::Tick, Step::CheckRekey), (0, 0, 0));
+        assert_eq!(take_step(Domain::Tick, Step::PollLinkRekeys), (0, 0, 0));
     }
 
     #[test]

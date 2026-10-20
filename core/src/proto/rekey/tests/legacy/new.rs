@@ -143,6 +143,12 @@ pub(crate) struct NewFmp {
     last_hb: u64,
     dead: bool,
     label: String,
+    /// Reap the link as the root crate's shell does: 30 s with no
+    /// authenticated frame under the current epoch since the later of the
+    /// last one and the last cutover, which resets the link's MMP receiver.
+    pub(crate) shipped: bool,
+    /// When the machine last reported a cutover.
+    cut: u64,
 }
 
 impl NewFmp {
@@ -182,6 +188,8 @@ impl NewFmp {
             last_hb: now,
             dead: false,
             label: String::from(label),
+            shipped: false,
+            cut: now,
         };
         let done = crate::proto::rekey::Completed::<Ik> {
             session: alloc::boxed::Box::new(crate::proto::fmp::rekey::ik::LinkKeys::new(session)),
@@ -192,7 +200,7 @@ impl NewFmp {
         let bonded = Bond::Key(peer).check(done).expect("the link setup bonds");
         let ids = crate::proto::rekey::Ids::new(ours, theirs, n.transport);
         let facts = SetupFacts {
-            peer_epoch,
+            peer_epoch: Some(peer_epoch),
             k,
             link_since: TestInstant(now),
             started: TestInstant(now),
@@ -297,8 +305,11 @@ impl NewFmp {
                 Output::Delegate { .. } | Output::Revoke { .. } => {
                     panic!("a node with no decrypt workers was asked to delegate")
                 }
-                other @ (Output::Installed { .. }
-                | Output::Retired { .. }
+                other @ Output::Installed { .. } => {
+                    self.cut = now;
+                    self.notes.push(note(&other));
+                }
+                other @ (Output::Retired { .. }
                 | Output::Reverted { .. }
                 | Output::PeerRestarted { .. }
                 | Output::Rekeyed { .. }
@@ -401,7 +412,10 @@ impl End for NewFmp {
             }
         }
         let v = self.machine().view();
-        let last = v.last_rx.unwrap_or(v.link_since).max(v.link_since);
+        let mut last = v.last_rx.unwrap_or(v.link_since).max(v.link_since);
+        if self.shipped {
+            last = last.max(TestInstant(self.cut));
+        }
         if now.saturating_sub(last.0) > 30_000 {
             let m = self.m.take().expect("a live machine");
             let (outputs, _) = m.close(Close::LinkDead);
@@ -621,7 +635,7 @@ impl NewFsp {
             .check(done)
             .expect("the session setup bonds");
         let facts = SetupFacts {
-            peer_epoch,
+            peer_epoch: Some(peer_epoch),
             k: false,
             link_since: TestInstant(now),
             started: TestInstant(now),

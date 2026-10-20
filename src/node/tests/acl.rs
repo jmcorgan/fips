@@ -96,11 +96,12 @@ async fn outbound_denied_at_msg2(
     let node_b_addr = *peer_b_identity.node_addr();
 
     let link_id_a = node_a.allocate_link_id();
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id)
                 .with_source_addr(remote_addr.clone()),
         )

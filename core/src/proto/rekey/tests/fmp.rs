@@ -1050,18 +1050,29 @@ fn counter_limits_force_a_rekey_and_then_tear_down() {
         matches!(evs.first(), Some(Ev::Bind(_, _, None, Purpose::Attempt))),
         "{evs:?}"
     );
+    // Unanswered, that attempt ends at its deadline, and the met soft limit
+    // starts the next in the same poll, past the back-off the abandon set.
+    let evs = a.poll(81_030);
+    assert!(
+        evs.contains(&Ev::Abandoned(Abandon::Unanswered)),
+        "the attempt ends at its deadline: {evs:?}"
+    );
+    assert!(
+        matches!(evs.last(), Some(Ev::Send(MsgKind::Msg1, _, _))),
+        "a met soft limit passes the back-off: {evs:?}"
+    );
     // At the hard limit seals are refused and the poll tears down (the
     // prompt at the adoption took counter 0).
     for _ in 51..60 {
-        a.data(51_300, DATA);
+        a.data(81_300, DATA);
     }
     let m = a.m.as_mut().expect("machine");
     assert_eq!(
-        m.seal(TestInstant(51_400)).map(|_| ()),
+        m.seal(TestInstant(81_400)).map(|_| ()),
         Err(SealRefusal::Exhausted)
     );
     assert_eq!(
-        a.poll(51_500),
+        a.poll(81_500),
         vec![Ev::Teardown(Teardown::CounterExhausted)]
     );
     // A frame with the counter's top value is refused without a panic.

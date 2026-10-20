@@ -31,7 +31,6 @@
 
 use super::*;
 use crate::config::UdpConfig;
-use crate::noise::HandshakeState;
 use crate::peer::ActivePeer;
 use crate::transport::udp::UdpTransport;
 use crate::transport::{TransportHandle, packet_channel};
@@ -99,9 +98,8 @@ fn inject_dummy_peers(node: &mut Node, count: usize) {
 /// down and the fresh handshake is promoted in its place.
 ///
 /// Oracle: after the push, the identity is still present but is a NEW peer —
-/// it now holds a live Noise session (the stale one had none), its stored
-/// remote epoch has advanced to the restart value, and it occupies a fresh link
-/// and session index. `schedule_reconnect` is a no-op under a bare test config
+/// it holds a live Noise session, its stored remote epoch has advanced to the
+/// restart value, and it occupies a fresh link and session index. `schedule_reconnect` is a no-op under a bare test config
 /// (no auto-connect peer configured), so `retry_pending` stays empty.
 #[tokio::test]
 async fn chartest_msg1_epoch_restart_replaces_active_peer() {
@@ -117,13 +115,13 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
     let new_epoch = [2u8; 8];
     let old_link = LinkId::new(4242);
 
-    // Pre-existing active peer at the OLD epoch, sessionless. `current_addr`
-    // makes `should_admit_msg1` recognize the source as an established peer.
-    let mut old_peer = ActivePeer::new(sender_pid, old_link, 1000);
+    // Pre-existing active peer at the OLD epoch, keyed (a peer's epoch lives
+    // with its keys). `current_addr` makes `should_admit_msg1` recognize the
+    // source as an established peer.
+    let mut old_peer = keyed_peer(&node, &sender, old_link, 1000);
     old_peer.set_remote_epoch(Some(old_epoch));
     old_peer.set_current_addr(transport_id, peer_addr.clone());
     node.peers.insert(sender_addr, old_peer);
-    assert!(!node.get_peer(&sender_addr).unwrap().has_session());
     assert_eq!(
         node.get_peer(&sender_addr).unwrap().remote_epoch(),
         Some(old_epoch)
@@ -275,15 +273,15 @@ async fn chartest_msg1_duplicate_active_same_epoch_resends_stored_msg2() {
     let stored_msg2 = vec![0xD0, 0xD1, 0xD2, 0xD3];
     let link_id = LinkId::new(555);
     let data = craft_msg1_wire(&node, &sender, epoch, SessionIndex::new(0x33), 2000);
-    let mut peer = ActivePeer::new(sender_pid, link_id, 1000);
+    let mut peer = keyed_peer(&node, &sender, link_id, 1000);
     peer.set_remote_epoch(Some(epoch));
     peer.set_current_addr(transport_id, peer_addr.clone());
     peer.set_handshake_msg2(stored_msg2.clone());
-    peer.note_setup(crate::proto::fmp::Msg1Digest::of(&data));
+    peer.note_setup(&data, &stored_msg2);
     node.peers.insert(sender_addr, peer);
     // Session age is ~0 (< 30s) → the rekey gate is false → a same-epoch msg1
     // classifies as a duplicate, not a rekey initiation.
-    assert!(!node.get_peer(&sender_addr).unwrap().has_session());
+    let _ = sender_pid;
 
     let packet = ReceivedPacket {
         transport_id,
@@ -333,10 +331,11 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     // different source address.
     let out_link = node.allocate_link_id();
     let out_addr = TransportAddr::from_string("10.0.0.9:2121");
-    let out_index = node.index_allocator.allocate().unwrap();
+    let out_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let out_index = crate::utils::index::SessionIndex::new(out_index_lease.index());
     node.seed_handshake_machine(
         HandshakeSeed::outbound(out_link, sender_pid, 1000)
-            .with_our_index(out_index)
+            .with_our_index(out_index_lease)
             .with_transport_id(transport_id)
             .with_source_addr(out_addr.clone()),
     )
@@ -414,10 +413,11 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
     // `has_pending_outbound_to_peer`, which turns off the early silent-drop.
     let out_link = node.allocate_link_id();
     let out_addr = TransportAddr::from_string("10.0.0.9:2121");
-    let out_index = node.index_allocator.allocate().unwrap();
+    let out_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let out_index = crate::utils::index::SessionIndex::new(out_index_lease.index());
     node.seed_handshake_machine(
         HandshakeSeed::outbound(out_link, sender_pid, 1000)
-            .with_our_index(out_index)
+            .with_our_index(out_index_lease)
             .with_transport_id(transport_id)
             .with_source_addr(out_addr.clone()),
     )
@@ -517,11 +517,12 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
 
     // A initiates to B.
     let link_a_out = node_a.allocate_link_id();
-    let out_index_a = node_a.index_allocator.allocate().unwrap();
+    let out_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let out_index_a = crate::utils::index::SessionIndex::new(out_index_a_lease.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_a_out, peer_b_identity, 1000)
-                .with_our_index(out_index_a)
+                .with_our_index(out_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -554,11 +555,12 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
 
     // B initiates to A.
     let link_b_out = node_b.allocate_link_id();
-    let out_index_b = node_b.index_allocator.allocate().unwrap();
+    let out_index_b_lease = fips_core::proto::rekey::allocate(&mut node_b.index_allocator).unwrap();
+    let out_index_b = crate::utils::index::SessionIndex::new(out_index_b_lease.index());
     node_b
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_b_out, peer_a_identity, 1000)
-                .with_our_index(out_index_b)
+                .with_our_index(out_index_b_lease)
                 .with_transport_id(transport_id_b)
                 .with_source_addr(remote_addr_a.clone()),
         )
@@ -724,26 +726,17 @@ pub(super) fn sender_with_addr_relation(node: &Node, want_greater: bool) -> Iden
     }
 }
 
-/// Arm a local in-flight (initiator) rekey on `node`'s peer for `sender`, with a
-/// real allocated index registered in `peers_by_index`/`pending_outbound` (as a
-/// genuine in-flight rekey would be). Returns the armed rekey index.
-pub(super) fn arm_local_rekey(
+/// Arm a local in-flight (initiator) rekey on `node`'s link to `sender`, as
+/// its link machine starts one, whatever the link's age: its index bound in
+/// `peers_by_index` for msg2 dispatch and its msg1 sent on the link. Returns
+/// the attempt's index.
+pub(super) async fn arm_local_rekey(
     node: &mut Node,
-    sender: &Identity,
+    _sender: &Identity,
     sender_addr: &NodeAddr,
-    transport_id: TransportId,
+    _transport_id: TransportId,
 ) -> SessionIndex {
-    let rekey_index = node.index_allocator.allocate().unwrap();
-    node.peers_by_index
-        .insert((transport_id, rekey_index.as_u32()), *sender_addr);
-    node.pending_outbound
-        .insert((transport_id, rekey_index.as_u32()), LinkId::new(0xF00D));
-    let local = Identity::generate();
-    let hs = HandshakeState::new_initiator(local.keypair(), sender.pubkey_full());
-    node.get_peer_mut(sender_addr)
-        .unwrap()
-        .set_rekey_state(hs, rekey_index, vec![0xAB; 64], 0);
-    rekey_index
+    super::start_link_rekey(node, sender_addr).await
 }
 
 /// Rekey-responder: a genuine rekey msg1 (a fresh IK handshake at the SAME
@@ -893,9 +886,16 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
     node.get_peer_mut(&sender_addr)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id);
+    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id).await;
     assert!(node.get_peer(&sender_addr).unwrap().rekey_in_progress());
     let index_count_before = node.index_allocator.count();
+    // Our own rekey msg1 went out to the peer's socket; take it off.
+    let mut buf = [0u8; 2048];
+    let ours = timeout(Duration::from_millis(500), peer_sock.recv_from(&mut buf)).await;
+    assert!(
+        ours.is_ok_and(|r| r.is_ok()),
+        "control: our rekey msg1 went out"
+    );
 
     // Their simultaneous rekey msg1 arrives.
     let data = craft_msg1_wire(&node, &sender, epoch, SessionIndex::new(0xAAAA), 2000);
@@ -926,11 +926,6 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
             .contains_key(&(transport_id, rekey_index.as_u32())),
         "our rekey index still registered in peers_by_index"
     );
-    assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
-        "our rekey pending_outbound entry retained"
-    );
     assert_eq!(
         node.index_allocator.count(),
         index_count_before,
@@ -957,7 +952,7 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
 /// responder.
 ///
 /// Oracle: our in-flight rekey is abandoned (`rekey_in_progress` cleared, the
-/// abandoned index freed and unregistered from `pending_outbound`), the new
+/// abandoned index freed and unregistered from `peers_by_index`), the new
 /// session is stored as pending with `pending_their_index` == the rekey msg1
 /// sender index, the pending index is registered, and a rekey msg2 is emitted.
 #[tokio::test]
@@ -987,8 +982,15 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
     node.get_peer_mut(&sender_addr)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id);
+    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id).await;
     assert!(node.get_peer(&sender_addr).unwrap().rekey_in_progress());
+    // Our own rekey msg1 went out to the peer's socket; take it off.
+    let mut buf = [0u8; 2048];
+    let ours = timeout(Duration::from_millis(500), peer_sock.recv_from(&mut buf)).await;
+    assert!(
+        ours.is_ok_and(|r| r.is_ok()),
+        "control: our rekey msg1 went out"
+    );
 
     // Their simultaneous rekey msg1 arrives.
     let rekey_sender_index = SessionIndex::new(0xCCCC);
@@ -1021,9 +1023,13 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
 
     assert!(
         !node
-            .pending_outbound
+            .peers_by_index
             .contains_key(&(transport_id, rekey_index.as_u32())),
-        "abandoned rekey pending_outbound entry removed"
+        "abandoned rekey index unregistered"
+    );
+    assert!(
+        !node.index_allocator.is_allocated(rekey_index),
+        "abandoned rekey index freed"
     );
     assert!(
         node.peers_by_index
@@ -1044,14 +1050,12 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
 // reuses this module's rekey arming and establish helpers, so it lives here.
 // ===========================================================================
 
-/// A rekey cycle abandoned for exhausting its msg1 retransmission budget must
-/// return its session index to the allocator and clear both registry entries
-/// keyed by it, leaving the live session untouched.
+/// A rekey cycle abandoned at its attempt deadline must return its session
+/// index to the allocator and clear its dispatch registration, leaving the
+/// live session untouched.
 ///
-/// `handshake_max_resends = 0` fires the abandon on the first
-/// `resend_rekeys_at` call: the classifier tests `resend_count >=
-/// max_resends` before it consults the resend-due predicate, so the clock
-/// is out of the path entirely.
+/// With `handshake_max_resends = 0` the msg1 is never resent and the attempt
+/// ends one tick after its first copy.
 #[tokio::test]
 async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
     let mut config = Config::new();
@@ -1077,7 +1081,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         .expect("peer established")
         .our_index()
         .expect("the established peer holds a session index");
-    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id);
+    let rekey_index = arm_local_rekey(&mut node, &sender, &sender_addr, transport_id).await;
     let allocated_before = node.index_allocator.count();
 
     // Controls: without these the assertions after the abandon could pass
@@ -1091,14 +1095,11 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
             .contains_key(&(transport_id, rekey_index.as_u32())),
         "control: the rekey index is registered for dispatch"
     );
-    assert!(
-        node.pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
-        "control: the rekey index is registered for msg2 dispatch"
-    );
 
-    // The rekey msg2 never arrives; the first poll spends the (zero) budget.
-    node.resend_rekeys_at(2000).await;
+    // The rekey msg2 never arrives; the first poll past the deadline ends
+    // the attempt.
+    crate::time::advance(Duration::from_millis(1_100));
+    node.poll_link_rekeys().await;
 
     let p = node.get_peer(&sender_addr).expect("peer still present");
     assert!(
@@ -1121,12 +1122,6 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
             .peers_by_index
             .contains_key(&(transport_id, rekey_index.as_u32())),
         "the abandoned cycle must clear its dispatch registration"
-    );
-    assert!(
-        !node
-            .pending_outbound
-            .contains_key(&(transport_id, rekey_index.as_u32())),
-        "the abandoned cycle must clear its msg2 dispatch entry"
     );
 
     // The limb that catches a fix binding the wrong index: the live session is

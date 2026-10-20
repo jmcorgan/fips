@@ -97,14 +97,41 @@ sleep.
   profiles against them, the same for the session node this release
   ships (the machine polled on the shell's tick), and the bounded
   explorer over the same pairs; its README describes it. It exists on master
-  only: next's merge of the production profiles replaces it.
+  only: next's merge of the production profiles replaces it. Compiled only
+  with the crate's `slow-tests` feature.
 - `regress.rs`: scripted schedules of historical defects and adversarial
   traces, each run with a zero O2 bound and each asserting that it reached
   the state it targets, so a schedule that drifts tests nothing loudly.
+- `survivors.rs`: scans the code of every non-test source file of the
+  core for a name the deployed rekey code of either layer had: the
+  session core's stateless decisions and snapshots, the timer cutover,
+  the tie-break at a setup and the session's transitional moves; the link
+  core's stateless poll, snapshots and their fields, configuration, rekey
+  effects and the trait methods listing the peers it polled, the rekey arms
+  of its inbound classification, the record of answered msg1s and its
+  moves, the shell's rekey vocabulary, the drain and dampening constants, the
+  link's transitional moves (the cross-connection replace, the offer at
+  promotion, the worker acceptance and the epoch record outside `step`);
+  and the policy both layers' deployed rules were held in, with its
+  constants and every field it had, and the fault switches of the session
+  policy. The protocol modules are also scanned for the link core's
+  snapshot type, whose name the statistics history shares, the link core
+  for its drain effect, whose name the machine's drain record shares, and
+  this directory's parent for the transitional module's name and the
+  deployed-rule reads the machine kept while a link ran those rules. Code is read
+  through `rekey::code_idents`, which the root crate's scan of its shells
+  shares, so comments and literals are not scanned; the scan also fails
+  if that reader blanked a line opening an item. A planted line shows each
+  list finds what it holds, and named files show the scan reaches both
+  layers, their profiles, the machine, its link accessors and its
+  parameters. A new transitional move or test seam must not take a
+  banned name: rename it rather than removing the name from the list.
 - `faults.rs`: the meta-test of the guard switches (`../faults.rs`). Each
   row's tests run in a child process of this test binary with its
   switches on and must fail; each named test runs once with none and must
-  pass; a switch with no row fails the test.
+  pass; a switch with no row fails the test. Compiled only with the
+  crate's `slow-tests` feature, since it re-runs the slowest tests many
+  times; GitHub CI's Linux job runs it on every push.
 - `candidates.rs`, `ladder.rs`, `lease.rs`, `params.rs`, `reason.rs`,
   `record.rs`, `resolve.rs`: tests of one module's private items, each
   attached from that module with `#[path]`, so their names are

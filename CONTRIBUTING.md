@@ -135,7 +135,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo clippy -p fips-core --lib -- -D warnings
 cargo clippy -p fips-core --all-targets -- -D warnings
-cargo test -p fips-core
+cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings
+cargo test -p fips-core --features slow-tests
 ```
 
 CI runs clippy twice, once with `--all-features` and once with the

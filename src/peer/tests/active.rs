@@ -2,7 +2,14 @@
 
 use super::*;
 use crate::Identity;
+use crate::node::REKEY_JITTER_SECS;
 use crate::node::diag::HsLine;
+use std::sync::LazyLock;
+
+/// A lease on `index` for a test peer, outside any allocator.
+fn lease(index: u32) -> IndexLease {
+    IndexLease::for_test(index)
+}
 
 fn make_peer_identity() -> PeerIdentity {
     let identity = Identity::generate();
@@ -54,7 +61,7 @@ fn test_npub_cache_matches_identity_with_session() {
     let identity = make_peer_identity();
     let (session, _peer_session) = ik_session_pair();
 
-    let peer = ActivePeer::with_session(
+    let peer = ActivePeer::with_test_session(
         identity,
         LinkId::new(1),
         1000,
@@ -253,8 +260,7 @@ fn test_rekey_jitter_in_range() {
     // Every newly constructed peer's jitter must lie in the
     // symmetric range [-REKEY_JITTER_SECS, +REKEY_JITTER_SECS].
     for _ in 0..100 {
-        let identity = make_peer_identity();
-        let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+        let peer = peer_with_current(ik_session_pair().1);
         let j = peer.rekey_jitter_secs();
         assert!(
             (-REKEY_JITTER_SECS..=REKEY_JITTER_SECS).contains(&j),
@@ -275,8 +281,7 @@ fn test_rekey_jitter_mean_near_zero() {
     let mut sum: i64 = 0;
     let n: i64 = 200;
     for _ in 0..n {
-        let identity = make_peer_identity();
-        let peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+        let peer = peer_with_current(ik_session_pair().1);
         sum += peer.rekey_jitter_secs();
     }
     let mean = sum / n;
@@ -288,74 +293,36 @@ fn test_rekey_jitter_mean_near_zero() {
     );
 }
 
-/// Put a peer into a rekey-in-progress state with a real (initiator)
-/// handshake so the msg1 resend budget can be exercised.
-fn arm_rekey(peer: &mut ActivePeer) {
-    let remote = Identity::generate();
-    let local = Identity::generate();
-    let hs = NoiseHandshakeState::new_initiator(local.keypair(), remote.pubkey_full());
-    peer.set_rekey_state(hs, SessionIndex::new(7), vec![0xAB; 64], 0);
-}
-
-#[test]
-fn rekey_msg1_resend_count_increments_and_caps() {
-    let identity = make_peer_identity();
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
-    arm_rekey(&mut peer);
-
-    assert!(peer.rekey_in_progress());
-    assert_eq!(peer.rekey_msg1_resend_count(), 0);
-    assert!(peer.rekey_msg1().is_some());
-
-    // The driver records one resend per call; the count tracks them.
-    let max_resends: u32 = 5;
-    for i in 0..max_resends {
-        peer.record_rekey_msg1_resend(1000 + i as u64 * 100);
-        assert_eq!(peer.rekey_msg1_resend_count(), i + 1);
-    }
-    assert_eq!(peer.rekey_msg1_resend_count(), max_resends);
-}
-
-#[test]
-fn rekey_msg1_budget_exhaustion_abandons_cleanly() {
-    let identity = make_peer_identity();
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
-    arm_rekey(&mut peer);
-
-    // Simulate the driver exhausting its budget.
-    let max_resends: u32 = 5;
-    for i in 0..max_resends {
-        peer.record_rekey_msg1_resend(1000 + i as u64 * 100);
-    }
-    assert_eq!(peer.rekey_msg1_resend_count(), max_resends);
-
-    // Budget exhausted -> abandon: state clears and the counter resets.
-    peer.abandon_rekey();
-    assert!(!peer.rekey_in_progress());
-    assert!(peer.rekey_msg1().is_none());
-    assert_eq!(peer.rekey_msg1_resend_count(), 0);
-}
-
-// === FMP rekey cutover: authenticate-before-promote ===
+// === Link rekeys driven through the machine ===
 //
-// IK-adapted analogue of the FSP trial-decrypt tests
-// (node/session/mod.rs `trial_decrypt_picks_pending_and_promotes` /
-// `trial_decrypt_failed_slot_leaves_replay_window_intact`). The FMP
-// cutover is gated on an authenticated decrypt against `pending`, not
-// the bare header K-bit. These tests exercise that primitive:
-// `pending_new_session_mut()` trial-decrypt followed by
-// `handle_peer_kbit_flip()` promotion.
+// Two ends of one test link, each an `ActivePeer` holding the other's half
+// of every session, rekeyed through `step_link` as the node drives them, so
+// what the shell does around a cutover is tested on real sessions.
 
-/// Complete an IK handshake and return the (sender, receiver) session
-/// pair. The receiver decrypts what the sender seals.
+/// The two nodes every test session runs between, so each session a test
+/// peer holds authenticates the same peer key, as a link machine requires.
+/// Each handshake still draws fresh ephemerals, so every pair is a distinct
+/// epoch.
+static PAIR: LazyLock<(Identity, Identity)> =
+    LazyLock::new(|| (Identity::generate(), Identity::generate()));
+
+/// The startup epoch of the first node of [`PAIR`].
+const EPOCH_A: [u8; 8] = [0xA1, 0xB2, 0xC3, 0xD4, 0x11, 0x22, 0x33, 0x44];
+
+/// The startup epoch of the second node of [`PAIR`].
+const EPOCH_B: [u8; 8] = [0xD4, 0xC3, 0xB2, 0xA1, 0x44, 0x33, 0x22, 0x11];
+
+/// Complete an IK handshake between the two nodes of [`PAIR`] and return the
+/// (initiator, responder) session pair.
 fn ik_session_pair() -> (NoiseSession, NoiseSession) {
-    let initiator_id = Identity::generate();
-    let responder_id = Identity::generate();
-    let mut initiator =
-        NoiseHandshakeState::new_initiator(initiator_id.keypair(), responder_id.pubkey_full());
-    initiator.set_local_epoch([0xA1, 0xB2, 0xC3, 0xD4, 0x11, 0x22, 0x33, 0x44]);
-    let mut responder = NoiseHandshakeState::new_responder(responder_id.keypair());
-    responder.set_local_epoch([0xD4, 0xC3, 0xB2, 0xA1, 0x44, 0x33, 0x22, 0x11]);
+    let (initiator_id, responder_id) = &*PAIR;
+    let mut initiator = crate::noise::HandshakeState::new_initiator(
+        initiator_id.keypair(),
+        responder_id.pubkey_full(),
+    );
+    initiator.set_local_epoch(EPOCH_A);
+    let mut responder = crate::noise::HandshakeState::new_responder(responder_id.keypair());
+    responder.set_local_epoch(EPOCH_B);
 
     let msg1 = initiator.write_message_1().unwrap();
     responder.read_message_1(&msg1).unwrap();
@@ -368,26 +335,10 @@ fn ik_session_pair() -> (NoiseSession, NoiseSession) {
     )
 }
 
-/// Seal an FMP frame the way the send path does: returns
-/// `(ciphertext, counter, header_bytes)` for the given K-bit.
-fn seal_fmp(
-    sender: &mut NoiseSession,
-    receiver_idx: SessionIndex,
-    plaintext: &[u8],
-    k_bit: bool,
-) -> (Vec<u8>, u64, [u8; 16]) {
-    use crate::proto::fmp::wire::{FLAG_KEY_EPOCH, build_established_header};
-    let counter = sender.current_send_counter();
-    let flags = if k_bit { FLAG_KEY_EPOCH } else { 0 };
-    let header = build_established_header(receiver_idx, counter, flags, plaintext.len() as u16);
-    let ciphertext = sender.encrypt_with_aad(plaintext, &header).unwrap();
-    (ciphertext, counter, header)
-}
-
 /// Build a peer whose `current` slot is `current_recv`.
 fn peer_with_current(current_recv: NoiseSession) -> ActivePeer {
     let identity = make_peer_identity();
-    ActivePeer::with_session(
+    ActivePeer::with_test_session(
         identity,
         LinkId::new(1),
         1_000,
@@ -403,6 +354,185 @@ fn peer_with_current(current_recv: NoiseSession) -> ActivePeer {
     )
 }
 
+/// One end of a test link: its peer entry for the other end, its node's
+/// keys and its node's index allocator.
+struct End {
+    peer: ActivePeer,
+    keys: fips_core::proto::rekey::NodeKeys,
+    alloc: crate::utils::index::IndexAllocator,
+}
+
+impl End {
+    /// Step this end's link machine with `input` now and carry out what the
+    /// node would beside the network: a cutover's shell resets and the
+    /// release of retired indices. Returns the outputs.
+    fn step(&mut self, input: fips_core::proto::rekey::Input<'_, LinkProfile>) -> LinkOutputs {
+        let out = self
+            .peer
+            .step_link(peer_now(), input, &mut self.alloc, &self.keys, false);
+        self.carry(&out);
+        out
+    }
+
+    /// Carry out the shell's part of `out`.
+    fn carry(&mut self, out: &LinkOutputs) {
+        for o in out {
+            if matches!(o, LinkOutput::Installed { .. }) {
+                self.peer.after_cutover();
+            }
+        }
+    }
+
+    /// A heartbeat sealed under this end's current session, framed for the
+    /// other end.
+    fn frame(&mut self) -> Vec<u8> {
+        use crate::proto::fmp::wire::{FLAG_KEY_EPOCH, build_encrypted, build_established_header};
+        let sealed = self
+            .peer
+            .seal(peer_now())
+            .expect("the current session seals");
+        let mut plaintext = (sealed.elapsed.as_millis() as u32).to_le_bytes().to_vec();
+        plaintext.push(crate::proto::link::LinkMessageType::Heartbeat.to_byte());
+        let flags = if sealed.k { FLAG_KEY_EPOCH } else { 0 };
+        let header = build_established_header(
+            SessionIndex::new(sealed.theirs.expect("the peer's index")),
+            sealed.counter,
+            flags,
+            plaintext.len() as u16,
+        );
+        let ciphertext =
+            fips_core::noise::seal(sealed.key.key(), sealed.counter, &header, &plaintext)
+                .expect("the session seals");
+        build_encrypted(&header, &ciphertext)
+    }
+
+    /// Take the frame `frame` the other end sent, returning the outputs.
+    fn take(&mut self, frame: &[u8]) -> LinkOutputs {
+        let header = crate::proto::fmp::wire::EncryptedHeader::parse(frame).expect("a frame");
+        let mut buf = frame.to_vec();
+        let hint = fips_core::proto::rekey::FrameHint {
+            counter: header.counter,
+            k: header.flags & crate::proto::fmp::wire::FLAG_KEY_EPOCH != 0,
+            index: header.receiver_idx.as_u32(),
+            body: header.ciphertext_offset(),
+        };
+        self.step(fips_core::proto::rekey::Input::Frame {
+            buf: &mut buf,
+            hint,
+        })
+    }
+}
+
+/// The handshake message of `kind` among `out`.
+fn sent(out: &LinkOutputs, kind: fips_core::proto::rekey::MsgKind) -> Vec<u8> {
+    out.iter()
+        .find_map(|o| match o {
+            LinkOutput::Send { msg, kind: k, .. } if *k == kind => Some(msg.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no {kind:?} among {out:?}"))
+}
+
+/// Whether `out` reports a cutover.
+fn installed(out: &LinkOutputs) -> bool {
+    out.iter()
+        .any(|o| matches!(o, LinkOutput::Installed { .. }))
+}
+
+/// The two ends of a test link [`LINK_AGE`] old, `a` the first node of
+/// [`PAIR`] and `b` the second, each knowing the other's startup epoch.
+fn ends() -> (End, End) {
+    let (a_session, b_session) = ik_session_pair();
+    let (a_id, b_id) = &*PAIR;
+    let end = |id: &Identity, peer: &Identity, session, ours, theirs, epoch, peer_epoch| End {
+        peer: ActivePeer::with_test_session(
+            PeerIdentity::from_pubkey_full(peer.pubkey_full()),
+            LinkId::new(1),
+            1_000,
+            session,
+            SessionIndex::new(ours),
+            SessionIndex::new(theirs),
+            TransportId::new(1),
+            TransportAddr::from_string("hci0/AA:BB:CC:DD:EE:01"),
+            LinkStats::new(),
+            true,
+            &MmpConfig::default(),
+            Some(peer_epoch),
+        ),
+        keys: fips_core::proto::rekey::NodeKeys::new(id.keypair(), epoch),
+        alloc: crate::utils::index::IndexAllocator::new(),
+    };
+    let (mut a, mut b) = (
+        end(a_id, b_id, a_session, 1, 2, EPOCH_A, EPOCH_B),
+        end(b_id, a_id, b_session, 2, 1, EPOCH_B, EPOCH_A),
+    );
+    // Old enough that each end answers the other's rekey.
+    a.peer.test_backdate_session_established(LINK_AGE);
+    b.peer.test_backdate_session_established(LINK_AGE);
+    (a, b)
+}
+
+/// The age each test link starts at: past the link and session ages at
+/// which a msg1 is answered as a rekey.
+const LINK_AGE: Duration = Duration::from_secs(40);
+
+/// Run a rekey `from` starts to `to` as far as `from` holding its pending
+/// session: its msg1, `to`'s answer into a responder pending, and the msg2
+/// that completes `from`'s attempt.
+fn rekey_to_pending(from: &mut End, to: &mut End) {
+    use fips_core::proto::rekey::{Arrival, Input, MsgKind};
+    let out = from
+        .peer
+        .start_rekey_now(peer_now(), &mut from.alloc, &from.keys);
+    let msg1 = sent(&out, MsgKind::Msg1);
+    let tok =
+        fips_core::proto::fmp::rekey::ik::read_msg1::<crate::identity::OsEntropy>(&to.keys, &msg1)
+            .expect("the msg1 reads");
+    let arrival = Arrival {
+        on_link: true,
+        reachable: true,
+    };
+    let out = to.step(Input::PeerMsg1 { tok, arrival });
+    let msg2 = sent(&out, MsgKind::Msg2);
+    from.step(Input::Reply {
+        bytes: &msg2,
+        route: (),
+    });
+    assert_eq!(from.peer.pending_role(), Some(Role::Initiator));
+    assert_eq!(to.peer.pending_role(), Some(Role::Responder));
+}
+
+/// The cutover of the initiator's pending at its next poll.
+fn initiator_cutover(end: &mut End) {
+    let out = end.step(fips_core::proto::rekey::Input::Poll);
+    assert!(
+        installed(&out),
+        "the initiator cuts over at its poll: {out:?}"
+    );
+}
+
+/// The responder's adoption of its pending on the initiator's first frame
+/// under the new session.
+fn responder_adoption(initiator: &mut End, responder: &mut End) {
+    let frame = initiator.frame();
+    let out = responder.take(&frame);
+    assert!(
+        installed(&out),
+        "the responder adopts on the frame: {out:?}"
+    );
+}
+
+/// The initiator hears the responder under the new session, which shows
+/// the peer moved: the initiator's drain ends one window later.
+fn heard_back(responder: &mut End, initiator: &mut End) {
+    let frame = responder.frame();
+    let out = initiator.take(&frame);
+    assert!(
+        out.iter().any(|o| matches!(o, LinkOutput::Deliver { .. })),
+        "the initiator opens the responder's frame: {out:?}"
+    );
+}
+
 /// Count `n` pending-refusal lines on `peer` this session.
 fn count_pending_lines(peer: &mut ActivePeer, n: u32) {
     for _ in 0..n {
@@ -414,332 +544,63 @@ fn count_pending_lines(peer: &mut ActivePeer, n: u32) {
 // count, whichever side made the change.
 #[test]
 fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_count() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
+    let (mut a, mut b) = ends();
 
-    count_pending_lines(&mut peer, 5);
-    let (_s, pend_recv) = ik_session_pair();
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-    assert!(peer.handle_peer_kbit_flip().is_some());
-    assert_eq!(peer.hs_lines_mut().count(HsLine::Pending), 1);
+    count_pending_lines(&mut b.peer, 5);
+    rekey_to_pending(&mut a, &mut b);
+    initiator_cutover(&mut a);
+    responder_adoption(&mut a, &mut b);
+    assert_eq!(b.peer.hs_lines_mut().count(HsLine::Pending), 1);
 
-    count_pending_lines(&mut peer, 3);
-    let (_s, pend_recv) = ik_session_pair();
-    peer.set_pending_session(pend_recv, SessionIndex::new(5), SessionIndex::new(6));
-    assert!(peer.cutover_to_new_session().is_some());
+    count_pending_lines(&mut b.peer, 3);
+    // a answers once its session is old enough to rekey again.
+    crate::time::advance(crate::peer::test_link_params().config().session_age);
+    rekey_to_pending(&mut b, &mut a);
+    initiator_cutover(&mut b);
 
-    count_pending_lines(&mut peer, 6);
+    count_pending_lines(&mut b.peer, 6);
     let (_s, next_recv) = ik_session_pair();
-    peer.replace_session(next_recv, SessionIndex::new(7), SessionIndex::new(8));
+    let mut caps = crate::peer::LinkCaps {
+        indices: &mut b.alloc,
+        local: &b.keys,
+        me: *PeerIdentity::from_pubkey_full(PAIR.1.pubkey_full()).node_addr(),
+        params: crate::peer::test_link_params(),
+        record: Record::new(),
+        workers: false,
+    };
+    let _ = b
+        .peer
+        .move_session(next_recv, lease(7), SessionIndex::new(8), &mut caps);
 
     // 2 from the first session, 1 from the second, 3 from the third.
-    let carried = peer.hs_lines_mut().take_carried().expect("lines withheld");
+    let carried = b
+        .peer
+        .hs_lines_mut()
+        .take_carried()
+        .expect("lines withheld");
     assert_eq!(carried.of(HsLine::Pending), 6);
-    assert_eq!(peer.hs_lines().unreported(), None);
-}
-
-// A genuine new-epoch frame authenticates against `pending` and the
-// peer promotes: pending -> current, K-bit flips, plaintext delivered.
-#[test]
-fn cutover_pending_authenticates_and_promotes() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (mut pend_send, pend_recv) = ik_session_pair();
-
-    let mut peer = peer_with_current(cur_recv);
-    let k_before = peer.current_k_bit();
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-
-    // Peer sealed in the new epoch with the flipped K-bit.
-    let (ct, counter, hdr) = seal_fmp(
-        &mut pend_send,
-        SessionIndex::new(3),
-        b"new-epoch",
-        !k_before,
-    );
-
-    // Trial-decrypt against pending succeeds (the cutover signal).
-    let plaintext = peer
-        .pending_new_session_mut()
-        .and_then(|p| p.decrypt_with_replay_check_and_aad(&ct, counter, &hdr).ok())
-        .expect("new-epoch frame must authenticate against pending");
-    assert_eq!(plaintext, b"new-epoch");
-
-    // Promotion moves pending -> current and flips the K-bit.
-    assert!(peer.handle_peer_kbit_flip().is_some());
-    assert!(peer.pending_new_session().is_none());
-    assert_eq!(peer.current_k_bit(), !k_before);
-    assert!(peer.previous_session().is_some());
-}
-
-// A stale/mismatched frame on a K-bit flip does NOT authenticate
-// against `pending`: no promotion, `pending` preserved with its replay
-// window intact, and the genuine current session still decrypts a
-// subsequent steady-state frame.
-#[test]
-fn cutover_stale_frame_does_not_promote() {
-    let (mut cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    // A third, unrelated session whose ciphertext will NOT authenticate
-    // against `pending` (wrong keys) — simulates a flip belonging to a
-    // different rekey epoch.
-    let (mut stale_send, _stale_recv) = ik_session_pair();
-
-    let mut peer = peer_with_current(cur_recv);
-    let k_before = peer.current_k_bit();
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-
-    // Frame carries the flipped K-bit but is sealed in an unrelated
-    // session: it must fail to authenticate against `pending`.
-    let (ct, counter, hdr) = seal_fmp(&mut stale_send, SessionIndex::new(3), b"stale", !k_before);
-    let result = peer
-        .pending_new_session_mut()
-        .and_then(|p| p.decrypt_with_replay_check_and_aad(&ct, counter, &hdr).ok());
-    assert!(
-        result.is_none(),
-        "stale frame must not authenticate against pending"
-    );
-
-    // No promotion happened: pending preserved, K-bit unchanged.
-    assert!(peer.pending_new_session().is_some());
-    assert_eq!(peer.current_k_bit(), k_before);
-
-    // The trial-decrypt left pending's replay window untouched, and the
-    // genuine current session still decrypts steady-state traffic — the
-    // fall-through path the handler takes on a non-authenticating flip.
-    let (ct2, counter2, hdr2) = seal_fmp(&mut cur_send, SessionIndex::new(1), b"steady", k_before);
-    let cur_pt = peer.noise_session_mut().and_then(|s| {
-        s.decrypt_with_replay_check_and_aad(&ct2, counter2, &hdr2)
-            .ok()
-    });
-    assert_eq!(cur_pt.as_deref(), Some(&b"steady"[..]));
-}
-
-/// Whether `peer`'s link instant reads at least `age` old.
-fn link_at_least(peer: &ActivePeer, age: Duration) -> bool {
-    since(peer.link_established_at()) >= age
-}
-
-/// The link instant is set at construction and is not moved by an
-/// initiator cutover, an adoption of the peer's rekey, or a
-/// cross-connection swap, each of which restarts the session instant.
-/// A pending whose msg2 revealed a peer restart leaves it alone while
-/// held, and restarts it when it is cut over, adopted or abandoned.
-#[test]
-fn the_link_instant_is_set_at_construction_and_kept_through_initiator_cutover_peer_adoption_and_cross_connection_swap_but_reset_when_a_revealed_restart_leaves_the_slot()
- {
-    let aged = Duration::from_secs(5);
-    let fresh = Duration::from_secs(1);
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    assert!(
-        since(peer.link_established_at()) < fresh,
-        "construction sets the link instant"
-    );
-    peer.test_backdate_session_established(aged);
-
-    let (_s, pend_recv) = ik_session_pair();
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-    assert!(peer.cutover_to_new_session().is_some());
-    assert!(since(peer.session_established_at()) < fresh);
-    assert!(
-        link_at_least(&peer, aged),
-        "initiator cutover kept the link"
-    );
-
-    let (_s, pend_recv) = ik_session_pair();
-    peer.answer_rekey(
-        pend_recv,
-        SessionIndex::new(5),
-        SessionIndex::new(6),
-        answer(),
-    );
-    assert!(peer.adopt_pending(false).is_some());
-    assert!(since(peer.session_established_at()) < fresh);
-    assert!(link_at_least(&peer, aged), "adoption kept the link");
-
-    let (_s, swap) = ik_session_pair();
-    peer.replace_session(swap, SessionIndex::new(7), SessionIndex::new(8));
-    assert!(
-        link_at_least(&peer, aged),
-        "a cross-connection swap kept the link"
-    );
-
-    type Exit = fn(&mut ActivePeer) -> Option<SessionIndex>;
-    let exits: [(&str, Exit); 3] = [
-        ("cutover", ActivePeer::cutover_to_new_session),
-        ("adopt", |p| p.adopt_pending(false)),
-        ("abandon", ActivePeer::abandon_rekey),
-    ];
-    for (name, exit) in exits {
-        let (_cur_send, cur_recv) = ik_session_pair();
-        let mut peer = peer_with_current(cur_recv);
-        peer.test_backdate_session_established(aged);
-        let (_s, pend_recv) = ik_session_pair();
-        peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-        peer.note_restart();
-        assert!(
-            link_at_least(&peer, aged),
-            "{name}: the link keeps its age while the restart pending is held"
-        );
-        assert!(exit(&mut peer).is_some(), "{name}: the pending must exit");
-        assert!(
-            since(peer.link_established_at()) < fresh,
-            "{name}: the restart pending leaving the slot restarts the link"
-        );
-    }
+    assert_eq!(b.peer.hs_lines().unreported(), None);
 }
 
 /// Backdating the session moves the link instant back with it when the
 /// link would otherwise read younger, and never moves it forward.
 #[test]
 fn backdating_the_session_never_leaves_the_link_younger_than_the_session() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.test_backdate_session_established(Duration::from_secs(40));
-    assert!(peer.link_established_at() <= peer.session_established_at());
-    assert!(link_at_least(&peer, Duration::from_secs(40)));
+    let (mut a, mut b) = ends();
+    a.peer
+        .test_backdate_session_established(Duration::from_secs(40));
+    assert!(a.peer.link_established_at() <= a.peer.session_established_at());
+    assert!(since(a.peer.link_established_at().unwrap()) >= Duration::from_secs(40));
 
-    let (_s, pend_recv) = ik_session_pair();
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-    assert!(peer.cutover_to_new_session().is_some());
-    peer.test_backdate_session_established(Duration::from_secs(12));
+    rekey_to_pending(&mut a, &mut b);
+    initiator_cutover(&mut a);
+    a.peer
+        .test_backdate_session_established(Duration::from_secs(12));
     assert!(
-        link_at_least(&peer, Duration::from_secs(40)),
+        since(a.peer.link_established_at().unwrap()) >= Duration::from_secs(40),
         "a smaller backdate after a cutover leaves the older link as it was"
     );
-    assert!(peer.link_established_at() <= peer.session_established_at());
-}
-
-/// A stand-in for the answer a responder records when it arms a pending.
-fn answer() -> RekeyAnswer {
-    RekeyAnswer {
-        msg1: crate::proto::fmp::Msg1Digest::of(b"msg1"),
-        msg2: vec![0x02; 8],
-    }
-}
-
-/// The answer that armed a responder pending is held exactly as long as
-/// the pending: it leaves on retirement, on promotion, and on abandon,
-/// leaving its msg1 recorded as an ended cycle, and a pending this node
-/// initiated carries none.
-#[test]
-fn the_answer_that_armed_a_pending_leaves_with_it() {
-    type Exit = fn(&mut ActivePeer) -> Option<SessionIndex>;
-    let exits: [(&str, Exit); 3] = [
-        ("retire", ActivePeer::retire_pending),
-        ("promote", ActivePeer::handle_peer_kbit_flip),
-        ("abandon", ActivePeer::abandon_rekey),
-    ];
-    for (name, exit) in exits {
-        let (_cur_send, cur_recv) = ik_session_pair();
-        let (_pend_send, pend_recv) = ik_session_pair();
-        let mut peer = peer_with_current(cur_recv);
-        peer.answer_rekey(
-            pend_recv,
-            SessionIndex::new(3),
-            SessionIndex::new(4),
-            answer(),
-        );
-        assert_eq!(
-            peer.rekey_answer().map(|a| a.msg2.clone()),
-            Some(vec![0x02; 8]),
-            "{name}: the answer must be held with the pending"
-        );
-        assert!(exit(&mut peer).is_some(), "{name}: the pending must exit");
-        assert!(peer.pending_new_session().is_none());
-        assert!(
-            peer.rekey_answer().is_none(),
-            "{name}: the answer must leave with the pending"
-        );
-        assert!(
-            peer.answered_before(&answer().msg1),
-            "{name}: the answered msg1 must be remembered as an ended cycle"
-        );
-    }
-
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-    assert!(peer.rekey_answer().is_none());
-}
-
-/// Retiring a pending session this node answered hands back its index for
-/// the caller to free, empties the pending slot and its role, and leaves
-/// the current session alone.
-#[test]
-fn retiring_an_answered_pending_returns_its_index_and_empties_the_slot() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.answer_rekey(
-        pend_recv,
-        SessionIndex::new(3),
-        SessionIndex::new(4),
-        answer(),
-    );
-    assert_eq!(peer.pending_role(), Some(RekeyRole::Responder));
-
-    assert_eq!(peer.retire_pending(), Some(SessionIndex::new(3)));
-    assert!(peer.pending_new_session().is_none());
-    assert_eq!(peer.pending_role(), None);
-    assert_eq!(peer.pending_their_index(), None);
-    assert_eq!(peer.pending_our_index(), None);
-    assert!(peer.noise_session().is_some());
-    assert_eq!(peer.our_index(), Some(SessionIndex::new(1)));
-}
-
-/// Retirement leaves a pending session this node initiated in place: that
-/// one is cut over on this node's schedule, never retired.
-#[test]
-fn retire_leaves_a_pending_this_node_initiated_in_place() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-    assert_eq!(peer.pending_role(), Some(RekeyRole::Initiator));
-
-    assert_eq!(peer.retire_pending(), None);
-    assert!(peer.pending_new_session().is_some());
-    assert_eq!(peer.pending_role(), Some(RekeyRole::Initiator));
-}
-
-/// Promoting an answered pending session on the peer's first new-epoch
-/// frame clears its role and install time with the slot.
-#[test]
-fn promotion_on_the_peers_new_epoch_frame_clears_the_pending_role() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.answer_rekey(
-        pend_recv,
-        SessionIndex::new(3),
-        SessionIndex::new(4),
-        answer(),
-    );
-
-    assert!(peer.handle_peer_kbit_flip().is_some());
-    assert_eq!(peer.pending_role(), None);
-    assert!(!peer.pending_expired(Duration::ZERO));
-}
-
-/// The pending hold is measured from the install time: not expired inside
-/// the hold, expired once the install time is older than it.
-#[test]
-fn pending_expiry_reads_the_install_time_against_the_hold() {
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.answer_rekey(
-        pend_recv,
-        SessionIndex::new(3),
-        SessionIndex::new(4),
-        answer(),
-    );
-
-    assert!(!peer.pending_expired(Duration::from_secs(60)));
-    peer.backdate_pending(Duration::from_secs(61));
-    assert!(peer.pending_expired(Duration::from_secs(60)));
+    assert!(a.peer.link_established_at() <= a.peer.session_established_at());
 }
 
 /// The responder's pending hold, the rekey dampening and the drain are all
@@ -749,85 +610,110 @@ fn pending_expiry_reads_the_install_time_against_the_hold() {
 #[test]
 fn advancing_the_monotonic_clock_passes_the_pending_hold_the_rekey_dampening_and_the_drain_at_their_lengths()
  {
-    const HOLD: Duration = Duration::from_secs(60);
-    const DAMPENING_SECS: u64 = 30;
-    const DRAIN_SECS: u64 = 10;
+    use fips_core::proto::rekey::Input;
+    let hold = crate::peer::test_link_params().config().hold;
+    let dampening = crate::peer::test_link_params().config().dampening;
+    let drain = crate::peer::test_link_params().config().drain;
     let tick = Duration::from_millis(100);
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    peer.answer_rekey(
-        pend_recv,
-        SessionIndex::new(3),
-        SessionIndex::new(4),
-        answer(),
-    );
-    peer.record_peer_rekey();
 
-    crate::time::advance(Duration::from_secs(DAMPENING_SECS) - tick);
-    assert!(
-        peer.is_rekey_dampened(DAMPENING_SECS),
-        "dampened inside its window"
-    );
+    // b answers a's rekey: it holds a responder pending and is dampened.
+    let (mut a, mut b) = ends();
+    rekey_to_pending(&mut a, &mut b);
+    crate::time::advance(dampening - tick);
+    assert!(b.peer.dampened(), "dampened inside its window");
     crate::time::advance(tick);
-    assert!(
-        !peer.is_rekey_dampened(DAMPENING_SECS),
-        "dampening ends at its length"
-    );
+    assert!(!b.peer.dampened(), "dampening ends at its length");
 
-    crate::time::advance(HOLD - Duration::from_secs(DAMPENING_SECS) - tick);
+    crate::time::advance(hold - dampening - tick);
+    b.step(Input::Poll);
     assert!(
-        !peer.pending_expired(HOLD),
+        b.peer.pending_new_session().is_some(),
         "the pending is held inside the hold"
     );
     crate::time::advance(tick);
-    assert!(peer.pending_expired(HOLD), "the hold passes at its length");
+    b.step(Input::Poll);
+    assert!(
+        b.peer.pending_new_session().is_none(),
+        "the hold passes at its length"
+    );
 
-    assert!(peer.handle_peer_kbit_flip().is_some());
-    crate::time::advance(Duration::from_secs(DRAIN_SECS) - tick);
-    assert!(
-        !peer.drain_expired(DRAIN_SECS),
-        "the drain runs inside its window"
-    );
+    // a cuts over and hears b under the new session: the drain runs one
+    // window from that frame.
+    let (mut a, mut b) = ends();
+    rekey_to_pending(&mut a, &mut b);
+    initiator_cutover(&mut a);
+    responder_adoption(&mut a, &mut b);
+    heard_back(&mut b, &mut a);
+    crate::time::advance(drain - tick);
+    a.step(Input::Poll);
+    assert!(a.peer.is_draining(), "the drain runs inside its window");
     crate::time::advance(tick);
-    assert!(
-        peer.drain_expired(DRAIN_SECS),
-        "the drain ends at its length"
-    );
+    a.step(Input::Poll);
+    assert!(!a.peer.is_draining(), "the drain ends at its length");
 }
 
-/// Both cutover bodies restart the previous-session frame count and stamp
-/// the cutover time, and completing the drain keeps both.
+/// Both cutovers restart the previous-session frame count and stamp the
+/// cutover time, and the drain's end keeps both.
 #[test]
 fn each_cutover_restarts_the_previous_frame_count_and_stamps_the_cutover() {
-    type Cutover = fn(&mut ActivePeer) -> Option<SessionIndex>;
-    let cutovers: [(&str, Cutover); 2] = [
-        ("initiator", ActivePeer::cutover_to_new_session),
-        ("responder", ActivePeer::handle_peer_kbit_flip),
-    ];
-    for (name, cutover) in cutovers {
-        let (_cur_send, cur_recv) = ik_session_pair();
-        let (_pend_send, pend_recv) = ik_session_pair();
-        let mut peer = peer_with_current(cur_recv);
-        assert!(peer.since_cutover().is_none(), "{name}: no cutover yet");
-        peer.count_previous();
-        peer.count_previous();
-        assert_eq!(peer.prev_frames(), 2);
-        peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
+    use fips_core::proto::rekey::Input;
+    for initiator in [true, false] {
+        let name = if initiator { "initiator" } else { "responder" };
+        let (mut a, mut b) = ends();
+        let end = if initiator { &mut a } else { &mut b };
+        assert!(end.peer.since_cutover().is_none(), "{name}: no cutover yet");
+        end.peer.count_previous();
+        end.peer.count_previous();
+        assert_eq!(end.peer.prev_frames(), 2);
 
-        assert!(cutover(&mut peer).is_some(), "{name}: the cutover runs");
-        assert_eq!(peer.prev_frames(), 0, "{name}: the count restarts");
+        rekey_to_pending(&mut a, &mut b);
+        initiator_cutover(&mut a);
+        responder_adoption(&mut a, &mut b);
+        heard_back(&mut b, &mut a);
+        let end = if initiator { &mut a } else { &mut b };
+        assert_eq!(end.peer.prev_frames(), 0, "{name}: the count restarts");
         assert!(
-            peer.since_cutover().is_some(),
+            end.peer.since_cutover().is_some(),
             "{name}: the cutover is stamped"
         );
 
-        peer.count_previous();
-        assert!(peer.complete_drain().is_some());
-        assert_eq!(peer.prev_frames(), 1, "{name}: the drain keeps the count");
+        end.peer.count_previous();
+        crate::time::advance(crate::peer::test_link_params().config().drain);
+        end.step(Input::Poll);
+        assert!(!end.peer.is_draining(), "{name}: the drain ended");
+        assert_eq!(
+            end.peer.prev_frames(),
+            1,
+            "{name}: the drain keeps the count"
+        );
         assert!(
-            peer.since_cutover().is_some(),
+            end.peer.since_cutover().is_some(),
             "{name}: the drain keeps the stamp"
+        );
+    }
+}
+
+/// Each cutover restarts the inner-header timestamp: the new session's
+/// timestamp base is the cutover, whatever the old session's age.
+#[test]
+fn each_cutover_restarts_the_inner_header_timestamp_at_the_new_session() {
+    for initiator in [true, false] {
+        let name = if initiator { "initiator" } else { "responder" };
+        let (mut a, mut b) = ends();
+        a.peer.test_backdate_session_start(Duration::from_secs(10));
+        b.peer.test_backdate_session_start(Duration::from_secs(10));
+        let end = if initiator { &a } else { &b };
+        assert!(
+            end.peer.session_elapsed_ms() >= 10_000,
+            "{name}: precondition: the old session's timestamp reads its age"
+        );
+        rekey_to_pending(&mut a, &mut b);
+        initiator_cutover(&mut a);
+        responder_adoption(&mut a, &mut b);
+        let end = if initiator { &a } else { &b };
+        assert!(
+            end.peer.session_elapsed_ms() < 1_000,
+            "{name}: the timestamp restarts at the cutover"
         );
     }
 }
@@ -850,62 +736,86 @@ fn the_last_failed_index_is_the_most_recent_one_recorded() {
 fn an_index_names_the_slot_of_the_session_it_belongs_to() {
     use crate::node::diag::Slot;
 
-    let (_cur_send, cur_recv) = ik_session_pair();
-    let (_pend_send, pend_recv) = ik_session_pair();
-    let mut peer = peer_with_current(cur_recv);
-    assert_eq!(Slot::of(&peer, SessionIndex::new(1)), Slot::Current);
-    assert_eq!(Slot::of(&peer, SessionIndex::new(9)), Slot::Unknown);
+    let (mut a, mut b) = ends();
+    assert_eq!(Slot::of(&b.peer, SessionIndex::new(2)), Slot::Current);
+    assert_eq!(Slot::of(&b.peer, SessionIndex::new(9)), Slot::Unknown);
 
-    peer.answer_rekey(
-        pend_recv,
-        SessionIndex::new(3),
-        SessionIndex::new(4),
-        answer(),
-    );
-    assert_eq!(
-        Slot::of(&peer, SessionIndex::new(3)),
-        Slot::PendingResponder
-    );
-    assert!(peer.handle_peer_kbit_flip().is_some());
-    assert_eq!(Slot::of(&peer, SessionIndex::new(3)), Slot::Current);
-    assert_eq!(Slot::of(&peer, SessionIndex::new(1)), Slot::Previous);
+    rekey_to_pending(&mut a, &mut b);
+    let answered = b.peer.pending_our_index().expect("b holds a pending");
+    assert_eq!(Slot::of(&b.peer, answered), Slot::PendingResponder);
+    initiator_cutover(&mut a);
+    responder_adoption(&mut a, &mut b);
+    assert_eq!(Slot::of(&b.peer, answered), Slot::Current);
+    assert_eq!(Slot::of(&b.peer, SessionIndex::new(2)), Slot::Previous);
 
-    let (_next_send, next_recv) = ik_session_pair();
-    peer.set_pending_session(next_recv, SessionIndex::new(5), SessionIndex::new(6));
-    assert_eq!(
-        Slot::of(&peer, SessionIndex::new(5)),
-        Slot::PendingInitiator
-    );
+    crate::time::advance(crate::peer::test_link_params().config().drain);
+    b.step(fips_core::proto::rekey::Input::Poll);
+    rekey_to_pending(&mut b, &mut a);
+    let made = b.peer.pending_our_index().expect("b holds its own pending");
+    assert_eq!(Slot::of(&b.peer, made), Slot::PendingInitiator);
     assert_eq!(Slot::Unknown.to_string(), "none");
     assert_eq!(Slot::PendingInitiator.to_string(), "pending-initiator");
+}
+
+/// A link frame the current session opened is refused when it arrives
+/// again: the open marks that session's replay window, as the inline decrypt
+/// always has, and the second copy is delivered to nobody.
+#[test]
+fn a_link_frame_opened_once_is_refused_when_it_arrives_again() {
+    use fips_core::proto::rekey::Reason;
+    let (mut a, mut b) = ends();
+    let frame = a.frame();
+    let first = b.take(&frame);
+    assert!(
+        first
+            .iter()
+            .any(|o| matches!(o, LinkOutput::Deliver { .. })),
+        "the frame's first arrival is delivered: {first:?}"
+    );
+    let second = b.take(&frame);
+    assert!(
+        !second
+            .iter()
+            .any(|o| matches!(o, LinkOutput::Deliver { .. })),
+        "the frame's second arrival is delivered again: {second:?}"
+    );
+    assert!(
+        second
+            .iter()
+            .any(|o| matches!(o, LinkOutput::Reject(Reason::Replay))),
+        "the frame's second arrival is refused as a replay: {second:?}"
+    );
 }
 
 /// A peer starts unheard, is heard after its first authenticated frame, and
 /// stays heard across either cutover and the drain that follows it.
 #[test]
 fn a_peer_is_unheard_until_its_first_frame_and_stays_heard_across_both_cutovers() {
+    use fips_core::proto::rekey::Input;
     let mut fresh = ActivePeer::new(make_peer_identity(), LinkId::new(1), 1000);
     assert!(!fresh.heard(), "a new peer starts unheard");
     fresh.touch(2000);
     assert!(fresh.heard(), "a frame marks the peer heard");
 
-    type Cutover = fn(&mut ActivePeer) -> Option<SessionIndex>;
-    let cutovers: [(&str, Cutover); 2] = [
-        ("initiator", ActivePeer::cutover_to_new_session),
-        ("responder", ActivePeer::handle_peer_kbit_flip),
-    ];
-    for (name, cutover) in cutovers {
-        let (_cur_send, cur_recv) = ik_session_pair();
-        let (_pend_send, pend_recv) = ik_session_pair();
-        let mut peer = peer_with_current(cur_recv);
-        assert!(!peer.heard(), "{name}: a promoted peer starts unheard");
-        peer.touch(2000);
-        assert!(peer.heard(), "{name}: a frame marks the peer heard");
-        peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
-
-        assert!(cutover(&mut peer).is_some(), "{name}: the cutover runs");
-        assert!(peer.heard(), "{name}: the cutover keeps the peer heard");
-        assert!(peer.complete_drain().is_some(), "{name}: the drain runs");
-        assert!(peer.heard(), "{name}: the drain keeps the peer heard");
+    for initiator in [true, false] {
+        let name = if initiator { "initiator" } else { "responder" };
+        let (mut a, mut b) = ends();
+        for end in [&mut a, &mut b] {
+            end.peer.heard = false;
+            end.peer.send.heard = false;
+            assert!(!end.peer.heard(), "{name}: a promoted peer starts unheard");
+            end.peer.touch(2000);
+            assert!(end.peer.heard(), "{name}: a frame marks the peer heard");
+        }
+        rekey_to_pending(&mut a, &mut b);
+        initiator_cutover(&mut a);
+        responder_adoption(&mut a, &mut b);
+        heard_back(&mut b, &mut a);
+        let end = if initiator { &mut a } else { &mut b };
+        assert!(end.peer.heard(), "{name}: the cutover keeps the peer heard");
+        crate::time::advance(crate::peer::test_link_params().config().drain);
+        end.step(Input::Poll);
+        assert!(!end.peer.is_draining(), "{name}: the drain runs");
+        assert!(end.peer.heard(), "{name}: the drain keeps the peer heard");
     }
 }

@@ -51,10 +51,10 @@ fn promoted_peer_with_the_far_side_session(
     // from_pubkey_full, not from_pubkey: the ECDH needs the parity bit.
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     node.seed_handshake_machine(
         HandshakeSeed::outbound(link_id, peer_identity, 1_000)
-            .with_our_index(our_index)
+            .with_our_index(our_index_lease)
             .with_their_index(SessionIndex::new(42))
             .with_transport_id(transport_id)
             .with_source_addr(TransportAddr::from_string(PROMOTED_ADDR)),

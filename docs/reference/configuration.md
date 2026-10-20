@@ -183,9 +183,9 @@ Handshake rate limiting protects against DoS on the Noise IK handshake path.
 | `node.rate_limit.handshake_burst` | u32 | `100` | Token bucket burst capacity |
 | `node.rate_limit.handshake_rate` | f64 | `10.0` | Tokens per second refill rate |
 | `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout, and how long a session's first SessionSetup is resent before the attempt is given up. Plus one tick (`node.tick_interval_secs`), it is also how long the node that started a session rekey waits to hear the peer under the new keys before deciding without it (31 s at the defaults) |
-| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial link handshake message resend interval. Not used for session handshakes: a session's first SessionSetup and its first SessionMsg3 are resent at 1, 3, 7, 15 and 31 s (the SessionSetup only while `handshake_timeout_secs` lasts), the last message of a session rekey at 1, 3, 7 and 15 s, and the first message of a session rekey first after twice the measured round trip (at least 1 s, and at most `handshake_timeout_secs` less one tick, divided by three: 9 s at the defaults) and then at doubling intervals until `handshake_timeout_secs` |
-| `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Link handshake resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults). Not used for session handshakes |
-| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt: of a link handshake message, and of a session's first SessionSetup and first SessionMsg3. Does not limit the first message of a session rekey, which is resent until `handshake_timeout_secs`. For the last message of a session rekey, resends due at or after the wait above are not sent |
+| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial resend interval of a link setup handshake message. Not used for a link rekey, whose msg1 is resent at 1, 3, 7 and 15 s (as many of those as `handshake_max_resends` allows, and only those that fall before the rekey is given up, at the earlier of one tick after the last and `handshake_timeout_secs`); nor for session handshakes: a session's first SessionSetup and its first SessionMsg3 are resent at 1, 3, 7, 15 and 31 s (the SessionSetup only while `handshake_timeout_secs` lasts), the last message of a session rekey at 1, 3, 7 and 15 s, and the first message of a session rekey first after twice the measured round trip (at least 1 s, and at most `handshake_timeout_secs` less one tick, divided by three: 9 s at the defaults) and then at doubling intervals until `handshake_timeout_secs` |
+| `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Link setup handshake resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults). Not used for link rekeys or session handshakes |
+| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt: of a link handshake message, a link rekey msg1 included, and of a session's first SessionSetup and first SessionMsg3. Does not limit the first message of a session rekey, which is resent until `handshake_timeout_secs`. For the last message of a session rekey, resends due at or after the wait above are not sent |
 | `node.rate_limit.established_handshake_burst` | u32 | derived | Burst capacity of the established-link bucket. Derived default is `node.limits.max_peers` (128) |
 | `node.rate_limit.established_handshake_rate` | f64 | derived | Refill rate of that bucket. Derived default is `(max_peers / max(node.rekey.after_secs, 1)) * (1 + handshake_max_resends)`, floored at 1.0/s — 6.4/s at shipped defaults |
 | `node.rate_limit.session_setup_burst` | u32 | `64` | Per-link-peer burst for inbound session-setup messages that would open a new session |
@@ -552,6 +552,19 @@ and whatever the thresholds, once it has sent data and heard nothing from
 the peer under the current keys for 30 seconds, doubling that wait while
 the silence lasts, up to `node.rekey.after_secs`; this finds a peer that
 restarted or dropped the session.
+A link resends a rekey msg1 that has had no answer at 1, 3, 7 and 15
+seconds and gives the rekey up 30 seconds after the first copy (the earlier
+of one tick after the last resend `node.rate_limit.handshake_max_resends`
+allows and the handshake timeout); the next waits a backoff of one tick,
+doubled for each rekey given up in a row (at most 120 seconds at the
+defaults), plus up to 15 seconds. A msg1 or msg2 the transport fails to
+send counts as lost and does not end the rekey. A link starts no rekey of its
+own within 30 seconds of answering one its peer started, nor, whatever the
+thresholds, before the link is one tick past 30 seconds old and one tick
+past 30 seconds since its last rekey. For links,
+`node.rekey.after_secs` below 45 seconds (the 15 seconds of jitter plus the
+30-second link age at which a peer answers a rekey) is taken as 45, with a
+warning.
 For sessions, a value above the largest the rekey timers take (4294967295
 seconds, 2^62 messages) is taken as that largest value, which never falls
 due. The `node.rekey.enabled` key was removed

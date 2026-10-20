@@ -25,9 +25,10 @@ use super::rate_limit::TokenBucket;
 use crate::noise::NoiseSession;
 use crate::peer::ActivePeer;
 use crate::proto::bloom::BloomFilter;
-use crate::proto::fmp::{Msg1Digest, RekeyRole};
+use crate::proto::fmp::Msg1Digest;
 use crate::transport::{TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
+use fips_core::proto::rekey::Role;
 use std::fmt;
 use std::time::Instant;
 
@@ -174,6 +175,44 @@ impl Msg1Path {
     }
 }
 
+/// Whether a failing frame was tried against the peer's pending session.
+/// The link's rekey machine opens a frame under the one session its
+/// receiver index names, so the pending session is tried exactly for a
+/// frame that names its index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trial {
+    /// The peer held no pending session.
+    NotRunNoPending,
+    /// A pending session was held, but the frame named another index.
+    NotRunOtherIndex,
+    /// The frame named the pending session's index, was tried against it,
+    /// and did not authenticate.
+    RunIndex,
+}
+
+impl Trial {
+    /// The trial outcome for a frame naming `index` that went on to fail,
+    /// with the peer's pending index `pending`. A trial that succeeded never
+    /// reaches a failure line.
+    pub(crate) fn of(pending: Option<SessionIndex>, index: SessionIndex) -> Self {
+        match pending {
+            None => Self::NotRunNoPending,
+            Some(p) if p == index => Self::RunIndex,
+            Some(_) => Self::NotRunOtherIndex,
+        }
+    }
+}
+
+impl fmt::Display for Trial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotRunNoPending => "not-run-no-pending",
+            Self::NotRunOtherIndex => "not-run-other-index",
+            Self::RunIndex => "run-index",
+        })
+    }
+}
+
 /// Which of a peer's sessions a receiver index names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
@@ -198,8 +237,8 @@ impl Slot {
             Self::Previous
         } else if peer.pending_our_index() == Some(idx) {
             match peer.pending_role() {
-                Some(RekeyRole::Responder) => Self::PendingResponder,
-                Some(RekeyRole::Initiator) => Self::PendingInitiator,
+                Some(Role::Responder) => Self::PendingResponder,
+                Some(Role::Initiator) => Self::PendingInitiator,
                 None => Self::Unknown,
             }
         } else {
@@ -255,51 +294,6 @@ impl KeyView {
             prev_epoch: OrNone(p.previous_session().map(epoch_tag)),
             pending_epoch: OrNone(p.pending_new_session().map(epoch_tag)),
         }
-    }
-}
-
-/// Whether a failing frame was tried against the peer's pending session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Trial {
-    /// The peer held no pending session.
-    NotRunNoPending,
-    /// A pending session was held, but the frame's K-bit matched ours and
-    /// it did not name the pending index, so the gate did not try it.
-    NotRunKbitEqual,
-    /// The gate tried the pending session on a flipped K-bit and it did not
-    /// authenticate the frame.
-    Failed,
-    /// The gate tried the pending session only because the frame named the
-    /// pending index, its K-bit equal to ours, and it did not authenticate
-    /// the frame.
-    RunIndex,
-}
-
-impl Trial {
-    /// The trial outcome for a frame that went on to fail: `pending` is
-    /// whether a pending session was held, `tried` is the gate's own
-    /// decision, and `kbit_differs` is whether the frame's K-bit differed
-    /// from ours. A differing K-bit takes precedence, so `failed` keeps the
-    /// meaning it had before an index match could select the trial. A trial
-    /// that succeeded never reaches a failure line.
-    pub(crate) fn of(pending: bool, tried: bool, kbit_differs: bool) -> Self {
-        match (pending, tried, kbit_differs) {
-            (false, _, _) => Self::NotRunNoPending,
-            (true, false, _) => Self::NotRunKbitEqual,
-            (true, true, true) => Self::Failed,
-            (true, true, false) => Self::RunIndex,
-        }
-    }
-}
-
-impl fmt::Display for Trial {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NotRunNoPending => "not-run-no-pending",
-            Self::NotRunKbitEqual => "not-run-kbit-equal",
-            Self::Failed => "failed",
-            Self::RunIndex => "run-index",
-        })
     }
 }
 
@@ -520,26 +514,6 @@ mod tests {
         let p = Msg1Path::new(t2, &other, link);
         assert_eq!(p.link_tid().to_string(), "transport:1");
         assert_eq!(p.link_addr().to_string(), "10.0.0.1:2121");
-    }
-
-    #[test]
-    fn the_trial_reads_whether_a_pending_was_held_whether_the_gate_tried_it_and_on_which_signal() {
-        for kbit_differs in [false, true] {
-            assert_eq!(
-                Trial::of(false, false, kbit_differs).to_string(),
-                "not-run-no-pending"
-            );
-            assert_eq!(
-                Trial::of(false, true, kbit_differs).to_string(),
-                "not-run-no-pending"
-            );
-            assert_eq!(
-                Trial::of(true, false, kbit_differs).to_string(),
-                "not-run-kbit-equal"
-            );
-        }
-        assert_eq!(Trial::of(true, true, true).to_string(), "failed");
-        assert_eq!(Trial::of(true, true, false).to_string(), "run-index");
     }
 
     #[test]

@@ -89,7 +89,7 @@ expect_usage_error "--rerun without a value" "--rerun needs a value" --rerun
 expect_usage_error "--rerun of an unknown suite" "Unknown suite: no-such-suite" \
     --rerun no-such-suite
 for opt in --only --build-only --test-only --skip-integration --cross-check \
-        --baremetal; do
+        --baremetal --slow-tests; do
     args=(--rerun firewall "$opt")
     [ "$opt" = --only ] && args+=(firewall)
     expect_usage_error "--rerun with $opt" \
@@ -105,6 +105,8 @@ expect_usage_error "--rerun chaos-tcp-mesh is a known suite" \
 # The builder asks for the bare-metal stage by environment, not by option.
 FIPS_CI_BAREMETAL=1 expect_usage_error "--rerun with FIPS_CI_BAREMETAL=1" \
     "--rerun cannot be combined with --baremetal" --rerun firewall
+FIPS_CI_SLOW_TESTS=1 expect_usage_error "--rerun with FIPS_CI_SLOW_TESTS=1" \
+    "--rerun cannot be combined with --slow-tests" --rerun firewall
 expect_help "--rerun with --help" --rerun firewall --help
 
 echo ""

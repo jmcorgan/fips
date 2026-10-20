@@ -599,6 +599,18 @@ impl Duo {
             .any(|(_, y, n)| *y == x && n.contains(text))
     }
 
+    /// Whether both ends are alive, one is not quiet, and a new node sent
+    /// the first message of a rekey in the last [`FRESH`] ms.
+    fn started_late(&self) -> bool {
+        let first = ["sent Msg1", "sent Setup"];
+        self.n.iter().all(|n| n.alive())
+            && !self.n.iter().all(|n| n.quiet())
+            && self
+                .notes
+                .iter()
+                .any(|(t, _, n)| *t + FRESH >= self.now && first.iter().any(|f| n == f))
+    }
+
     /// The notes, for a failure message.
     pub(crate) fn transcript(&self) -> String {
         let mut s = String::new();
@@ -615,6 +627,20 @@ fn next_tick(now: u64, phase: u64) -> u64 {
     let base = now - now % 1_000 + phase;
     if base > now { base } else { base + 1_000 }
 }
+
+/// How long a rekey started just before the end of healing may run on: a
+/// link attempt's 30 s budget and one check.
+const SETTLE: u64 = 31_000;
+
+/// How close to the end of healing a new node's first rekey message counts
+/// as just before it: one check for the cutover and a round trip, with
+/// room. A rekey started earlier has had time to finish on a healed
+/// channel, so one still in flight at the end is a stall.
+const FRESH: u64 = 2_000;
+
+/// The notes of a new node giving up its own attempt or a responder pending
+/// unanswered.
+const GIVEN_UP: [&str; 2] = ["Abandoned(Unanswered)", "Abandoned(Unadopted)"];
 
 /// A trace's expectation, checked after it ran and healed.
 pub(crate) struct Expect {
@@ -701,6 +727,33 @@ impl Expect {
         let end = duo.now + heal;
         duo.run_until(end);
         let fail = |what: String, duo: &Duo| Err(format!("{name}: {what}\n{}", duo.transcript()));
+        if !self.stall && duo.started_late() {
+            // A rekey the trigger started just before the end cannot have
+            // finished by it, even with nothing lost: let it run on, and
+            // fail if a new node gives up a cycle meanwhile.
+            let given_up = |duo: &Duo| {
+                duo.notes
+                    .iter()
+                    .filter(|(_, _, n)| GIVEN_UP.iter().any(|g| n.contains(g)))
+                    .count()
+            };
+            let before = given_up(duo);
+            // Each step ends a millisecond past a whole second, on neither
+            // end's tick: a run that ends on a tick never runs it.
+            let start = duo.now - duo.now % 1_000 + 1;
+            for step in 1..=SETTLE / 1_000 {
+                if duo.n.iter().all(|n| n.quiet()) {
+                    break;
+                }
+                duo.run_until(start + step * 1_000);
+            }
+            if given_up(duo) > before {
+                return fail(
+                    String::from("a rekey started just before the end of healing was given up"),
+                    duo,
+                );
+            }
+        }
         for x in 0..2 {
             let o = duo.outage(x);
             if o > self.outage[x] {

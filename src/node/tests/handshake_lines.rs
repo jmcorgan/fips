@@ -12,7 +12,8 @@ use super::establish_chartests::{
 };
 use super::heartbeat::set_link_dead_timeout;
 use super::link_setup_diag::{
-    EPOCH, Established, arm_pending, drain, established, expect_line, field, packet, stop_transport,
+    EPOCH, Established, arm_pending, arm_pending_with_peer, drain, established, expect_line, field,
+    packet, sender_frame, stop_transport,
 };
 use super::*;
 use crate::testutil::{LogCapture, capture_logs_scoped};
@@ -201,15 +202,18 @@ async fn five_refused_while_pending(e: &mut Established) -> LogCapture {
 #[tokio::test]
 async fn a_rekey_cutover_restarts_the_count_and_reports_the_previous_sessions_suppressed_lines() {
     let mut e = established(31).await;
-    let logs = five_refused_while_pending(&mut e).await;
+    let (mut session, index) = arm_pending_with_peer(&mut e, 0x0D01).await;
+    let msg1s = fresh_msg1s(&e, 0x0D10, 5);
+    let logs = deliver_logged(&mut e.node, TransportId::new(1), &e.addr, msg1s).await;
     assert_eq!(logs.lines_with(PENDING).len(), 3, "{:#?}", logs.lines());
     assert_eq!(logs.lines_with(NOTICE).len(), 1, "{:#?}", logs.lines());
 
     // The peer's first frame on the pending adopts it; the next session is
     // old enough to rekey, and holds a pending of its own.
+    let kbit = !e.node.get_peer(&e.peer).unwrap().current_k_bit();
+    sender_frame(&mut e, &mut session, index, kbit).await;
     let peer = e.node.get_peer_mut(&e.peer).unwrap();
-    let kbit = !peer.current_k_bit();
-    peer.adopt_pending(kbit).expect("the pending was adopted");
+    assert_eq!(peer.our_index(), Some(index), "the pending was adopted");
     peer.test_backdate_session_established(Duration::from_secs(31));
     arm_pending(&mut e, 0x0D20).await;
 
@@ -256,7 +260,7 @@ async fn every_msg1_dropped_by_winning_a_dual_rekey_initiation_is_logged() {
     node.get_peer_mut(&peer)
         .unwrap()
         .test_backdate_session_established(Duration::from_secs(31));
-    arm_local_rekey(&mut node, &sender, &peer, tid);
+    arm_local_rekey(&mut node, &sender, &peer, tid).await;
 
     let msg1s = (0xAA00..0xAA06)
         .map(|i| craft_msg1_wire(&node, &sender, EPOCH, SessionIndex::new(i), 2000))
