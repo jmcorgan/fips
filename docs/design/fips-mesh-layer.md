@@ -134,6 +134,25 @@ peer has restarted, triggering full link re-establishment rather than
 treating the handshake as a simple reconnection. This prevents stale
 session state from persisting across restarts.
 
+A restart can also be revealed by the msg2 of this node's own link rekey:
+the restarted peer answers the rekey msg1 as a msg1 from a node it does
+not hold. The node keeps the link and cuts over to the new session as for
+any rekey, but retires the old session instead of draining it, since the
+restarted peer cannot send under it, and starts its K-bit at 0 and the
+link's age afresh. After the cutover it drops everything it held about
+the peer's previous run: the end-to-end session with the peer (with the
+path MTU that session learned), the peer's spanning-tree declaration and
+its filter, whose sequence numbers began again with the restart. It then
+sends the peer its TreeAnnounce at once and its FilterAnnounce on the
+next tick, both under the new session.
+
+The msg2 of a dial this node made can reveal a restart too, when the node
+already holds the identity it dialled through another link and the msg2
+carries a different epoch. That is not a cross-connection, and the
+tie-breaker does not apply: the node tears the stale peer down as on any
+restart, with its sessions and the state built on them, and installs the
+peer from its own dial, which the restarted peer answered as a new link.
+
 ### Identity Binding
 
 The Noise handshake binds the link to the peer's cryptographic identity.
@@ -209,6 +228,14 @@ Configuration (under `node.rate_limit.*`):
 - `handshake_resend_interval_ms` (default 1000): initial resend interval
 - `handshake_resend_backoff` (default 2.0): backoff multiplier per resend
 - `handshake_max_resends` (default 5): max resends per handshake attempt
+
+A link rekey's msg1 is resent at 1, 3, 7 and 15 s after the first copy (as
+many of those as `handshake_max_resends` allows), whatever the interval and
+backoff say, and the rekey is given up at the earlier of one tick after the
+last resend and the handshake timeout: 30 s at the defaults, so the fifth
+resend, at 31 s, is never sent. The next rekey waits a backoff of one tick,
+doubled for each rekey given up in a row (at most 120 s at the defaults),
+plus up to 15 s. A copy the transport fails to send counts as lost.
 
 With defaults, resends occur at 1s, 2s, 4s, 8s, 16s — all within the 30s
 handshake timeout. Under 19% per-attempt loss (10% bidirectional), the
@@ -398,11 +425,22 @@ rotating the session indices that addressed packets carry on the wire.
 A rekey is initiated when either threshold is reached on the link's current
 session: `node.rekey.after_secs` (default 120) elapsed since the link came
 up or last rekeyed, or `node.rekey.after_messages` (default 65536) frames
-sent. Either side can be the initiator independently. Rekey is on by
-default. `node.rekey.enabled: false` stops this node initiating rekey, but
-that configuration is unsupported: it is a less-tested path, and the option
-is removed in v2 (the configuration tree is documented in
-[../reference/configuration.md](../reference/configuration.md)).
+sent. Either side can be the initiator independently, and a node answers
+its peer's rekey whatever its own settings (the configuration tree is
+documented in
+[../reference/configuration.md](../reference/configuration.md)). A node
+starts no rekey of its own before the link is one tick past 30 s old and
+one tick past 30 s since its last cutover, below which a peer takes a msg1
+for a fresh dial rather than a rekey.
+
+A rekey msg1 carries nothing fresh, so a copy of one still authenticates
+after its cycle has ended. Each link remembers the ephemeral key of every
+msg1 it answered or refused, which the msg1's encryption binds whatever its
+header says, and refuses a later copy of any of them. The node keeps a
+closed link's memory under the peer's identity and startup epoch, for up to
+twice as many links as `node.limits.max_peers`, and hands it to the next
+link with that peer at that epoch. A peer that resends a msg1 this node
+refused is refused again; its next attempt, with a fresh msg1, is answered.
 
 ### Mechanism
 
@@ -415,23 +453,43 @@ the initiator then sends msg3. After both sides have exchanged messages
 and finalised the new keys, traffic transitions from the old session to
 the new one.
 
-Cutover is signalled in-band by the **K-bit** in the FMP flags byte. Each
-side starts emitting frames under the new session with K set; on receipt
-of the first K-marked frame the peer accepts the cutover and follows
-suit. A new pair of session indices is allocated as part of the new
-session, replacing the old indices on subsequent frames (see
+The initiator switches first, at its next tick once it has read msg2, and
+at once sends a heartbeat under the new session, repeated 1 s and 3 s
+later until a frame from the peer authenticates under that session. The
+responder follows on the first frame that authenticates against its new
+session, which the frame's receiver index names, and sends one heartbeat
+back under it. A responder drops a pending session the initiator never
+adopts after a hold (the drain ceiling, 120 s at stock settings), so the
+next rekey can proceed. A new pair of session indices is allocated as part
+of the new session, replacing the old indices on subsequent frames (see
 [Index Properties](#index-properties)).
+
+Cutover is also visible in-band in the **K-bit** of the FMP flags byte,
+which each session fixes when it is created. The initiator's new session
+takes the inverse of the K-bit last seen on the peer's frames under the
+current session, whether the node opened them itself or a decrypt worker
+did (the inverse of its own bit when it has seen none, and 0 after a peer
+restart); the responder's takes the bit of the frame it adopts on. A
+0.5.0 to 0.5.2 peer tries its pending session only on a frame whose
+K-bit differs from its own, so a new session takes a bit that differs
+from the peer's even when the two ends' bits have fallen out of step.
 
 ### Drain Window
 
-To absorb in-flight reordering across the cutover, the old session is not
-discarded immediately. Each peer retains it in a `previous_session` slot
-on the active-peer state for `DRAIN_WINDOW_SECS = 10` seconds (a
-compile-time constant in `src/node/handlers/rekey.rs`). During the
-window, decrypt attempts fall back to `previous_session` when the new
-session rejects a frame, so a packet sent under the old keys that
-arrives a few hundred milliseconds late still decrypts. After the
-window expires, the old session is dropped.
+To absorb in-flight reordering across the cutover, and a peer that has not
+yet moved, the old session is not discarded immediately. Each link's rekey
+machine (`core/src/proto/rekey/`) keeps it as the previous session until 10
+seconds after the first evidence that the peer seals under the new session,
+and never more than 120 seconds after the cutover. A responder's adoption
+is made on such a frame, so its drain is 10 seconds; an initiator's ends 10
+seconds after the first frame it hears from the peer under the new session.
+A frame is opened under the session its receiver index names, so a packet
+sent under the old keys still decrypts while the drain holds it. Frames
+under the previous session are delivered and count for link liveness, so a
+peer that goes on sealing under it is not removed at the link-dead timeout;
+they never extend the drain. Answering a peer's rekey leaves a drain in
+progress to its own end, and the cutover that adopts the answer retires it
+first, so a link holds at most three sessions at once.
 
 ### Dual-Initiation Race
 
@@ -444,7 +502,27 @@ FMP arbitrates with a deterministic tie-breaker: the peer with the
 discards any inbound msg1 it sees during the race; the larger-`NodeAddr`
 peer abandons its own initiation and processes the inbound msg1 as
 responder. The same tie-breaker is applied to cross-connection races
-during initial handshake.
+during initial handshake, unless the msg2 of this node's dial carries a
+startup epoch other than the one on record for the peer: that is a
+restart, not a cross-connection (see
+[Epoch Exchange and Peer Restart Detection](#epoch-exchange-and-peer-restart-detection)).
+Nor is a msg2 that answers a second dial of this node's to a peer it holds
+from its own first dial, as when it opens two paths to the peer at once: the
+peer's answer to the second dial supersedes the first (it replaces the
+peering the first dial set up, or, on a link old enough to rekey, answers it
+as a rekey), so this node moves to the second dial's session at either
+address. The node takes the order the answers arrive in for the order the
+peer gave them, so an answer to the first dial that arrives after the
+second's moves it to a session the peer has discarded.
+
+The smaller node resolves a cross-connection by moving the established
+peer onto its own dial's session. Its link's rekey machine is closed and a
+new one is built on that session: a rekey of its own in flight, a pending
+session it answered and the drain of a previous session end there, and
+their indices are released. The moved session keeps the replaced session's
+K-bit and start, so its rekey age and inner-header timestamps carry on, as
+well as the link's age, the K-bit last seen on the peer's frames and the
+link's memory of the msg1s it answered or refused.
 
 ### Operator Visibility
 

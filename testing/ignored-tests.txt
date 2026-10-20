@@ -1,0 +1,46 @@
+# Every ignored test in the workspace, one line each. Checked against the
+# sources by testing/check-ignored-tests.py; the known-defect entries are run
+# by testing/known-defect-lane.sh, which expects each to fail.
+#
+# Fields, separated by whitespace:
+#   class   environment   needs root, a network namespace, hardware or a
+#                         permission the unit-test lane does not have
+#           benchmark     a measurement run by hand, nothing asserted for CI
+#           long-running  correct and runnable, too slow for every run
+#           helper        not a test of its own; another test drives it
+#           known-defect  asserts the correct behaviour and fails today; the
+#                         lane reds when one passes, so the fix removes both
+#                         the ignore and this line
+#   crate   the package: fips-mesh or fips-core
+#   test    the test's path inside its crate's library tests, as
+#           `cargo test -- --list` prints it
+#   file    the source file holding the test
+
+# fips-core
+benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
+
+# fips-mesh
+environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
+environment   fips-mesh  ipv6tun::dns::tests::a_lan_query_with_a_forged_mesh_source_is_not_answered_into_the_mesh  src/ipv6tun/dns.rs
+environment   fips-mesh  ipv6tun::dns::tests::a_lan_query_with_a_forged_mesh_source_is_not_answered_into_the_mesh_on_a_specific_bind  src/ipv6tun/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_on_a_specific_bind_with_no_mesh_index_is_not_answered_into_the_mesh  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_global_lan_client_on_a_specific_bind_with_no_mesh_index_is_answered  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_local_client_sending_from_the_mesh_address_on_a_specific_bind_is_answered  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::an_on_link_ula_client_on_a_specific_bind_with_no_mesh_index_is_answered  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  mdns::tests::matched_scope_peers_observe_each_other  src/mdns/tests.rs
+environment   fips-mesh  node::netmon::tests::a_route_change_alone_reaches_the_watcher  src/node/netmon/tests.rs
+environment   fips-mesh  node::netmon::tests::an_interface_going_down_is_reported_only_when_a_peer_was_reached_over_it  src/node/netmon/tests.rs
+environment   fips-mesh  node::netmon::tests::an_interface_no_peer_is_reached_through_does_not_move_the_fingerprint  src/node/netmon/tests.rs
+environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_after_claims_of_a_connected_peer_stop_at_the_drop  src/node/tests/claim_slots.rs
+environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_when_its_retries_fall_between_slot_releases  src/node/tests/claim_slots.rs
+environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_when_no_claims_are_made  src/node/tests/claim_slots.rs
+environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_while_claims_of_a_connected_peer_continue  src/node/tests/claim_slots.rs
+environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::the_radio_comes_up_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
+environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::dials_a_peer_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
+environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
+environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
+helper        fips-mesh  transport::ble::io_macos::corebluetooth::tests::sink_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
+long-running  fips-mesh  node::tests::discovery::test_discovery_100_nodes  src/node/tests/discovery.rs
+benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
+benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
+known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs

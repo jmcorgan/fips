@@ -6,18 +6,21 @@
 //! it directly). The hottest counters are cache-line padded to avoid false
 //! sharing between the writer and off-thread readers.
 //!
-//! The forwarding, discovery, tree, bloom, congestion, and error families
-//! live here exclusively and are both written and served from the registry.
+//! The forwarding, discovery, tree, bloom, congestion, error, native and
+//! dataplane families live here exclusively and are both written and served
+//! from the registry.
 //! The remaining families (session, handshake, mmp, transport) stay on
 //! `NodeStats`.
 
 use portable_atomic::{AtomicU64, Ordering};
 
 use crate::cache::HintOutcome;
-use crate::node::reject::{BloomReject, DiscoveryReject, ForwardingReject, TreeReject};
+use crate::node::reject::{
+    BloomReject, DataplaneReject, DiscoveryReject, ForwardingReject, TreeReject,
+};
 use crate::node::stats::{
-    BloomStatsSnapshot, CongestionStatsSnapshot, ErrorSignalStatsSnapshot, ForwardingStatsSnapshot,
-    LookupStatsSnapshot, NativeStatsSnapshot, TreeStatsSnapshot,
+    BloomStatsSnapshot, CongestionStatsSnapshot, DataplaneStatsSnapshot, ErrorSignalStatsSnapshot,
+    ForwardingStatsSnapshot, LookupStatsSnapshot, NativeStatsSnapshot, TreeStatsSnapshot,
 };
 
 /// An atomic counter.
@@ -727,11 +730,45 @@ impl NativeMetrics {
     }
 }
 
+/// Encrypted-frame drops made before the frame's peer is resolved.
+///
+/// The drop sites sit on the receive hot path ahead of any peer lookup, so
+/// these are the only record of them: a link whose peer keeps sealing for
+/// an index this node retired shows here and nowhere else. Bumped on the
+/// rx_loop only.
+#[derive(Default)]
+pub struct DataplaneMetrics {
+    /// Frames naming a receiver index with no entry on that transport.
+    pub unknown_index: Counter,
+    /// Frames naming an index whose entry pointed at a peer no longer held.
+    pub orphaned_index: Counter,
+}
+
+impl DataplaneMetrics {
+    /// Route a typed dataplane rejection to its counter.
+    #[inline]
+    pub fn record_reject(&self, reason: DataplaneReject) {
+        match reason {
+            DataplaneReject::UnknownIndex => self.unknown_index.inc(),
+            DataplaneReject::OrphanedIndex => self.orphaned_index.inc(),
+        }
+    }
+
+    /// Sample every counter into a serializable snapshot.
+    pub fn snapshot(&self) -> DataplaneStatsSnapshot {
+        DataplaneStatsSnapshot {
+            unknown_index: self.unknown_index.get(),
+            orphaned_index: self.orphaned_index.get(),
+        }
+    }
+}
+
 /// Atomic counter registry shared across the node via `Arc`.
 ///
 /// Sole storage for the forwarding, discovery, tree, bloom, congestion,
-/// error, and native counter families; these were migrated off `NodeStats`,
-/// which now holds only the session, handshake, mmp, and transport families.
+/// error, native and dataplane counter families; the first six were migrated
+/// off `NodeStats`, which now holds only the session, handshake, mmp, and
+/// transport families.
 #[derive(Default)]
 pub struct MetricsRegistry {
     pub forwarding: ForwardingMetrics,
@@ -741,6 +778,7 @@ pub struct MetricsRegistry {
     pub congestion: CongestionMetrics,
     pub errors: ErrorMetrics,
     pub native: NativeMetrics,
+    pub dataplane: DataplaneMetrics,
 }
 
 impl MetricsRegistry {

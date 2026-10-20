@@ -9,8 +9,8 @@
 //! The top-level variant set mirrors the protocol-layer / subsystem
 //! split that the [`NodeStats`](crate::node::stats::NodeStats)
 //! sub-structures already follow, with additional categories
-//! (`Handshake`/`Session`/`Mmp`/`Forwarding`/`Transport`) for known
-//! silent-rejection clusters that don't yet have dedicated stats
+//! (`Handshake`/`Session`/`Mmp`/`Forwarding`/`Transport`/`Dataplane`) for
+//! known silent-rejection clusters that don't yet have dedicated stats
 //! sub-structures.
 //!
 //! The second-level enums are marked `#[non_exhaustive]` to keep the
@@ -42,6 +42,8 @@ pub enum RejectReason {
     Forwarding(ForwardingReject),
     /// Transport-layer rejection (admission caps, framing, etc.).
     Transport(TransportReject),
+    /// Encrypted-frame rejection before any peer is resolved.
+    Dataplane(DataplaneReject),
 }
 
 /// Spanning-tree rejection reasons.
@@ -185,10 +187,10 @@ pub enum DiscoveryReject {
 ///
 /// Variants cover the state-machine cluster in
 /// `handlers/handshake.rs` (msg1, msg2, and, on the next-side XX
-/// handshake, msg3). `BadState` covers the bulk of the cluster: header
+/// handshake, msg3). `BadState` covers the remainder of the cluster: header
 /// parse failures, crypto-step failures, identity not learned, index
 /// allocator exhaustion, wire send failures, promotion failures, ACL
-/// rejections, and admission-gate drops at max_peers / accept_connections.
+/// rejections, and the admission gates other than the msg1 `max_peers` gate.
 /// `UnknownConnection` covers lookup-miss sites where an inbound message
 /// arrived for a connection identifier we don't recognise (no pending
 /// outbound for the receiver_idx in msg2; duplicate msg1 with no stored
@@ -232,6 +234,30 @@ pub enum HandshakeReject {
     /// started is running. Not counted in `bad_state`. Tracked via
     /// [`HandshakeStats::silent_backoff`](crate::node::stats::HandshakeStats).
     SilentBackoff,
+    /// Inbound msg1 from a new identity refused at the `max_peers` cap,
+    /// before any msg2 was built. Tracked via
+    /// [`HandshakeStats::max_peers`](crate::node::stats::HandshakeStats).
+    AtMaxPeers,
+    /// Inbound rekey msg1 refused because the peer already holds a completed
+    /// rekey awaiting its cutover, and this msg1 is not the one that armed
+    /// it. Tracked via
+    /// [`HandshakeStats::rekey_pending`](crate::node::stats::HandshakeStats).
+    RekeyPending,
+    /// Inbound rekey msg1 refused because our own rekey of that link is in
+    /// flight and our address sorted smaller, so the tie-break kept us as
+    /// initiator. A healthy crossing produces one; a run of them is a
+    /// dual-initiation loop. Tracked via
+    /// [`HandshakeStats::rekey_tiebreak`](crate::node::stats::HandshakeStats).
+    RekeyTiebreak,
+    /// Inbound rekey msg1 refused as a copy of one answered in a rekey cycle
+    /// that has already ended, or arriving on a link or session too young to
+    /// rekey. Tracked via
+    /// [`HandshakeStats::answered_before`](crate::node::stats::HandshakeStats).
+    AnsweredBefore,
+    /// Inbound same-epoch msg1 refused because it arrived off the peer's
+    /// established link while that link works. Tracked via
+    /// [`HandshakeStats::off_link`](crate::node::stats::HandshakeStats).
+    OffLink,
 }
 
 /// FSP session rejection reasons.
@@ -272,26 +298,27 @@ pub enum SessionReject {
     /// answering or initiating rekeys under their own key. Tracked via
     /// [`SessionStats::rekey_key_mismatch`](crate::node::stats::SessionStats).
     RekeyKeyMismatch,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight, and our address sorted smaller, so the
-    /// tie-break kept us as initiator and their msg1 was dropped. Tracked
-    /// via [`SessionStats::rekey_tiebreak`](crate::node::stats::SessionStats).
+    /// A msg3 completed an established peer's rekey while our own completed
+    /// rekey of that session waited for the peer, and our address sorted
+    /// smaller, so the tie-break kept ours and the peer's was dropped.
+    /// Tracked via
+    /// [`SessionStats::rekey_tiebreak`](crate::node::stats::SessionStats).
     RekeyTiebreak,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight, and our address sorted larger, so we
-    /// abandoned our rekey and answered as responder. The message carries
-    /// no authenticator, so a sustained rate here means local key rotation
-    /// is being suppressed. Tracked via
+    /// A msg3 completed an established peer's rekey while our own rekey of
+    /// that session was still in flight, so ours was given up. The msg3
+    /// authenticated the peer. A completed rekey of ours that was waiting
+    /// for the peer and gave way is counted as a replaced pending session
+    /// instead. Tracked via
     /// [`SessionStats::rekey_yielded`](crate::node::stats::SessionStats).
     RekeyYielded,
-    /// A setup message named an established peer while a handshake that
-    /// peer armed was still waiting for its msg3, so the message was dropped
-    /// and the handshake kept. Tracked via
+    /// A setup message named an established peer whose session holds as
+    /// many rekey candidates as it may, overall or from that link peer, so
+    /// the message was dropped; no candidate is evicted. Tracked via
     /// [`SessionStats::rekey_held`](crate::node::stats::SessionStats).
     RekeyHeld,
-    /// A setup message named an established peer that already holds a
-    /// completed rekey awaiting cut-over, so the message was dropped
-    /// rather than arming a second handshake. Tracked via
+    /// A setup message named an established peer while our own completed
+    /// rekey waited for the peer and our address sorted smaller, so the
+    /// message was refused rather than answered. Tracked via
     /// [`SessionStats::rekey_pending`](crate::node::stats::SessionStats).
     RekeyPending,
     /// An inbound SessionAck naming a session we are initiating failed the
@@ -406,6 +433,30 @@ pub enum TransportReject {
     /// (`max_inbound_connections`) was already reached. Tracked via
     /// [`TransportStats::inbound_cap_exceeded`](crate::node::stats::TransportStats).
     InboundCapExceeded,
+}
+
+/// Encrypted-frame rejection reasons.
+///
+/// Each variant is a drop in `src/node/dataplane/encrypted.rs` that returns
+/// before the frame's peer is resolved, so nothing on the peer counts it:
+/// not the decrypt-failure count, not link statistics. Without these the
+/// side of a diverged link whose index the peer still addresses is silent.
+/// Recorded on the
+/// [`DataplaneMetrics`](crate::node::metrics::DataplaneMetrics) family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DataplaneReject {
+    /// An encrypted frame named a receiver index this node has not
+    /// allocated on that transport: the index was retired (a rekey drain
+    /// ended, a peer was removed), the peer kept addressing a session this
+    /// node no longer holds, or the frame is noise or a probe. Tracked via
+    /// [`DataplaneMetrics::unknown_index`](crate::node::metrics::DataplaneMetrics).
+    UnknownIndex,
+    /// An encrypted frame named a receiver index whose entry still pointed at
+    /// a peer this node no longer holds; the stale entry is removed with the
+    /// drop. Tracked via
+    /// [`DataplaneMetrics::orphaned_index`](crate::node::metrics::DataplaneMetrics).
+    OrphanedIndex,
 }
 
 #[cfg(test)]

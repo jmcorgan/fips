@@ -507,19 +507,19 @@ fn test_promote_connection_error_order_and_leg_detach() {
     // gathered all of them before validating would name the wrong one.
     expect_promotion_failure(|seed| seed, "missing our_index");
     expect_promotion_failure(
-        |seed| seed.with_our_index(SessionIndex::new(7)),
+        |seed| seed.with_our_index(fips_core::proto::rekey::IndexLease::for_test(7)),
         "missing their_index",
     );
     expect_promotion_failure(
         |seed| {
-            seed.with_our_index(SessionIndex::new(7))
+            seed.with_our_index(fips_core::proto::rekey::IndexLease::for_test(7))
                 .with_their_index(SessionIndex::new(42))
         },
         "missing transport_id",
     );
     expect_promotion_failure(
         |seed| {
-            seed.with_our_index(SessionIndex::new(7))
+            seed.with_our_index(fips_core::proto::rekey::IndexLease::for_test(7))
                 .with_their_index(SessionIndex::new(42))
                 .with_transport_id(TransportId::new(1))
         },
@@ -849,11 +849,12 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     // This simulates A having sent msg1 to B before B was running.
     let pending_link_id = LinkId::new(1);
     let pending_time_ms = 1000;
-    let pending_index = node.index_allocator.allocate().unwrap();
+    let pending_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let pending_index = crate::utils::index::SessionIndex::new(pending_index_lease.index());
     let pending_addr = TransportAddr::from_string("10.0.0.2:2121");
     node.seed_handshake_machine(
         HandshakeSeed::outbound(pending_link_id, peer_b_identity, pending_time_ms)
-            .with_our_index(pending_index)
+            .with_our_index(pending_index_lease)
             .with_transport_id(transport_id)
             .with_source_addr(pending_addr.clone()),
     )
@@ -892,10 +893,11 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let completing_link_id = LinkId::new(2);
     let completing_time_ms = 2000;
 
-    let completing_index = node.index_allocator.allocate().unwrap();
+    let completing_index_lease =
+        fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     node.seed_handshake_machine(
         HandshakeSeed::outbound(completing_link_id, peer_b_identity, completing_time_ms)
-            .with_our_index(completing_index)
+            .with_our_index(completing_index_lease)
             .with_their_index(SessionIndex::new(99))
             .with_transport_id(transport_id)
             .with_source_addr(TransportAddr::from_string("10.0.0.2:4001")),
@@ -3792,6 +3794,20 @@ fn the_inbound_idle_deadline_is_the_link_silence_bound_and_tracks_the_link_dead_
         inbound_idle_timeout(&raised),
         inbound_idle_timeout(&stock) + Duration::from_secs(270)
     );
+    // The link rekey msg1 ladder the bound covers resends at 1, 3, 7, 15 and
+    // 31 s whatever the handshake resend interval and backoff say.
+    let reshaped = crate::config::NodeConfig {
+        rate_limit: crate::config::RateLimitConfig {
+            handshake_resend_interval_ms: 500,
+            handshake_resend_backoff: 1.5,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(
+        inbound_idle_timeout(&reshaped),
+        inbound_idle_timeout(&stock)
+    );
 
     for node in [
         stock,
@@ -5608,4 +5624,77 @@ mod worker_liveness {
     async fn a_healthy_pool_leaves_the_node_running_through_the_rx_loop() {
         assert_eq!(drive_with_pool(false).await, NodeState::Running);
     }
+}
+
+/// Each link's rekey machine is built with the node's rekey thresholds, its
+/// resend count, tick and handshake timeout and the pending hold; a time
+/// trigger below the jitter plus the link age at which a peer answers a
+/// rekey is raised to that sum, and timers the machine refuses fall back
+/// to the link defaults.
+#[test]
+fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_short_interval_and_fall_back_only_when_they_cannot_fit()
+ {
+    use crate::node::handlers::rekey::link_params;
+    use fips_core::proto::rekey::Config;
+
+    let stock = crate::config::NodeConfig::default();
+    let config = *link_params(&stock).config();
+    assert_eq!(
+        (config.after, config.messages, config.resends),
+        (Duration::from_secs(120), 65_536, 5)
+    );
+    assert_eq!(config.hold, Duration::from_secs(120));
+    assert_eq!(
+        (config.floor_link, config.floor_session),
+        (Duration::from_secs(31), Duration::from_secs(31))
+    );
+
+    let mut node = crate::config::NodeConfig::default();
+    node.rekey.after_secs = 300;
+    node.rekey.after_messages = 7;
+    node.rate_limit.handshake_max_resends = 3;
+    node.rate_limit.handshake_timeout_secs = 60;
+    node.tick_interval_secs = 2;
+    let config = *link_params(&node).config();
+    assert_eq!(
+        (
+            config.after,
+            config.messages,
+            config.resends,
+            config.handshake,
+            config.check
+        ),
+        (
+            Duration::from_secs(300),
+            7,
+            3,
+            Duration::from_secs(60),
+            Duration::from_secs(2)
+        ),
+        "the configured thresholds and timers reach the machine"
+    );
+    assert_eq!(
+        (config.floor_link, config.floor_session),
+        (Duration::from_secs(32), Duration::from_secs(32)),
+        "own rekeys wait one tick past the 30 s link age and the 30 s after a cutover"
+    );
+
+    node.rekey.after_secs = 35;
+    assert_eq!(
+        link_params(&node).config().after,
+        Duration::from_secs(45),
+        "an interval below the jitter plus the 30 s link age is raised to it"
+    );
+
+    node.rate_limit.handshake_timeout_secs = 3;
+    let config = *link_params(&node).config();
+    assert_eq!(
+        (config.handshake, config.check, config.resends),
+        (
+            Config::fmp().handshake,
+            Config::fmp().check,
+            Config::fmp().resends
+        ),
+        "timers the machine refuses fall back to the link defaults"
+    );
 }

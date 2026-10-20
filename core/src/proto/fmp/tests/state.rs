@@ -62,10 +62,16 @@ fn index_setters_round_trip() {
     assert!(state.our_index().is_none());
     assert!(state.their_index().is_none());
 
-    state.set_our_index(SessionIndex::new(0x1111));
+    assert!(
+        state
+            .set_our_index(crate::proto::rekey::IndexLease::for_test(0x1111))
+            .is_none()
+    );
     state.set_their_index(SessionIndex::new(0x2222));
     assert_eq!(state.our_index(), Some(SessionIndex::new(0x1111)));
     assert_eq!(state.their_index(), Some(SessionIndex::new(0x2222)));
+    assert_eq!(state.take_our_index().map(|l| l.release()), Some(0x1111));
+    assert!(state.our_index().is_none());
 }
 
 #[test]

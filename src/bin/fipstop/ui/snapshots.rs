@@ -625,6 +625,29 @@ fn peers_effective_depth_column_and_detail() {
     assert!(testkit::contains_row(&buf, "2.50"));
 }
 
+/// Session detail: a session the daemon reports with no `npub`, because no
+/// handshake has proven its peer yet, renders a placeholder for the key and
+/// the daemon's identity status, instead of failing to draw.
+#[test]
+fn sessions_detail_reads_npub_as_optional_and_shows_the_identity_status() {
+    let data = json!({
+        "sessions": [
+            {
+                "display_name": "aa00bb11", "remote_addr": "aa00bb11",
+                "identity": "unproven", "state": "awaiting_msg3",
+                "is_initiator": false, "last_activity_ms": 0, "stats": {}
+            }
+        ]
+    });
+    let mut app = app_with(Tab::Sessions, data);
+    app.detail_view = Some(crate::app::DetailView { scroll: 0 });
+    let buf = testkit::render(140, 30, |frame, area| {
+        super::sessions::draw(frame, &mut app, area);
+    });
+    assert!(testkit::contains_row(&buf, "Npub: -"));
+    assert!(testkit::contains_row(&buf, "Identity: unproven"));
+}
+
 /// Bloom Filter State: the uptree fill/subtree-est lines render the values for
 /// a non-root node, and `n/a (root)` when this node is root.
 #[test]

@@ -769,9 +769,12 @@ pub fn show_sessions(node: &Node) -> Value {
                 "last_activity_ms": entry.last_activity().wall_ms(),
             });
 
-            // Derive npub from session's remote public key
-            let (xonly, _parity) = entry.remote_pubkey().x_only_public_key();
-            session_json["npub"] = json!(encode_npub(&xonly));
+            // Only a key a handshake proved is reported: an unproved
+            // session gets no npub rather than a guessed one.
+            if let Some(key) = entry.peer_key() {
+                session_json["npub"] = json!(encode_npub(&key));
+            }
+            session_json["identity"] = json!(entry.identity_status());
 
             // Traffic counters
             let (pkts_tx, pkts_rx, bytes_tx, bytes_rx) = entry.traffic_counters();
@@ -849,7 +852,10 @@ pub(crate) fn show_sessions_from_handle(handle: &super::read_handle::ControlRead
                 "last_activity_ms": session.last_activity_ms,
             });
 
-            session_json["npub"] = json!(session.npub);
+            if let Some(npub) = &session.npub {
+                session_json["npub"] = json!(npub);
+            }
+            session_json["identity"] = json!(session.identity);
 
             session_json["stats"] = json!({
                 "packets_sent": session.stats.packets_sent,
@@ -2546,8 +2552,13 @@ pub(super) fn render(
 /// gauges and histograms that need live `Node` state are out of scope and
 /// stay on the rx_loop path. This is the Prometheus-exporter enabler — an
 /// automated scraper reads this without ever touching the hot path.
+///
+/// The registry families are read live. `handshake` and `session` are kept
+/// on the rx_loop's `NodeStats`, so they are read from the tick-published
+/// stats snapshot and are as of the last tick.
 pub(crate) fn show_metrics_from_handle(handle: &super::read_handle::ControlReadHandle) -> Value {
     let m = handle.metrics();
+    let stats = handle.stats();
     json!({
         "forwarding": m.forwarding.snapshot(),
         // COMPAT: `discovery` is the deprecated alias for `lookup`; drop at the v2 cutover.
@@ -2558,6 +2569,9 @@ pub(crate) fn show_metrics_from_handle(handle: &super::read_handle::ControlReadH
         "congestion": m.congestion.snapshot(),
         "errors": m.errors.snapshot(),
         "native": m.native.snapshot(),
+        "dataplane": m.dataplane.snapshot(),
+        "handshake": &stats.handshake,
+        "session": &stats.session,
     })
 }
 
@@ -3186,10 +3200,14 @@ mod tests {
     /// golden fixture this pins the *shape*: every counter family appears
     /// as a key, each maps to an object, and a representative counter key
     /// is present in each family. This catches family renames / drops
-    /// without flaking on live values.
+    /// without flaking on live values. The two families copied from
+    /// `NodeStats` at the stats publish are then shown to carry a recorded
+    /// reject, each in its own family, once the publish has run.
     #[test]
-    fn show_metrics_shape_covers_all_families() {
-        let node = build_test_node();
+    fn show_metrics_serves_every_family_and_the_node_stats_families_from_the_last_publish() {
+        use crate::node::reject::{HandshakeReject, RejectReason, SessionReject};
+
+        let mut node = build_test_node();
         let handle = node.control_read_handle();
         let value = show_metrics_from_handle(&handle);
         let obj = value.as_object().expect("show_metrics renders an object");
@@ -3204,6 +3222,9 @@ mod tests {
             ("congestion", "ce_forwarded"),
             ("errors", "coords_required"),
             ("native", "flows_opened"),
+            ("dataplane", "unknown_index"),
+            ("handshake", "bad_state"),
+            ("session", "rekey_armed"),
         ];
         assert_eq!(
             obj.len(),
@@ -3229,6 +3250,22 @@ mod tests {
                 "fresh-node counter {family}.{sample_key} should be 0"
             );
         }
+
+        node.stats_mut()
+            .record_reject(RejectReason::Handshake(HandshakeReject::OffLink));
+        node.stats_mut()
+            .record_reject(RejectReason::Session(SessionReject::RekeyHeld));
+        node.record_stats_history();
+        let value = show_metrics_from_handle(&handle);
+        assert_eq!(
+            (
+                value["handshake"]["off_link"].as_u64(),
+                value["handshake"]["bad_state"].as_u64(),
+                value["session"]["rekey_held"].as_u64(),
+            ),
+            (Some(1), Some(0), Some(1)),
+            "a recorded handshake and session reject must be served from the next publish"
+        );
     }
 
     /// The scalar-and-series queries are served off-loop via

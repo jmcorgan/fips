@@ -539,14 +539,8 @@ impl Node {
                         self.poll_lan_rendezvous().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DrivePeerTimers,
                         self.drive_peer_timers(now_ms).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingRekeys,
-                        self.resend_pending_rekeys(now_ms).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingFmpRekeyMsg3,
-                        self.resend_pending_fmp_rekey_msg3(now_ms).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingSessionHandshakes,
-                        self.resend_pending_session_handshakes(session_now).await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingSessionMsg3,
-                        self.resend_pending_session_msg3(session_now).await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollSessionRekeys,
+                        self.poll_session_rekeys(session_now).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeIdleSessions,
                         self.purge_idle_sessions(session_now));
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeExpiredPathMtu,
@@ -567,10 +561,8 @@ impl Node {
                         self.check_session_mmp_reports().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckLinkHeartbeats,
                         self.check_link_heartbeats().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckRekey,
-                        self.check_rekey().await);
-                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckSessionRekey,
-                        self.check_session_rekey().await);
+                        instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollLinkRekeys,
+                        self.poll_link_rekeys().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckPendingLookups,
                         self.check_pending_lookups(now_ms).await);
                         // After CheckPendingLookups so a probe's resolve stage

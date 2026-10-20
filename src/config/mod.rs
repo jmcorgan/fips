@@ -21,6 +21,7 @@
 
 #[cfg(target_os = "linux")]
 mod gateway;
+mod loadlog;
 mod node;
 mod peer;
 mod transport;
@@ -42,6 +43,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(target_os = "linux")]
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
+pub use loadlog::LoadLog;
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
     NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy,
@@ -1452,6 +1454,30 @@ pub struct Config {
     pub gateway: Option<GatewayConfig>,
 }
 
+/// Warn that a config file set the removed `node.rekey.enabled` switch.
+///
+/// The key is ignored rather than refused, because a file written for an
+/// older release, or one shared with nodes still running one, must keep
+/// loading. A node that had it off is told it now rekeys, since that changes
+/// what its peers receive.
+fn warn_rekeyswitch(enabled: bool) {
+    if enabled {
+        tracing::warn!(
+            target: "fips::config",
+            "`node.rekey.enabled` is removed and ignored: rekey starts on the \
+             `node.rekey.after_secs` and `node.rekey.after_messages` thresholds. \
+             Delete the key from the config."
+        );
+    } else {
+        tracing::warn!(
+            target: "fips::config",
+            "`node.rekey.enabled: false` is removed and ignored: this node now \
+             starts rekeys of its own and answers its peers' rekeys. Delete the \
+             key from the config."
+        );
+    }
+}
+
 impl Config {
     /// Create a new empty configuration.
     pub fn new() -> Self {
@@ -1603,6 +1629,9 @@ impl Config {
     /// values each file already folded, and carries no `discovery` key, so it
     /// is not folded again.
     pub(crate) fn normalize_deprecated_keys(&mut self) {
+        if let Some(enabled) = self.node.rekey.legacy_enabled.take() {
+            warn_rekeyswitch(enabled);
+        }
         let Some(compat) = self.node.discovery.take() else {
             return;
         };
@@ -2100,11 +2129,9 @@ impl Config {
             }
         }
 
-        // Reject rekey triggers that fire immediately and forever. Both
-        // arms are checked regardless of `node.rekey.enabled` so that
-        // turning rekey on later cannot surface a config error at a
-        // surprising moment. There is deliberately no upper bound:
-        // u64::MAX is the idiom for disabling one arm of the trigger.
+        // Reject rekey triggers that fire immediately and forever. There is
+        // deliberately no upper bound: u64::MAX is the idiom for disabling
+        // one arm of the trigger.
         let rekey = &self.node.rekey;
 
         if rekey.after_messages == 0 {
@@ -2176,9 +2203,8 @@ impl Config {
         // the freshness check, or it can be accepted a second time. A signal
         // is acceptable over `signal_ttl_secs` plus the skew tolerance on each
         // side, so that span has to stay strictly inside `replay_window_secs`.
-        // Checked regardless of `nostr.enabled`, for the reason the rekey
-        // block above gives: enabling the feature later must not surface a
-        // config error at a surprising moment.
+        // Checked regardless of `nostr.enabled`, so that enabling the feature
+        // later cannot surface a config error at a surprising moment.
         let skew_secs = FRESHNESS_SKEW_TOLERANCE_MS / 1000;
         let freshness_window_secs = nostr.signal_ttl_secs.saturating_add(2 * skew_secs);
         if freshness_window_secs >= nostr.replay_window_secs {
@@ -2260,6 +2286,10 @@ fn check_interface_name(label: &str, iface: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 #[path = "tests/udp_interface.rs"]
 mod udp_interface_tests;
+
+#[cfg(test)]
+#[path = "tests/rekey_switch.rs"]
+mod rekey_switch;
 
 #[cfg(test)]
 mod tests {
@@ -4723,23 +4753,6 @@ node:
         config
             .validate()
             .expect("u64::MAX disables an arm of the trigger and must stay legal");
-    }
-
-    #[test]
-    fn test_validate_rekey_checked_even_when_disabled() {
-        let mut config = Config::default();
-        config.node.rekey.enabled = false;
-        config.node.rekey.after_messages = 0;
-
-        let err = config.validate().expect_err("validation should fail");
-        assert!(err.to_string().contains("after_messages"));
-
-        let mut config = Config::default();
-        config.node.rekey.enabled = false;
-        config.node.rekey.after_secs = REKEY_JITTER_SECS.unsigned_abs();
-
-        let err = config.validate().expect_err("validation should fail");
-        assert!(err.to_string().contains("after_secs"));
     }
 
     #[test]

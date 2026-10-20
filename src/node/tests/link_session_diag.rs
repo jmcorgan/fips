@@ -17,12 +17,13 @@ use super::link_setup_diag::{expect_line, field, index_text, session_tag};
 use super::session::{AgedLinkPair, aged_link_pair};
 use super::spanning_tree::*;
 use super::*;
-use crate::noise::NoiseSession;
+use crate::peer::ActivePeer;
 use crate::proto::fmp::wire::{
     ESTABLISHED_HEADER_SIZE, FLAG_KEY_EPOCH, build_encrypted, build_established_header,
 };
 use crate::proto::link::LinkMessageType;
 use crate::testutil::{LogCapture, capture_logs_scoped, log_field};
+use fips_core::proto::rekey::Slot;
 use std::time::Instant;
 
 /// Deliver queued packets between the nodes until a round moves none, for at
@@ -137,15 +138,11 @@ fn heartbeat_plaintext() -> Vec<u8> {
     p
 }
 
-/// Seal a heartbeat frame on `session` for `receiver_idx` with K-bit `k_bit`,
-/// the way the send path does.
-fn seal(session: &mut NoiseSession, receiver_idx: SessionIndex, k_bit: bool) -> Vec<u8> {
-    let plaintext = heartbeat_plaintext();
-    let counter = session.current_send_counter();
+/// Seal a heartbeat frame on `peer`'s session in `slot` for `receiver_idx`
+/// with K-bit `k_bit`, the way the send path does.
+fn seal(peer: &mut ActivePeer, slot: Slot, receiver_idx: SessionIndex, k_bit: bool) -> Vec<u8> {
     let flags = if k_bit { FLAG_KEY_EPOCH } else { 0 };
-    let header = build_established_header(receiver_idx, counter, flags, plaintext.len() as u16);
-    let ciphertext = session.encrypt_with_aad(&plaintext, &header).unwrap();
-    build_encrypted(&header, &ciphertext)
+    peer.seal_test_frame(slot, receiver_idx, flags, &heartbeat_plaintext())
 }
 
 /// `frame` with its first ciphertext byte flipped, so it authenticates
@@ -224,7 +221,7 @@ fn sealed_by_node0_pending(
         .pending_their_index()
         .expect("node 0 holds a pending after the msg2");
     let tag = session_tag(p0.pending_new_session().unwrap());
-    let frame = seal(p0.pending_new_session_mut().unwrap(), idx, k_bit);
+    let frame = seal(p0, Slot::Pending, idx, k_bit);
     (frame, idx, tag)
 }
 
@@ -277,11 +274,12 @@ async fn a_frame_on_the_pending_index_carrying_our_kbit_logs_that_the_pending_tr
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A frame with the other K-bit is tried against the pending session; when
-/// it fails that trial too, the line says the trial ran and failed. An
-/// authentic frame sealed the same way promotes and logs no failure.
+/// A frame on the pending index with the other K-bit is tried against the
+/// pending session by its index; when it fails there, the line says the
+/// trial ran on the index. An authentic frame sealed the same way promotes
+/// and logs no failure.
 #[tokio::test]
-async fn a_flipped_frame_that_fails_the_pending_trial_logs_that_the_trial_failed() {
+async fn a_flipped_frame_on_the_pending_index_that_fails_logs_that_the_trial_ran_on_the_index() {
     let HeldMsg2Pair {
         mut nodes,
         node0_addr,
@@ -301,8 +299,8 @@ async fn a_flipped_frame_that_fails_the_pending_trial_logs_that_the_trial_failed
     drop(guard);
 
     let line = expect_line(&logs, "Decryption failed");
-    assert_eq!(field(&line, "trial"), "failed", "{line}");
-    assert_eq!(field(&line, "slot"), "pending", "{line}");
+    assert_eq!(field(&line, "trial"), "run-index", "{line}");
+    assert_eq!(field(&line, "slot"), "pending-responder", "{line}");
     assert_eq!(field(&line, "kbit_frame"), "true", "{line}");
     assert_eq!(
         lines_with(&logs, "Decryption failed").len(),
@@ -339,7 +337,7 @@ async fn a_frame_naming_the_pending_session_we_initiated_logs_its_slot() {
         .pending_our_index()
         .expect("node 0 holds a pending after the msg2");
     let p1 = nodes[1].node.get_peer_mut(&node0_addr).unwrap();
-    let frame = seal(p1.pending_new_session_mut().unwrap(), idx, false);
+    let frame = seal(p1, Slot::Pending, idx, false);
 
     let p = arriving(&nodes[0], &nodes[1], corrupt(frame));
     let logs = frame_logged(&mut nodes[0].node, p).await;
@@ -373,7 +371,7 @@ async fn corrupt_frames_on_the_current_and_draining_sessions_log_their_slots() {
         )
     };
     let p1 = nodes[1].node.get_peer_mut(&node0_addr).unwrap();
-    let frame = seal(p1.noise_session_mut().unwrap(), old_idx, false);
+    let frame = seal(p1, Slot::Current, old_idx, false);
     let p = arriving(&nodes[0], &nodes[1], corrupt(frame));
     let logs = frame_logged(&mut nodes[0].node, p).await;
     let line = expect_line(&logs, "Decryption failed");
@@ -383,8 +381,8 @@ async fn corrupt_frames_on_the_current_and_draining_sessions_log_their_slots() {
     assert_eq!(field(&line, "epoch"), old_tag, "{line}");
 
     // After node 0's cutover the old index is the draining previous one.
-    complete_held(&mut nodes, held_msg2).await;
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.handle_msg2(held_msg2).await;
+    nodes[0].node.poll_link_rekeys().await;
     let new_tag = {
         let p0 = nodes[0].node.get_peer(&node1_addr).unwrap();
         assert_eq!(p0.previous_our_index(), Some(old_idx), "node 0 cut over");
@@ -392,7 +390,7 @@ async fn corrupt_frames_on_the_current_and_draining_sessions_log_their_slots() {
     };
     assert_ne!(new_tag, old_tag);
     let p1 = nodes[1].node.get_peer_mut(&node0_addr).unwrap();
-    let frame = seal(p1.noise_session_mut().unwrap(), old_idx, false);
+    let frame = seal(p1, Slot::Current, old_idx, false);
     let p = arriving(&nodes[0], &nodes[1], corrupt(frame));
     let logs = frame_logged(&mut nodes[0].node, p).await;
     let line = expect_line(&logs, "Decryption failed");
@@ -451,7 +449,7 @@ fn current_frame(
     authentic: bool,
 ) -> ReceivedPacket {
     let p1 = nodes[1].node.get_peer_mut(node0_addr).unwrap();
-    let frame = seal(p1.noise_session_mut().unwrap(), idx, false);
+    let frame = seal(p1, Slot::Current, idx, false);
     let frame = if authentic { frame } else { corrupt(frame) };
     arriving(&nodes[0], &nodes[1], frame)
 }
@@ -541,7 +539,8 @@ async fn a_worker_decrypt_failure_logs_the_frames_index_and_path() {
     let tid0 = nodes[0].transport_id;
     let n0 = &mut nodes[0].node;
     n0.supervisor.decrypt_workers = Some(DecryptWorkerPool::for_test(vec![TestWorker::Run]));
-    n0.register_decrypt_worker_session(&node1_addr);
+    let offer = n0.get_peer(&node1_addr).unwrap().offer_to_workers();
+    n0.run_link_outputs(&node1_addr, offer);
     let mut events = n0.decrypt_fallback_rx.take().expect("the event receiver");
     let idx = n0.get_peer(&node1_addr).unwrap().our_index().unwrap();
     assert!(
@@ -687,7 +686,7 @@ async fn both_ends_log_the_same_new_session_tag_and_their_kbit_through_a_rekey()
             .unwrap(),
     );
     nodes[0].node.handle_msg2(held_msg2).await;
-    nodes[0].node.check_rekey().await;
+    nodes[0].node.poll_link_rekeys().await;
     nodes[0]
         .node
         .send_encrypted_link_message(&node1_addr, &[LinkMessageType::Heartbeat.to_byte()])
@@ -749,8 +748,8 @@ async fn node0_cut_over() -> HeldMsg2Pair {
     let mut pair = rekey_pair_with_held_msg2().await;
     let held = pair.held_msg2.clone();
     pair.nodes[0].node.handle_msg2(held).await;
-    pair.nodes[0].node.check_rekey().await;
-    let p0 = pair.nodes[0].node.get_peer_mut(&pair.node1_addr).unwrap();
+    pair.nodes[0].node.poll_link_rekeys().await;
+    let p0 = pair.nodes[0].node.get_peer(&pair.node1_addr).unwrap();
     assert_eq!(
         p0.previous_our_index(),
         pair.node0_idx_before,
@@ -760,13 +759,15 @@ async fn node0_cut_over() -> HeldMsg2Pair {
     pair
 }
 
-/// Make node 0's peer read as silent since its session start for longer
-/// than the default link-dead timeout, then run the heartbeat check with its
-/// lines captured.
+/// Let 31 s pass with nothing received, past the default link-dead timeout
+/// measured from the session start and from every frame, then run the
+/// heartbeat check with its lines captured.
 async fn reap_logged(node: &mut Node, peer: &NodeAddr) -> LogCapture {
-    node.get_peer_mut(peer)
-        .unwrap()
-        .test_backdate_session_start(Duration::from_secs(31));
+    assert!(
+        node.get_peer(peer).is_some(),
+        "precondition: the peer is held"
+    );
+    crate::time::advance(Duration::from_secs(31));
     let (logs, guard) = capture_logs_scoped();
     node.check_link_heartbeats().await;
     drop(guard);
@@ -774,12 +775,12 @@ async fn reap_logged(node: &mut Node, peer: &NodeAddr) -> LogCapture {
     logs
 }
 
-/// A link-dead removal after a cutover, while the peer still sends on the
-/// old session, says the silence was measured from the session start and
-/// that frames did arrive on the previous session.
+/// A link-dead removal after a cutover, once a peer that went on sending on
+/// the old session falls silent, says the silence was measured from its last
+/// frame on that session and that frames did arrive on it.
 #[tokio::test]
-async fn a_link_dead_removal_after_a_cutover_logs_the_session_start_basis_and_previous_session_frames()
- {
+async fn a_link_dead_removal_after_a_cutover_logs_the_last_heard_basis_and_previous_session_frames()
+{
     let HeldMsg2Pair {
         mut nodes,
         node0_addr,
@@ -810,7 +811,7 @@ async fn a_link_dead_removal_after_a_cutover_logs_the_session_start_basis_and_pr
     let (link_tid, link_addr) = (nodes[0].transport_id, nodes[1].addr.clone());
     let logs = reap_logged(&mut nodes[0].node, &node1_addr).await;
     let line = expect_line(&logs, "Removing peer: link dead timeout");
-    assert_eq!(field(&line, "basis"), "session_start", "{line}");
+    assert_eq!(field(&line, "basis"), "last_heard", "{line}");
     let frames: u64 = field(&line, "prev_slot_frames").parse().expect("a count");
     assert!(frames > 0, "{line}");
     field(&line, "since_cutover_ms")

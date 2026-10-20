@@ -22,14 +22,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// state back after a message that advanced it before failing to
 /// authenticate.
 ///
-/// `ck` and `h` are cleared on drop, including on the clone above once it
-/// goes out of scope. `cipher` is skipped because [`CipherState`] holds no
+/// `ck` and `h` are cleared on drop, including on a fork's copy once it goes
+/// out of scope. `cipher` is skipped because [`CipherState`] holds no
 /// key bytes of its own: its key is the cached keyed cipher, which clears
 /// itself on drop on RustCrypto and cannot be cleared on `ring`.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-struct SymmetricState {
+pub(super) struct SymmetricState {
     /// Chaining key for key derivation.
-    ck: [u8; 32],
+    pub(super) ck: [u8; 32],
     /// Running SHA-256 accumulator over the handshake transcript.
     ///
     /// Maintained by `mix_hash` at every step, but never fed to the AEAD:
@@ -37,10 +37,10 @@ struct SymmetricState {
     /// production reads it, so it provides no transcript binding today, and
     /// anything built on `handshake_hash()` (channel binding, an exporter,
     /// cookie binding) will silently not work until the AAD carries `h`.
-    h: [u8; 32],
+    pub(super) h: [u8; 32],
     /// Current cipher state for encrypting handshake payloads.
     #[zeroize(skip)]
-    cipher: CipherState,
+    pub(super) cipher: CipherState,
 }
 
 impl SymmetricState {
@@ -149,31 +149,35 @@ pub struct Message2Rollback {
 /// Handshake state for the Noise XX pattern.
 ///
 /// `E` is the host's random source, used for the ephemeral key.
+///
+/// The fields are visible to the rest of `noise` so that `fork.rs` can copy
+/// every one of them and its tests can compare a state field by field.
+/// Nothing else outside this file reads or writes them.
 pub struct HandshakeState<E> {
     /// Which Noise pattern is being used.
-    pattern: NoisePattern,
+    pub(super) pattern: NoisePattern,
     /// Our role in the handshake.
-    role: HandshakeRole,
+    pub(super) role: HandshakeRole,
     /// Current progress.
-    progress: HandshakeProgress,
+    pub(super) progress: HandshakeProgress,
     /// Symmetric state.
-    symmetric: SymmetricState,
+    pub(super) symmetric: SymmetricState,
     /// Our static keypair.
-    static_keypair: Keypair,
+    pub(super) static_keypair: Keypair,
     /// Our ephemeral keypair (generated at handshake start).
-    ephemeral_keypair: Option<Keypair>,
+    pub(super) ephemeral_keypair: Option<Keypair>,
     /// Remote static public key.
     /// For XX initiator: learned from message 2.
     /// For XX responder: learned from message 3.
-    remote_static: Option<PublicKey>,
+    pub(super) remote_static: Option<PublicKey>,
     /// Remote ephemeral public key (learned during handshake).
-    remote_ephemeral: Option<PublicKey>,
+    pub(super) remote_ephemeral: Option<PublicKey>,
     /// The random source for the ephemeral key.
-    entropy: PhantomData<fn() -> E>,
+    pub(super) entropy: PhantomData<fn() -> E>,
     /// Our startup epoch for restart detection.
-    local_epoch: Option<[u8; 8]>,
+    pub(super) local_epoch: Option<[u8; 8]>,
     /// Remote peer's startup epoch (learned during handshake).
-    remote_epoch: Option<[u8; 8]>,
+    pub(super) remote_epoch: Option<[u8; 8]>,
 }
 
 impl<E: EntropySource> HandshakeState<E> {

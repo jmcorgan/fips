@@ -241,7 +241,7 @@ async fn test_disconnect_chain_partition() {
 #[tokio::test]
 async fn test_disconnect_clears_session() {
     use crate::identity::Identity;
-    use crate::node::session::{EndToEndState, SessionEntry};
+    use crate::node::session::SessionEntry;
     use crate::noise::HandshakeState;
 
     // Two-node topology: 0 -- 1.
@@ -274,10 +274,9 @@ async fn test_disconnect_clears_session() {
         responder.read_message_3(&msg3).unwrap();
         let session = initiator.into_session().unwrap();
 
-        let entry = SessionEntry::new(
+        let entry = SessionEntry::keyed(
             node0_addr,
-            remote_identity.pubkey_full(),
-            EndToEndState::Established(session),
+            session,
             crate::node::session::session_at(1_000),
             true,
         );

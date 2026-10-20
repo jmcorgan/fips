@@ -143,10 +143,9 @@ impl Node {
                 }
                 return;
             }
-            // As on the TUN path: an entry holding only responder candidates
-            // that have had the minimum age to complete makes this node
-            // initiate itself.
-            if entry.responder_hold_expired(Self::session_now()) {
+            // As on the TUN path: a session holding only the peer's setups
+            // makes this node start its own attempt beside them at once.
+            if !entry.is_initiating() {
                 let pubkey = peer.public_key(secp256k1::Parity::Even);
                 self.cache_flow_key(&key.peer, pubkey);
                 self.initiate_behind_candidates(key.peer, pubkey).await;

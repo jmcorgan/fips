@@ -1,27 +1,14 @@
 //! Link-dead heartbeat rekey-awareness integration tests.
 //!
 //! `check_link_heartbeats()` reaps a peer after the link-dead timeout,
-//! but suppresses teardown while an FMP rekey is genuinely in flight with
-//! its msg1 retransmission budget unexhausted. These tests drive a real
-//! two-node UDP peering, inject rekey state on the peer, and verify the
-//! suppress / resume / regression behaviors. `link_dead_timeout_secs` is
-//! set to 0 so the elapsed-time predicate is always satisfied and the only
-//! variable is the rekey-active guard.
+//! but suppresses teardown while this node's FMP rekey is in flight. These
+//! tests drive a two-node peering, let the link machine's time trigger
+//! start a rekey, and verify the suppress / resume / regression behaviors.
+//! `link_dead_timeout_secs` is set to 0 so the elapsed-time predicate is
+//! always satisfied and the only variable is the rekey-active guard.
 
 use super::spanning_tree::*;
 use super::*;
-use crate::Identity;
-use crate::noise::HandshakeState;
-use crate::utils::index::SessionIndex;
-
-/// Arm a real (initiator) FMP rekey on the peer the given node holds for
-/// `peer_addr`, so the msg1 resend budget can be exercised.
-fn arm_rekey(node: &mut crate::node::Node, peer_addr: &NodeAddr) {
-    let local = Identity::generate();
-    let hs = HandshakeState::new_initiator(local.keypair());
-    let peer = node.get_peer_mut(peer_addr).expect("peer present");
-    peer.set_rekey_state(hs, SessionIndex::new(7), vec![0xAB; 64], 0);
-}
 
 /// Set `link_dead_timeout_secs` on an already-constructed node via the
 /// sole-store copy-on-write context swap (immutable state is no longer a
@@ -98,67 +85,257 @@ async fn a_failed_heartbeat_send_is_not_recorded_as_landed() {
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A peer past the link-dead timeout is NOT reaped while an FMP rekey is in
-/// progress with its msg1 budget unexhausted.
+/// The rekey msg1s queued at `tn`, taking every packet off its queue.
+fn msg1s(tn: &mut TestNode) -> Vec<Vec<u8>> {
+    use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1};
+
+    std::iter::from_fn(|| tn.packet_rx.try_recv().ok())
+        .map(|p| p.data)
+        .filter(|d| CommonPrefix::parse(d).is_some_and(|p| p.phase == PHASE_MSG1))
+        .collect()
+}
+
+/// A link rekey toward a peer that has gone silent sends its msg1 at 0, 1,
+/// 3, 7 and 15 s and no copy at 31 s, and ends 30 s after its first msg1;
+/// the poll that ends it starts no other, and the next waits out a back-off
+/// of one tick plus up to 15 s. The link is kept while an attempt is in
+/// flight, even one whose every msg1 the transport refuses, and is reaped
+/// by the first link-dead check after that attempt ends.
+///
+/// The tick checks heartbeats before it polls the link machines, so the
+/// back-off is what lets the reap run between two attempts.
 #[tokio::test]
-async fn heartbeat_suppressed_during_rekey() {
-    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
-    verify_tree_convergence(&nodes);
+async fn a_silent_peers_link_rekey_ends_30_s_after_its_first_msg1_backs_off_and_the_link_is_reaped_after_an_attempt_whose_sends_all_fail()
+ {
+    use super::rekey_parity::{age_link, linked_pair, rekey_config, trigger_age};
 
-    let addr_1 = *nodes[1].node.node_addr();
-    assert!(nodes[0].node.get_peer(&addr_1).is_some());
+    let mut nodes = linked_pair(rekey_config(60), crate::config::Config::new()).await;
+    let peer = *nodes[1].node.node_addr();
+    age_link(&mut nodes, 0, 1, trigger_age());
+    let in_flight = |nodes: &[TestNode]| {
+        nodes[0]
+            .node
+            .get_peer(&peer)
+            .is_some_and(|p| p.rekey_in_progress())
+    };
 
-    // Force every link to read as dead on elapsed time alone.
-    set_link_dead_timeout(&mut nodes[0].node, 0);
-
-    // Arm a rekey with budget left (count 0 < max_resends default 5).
-    arm_rekey(&mut nodes[0].node, &addr_1);
-    assert!(nodes[0].node.get_peer(&addr_1).unwrap().rekey_in_progress());
-
-    nodes[0].node.check_link_heartbeats().await;
-
+    nodes[0].node.poll_link_rekeys().await;
+    let first = msg1s(&mut nodes[1]);
     assert!(
-        nodes[0].node.get_peer(&addr_1).is_some(),
-        "peer reaped despite an in-flight rekey with budget remaining"
+        in_flight(&nodes) && first.len() == 1,
+        "control: the time trigger started a rekey and its msg1 went out"
+    );
+
+    // Node 1 is never driven, so nothing answers.
+    let mut copies = Vec::new();
+    for s in 1..=30u64 {
+        crate::time::advance(Duration::from_secs(1));
+        nodes[0].node.poll_link_rekeys().await;
+        for m in msg1s(&mut nodes[1]) {
+            assert_eq!(
+                m, first[0],
+                "at {s} s a msg1 other than the first's copy went out"
+            );
+            copies.push(s);
+        }
+    }
+    assert!(
+        !in_flight(&nodes),
+        "the attempt must end 30 s after its first msg1, and the poll that ends it must start no other"
+    );
+    assert_eq!(
+        copies,
+        [1, 3, 7, 15],
+        "the msg1 must be resent at 1, 3, 7 and 15 s and not at 31 s"
+    );
+
+    // From here every send fails.
+    nodes[0].node.transports.clear();
+    let mut next = None;
+    for s in 31..=46u64 {
+        crate::time::advance(Duration::from_secs(1));
+        nodes[0].node.poll_link_rekeys().await;
+        if in_flight(&nodes) {
+            next = Some(s);
+            break;
+        }
+    }
+    let next =
+        next.expect("the next attempt must start once one tick plus at most 15 s have passed");
+
+    // One-second ticks in the node's order, the peer past the link-dead
+    // timeout throughout.
+    set_link_dead_timeout(&mut nodes[0].node, 0);
+    let mut reaped_at = None;
+    for s in next + 1..=next + 60 {
+        crate::time::advance(Duration::from_secs(1));
+        nodes[0].node.check_link_heartbeats().await;
+        if nodes[0].node.get_peer(&peer).is_none() {
+            reaped_at = Some(s);
+            break;
+        }
+        nodes[0].node.poll_link_rekeys().await;
+    }
+    assert_eq!(
+        reaped_at,
+        Some(next + 31),
+        "the link must be kept while the attempt started at {next} s is in flight, every msg1 of it \
+         refused, and reaped by the first link-dead check after it ends at {} s",
+        next + 30
     );
 
     cleanup_nodes(&mut nodes).await;
 }
 
-/// Once the msg1 budget is exhausted the rekey-active guard no longer
-/// holds, so a peer past the link-dead timeout IS reaped.
+/// The established frames queued at `tn`, each with the receiver index its
+/// header names, taking every packet off its queue.
+fn frames(tn: &mut TestNode) -> Vec<(SessionIndex, ReceivedPacket)> {
+    use crate::proto::fmp::wire::EncryptedHeader;
+
+    std::iter::from_fn(|| tn.packet_rx.try_recv().ok())
+        .filter_map(|p| EncryptedHeader::parse(&p.data).map(|h| (h.receiver_idx, p)))
+        .collect()
+}
+
+/// A link rekey's initiator prompts its peer under the new session at its
+/// cutover, and again 1 s and 3 s after it while it has not heard the peer
+/// under that session; the responder that adopts on a prompt prompts once
+/// in turn, and that frame stops the initiator's prompts. A responder
+/// whose first prompts were lost therefore adopts within seconds rather
+/// than on the next heartbeat or data, and the initiator hears the peer
+/// under the new session at once instead of only on the previous one.
+///
+/// Run twice: the first prompt to arrive is the one sent at 1 s, after
+/// which the 3 s one must not be sent, and the one sent at 3 s, after
+/// which there is no rung left.
 #[tokio::test]
-async fn heartbeat_resumes_after_budget_exhausted() {
-    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
-    verify_tree_convergence(&nodes);
+async fn a_link_cutover_prompts_the_peer_at_once_and_at_1_s_and_3_s_until_it_is_heard_and_the_adoption_prompts_once()
+ {
+    use super::rekey_parity::{
+        age_link, cutover, linked_pair, rekey_config, rekey_to_pending, trigger_age,
+    };
 
-    let addr_1 = *nodes[1].node.node_addr();
-    assert!(nodes[0].node.get_peer(&addr_1).is_some());
+    for kept in [1u64, 3] {
+        let mut nodes = linked_pair(rekey_config(60), crate::config::Config::new()).await;
+        let a = *nodes[0].node.node_addr();
+        let b = *nodes[1].node.node_addr();
+        age_link(&mut nodes, 0, 1, trigger_age());
+        let b_pending = rekey_to_pending(&mut nodes, 0, 1).await;
+        cutover(&mut nodes[0], &b).await;
+        let a_current = nodes[0].node.get_peer(&b).unwrap().our_index().unwrap();
 
-    set_link_dead_timeout(&mut nodes[0].node, 0);
-    let max_resends = nodes[0].node.config().node.rate_limit.handshake_max_resends;
+        // Every prompt sent before the one at `kept` s is lost.
+        for (s, step) in [(0u64, 0u64), (1, 1), (3, 2)] {
+            crate::time::advance(Duration::from_secs(step));
+            if s > 0 {
+                nodes[0].node.poll_link_rekeys().await;
+            }
+            let queued = frames(&mut nodes[1]);
+            let indices: Vec<_> = queued.iter().map(|(i, _)| *i).collect();
+            if s > kept {
+                assert!(
+                    queued.is_empty(),
+                    "heard under the new session at {kept} s, the initiator must send nothing at \
+                     {s} s; queued: {indices:?}"
+                );
+                continue;
+            }
+            assert!(
+                queued.len() == 1 && queued[0].0 == b_pending,
+                "at {s} s after the cutover the initiator must send one frame under the new \
+                 session, to the responder's pending index; queued: {indices:?}"
+            );
+            if s < kept {
+                continue;
+            }
 
-    arm_rekey(&mut nodes[0].node, &addr_1);
+            // This prompt arrives: the responder adopts and prompts once.
+            for (_, p) in queued {
+                nodes[1].node.handle_encrypted_frame(p).await;
+            }
+            let peer = nodes[1].node.get_peer(&a).unwrap();
+            assert!(
+                peer.pending_new_session().is_none() && peer.our_index() == Some(b_pending),
+                "the responder adopts the new session on the prompt sent at {kept} s"
+            );
+            let answer = frames(&mut nodes[0]);
+            assert!(
+                answer.len() == 1 && answer[0].0 == a_current,
+                "the adoption must send one frame under the new session; queued: {:?}",
+                answer.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+            );
+            for (_, p) in answer {
+                nodes[0].node.handle_encrypted_frame(p).await;
+            }
+        }
 
-    // Exhaust the budget: count reaches max_resends, guard goes false.
-    let peer = nodes[0].node.get_peer_mut(&addr_1).unwrap();
-    for i in 0..max_resends {
-        peer.record_rekey_msg1_resend(1000 + i as u64 * 100);
+        // Neither end prompts again.
+        for _ in 0..10 {
+            crate::time::advance(Duration::from_secs(1));
+            nodes[0].node.poll_link_rekeys().await;
+            nodes[1].node.poll_link_rekeys().await;
+        }
+        let late = (frames(&mut nodes[1]).len(), frames(&mut nodes[0]).len());
+        assert_eq!(
+            late,
+            (0, 0),
+            "heard at {kept} s: no prompt may follow once each end has heard the other under \
+             the new session"
+        );
+
+        cleanup_nodes(&mut nodes).await;
+    }
+}
+
+/// After this node's link rekey cutover, a peer that never hears the new
+/// session goes on sealing under the previous one. Nothing shows the peer
+/// moved, so the previous session is kept until the drain's 120 s ceiling,
+/// and the peer's frames under it count for liveness: the link is not
+/// reaped at the link-dead timeout while they keep arriving.
+///
+/// Every frame this node sends after the cutover is lost; the peer's
+/// heartbeats arrive every 5 s.
+#[tokio::test]
+async fn a_peer_heard_only_under_the_previous_session_after_a_cutover_keeps_it_to_the_drain_ceiling_and_is_not_reaped()
+ {
+    use super::rekey_parity::{
+        age_link, cutover, deliver, heartbeat, linked_pair, rekey_config, rekey_to_pending,
+    };
+
+    // A rekey interval long enough that no second rekey starts in the run.
+    let after = 300;
+    let mut nodes = linked_pair(rekey_config(after), crate::config::Config::new()).await;
+    let a = *nodes[0].node.node_addr();
+    let b = *nodes[1].node.node_addr();
+    age_link(&mut nodes, 0, 1, Duration::from_secs(after + 16));
+    rekey_to_pending(&mut nodes, 0, 1).await;
+    let previous = nodes[0].node.get_peer(&b).unwrap().our_index();
+    cutover(&mut nodes[0], &b).await;
+
+    let mut reaped = None;
+    let mut dropped = None;
+    for s in (5..=125u64).step_by(5) {
+        crate::time::advance(Duration::from_secs(5));
+        while nodes[1].packet_rx.try_recv().is_ok() {}
+        heartbeat(&mut nodes[1], &a).await;
+        deliver(&mut nodes[0]).await;
+        nodes[0].node.check_link_heartbeats().await;
+        if nodes[0].node.get_peer(&b).is_none() {
+            reaped = Some(s);
+            break;
+        }
+        nodes[0].node.poll_link_rekeys().await;
+        let held = nodes[0].node.get_peer(&b).unwrap().previous_our_index();
+        if dropped.is_none() && held != previous {
+            dropped = Some(s);
+        }
     }
     assert_eq!(
-        nodes[0]
-            .node
-            .get_peer(&addr_1)
-            .unwrap()
-            .rekey_msg1_resend_count(),
-        max_resends
-    );
-
-    nodes[0].node.check_link_heartbeats().await;
-
-    assert!(
-        nodes[0].node.get_peer(&addr_1).is_none(),
-        "peer not reaped after its rekey budget was exhausted"
+        (reaped, dropped),
+        (None, Some(120)),
+        "(reaped at, previous session dropped at), in seconds after the cutover: the peer must \
+         be kept while its frames arrive under the previous session, and that session held to \
+         the drain's 120 s ceiling"
     );
 
     cleanup_nodes(&mut nodes).await;

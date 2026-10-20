@@ -150,7 +150,7 @@ async fn isolated_service_types_do_not_cross_feed() {
 /// the same code path correctly — verify with `cargo test -- --ignored
 /// matched_scope_peers_observe_each_other` on a setup where this
 /// matters, or via end-to-end integration with two daemons.
-#[ignore]
+#[ignore = "two mDNS daemons in one process depend on the host's multicast loopback; run on a host where it works"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn matched_scope_peers_observe_each_other() {
     let identity_a = Identity::generate();

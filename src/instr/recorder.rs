@@ -53,12 +53,7 @@ pub(crate) enum Step {
     PollNostrRendezvous,
     PollLanRendezvous,
     DrivePeerTimers,
-    ResendPendingRekeys,
-    /// `next`-only: the FMP rekey msg3 resend driver has no master-line
-    /// counterpart, so this variant exists on this line alone.
-    ResendPendingFmpRekeyMsg3,
-    ResendPendingSessionHandshakes,
-    ResendPendingSessionMsg3,
+    PollSessionRekeys,
     PurgeIdleSessions,
     PurgeExpiredPathMtu,
     ProcessPendingRetries,
@@ -69,8 +64,7 @@ pub(crate) enum Step {
     CheckMmpReports,
     CheckSessionMmpReports,
     CheckLinkHeartbeats,
-    CheckRekey,
-    CheckSessionRekey,
+    PollLinkRekeys,
     CheckPendingLookups,
     PollProbes,
     PollTransportDiscovery,
@@ -96,10 +90,7 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::PollNostrRendezvous,
     Step::PollLanRendezvous,
     Step::DrivePeerTimers,
-    Step::ResendPendingRekeys,
-    Step::ResendPendingFmpRekeyMsg3,
-    Step::ResendPendingSessionHandshakes,
-    Step::ResendPendingSessionMsg3,
+    Step::PollSessionRekeys,
     Step::PurgeIdleSessions,
     Step::PurgeExpiredPathMtu,
     Step::ProcessPendingRetries,
@@ -110,8 +101,7 @@ pub(crate) const STEPS: [Step; N_STEPS] = [
     Step::CheckMmpReports,
     Step::CheckSessionMmpReports,
     Step::CheckLinkHeartbeats,
-    Step::CheckRekey,
-    Step::CheckSessionRekey,
+    Step::PollLinkRekeys,
     Step::CheckPendingLookups,
     Step::PollProbes,
     Step::PollTransportDiscovery,
@@ -132,10 +122,7 @@ impl Step {
             Step::PollNostrRendezvous => "poll_nostr_rendezvous",
             Step::PollLanRendezvous => "poll_lan_rendezvous",
             Step::DrivePeerTimers => "drive_peer_timers",
-            Step::ResendPendingRekeys => "resend_pending_rekeys",
-            Step::ResendPendingFmpRekeyMsg3 => "resend_pending_fmp_rekey_msg3",
-            Step::ResendPendingSessionHandshakes => "resend_pending_session_handshakes",
-            Step::ResendPendingSessionMsg3 => "resend_pending_session_msg3",
+            Step::PollSessionRekeys => "poll_session_rekeys",
             Step::PurgeIdleSessions => "purge_idle_sessions",
             Step::PurgeExpiredPathMtu => "purge_expired_path_mtu",
             Step::ProcessPendingRetries => "process_pending_retries",
@@ -146,8 +133,7 @@ impl Step {
             Step::CheckMmpReports => "check_mmp_reports",
             Step::CheckSessionMmpReports => "check_session_mmp_reports",
             Step::CheckLinkHeartbeats => "check_link_heartbeats",
-            Step::CheckRekey => "check_rekey",
-            Step::CheckSessionRekey => "check_session_rekey",
+            Step::PollLinkRekeys => "poll_link_rekeys",
             Step::CheckPendingLookups => "check_pending_lookups",
             Step::PollProbes => "poll_probes",
             Step::PollTransportDiscovery => "poll_transport_discovery",
@@ -390,19 +376,9 @@ mod tests {
     #[test]
     fn emitted_row_count_matches_build() {
         let emitted = STEPS.iter().filter(|s| s.emitted()).count();
-        // 27 unconditional subsystem steps on this line (26 shared with the
-        // master line, plus `resend_pending_fmp_rekey_msg3`, which exists only
-        // here) + the whole-tick span, plus the three conditionally-compiled
-        // steps where this build has them. The count is pinned deliberately: it
-        // is what caught the extra step when the master-line instrumentation
-        // was merged up, rather than letting the tables silently disagree — and
-        // it did so again when `purge_expired_path_mtu` arrived with the
-        // path-MTU expiry work, taking the shared count from 24 to 25, and
-        // again when `poll_probes` arrived with the probe diagnostic, taking it
-        // from 25 to 26. That merge is the sharpest case so far: both lines
-        // held 27 for different reasons, so the literal merged without a
-        // conflict and only the comment above it collided.
-        let mut expected = 28;
+        // 23 unconditional subsystem steps + the whole-tick span, plus the
+        // three conditionally-compiled steps where this build has them.
+        let mut expected = 24;
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             expected += 1;
         }
@@ -419,12 +395,12 @@ mod tests {
     fn record_accumulates_count_max_and_total() {
         let _guard = serial();
         reset();
-        record(Domain::Tick, Step::CheckRekey, Duration::from_nanos(10));
-        record(Domain::Tick, Step::CheckRekey, Duration::from_nanos(30));
-        let (count, max, total) = take_step(Domain::Tick, Step::CheckRekey);
+        record(Domain::Tick, Step::PollLinkRekeys, Duration::from_nanos(10));
+        record(Domain::Tick, Step::PollLinkRekeys, Duration::from_nanos(30));
+        let (count, max, total) = take_step(Domain::Tick, Step::PollLinkRekeys);
         assert_eq!((count, max, total), (2, 30, 40));
         // Taking clears the slot.
-        assert_eq!(take_step(Domain::Tick, Step::CheckRekey), (0, 0, 0));
+        assert_eq!(take_step(Domain::Tick, Step::PollLinkRekeys), (0, 0, 0));
     }
 
     #[test]

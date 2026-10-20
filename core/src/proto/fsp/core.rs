@@ -1,20 +1,18 @@
-//! Sans-IO FSP session-rekey + epoch-reaction decision core.
+//! Sans-IO FSP session decision core.
 //!
 //! Pure, runtime-agnostic decisions for the FSP end-to-end session lifecycle:
-//! the per-tick rekey choreography (initiator cutover, drain completion, rekey
-//! trigger), rekey and initial-handshake msg3 resend classification, and the
-//! post-decrypt epoch reaction. The async I/O adapters in `node::handlers::{rekey,session}` build
-//! the plain-data snapshots (pre-computing every clock read into `u64`/`bool`),
-//! call these decisions, and drive the returned effects — the sends, the
-//! `SessionEntry` mutations, metrics, and logging. No I/O, no clock, no crypto,
-//! no metrics, no logging here.
+//! the coordinate and path-MTU reactions, and the transforms applied to
+//! session data. The async session handlers in `node::handlers::session`
+//! pass in the facts these decisions read, call them, and drive the returned
+//! effects: the cache writes, lookups, metrics and logging. No I/O, no
+//! clock, no crypto, no metrics, no logging here.
 //!
-//! The crypto-owning `SessionEntry` stays shell-side (`node::session`), so this
-//! core carries no `proto -> noise` and no `proto -> node` dependency: the
-//! trial-decrypt AEAD open runs shell-side and the resulting epoch is mapped to
-//! the plain-data [`DecryptSlot`] mirror before it reaches [`Fsp::classify_epoch`].
+//! A session's handshakes, keys and epochs are held by its rekey machine
+//! (`proto::rekey` on the profile in `fsp::rekey`), which `SessionEntry` owns
+//! shell-side and which runs the first handshake and decides every rekey,
+//! cutover and drain; this core carries no `proto -> noise` and no
+//! `proto -> node` dependency.
 
-use super::limits::FSP_CUTOVER_DELAY_MS;
 use super::quorum::QuorumVerdict;
 use crate::identity::{Ipv6Address, NodeAddr};
 use alloc::vec;
@@ -43,58 +41,14 @@ impl Fsp {
     }
 }
 
-/// A registry/session effect the async shell performs on the core's behalf.
+/// A coordinate-cache, path-MTU or discovery effect the async shell performs
+/// on the core's behalf.
 ///
-/// Only the variants the stage-2 rekey/epoch decisions actually emit are
-/// defined; the send/decrypt-path effects are added when their emitting arms
-/// migrate (an unconstructed variant would trip `clippy::dead_code`).
+/// A variant exists only while a decision here emits it, since an
+/// unconstructed variant would trip `clippy::dead_code`. Rekey, cutover and
+/// drain effects are the session rekey machine's outputs, not variants here.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FspAction {
-    /// Perform the initiator-side K-bit cutover to `addr`'s pending session
-    /// (`SessionEntry::cutover_to_new_session`).
-    CutOver { addr: NodeAddr },
-    /// Complete `addr`'s drain window (`SessionEntry::complete_drain`): erase
-    /// the previous session.
-    CompleteDrain { addr: NodeAddr },
-    /// Initiate a fresh outbound rekey to `addr` (`initiate_session_rekey`).
-    /// The XK msg1 construction is the shell-side establish leaf; the action
-    /// carries only the target.
-    InitiateRekey { addr: NodeAddr },
-    /// Abandon `addr`'s in-flight rekey cycle (`SessionEntry::abandon_rekey`):
-    /// its msg3 went unconfirmed past the retransmission budget.
-    AbandonRekey { addr: NodeAddr },
-    /// Drop only `addr`'s armed handshake (`SessionEntry::abandon_handshake`):
-    /// a peer's setup message armed it and the matching msg3 never arrived.
-    ///
-    /// Deliberately not [`AbandonRekey`](Self::AbandonRekey). A completed
-    /// `pending` session beside the handshake is the epoch that peer has
-    /// already moved to — it exists only because a msg3 carrying the session's
-    /// authenticated peer key was accepted, and the sender of that msg3
-    /// promotes the new epoch on a timer gated on nothing this side does.
-    /// Discarding it would make every later frame from that peer
-    /// undecryptable, so the handshake alone is dropped.
-    AbandonHandshake { addr: NodeAddr },
-    /// Drop only `addr`'s handshake that this node armed by sending a setup
-    /// message never answered within the handshake timeout
-    /// (`SessionEntry::abandon_handshake`). The trigger starts a fresh rekey
-    /// on a later tick.
-    ///
-    /// The handshake only, not [`AbandonRekey`](Self::AbandonRekey): an
-    /// entry whose handshake this node armed holds no pending session, and
-    /// dropping only the handshake keeps any such session safe even if that
-    /// ever stops holding.
-    ExpireInitiation { addr: NodeAddr },
-    /// Retransmit `addr`'s retained rekey msg3 (the shell re-reads the payload
-    /// from the entry, sends it, then records the retransmission on success).
-    ResendSessionMsg3 { addr: NodeAddr },
-    /// Resend `addr`'s retained initial-handshake msg3 (the shell re-reads the
-    /// payload from the entry's handshake resend slot, sends it, then records
-    /// the resend on success).
-    ResendInitialMsg3 { addr: NodeAddr },
-    /// Stop retaining `addr`'s initial-handshake msg3: the resend budget is
-    /// spent without an inbound frame showing the peer received it. The session
-    /// itself is kept; only the retained payload is dropped.
-    ReleaseInitialMsg3 { addr: NodeAddr },
     /// Invalidate the shared cached coordinates for `addr`
     /// (`coord_cache.remove`).
     InvalidateCoords { addr: NodeAddr },
@@ -112,299 +66,7 @@ pub enum FspAction {
     InitiateLookup { dest: NodeAddr },
 }
 
-/// The rekey trigger thresholds, read shell-side from node config.
-pub struct RekeyCfg {
-    /// Whether this node starts rekeys of its own (`node.rekey.enabled`).
-    ///
-    /// Gates the trigger and nothing else. A peer's setup message is answered
-    /// in either configuration, so a superseded key epoch and a handshake the
-    /// peer armed and abandoned both exist with periodic rekey off; the
-    /// cutover, drain and abandoned-handshake decisions therefore ignore this.
-    pub enabled: bool,
-    /// Rekey after this many seconds of session age (before jitter).
-    pub after_secs: u64,
-    /// Rekey after this many sent messages.
-    pub after_messages: u64,
-}
-
-/// A snapshot of one established session's rekey-relevant state, taken by the
-/// shell so the core decides without touching the live `SessionEntry` or reading
-/// a clock.
-///
-/// Every clock read is resolved shell-side into a plain `u64`/`bool`:
-/// `cutover_timer_elapsed`, `drain_expired`, and `is_dampened` are the
-/// pre-evaluated timer predicates; `elapsed_secs` is the monotonic session age.
-/// The core applies the rekey thresholds and jitter with **no** clock read.
-pub struct SessionSnapshot {
-    /// The session's remote node address (cutover/drain/rekey target).
-    pub addr: NodeAddr,
-    /// A completed rekey session is pending, awaiting the K-bit cutover.
-    pub has_pending: bool,
-    /// A rekey handshake is currently in flight.
-    pub rekey_in_progress: bool,
-    /// We initiated the current rekey (only the initiator cuts over on the
-    /// liveness timer).
-    pub is_rekey_initiator: bool,
-    /// The initiator liveness-cutover delay has elapsed (pre-evaluated:
-    /// `now - rekey_completed_ms >= FSP_CUTOVER_DELAY_MS`).
-    pub cutover_timer_elapsed: bool,
-    /// The session is in its post-cutover drain window.
-    pub is_draining: bool,
-    /// The drain window has expired (pre-evaluated against the drain timer).
-    pub drain_expired: bool,
-    /// The initiator still retains a msg3 retransmission payload (a rekey cycle
-    /// is mid-flight; do not start another).
-    pub has_rekey_msg3_payload: bool,
-    /// Local rekey initiation is dampened after a recently received peer rekey
-    /// msg1 (pre-evaluated against the dampening timer).
-    pub is_dampened: bool,
-    /// A handshake armed by the peer's setup message has passed the handshake
-    /// timeout without its msg3 (pre-evaluated: `last_peer_rekey_ms != 0 &&
-    /// now - last_peer_rekey_ms > handshake_timeout`). False when the entry
-    /// carries no peer-rekey stamp. A handshake this side armed is never
-    /// aged out on the peer's clock; it has its own deadline,
-    /// [`initiation_expired`](Self::initiation_expired).
-    pub armed_handshake_expired: bool,
-    /// This node's own armed handshake has passed the handshake timeout
-    /// measured from the setup message it sent (pre-evaluated: `now -
-    /// initiated_ms > handshake_timeout`).
-    pub initiation_expired: bool,
-    /// Monotonic session age in seconds (`(now - session_start_ms) / 1000`).
-    pub elapsed_secs: u64,
-    /// Current Noise send counter.
-    pub counter: u64,
-    /// Per-session symmetric rekey jitter, added to the time threshold.
-    pub jitter_secs: i64,
-}
-
-/// A snapshot of one session with a retained rekey-msg3 payload, taken by the
-/// shell for the msg3 retransmission decision.
-pub struct RekeyMsg3ResendSnapshot {
-    /// The session's remote node address (abandon/resend target).
-    pub addr: NodeAddr,
-    /// How many msg3 retransmissions have already happened. Drives the
-    /// abandon-vs-resend classification.
-    pub resend_count: u32,
-    /// The retained msg3 is due for retransmission as of the shell's `now_ms`
-    /// (pre-evaluated: `next_resend_ms != 0 && now_ms >= next_resend_ms`).
-    pub resend_due: bool,
-}
-
-/// A snapshot of one established session whose initiator still retains its
-/// initial-handshake msg3, taken by the shell for the resend decision.
-pub struct InitialMsg3ResendSnapshot {
-    /// The session's remote node address (release/resend target).
-    pub addr: NodeAddr,
-    /// How many msg3 resends have already happened.
-    pub resend_count: u32,
-    /// The retained msg3 is due as of the shell's `now_ms` (pre-evaluated:
-    /// `next_resend_at_ms != 0 && now_ms >= next_resend_at_ms`).
-    pub resend_due: bool,
-}
-
-/// Which key epoch a just-decrypted frame authenticated against — the shell-side
-/// `EpochSlot` mapped to a proto-local
-/// plain-data mirror so the core carries no `node` dependency.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DecryptSlot {
-    /// Decrypted against the current (active) session — steady state.
-    Current,
-    /// Decrypted against the pending (new) session — the peer cut over first.
-    Pending,
-    /// Decrypted against the previous (draining) session — old-epoch straggler.
-    Previous,
-}
-
-/// The reaction the shell drives after a frame authenticates against a given
-/// epoch. Post-decrypt classification (§3): the shell opens the frame, the core
-/// classifies, the shell applies the `SessionEntry` mutation + observability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EpochReaction {
-    /// A `pending` hit while a msg3 retransmission is retained: confirm the peer
-    /// on the new epoch (stop retransmitting), then promote (cutover).
-    PromoteConfirming,
-    /// A `pending` hit with no retained msg3: promote (cutover).
-    Promote,
-    /// A `current` hit as the already-cut-over initiator (msg3 retained, no
-    /// pending): confirm the responder reached the new epoch.
-    ConfirmResponder,
-    /// No state change (a steady-state `current` hit, or an old-epoch
-    /// `previous` straggler — the drain refresh already happened shell-side).
-    None,
-}
-
 impl Fsp {
-    /// Decide the per-tick rekey choreography for the established sessions the
-    /// shell snapshotted. Reproduces `check_session_rekey`'s priority and phase
-    /// grouping exactly:
-    ///
-    /// - **Cutover** takes precedence: an initiator with a pending session, no
-    ///   in-flight rekey, and an elapsed liveness timer cuts over and is
-    ///   considered for nothing else.
-    /// - Otherwise an expired drain window is completed, and — independently —
-    ///   a handshake the peer armed and never finished, or a handshake this
-    ///   node armed and never got an answer to, is abandoned, which is the
-    ///   last word on that session this tick.
-    /// - Failing both, the rekey trigger fires when the session is neither
-    ///   mid-rekey, holding a pending session, retaining a msg3 payload, nor
-    ///   dampened, and its jittered time threshold or send counter is reached.
-    ///   Only this last decision is gated on `cfg.enabled`: the cutover, the
-    ///   drain and the abandon of a peer-armed handshake maintain state a
-    ///   peer's setup message can create with periodic rekey switched off.
-    ///   A handshake this node armed exists only when the trigger fired, but
-    ///   its expiry sits above the gate too, so whether an existing
-    ///   handshake is retired does not depend on whether new ones may start.
-    ///
-    /// Actions are returned phase-grouped (all cutovers, then all drains, then
-    /// all abandoned or expired handshakes, then all rekey initiations) to
-    /// preserve the pre-refactor execution order.
-    pub fn poll_rekey(&self, sessions: Vec<SessionSnapshot>, cfg: &RekeyCfg) -> Vec<FspAction> {
-        let mut cutovers = Vec::new();
-        let mut drains = Vec::new();
-        let mut abandons = Vec::new();
-        let mut rekeys = Vec::new();
-        for s in sessions {
-            // 1. Initiator-side cutover (unconditional liveness timer).
-            if s.has_pending
-                && !s.rekey_in_progress
-                && s.is_rekey_initiator
-                && s.cutover_timer_elapsed
-            {
-                cutovers.push(FspAction::CutOver { addr: s.addr });
-                continue;
-            }
-            // 2. Drain window expiry (does not preclude a trigger below).
-            if s.is_draining && s.drain_expired {
-                drains.push(FspAction::CompleteDrain { addr: s.addr });
-            }
-            // 3. Abandon a responder-side handshake the peer never finished.
-            //    A parked one blocks a later genuine setup message through the
-            //    dual-initiation tie-break, so it clears on the handshake
-            //    timeout. Nothing is lost with it: an armed handshake holds no
-            //    key material either side can be using, and a completed
-            //    `pending` beside it survives (see `AbandonHandshake`).
-            if !s.is_rekey_initiator && s.rekey_in_progress && s.armed_handshake_expired {
-                abandons.push(FspAction::AbandonHandshake { addr: s.addr });
-                continue;
-            }
-            // 3b. Retire a handshake this node armed whose setup or
-            //     SessionAck was lost. Arm 3 cannot: it runs on the peer's
-            //     clock, which says nothing about our own setup. Only the
-            //     handshake goes; the trigger below starts a fresh rekey on a
-            //     later tick.
-            if s.is_rekey_initiator && s.rekey_in_progress && s.initiation_expired {
-                abandons.push(FspAction::ExpireInitiation { addr: s.addr });
-                continue;
-            }
-            // 4. Rekey trigger.
-            if !cfg.enabled {
-                continue;
-            }
-            if s.rekey_in_progress || s.has_pending || s.has_rekey_msg3_payload || s.is_dampened {
-                continue;
-            }
-            let effective_after = cfg.after_secs.saturating_add_signed(s.jitter_secs);
-            if s.elapsed_secs >= effective_after || s.counter >= cfg.after_messages {
-                rekeys.push(FspAction::InitiateRekey { addr: s.addr });
-            }
-        }
-        cutovers.extend(drains);
-        cutovers.extend(abandons);
-        cutovers.extend(rekeys);
-        cutovers
-    }
-
-    /// Decide the msg3 retransmission choreography for the sessions the shell
-    /// snapshotted as retaining a msg3 payload. A due candidate past
-    /// `max_resends` has its cycle abandoned; an in-budget due candidate is
-    /// retransmitted. Candidates not yet due are neither abandoned nor resent
-    /// this tick (matching the pre-refactor due-gate ordering).
-    ///
-    /// Actions are returned abandons-first (matching the pre-refactor two-pass
-    /// order); the shell commits a retransmission's count++ and reschedule only
-    /// on a successful send.
-    pub fn poll_rekey_msg3_resends(
-        &self,
-        candidates: Vec<RekeyMsg3ResendSnapshot>,
-        max_resends: u32,
-    ) -> Vec<FspAction> {
-        let mut abandons = Vec::new();
-        let mut resends = Vec::new();
-        for c in candidates {
-            if !c.resend_due {
-                continue;
-            }
-            if c.resend_count >= max_resends {
-                abandons.push(FspAction::AbandonRekey { addr: c.addr });
-                continue;
-            }
-            resends.push(FspAction::ResendSessionMsg3 { addr: c.addr });
-        }
-        abandons.extend(resends);
-        abandons
-    }
-
-    /// Decide the initial-handshake msg3 resends for the established sessions
-    /// the shell snapshotted as retaining one. A due candidate whose budget is
-    /// spent is released; an in-budget due candidate is resent; a candidate not
-    /// yet due gets nothing this tick. Releases come first, as abandons do in
-    /// [`poll_rekey_msg3_resends`](Self::poll_rekey_msg3_resends); the shell
-    /// commits a resend's count and reschedule only on a successful send.
-    pub fn poll_initial_msg3_resends(
-        &self,
-        candidates: Vec<InitialMsg3ResendSnapshot>,
-        max_resends: u32,
-    ) -> Vec<FspAction> {
-        let mut releases = Vec::new();
-        let mut resends = Vec::new();
-        for c in candidates {
-            if !c.resend_due {
-                continue;
-            }
-            if c.resend_count >= max_resends {
-                releases.push(FspAction::ReleaseInitialMsg3 { addr: c.addr });
-                continue;
-            }
-            resends.push(FspAction::ResendInitialMsg3 { addr: c.addr });
-        }
-        releases.extend(resends);
-        releases
-    }
-
-    /// Classify the reaction to a frame that authenticated against `slot`. Pure
-    /// over the slot and the two plain-data session flags; the shell applies the
-    /// resulting `SessionEntry` mutation and observability.
-    ///
-    /// Mirrors the pre-refactor `handle_encrypted_session_msg` epoch reaction
-    /// exactly: a `pending` hit always promotes (confirming first when a msg3
-    /// payload is retained); a `current` hit confirms the responder only when
-    /// the initiator already cut over (msg3 retained, no pending); a `previous`
-    /// hit is a no-op (the drain refresh happened during the shell-side open).
-    pub fn classify_epoch(
-        &self,
-        slot: DecryptSlot,
-        has_rekey_msg3_payload: bool,
-        has_pending: bool,
-    ) -> EpochReaction {
-        match slot {
-            DecryptSlot::Pending => {
-                if has_rekey_msg3_payload {
-                    EpochReaction::PromoteConfirming
-                } else {
-                    EpochReaction::Promote
-                }
-            }
-            DecryptSlot::Current => {
-                if has_rekey_msg3_payload && !has_pending {
-                    EpochReaction::ConfirmResponder
-                } else {
-                    EpochReaction::None
-                }
-            }
-            DecryptSlot::Previous => EpochReaction::None,
-        }
-    }
-
     /// Decide the discovery reaction to a `CoordsRequired` signal: trigger a
     /// lookup toward `dest` only when the target's identity is cached (else the
     /// `LookupResponse` proof cannot be verified). The rate-limited warmup send
@@ -472,23 +134,6 @@ impl Fsp {
             Vec::new()
         }
     }
-}
-
-/// Pre-evaluate the initiator liveness-cutover timer for a session: whether the
-/// `FSP_CUTOVER_DELAY_MS` bound has elapsed since the rekey handshake completed.
-/// Resolved shell-side into [`SessionSnapshot::cutover_timer_elapsed`].
-pub fn cutover_timer_elapsed(now_ms: u64, rekey_completed_ms: u64) -> bool {
-    now_ms.saturating_sub(rekey_completed_ms) >= FSP_CUTOVER_DELAY_MS
-}
-
-/// Determine the winner of an FSP session-initiation tie-break: the node with
-/// the smaller `NodeAddr` wins as initiator. Deterministic and symmetric — both
-/// endpoints reach the same conclusion. Used for both simultaneous session
-/// setup and dual rekey initiation.
-///
-/// Returns `true` if *we* win (keep initiating, drop the peer's message).
-pub fn initiation_winner(our_node_addr: &NodeAddr, their_node_addr: &NodeAddr) -> bool {
-    our_node_addr < their_node_addr
 }
 
 /// Decide whether a path-MTU update should be applied to the shared

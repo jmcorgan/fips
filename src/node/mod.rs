@@ -1807,9 +1807,8 @@ impl Node {
         if let Some(peer) = self.peers.get(addr) {
             return peer.short_npub().to_string();
         }
-        if let Some(entry) = self.sessions.get(addr) {
-            let (xonly, _) = entry.remote_pubkey().x_only_public_key();
-            return PeerIdentity::from_pubkey(xonly).short_npub();
+        if let Some(key) = self.sessions.get(addr).and_then(SessionEntry::peer_key) {
+            return PeerIdentity::from_pubkey(key).short_npub();
         }
         addr.short_hex()
     }
@@ -2272,6 +2271,8 @@ impl Node {
             peer_aliases: std::sync::Arc::new(self.peer_aliases.clone()),
             acl_status: self.peer_acl_status(),
             peer_meta: std::sync::Arc::new(peer_meta),
+            handshake: self.stats.handshake.snapshot(),
+            session: self.stats.session.snapshot(),
         };
         self.stats_snapshot.store(std::sync::Arc::new(snapshot));
 
@@ -2748,7 +2749,6 @@ impl Node {
                 } else {
                     "unknown"
                 };
-                let (xonly, _parity) = entry.remote_pubkey().x_only_public_key();
                 let (pkts_tx, pkts_rx, bytes_tx, bytes_rx) = entry.traffic_counters();
 
                 let resend_count = (!entry.is_established()).then(|| entry.resend_count());
@@ -2772,7 +2772,10 @@ impl Node {
                     state,
                     is_initiator: entry.is_initiator(),
                     last_activity_ms: entry.last_activity().wall_ms(),
-                    npub: crate::identity::encode_npub(&xonly),
+                    npub: entry
+                        .peer_key()
+                        .map(|key| crate::identity::encode_npub(&key)),
+                    identity: entry.identity_status(),
                     stats: snap::SessionStats {
                         packets_sent: pkts_tx,
                         packets_recv: pkts_rx,
@@ -3441,7 +3444,7 @@ impl Node {
                     None => PeerMachine::new_inbound(link_id, started_at_ms),
                 });
         if let Some(index) = seed.our_index {
-            machine.set_conn_our_index(index);
+            let _ = machine.set_conn_our_index(index);
         }
         if let Some(index) = seed.their_index {
             machine.set_conn_their_index(index);
@@ -4359,12 +4362,12 @@ impl Node {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let connected_socket = peer.connected_udp();
 
-        let session = peer
-            .noise_session_mut()
-            .ok_or_else(|| NodeError::SendFailed {
+        if !peer.has_session() {
+            return Err(NodeError::SendFailed {
                 node_addr: *node_addr,
                 reason: "no noise session".into(),
-            })?;
+            });
+        }
 
         // ── Off-task encrypt + sendmmsg/GSO fast path (unix + UDP) ──
         // Build the wire buffer directly as
@@ -4379,9 +4382,7 @@ impl Node {
 
         #[cfg(unix)]
         {
-            let send_cipher_opt = session.send_cipher_clone();
-            if let Some(fmp_cipher) = send_cipher_opt
-                && let Some(workers) = self.supervisor.encrypt_workers.as_ref().cloned()
+            if let Some(workers) = self.supervisor.encrypt_workers.as_ref().cloned()
                 && let Some(transport) = self.transports.get(&transport_id)
                 && let TransportHandle::Udp(udp) = transport
                 && let Some(socket) = udp.async_socket()
@@ -4404,13 +4405,26 @@ impl Node {
                     }
                 };
                 if let Some(dest_socket_addr) = socket_addr_opt {
-                    let counter =
-                        session
-                            .take_send_counter()
+                    // The counter and the send key come from the link's
+                    // rekey machine, which fixes them for its current
+                    // session, as `their_index`, the K-bit and the timestamp
+                    // read above.
+                    let sealed =
+                        peer.seal(crate::peer::peer_now())
                             .map_err(|e| NodeError::SendFailed {
                                 node_addr: *node_addr,
-                                reason: format!("counter reservation failed: {}", e),
+                                reason: format!(
+                                    "counter reservation failed: {}",
+                                    link_seal_error(e)
+                                ),
                             })?;
+                    let counter = sealed.counter;
+                    let Some(fmp_cipher) = sealed.key.key().cloned() else {
+                        return Err(NodeError::SendFailed {
+                            node_addr: *node_addr,
+                            reason: "no noise session".into(),
+                        });
+                    };
                     let header = build_established_header(their_index, counter, flags, payload_len);
                     let wire_capacity =
                         ESTABLISHED_HEADER_SIZE + inner_len + crate::noise::TAG_SIZE;
@@ -4470,17 +4484,39 @@ impl Node {
         // avoids the alloc.
         let inner_plaintext = prepend_inner_header(timestamp_ms, plaintext);
 
-        // Build 16-byte outer header (used as AAD for AEAD)
-        let counter = session.current_send_counter();
+        // Build 16-byte outer header (used as AAD for AEAD), on the counter
+        // the link's rekey machine reserves. A plaintext too large to seal
+        // is refused before a counter is taken.
+        let size = inner_plaintext.len();
+        if size > crate::noise::MAX_MESSAGE_SIZE - crate::noise::TAG_SIZE {
+            return Err(NodeError::SendFailed {
+                node_addr: *node_addr,
+                reason: format!(
+                    "encryption failed: {}",
+                    crate::noise::NoiseError::MessageTooLarge {
+                        size,
+                        max: crate::noise::MAX_MESSAGE_SIZE - crate::noise::TAG_SIZE,
+                    }
+                ),
+            });
+        }
+        let sealed = peer
+            .seal(crate::peer::peer_now())
+            .map_err(|e| NodeError::SendFailed {
+                node_addr: *node_addr,
+                reason: format!("encryption failed: {}", link_seal_error(e)),
+            })?;
+        let counter = sealed.counter;
         let header = build_established_header(their_index, counter, flags, payload_len);
 
         // Encrypt with AAD binding to the outer header
-        let ciphertext = session
-            .encrypt_with_aad(&inner_plaintext, &header)
-            .map_err(|e| NodeError::SendFailed {
-                node_addr: *node_addr,
-                reason: format!("encryption failed: {}", e),
-            })?;
+        let ciphertext =
+            fips_core::noise::seal(sealed.key.key(), counter, &header, &inner_plaintext).map_err(
+                |e| NodeError::SendFailed {
+                    node_addr: *node_addr,
+                    reason: format!("encryption failed: {}", e),
+                },
+            )?;
 
         let wire_packet = build_encrypted(&header, &ciphertext);
 
@@ -4629,6 +4665,22 @@ impl Node {
     }
 }
 
+/// The error the deployed link send reported where a link's rekey machine
+/// refuses to seal: the send counter spent, or no session to seal under.
+pub(crate) fn link_seal_error(
+    refusal: fips_core::proto::rekey::SealRefusal,
+) -> crate::noise::NoiseError {
+    use crate::noise::NoiseError;
+    match refusal {
+        fips_core::proto::rekey::SealRefusal::Exhausted => NoiseError::NonceOverflow,
+        fips_core::proto::rekey::SealRefusal::NotEstablished
+        | fips_core::proto::rekey::SealRefusal::NotSealable => NoiseError::WrongState {
+            expected: "established session".to_string(),
+            got: "no session".to_string(),
+        },
+    }
+}
+
 /// Map a transport's refusal of an encrypted link frame to `node_addr` onto
 /// the error the link-send path reports.
 fn link_send_error(node_addr: NodeAddr, e: TransportError) -> NodeError {
@@ -4769,14 +4821,14 @@ impl fmt::Debug for Node {
 /// Only fields the establish paths write at seed time belong here; the Noise
 /// handshake is driven afterwards through the machine's own crypto methods.
 #[cfg(test)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct HandshakeSeed {
     link_id: LinkId,
     expected_identity: Option<PeerIdentity>,
     started_at_ms: u64,
     transport_id: Option<TransportId>,
     source_addr: Option<TransportAddr>,
-    our_index: Option<crate::utils::index::SessionIndex>,
+    our_index: Option<fips_core::proto::rekey::IndexLease>,
     their_index: Option<crate::utils::index::SessionIndex>,
 }
 
@@ -4809,7 +4861,7 @@ impl HandshakeSeed {
         self
     }
 
-    pub(crate) fn with_our_index(mut self, index: crate::utils::index::SessionIndex) -> Self {
+    pub(crate) fn with_our_index(mut self, index: fips_core::proto::rekey::IndexLease) -> Self {
         self.our_index = Some(index);
         self
     }

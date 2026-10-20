@@ -51,10 +51,10 @@ fn promoted_peer_with_the_far_side_session(
     // from_pubkey_full, not from_pubkey: the ECDH needs the parity bit.
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_index_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     node.seed_handshake_machine(
         HandshakeSeed::outbound(link_id, peer_identity, 1_000)
-            .with_our_index(our_index)
+            .with_our_index(our_index_lease)
             .with_their_index(SessionIndex::new(42))
             .with_transport_id(transport_id)
             .with_source_addr(TransportAddr::from_string(PROMOTED_ADDR)),
@@ -404,17 +404,16 @@ async fn a_link_message_the_encrypt_worker_sends_counts_once_in_the_udp_transpor
 #[cfg(unix)]
 #[tokio::test]
 async fn session_data_the_encrypt_worker_sends_counts_once_in_the_udp_transport_stats() {
-    use crate::node::session::{EndToEndState, SessionEntry};
+    use crate::node::session::SessionEntry;
 
     let (mut node, node_addr, stats, remote) = peer_behind_the_encrypt_workers().await;
     let far_side = Identity::generate();
     let session = super::session::make_noise_session(node.identity(), &far_side);
     node.sessions.insert(
         node_addr,
-        SessionEntry::new(
+        SessionEntry::keyed(
             node_addr,
-            far_side.pubkey_full(),
-            EndToEndState::Established(session),
+            session,
             crate::node::session::session_at(1_000),
             true,
         ),

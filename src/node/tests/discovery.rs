@@ -1031,7 +1031,7 @@ async fn test_request_dedup_convergent_paths() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Long-running (~2 min): run explicitly with --ignored
+#[ignore = "long-running (about 2 min); run explicitly with --ignored"]
 async fn test_discovery_100_nodes() {
     let _guard = lock_large_network_test().await;
 
@@ -2643,7 +2643,7 @@ async fn native_datagrams_held_for_an_initiating_session_are_kept_and_released_a
     let timeout_ms = rate_limit.handshake_timeout_secs * 1000;
     nodes[0]
         .node
-        .resend_pending_session_handshakes(crate::node::session::session_after(
+        .poll_session_rekeys(crate::node::session::session_after(
             last_activity,
             timeout_ms + 1_000,
         ))
@@ -3133,15 +3133,12 @@ async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_pa
     let rx = install_tun_channel(&mut node);
     let dest = registered_destination(&mut node);
     let other = Identity::generate();
-    let handshake = crate::noise::HandshakeState::new_initiator(node.identity().keypair());
     node.sessions.insert(
         *other.node_addr(),
-        crate::node::session::SessionEntry::new(
-            *other.node_addr(),
-            other.pubkey_full(),
-            crate::node::session::EndToEndState::Initiating(handshake),
+        crate::node::session::SessionEntry::opened_for_test(
+            &other.pubkey_full(),
+            node.identity().keypair(),
             crate::node::session::session_at(1000),
-            true,
         ),
     );
     node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
@@ -3543,15 +3540,12 @@ async fn a_lookup_answer_for_a_destination_with_a_session_entry_but_no_cached_id
     let rx = install_tun_channel(&mut node);
     let dest = Identity::generate();
     let dest_addr = *dest.node_addr();
-    let handshake = crate::noise::HandshakeState::new_initiator(node.identity().keypair());
     node.sessions.insert(
         dest_addr,
-        crate::node::session::SessionEntry::new(
-            dest_addr,
-            dest.pubkey_full(),
-            crate::node::session::EndToEndState::Initiating(handshake),
+        crate::node::session::SessionEntry::opened_for_test(
+            &dest.pubkey_full(),
+            node.identity().keypair(),
             crate::node::session::session_at(1000),
-            true,
         ),
     );
     assert!(
@@ -3598,14 +3592,10 @@ async fn a_failed_session_retry_after_a_lookup_answer_leaves_packets_held_behind
     node.register_identity(dest, identity.pubkey_full());
     node.sessions.insert(
         dest,
-        crate::node::session::SessionEntry::new(
+        crate::node::session::SessionEntry::answering_for_test(
             dest,
-            identity.pubkey_full(),
-            crate::node::session::EndToEndState::AwaitingMsg3(
-                crate::noise::HandshakeState::new_responder(node.identity().keypair()),
-            ),
+            node.identity().keypair(),
             Node::session_now(),
-            false,
         ),
     );
     node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));

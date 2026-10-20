@@ -7,40 +7,6 @@ use crate::testutil::make_node_addr;
 use crate::transport::LinkId;
 use alloc::vec::Vec;
 
-/// Build a `RekeyResendSnapshot` for the given peer byte, prior retransmission
-/// count, due-flag, and opaque msg1 bytes.
-pub(super) fn rekey_resend_snapshot(
-    peer_byte: u8,
-    resend_count: u32,
-    needs_resend: bool,
-    msg1: Vec<u8>,
-) -> RekeyResendSnapshot {
-    RekeyResendSnapshot {
-        peer: make_node_addr(peer_byte),
-        resend_count,
-        needs_resend,
-        msg1,
-    }
-}
-
-/// Build a quiescent `PeerSnapshot` for `addr`, with no
-/// pending cutover, no drain, no dampening, zero ages/counter/jitter. Tests set
-/// only the fields the case exercises.
-pub(super) fn peer_snapshot(addr_byte: u8) -> PeerSnapshot {
-    PeerSnapshot {
-        addr: make_node_addr(addr_byte),
-        has_pending: false,
-        rekey_in_progress: false,
-        is_draining: false,
-        drain_expired: false,
-        is_dampened: false,
-        rekey_msg3_pending: false,
-        elapsed_secs: 0,
-        counter: 0,
-        jitter_secs: 0,
-    }
-}
-
 /// Build a `ConnSnapshot` for the teardown path with the given link, direction,
 /// and retry target. Fields the teardown decision ignores are left at their
 /// natural defaults.

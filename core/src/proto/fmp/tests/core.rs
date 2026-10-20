@@ -18,25 +18,6 @@ use alloc::vec::Vec;
 /// Matching-epoch default used by `establish_snapshot`.
 const SAME_EPOCH: [u8; 8] = [0x01; 8];
 
-/// Threshold config used across the rekey decision tests: an initiating node
-/// that rekeys at 100s of session age or 1000 sent messages.
-fn cfg() -> RekeyCfg {
-    RekeyCfg {
-        initiate: true,
-        after_secs: 100,
-        after_messages: 1_000,
-    }
-}
-
-/// The same thresholds on a node that does not initiate rekeys
-/// (`node.rekey.enabled = false`).
-fn cfg_no_initiate() -> RekeyCfg {
-    RekeyCfg {
-        initiate: false,
-        ..cfg()
-    }
-}
-
 #[test]
 fn empty_stale_set_yields_no_actions() {
     let fmp = Fmp::new();
@@ -127,269 +108,7 @@ fn resend_backoff_exponent_uses_count_plus_one() {
 
 // --- rekey decision (synthetic clock: elapsed_secs/counter fed directly) ---
 
-#[test]
-fn rekey_no_peers_yields_no_actions() {
-    let fmp = Fmp::new();
-    assert!(fmp.poll_rekey(Vec::new(), &cfg()).is_empty());
-}
-
-#[test]
-fn rekey_cutover_takes_precedence_over_trigger() {
-    let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x10);
-    p.has_pending = true;
-    // Wildly over the time threshold, but cutover wins and nothing else fires.
-    p.elapsed_secs = 10_000;
-    p.counter = 10_000;
-    let actions = fmp.poll_rekey(vec![p], &cfg());
-    assert_eq!(actions.len(), 1);
-    assert!(matches!(actions[0], ConnAction::Cutover { peer } if peer == make_node_addr(0x10)));
-}
-
-#[test]
-fn rekey_pending_with_inflight_rekey_does_not_cut_over() {
-    let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x11);
-    p.has_pending = true;
-    p.rekey_in_progress = true;
-    p.elapsed_secs = 10_000;
-    // has_pending gated by !rekey_in_progress -> no cutover; in-progress -> no
-    // trigger either.
-    assert!(fmp.poll_rekey(vec![p], &cfg()).is_empty());
-}
-
-#[test]
-fn rekey_expired_drain_and_trigger_both_fire() {
-    let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x12);
-    p.is_draining = true;
-    p.drain_expired = true;
-    p.elapsed_secs = 150; // past 100s threshold
-    let actions = fmp.poll_rekey(vec![p], &cfg());
-    // Draining does not preclude re-triggering in the same tick.
-    assert_eq!(actions.len(), 2);
-    assert!(matches!(actions[0], ConnAction::Drain { peer } if peer == make_node_addr(0x12)));
-    assert!(
-        matches!(actions[1], ConnAction::InitiateRekey { peer } if peer == make_node_addr(0x12))
-    );
-}
-
-/// A node that does not initiate rekeys still completes an expired drain, and
-/// still does nothing else.
-///
-/// The two halves are one property. A node with `rekey.enabled = false` accepts
-/// its peers' rekeys — the declaration on the wire decides that, not local
-/// config — and every acceptance demotes a live session into the drain slot.
-/// Nothing but this arm releases that session and its index, so suppressing the
-/// whole poll strands both for the life of the peer.
-///
-/// The other half is why the suppression cannot simply be dropped: this snapshot
-/// carries no rekey role, so `has_pending` is set by a responder-stored session
-/// exactly as by an initiated one. Letting the cutover arm run here would move a
-/// non-initiating node's cutover off the peer's K-bit flip and onto the poll.
-#[test]
-fn rekey_without_initiation_drains_but_does_not_cut_over_or_trigger() {
-    let fmp = Fmp::new();
-
-    let mut draining = peer_snapshot(0x14);
-    draining.is_draining = true;
-    draining.drain_expired = true;
-    // Also over both trigger thresholds, and holding a pending session as a
-    // responder would: neither may produce an action.
-    draining.has_pending = true;
-    draining.elapsed_secs = 10_000;
-    draining.counter = 10_000;
-    let actions = fmp.poll_rekey(vec![draining], &cfg_no_initiate());
-    assert_eq!(
-        actions.len(),
-        1,
-        "a non-initiating node must emit the drain and nothing else"
-    );
-    assert!(matches!(actions[0], ConnAction::Drain { peer } if peer == make_node_addr(0x14)));
-
-    // An unexpired drain window is still not due, so the arm is not simply
-    // firing on every poll.
-    let mut unexpired = peer_snapshot(0x14);
-    unexpired.is_draining = true;
-    assert!(
-        fmp.poll_rekey(vec![unexpired], &cfg_no_initiate())
-            .is_empty(),
-        "an unexpired drain window must not complete"
-    );
-}
-
-/// The send-counter arm of the rekey trigger, pinned at its boundary through
-/// the real `poll_rekey` rather than a reimplementation of its predicate.
-///
-/// Firing at the threshold catches the arm being deleted, its comparison
-/// narrowed to `>`, or its comparison inverted. The silence-below half is what
-/// this test adds over that: it catches the arm being *widened* below its
-/// configured bound. Measured rather than assumed — replacing the bound with
-/// `p.counter >= 1` reds exactly one test in the whole library suite, this one,
-/// while a bound removed altogether is already caught by the time arm's own
-/// negative tests.
-///
-/// The time arm is held off in both halves — `elapsed_secs` stays 0 against a
-/// 100 s threshold with no jitter — so the counter is provably what decides.
-#[test]
-fn rekey_counter_arm_fires_at_threshold_and_is_silent_below() {
-    let fmp = Fmp::new();
-
-    let mut below = peer_snapshot(0x13);
-    below.counter = 999; // one below after_messages
-    assert!(
-        fmp.poll_rekey(vec![below], &cfg()).is_empty(),
-        "a send counter one below the threshold must not trigger a rekey"
-    );
-
-    let mut at = peer_snapshot(0x13);
-    at.counter = 1_000; // == after_messages
-    let actions = fmp.poll_rekey(vec![at], &cfg());
-    assert!(
-        matches!(actions[0], ConnAction::InitiateRekey { .. }),
-        "a send counter at the threshold must trigger a rekey"
-    );
-}
-
-#[test]
-fn rekey_negative_jitter_lowers_time_threshold() {
-    let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x14);
-    p.elapsed_secs = 90;
-    p.jitter_secs = -15; // effective threshold 85 -> 90 >= 85 fires
-    assert!(matches!(
-        fmp.poll_rekey(vec![p], &cfg())[0],
-        ConnAction::InitiateRekey { .. }
-    ));
-}
-
-#[test]
-fn rekey_positive_jitter_raises_time_threshold() {
-    let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x15);
-    p.elapsed_secs = 105;
-    p.jitter_secs = 10; // effective threshold 110 -> 105 < 110, no time trigger
-    assert!(fmp.poll_rekey(vec![p], &cfg()).is_empty());
-}
-
-#[test]
-fn rekey_dampening_suppresses_trigger() {
-    let fmp = Fmp::new();
-    let mut p = peer_snapshot(0x16);
-    p.elapsed_secs = 10_000;
-    p.is_dampened = true;
-    assert!(fmp.poll_rekey(vec![p], &cfg()).is_empty());
-}
-
-#[test]
-fn rekey_msg3_pending_suppresses_trigger() {
-    let fmp = Fmp::new();
-    // The initiator already cut over and is still retransmitting this cycle's
-    // rekey msg3; a fresh rekey must not start (it would overwrite the retained
-    // payload). Mirrors the dampening-suppression case.
-    let mut p = peer_snapshot(0x17);
-    p.elapsed_secs = 10_000;
-    p.rekey_msg3_pending = true;
-    assert!(fmp.poll_rekey(vec![p], &cfg()).is_empty());
-}
-
-#[test]
-fn rekey_actions_are_phase_grouped_across_peers() {
-    let fmp = Fmp::new();
-    // Peer A: trigger only. Peer B: cutover. Peer C: drain + trigger.
-    let mut a = peer_snapshot(0x01);
-    a.elapsed_secs = 200;
-    let mut b = peer_snapshot(0x02);
-    b.has_pending = true;
-    let mut c = peer_snapshot(0x03);
-    c.is_draining = true;
-    c.drain_expired = true;
-    c.counter = 5_000;
-    let actions = fmp.poll_rekey(vec![a, b, c], &cfg());
-    // Order must be: all cutovers, then all drains, then all rekeys.
-    assert!(matches!(actions[0], ConnAction::Cutover { peer } if peer == make_node_addr(0x02)));
-    assert!(matches!(actions[1], ConnAction::Drain { peer } if peer == make_node_addr(0x03)));
-    assert!(
-        matches!(actions[2], ConnAction::InitiateRekey { peer } if peer == make_node_addr(0x01))
-    );
-    assert!(
-        matches!(actions[3], ConnAction::InitiateRekey { peer } if peer == make_node_addr(0x03))
-    );
-    assert_eq!(actions.len(), 4);
-}
-
 // --- rekey msg1 retransmission decision ---
-
-#[test]
-fn rekey_resend_no_candidates_yields_no_actions() {
-    let fmp = Fmp::new();
-    assert!(
-        fmp.poll_rekey_resends(Vec::new(), 1_000, 500, 2.0, 5)
-            .is_empty()
-    );
-}
-
-#[test]
-fn rekey_resend_over_budget_abandons() {
-    let fmp = Fmp::new();
-    // resend_count == max_resends -> abandon (even though it is "due").
-    let c = rekey_resend_snapshot(0x40, 5, true, vec![9]);
-    let actions = fmp.poll_rekey_resends(vec![c], 1_000, 500, 2.0, 5);
-    assert_eq!(actions.len(), 1);
-    assert!(
-        matches!(actions[0], ConnAction::AbandonRekey { peer } if peer == make_node_addr(0x40))
-    );
-}
-
-#[test]
-fn rekey_resend_due_retransmits_with_backoff() {
-    let fmp = Fmp::new();
-    let msg1 = vec![0xaa, 0xbb];
-    // prior_count=1 -> exponent 2 -> next = 1000 + 500 * 2^2 = 3000.
-    let c = rekey_resend_snapshot(0x41, 1, true, msg1.clone());
-    let actions = fmp.poll_rekey_resends(vec![c], 1_000, 500, 2.0, 5);
-    assert_eq!(actions.len(), 1);
-    match &actions[0] {
-        ConnAction::ResendRekeyMsg1 {
-            peer,
-            bytes,
-            next_resend_at_ms,
-        } => {
-            assert_eq!(*peer, make_node_addr(0x41));
-            assert_eq!(bytes, &msg1);
-            assert_eq!(*next_resend_at_ms, 3_000);
-        }
-        _ => panic!("expected ResendRekeyMsg1"),
-    }
-}
-
-#[test]
-fn rekey_resend_not_due_is_skipped() {
-    let fmp = Fmp::new();
-    // Under budget but not due -> no action.
-    let c = rekey_resend_snapshot(0x42, 1, false, vec![1]);
-    assert!(
-        fmp.poll_rekey_resends(vec![c], 1_000, 500, 2.0, 5)
-            .is_empty()
-    );
-}
-
-#[test]
-fn rekey_resend_abandons_precede_retransmits() {
-    let fmp = Fmp::new();
-    let due = rekey_resend_snapshot(0x43, 0, true, vec![1]);
-    let over = rekey_resend_snapshot(0x44, 9, true, vec![2]);
-    // Input order: due-resend first, then over-budget; output must be
-    // abandons-first regardless.
-    let actions = fmp.poll_rekey_resends(vec![due, over], 1_000, 500, 2.0, 5);
-    assert_eq!(actions.len(), 2);
-    assert!(
-        matches!(actions[0], ConnAction::AbandonRekey { peer } if peer == make_node_addr(0x44))
-    );
-    assert!(
-        matches!(actions[1], ConnAction::ResendRekeyMsg1 { peer, .. } if peer == make_node_addr(0x43))
-    );
-}
 
 // ===========================================================================
 // XX inbound establish classification (`establish_inbound`).
@@ -761,9 +480,14 @@ fn establish_outbound_no_existing_peer_promotes() {
     // our_outbound_wins is irrelevant when there is no existing peer.
     let snap = OutboundSnapshot {
         has_existing_peer: false,
+        existing_peer_epoch: None,
         our_outbound_wins: true,
+        own_dial: false,
     };
-    assert_eq!(fmp.establish_outbound(&snap), OutboundDecision::Promote);
+    assert_eq!(
+        fmp.establish_outbound(&snap, None),
+        OutboundDecision::Promote
+    );
 }
 
 #[test]
@@ -771,10 +495,12 @@ fn establish_outbound_cross_connection_win_swaps() {
     let fmp = Fmp::new();
     let snap = OutboundSnapshot {
         has_existing_peer: true,
+        existing_peer_epoch: None,
         our_outbound_wins: true,
+        own_dial: false,
     };
     assert_eq!(
-        fmp.establish_outbound(&snap),
+        fmp.establish_outbound(&snap, None),
         OutboundDecision::CrossConnectionSwap
     );
 }
@@ -784,10 +510,12 @@ fn establish_outbound_cross_connection_loss_keeps() {
     let fmp = Fmp::new();
     let snap = OutboundSnapshot {
         has_existing_peer: true,
+        existing_peer_epoch: None,
         our_outbound_wins: false,
+        own_dial: false,
     };
     assert_eq!(
-        fmp.establish_outbound(&snap),
+        fmp.establish_outbound(&snap, None),
         OutboundDecision::CrossConnectionKeep
     );
 }

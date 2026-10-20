@@ -8,7 +8,6 @@
 //! reaches, and the observable is the next hop `find_next_hop` picks.
 
 use super::*;
-use crate::node::session::EndToEndState;
 use crate::node::tests::spanning_tree::{TestNode, cleanup_nodes, run_tree_test};
 use crate::proto::fsp::SessionSetup;
 use crate::proto::link::SessionDatagram;
@@ -53,15 +52,10 @@ fn coords_under(dest: NodeAddr, parent: &TreeCoordinate) -> TreeCoordinate {
 /// Install the entry `initiate_session` creates for `remote`, which is what
 /// makes the admission gate accept a signal naming it.
 fn install_initiating(node: &mut Node, remote: &Identity) {
-    use crate::noise::HandshakeState;
-
-    let handshake = HandshakeState::new_initiator(node.identity().keypair());
-    let entry = crate::node::session::SessionEntry::new(
-        *remote.node_addr(),
-        remote.pubkey_full(),
-        EndToEndState::Initiating(handshake),
+    let entry = crate::node::session::SessionEntry::opened_for_test(
+        &remote.pubkey_full(),
+        node.identity().keypair(),
         crate::node::session::session_at(1000),
-        true,
     );
     node.sessions.insert(*remote.node_addr(), entry);
 }
@@ -542,18 +536,19 @@ async fn an_admitted_path_broken_starts_a_lookup_without_a_cached_identity() {
 }
 
 /// The lookup a PathBroken starts must be answerable when the destination's
-/// identity is not cached. The session already holds the destination's key,
-/// so the lookup's answer can be verified with it: the position is learned,
-/// the lookup does not run to its timeout, and packets queued for the
-/// destination are not dropped as unreachable when it would have.
+/// identity is not cached. The established session holds the key its
+/// handshake authenticated, so the lookup's answer can be verified with it:
+/// the position is learned, the lookup does not run to its timeout, and
+/// packets queued for the destination are not dropped as unreachable when it
+/// would have.
 #[tokio::test]
 async fn a_path_broken_without_a_cached_identity_starts_a_lookup_this_node_can_verify() {
-    // V - P1 - D, with D a real node V has a session with but whose identity
-    // V has not cached.
+    // V - P1 - D, with D a real node V has an established session with but
+    // whose identity V has not cached.
     let mut nodes = run_tree_test(3, &[(0, 1), (1, 2)], false).await;
     let p1 = *nodes[1].node.node_addr();
     let dest = *nodes[2].node.node_addr();
-    let dest_pubkey = nodes[2].node.identity().pubkey_full();
+    let _dest_pubkey = nodes[2].node.identity().pubkey_full();
     let real: Vec<NodeAddr> = nodes[2]
         .node
         .tree_state()
@@ -561,13 +556,13 @@ async fn a_path_broken_without_a_cached_identity_starts_a_lookup_this_node_can_v
         .node_addrs()
         .copied()
         .collect();
-    let handshake = crate::noise::HandshakeState::new_initiator(nodes[0].node.identity().keypair());
+    let session =
+        super::session::make_noise_session(nodes[0].node.identity(), nodes[2].node.identity());
     nodes[0].node.sessions.insert(
         dest,
-        crate::node::session::SessionEntry::new(
+        crate::node::session::SessionEntry::keyed(
             dest,
-            dest_pubkey,
-            EndToEndState::Initiating(handshake),
+            session,
             crate::node::session::session_at(1000),
             true,
         ),
@@ -658,15 +653,13 @@ async fn a_genuine_path_broken_still_replaces_stale_verified_coordinates_by_look
         .copied()
         .collect();
     nodes[0].node.register_identity(dest, dest_pubkey);
-    let handshake = crate::noise::HandshakeState::new_initiator(nodes[0].node.identity().keypair());
+    let keypair = nodes[0].node.identity().keypair();
     nodes[0].node.sessions.insert(
         dest,
-        crate::node::session::SessionEntry::new(
-            dest,
-            dest_pubkey,
-            EndToEndState::Initiating(handshake),
+        crate::node::session::SessionEntry::opened_for_test(
+            &dest_pubkey,
+            keypair,
             crate::node::session::session_at(1000),
-            true,
         ),
     );
 

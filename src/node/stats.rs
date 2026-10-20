@@ -42,43 +42,40 @@ pub struct SessionStats {
     /// abandons its handshake, the initiator keeps its rekey rolled back,
     /// and the existing session is left intact either way.
     pub rekey_key_mismatch: u64,
-    /// A setup message naming an already-established peer armed a
-    /// responder-side handshake alongside the running session and a
-    /// SessionAck was sent. The message carries no authenticator, so this
-    /// counts genuine peer restarts and forged setups alike; its rate is
-    /// the signal that something is spraying setup messages, which the
+    /// A setup message naming an already-established peer was held as a
+    /// rekey candidate beside the running session and a SessionAck was
+    /// sent. The message carries no authenticator, so this counts genuine
+    /// peer rekeys and restarts and forged setups alike; its rate is the
+    /// signal that something is spraying setup messages, which the
     /// per-message DEBUG line cannot carry safely at line rate.
     pub rekey_armed: u64,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight and our address sorted smaller, so the
-    /// tie-break dropped their msg1 and kept us as initiator.
+    /// A msg3 completed a peer's rekey while our own completed rekey of
+    /// that session waited for the peer under its keys, and our address
+    /// sorted smaller, so the tie-break kept ours and dropped the peer's.
     pub rekey_tiebreak: u64,
-    /// A setup message named an established peer while our own rekey of
-    /// that session was in flight and our address sorted larger, so we
-    /// abandoned our own rekey and answered as responder. A sustained
-    /// rate here means local key rotation is being suppressed.
+    /// A msg3 completed a peer's rekey while our own rekey of that session
+    /// was still in flight, so ours was given up. The msg3 authenticated
+    /// the session's peer. A completed rekey of ours that was waiting for
+    /// the peer and gave way is counted by `pending_replaced` instead.
     pub rekey_yielded: u64,
-    /// A setup message named an established peer while a handshake that
-    /// peer armed was still waiting for its msg3, so the message was dropped
-    /// and the handshake kept. A genuine retry lands here when the peer
-    /// abandoned a rekey this node answered; a sustained rate means setups
-    /// are being sprayed at the session.
+    /// A setup message named an established peer whose session already
+    /// holds as many rekey candidates as it may, overall or from that link
+    /// peer, so the message was dropped and no candidate was evicted. A
+    /// sustained rate means setups are being sprayed at the session.
     pub rekey_held: u64,
-    /// A setup message named an established peer that already holds a
-    /// completed rekey awaiting cut-over, so the message was dropped
-    /// rather than arming a second handshake.
+    /// A setup message named an established peer while our own completed
+    /// rekey waited for the peer under its keys and our address sorted
+    /// smaller, so the message was refused rather than answered: a peer
+    /// on an earlier release commits to the keys on the answer.
     pub rekey_pending: u64,
-    /// A responder-side handshake armed by a peer's setup message passed
-    /// the handshake timeout without a msg3 and was discarded. The
-    /// established session is retained.
+    /// A rekey candidate held for a peer's setup message reached the end of
+    /// its 40 s lifetime without a msg3 and was discarded. The established
+    /// session is retained.
     pub rekey_expired: u64,
-    /// A rekey this node initiated got no SessionAck from its peer within
-    /// the handshake timeout, and its handshake was discarded so the trigger
-    /// can retry. An ack that does not read, or that reads under a key other
-    /// than the peer's, does not count as an answer. The established
-    /// session is retained. A sustained rate means setups or acks to that
-    /// peer are being lost, or the peer holds a stuck handshake of its own
-    /// and wins the tie-break.
+    /// A rekey this node initiated got no readable SessionAck within the
+    /// handshake timeout and was given up, so the trigger can retry after
+    /// a backoff. The established session is retained. A sustained rate
+    /// means setups or acks to that peer are being lost.
     pub rekey_unanswered: u64,
     /// A completed rekey session still waiting for the peer's cut-over was
     /// replaced by a newer one, completed from a msg3 carrying the same
@@ -86,6 +83,14 @@ pub struct SessionStats {
     /// already have adopted, so a sustained rate means one side keeps
     /// rekeying while the other never appears on the new epoch.
     pub pending_replaced: u64,
+    /// A rekey of an established session completed with a peer whose
+    /// startup epoch had changed since the session was set up: the peer
+    /// restarted and lost the session. The old keys were discarded, the
+    /// session continues under the new ones, and a node that started the
+    /// rekey moved to them at once. A rekey this node starts after 30 s of
+    /// sending data with nothing heard from the peer is how a peer that
+    /// restarted and stays silent is found.
+    pub peer_restarted: u64,
     /// An inbound SessionAck failed the XX msg2 read, or its negotiation
     /// payload, against a session we are initiating. The entry is kept and
     /// the handshake rolled back, since the message authenticates nothing
@@ -131,6 +136,7 @@ impl SessionStats {
             rekey_expired: self.rekey_expired,
             rekey_unanswered: self.rekey_unanswered,
             pending_replaced: self.pending_replaced,
+            peer_restarted: self.peer_restarted,
             ack_handshake_failed: self.ack_handshake_failed,
             ack_identity_mismatch: self.ack_identity_mismatch,
             setup_rate_limited: self.setup_rate_limited,
@@ -166,14 +172,15 @@ impl SessionStats {
 /// `handlers/handshake.rs` across msg1, msg2, and (on the XX side) msg3.
 /// Each counter increments once per dropped inbound message; the
 /// WARN/DEBUG log line at the site is preserved alongside the counter
-/// bump for operator visibility.
+/// bump for operator visibility. The counters partition the drops: each
+/// one is counted once, in exactly one field.
 #[derive(Default)]
 pub struct HandshakeStats {
     /// Handshake state-machine rejection: header parse failed, Noise
     /// crypto step failed, identity could not be learned, index allocator
     /// returned an error, msg2/msg3 send failed, promote_connection
-    /// returned an error, ACL gate rejected the peer, or the admission
-    /// gate fired (max_peers / accept_connections).
+    /// returned an error, ACL gate rejected the peer, or an admission gate
+    /// other than the msg1 `max_peers` gate fired.
     pub bad_state: u64,
     /// Inbound handshake message arrived but no matching connection was
     /// found by the receiver_idx (or addr) lookup: msg2 for an unknown
@@ -191,6 +198,22 @@ pub struct HandshakeStats {
     /// startup epoch ended without an authenticated frame and its back-off
     /// is running. Not part of `bad_state`.
     pub silent_backoff: u64,
+    /// Inbound msg1 from a new identity refused at the `max_peers` cap.
+    pub max_peers: u64,
+    /// Inbound rekey msg1 refused because a completed rekey already awaits
+    /// its cutover. A sustained rate means the peer keeps rekeying while
+    /// this node's pending session waits for a frame on the new epoch.
+    pub rekey_pending: u64,
+    /// Inbound rekey msg1 refused because our own rekey of the link is in
+    /// flight and our smaller address won the tie-break.
+    pub rekey_tiebreak: u64,
+    /// Inbound rekey msg1 refused as a copy from an ended cycle, or on a
+    /// link or session too young to rekey. A sustained rate is replayed
+    /// msg1s, since a genuine peer does not resend a msg1 once answered.
+    pub answered_before: u64,
+    /// Inbound same-epoch msg1 refused because it arrived off the peer's
+    /// working established link.
+    pub off_link: u64,
 }
 
 impl HandshakeStats {
@@ -200,6 +223,11 @@ impl HandshakeStats {
             unknown_connection: self.unknown_connection,
             rekey_static_mismatch: self.rekey_static_mismatch,
             silent_backoff: self.silent_backoff,
+            max_peers: self.max_peers,
+            rekey_pending: self.rekey_pending,
+            rekey_tiebreak: self.rekey_tiebreak,
+            answered_before: self.answered_before,
+            off_link: self.off_link,
         }
     }
 
@@ -209,6 +237,11 @@ impl HandshakeStats {
             HandshakeReject::UnknownConnection => self.unknown_connection += 1,
             HandshakeReject::RekeyStaticMismatch => self.rekey_static_mismatch += 1,
             HandshakeReject::SilentBackoff => self.silent_backoff += 1,
+            HandshakeReject::AtMaxPeers => self.max_peers += 1,
+            HandshakeReject::RekeyPending => self.rekey_pending += 1,
+            HandshakeReject::RekeyTiebreak => self.rekey_tiebreak += 1,
+            HandshakeReject::AnsweredBefore => self.answered_before += 1,
+            HandshakeReject::OffLink => self.off_link += 1,
         }
     }
 }
@@ -318,13 +351,14 @@ impl NodeStats {
             RejectReason::Handshake(r) => self.handshake.record_reject(r),
             RejectReason::Transport(r) => self.transport.record_reject(r),
             RejectReason::Mmp(r) => self.mmp.record_reject(r),
-            // The forwarding, discovery, tree, and bloom families are
-            // recorded directly on the MetricsRegistry and never reach
+            // The forwarding, discovery, tree, bloom and dataplane families
+            // are recorded directly on the MetricsRegistry and never reach
             // this NodeStats dispatch.
             RejectReason::Forwarding(_)
             | RejectReason::Discovery(_)
             | RejectReason::Tree(_)
-            | RejectReason::Bloom(_) => {
+            | RejectReason::Bloom(_)
+            | RejectReason::Dataplane(_) => {
                 debug_assert!(false, "migrated reject family must use MetricsRegistry");
             }
         }
@@ -456,6 +490,7 @@ pub struct SessionStatsSnapshot {
     pub rekey_expired: u64,
     pub rekey_unanswered: u64,
     pub pending_replaced: u64,
+    pub peer_restarted: u64,
     pub ack_handshake_failed: u64,
     pub ack_identity_mismatch: u64,
     pub setup_rate_limited: u64,
@@ -470,6 +505,11 @@ pub struct HandshakeStatsSnapshot {
     pub unknown_connection: u64,
     pub rekey_static_mismatch: u64,
     pub silent_backoff: u64,
+    pub max_peers: u64,
+    pub rekey_pending: u64,
+    pub rekey_tiebreak: u64,
+    pub answered_before: u64,
+    pub off_link: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -503,6 +543,14 @@ pub struct ErrorSignalStatsSnapshot {
     pub emit_over_dest_interval: u64,
     pub emit_limiter_at_capacity: u64,
     pub mtu_exceeded_uncorroborated: u64,
+}
+
+/// Encrypted-frame drops made before any peer is resolved, one counter per
+/// [`DataplaneReject`](crate::node::reject::DataplaneReject) variant.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DataplaneStatsSnapshot {
+    pub unknown_index: u64,
+    pub orphaned_index: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

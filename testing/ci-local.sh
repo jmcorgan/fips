@@ -17,6 +17,12 @@
 #                        llvm-ar. When asked for, a missing prerequisite fails
 #                        the run. FIPS_CI_BAREMETAL=1 in the environment turns
 #                        it on too. GitHub CI runs it on every push.
+#   --slow-tests         Also run fips-core's slow test suites (the models of
+#                        the deployed releases and the guard-switch
+#                        meta-test) in the core's own test run. Off by
+#                        default: they take minutes, and GitHub CI's Linux job
+#                        runs them on every push. FIPS_CI_SLOW_TESTS=1 in the
+#                        environment turns it on too.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -29,8 +35,9 @@
 #                        stages. For rerunning a suite on a tree whose full run
 #                        already passed them; not a full local CI verdict.
 #                        Cannot be combined with --only, --build-only,
-#                        --test-only, --skip-integration, --cross-check or
-#                        --baremetal (or FIPS_CI_BAREMETAL=1).
+#                        --test-only, --skip-integration, --cross-check,
+#                        --baremetal (or FIPS_CI_BAREMETAL=1) or --slow-tests
+#                        (or FIPS_CI_SLOW_TESTS=1).
 #   -j, --jobs <N>       Max parallel chaos scenarios (default: 4)
 #   --list               List available integration suites
 #   --check-parity       Verify this suite set matches ci.yml's integration
@@ -194,6 +201,7 @@ TEST_ONLY=false
 SKIP_INTEGRATION=false
 SKIP_CHAOS=false
 BAREMETAL=false
+SLOW_TESTS=false
 CROSS_CHECK=false
 WITH_TOR=false
 ONLY_SUITE=""
@@ -381,6 +389,9 @@ need_value() {
 if [[ "${FIPS_CI_BAREMETAL:-}" == 1 ]]; then
     BAREMETAL=true
 fi
+if [[ "${FIPS_CI_SLOW_TESTS:-}" == 1 ]]; then
+    SLOW_TESTS=true
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -389,6 +400,7 @@ while [[ $# -gt 0 ]]; do
         --skip-integration) SKIP_INTEGRATION=true; shift ;;
         --skip-chaos)       SKIP_CHAOS=true; shift ;;
         --baremetal)        BAREMETAL=true; shift ;;
+        --slow-tests)       SLOW_TESTS=true; shift ;;
         --cross-check)      CROSS_CHECK=true; shift ;;
         --with-tor)         WITH_TOR=true; shift ;;
         --only)             need_value "$@"; ONLY_SUITE="$2"; ONLY_GIVEN=true; shift 2 ;;
@@ -408,7 +420,8 @@ if [[ "$RERUN" == true ]]; then
     known_suite "$ONLY_SUITE" || usage_error "Unknown suite: $ONLY_SUITE (see --list)"
     for _opt in only:"$ONLY_GIVEN" build-only:"$BUILD_ONLY" \
             test-only:"$TEST_ONLY" skip-integration:"$SKIP_INTEGRATION" \
-            cross-check:"$CROSS_CHECK" baremetal:"$BAREMETAL"; do
+            cross-check:"$CROSS_CHECK" baremetal:"$BAREMETAL" \
+            slow-tests:"$SLOW_TESTS"; do
         [[ "${_opt#*:}" == true ]] \
             && usage_error "--rerun cannot be combined with --${_opt%%:*}"
     done
@@ -745,6 +758,16 @@ run_build() {
         return 1
     fi
 
+    # The slow test suites are linted on every run, though they run only with
+    # --slow-tests. Mirrored in .github/workflows/ci.yml.
+    info "cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings"
+    if cargo clippy -p fips-core --all-targets --features slow-tests -- -D warnings 2>&1; then
+        record "core-fence-slow" 0
+    else
+        record "core-fence-slow" 1
+        return 1
+    fi
+
     # The no_std core on targets with no standard library. The fence above
     # runs on the host, where std exists, so a dependency that links it
     # passes there; this build fails on it. The script holds the command,
@@ -853,12 +876,28 @@ run_tests() {
 
     # The no_std core's tests under the core's own feature resolution, so a
     # test whose result depends on a feature only the root crate enables runs
-    # at least once without it. Mirrored in .github/workflows/ci.yml.
-    info "cargo test -p fips-core"
-    if cargo test -p fips-core 2>&1; then
+    # at least once without it. Mirrored in .github/workflows/ci.yml, which
+    # always runs the slow suites here; locally they need --slow-tests.
+    local core_test=(cargo test -p fips-core)
+    if [[ "$SLOW_TESTS" == true ]]; then
+        core_test+=(--features slow-tests)
+    fi
+    info "${core_test[*]}"
+    if "${core_test[@]}" 2>&1; then
         record "core-fence-tests" 0
     else
         record "core-fence-tests" 1
+    fi
+
+    # The known-defect lane: every test the inventory marks known-defect is
+    # run and must still fail, so the change that fixes one has to un-ignore
+    # it. Also checks the full test path of every ignored test the host
+    # compiles. Mirrored in .github/workflows/ci.yml.
+    info "testing/known-defect-lane.sh"
+    if bash "$SCRIPT_DIR/known-defect-lane.sh" 2>&1; then
+        record "known-defect" 0
+    else
+        record "known-defect" 1
     fi
 
     # The `profiling` feature adds a module, a recorder and a writer thread that
@@ -1983,6 +2022,19 @@ run_comment_refs() {
     record "comment-refs" $rc
 }
 
+# Every ignored test must carry a reason and an entry in
+# testing/ignored-tests.txt, and every entry must still name an ignored test.
+# An ignored test runs nowhere unless something runs it on purpose, so one
+# added without a record has silently stopped gating. Static, about a second.
+# Mirrored in ci.yml's ci-parity job by hand.
+run_ignored_tests() {
+    local rc=0
+    info "[ignored-tests] Checking every ignored test against its inventory"
+    python3 "$SCRIPT_DIR/check-ignored-tests.py" || rc=$?
+    record "ignored-tests" $rc
+    return 0
+}
+
 # No non-test code may use std's 64-bit atomics. They do not exist on 32-bit
 # MIPS, so one such use stops the crate building for the OpenWrt MIPS targets,
 # and no leg builds for MIPS to notice. Static, and it needs nothing built.
@@ -2136,6 +2188,7 @@ run_guards() {
     run_image_scoping
     run_action_pins
     run_comment_refs
+    run_ignored_tests
     run_portable_atomics
     run_mount_tmpdir
     run_shellcheck

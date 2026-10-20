@@ -120,10 +120,10 @@ pub struct RateLimitConfig {
     /// Per-link-peer refill rate for those messages, in tokens per second
     /// (`node.rate_limit.session_setup_rate`).
     ///
-    /// 16/s caps one neighbour's forced half-open occupancy at
-    /// `rate * handshake_timeout_secs` (480 responder candidates at
-    /// defaults) and its ack amplification at `rate` (16 acks/s): a
-    /// responder sends one ack per admitted setup and does not resend it.
+    /// 16/s caps one neighbour's forced half-open occupancy at `rate`
+    /// times the 40 s a held setup lives (640 held setups at defaults) and
+    /// its ack amplification at `rate` (16 acks/s): a responder sends one
+    /// ack per admitted setup and does not resend it on a timer.
     ///
     /// Setup messages naming a peer this node is already established with
     /// are metered on a separate per-link bucket, derived from
@@ -1212,14 +1212,18 @@ impl BuffersConfig {
 
 /// Rekey / session rekeying configuration (`node.rekey.*`).
 ///
-/// Controls periodic full rekey for both FMP (link layer) and FSP
+/// Sets when periodic full rekey starts for both FMP (link layer) and FSP
 /// (session layer) Noise sessions. Rekeying provides true forward secrecy
-/// with fresh DH randomness, nonce reset, and session index rotation.
+/// with fresh DH randomness, nonce reset, and session index rotation. A node
+/// always answers its peers' rekeys; these thresholds set when it starts its
+/// own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RekeyConfig {
-    /// Enable periodic rekey (`node.rekey.enabled`).
-    #[serde(default = "RekeyConfig::default_enabled")]
-    pub enabled: bool,
+    /// COMPAT (drop at the v2 cutover): the removed `node.rekey.enabled`
+    /// switch, read only so that [`Config::normalize_deprecated_keys`] can
+    /// warn that it is ignored. Never re-serialized.
+    #[serde(default, rename = "enabled", skip_serializing)]
+    pub(crate) legacy_enabled: Option<bool>,
 
     /// Initiate rekey after this many seconds (`node.rekey.after_secs`).
     #[serde(default = "RekeyConfig::default_after_secs")]
@@ -1233,7 +1237,7 @@ pub struct RekeyConfig {
 impl Default for RekeyConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            legacy_enabled: None,
             after_secs: 120,
             after_messages: 1 << 16, // 65536
         }
@@ -1241,9 +1245,6 @@ impl Default for RekeyConfig {
 }
 
 impl RekeyConfig {
-    fn default_enabled() -> bool {
-        true
-    }
     fn default_after_secs() -> u64 {
         120
     }

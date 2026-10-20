@@ -1,14 +1,10 @@
-//! Timeout management for stale handshake connections, idle sessions,
-//! and handshake message resend scheduling.
+//! Timeout management for stale handshake connections, idle sessions, link
+//! handshake message resend scheduling, and held TUN packets.
 
 use crate::node::Node;
 use crate::node::session::SessionInstant;
 use crate::peer::machine::TimerKind;
-use crate::proto::fmp::{
-    ConnAction, ConnSnapshot, LifecycleView, PeerSnapshot, RekeyResendSnapshot,
-};
-use crate::proto::fsp::{FspAction, InitialMsg3ResendSnapshot};
-use crate::time::deadline;
+use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
 use crate::transport::LinkId;
 use fips_core::time::Instant;
 use std::time::Duration;
@@ -40,16 +36,6 @@ impl LifecycleView for Node {
                 msg1: Vec::new(),
             })
             .collect()
-    }
-
-    fn rekey_peers(&self) -> Vec<PeerSnapshot> {
-        // The snapshot builder lives in `rekey` beside its drain/dampening
-        // constants; the read-seam unifies here.
-        self.rekey_peer_snapshots()
-    }
-
-    fn rekey_resend_candidates(&self, now_ms: u64) -> Vec<RekeyResendSnapshot> {
-        self.rekey_resend_snapshots(now_ms)
     }
 }
 
@@ -151,19 +137,22 @@ impl Node {
         };
         // Read the transport ID and session index off the surviving carrier
         // before disposing the machine (the leg no longer projects them).
-        let (transport_id, our_index) = match self.peer_machines.get(&link_id) {
-            Some(machine) => (machine.conn_transport_id(), machine.our_index()),
+        let (transport_id, our_index) = match self.peer_machines.get_mut(&link_id) {
+            Some(machine) => (machine.conn_transport_id(), machine.take_our_index()),
             None => (None, None),
         };
         self.remove_peer_machine(link_id);
 
-        // Free session index and pending_outbound/pending_inbound if allocated
-        if let Some(idx) = our_index {
+        // Free session index and pending_outbound if allocated
+        if let Some(lease) = our_index {
+            let idx = lease.release();
             if let Some(tid) = transport_id {
-                self.pending_outbound.remove(&(tid, idx.as_u32()));
+                self.pending_outbound.remove(&(tid, idx));
                 self.pending_inbound.remove(&(tid, idx.as_u32()));
             }
-            let _ = self.index_allocator.free(idx);
+            let _ = self
+                .index_allocator
+                .free(crate::utils::index::SessionIndex::new(idx));
         }
 
         // Tear down the transport connection, not just the node-side state.
@@ -426,224 +415,6 @@ impl Node {
         }
     }
 
-    /// Resend session-layer handshake messages and timeout stale handshakes.
-    ///
-    /// For sessions still being set up:
-    /// - Expire each responder candidate, and this node's initiator leg, once
-    ///   it has exceeded the timeout window; remove the session when it holds
-    ///   neither and any responder hold on it is a timeout window old.
-    /// - If this node's own setup is due a resend and under max resends,
-    ///   resend it wrapped in a fresh SessionDatagram (so routing can adapt).
-    ///   Responder candidates are not resent on a timer.
-    ///
-    /// For an established initiator still holding its msg3, resend it until
-    /// the peer is heard from or the budget is spent (see
-    /// `resend_initial_msg3`). Established sessions are never removed here.
-    pub(in crate::node) async fn resend_pending_session_handshakes(&mut self, now: SessionInstant) {
-        if self.sessions.is_empty() {
-            return;
-        }
-
-        let timeout = Duration::from_secs(self.config().node.rate_limit.handshake_timeout_secs);
-        let max_resends = self.config().node.rate_limit.handshake_max_resends;
-        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
-        let ttl = self.config().node.session.default_ttl;
-
-        // First pass: expire each handshake leg by its own age. Responder
-        // candidates go one by one, from when their setup was admitted,
-        // including those a tie-break loser keeps beside its session; this
-        // node's initiator leg goes from its last activity. An entry goes
-        // when it holds neither and its responder hold, if any, is a
-        // handshake timeout old.
-        for entry in self.sessions.values_mut() {
-            entry.expire_candidates(now, timeout);
-            if entry.is_established() {
-                continue;
-            }
-            if entry.has_initiator_leg()
-                && now.saturating_duration_since(entry.last_activity()) > timeout
-                && (entry.has_candidates() || entry.responder_hold_open(now, timeout))
-            {
-                entry.drop_initiator_leg();
-            }
-        }
-        let timed_out: Vec<crate::NodeAddr> = self
-            .sessions
-            .iter()
-            .filter(|(_, entry)| {
-                !entry.is_established()
-                    && !entry.has_candidates()
-                    && !entry.responder_hold_open(now, timeout)
-                    && (!entry.has_initiator_leg()
-                        || now.saturating_duration_since(entry.last_activity()) > timeout)
-            })
-            .map(|(addr, _)| *addr)
-            .collect();
-
-        for addr in &timed_out {
-            let name = self.peer_display_name(addr);
-            info!(dest = %name, "Session handshake timed out, removing");
-            self.sessions.remove(addr);
-            self.pending_tun_packets.remove(addr);
-            self.path_mtu_lookup_release(addr);
-        }
-
-        // A paused initiator leg (this node lost a simultaneous-initiation
-        // tie-break and is answering the peer's setup instead) is no live
-        // attempt once the hold is the minimum age old with nothing
-        // completed: the setup it yielded to may have been forged. Nor once
-        // no candidate is left, since there is then nothing to answer
-        // instead (a forger's msg3 drops its own candidate). Its resends
-        // resume, due now.
-        for entry in self.sessions.values_mut() {
-            if entry.has_initiator_leg()
-                && entry.initiator_paused()
-                && (!entry.has_candidates() || entry.responder_hold_aged(now))
-            {
-                entry.resume_initiator(now);
-            }
-        }
-
-        // Second pass: collect resend candidates. Only this node's own
-        // setup is resent here: a responder candidate sends one ack per
-        // setup it receives and no more, and the initiator's own setup
-        // resend recovers a lost ack.
-        let my_addr = *self.node_addr();
-        let candidates: Vec<(crate::NodeAddr, Vec<u8>)> = self
-            .sessions
-            .iter()
-            .filter(|(_, entry)| {
-                !entry.is_established()
-                    && entry.has_initiator_leg()
-                    && !entry.initiator_paused()
-                    && entry.handshake_payload().is_some()
-                    && entry.resend_count() < max_resends
-                    && entry.next_resend_at().is_some_and(|at| now >= at)
-            })
-            .map(|(addr, entry)| (*addr, entry.handshake_payload().unwrap().to_vec()))
-            .collect();
-
-        for (dest_addr, payload) in candidates {
-            use crate::proto::link::SessionDatagram;
-
-            let mut datagram = SessionDatagram::new(my_addr, dest_addr, payload).with_ttl(ttl);
-            let sent = match self.send_session_datagram(&mut datagram).await {
-                Ok(_) => true,
-                Err(e) => {
-                    debug!(
-                        dest = %self.peer_display_name(&dest_addr),
-                        error = %e,
-                        "Session handshake resend failed"
-                    );
-                    false
-                }
-            };
-
-            if sent && let Some(entry) = self.sessions.get_mut(&dest_addr) {
-                let count = entry.resend_count() + 1;
-                let next = resend_deadline(now, interval_ms, backoff, count);
-                entry.record_resend(next);
-                debug!(
-                    dest = %self.peer_display_name(&dest_addr),
-                    resend = count,
-                    "Resent session handshake"
-                );
-            }
-        }
-
-        self.resend_initial_msg3(now).await;
-    }
-
-    /// Resend an established initiator's retained msg3 until the responder is
-    /// heard from, and stop retaining it once the resend budget is spent.
-    ///
-    /// The initiator is established the moment msg3 leaves; the responder only
-    /// once it arrives. The responder does not resend its SessionAck, and a
-    /// second ack, drawn by a resent setup, is refused by an established
-    /// entry, so a lost msg3 is repaired only here and by the established arm
-    /// of `handle_session_setup`, which answers a setup from the waiting
-    /// responder with this msg3. The payload is released by the first inbound frame that
-    /// authenticates on the session (`handle_encrypted_session_msg`) or, here,
-    /// when the budget is spent. Runs whether or not periodic rekey is enabled.
-    async fn resend_initial_msg3(&mut self, now: SessionInstant) {
-        use crate::proto::link::SessionDatagram;
-
-        let candidates = self.initial_msg3_resend_snapshots(now);
-        if candidates.is_empty() {
-            return;
-        }
-        let max_resends = self.config().node.rate_limit.handshake_max_resends;
-        let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let backoff = self.config().node.rate_limit.handshake_resend_backoff;
-        let ttl = self.config().node.session.default_ttl;
-        let my_addr = *self.node_addr();
-
-        for action in self.fsp.poll_initial_msg3_resends(candidates, max_resends) {
-            match action {
-                FspAction::ReleaseInitialMsg3 { addr } => {
-                    if let Some(entry) = self.sessions.get_mut(&addr) {
-                        entry.clear_handshake_payload();
-                    }
-                    info!(
-                        dest = %self.peer_display_name(&addr),
-                        "Session msg3 unconfirmed after max resends, no longer resending"
-                    );
-                }
-                FspAction::ResendInitialMsg3 { addr } => {
-                    let payload = match self.sessions.get(&addr).and_then(|e| e.handshake_payload())
-                    {
-                        Some(p) => p.to_vec(),
-                        None => continue,
-                    };
-                    let mut datagram = SessionDatagram::new(my_addr, addr, payload).with_ttl(ttl);
-                    let sent = match self.send_session_datagram(&mut datagram).await {
-                        Ok(_) => true,
-                        Err(e) => {
-                            debug!(
-                                dest = %self.peer_display_name(&addr),
-                                error = %e,
-                                "Session msg3 resend failed"
-                            );
-                            false
-                        }
-                    };
-                    if sent && let Some(entry) = self.sessions.get_mut(&addr) {
-                        let count = entry.resend_count() + 1;
-                        let next = resend_deadline(now, interval_ms, backoff, count);
-                        entry.record_resend(next);
-                        debug!(
-                            dest = %self.peer_display_name(&addr),
-                            resend = count,
-                            "Resent session msg3"
-                        );
-                    }
-                }
-                #[allow(unreachable_patterns)]
-                _ => {}
-            }
-        }
-    }
-
-    /// Snapshot every established session still retaining its initial msg3,
-    /// pre-evaluating the resend-due predicate against `now` so the core
-    /// reads no clock.
-    ///
-    /// `is_established()` partitions the shared handshake resend slot: a
-    /// non-established entry's SessionSetup or SessionAck belongs to the passes
-    /// above, an established entry's msg3 to this one.
-    fn initial_msg3_resend_snapshots(&self, now: SessionInstant) -> Vec<InitialMsg3ResendSnapshot> {
-        self.sessions
-            .iter()
-            .filter(|(_, entry)| entry.is_established() && entry.handshake_payload().is_some())
-            .map(|(addr, entry)| InitialMsg3ResendSnapshot {
-                addr: *addr,
-                resend_count: entry.resend_count(),
-                resend_due: entry.next_resend_at().is_some_and(|at| now >= at),
-            })
-            .collect()
-    }
-
     /// Release TUN packets held for a destination nothing is still working
     /// to deliver, or held for longer than any legitimate wait.
     ///
@@ -726,9 +497,9 @@ impl Node {
 
     /// Remove established sessions that have been idle too long.
     ///
-    /// Only targets sessions in the Established state. Entries still being set
-    /// up, with an initiator leg or responder candidates, are handled by the
-    /// handshake timeout.
+    /// Only targets sessions in the Established state. A session whose first
+    /// handshake is still open is ended by its rekey machine, when its own
+    /// attempt and every candidate it held have run out.
     pub(in crate::node) fn purge_idle_sessions(&mut self, now: SessionInstant) {
         let timeout_ms = self.config().node.session.idle_timeout_secs * 1000;
         if timeout_ms == 0 {
@@ -866,18 +637,6 @@ fn is_stranded(
     max_age: std::time::Duration,
 ) -> bool {
     (!live && !in_hold) || age > max_age
-}
-
-/// When the handshake resend after `count` resends is due: `interval_ms`
-/// grown by `backoff` per resend, from `now`.
-pub(in crate::node) fn resend_deadline(
-    now: SessionInstant,
-    interval_ms: u64,
-    backoff: f64,
-    count: u32,
-) -> SessionInstant {
-    let delay_ms = (interval_ms as f64 * backoff.powi(count as i32)) as u64;
-    deadline(now, Duration::from_millis(delay_ms))
 }
 
 #[cfg(test)]

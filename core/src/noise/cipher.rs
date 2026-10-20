@@ -389,7 +389,11 @@ impl fmt::Debug for CipherState {
 /// Encrypt `plaintext` with the given keyed AEAD, counter, and AAD,
 /// returning a `Vec<u8>` of `plaintext.len() + TAG_SIZE` bytes: the
 /// ciphertext, sealed in place, then the tag.
-fn seal(
+///
+/// What [`CipherState::encrypt_with_aad`] does once it has taken its
+/// counter, for a sender that reserved the counter and cloned the key
+/// elsewhere (the session rekey machine's seal).
+pub fn seal(
     cipher: Option<&AeadKey>,
     counter: u64,
     aad: &[u8],

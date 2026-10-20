@@ -11,6 +11,7 @@
 
 pub mod aead;
 mod cipher;
+mod fork;
 mod handshake;
 mod replay;
 mod session;
@@ -18,12 +19,14 @@ mod session;
 pub(crate) use cipher::PROTOCOL_NAME_XX;
 #[cfg(any(test, feature = "test-hooks"))]
 pub use cipher::open;
+pub use cipher::seal;
 pub use cipher::{
     CipherState, HandshakeProgress, HandshakeRole, MAX_MESSAGE_SIZE, NoiseError, NoisePattern,
     REPLAY_WINDOW_SIZE,
 };
 #[doc(hidden)]
 pub use cipher::{clear_slot, take_cleared};
+pub use fork::Fork;
 pub use handshake::{HandshakeState, Message2Rollback};
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;

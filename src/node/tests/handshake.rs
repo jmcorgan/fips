@@ -8,9 +8,7 @@ use super::*;
 #[tokio::test]
 async fn test_two_node_handshake_udp() {
     use crate::config::UdpConfig;
-    use crate::proto::fmp::wire::{
-        build_encrypted, build_established_header, build_msg1, prepend_inner_header,
-    };
+    use crate::proto::fmp::wire::{build_msg1, prepend_inner_header};
     use crate::transport::udp::UdpTransport;
     use tokio::time::{Duration, timeout};
 
@@ -58,12 +56,13 @@ async fn test_two_node_handshake_udp() {
     let link_id_a = node_a.allocate_link_id();
 
     // Allocate session index for A's outbound
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
 
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -197,12 +196,12 @@ async fn test_two_node_handshake_udp() {
     let inner_a = prepend_inner_header(0, msg_a);
     let peer_b = node_a.get_peer_mut(&peer_b_node_addr).unwrap();
     let their_index_b = peer_b.their_index().expect("A should know B's index");
-    let session_a = peer_b.noise_session_mut().unwrap();
-    let counter_a = session_a.current_send_counter();
-    let header_a = build_established_header(their_index_b, counter_a, 0, inner_a.len() as u16);
-    let ciphertext_a = session_a.encrypt_with_aad(&inner_a, &header_a).unwrap();
-
-    let wire_encrypted = build_encrypted(&header_a, &ciphertext_a);
+    let wire_encrypted = peer_b.seal_test_frame(
+        fips_core::proto::rekey::Slot::Current,
+        their_index_b,
+        0,
+        &inner_a,
+    );
     let transport = node_a.transports.get(&transport_id_a).unwrap();
     transport
         .send(&remote_addr_b, &wire_encrypted)
@@ -224,12 +223,12 @@ async fn test_two_node_handshake_udp() {
     let inner_b = prepend_inner_header(0, msg_b);
     let peer_a = node_b.get_peer_mut(&peer_a_node_addr).unwrap();
     let their_index_a = peer_a.their_index().expect("B should know A's index");
-    let session_b = peer_a.noise_session_mut().unwrap();
-    let counter_b = session_b.current_send_counter();
-    let header_b = build_established_header(their_index_a, counter_b, 0, inner_b.len() as u16);
-    let ciphertext_b = session_b.encrypt_with_aad(&inner_b, &header_b).unwrap();
-
-    let wire_encrypted_b = build_encrypted(&header_b, &ciphertext_b);
+    let wire_encrypted_b = peer_a.seal_test_frame(
+        fips_core::proto::rekey::Slot::Current,
+        their_index_a,
+        0,
+        &inner_b,
+    );
     let transport = node_b.transports.get(&transport_id_b).unwrap();
     transport
         .send(&remote_addr_a, &wire_encrypted_b)
@@ -314,11 +313,12 @@ async fn test_run_rx_loop_handshake() {
 
     let link_id_a = node_a.allocate_link_id();
 
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -506,11 +506,12 @@ async fn test_cross_connection_both_initiate() {
 
     // Node A initiates to Node B
     let link_id_a_out = node_a.allocate_link_id();
-    let our_index_a = node_a.index_allocator.allocate().unwrap();
+    let our_index_a_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+    let our_index_a = crate::utils::index::SessionIndex::new(our_index_a_lease.index());
     node_a
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_a_out, peer_b_identity, 1000)
-                .with_our_index(our_index_a)
+                .with_our_index(our_index_a_lease)
                 .with_transport_id(transport_id_a)
                 .with_source_addr(remote_addr_b.clone()),
         )
@@ -543,11 +544,12 @@ async fn test_cross_connection_both_initiate() {
 
     // Node B initiates to Node A
     let link_id_b_out = node_b.allocate_link_id();
-    let our_index_b = node_b.index_allocator.allocate().unwrap();
+    let our_index_b_lease = fips_core::proto::rekey::allocate(&mut node_b.index_allocator).unwrap();
+    let our_index_b = crate::utils::index::SessionIndex::new(our_index_b_lease.index());
     node_b
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id_b_out, peer_a_identity, 1000)
-                .with_our_index(our_index_b)
+                .with_our_index(our_index_b_lease)
                 .with_transport_id(transport_id_b)
                 .with_source_addr(remote_addr_a.clone()),
         )
@@ -744,10 +746,11 @@ async fn test_stale_connection_cleanup() {
     let link_id = node.allocate_link_id();
 
     // Allocate session index and set transport info
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     node.seed_handshake_machine(
         HandshakeSeed::outbound(link_id, peer_identity, past_time_ms)
-            .with_our_index(our_index)
+            .with_our_index(our_lease)
             .with_transport_id(transport_id)
             .with_source_addr(remote_addr.clone()),
     )
@@ -828,10 +831,11 @@ async fn test_failed_connection_cleanup() {
         .unwrap_or(0);
     let link_id = node.allocate_link_id();
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     node.seed_handshake_machine(
         HandshakeSeed::outbound(link_id, peer_identity, now_ms)
-            .with_our_index(our_index)
+            .with_our_index(our_lease)
             .with_transport_id(transport_id)
             .with_source_addr(remote_addr.clone()),
     )
@@ -912,12 +916,13 @@ async fn test_msg1_stored_for_resend() {
     let link_id = node.allocate_link_id();
     let mut conn = outbound_leg(link_id, peer_identity, now_ms);
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
         .unwrap();
-    conn.set_conn_our_index(our_index);
+    let _ = conn.set_conn_our_index(our_lease);
     conn.set_conn_transport_id(transport_id);
     conn.set_conn_source_addr(remote_addr.clone());
 
@@ -943,7 +948,8 @@ async fn test_resend_scheduling() {
     let link_id = node.allocate_link_id();
     let mut conn = outbound_leg(link_id, peer_identity, now_ms);
 
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
         .start_handshake(our_keypair, node.startup_epoch(), now_ms)
@@ -985,7 +991,7 @@ async fn test_resend_scheduling() {
     // The msg1 wire lives on the machine's carrier (the retransmit driver's
     // resend source), mirroring `prepare_outbound_msg1`.
     machine.set_conn_handshake_msg1(wire_msg1, now_ms + 1000);
-    machine.set_conn_our_index(our_index);
+    let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
@@ -1027,7 +1033,8 @@ async fn test_handshake_timeout_drive() {
     let dial_ms = 1000u64;
     let link_id = node.allocate_link_id();
     let mut conn = outbound_leg(link_id, peer_identity, dial_ms);
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let _ = conn
         .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
@@ -1061,7 +1068,7 @@ async fn test_handshake_timeout_drive() {
         dial_ms,
         &mut node.index_allocator,
     );
-    machine.set_conn_our_index(our_index);
+    let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
     node.peer_machines.insert(link_id, machine);
@@ -5784,11 +5791,12 @@ mod dead_encrypt_worker {
         let peer_b = *peer_b_identity.node_addr();
         let peer_a = *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();
         let link_id = node_a.allocate_link_id();
-        let our_index = node_a.index_allocator.allocate().unwrap();
+        let our_lease = fips_core::proto::rekey::allocate(&mut node_a.index_allocator).unwrap();
+        let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
         node_a
             .seed_handshake_machine(
                 HandshakeSeed::outbound(link_id, peer_b_identity, 1000)
-                    .with_our_index(our_index)
+                    .with_our_index(our_lease)
                     .with_transport_id(tid)
                     .with_source_addr(remote_addr_b.clone()),
             )

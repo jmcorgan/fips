@@ -36,6 +36,13 @@ pub(crate) fn mono_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// The [`mono_ms`] reading of `instant`: its milliseconds from the same
+/// epoch, truncated the same way, so it compares exactly with a `mono_ms`
+/// value. An instant before the epoch reads 0.
+pub(crate) fn mono_ms_at(instant: HostInstant) -> u64 {
+    instant.0.saturating_duration_since(*START).as_millis() as u64
+}
+
 /// Current Unix time in milliseconds, or 0 if the system clock reads before
 /// the epoch.
 pub(crate) fn wall_ms() -> u64 {

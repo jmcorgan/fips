@@ -7,6 +7,7 @@
 
 use crate::NodeAddr;
 use crate::PeerIdentity;
+use crate::identity::OsEntropy;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::{self, HsLine, OrNone, Shown, Withheld};
@@ -39,6 +40,7 @@ impl Node {
     /// (`is_outbound = true`), resolved into a plain `bool` here so the core
     /// stays free of the peer helper.
     fn outbound_snapshot(&self, peer_addr: &NodeAddr) -> OutboundSnapshot {
+        let existing = self.peers.get(peer_addr);
         OutboundSnapshot {
             has_existing_peer: self.peers.contains_key(peer_addr),
             our_outbound_wins: cross_connection_winner(
@@ -46,6 +48,9 @@ impl Node {
                 peer_addr,
                 true,
             ),
+            own_dial: existing
+                .and_then(|p| self.links.get(&p.link_id()))
+                .is_some_and(|link| link.direction() == LinkDirection::Outbound),
         }
     }
 
@@ -104,30 +109,6 @@ impl Node {
                 peer = %self.peer_display_name(peer),
                 refused,
                 "Suppressed repeated handshake lines"
-            );
-        }
-    }
-
-    /// Feed the peer's control machine the completed-rekey observation after the
-    /// inline `complete_rekey_msg2`. The obs records the peer's new session index
-    /// and advances the rekey phase; it emits no action, so a bare `step` keeps
-    /// the machine coherent without an executor pass.
-    fn observe_rekey_msg2(&mut self, node_addr: &NodeAddr, their_index: SessionIndex) {
-        let link = match self.peers.get(node_addr) {
-            Some(peer) => peer.link_id(),
-            None => return,
-        };
-        if let Some(machine) = self.peer_machines.get_mut(&link) {
-            let acts = machine.step(
-                PeerEvent::RekeyMsg2 { their_index },
-                Self::now_ms(),
-                &mut self.index_allocator,
-            );
-            debug_assert!(acts.is_empty(), "completed-rekey is a pure observation");
-        } else {
-            debug_assert!(
-                false,
-                "peer machine present for every established rekey peer"
             );
         }
     }
@@ -629,6 +610,317 @@ impl Node {
             .is_some_and(|answered| answered != msg1)
     }
 
+    /// Hand `packet`'s msg1, read as `wire`, a same-epoch msg1 from the held
+    /// peer `peer`, to that peer's link rekey machine, and carry out what it
+    /// asks for: answer it into a new pending session, resend a stored
+    /// answer, or refuse it, each counted and logged. Returns whether the
+    /// msg1 goes on to the restart gates as a replacement: the machine asked
+    /// for them (a fresh dial on a link too young to rekey), or the peer has
+    /// no machine to ask.
+    async fn msg1_to_link(
+        &mut self,
+        peer: &NodeAddr,
+        packet: &ReceivedPacket,
+        wire: &WireOutcome,
+    ) -> bool {
+        if !self.peers.get(peer).is_some_and(|p| p.has_session()) {
+            return true;
+        }
+        let local = self.session_node_keys();
+        let Some(tok) = read_msg1::<OsEntropy>(&local, &packet.data) else {
+            // The control machine's read authenticated this msg1, so only one
+            // that carries no startup epoch fails the machine's.
+            debug!(
+                peer = %self.peer_display_name(peer),
+                remote_addr = %packet.remote_addr,
+                "Same-epoch msg1 carries no startup epoch, dropping"
+            );
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+            return false;
+        };
+        // On this peer's link, by its transport and current address or by an
+        // `addr_to_link` entry for its link, such as a hostname-keyed dial
+        // address beside a numeric current address.
+        let on_link = self.peers.get(peer).is_some_and(|p| {
+            (p.transport_id() == Some(packet.transport_id)
+                && p.current_addr() == Some(&packet.remote_addr))
+                || self
+                    .addr_to_link
+                    .get(&(packet.transport_id, packet.remote_addr.clone()))
+                    == Some(&p.link_id())
+        });
+        let arrival = Arrival {
+            on_link,
+            reachable: self.link_reachable(peer).await,
+        };
+        let path = Msg1Path::new(
+            packet.transport_id,
+            &packet.remote_addr,
+            self.established_link(peer),
+        );
+        let held = self.peers.get(peer).and_then(|p| p.rekey_answer());
+        let held_dg = OrNone(held.as_ref().map(|(msg1, _)| diag::msg1_tag(msg1)));
+        let pending_age_s = OrNone(
+            self.peers
+                .get(peer)
+                .and_then(|p| p.pending_age())
+                .map(|d| d.as_secs()),
+        );
+        let age_s = OrNone(
+            self.peers
+                .get(peer)
+                .and_then(|p| p.session_established_at())
+                .map(|t| crate::peer::since(t).as_secs()),
+        );
+        let msg1_dg = diag::msg1_tag(&wire.msg1_digest);
+        let msg1_sidx = wire.their_index;
+        // The receiver index of the stored msg2 a resent setup msg1 is
+        // answered with is the sender index of the msg1 it answers.
+        let stored_ridx = self
+            .peers
+            .get(peer)
+            .and_then(|p| p.handshake_msg2())
+            .and_then(Msg2Header::parse)
+            .map(|h| h.receiver_idx);
+        let answers_it = OrNone(stored_ridx.map(|r| r == wire.their_index));
+        let stored_ridx = OrNone(stored_ridx);
+        let Some(out) = self.step_link(peer, Input::PeerMsg1 { tok, arrival }) else {
+            return false;
+        };
+        let report = self.run_link_step(peer, out).await;
+        for reason in &report.rejects {
+            let shown = match reason {
+                Reason::PendingHeld => self.shown(peer, HsLine::Pending),
+                Reason::AnsweredBefore => self.shown(peer, HsLine::Answered),
+                Reason::OffLink => self.shown(peer, HsLine::OffLink),
+                // Never suppressed: an integration check counts the
+                // tie-break line to detect a dual-initiation loop, which
+                // holds one session and so would never restart a
+                // per-session count.
+                _ => true,
+            };
+            if shown {
+                match reason {
+                    Reason::PendingHeld => debug!(
+                        peer = %self.peer_display_name(peer),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        same_path = path.same_path(),
+                        msg1_dg = %msg1_dg,
+                        held_dg = %held_dg,
+                        pending_age_s = %pending_age_s,
+                        "Rekey msg1 received but already have pending session, dropping"
+                    ),
+                    Reason::DualInitWon => debug!(
+                        peer = %self.peer_display_name(peer),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        same_path = path.same_path(),
+                        msg1_dg = %msg1_dg,
+                        "Dual rekey initiation: we win (smaller addr), dropping their msg1"
+                    ),
+                    Reason::AnsweredBefore => debug!(
+                        peer = %self.peer_display_name(peer),
+                        remote_addr = %packet.remote_addr,
+                        transport_id = %packet.transport_id,
+                        same_path = path.same_path(),
+                        msg1_dg = %msg1_dg,
+                        "Rekey msg1 answered in an ended cycle, dropping the copy"
+                    ),
+                    Reason::OffLink => debug!(
+                        peer = %self.peer_display_name(peer),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        same_path = path.same_path(),
+                        msg1_dg = %msg1_dg,
+                        "Same-epoch msg1 off the established link while that link is up, dropping"
+                    ),
+                    Reason::IndexExhausted => warn!(
+                        peer = %self.peer_display_name(peer),
+                        error = %IndexError::Exhausted,
+                        "Failed to allocate index for rekey"
+                    ),
+                    other => debug!(
+                        peer = %self.peer_display_name(peer),
+                        remote_addr = %packet.remote_addr,
+                        reason = ?other,
+                        "Rekey msg1 refused"
+                    ),
+                }
+            }
+            self.stats_mut()
+                .record_reject(RejectReason::Handshake(msg1_refusal(*reason)));
+        }
+        for msg2 in &report.replies {
+            let sent = self.answer_msg1(peer, packet, msg2).await;
+            if report.pending {
+                match sent {
+                    Ok(_) => debug!(
+                        peer = %self.peer_display_name(peer),
+                        new_our_index = %OrNone(
+                            self.peers.get(peer).and_then(|p| p.pending_our_index())
+                        ),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        link_tid = %path.link_tid(),
+                        link_addr = %path.link_addr(),
+                        same_path = path.same_path(),
+                        age_s = %age_s,
+                        msg1_sidx = %msg1_sidx,
+                        msg1_dg = %msg1_dg,
+                        epoch = %OrNone(
+                            self.peers
+                                .get(peer)
+                                .and_then(|p| p.pending_new_session())
+                                .map(diag::epoch_tag)
+                        ),
+                        kbit_ours = %OrNone(self.peers.get(peer).map(|p| p.current_k_bit())),
+                        "Sent rekey msg2 response"
+                    ),
+                    // The pending stays held: a msg2 the transport refused is
+                    // lost, and the peer's resend of its msg1 draws it again.
+                    Err(e) => {
+                        warn!(
+                            peer = %self.peer_display_name(peer),
+                            error = %e,
+                            transport_id = %packet.transport_id,
+                            remote_addr = %packet.remote_addr,
+                            link_tid = %path.link_tid(),
+                            link_addr = %path.link_addr(),
+                            same_path = path.same_path(),
+                            msg1_sidx = %msg1_sidx,
+                            msg1_dg = %msg1_dg,
+                            "Failed to send rekey msg2"
+                        );
+                        self.stats_mut()
+                            .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    }
+                }
+            } else if held.as_ref().is_some_and(|(_, answer)| answer == msg2) {
+                // A resend of the msg1 that armed the pending we hold: our
+                // msg2 was lost, so the same answer goes again.
+                match sent {
+                    Ok(_) if self.shown(peer, HsLine::RekeyResend) => debug!(
+                        peer = %self.peer_display_name(peer),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        same_path = path.same_path(),
+                        "Resent rekey msg2 for a resent msg1"
+                    ),
+                    Err(e) if self.shown(peer, HsLine::RekeyResendFailed) => debug!(
+                        peer = %self.peer_display_name(peer),
+                        error = %e,
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        same_path = path.same_path(),
+                        "Failed to resend rekey msg2"
+                    ),
+                    _ => {}
+                }
+            } else {
+                // A resend of the msg1 the peering was promoted from, on a
+                // link too young to rekey: the stored msg2 goes again.
+                match sent {
+                    Ok(_) if self.shown(peer, HsLine::Resend) => debug!(
+                        peer = %self.peer_display_name(peer),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        link_tid = %path.link_tid(),
+                        link_addr = %path.link_addr(),
+                        same_path = path.same_path(),
+                        msg1_sidx = %msg1_sidx,
+                        msg1_dg = %msg1_dg,
+                        age_s = %age_s,
+                        stored_ridx = %stored_ridx,
+                        answers_it = %answers_it,
+                        "Resent msg2 for duplicate msg1 (same epoch)"
+                    ),
+                    Err(e) if self.shown(peer, HsLine::ResendFailed) => debug!(
+                        peer = %self.peer_display_name(peer),
+                        error = %e,
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        link_tid = %path.link_tid(),
+                        link_addr = %path.link_addr(),
+                        same_path = path.same_path(),
+                        msg1_sidx = %msg1_sidx,
+                        msg1_dg = %msg1_dg,
+                        age_s = %age_s,
+                        stored_ridx = %stored_ridx,
+                        answers_it = %answers_it,
+                        "Failed to resend msg2"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        report.replace
+    }
+
+    /// Hand `packet`'s msg2, which names `peer`'s index, to that peer's link
+    /// rekey machine: it completes the own rekey whose attempt the index
+    /// names, or changes nothing, each counted and logged.
+    async fn msg2_to_link(&mut self, peer: &NodeAddr, packet: &ReceivedPacket) {
+        let Some(out) = self.step_link(
+            peer,
+            Input::Reply {
+                bytes: &packet.data,
+                route: (),
+            },
+        ) else {
+            return;
+        };
+        let report = self.run_link_step(peer, out).await;
+        if report.pending {
+            let p = self.peers.get(peer);
+            debug!(
+                peer = %self.peer_display_name(peer),
+                new_our_index = %OrNone(p.and_then(|p| p.pending_our_index())),
+                epoch = %OrNone(p.and_then(|p| p.pending_new_session()).map(diag::epoch_tag)),
+                kbit_ours = %OrNone(p.map(|p| p.current_k_bit())),
+                "Rekey completed (initiator), pending K-bit cutover"
+            );
+        }
+        for reason in report.rejects {
+            match reason {
+                // Nothing authenticated this msg2 before the read, and the
+                // index it names travels in cleartext in our msg1, so it may
+                // be a forgery: the machine keeps the attempt, its resends
+                // and its deadline, so the genuine msg2 can still complete it.
+                Reason::ReplyUnauthenticated => {
+                    debug!(
+                        peer = %self.peer_display_name(peer),
+                        "Rekey msg2 did not authenticate, keeping the rekey cycle"
+                    );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                }
+                // A duplicate or late copy of a msg2 that already completed,
+                // or one for an attempt already given up.
+                Reason::LateReply | Reason::UnknownAttempt | Reason::UnknownIndex => {
+                    debug!(
+                        peer = %self.peer_display_name(peer),
+                        receiver_idx = ?Msg2Header::parse(&packet.data).map(|h| h.receiver_idx),
+                        reason = ?reason,
+                        "Rekey msg2 for no attempt in flight, dropping"
+                    );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
+                }
+                other => {
+                    warn!(
+                        peer = %self.peer_display_name(peer),
+                        reason = ?other,
+                        "Rekey msg2 processing failed"
+                    );
+                    self.stats_mut()
+                        .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                }
+            }
+        }
+    }
+
     /// Find stored msg2 bytes for a given link (pre- or post-promotion).
     ///
     /// Checks the control machine's carrier (if still pending) and then the
@@ -672,295 +964,49 @@ impl Node {
             }
         };
 
-        // Look up our pending handshake by our sender_idx (receiver_idx in msg2)
+        // Look up our pending handshake by our sender_idx (receiver_idx in
+        // msg2). A link-setup dial's index maps to its connection in
+        // `pending_outbound`, whose control machine still carries the
+        // handshake; a link rekey's attempt index is bound to its peer in
+        // `peers_by_index`, and its peer's link machine reads the msg2.
         let key = (packet.transport_id, header.receiver_idx.as_u32());
-        let link_id = match self.pending_outbound.get(&key) {
-            Some(id) => *id,
-            None => {
+        let setup = self.pending_outbound.get(&key).copied();
+        let link_id = match setup {
+            Some(id)
+                if self
+                    .peer_machines
+                    .get(&id)
+                    .is_some_and(|machine| machine.leg().is_some()) =>
+            {
+                id
+            }
+            _ => {
+                if let Some(&peer) = self.peers_by_index.get(&key)
+                    && self.peers.contains_key(&peer)
+                {
+                    self.msg2_to_link(&peer, &packet).await;
+                    return;
+                }
                 debug!(
                     receiver_idx = %header.receiver_idx,
                     transport_id = %packet.transport_id,
                     remote_addr = %packet.remote_addr,
                     "No pending outbound handshake for index"
                 );
+                // A `pending_outbound` entry whose connection no longer
+                // carries a handshake is stale: a state-machine
+                // inconsistency, not a fresh lookup miss.
+                let reject = if setup.is_some() {
+                    self.pending_outbound.remove(&key);
+                    HandshakeReject::BadState
+                } else {
+                    HandshakeReject::UnknownConnection
+                };
                 self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
+                    .record_reject(RejectReason::Handshake(reject));
                 return;
             }
         };
-
-        // Check if this is a rekey msg2: the handshake state is on the
-        // ActivePeer, not in a handshake carrier, so the link's machine — if
-        // one survives at all — carries no pending handshake. A bare machine
-        // lookup would NOT discriminate here: an established peer's machine
-        // stays keyed by this link, so the pending connection's presence is
-        // what marks a fresh establish. Look for a peer with matching
-        // rekey_our_index.
-        if self
-            .peer_machines
-            .get(&link_id)
-            .is_none_or(|machine| machine.leg().is_none())
-        {
-            let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-
-            // Find peer with rekey in progress for this index
-            let peer_addr = self.peers.iter().find_map(|(addr, peer)| {
-                if peer.rekey_in_progress() && peer.rekey_our_index() == Some(header.receiver_idx) {
-                    Some(*addr)
-                } else {
-                    None
-                }
-            });
-
-            if let Some(peer_node_addr) = peer_addr {
-                let display_name = self.peer_display_name(&peer_node_addr);
-
-                // Complete the rekey handshake on the ActivePeer
-                // XX: complete_rekey_msg2 processes msg2 and generates msg3
-                let transport_id = self
-                    .peers
-                    .get(&peer_node_addr)
-                    .and_then(|p| p.transport_id());
-                let remote_addr = self
-                    .peers
-                    .get(&peer_node_addr)
-                    .and_then(|p| p.current_addr().cloned());
-                let msg3_resend_interval =
-                    self.config().node.rate_limit.handshake_resend_interval_ms;
-                let msg3_now_ms = Self::now_ms();
-
-                let mut rekey_completed = false;
-                let our_profile = self.node_profile();
-                // Static-key continuity gate. The rekey msg2 was matched to this
-                // peer by the session index WE allocated, which travels in the
-                // cleartext rekey msg1 header and is observable on path; under
-                // XX the responder's static is learned from msg2 rather than
-                // pinned a priori, so crypto success alone does not prove the
-                // peer already holding this link is the one that answered. The
-                // core decides, inside complete_rekey_msg2 and before the
-                // handshake is consumed. A reject costs the established session
-                // nothing: its send/recv cipher state is never touched here and
-                // set_remote_epoch is confined to the install arm. It costs the
-                // rekey cycle nothing either: the handshake is restored to its
-                // pre-read state and the msg1 resend schedule is untouched, so
-                // the peer's genuine msg2 can still complete the cycle.
-                let fmp = &self.fmp;
-                let continuity = |learned_peer| {
-                    fmp.rekey_outbound(&RekeyMsg2Snapshot {
-                        established_peer: peer_node_addr,
-                        learned_peer,
-                    })
-                };
-                if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                    match peer.complete_rekey_msg2(noise_msg2, our_profile, continuity) {
-                        Ok(step) => {
-                            match step {
-                                RekeyMsg2Step::Installed(completion) => {
-                                    let (msg3_bytes, session, remote_epoch, _learned_peer) =
-                                        *completion;
-                                    let our_index =
-                                        peer.rekey_our_index().unwrap_or(header.receiver_idx);
-                                    // Detect a peer restart: the epoch carried in this
-                                    // rekey msg2 differs from the one recorded at the
-                                    // last handshake. Compute before updating the field.
-                                    let remote_epoch_changed = matches!(
-                                        (peer.remote_epoch(), remote_epoch),
-                                        (Some(old), Some(new)) if old != new
-                                    );
-                                    if remote_epoch.is_some() {
-                                        peer.set_remote_epoch(remote_epoch);
-                                    }
-
-                                    // Send msg3 before setting pending session.
-                                    // A reply on the rx loop, so it never dials;
-                                    // with the link's connection gone the send
-                                    // fails at once and the rekey is abandoned
-                                    // below, as on any send failure.
-                                    let wire_msg3 =
-                                        build_msg3(our_index, header.sender_idx, &msg3_bytes);
-                                    let msg3_sent = if let (Some(tid), Some(addr)) =
-                                        (transport_id, &remote_addr)
-                                        && let Some(transport) = self.transports.get(&tid)
-                                    {
-                                        match transport.send_existing(addr, &wire_msg3).await {
-                                            Ok(_) => {
-                                                debug!(
-                                                    peer = %display_name,
-                                                    "Sent rekey msg3"
-                                                );
-                                                true
-                                            }
-                                            Err(e) => {
-                                                warn!(
-                                                    peer = %display_name,
-                                                    error = %e,
-                                                    "Failed to send rekey msg3"
-                                                );
-                                                false
-                                            }
-                                        }
-                                    } else {
-                                        false
-                                    };
-
-                                    if msg3_sent {
-                                        peer.set_pending_session(
-                                            session,
-                                            our_index,
-                                            header.sender_idx,
-                                        );
-
-                                        // Retain msg3 for retransmission until the
-                                        // responder is confirmed on the new epoch.
-                                        // FMP sends msg3 exactly once otherwise; a
-                                        // lost datagram leaves the responder without
-                                        // the new session, so when the initiator cuts
-                                        // over its new-epoch frames silently miss at
-                                        // the peer → 30s link-dead. Mirrors FSP's
-                                        // resend_pending_session_msg3 liveness path.
-                                        peer.set_rekey_msg3_payload(
-                                            wire_msg3.clone(),
-                                            msg3_now_ms + msg3_resend_interval,
-                                        );
-
-                                        if let Some(tid) = transport_id {
-                                            self.peers_by_index
-                                                .insert((tid, our_index.as_u32()), peer_node_addr);
-                                        }
-
-                                        // Peer restart detected during this rekey:
-                                        // drop the stale FSP session-layer entry so the
-                                        // session map does not linger out of sync with
-                                        // the freshly rekeyed FMP link. Only after a
-                                        // successful msg3 send (the rekey actually
-                                        // completed); on a send failure the rekey is
-                                        // abandoned above and no teardown is warranted.
-                                        if remote_epoch_changed {
-                                            peer.note_restart();
-                                            if self.sessions.remove(&peer_node_addr).is_some() {
-                                                debug!(
-                                                    peer = %display_name,
-                                                    "Cleared stale FSP session after peer restart during FMP rekey"
-                                                );
-                                            }
-                                            debug!(
-                                                peer = %display_name,
-                                                "Peer restart detected during FMP rekey, replacing stale endpoint session"
-                                            );
-                                        }
-
-                                        let epoch =
-                                            OrNone(peer.pending_new_session().map(diag::epoch_tag));
-                                        let kbit_ours = peer.current_k_bit();
-                                        debug!(
-                                            peer = %display_name,
-                                            our_addr = %self.identity().node_addr(),
-                                            new_our_index = %our_index,
-                                            new_their_index = %header.sender_idx,
-                                            epoch = %epoch,
-                                            kbit_ours,
-                                            "rekey-msg2 initiator: pending session set, awaiting K-bit cutover"
-                                        );
-
-                                        rekey_completed = true;
-                                    } else {
-                                        // msg3 send failed — abandon rekey
-                                        if let Some(idx) = peer.abandon_rekey() {
-                                            if let Some(tid) = peer.transport_id() {
-                                                self.peers_by_index.remove(&(tid, idx.as_u32()));
-                                            }
-                                            let _ = self.index_allocator.free(idx);
-                                        }
-                                        self.stats_mut().record_reject(RejectReason::Handshake(
-                                            HandshakeReject::BadState,
-                                        ));
-                                    }
-                                    self.pending_outbound.remove(&key);
-                                }
-                                RekeyMsg2Step::Rejected {
-                                    reason: RekeyMsg2Reject::StaticMismatch,
-                                    learned_peer,
-                                } => {
-                                    // Not our peer: no session was derived, no
-                                    // msg3 is sent, and the current session, its
-                                    // indices and its recorded epoch are left
-                                    // exactly as they were, so the impostor
-                                    // learns nothing beyond what it already
-                                    // observed on the wire. The rekey cycle and
-                                    // its dispatch entry stay for the peer's own
-                                    // msg2.
-                                    warn!(
-                                        peer = %display_name,
-                                        established = %peer_node_addr,
-                                        learned = %learned_peer,
-                                        "rekey-msg2 initiator: learned static is not the established peer, keeping current session"
-                                    );
-                                    self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::RekeyStaticMismatch,
-                                    ));
-                                }
-                                RekeyMsg2Step::Unreadable(e) => {
-                                    // The msg2 may be a forgery naming our
-                                    // cleartext rekey index. The handshake was
-                                    // restored, so keep the cycle and its
-                                    // dispatch entry for the genuine msg2. If
-                                    // none arrives, the msg1 resend budget
-                                    // abandons the cycle as it would for a lost
-                                    // one.
-                                    debug!(
-                                        peer = %display_name,
-                                        error = %e,
-                                        "Rekey msg2 did not authenticate, keeping the rekey cycle"
-                                    );
-                                    self.stats_mut().record_reject(RejectReason::Handshake(
-                                        HandshakeReject::BadState,
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                peer = %display_name,
-                                error = %e,
-                                "Rekey msg2 processing failed"
-                            );
-                            if let Some(idx) = peer.abandon_rekey() {
-                                if let Some(tid) = peer.transport_id() {
-                                    self.peers_by_index.remove(&(tid, idx.as_u32()));
-                                }
-                                let _ = self.index_allocator.free(idx);
-                            }
-                            self.stats_mut()
-                                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-                            self.pending_outbound.remove(&key);
-                        }
-                    }
-                } else {
-                    self.pending_outbound.remove(&key);
-                }
-
-                // Feed the control machine the completed-rekey observation so its
-                // shadow index and rekey phase stay coherent. Only on an install
-                // with its msg3 sent — every other path above either keeps the
-                // cycle as it was or abandons it, and leaves the machine
-                // untouched. The crypto effect already ran inline; this emits no
-                // action.
-                if rekey_completed {
-                    self.observe_rekey_msg2(&peer_node_addr, header.sender_idx);
-                }
-
-                return;
-            }
-
-            // Not a rekey — stale pending_outbound entry pointing at a
-            // removed connection and no rekey-in-progress peer claims the
-            // receiver_idx. State-machine inconsistency, not a fresh
-            // lookup miss.
-            self.pending_outbound.remove(&key);
-            self.stats_mut()
-                .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
-            return;
-        }
 
         let our_profile = self.node_profile();
         let (peer_identity, dialed_peer, msg3_bytes, our_index) = {
@@ -1266,26 +1312,24 @@ impl Node {
         //
         // This ensures both nodes use the same Noise handshake (the winner's
         // outbound = the loser's inbound).
+        //
+        // If the peer was promoted via an earlier dial of ours instead, the
+        // peer's answer to this later dial supersedes the earlier one (a
+        // replacement on a link too young to rekey, a rekey on an older one),
+        // so this node swaps at either address.
         // The machine is the sole computation site of the establish decision:
         // the shell builds the outbound snapshot, steps the machine once here,
         // and routes on the returned decision — a cross-connection resolves as
         // a single `ResolveCrossConnection { swap }` action, a net-new
         // establish as the promote action sequence. The Swap/Keep resolution
         // bodies stay inline in the shell because they mutate the already
-        // promoted peer via `replace_session`, for which no `PeerAction`
-        // exists.
-        //
-        // Every outbound leg carries a persistent machine by now — identified
-        // dials persist one at dial, anonymous-discovery legs at leg birth in
-        // `start_handshake` — so the lookup is expected to hit, and the
-        // executor's `PromoteToActive` arm can feed `PromotionResolved` back
-        // via the same lookup. For an anonymous machine this is where its
-        // identity crystallizes: msg2 revealed who answered, and the learned
-        // identity lands on the machine before the step (a no-op for
-        // identified machines), so the Promote arm reads a crystallized
-        // address. The `pending_outbound` lifecycle stays shell-side — the
+        // promoted peer via `move_session`, for which no `PeerAction`
+        // exists. The machine was persisted at DIAL, so the executor's
+        // `PromoteToActive` arm can feed `PromotionResolved` back via the same
+        // lookup; the `pending_outbound` lifecycle stays shell-side — the
         // machine never touches it.
         let out_snap = self.outbound_snapshot(&peer_node_addr);
+        let own_dial = out_snap.has_existing_peer && out_snap.own_dial;
         let actions = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => {
                 machine.crystallize_identity(peer_identity);
@@ -1341,7 +1385,7 @@ impl Node {
                 match self.peer_machines.get_mut(&link_id) {
                     Some(machine) => (
                         machine.take_leg(),
-                        machine.our_index(),
+                        machine.take_our_index(),
                         machine.conn_handshake_msg1().map(Msg1Digest::of),
                     ),
                     None => (None, None, None),
@@ -1360,16 +1404,18 @@ impl Node {
 
             let mut cross_conn_outcome: Option<CrossConnOutcome> = None;
             if swap {
-                // We're the smaller node. Swap to outbound session + indices.
-                // The peer will keep their inbound session (complement of ours).
+                // We're the smaller node, or the peer's answer to this dial
+                // supersedes our earlier dial's. Swap to outbound session +
+                // indices. The peer keeps the session it answered this dial
+                // with (complement of ours).
                 let outbound_our_index = carrier_our_index;
                 let outbound_session = conn.noise_session.take();
 
-                let (outbound_session, outbound_our_index) = match (
+                let (outbound_session, outbound_lease) = match (
                     outbound_session,
                     outbound_our_index,
                 ) {
-                    (Some(s), Some(idx)) => (s, idx),
+                    (Some(s), Some(lease)) => (s, lease),
                     _ => {
                         warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
                         self.pending_outbound.remove(&key);
@@ -1378,29 +1424,33 @@ impl Node {
                         return;
                     }
                 };
+                let outbound_our_index = SessionIndex::new(outbound_lease.index());
+                let local = self.session_node_keys();
+                let me = *self.identity().node_addr();
+                let params = crate::node::handlers::rekey::link_params(&self.config().node);
+                let workers = self.link_workers();
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
                     let epoch = diag::epoch_tag(&outbound_session);
-                    let old_our_index = peer.replace_session(
-                        outbound_session,
-                        outbound_our_index,
-                        header.sender_idx,
-                    );
-
-                    // Update peers_by_index: remove old inbound index, add outbound
-                    let Some(transport_id) = peer.transport_id() else {
-                        warn!(peer = %self.peer_display_name(&peer_node_addr), "Active peer missing transport_id during cross-connection");
-                        self.pending_outbound.remove(&key);
-                        return;
+                    // The peer's link machine is closed and rebuilt on the
+                    // outbound session: what it held is unbound and freed,
+                    // the outbound index bound on the peer's transport.
+                    let mut caps = LinkCaps {
+                        indices: &mut self.index_allocator,
+                        local: &local,
+                        me,
+                        params,
+                        record: fips_core::proto::rekey::Record::new(),
+                        workers,
                     };
-                    if let Some(old_idx) = old_our_index {
-                        self.peers_by_index
-                            .remove(&(transport_id, old_idx.as_u32()));
-                        let _ = self.index_allocator.free(old_idx);
-                    }
-                    self.peers_by_index
-                        .insert((transport_id, outbound_our_index.as_u32()), peer_node_addr);
+                    let out = peer.move_session(
+                        outbound_session,
+                        outbound_lease,
+                        header.sender_idx,
+                        &mut caps,
+                    );
+                    self.run_link_outputs(&peer_node_addr, out);
 
                     if suppressed > 0 {
                         debug!(
@@ -1419,7 +1469,12 @@ impl Node {
                         msg1_sidx = %outbound_our_index,
                         msg1_dg = %OrNone(sent_msg1_digest.as_ref().map(diag::msg1_tag)),
                         epoch = %epoch,
-                        "Cross-connection: swapped to outbound session (our outbound wins)"
+                        "{}",
+                        if own_dial {
+                            "Second dial answered: swapped to its session (the answer supersedes our earlier dial's)"
+                        } else {
+                            "Cross-connection: swapped to outbound session (our outbound wins)"
+                        }
                     );
 
                     cross_conn_outcome = Some(CrossConnOutcome::Swap {
@@ -1451,8 +1506,10 @@ impl Node {
                 }
 
                 // Free the outbound's session index since we're not using it
-                if let Some(idx) = outbound_our_index {
-                    let _ = self.index_allocator.free(idx);
+                if let Some(lease) = outbound_our_index {
+                    let _ = self
+                        .index_allocator
+                        .free(SessionIndex::new(lease.release()));
                 }
 
                 cross_conn_outcome = Some(CrossConnOutcome::Keep);
@@ -1488,13 +1545,13 @@ impl Node {
         }
 
         // === Net-new outbound establish, driven by the machine. ===
-        // The machine's decision was `Promote` (`has_existing_peer == false` —
-        // the cross-connection block above returns otherwise), so
-        // `promote_connection` hits its normal-promotion branch and returns
-        // `Promoted`. The machine survives the promotion and the executor
-        // crystallizes its state via the `PromotionResolved` feedback. The
-        // promote tail (info log, tree/bloom/backoff, `pending_outbound`
-        // removal) lives in the executor's `PromoteToActive` arm.
+        // This arm is reached with no existing peer, or with one the msg2
+        // shows has restarted, which the machine's leading
+        // `[InvalidateSendState, ReportLost]` removes before the promotion
+        // (FRC-1201 Section 5.5: no tie-break). Either way
+        // `promote_connection` finds no existing peer and returns
+        // `Promoted`; the defensive `CrossConnectionWon/Lost` follow-ups
+        // are UNREACHABLE here.
         //
         // The outbound Msg2 Promote step cancels the two dial-armed handshake
         // timers (the machine survives promotion, so they would otherwise linger
@@ -1502,18 +1559,25 @@ impl Node {
         // promoted leg's pending connection is consumed and the machine has left
         // `SentMsg1`, so they can no longer fire) and then promotes.
         // `PromoteToActive` is what performs the promotion.
-        debug_assert_eq!(
-            actions,
-            vec![
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeRetransmit
-                },
-                PeerAction::CancelTimer {
-                    kind: TimerKind::HandshakeTimeout
-                },
-                PeerAction::PromoteToActive { link: link_id },
-            ]
-        );
+        let promote = [
+            PeerAction::CancelTimer {
+                kind: TimerKind::HandshakeRetransmit,
+            },
+            PeerAction::CancelTimer {
+                kind: TimerKind::HandshakeTimeout,
+            },
+            PeerAction::PromoteToActive { link: link_id },
+        ];
+        let restarted = actions.first() == Some(&PeerAction::InvalidateSendState);
+        debug_assert!(actions.ends_with(&promote));
+        debug_assert_eq!(actions.len(), if restarted { 5 } else { 3 });
+        if restarted {
+            info!(
+                peer = %self.peer_display_name(&peer_node_addr),
+                link_id = %link_id,
+                "Peer restart detected on our dial (epoch mismatch), replacing the stale peer"
+            );
+        }
 
         let ambient = PeerActionCtx {
             verified_identity: peer_identity,
@@ -2200,6 +2264,16 @@ impl Node {
             reason: "missing source_addr".into(),
         })?;
         let remote_epoch = carrier_remote_epoch;
+        // The lease that holds `our_index` moves from the carrier to the
+        // promoted peer's link rekey machine, or back to the allocator.
+        let our_lease = self
+            .peer_machines
+            .get_mut(&link_id)
+            .and_then(PeerMachine::take_our_index)
+            .ok_or_else(|| NodeError::PromotionFailed {
+                link_id,
+                reason: "missing our_index".into(),
+            })?;
 
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = carrier_is_outbound;
@@ -2236,27 +2310,19 @@ impl Node {
                 // the winner link_id. NEUTRAL: nothing reads peer_machines yet.
                 self.remove_peer_machine(loser_link_id);
 
-                // Clean up old peer's index from peers_by_index
-                if let (Some(old_tid), Some(old_idx)) =
-                    (old_peer.transport_id(), old_peer.our_index())
-                {
-                    self.peers_by_index.remove(&(old_tid, old_idx.as_u32()));
-                    // Unregister the OLD cache_key from the decrypt
-                    // worker pool BEFORE freeing the index for reuse.
-                    // Otherwise the worker's per-shard HashMap retains a
-                    // stale entry pointing at the removed peer's session;
-                    // if the index allocator later recycles old_idx to a
-                    // different peer, the new register call overwrites
-                    // the stale entry — but until that point, decrypt
-                    // jobs that land at the recycled cache_key resolve
-                    // to the wrong session and AEAD silently fails.
-                    #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((old_tid, old_idx.as_u32()));
-                    let _ = self.index_allocator.free(old_idx);
-                }
+                // Clean up the old peer's indices from peers_by_index,
+                // unregistering each from the decrypt worker pool BEFORE
+                // freeing it for reuse. Otherwise the worker's per-shard
+                // HashMap retains a stale entry pointing at the removed
+                // peer's session; if the index allocator later recycles the
+                // index to a different peer, the new register call
+                // overwrites the stale entry — but until that point, decrypt
+                // jobs that land at the recycled cache_key resolve to the
+                // wrong session and AEAD silently fails.
+                self.release_peer_indices(&peer_node_addr, &mut old_peer);
 
                 if remote_epoch_changed {
-                    if self.sessions.remove(&peer_node_addr).is_some() {
+                    if self.close_session(&peer_node_addr) {
                         debug!(
                             peer = %self.peer_display_name(&peer_node_addr),
                             "Cleared stale FSP session after peer restart during promotion"
@@ -2272,22 +2338,21 @@ impl Node {
 
                 self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);
 
-                let mut new_peer = ActivePeer::with_session(
-                    verified_identity,
+                let (mut new_peer, out) = self.keyed_peer(
                     link_id,
+                    verified_identity,
                     current_time_ms,
                     noise_session,
-                    our_index,
+                    our_lease,
                     their_index,
                     transport_id,
                     current_addr,
                     link_stats,
                     is_outbound,
-                    &self.config().node.mmp,
                     remote_epoch,
                     self.node_profile(),
                     peer_profile,
-                );
+                )?;
                 new_peer.set_tree_announce_min_interval_ms(
                     self.config().node.tree.announce_min_interval_ms,
                 );
@@ -2296,8 +2361,7 @@ impl Node {
                 // The winning leg's machine (keyed by the winner link) survives
                 // the promotion; the executor crystallizes it in place via the
                 // `PromotionResolved` feedback after this returns.
-                self.peers_by_index
-                    .insert((transport_id, our_index.as_u32()), peer_node_addr);
+                self.run_link_outputs(&peer_node_addr, out);
                 self.peering
                     .reconciler
                     .retry_pending
@@ -2317,12 +2381,6 @@ impl Node {
                     "Cross-connection resolved: this connection won"
                 );
 
-                // Hand the FMP recv cipher + replay window to the
-                // decrypt shard worker. (Same as normal-promotion tail
-                // below.)
-                #[cfg(unix)]
-                self.register_decrypt_worker_session(&peer_node_addr);
-
                 Ok(PromotionResult::CrossConnectionWon {
                     loser_link_id,
                     node_addr: peer_node_addr,
@@ -2330,7 +2388,9 @@ impl Node {
             } else {
                 // This connection loses, keep existing
                 // Free the index we allocated
-                let _ = self.index_allocator.free(our_index);
+                let _ = self
+                    .index_allocator
+                    .free(SessionIndex::new(our_lease.release()));
 
                 // Dispose the losing leg's machine here, with the leg. The
                 // executor's post-promote `PromotionResolved` dispatch then
@@ -2380,7 +2440,9 @@ impl Node {
 
             // Normal promotion
             if self.max_peers() > 0 && self.peers.len() >= self.max_peers() {
-                let _ = self.index_allocator.free(our_index);
+                let _ = self
+                    .index_allocator
+                    .free(SessionIndex::new(our_lease.release()));
                 return Err(NodeError::MaxPeersExceeded {
                     max: self.max_peers(),
                 });
@@ -2401,22 +2463,21 @@ impl Node {
             // The msg1's sender index is the initiator's, so both ends log
             // the same one.
             let msg1_sidx = if is_outbound { our_index } else { their_index };
-            let mut new_peer = ActivePeer::with_session(
-                verified_identity,
+            let (mut new_peer, out) = self.keyed_peer(
                 link_id,
+                verified_identity,
                 current_time_ms,
                 noise_session,
-                our_index,
+                our_lease,
                 their_index,
                 transport_id,
                 current_addr,
                 link_stats,
                 is_outbound,
-                &self.config().node.mmp,
                 remote_epoch,
                 self.node_profile(),
                 peer_profile,
-            );
+            )?;
             new_peer.set_tree_announce_min_interval_ms(
                 self.config().node.tree.announce_min_interval_ms,
             );
@@ -2428,8 +2489,7 @@ impl Node {
             // The promoted leg's machine (born at msg1 for inbound, at dial for
             // outbound) survives the promotion; the executor crystallizes it in
             // place via the `PromotionResolved` feedback after this returns.
-            self.peers_by_index
-                .insert((transport_id, our_index.as_u32()), peer_node_addr);
+            self.run_link_outputs(&peer_node_addr, out);
             self.peering
                 .reconciler
                 .retry_pending
@@ -2456,16 +2516,75 @@ impl Node {
                 "Connection promoted to active peer"
             );
 
-            // Hand the FMP recv cipher + replay window to the
-            // decrypt shard worker. From this point on the worker
-            // is the sole authority on FMP replay protection for
-            // this session. No-op when the worker pool isn't
-            // spawned (unit-test path or `FIPS_DECRYPT_WORKERS=0`).
-            #[cfg(unix)]
-            self.register_decrypt_worker_session(&peer_node_addr);
-
             Ok(PromotionResult::Promoted(peer_node_addr))
         }
+    }
+
+    /// Build the active peer of a link whose setup completed with
+    /// `noise_session`: its link rekey machine takes the session as its first
+    /// epoch, under `our_index` (the lease link setup took) and the peer's
+    /// `their_index`, bound on `transport_id`, and is offered to the decrypt
+    /// workers when a pool runs. Returns the peer and the machine's outputs
+    /// (the binding of `our_index` and any offer), to execute once the peer
+    /// is in the table. A session that authenticated another key than
+    /// `verified_identity`'s, which a completed handshake never has, frees
+    /// the index and fails the promotion.
+    #[allow(clippy::too_many_arguments)]
+    fn keyed_peer(
+        &mut self,
+        link_id: LinkId,
+        verified_identity: PeerIdentity,
+        current_time_ms: u64,
+        noise_session: crate::noise::NoiseSession,
+        our_index: fips_core::proto::rekey::IndexLease,
+        their_index: SessionIndex,
+        transport_id: TransportId,
+        current_addr: crate::transport::TransportAddr,
+        link_stats: crate::transport::LinkStats,
+        is_outbound: bool,
+        remote_epoch: Option<[u8; 8]>,
+    ) -> Result<(ActivePeer, LinkOutputs), NodeError> {
+        let local = self.session_node_keys();
+        let me = *self.identity().node_addr();
+        let mmp = self.config().node.mmp.clone();
+        let params = crate::node::handlers::rekey::link_params(&self.config().node);
+        let record = self.link_records.take(
+            verified_identity.node_addr(),
+            remote_epoch.unwrap_or_default(),
+        );
+        let workers = self.link_workers();
+        let mut caps = LinkCaps {
+            indices: &mut self.index_allocator,
+            local: &local,
+            me,
+            params,
+            record,
+            workers,
+        };
+        ActivePeer::with_session(
+            verified_identity,
+            link_id,
+            current_time_ms,
+            noise_session,
+            our_index,
+            their_index,
+            transport_id,
+            current_addr,
+            link_stats,
+            is_outbound,
+            &mmp,
+            remote_epoch,
+            &mut caps,
+        )
+        .map_err(|lease| {
+            let _ = self
+                .index_allocator
+                .free(SessionIndex::new(lease.release()));
+            NodeError::PromotionFailed {
+                link_id,
+                reason: "session authenticated another key".into(),
+            }
+        })
     }
 }
 

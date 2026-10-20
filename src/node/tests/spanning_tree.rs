@@ -227,12 +227,14 @@ pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usiz
 
     let link_id = initiator.node.allocate_link_id();
 
-    let our_index = initiator.node.index_allocator.allocate().unwrap();
+    let our_index_lease =
+        fips_core::proto::rekey::allocate(&mut initiator.node.index_allocator).unwrap();
+    let our_index = crate::utils::index::SessionIndex::new(our_index_lease.index());
     initiator
         .node
         .seed_handshake_machine(
             HandshakeSeed::outbound(link_id, peer_identity, 1000)
-                .with_our_index(our_index)
+                .with_our_index(our_index_lease)
                 .with_transport_id(transport_id)
                 .with_source_addr(responder_addr.clone()),
         )

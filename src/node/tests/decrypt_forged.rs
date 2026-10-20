@@ -163,7 +163,8 @@ async fn twenty_five_forged_frames_failing_in_the_decrypt_worker_leave_the_peer_
     let index = index_at_1(&nodes);
 
     nodes[1].node.supervisor.decrypt_workers = Some(DecryptWorkerPool::spawn(1));
-    nodes[1].node.register_decrypt_worker_session(&addr0);
+    let offer = nodes[1].node.get_peer(&addr0).unwrap().offer_to_workers();
+    nodes[1].node.run_link_outputs(&addr0, offer);
     assert!(
         nodes[1]
             .node

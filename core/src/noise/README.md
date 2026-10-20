@@ -16,8 +16,10 @@ host's entropy source as a type parameter, for its ephemeral keys; the
 root fixes it with the alias
 `fips::noise::HandshakeState = HandshakeState<OsEntropy>`, so its
 callers are unchanged. The root also reaches `take_cleared` and
-`clear_slot` (hidden from the docs here) and, from its tests only,
-`open`, which is behind the `test-hooks` feature.
+`clear_slot` (hidden from the docs here), `seal`, with which its session
+send paths seal a frame on a counter and key the session's rekey machine
+reserved, and, from its tests only, `open`, which is behind the
+`test-hooks` feature.
 
 ## Files
 
@@ -38,10 +40,18 @@ callers are unchanged. The root also reaches `take_cleared` and
   symmetric state under it, and `Message2Rollback`, the state message 2
   overwrites, kept so `restore_message_2` can put it back; `into_session`
   turns a completed handshake into a `NoiseSession`.
+- `fork.rs`: the `Fork` trait, a copy of a handshake made for one read,
+  its implementation for `HandshakeState`, and the read-on-fork methods
+  `fork_msg2` (IK msg2 at the initiator), `fork_xk2` (XK msg2 at the
+  initiator) and `fork_xk3` (XK msg3 at the responder). Each borrows the
+  handshake immutably and returns the fork the read advanced.
 - `session.rs`: `NoiseSession`, the two cipher states and the replay
   window of a completed handshake, and the key hand-outs
   (`send_cipher_clone`, `recv_cipher_clone`) and counter calls the
-  root crate's encrypt and decrypt workers use.
+  root crate's encrypt and decrypt workers use. `open_unmarked`
+  authenticates a frame without touching the window, for the rekey
+  machine, which checks the window, opens, and marks the counter only
+  once it has decided to accept the frame.
 - `replay.rs`: `ReplayWindow`, the sliding window that rejects repeated
   or too-old counters.
 - `aead.rs`: ChaCha20-Poly1305 (RFC 8439) behind the `Aead` trait, with
@@ -71,6 +81,18 @@ paths are not built, the tie is the check that keeps the daemon on
 `ring`.
 
 ## Invariants
+
+- **A message nothing has authenticated is read on a fork.** A Noise
+  read advances the symmetric state before the AEAD that authenticates
+  the message has run, so a read that fails partway would leave a
+  handshake the genuine message can no longer complete. Every caller
+  that reads a msg2 or msg3 into a handshake it keeps on failure uses
+  the read-on-fork methods and commits by replacing the handshake with
+  the returned fork. There is no restore after a failed read, and no
+  list of fields to restore: the fork copies every field through a
+  struct literal the compiler checks, and both copies erase their
+  secrets on drop. `every_read_on_garbage_leaves_the_handshake_byte_identical`
+  in `tests/fork.rs` holds the methods to it.
 
 - **The sizes and the nonce layout are wire format.** Every node must
   agree on them. This line uses the XX sizes; `maint` and `master` use

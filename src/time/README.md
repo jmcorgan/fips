@@ -12,6 +12,8 @@ traits, is `fips_core::time` (`core/src/time/`).
     and from `std::time::Instant` for code that still holds those.
   - `mono_ms()`: the same monotonic clock as `u64` milliseconds from the
     process's first read, for the cores that still take milliseconds.
+    `mono_ms_at(instant)` reads a `HostInstant` on that scale, so a time
+    held as an instant compares exactly with one held as milliseconds.
   - `wall_ms()`: Unix time in milliseconds. `Node::now_ms` delegates to
     it.
   - `WallStamp`: Unix milliseconds of an instant, for the control API

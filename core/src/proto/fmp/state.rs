@@ -20,13 +20,17 @@
 //! value types are the plain-data `transport` primitives, and
 //! [`PeerIdentity`] and [`SessionIndex`] are this crate's `identity` and
 //! `utils::index` types. They are named here as data only (never driving
-//! crypto).
+//! crypto). This node's index for the handshake is held as an
+//! [`IndexLease`], minted by the rekey machine's `lease::allocate`, so the
+//! promotion can hand it to the link's rekey machine as the index of its
+//! first epoch.
 //!
 //! [`Fmp`] is the separate, stateless lifecycle anchor owned by
 //! `Node`; see its doc below.
 
 use super::wire::NodeProfile;
 use crate::identity::PeerIdentity;
+use crate::proto::rekey::IndexLease;
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use alloc::vec::Vec;
@@ -79,10 +83,11 @@ pub struct ConnectionState {
     link_stats: LinkStats,
 
     // === Wire Protocol Index Tracking ===
-    /// Our sender_idx for this handshake (chosen by us).
+    /// Our sender_idx for this handshake (chosen by us), as the lease that
+    /// holds it in the node's allocator.
     /// For outbound: included in msg1, used as receiver_idx in msg2 echo.
     /// For inbound: chosen after processing msg1, included in msg2.
-    our_index: Option<SessionIndex>,
+    our_index: Option<IndexLease>,
 
     /// Their sender_idx (learned from their messages).
     /// For outbound: learned from msg2.
@@ -297,16 +302,20 @@ impl ConnectionState {
     /// Get our session index (if set).
     pub fn our_index(&self) -> Option<SessionIndex> {
         self.our_index
+            .as_ref()
+            .map(|lease| SessionIndex::new(lease.index()))
     }
 
-    /// Set our session index.
-    pub fn set_our_index(&mut self, index: SessionIndex) {
-        self.our_index = Some(index);
+    /// Hold `lease` as our session index. A lease already held is handed
+    /// back, for the caller to release.
+    pub fn set_our_index(&mut self, lease: IndexLease) -> Option<IndexLease> {
+        self.our_index.replace(lease)
     }
 
-    /// Clear our session index (back to unset).
-    pub fn clear_our_index(&mut self) {
-        self.our_index = None;
+    /// Take our session index's lease (back to unset), for the caller to
+    /// release or to hand on.
+    pub fn take_our_index(&mut self) -> Option<IndexLease> {
+        self.our_index.take()
     }
 
     /// Get their session index (if known).

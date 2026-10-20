@@ -28,12 +28,17 @@ mod handshake;
 mod handshake_lines;
 mod heartbeat;
 mod lan_label;
+mod link_index_audit;
 mod link_session_diag;
 mod link_setup_diag;
 mod lookup_echo;
 mod mmp_chartests;
 mod netmon;
+mod peer_restart;
 mod probe;
+mod rekey_answer;
+mod rekey_clock;
+mod rekey_cutover_index;
 mod rekey_parity;
 mod routing;
 mod rx_stall;
@@ -41,12 +46,22 @@ mod session;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;
+mod survivors;
 mod tcp;
 mod traffic_diag;
 mod tree_send_failure;
 mod udp_dns;
 mod unit;
 mod update_peers;
+
+/// Msg1 refusals as `bad_state` counted them before each refusal the msg1
+/// classification decides was given a counter of its own: `bad_state` plus
+/// those counters. A test asserting that a msg1 was refused, for whatever
+/// reason, reads this.
+pub(super) fn refusals(node: &Node) -> u64 {
+    let h = &node.stats().handshake;
+    h.bad_state + h.max_peers + h.rekey_pending + h.rekey_tiebreak + h.answered_before + h.off_link
+}
 
 pub(super) fn make_node() -> Node {
     make_node_with(Config::new())
@@ -168,6 +183,63 @@ pub(super) fn make_peer_identity() -> PeerIdentity {
 /// A control machine carrying a fresh outbound connection, for tests that
 /// drive one end of a handshake without a whole node behind it. The machine
 /// owns the handshake operations, so it is what the crypto runs on.
+/// A peer for `remote` with a live link session: the node's half of an IK
+/// handshake it completed toward `remote`, under our index 1 and their index
+/// 2 on transport 1, authenticated at `authenticated_at`. A link's peer
+/// epoch, replay record and timestamp base live in its rekey machine, which
+/// exists only with keys, so a test that sets them stands up a keyed peer.
+/// The index binding is not executed: `peers_by_index` stays as it was.
+pub(super) fn keyed_peer(
+    node: &Node,
+    remote: &Identity,
+    link_id: LinkId,
+    authenticated_at: u64,
+) -> crate::peer::ActivePeer {
+    let mut initiator = crate::noise::HandshakeState::new_initiator(
+        node.identity().keypair(),
+        remote.pubkey_full(),
+    );
+    initiator.set_local_epoch(node.startup_epoch());
+    let mut responder = crate::noise::HandshakeState::new_responder(remote.keypair());
+    responder.set_local_epoch([0x5E; 8]);
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    initiator.read_message_2(&msg2).unwrap();
+    crate::peer::ActivePeer::with_test_session(
+        PeerIdentity::from_pubkey_full(remote.pubkey_full()),
+        link_id,
+        authenticated_at,
+        initiator.into_session().unwrap(),
+        SessionIndex::new(1),
+        SessionIndex::new(2),
+        TransportId::new(1),
+        TransportAddr::from_string("127.0.0.1:1"),
+        crate::transport::LinkStats::new(),
+        true,
+        &crate::config::MmpConfig::default(),
+        None,
+    )
+}
+
+/// Start `node`'s own rekey of its link to `peer` now, as a trigger that
+/// has come would whatever the link's age, and carry out what its link
+/// machine asks for: the attempt index is bound for msg2 dispatch and the
+/// msg1 goes out on the link. Returns the attempt's index.
+pub(super) async fn start_link_rekey(node: &mut Node, peer: &NodeAddr) -> SessionIndex {
+    let local = node.session_node_keys();
+    let out = node
+        .peers
+        .get_mut(peer)
+        .expect("a held peer")
+        .start_rekey_now(crate::peer::peer_now(), &mut node.index_allocator, &local);
+    node.run_link_step(peer, out).await;
+    node.get_peer(peer)
+        .unwrap()
+        .rekey_our_index()
+        .expect("the link machine started a rekey")
+}
+
 pub(super) fn outbound_leg(
     link_id: LinkId,
     expected_identity: PeerIdentity,
@@ -196,7 +268,7 @@ pub(super) fn seed_completed_connection(
     transport_id: TransportId,
     current_time_ms: u64,
 ) -> PeerIdentity {
-    let our_index = node.index_allocator.allocate().unwrap();
+    let our_index = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     seed_completed_connection_with(node, link_id, current_time_ms, |seed| {
         seed.with_our_index(our_index)
             .with_their_index(SessionIndex::new(42))

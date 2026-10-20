@@ -243,9 +243,10 @@ impl Node {
     ///
     /// **Key mismatch: counted only.** A coordinate whose first element is not
     /// the address it is filed under is wrong, but refusing it here would also
-    /// refuse a write honest nodes make: a sender whose own cache missed puts
-    /// its *own* coordinates in `SessionSetup.dest_coords`, by way of
-    /// `get_dest_coords`. What that costs a transit node on first contact is
+    /// refuse a write honest nodes make: a sender whose own cache missed, and
+    /// who has no announcement from the destination as a direct peer, puts
+    /// its *own* coordinates in `SessionSetup.dest_coords` (the executor's
+    /// `send_rekey_message`). What that costs a transit node on first contact is
     /// not established, so this counts and does not refuse. It is **not** a
     /// security check either way — an attacker satisfies it by naming the
     /// victim as its own child, which is the forgery worth making.

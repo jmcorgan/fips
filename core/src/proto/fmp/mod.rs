@@ -21,6 +21,8 @@
 //!   [`cross_connection_winner`] tie-break helper, and the FMP negotiation
 //!   decision logic (version agreement, profile validation).
 //! - `limits.rs` — the pure connection-retry backoff math.
+//! - `rekey/` — the link profile of the shared rekey machine (Noise IK) and
+//!   the node-level msg1 read; hidden from the docs.
 //! - `silent.rs` — [`SilentSessions`], the per-identity record of link
 //!   sessions that ended without an authenticated frame, and the msg1
 //!   refusal it drives.
@@ -37,6 +39,8 @@
 
 mod core;
 mod limits;
+#[doc(hidden)]
+pub mod rekey;
 mod silent;
 mod state;
 pub mod wire;

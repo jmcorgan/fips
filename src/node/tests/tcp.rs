@@ -245,11 +245,10 @@ async fn tcp_link_kept_alive_only_by_heartbeats_survives_several_idle_deadlines(
     let mut config = Config::new();
     config.node.heartbeat_interval_secs = 1;
     config.node.link_dead_timeout_secs = 3;
-    config.node.rate_limit.handshake_resend_interval_ms = 100;
     config.node.rate_limit.handshake_max_resends = 1;
     let idle = inbound_idle_timeout(&config.node);
-    // 100 ms of ladder, three 1 s ticks, 3 s link-dead.
-    assert_eq!(idle, Duration::from_millis(6100));
+    // 1 s of msg1 ladder (one resend), three 1 s ticks, 3 s link-dead.
+    assert_eq!(idle, Duration::from_millis(7000));
     let mut nodes = vec![
         make_test_node_tcp_idle(config.clone(), Some(idle)).await,
         make_test_node_tcp_idle(config, Some(idle)).await,
