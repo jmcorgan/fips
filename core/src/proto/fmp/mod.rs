@@ -16,6 +16,8 @@
 //!   effect vocabulary, the snapshot types, the pure `poll_*` decisions, and
 //!   the [`cross_connection_winner`] tie-break helper.
 //! - `limits.rs` — the pure connection-retry backoff math.
+//! - `rekey/` — the link profile of the shared rekey machine (Noise IK) and
+//!   the node-level msg1 read; hidden, with no caller yet.
 //! - `silent.rs` — [`SilentSessions`], the per-identity record of link
 //!   sessions that ended without an authenticated frame, and the msg1
 //!   refusal it drives.
@@ -31,6 +33,8 @@
 
 mod core;
 mod limits;
+#[doc(hidden)]
+pub mod rekey;
 mod silent;
 mod state;
 pub mod wire;

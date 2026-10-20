@@ -38,6 +38,11 @@ rest) at its own crate root.
 - `lookup/`: mesh lookups for a destination's coordinates.
 - `mmp/`: link and session metrics and their reports.
 - `probe/`: the diagnostic path probe.
+- `rekey/`: the key-rotation state machine one link peer or one session
+  runs, shared by the link and session layers. Each layer binds it to its
+  handshake pattern in a `rekey/` subdirectory of its own (`fmp/rekey/`,
+  `fsp/rekey/`). Hidden from the docs and not yet called; see its
+  README.
 - `routing/`: next-hop selection and routing error signals.
 - `stp/`: the spanning tree.
 
@@ -48,7 +53,11 @@ Each subdirectory has its own README.
 - **Sans-IO.** Inputs in, actions out. No sockets, no clock reads (time
   is a `u64` millisecond argument), no randomness of its own, no logging
   and no async. A decision that used to log returns a value the caller
-  logs.
+  logs. `rekey/` is the first module here to take time as instants of a
+  host clock (`C: time::Clock`) instead of milliseconds, and the only one
+  that holds keys: it owns its handshake states and transport sessions,
+  so that a read is a transaction and an epoch exists only for the bonded
+  peer.
 - **Wire formats are protocol.** Every codec here encodes what other
   nodes decode. A change to one changes the protocol and does not happen
   on the deployed lines.

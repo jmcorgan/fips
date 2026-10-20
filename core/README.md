@@ -39,6 +39,10 @@ moves in from the root crate one module at a time. So far it holds:
   machines of every layer (link, session, spanning tree, bloom filters,
   routing, lookups, metrics, probes). The root crate reaches it as
   `crate::proto` and re-exports its public types at its crate root.
+  `proto::rekey`, the key-rotation machine both layers will share, and
+  its two production profiles, `proto::fmp::rekey` (Noise IK) and
+  `proto::fsp::rekey` (Noise XK), are hidden from the docs and have no
+  caller yet.
 
 ## What belongs here
 

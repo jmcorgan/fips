@@ -167,6 +167,24 @@ impl NoiseSession {
         Ok(plaintext)
     }
 
+    /// Authenticate and decrypt with an explicit counter and AAD, leaving
+    /// the replay window as it is.
+    ///
+    /// For a caller that checks the window before the decrypt and marks the
+    /// counter only once it has decided to accept the frame (the rekey
+    /// machine's trial open, which decides in one step and commits in the
+    /// next). Pair it with [`check_replay`](Self::check_replay) and
+    /// [`accept_replay`](Self::accept_replay).
+    pub fn open_unmarked(
+        &self,
+        ciphertext: &[u8],
+        counter: u64,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, NoiseError> {
+        self.recv_cipher
+            .decrypt_with_counter_and_aad(ciphertext, counter, aad)
+    }
+
     /// Get the highest received counter.
     #[inline]
     pub fn highest_received_counter(&self) -> u64 {

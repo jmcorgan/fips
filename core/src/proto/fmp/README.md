@@ -23,6 +23,10 @@ Handshake message bytes are opaque here.
 - `silent.rs`: `SilentSessions`, the record of link sessions that ended
   without an authenticated frame, and the msg1 refusal it drives.
 - `limits.rs`: the connection-retry backoff arithmetic.
+- `rekey/`: the link's profile of the shared rekey machine
+  (`proto::rekey`) over Noise IK, the node-level read of a peer's msg1,
+  and the replay record of a link setup. Hidden from the docs and not
+  yet called; its README describes it.
 - `wire.rs`: the link framing codec: the common prefix, the encrypted,
   msg1 and msg2 headers, the handshake message types, disconnect
   reasons and the disconnect message.
@@ -41,4 +45,6 @@ Handshake message bytes are opaque here.
 - **The framing is wire format** and does not change on the deployed
   lines.
 - **No encryption here.** Encryption, decryption and key derivation
-  are in the Noise code in `core/src/noise` (`crate::noise`).
+  are in the Noise code in `core/src/noise` (`crate::noise`). The rule
+  covers the files at this level; `rekey/` drives the Noise handshake and
+  holds keys, as the shared machine it binds does.

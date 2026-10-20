@@ -45,7 +45,10 @@ callers are unchanged. The root also reaches `take_cleared` and
 - `session.rs`: `NoiseSession`, the two cipher states and the replay
   window of a completed handshake, and the key hand-outs
   (`send_cipher_clone`, `recv_cipher_clone`) and counter calls the
-  root crate's encrypt and decrypt workers use.
+  root crate's encrypt and decrypt workers use. `open_unmarked`
+  authenticates a frame without touching the window, for the rekey
+  machine, which checks the window, opens, and marks the counter only
+  once it has decided to accept the frame.
 - `replay.rs`: `ReplayWindow`, the sliding window that rejects repeated
   or too-old counters.
 - `aead.rs`: ChaCha20-Poly1305 (RFC 8439) behind the `Aead` trait, with

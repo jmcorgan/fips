@@ -17,6 +17,9 @@ module has no cryptography.
 - `limits.rs`: the session rekey timing constants.
 - `quorum.rs`: `LinkQuorum`, the distinct-link count that must report a
   broken path before verified coordinates are demoted.
+- `rekey/`: the session's profile of the shared rekey machine
+  (`proto::rekey`) over Noise XK. Hidden from the docs and not yet
+  called; its README describes it.
 - `wire.rs`: the session message types (`SessionSetup`, `SessionAck`,
   `SessionMsg3`), packet flags, the inner message catalog and the
   header codecs.
@@ -26,7 +29,11 @@ module has no cryptography.
 
 - **No cryptography and no clock.** Time comes in as an argument; keys
   and ciphertext are handled by the Noise code in `core/src/noise`
-  (`crate::noise`).
+  (`crate::noise`). The rule covers the files here. Session key rotation
+  is moving to the shared machine one level up, `proto/rekey/`, which
+  holds keys and takes a clock's instants; the session profile that
+  binds it to Noise XK sits in `rekey/` here with the same exemption, and
+  `core.rs` keeps the rule.
 - **The session wire is protocol** and does not change on the deployed
   lines.
 - **The quorum counts links, not reporters.** A vote is keyed on the

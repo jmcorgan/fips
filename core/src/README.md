@@ -39,7 +39,11 @@ changing anything here.
   tests build randomized types with; and `FixedEntropy`, a source that
   fills every byte with one value; `TestClock` and `TestInstant`, a
   clock of whole milliseconds from 0 that moves only when a test
-  advances it). Compiled for tests only.
+  advances it; `SplitMix64`, the seeded generator the rekey simulator
+  draws from, so a run replays byte for byte from its seed;
+  `SeededEntropy`, an entropy source on a per-thread `SplitMix64` that
+  `seed_entropy` reseeds, and `seeded_keypair`, so a simulation with real
+  Noise handshakes replays too). Compiled for tests only.
 
 ## Rules for this level
 

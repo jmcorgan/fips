@@ -18,5 +18,7 @@ pub mod math;
 pub mod mmp;
 pub mod probe;
 pub mod rate_limit;
+#[doc(hidden)]
+pub mod rekey;
 pub mod routing;
 pub mod stp;

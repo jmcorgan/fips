@@ -17,6 +17,9 @@
 //!   `classify_epoch`, the initiation tie-break, and the pure MTU-clamp /
 //!   bounded-queue / ECN transforms. No clock/crypto/I/O/tracing.
 //! - `limits.rs` — the session-rekey timing constants.
+//! - `rekey/` — the session profile of the shared rekey machine (Noise XK),
+//!   the one part of this module that holds keys; hidden, with no caller
+//!   yet.
 //! - `quorum.rs` — the distinct-link quorum that gates demoting verified
 //!   coordinates on `PathBroken`. Clock injected.
 //! - `wire.rs` — the FSP session wire codec and message types. Clock-free,
@@ -25,6 +28,8 @@
 pub mod core;
 pub mod limits;
 pub mod quorum;
+#[doc(hidden)]
+pub mod rekey;
 pub mod wire;
 
 #[cfg(test)]
