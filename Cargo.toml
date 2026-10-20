@@ -4,7 +4,7 @@
 # [lib]), every binary keeps its name, and the Debian package is pinned to
 # `fips` in [package.metadata.deb], so no installed file or artifact changes.
 name = "fips-mesh"
-version = "0.5.3"
+version = "0.5.4-dev"
 edition = "2024"
 description = "A distributed, decentralized network routing protocol for mesh nodes connecting over arbitrary transports"
 license = "MIT"
