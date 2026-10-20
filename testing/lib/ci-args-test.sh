@@ -16,6 +16,11 @@
 
 set -u
 
+# The switches ci-local.sh reads from the environment change what a parse
+# rejects first, and the internal builder exports both for its runs. Clear
+# them so every case sees only what it sets itself.
+unset FIPS_CI_BAREMETAL FIPS_CI_SLOW_TESTS
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CI_LOCAL="$SCRIPT_DIR/../ci-local.sh"
 
