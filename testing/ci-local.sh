@@ -643,6 +643,11 @@ ci_teardown() {
     if [[ -n "${CI_BUILD_CONTEXT:-}" && "$CI_BUILD_CONTEXT" != "$SCRIPT_DIR/docker-" ]]; then
         rm -rf "$CI_BUILD_CONTEXT"
     fi
+
+    # 5. The live marker goes last, once nothing of this run is left for the
+    #    builder to spare.
+    [[ -n "${CI_LIVE_MARKER:-}" ]] && rm -f "$CI_LIVE_MARKER"
+    return 0
 }
 
 on_signal() {
@@ -666,6 +671,19 @@ on_exit() {
 trap 'on_signal TERM' TERM
 trap 'on_signal INT'  INT
 trap 'on_exit'        EXIT
+
+# Announce this run to the internal builder on this host. The builder's image
+# prune and orphan sweep cannot see a hand-started run between two suites, when
+# it has no container up, and would delete its images. They spare any run id
+# with a marker in $CI_LIVE_DIR whose first token is a live pid. Written after
+# the traps so teardown always removes it; skipped on a host without the
+# directory.
+CI_LIVE_DIR="/run/fips-ci"
+CI_LIVE_MARKER=""
+if [[ -d "$CI_LIVE_DIR" && -w "$CI_LIVE_DIR" ]]; then
+    CI_LIVE_MARKER="$CI_LIVE_DIR/${CI_RUN_ID}.live"
+    echo "$$" > "$CI_LIVE_MARKER" || CI_LIVE_MARKER=""
+fi
 
 # ── Stage 1: Build ─────────────────────────────────────────────────────────
 
