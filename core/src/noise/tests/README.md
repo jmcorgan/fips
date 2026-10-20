@@ -18,6 +18,17 @@ Unit tests for `core/src/noise`.
   `test_handshake_ephemeral_draws_from_the_entropy_source` uses
   `FixedEntropy` instead, to show the ephemeral key comes from the
   handshake's source.
+- `fork.rs`: the tests for `../fork.rs`, attached from it with
+  `#[cfg(test)] #[path = "tests/fork.rs"] mod tests;`, so their names are
+  `noise::fork::tests::*`.
+  `every_read_on_garbage_leaves_the_handshake_byte_identical` feeds each
+  of the three read-on-fork methods messages that fail before and after
+  the read has advanced the state, and compares every field of the
+  handshake (through a fingerprint that names each field) before and
+  after. A control reads the deepest-failing message in place, to show
+  the garbage would spoil a state read that way; then the genuine
+  message must read, on a fork, to exactly the state an untouched copy
+  reaches by reading it in place.
 - `aead.rs`: the tests for `../aead.rs`, attached from it with
   `#[cfg(test)] #[path = "tests/aead.rs"] mod tests;`, so they are a
   child module of `aead` and see its private items. The RFC 8439

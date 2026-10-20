@@ -39,6 +39,7 @@ mod mmp_chartests;
 mod netmon;
 mod probe;
 mod rekey_answer;
+mod rekey_clock;
 mod rekey_parity;
 mod routing;
 mod rx_stall;
@@ -54,6 +55,15 @@ mod tree_send_failure;
 mod udp_dns;
 mod unit;
 mod update_peers;
+
+/// Msg1 refusals as `bad_state` counted them before each refusal the msg1
+/// classification decides was given a counter of its own: `bad_state` plus
+/// those counters. A test asserting that a msg1 was refused, for whatever
+/// reason, reads this.
+pub(super) fn refusals(node: &Node) -> u64 {
+    let h = &node.stats().handshake;
+    h.bad_state + h.max_peers + h.rekey_pending + h.rekey_tiebreak + h.answered_before + h.off_link
+}
 
 pub(super) fn make_node() -> Node {
     make_node_with(Config::new())

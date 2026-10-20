@@ -943,6 +943,12 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
         got.is_err(),
         "winner emits no msg2 in response to the dropped rekey msg1"
     );
+    let handshake = &node.stats().handshake;
+    assert_eq!(
+        (handshake.rekey_tiebreak, handshake.bad_state),
+        (1, 0),
+        "the dropped msg1 is counted as a tie-break refusal, not as bad state"
+    );
 }
 
 /// Rekey dual-init, WE LOSE: with a local rekey in flight, a simultaneous rekey
@@ -1043,8 +1049,8 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
 /// keyed by it, leaving the live session untouched.
 ///
 /// `handshake_max_resends = 0` fires the abandon on the first
-/// `resend_pending_rekeys` call: the classifier tests `resend_count >=
-/// max_resends` before it consults the resend-due predicate, so the wall clock
+/// `resend_rekeys_at` call: the classifier tests `resend_count >=
+/// max_resends` before it consults the resend-due predicate, so the clock
 /// is out of the path entirely.
 #[tokio::test]
 async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
@@ -1092,7 +1098,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
     );
 
     // The rekey msg2 never arrives; the first poll spends the (zero) budget.
-    node.resend_pending_rekeys(2000).await;
+    node.resend_rekeys_at(2000).await;
 
     let p = node.get_peer(&sender_addr).expect("peer still present");
     assert!(

@@ -2,6 +2,7 @@
 
 use crate::node::Node;
 use crate::node::diag::{self, KeyView, OrNone, Trial};
+use crate::node::reject::DataplaneReject;
 use crate::noise::NoiseError;
 use crate::proto::fmp::wire::{
     EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP, strip_inner_header,
@@ -71,12 +72,18 @@ impl Node {
                         "Unknown session index, dropping"
                     );
                 }
+                self.metrics()
+                    .dataplane
+                    .record_reject(DataplaneReject::UnknownIndex);
                 return;
             }
         };
 
         if !self.peers.contains_key(&node_addr) {
             self.peers_by_index.remove(&key);
+            self.metrics()
+                .dataplane
+                .record_reject(DataplaneReject::OrphanedIndex);
             return;
         }
 

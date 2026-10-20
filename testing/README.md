@@ -223,6 +223,30 @@ probing it asks whether `getifaddrs` works rather than whether it reports an
 interface that has none — which is exactly what `fips-mesh0` and `fips-ap0`
 are on OpenWrt. Set the variable by hand to run the assertion locally against
 an interface you have created; leave it unset and the assertion does not run.
+
+### Ignored tests and the known-defect lane
+
+An ignored test runs nowhere unless something runs it on purpose.
+[`ignored-tests.txt`](ignored-tests.txt) lists every one, with the reason
+class it is ignored under: `environment` (needs root, a namespace, hardware
+or a permission the unit-test lane lacks), `benchmark`, `long-running`,
+`helper`, or `known-defect` (asserts the correct behaviour and fails today).
+[`check-ignored-tests.py`](check-ignored-tests.py), one of the static guards,
+reds on an `#[ignore]` without a reason, an ignored test with no entry, and an
+entry that names no ignored test. It reads the sources, so it sees tests every
+platform compiles, but it cannot resolve module paths.
+
+[`known-defect-lane.sh`](known-defect-lane.sh) runs in the unit-test stage,
+here and on GitHub. It runs each `known-defect` test and expects it to fail:
+one that passes reds the lane, so the change that fixes a defect also removes
+its ignore and its inventory line, and the test gates from then on. It also
+lists the ignored tests of each library test binary and reds on one the
+inventory does not name under its full path. Each test runs under a timeout
+(`FIPS_KNOWN_DEFECT_TIMEOUT`, default 120 s) that counts as still failing,
+since a defect can be a hang; a fixed test slower than the timeout would
+therefore not be noticed. Tests the host does not compile, such as the macOS
+hardware tests on Linux, are checked only by the static guard.
+
 ### Cross-target compile check
 
 `--cross-check` adds a stage to the build that compiles the crate and all its

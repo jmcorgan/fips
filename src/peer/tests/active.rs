@@ -516,7 +516,7 @@ fn cutover_stale_frame_does_not_promote() {
 
 /// Whether `peer`'s link instant reads at least `age` old.
 fn link_at_least(peer: &ActivePeer, age: Duration) -> bool {
-    peer.link_established_at().elapsed() >= age
+    since(peer.link_established_at()) >= age
 }
 
 /// The link instant is set at construction and is not moved by an
@@ -532,7 +532,7 @@ fn the_link_instant_is_set_at_construction_and_kept_through_initiator_cutover_pe
     let (_cur_send, cur_recv) = ik_session_pair();
     let mut peer = peer_with_current(cur_recv);
     assert!(
-        peer.link_established_at().elapsed() < fresh,
+        since(peer.link_established_at()) < fresh,
         "construction sets the link instant"
     );
     peer.test_backdate_session_established(aged);
@@ -540,7 +540,7 @@ fn the_link_instant_is_set_at_construction_and_kept_through_initiator_cutover_pe
     let (_s, pend_recv) = ik_session_pair();
     peer.set_pending_session(pend_recv, SessionIndex::new(3), SessionIndex::new(4));
     assert!(peer.cutover_to_new_session().is_some());
-    assert!(peer.session_established_at().elapsed() < fresh);
+    assert!(since(peer.session_established_at()) < fresh);
     assert!(
         link_at_least(&peer, aged),
         "initiator cutover kept the link"
@@ -554,7 +554,7 @@ fn the_link_instant_is_set_at_construction_and_kept_through_initiator_cutover_pe
         answer(),
     );
     assert!(peer.adopt_pending(false).is_some());
-    assert!(peer.session_established_at().elapsed() < fresh);
+    assert!(since(peer.session_established_at()) < fresh);
     assert!(link_at_least(&peer, aged), "adoption kept the link");
 
     let (_s, swap) = ik_session_pair();
@@ -583,7 +583,7 @@ fn the_link_instant_is_set_at_construction_and_kept_through_initiator_cutover_pe
         );
         assert!(exit(&mut peer).is_some(), "{name}: the pending must exit");
         assert!(
-            peer.link_established_at().elapsed() < fresh,
+            since(peer.link_established_at()) < fresh,
             "{name}: the restart pending leaving the slot restarts the link"
         );
     }
@@ -740,6 +740,60 @@ fn pending_expiry_reads_the_install_time_against_the_hold() {
     assert!(!peer.pending_expired(Duration::from_secs(60)));
     peer.backdate_pending(Duration::from_secs(61));
     assert!(peer.pending_expired(Duration::from_secs(60)));
+}
+
+/// The responder's pending hold, the rekey dampening and the drain are all
+/// measured on the peer clock, so advancing the host's monotonic clock in a
+/// test passes each of them, with no backdate, at its exact length and not
+/// before.
+#[test]
+fn advancing_the_monotonic_clock_passes_the_pending_hold_the_rekey_dampening_and_the_drain_at_their_lengths()
+ {
+    const HOLD: Duration = Duration::from_secs(60);
+    const DAMPENING_SECS: u64 = 30;
+    const DRAIN_SECS: u64 = 10;
+    let tick = Duration::from_millis(100);
+    let (_cur_send, cur_recv) = ik_session_pair();
+    let (_pend_send, pend_recv) = ik_session_pair();
+    let mut peer = peer_with_current(cur_recv);
+    peer.answer_rekey(
+        pend_recv,
+        SessionIndex::new(3),
+        SessionIndex::new(4),
+        answer(),
+    );
+    peer.record_peer_rekey();
+
+    crate::time::advance(Duration::from_secs(DAMPENING_SECS) - tick);
+    assert!(
+        peer.is_rekey_dampened(DAMPENING_SECS),
+        "dampened inside its window"
+    );
+    crate::time::advance(tick);
+    assert!(
+        !peer.is_rekey_dampened(DAMPENING_SECS),
+        "dampening ends at its length"
+    );
+
+    crate::time::advance(HOLD - Duration::from_secs(DAMPENING_SECS) - tick);
+    assert!(
+        !peer.pending_expired(HOLD),
+        "the pending is held inside the hold"
+    );
+    crate::time::advance(tick);
+    assert!(peer.pending_expired(HOLD), "the hold passes at its length");
+
+    assert!(peer.handle_peer_kbit_flip().is_some());
+    crate::time::advance(Duration::from_secs(DRAIN_SECS) - tick);
+    assert!(
+        !peer.drain_expired(DRAIN_SECS),
+        "the drain runs inside its window"
+    );
+    crate::time::advance(tick);
+    assert!(
+        peer.drain_expired(DRAIN_SECS),
+        "the drain ends at its length"
+    );
 }
 
 /// Both cutover bodies restart the previous-session frame count and stamp

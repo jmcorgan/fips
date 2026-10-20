@@ -282,6 +282,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps its name, so `tail -F` follows it. Unset, logging stays on stdout,
   which journald and syslog already rotate.
 
+- `show_metrics` (`fipsctl stats metrics`) serves three more counter
+  families. `dataplane` counts the encrypted frames dropped before any peer
+  is looked up, which nothing counted before: `unknown_index`, a frame naming
+  a session index this node has not allocated, as the peer of a diverged link
+  produces when it keeps sealing for a session this node retired, and
+  `orphaned_index`, an index left pointing at a removed peer. `handshake` and
+  `session` serve the handshake and FSP session reject counters, which were
+  kept but served by no query; they are as of the last tick, where the other
+  families are read live. In `handshake`, the msg1 refusals that were all
+  counted as `bad_state` now have counters of their own: `max_peers`,
+  `rekey_pending`, `rekey_tiebreak`, `answered_before` and `off_link`, so
+  `bad_state` keeps only the remaining causes.
+
 ### Changed
 
 - The debug lines for handshake msg1 and msg2 handling, link promotion,
@@ -569,6 +582,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set the key. **Source-breaking for consumers of the library crate**:
   `RekeyConfig::enabled` is gone.
 
+- **Source-breaking for consumers of the library crate**: `ActivePeer`'s
+  session-slot and rekey methods are private to the crate. The methods that
+  read or change its Noise sessions and their indices, the K-bit, the
+  session time base, the stored link-setup msg2, the peer's startup epoch
+  and the rekey cycle are no longer public, among them `with_session`,
+  `noise_session`, `our_index`, `replace_session`, `current_k_bit`,
+  `set_pending_session`, `cutover_to_new_session`, `abandon_rekey` and
+  `complete_rekey_msg2`; `set_their_index`, `clear_handshake_msg2`,
+  `set_rekey_in_progress` and `set_msg1_next_resend`, which nothing called,
+  are gone. Calling them from outside could leave a peer's sessions out of
+  step with the node's index tables, and keeping them private lets later
+  rekey work change them without another library break. The full list, and
+  what an embedder reads instead, is in
+  `docs/how-to/migrate-an-embedder-to-v0.6.md`. The daemon, the control
+  socket and the wire are unchanged.
+
 - **Source-breaking for consumers of the library crate**: `ActivePeer` no
   longer stores a connectivity state. `ActivePeer::connectivity`, `can_send`,
   `is_healthy`, `mark_stale`, `mark_reconnecting`, `mark_disconnected` and
@@ -594,6 +623,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 #### Node lifecycle
+
+- A step of the system clock no longer moves the link rekey msg1 resends. The
+  resend schedule was read from the wall clock, so a forward step (an NTP
+  correction, a manual set, a resume from suspend) resent a msg1 at once, and
+  a backward step held every resend back by the size of the step, leaving the
+  rekey to stall until its handshake timed out. The schedule is now read on
+  the monotonic clock, as the other link and session rekey timers already
+  were. Nothing on the wire changes.
 
 - Losing an interface no longer leaves its peers in the routing table. The
   peers stayed in the registry, the routes through them stayed selectable, and

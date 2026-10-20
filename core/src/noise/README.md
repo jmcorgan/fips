@@ -35,7 +35,13 @@ callers are unchanged. The root also reaches `take_cleared` and
   clear the bytes a moved-out secret leaves in its slot.
 - `handshake.rs`: `HandshakeState<E>`, the IK and XK state machines,
   and the symmetric state under them; `into_session` turns a completed
-  handshake into a `NoiseSession`.
+  handshake into a `NoiseSession`. Its fields are visible to the rest of
+  the module only for `fork.rs` and that file's tests.
+- `fork.rs`: the `Fork` trait, a copy of a handshake made for one read,
+  its implementation for `HandshakeState`, and the read-on-fork methods
+  `fork_msg2` (IK msg2 at the initiator), `fork_xk2` (XK msg2 at the
+  initiator) and `fork_xk3` (XK msg3 at the responder). Each borrows the
+  handshake immutably and returns the fork the read advanced.
 - `session.rs`: `NoiseSession`, the two cipher states and the replay
   window of a completed handshake, and the key hand-outs
   (`send_cipher_clone`, `recv_cipher_clone`) and counter calls the
@@ -69,6 +75,18 @@ paths are not built, the tie is the check that keeps the daemon on
 `ring`.
 
 ## Invariants
+
+- **A message nothing has authenticated is read on a fork.** A Noise
+  read advances the symmetric state before the AEAD that authenticates
+  the message has run, so a read that fails partway would leave a
+  handshake the genuine message can no longer complete. Every caller
+  that reads a msg2 or msg3 into a handshake it keeps on failure uses
+  the read-on-fork methods and commits by replacing the handshake with
+  the returned fork. There is no restore after a failed read, and no
+  list of fields to restore: the fork copies every field through a
+  struct literal the compiler checks, and both copies erase their
+  secrets on drop. `every_read_on_garbage_leaves_the_handshake_byte_identical`
+  in `tests/fork.rs` holds the methods to it.
 
 - **The sizes and the nonce layout are wire format.** Every node must
   agree on them, and they do not change on the deployed lines. A new

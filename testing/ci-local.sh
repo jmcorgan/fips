@@ -847,6 +847,17 @@ run_tests() {
         record "core-fence-tests" 1
     fi
 
+    # The known-defect lane: every test the inventory marks known-defect is
+    # run and must still fail, so the change that fixes one has to un-ignore
+    # it. Also checks the full test path of every ignored test the host
+    # compiles. Mirrored in .github/workflows/ci.yml.
+    info "testing/known-defect-lane.sh"
+    if bash "$SCRIPT_DIR/known-defect-lane.sh" 2>&1; then
+        record "known-defect" 0
+    else
+        record "known-defect" 1
+    fi
+
     # The `profiling` feature adds a module, a recorder and a writer thread that
     # the default-feature run above never compiles. Run the library tests once
     # more with it on so its own tests execute at all. Mirrored in
@@ -1969,6 +1980,19 @@ run_comment_refs() {
     record "comment-refs" $rc
 }
 
+# Every ignored test must carry a reason and an entry in
+# testing/ignored-tests.txt, and every entry must still name an ignored test.
+# An ignored test runs nowhere unless something runs it on purpose, so one
+# added without a record has silently stopped gating. Static, about a second.
+# Mirrored in ci.yml's ci-parity job by hand.
+run_ignored_tests() {
+    local rc=0
+    info "[ignored-tests] Checking every ignored test against its inventory"
+    python3 "$SCRIPT_DIR/check-ignored-tests.py" || rc=$?
+    record "ignored-tests" $rc
+    return 0
+}
+
 # No non-test code may use std's 64-bit atomics. They do not exist on 32-bit
 # MIPS, so one such use stops the crate building for the OpenWrt MIPS targets,
 # and no leg builds for MIPS to notice. Static, and it needs nothing built.
@@ -2122,6 +2146,7 @@ run_guards() {
     run_image_scoping
     run_action_pins
     run_comment_refs
+    run_ignored_tests
     run_portable_atomics
     run_mount_tmpdir
     run_shellcheck

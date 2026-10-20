@@ -589,19 +589,18 @@ pub enum InboundDecision {
     /// opaque stored bytes, always present when the setup digest matched,
     /// since the two are stored and cleared together.
     ResendMsg2 { msg2: Option<Vec<u8>> },
-    /// Drop this msg1 with a handshake reject and no promotion. Every reject
-    /// but [`InboundReject::SilentBackoff`] records `HandshakeReject::BadState`;
-    /// that one records its own reason. `reason` otherwise selects only the
+    /// Drop this msg1 with a handshake reject and no promotion. The shell
+    /// records one handshake reject counter per `reason`, apart from its
+    /// generic state-machine counter; `reason` otherwise selects only the
     /// diagnostic log line, and every reject completes the rate-limiter
     /// identically.
     Reject { reason: InboundReject },
 }
 
 /// Why an inbound msg1 was rejected. Every variant rejects identically
-/// (rate-limiter complete, the local not-yet-registered connection dropped)
-/// and records `HandshakeReject::BadState`, except
-/// [`SilentBackoff`](InboundReject::SilentBackoff), which records its own
-/// reason.
+/// (rate-limiter complete, the local not-yet-registered connection dropped),
+/// and the shell counts each variant under a handshake reject reason of its
+/// own, so no two of them share a counter.
 #[derive(Debug)]
 pub enum InboundReject {
     /// At `max_peers` and this is a net-new identity with no pending outbound to

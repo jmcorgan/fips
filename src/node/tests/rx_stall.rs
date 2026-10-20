@@ -240,7 +240,7 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
     match trigger {
         Trigger::Packet(packet) => node.process_packet(packet).await,
         Trigger::RekeyCheck => node.check_rekey().await,
-        Trigger::RekeyResend => node.resend_pending_rekeys(Node::now_ms() + 60_000).await,
+        Trigger::RekeyResend => node.resend_rekeys_at(crate::time::mono_ms() + 60_000).await,
         Trigger::PeerTimers(now_ms) => node.drive_peer_timers(now_ms).await,
         Trigger::StoredMsg1(link, addr) => {
             node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::now_ms())

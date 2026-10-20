@@ -9,8 +9,8 @@
 //! The top-level variant set mirrors the protocol-layer / subsystem
 //! split that the [`NodeStats`](crate::node::stats::NodeStats)
 //! sub-structures already follow, with additional categories
-//! (`Handshake`/`Session`/`Mmp`/`Forwarding`/`Transport`) for known
-//! silent-rejection clusters that don't yet have dedicated stats
+//! (`Handshake`/`Session`/`Mmp`/`Forwarding`/`Transport`/`Dataplane`) for
+//! known silent-rejection clusters that don't yet have dedicated stats
 //! sub-structures.
 //!
 //! The second-level enums are marked `#[non_exhaustive]` to keep the
@@ -42,6 +42,8 @@ pub enum RejectReason {
     Forwarding(ForwardingReject),
     /// Transport-layer rejection (admission caps, framing, etc.).
     Transport(TransportReject),
+    /// Encrypted-frame rejection before any peer is resolved.
+    Dataplane(DataplaneReject),
 }
 
 /// Spanning-tree rejection reasons.
@@ -185,23 +187,25 @@ pub enum DiscoveryReject {
 ///
 /// Variants cover the state-machine cluster in
 /// `handlers/handshake.rs` (msg1, msg2, and, on the next-side XX
-/// handshake, msg3). `BadState` covers the bulk of the cluster: header
+/// handshake, msg3). `BadState` covers the remainder of the cluster: header
 /// parse failures, crypto-step failures, identity not learned, index
 /// allocator exhaustion, wire send failures, promotion failures, ACL
-/// rejections, and admission-gate drops at max_peers / accept_connections.
+/// rejections, and the admission gates other than the msg1 `max_peers` gate.
 /// `UnknownConnection` covers lookup-miss sites where an inbound message
 /// arrived for a connection identifier we don't recognise (no pending
 /// outbound for the receiver_idx in msg2; duplicate msg1 with no stored
-/// msg2 to resend). `SilentBackoff` covers a msg1 refused because the
-/// identity's recent sessions ended without an authenticated frame.
+/// msg2 to resend). Each refusal the msg1 classification decides has a
+/// variant of its own: `AtMaxPeers`, `RekeyPending`, `RekeyTiebreak`,
+/// `AnsweredBefore`, `OffLink` and `SilentBackoff`, none counted in
+/// `bad_state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum HandshakeReject {
     /// Handshake state-machine rejection: header parse failed, crypto step
     /// failed, identity could not be learned, index allocator returned an
     /// error, msg2/msg3 send failed, promote_connection returned an error,
-    /// ACL gate rejected the peer, or the admission gate fired
-    /// (max_peers / accept_connections). Tracked via
+    /// ACL gate rejected the peer, or an admission gate other than the msg1
+    /// `max_peers` gate fired. Tracked via
     /// [`HandshakeStats::bad_state`](crate::node::stats::HandshakeStats).
     BadState,
     /// Inbound handshake message arrived but the connection identifier
@@ -217,6 +221,30 @@ pub enum HandshakeReject {
     /// counted in `bad_state`. Tracked via
     /// [`HandshakeStats::silent_backoff`](crate::node::stats::HandshakeStats).
     SilentBackoff,
+    /// Inbound msg1 from a new identity refused at the `max_peers` cap,
+    /// before any msg2 was built. Tracked via
+    /// [`HandshakeStats::max_peers`](crate::node::stats::HandshakeStats).
+    AtMaxPeers,
+    /// Inbound rekey msg1 refused because the peer already holds a completed
+    /// rekey awaiting its cutover, and this msg1 is not the one that armed
+    /// it. Tracked via
+    /// [`HandshakeStats::rekey_pending`](crate::node::stats::HandshakeStats).
+    RekeyPending,
+    /// Inbound rekey msg1 refused because our own rekey of that link is in
+    /// flight and our address sorted smaller, so the tie-break kept us as
+    /// initiator. A healthy crossing produces one; a run of them is a
+    /// dual-initiation loop. Tracked via
+    /// [`HandshakeStats::rekey_tiebreak`](crate::node::stats::HandshakeStats).
+    RekeyTiebreak,
+    /// Inbound rekey msg1 refused as a copy of one answered in a rekey cycle
+    /// that has already ended, or arriving on a link or session too young to
+    /// rekey. Tracked via
+    /// [`HandshakeStats::answered_before`](crate::node::stats::HandshakeStats).
+    AnsweredBefore,
+    /// Inbound same-epoch msg1 refused because it arrived off the peer's
+    /// established link while that link works. Tracked via
+    /// [`HandshakeStats::off_link`](crate::node::stats::HandshakeStats).
+    OffLink,
 }
 
 /// FSP session rejection reasons.
@@ -384,6 +412,30 @@ pub enum TransportReject {
     /// is decided before the phase dispatch. Tracked via
     /// [`TransportStats::payload_len_mismatch`](crate::node::stats::TransportStats).
     PayloadLenMismatch,
+}
+
+/// Encrypted-frame rejection reasons.
+///
+/// Each variant is a drop in `src/node/dataplane/encrypted.rs` that returns
+/// before the frame's peer is resolved, so nothing on the peer counts it:
+/// not the decrypt-failure count, not link statistics. Without these the
+/// side of a diverged link whose index the peer still addresses is silent.
+/// Recorded on the
+/// [`DataplaneMetrics`](crate::node::metrics::DataplaneMetrics) family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DataplaneReject {
+    /// An encrypted frame named a receiver index this node has not
+    /// allocated on that transport: the index was retired (a rekey drain
+    /// ended, a peer was removed), the peer kept addressing a session this
+    /// node no longer holds, or the frame is noise or a probe. Tracked via
+    /// [`DataplaneMetrics::unknown_index`](crate::node::metrics::DataplaneMetrics).
+    UnknownIndex,
+    /// An encrypted frame named a receiver index whose entry still pointed at
+    /// a peer this node no longer holds; the stale entry is removed with the
+    /// drop. Tracked via
+    /// [`DataplaneMetrics::orphaned_index`](crate::node::metrics::DataplaneMetrics).
+    OrphanedIndex,
 }
 
 #[cfg(test)]

@@ -3618,3 +3618,76 @@ mod heard {
         two_msg1s_in_one_tick_leave_a_working_peering(false).await;
     }
 }
+
+/// Each refusal the msg1 classification decides is counted on a counter of
+/// its own, and the split conserves the old total: one input of each refusal
+/// that used to record `BadState` moves the new counters by exactly as much,
+/// in all, as it used to move `bad_state` alone, leaves `bad_state` itself
+/// unmoved, and the silent back-off stays outside both.
+#[test]
+fn msg1_refusals_each_land_on_their_own_counter_and_conserve_the_old_bad_state_total() {
+    use crate::node::handlers::handshake::msg1_reject;
+    use crate::node::reject::HandshakeReject;
+    use crate::node::stats::HandshakeStats;
+    use crate::proto::fmp::InboundReject;
+    use std::collections::HashSet;
+
+    let formerly_bad_state = [
+        InboundReject::AtMaxPeers,
+        InboundReject::PendingSession,
+        InboundReject::DualRekeyWon,
+        InboundReject::AnsweredBefore,
+        InboundReject::OffLink,
+    ];
+    // A refusal added to the classification stops this compiling until it is
+    // placed in one of the two groups above or below.
+    for reason in formerly_bad_state
+        .iter()
+        .chain([&InboundReject::SilentBackoff])
+    {
+        match reason {
+            InboundReject::AtMaxPeers
+            | InboundReject::PendingSession
+            | InboundReject::DualRekeyWon
+            | InboundReject::AnsweredBefore
+            | InboundReject::OffLink
+            | InboundReject::SilentBackoff => {}
+        }
+    }
+
+    let mut stats = HandshakeStats::default();
+    let mut counters = HashSet::new();
+    for reason in &formerly_bad_state {
+        let counted = msg1_reject(reason);
+        assert_ne!(
+            counted,
+            HandshakeReject::BadState,
+            "{reason:?} must leave bad_state"
+        );
+        assert!(counters.insert(counted), "{reason:?} shares a counter");
+        stats.record_reject(counted);
+    }
+    stats.record_reject(msg1_reject(&InboundReject::SilentBackoff));
+
+    let snap = stats.snapshot();
+    let split = [
+        snap.max_peers,
+        snap.rekey_pending,
+        snap.rekey_tiebreak,
+        snap.answered_before,
+        snap.off_link,
+    ];
+    assert_eq!(
+        split, [1; 5],
+        "each refusal is counted once, on its own counter"
+    );
+    assert_eq!(
+        split.iter().sum::<u64>() + snap.bad_state,
+        formerly_bad_state.len() as u64,
+        "the new counters and the residual bad_state together keep the old total"
+    );
+    assert_eq!(
+        (snap.bad_state, snap.silent_backoff, snap.unknown_connection),
+        (0, 1, 0)
+    );
+}

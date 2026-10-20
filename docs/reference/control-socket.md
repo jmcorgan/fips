@@ -130,7 +130,7 @@ table below lists every command currently registered.
 | `show_native_flows` | — | `flows[]`, `listeners[]`, `stats` (the `native` counter family). Each flow: `flow_id`, `peer` (the peer's npub, which is its address; always present, because the flow carries the key its client named or its session authenticated), `peer_addr` (the 16-byte node address in hex — a truncated hash of the same key, kept because it is what `show_sessions` and `show_routing` key on), `local_port`, `remote_port`, `state` (`established` / `pending_accept`), `queued` (datagrams the node is holding for the flow), `age_ms` (time since the flow reached its current state: opened for a flow this node opened, accepted for one taken off a listener, announced for one still pending — accepting a pending flow restarts the clock). Each listener: `local_port`, `backlog`. |
 | `show_listening_sockets` | — | `fips0_addr`, `firewall_active` (bool — `inet fips` table loaded), `sockets[]`. Each entry: `proto` (`tcp` / `udp`), `local_addr` (`::` or the node's fd00::/8 address), `port`, `pid` (nullable), `process` (nullable), `wildcard_bind` (bool — `local_addr == ::`), `filter` (`accept` / `drop` / `unknown` / `no_firewall`). Linux-only; returns an empty `sockets[]` on other platforms. |
 | `show_stats_list` | — | `metrics[]` (each with `name`, `unit`, `scope`), `fast_ring_seconds`, `slow_ring_minutes`, `peer_retention_seconds`. |
-| `show_metrics` | — | Flat snapshot of every counter family in the metrics registry: `forwarding`, `discovery`, `tree`, `bloom`, `congestion`, `errors`, `native`. Each value is that family's counter snapshot object. Counter-only — gauges/histograms that need the live node are excluded. Served off the main loop. Silent-rejection sites classify their reason as a typed `RejectReason` and increment the matching per-family counter exposed here — see [Rejection reasons](#rejection-reasons). |
+| `show_metrics` | — | Flat snapshot of every counter family: `forwarding`, `discovery` (a deprecated alias of `lookup`), `lookup`, `tree`, `bloom`, `congestion`, `errors`, `native` and `dataplane` from the metrics registry, read live, and `handshake` and `session`, which the main loop keeps and publishes each tick, so they are as of the last tick. Each value is that family's counter snapshot object. Counter-only — gauges/histograms that need the live node are excluded. Served off the main loop. Silent-rejection sites classify their reason as a typed `RejectReason` and increment the matching per-family counter exposed here — see [Rejection reasons](#rejection-reasons). |
 | `show_stats_history` | `metric` (req), `peer` (req for per-peer metrics), `window` (`<N>s` / `<N>m` / `<N>h`, default `10m`), `granularity` (`1s` / `1m`, default `1s`) | A single `Series`: `metric`, `unit`, `granularity_seconds`, `values[]`. |
 | `show_stats_all_history` | `peer` (optional npub), `window`, `granularity` | `granularity_seconds`, `window_seconds`, `peer`, `series[]` (one per metric). |
 | `show_stats_peers` | — | `peers[]`, `count`. Each entry: `npub`, `node_addr`, `display_name`, `is_active`, `first_seen_secs_ago`, `last_contact_secs_ago`. |
@@ -145,7 +145,7 @@ fixtures.
 Silent-rejection paths across the node classify why a message was
 dropped via a typed `RejectReason` rather than only logging it, so the
 *what* of a rejection is visible in the counter snapshots above. The
-top-level reason set has eight families, mirroring the protocol-layer /
+top-level reason set has nine families, mirroring the protocol-layer /
 subsystem split of the metrics:
 
 - **Tree** — spanning-tree `TreeAnnounce` processing rejections.
@@ -156,11 +156,15 @@ subsystem split of the metrics:
 - **Mmp** — MMP link-layer rejections.
 - **Forwarding** — forwarding-path rejections (no-route, TTL, MTU).
 - **Transport** — transport-layer rejections (admission caps, framing).
+- **Dataplane** — encrypted frames dropped before any peer is looked up
+  (an unknown or orphaned session index).
 
 Each rejection increments the corresponding counter in its family's
 stats, surfaced through `show_metrics` (the `tree`, `bloom`,
-`discovery`, and `forwarding` families carry their own counters; the
-`errors` family and the remaining subsystem counters carry the rest).
+`discovery`, `forwarding`, `dataplane`, `handshake` and `session`
+families carry their own counters; the `errors` family carries the
+routing-signal ones). The `mmp` and `transport` reject counters are not
+served by any query yet.
 The full per-family variant list lives in `src/node/reject.rs`; it is
 not reproduced here to avoid duplicating the source.
 

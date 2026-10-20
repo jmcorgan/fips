@@ -2,15 +2,18 @@
 //!
 //! The IK (link layer) and XK (session layer) handshakes over secp256k1,
 //! the sessions they produce, the replay window, and the ChaCha20-Poly1305
-//! AEAD they seal and open with. Below the declarations are the fixed sizes
-//! of the AEAD tag, a public key, the startup epoch and the IK handshake
-//! messages, which the link-layer wire codec checks frames against. They are
-//! wire format. The root crate re-exports this module's items other than
-//! `aead` as `fips::noise`, with `HandshakeState` drawing its ephemeral keys
-//! from the host's entropy source.
+//! AEAD they seal and open with. A handshake message is read on a fork
+//! (`Fork`), so a message that fails to authenticate leaves the handshake as
+//! it was. Below the declarations are the fixed sizes of the AEAD tag, a
+//! public key, the startup epoch and the IK handshake messages, which the
+//! link-layer wire codec checks frames against. They are wire format. The
+//! root crate re-exports this module's items other than `aead` as
+//! `fips::noise`, with `HandshakeState` drawing its ephemeral keys from the
+//! host's entropy source.
 
 pub mod aead;
 mod cipher;
+mod fork;
 mod handshake;
 mod replay;
 mod session;
@@ -24,6 +27,7 @@ pub use cipher::{
 pub(crate) use cipher::{PROTOCOL_NAME_IK, PROTOCOL_NAME_XK};
 #[doc(hidden)]
 pub use cipher::{clear_slot, take_cleared};
+pub use fork::Fork;
 pub use handshake::HandshakeState;
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;

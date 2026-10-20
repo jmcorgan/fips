@@ -400,7 +400,7 @@ impl Node {
                 is_draining: peer.is_draining(),
                 drain_expired: peer.drain_expired(DRAIN_WINDOW_SECS),
                 is_dampened: peer.is_rekey_dampened(REKEY_DAMPENING_SECS),
-                elapsed_secs: peer.session_established_at().elapsed().as_secs(),
+                elapsed_secs: crate::peer::since(peer.session_established_at()).as_secs(),
                 counter: peer
                     .noise_session()
                     .map(|s| s.current_send_counter())
@@ -515,7 +515,7 @@ impl Node {
 
         // Store handshake state on the ActivePeer (not a separate PeerConnection)
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let now_ms = Self::now_ms();
+        let now_ms = crate::time::mono_ms();
         if let Some(peer) = self.peers.get_mut(node_addr) {
             peer.set_rekey_state(hs, our_index, wire_msg1, now_ms + resend_interval);
         }
@@ -525,11 +525,21 @@ impl Node {
             .insert((transport_id, our_index.as_u32()), link_id);
     }
 
-    /// Resend pending rekey msg1s and abandon timed-out rekeys.
+    /// Resend pending rekey msg1s and abandon timed-out rekeys, now.
     ///
-    /// Called from the tick loop. Uses the same resend interval and max
-    /// resend count as initial handshakes.
-    pub(in crate::node) async fn resend_pending_rekeys(&mut self, now_ms: u64) {
+    /// Called from the tick loop. The schedule is read on the monotonic clock,
+    /// as it was stamped when the msg1 went out, so a step of the system clock
+    /// neither sends a resend early nor holds one back.
+    pub(in crate::node) async fn resend_pending_rekeys(&mut self) {
+        self.resend_rekeys_at(crate::time::mono_ms()).await;
+    }
+
+    /// Resend pending rekey msg1s and abandon timed-out rekeys as of `now_ms`,
+    /// in milliseconds of [`crate::time::mono_ms`].
+    ///
+    /// Uses the same resend interval and max resend count as initial
+    /// handshakes.
+    pub(in crate::node) async fn resend_rekeys_at(&mut self, now_ms: u64) {
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
         let backoff = self.config().node.rate_limit.handshake_resend_backoff;
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
@@ -625,7 +635,8 @@ impl Node {
 
     /// Snapshot every peer with a rekey handshake in flight (and a stored
     /// msg1) for the retransmission decision, pre-evaluating the resend-due
-    /// predicate against `now_ms` so the core reads no clock.
+    /// predicate against `now_ms`, in milliseconds of
+    /// [`crate::time::mono_ms`], so the core reads no clock.
     pub(in crate::node) fn rekey_resend_snapshots(&self, now_ms: u64) -> Vec<RekeyResendSnapshot> {
         self.peers
             .iter()

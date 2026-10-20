@@ -11,7 +11,9 @@
 //!   node `state`, `tun_state`, `tun_name`, `effective_ipv6_mtu`, and the
 //!   peer / session / link / connection / transport counts), plus
 //!   `peer_aliases` (copied from the node's display-name map on each tick;
-//!   it changes when `update_peers` replaces the peer list).
+//!   it changes when `update_peers` replaces the peer list), and
+//! - the handshake and session reject counters, which `NodeStats` keeps on
+//!   the rx_loop as plain integers, copied so `show_metrics` can serve them.
 //!
 //! The snapshot holds *data*, not rendered `Response` envelopes:
 //! rendering happens in the control task off the rx_loop. Staleness is bounded
@@ -26,6 +28,7 @@ use crate::identity::NodeAddr;
 use crate::ipv6tun::tun::TunState;
 use crate::node::NodeState;
 use crate::node::acl::PeerAclStatus;
+use crate::node::stats::{HandshakeStatsSnapshot, SessionStatsSnapshot};
 use crate::node::stats_history::StatsHistory;
 use secp256k1::XOnlyPublicKey;
 
@@ -79,6 +82,13 @@ pub(crate) struct StatsSnapshot {
     /// only the cross-subsystem fields a renderer can't derive from the rings
     /// alone (`is_active`, resolved `npub`, resolved `display_name`).
     pub peer_meta: Arc<HashMap<NodeAddr, StatsPeerMeta>>,
+    /// The handshake reject counters, which live on the rx_loop's
+    /// `NodeStats` rather than in the shared atomic registry, copied at
+    /// publish time for `show_metrics`.
+    pub handshake: HandshakeStatsSnapshot,
+    /// The FSP session reject counters, copied from `NodeStats` at publish
+    /// time for `show_metrics`, as `handshake` is.
+    pub session: SessionStatsSnapshot,
 }
 
 /// Cross-subsystem metadata for one peer tracked in the stats-history rings,
@@ -118,6 +128,8 @@ impl StatsSnapshot {
             peer_aliases: Arc::new(HashMap::new()),
             acl_status: empty_acl_status(),
             peer_meta: Arc::new(HashMap::new()),
+            handshake: HandshakeStatsSnapshot::default(),
+            session: SessionStatsSnapshot::default(),
         }
     }
 }

@@ -14,8 +14,9 @@ Unit tests for the modules in `src/peer/`, kept out of the source files.
   are a child module of `active` and keep their test names. They cover the
   peer's link state: tree position and filter bookkeeping, decrypt-failure
   and replay counters, rekey jitter and msg1 resends, the pending, current
-  and previous session slots across a cutover, and the withheld handshake
-  diagnostics.
+  and previous session slots across a cutover, the withheld handshake
+  diagnostics, and that the rekey dampening, the pending hold and the drain
+  run on the peer clock, which `crate::time::advance` moves.
 
 `machine.rs` and `mod.rs` also carry older inline `mod tests` blocks. New tests
 go here rather than into those blocks; the inline blocks are not converted in

@@ -99,6 +99,23 @@ pub(in crate::node) const UNHEARD_PEERING_MIN_AGE_MS: u64 = 1_000;
 /// No measured basis.
 const MAX_REPLAYED_MSG1S: usize = 8;
 
+/// The handshake reject a msg1 refusal records.
+///
+/// Each refusal the classification decides keeps its own counter, so a
+/// rekey copy, a crossing and an admission refusal are told apart in
+/// `show_metrics` rather than summed into `bad_state`. The match has no
+/// wildcard: a new refusal does not compile until it is given a counter.
+pub(in crate::node) fn msg1_reject(reason: &InboundReject) -> HandshakeReject {
+    match reason {
+        InboundReject::AtMaxPeers => HandshakeReject::AtMaxPeers,
+        InboundReject::PendingSession => HandshakeReject::RekeyPending,
+        InboundReject::DualRekeyWon => HandshakeReject::RekeyTiebreak,
+        InboundReject::AnsweredBefore => HandshakeReject::AnsweredBefore,
+        InboundReject::OffLink => HandshakeReject::OffLink,
+        InboundReject::SilentBackoff => HandshakeReject::SilentBackoff,
+    }
+}
+
 /// What the replay memory says about a msg1 that would replace an unheard
 /// peering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,10 +237,10 @@ impl EstablishView for Node {
             has_existing_peer: existing.is_some(),
             existing_peer_epoch: existing.and_then(|p| p.remote_epoch()),
             existing_session_age_secs: existing
-                .map(|p| p.session_established_at().elapsed().as_secs())
+                .map(|p| crate::peer::since(p.session_established_at()).as_secs())
                 .unwrap_or(0),
             existing_link_age_secs: existing
-                .map(|p| p.link_established_at().elapsed().as_secs())
+                .map(|p| crate::peer::since(p.link_established_at()).as_secs())
                 .unwrap_or(0),
             has_session: existing.map(|p| p.has_session()).unwrap_or(false),
             pending_new_session: existing
@@ -975,7 +992,9 @@ impl Node {
                     }
                 ));
                 self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    .record_reject(RejectReason::Handshake(msg1_reject(
+                        &InboundReject::AtMaxPeers,
+                    )));
             }
             InboundDecision::Reject {
                 reason: InboundReject::SilentBackoff,
@@ -1004,7 +1023,9 @@ impl Node {
                     );
                 }
                 self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::SilentBackoff));
+                    .record_reject(RejectReason::Handshake(msg1_reject(
+                        &InboundReject::SilentBackoff,
+                    )));
             }
             InboundDecision::Reject {
                 reason:
@@ -1068,7 +1089,7 @@ impl Node {
                 // `conn`/`link_id` were never inserted into the registry, so the
                 // local drop suffices — no cleanup needed.
                 self.stats_mut()
-                    .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                    .record_reject(RejectReason::Handshake(msg1_reject(&reason)));
             }
             InboundDecision::ResendMsg2 { msg2 } => {
                 // A resend of the msg1 the peering was promoted from: the

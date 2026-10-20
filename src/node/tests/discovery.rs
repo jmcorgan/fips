@@ -1039,7 +1039,7 @@ async fn test_request_dedup_convergent_paths() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Long-running (~2 min): run explicitly with --ignored
+#[ignore = "long-running (about 2 min); run explicitly with --ignored"]
 async fn test_discovery_100_nodes() {
     let _guard = lock_large_network_test().await;
 

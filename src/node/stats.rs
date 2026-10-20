@@ -155,14 +155,15 @@ impl SessionStats {
 /// `handlers/handshake.rs` across msg1, msg2, and (on the XX side) msg3.
 /// Each counter increments once per dropped inbound message; the
 /// WARN/DEBUG log line at the site is preserved alongside the counter
-/// bump for operator visibility.
+/// bump for operator visibility. The counters partition the drops: each
+/// one is counted once, in exactly one field.
 #[derive(Default)]
 pub struct HandshakeStats {
     /// Handshake state-machine rejection: header parse failed, Noise
     /// crypto step failed, identity could not be learned, index allocator
     /// returned an error, msg2/msg3 send failed, promote_connection
-    /// returned an error, ACL gate rejected the peer, or the admission
-    /// gate fired (max_peers / accept_connections).
+    /// returned an error, ACL gate rejected the peer, or an admission gate
+    /// other than the msg1 `max_peers` gate fired.
     pub bad_state: u64,
     /// Inbound handshake message arrived but no matching connection was
     /// found by the receiver_idx (or addr) lookup: msg2 for an unknown
@@ -174,6 +175,22 @@ pub struct HandshakeStats {
     /// startup epoch ended without an authenticated frame and its back-off
     /// is running. Not part of `bad_state`.
     pub silent_backoff: u64,
+    /// Inbound msg1 from a new identity refused at the `max_peers` cap.
+    pub max_peers: u64,
+    /// Inbound rekey msg1 refused because a completed rekey already awaits
+    /// its cutover. A sustained rate means the peer keeps rekeying while
+    /// this node's pending session waits for a frame on the new epoch.
+    pub rekey_pending: u64,
+    /// Inbound rekey msg1 refused because our own rekey of the link is in
+    /// flight and our smaller address won the tie-break.
+    pub rekey_tiebreak: u64,
+    /// Inbound rekey msg1 refused as a copy from an ended cycle, or on a
+    /// link or session too young to rekey. A sustained rate is replayed
+    /// msg1s, since a genuine peer does not resend a msg1 once answered.
+    pub answered_before: u64,
+    /// Inbound same-epoch msg1 refused because it arrived off the peer's
+    /// working established link.
+    pub off_link: u64,
 }
 
 impl HandshakeStats {
@@ -182,6 +199,11 @@ impl HandshakeStats {
             bad_state: self.bad_state,
             unknown_connection: self.unknown_connection,
             silent_backoff: self.silent_backoff,
+            max_peers: self.max_peers,
+            rekey_pending: self.rekey_pending,
+            rekey_tiebreak: self.rekey_tiebreak,
+            answered_before: self.answered_before,
+            off_link: self.off_link,
         }
     }
 
@@ -190,6 +212,11 @@ impl HandshakeStats {
             HandshakeReject::BadState => self.bad_state += 1,
             HandshakeReject::UnknownConnection => self.unknown_connection += 1,
             HandshakeReject::SilentBackoff => self.silent_backoff += 1,
+            HandshakeReject::AtMaxPeers => self.max_peers += 1,
+            HandshakeReject::RekeyPending => self.rekey_pending += 1,
+            HandshakeReject::RekeyTiebreak => self.rekey_tiebreak += 1,
+            HandshakeReject::AnsweredBefore => self.answered_before += 1,
+            HandshakeReject::OffLink => self.off_link += 1,
         }
     }
 }
@@ -309,13 +336,14 @@ impl NodeStats {
             RejectReason::Handshake(r) => self.handshake.record_reject(r),
             RejectReason::Transport(r) => self.transport.record_reject(r),
             RejectReason::Mmp(r) => self.mmp.record_reject(r),
-            // The forwarding, discovery, tree, and bloom families are
-            // recorded directly on the MetricsRegistry and never reach
+            // The forwarding, discovery, tree, bloom and dataplane families
+            // are recorded directly on the MetricsRegistry and never reach
             // this NodeStats dispatch.
             RejectReason::Forwarding(_)
             | RejectReason::Discovery(_)
             | RejectReason::Tree(_)
-            | RejectReason::Bloom(_) => {
+            | RejectReason::Bloom(_)
+            | RejectReason::Dataplane(_) => {
                 debug_assert!(false, "migrated reject family must use MetricsRegistry");
             }
         }
@@ -452,6 +480,11 @@ pub struct HandshakeStatsSnapshot {
     pub bad_state: u64,
     pub unknown_connection: u64,
     pub silent_backoff: u64,
+    pub max_peers: u64,
+    pub rekey_pending: u64,
+    pub rekey_tiebreak: u64,
+    pub answered_before: u64,
+    pub off_link: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -486,6 +519,14 @@ pub struct ErrorSignalStatsSnapshot {
     pub emit_over_dest_interval: u64,
     pub emit_limiter_at_capacity: u64,
     pub mtu_exceeded_uncorroborated: u64,
+}
+
+/// Encrypted-frame drops made before any peer is resolved, one counter per
+/// [`DataplaneReject`](crate::node::reject::DataplaneReject) variant.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DataplaneStatsSnapshot {
+    pub unknown_index: u64,
+    pub orphaned_index: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -752,11 +752,12 @@ impl PeerMachine {
     ///
     /// Nothing authenticates a msg2 before it is read, and the index it names
     /// travels in cleartext in our msg1, so a msg2 that fails to read may be a
-    /// forgery rather than the responder's answer. Such a read is rolled back
-    /// and the handshake handle goes back into the leg, so the genuine msg2 can
-    /// still complete it. The two kinds of error are told apart by the leg:
+    /// forgery rather than the responder's answer. The read runs on a fork of
+    /// the handshake, which stays in the leg untouched, so the genuine msg2
+    /// can still complete it. The two kinds of error are told apart by the
+    /// leg:
     ///
-    /// - an error with the handle back in the leg means the msg2 did not
+    /// - an error with the handle still in the leg means the msg2 did not
     ///   authenticate and nothing on the machine changed;
     /// - an error with the handle gone (no handshake in progress, or a failure
     ///   to make the session after a successful read) means the leg cannot
@@ -773,27 +774,22 @@ impl PeerMachine {
             // present (set by `start_handshake`, taken here on completion).
             // Gating on the handle directly is byte-equivalent to the old
             // `!= SentMsg1` guard for every reachable transition.
-            if leg.noise_handshake.is_none() {
+            let Some(pending) = leg.noise_handshake.as_ref() else {
                 return Err(NoiseError::WrongState {
                     expected: "sent_msg1 state".to_string(),
                     got: "no active handshake".to_string(),
                 });
-            }
+            };
 
-            // The slot is heap memory that outlives this call; clearing it once
-            // the handshake has left keeps both private keys from staying
-            // there. Unwrapping before clearing lets the handshake move
-            // straight from the slot to `hs`, with no second stack copy.
-            let mut hs = leg
-                .noise_handshake
-                .take()
-                .expect("noise handshake must exist in SentMsg1 state");
+            // The read runs on a fork, so a msg2 that fails it leaves the
+            // handshake in its slot exactly as it was.
+            let hs = pending.fork_msg2(message)?;
+
+            // The read authenticated, so the fork replaces the handshake in
+            // the slot. The slot is heap memory that outlives this call;
+            // clearing it drops the handshake in place, which erases both of
+            // its private keys there, and zeroes what is left.
             noise::clear_slot(&mut leg.noise_handshake);
-
-            if let Err(e) = hs.try_read_message_2(message) {
-                leg.noise_handshake = Some(hs);
-                return Err(e);
-            }
 
             // Capture remote epoch from msg2
             let remote_epoch = hs.remote_epoch();

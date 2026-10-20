@@ -18,20 +18,18 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 ///
 /// Maintains the chaining key (ck), handshake hash (h), and current cipher.
 ///
-/// `Clone` exists for [`HandshakeState::try_read_message_2`],
-/// [`HandshakeState::try_read_xk_message_2`] and
-/// [`HandshakeState::try_read_xk_message_3`], which have to put the pre-read
-/// state back after a message that advanced it before failing to
-/// authenticate.
+/// `Clone` exists for [`Fork`](super::Fork), which copies the handshake so
+/// that a message is read on the copy and a failed read leaves the original
+/// untouched.
 ///
-/// `ck` and `h` are cleared on drop, including on the clone above once it
-/// goes out of scope. `cipher` is skipped because [`CipherState`] holds no
+/// `ck` and `h` are cleared on drop, including on a fork's copy once it goes
+/// out of scope. `cipher` is skipped because [`CipherState`] holds no
 /// key bytes of its own: its key is the cached keyed cipher, which clears
 /// itself on drop on RustCrypto and cannot be cleared on `ring`.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-struct SymmetricState {
+pub(super) struct SymmetricState {
     /// Chaining key for key derivation.
-    ck: [u8; 32],
+    pub(super) ck: [u8; 32],
     /// Running SHA-256 accumulator over the handshake transcript.
     ///
     /// Maintained by `mix_hash` at every step, but never fed to the AEAD:
@@ -39,10 +37,10 @@ struct SymmetricState {
     /// production reads it, so it provides no transcript binding today, and
     /// anything built on `handshake_hash()` (channel binding, an exporter,
     /// cookie binding) will silently not work until the AAD carries `h`.
-    h: [u8; 32],
+    pub(super) h: [u8; 32],
     /// Current cipher state for encrypting handshake payloads.
     #[zeroize(skip)]
-    cipher: CipherState,
+    pub(super) cipher: CipherState,
 }
 
 impl SymmetricState {
@@ -137,33 +135,37 @@ impl SymmetricState {
 /// Handshake state for Noise IK and XK patterns.
 ///
 /// `E` is the host's random source, used for the ephemeral key.
+///
+/// The fields are visible to the rest of `noise` so that `fork.rs` can copy
+/// every one of them and its tests can compare a state field by field.
+/// Nothing else outside this file reads or writes them.
 pub struct HandshakeState<E> {
     /// Which Noise pattern is being used.
-    pattern: NoisePattern,
+    pub(super) pattern: NoisePattern,
     /// Our role in the handshake.
-    role: HandshakeRole,
+    pub(super) role: HandshakeRole,
     /// Current progress.
-    progress: HandshakeProgress,
+    pub(super) progress: HandshakeProgress,
     /// Symmetric state.
-    symmetric: SymmetricState,
+    pub(super) symmetric: SymmetricState,
     /// Our static keypair.
-    static_keypair: Keypair,
+    pub(super) static_keypair: Keypair,
     /// Our ephemeral keypair (generated at handshake start).
-    ephemeral_keypair: Option<Keypair>,
+    pub(super) ephemeral_keypair: Option<Keypair>,
     /// Remote static public key.
     /// For IK initiator: known before handshake (from config).
     /// For IK responder: learned from message 1.
     /// For XK initiator: known before handshake (from config).
     /// For XK responder: learned from message 3.
-    remote_static: Option<PublicKey>,
+    pub(super) remote_static: Option<PublicKey>,
     /// Remote ephemeral public key (learned during handshake).
-    remote_ephemeral: Option<PublicKey>,
+    pub(super) remote_ephemeral: Option<PublicKey>,
     /// The random source for the ephemeral key.
-    entropy: PhantomData<fn() -> E>,
+    pub(super) entropy: PhantomData<fn() -> E>,
     /// Our startup epoch for restart detection.
-    local_epoch: Option<[u8; 8]>,
+    pub(super) local_epoch: Option<[u8; 8]>,
     /// Remote peer's startup epoch (learned during handshake).
-    remote_epoch: Option<[u8; 8]>,
+    pub(super) remote_epoch: Option<[u8; 8]>,
 }
 
 impl<E: EntropySource> HandshakeState<E> {
@@ -642,41 +644,6 @@ impl<E: EntropySource> HandshakeState<E> {
         Ok(())
     }
 
-    /// Read message 2, leaving the handshake untouched when the message
-    /// does not authenticate.
-    ///
-    /// `read_message_2` mixes the sender's ephemeral into the symmetric state,
-    /// and both DH results into the key, before it authenticates the encrypted
-    /// epoch, so a message that fails partway leaves a handshake that can
-    /// never read the genuine msg2 afterwards. A caller that keeps its rekey
-    /// cycle across a failed read — because the message may be a forgery
-    /// rather than the responder's corrupt reply — needs the pre-read state
-    /// back.
-    ///
-    /// The saved set is exactly what `read_message_2` writes: `symmetric`,
-    /// `remote_ephemeral`, `remote_epoch` and `progress`. `remote_static` is
-    /// not in it, because IK pins the responder's static before msg1 and the
-    /// read only uses it. **That mirror is manual.** A later edit that adds a
-    /// write to `read_message_2` without adding it here silently reintroduces
-    /// the poisoning, and no caller can detect it.
-    pub fn try_read_message_2(&mut self, message: &[u8]) -> Result<(), NoiseError> {
-        let symmetric = self.symmetric.clone();
-        let remote_ephemeral = self.remote_ephemeral;
-        let remote_epoch = self.remote_epoch;
-        let progress = self.progress;
-
-        match self.read_message_2(message) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.symmetric = symmetric;
-                self.remote_ephemeral = remote_ephemeral;
-                self.remote_epoch = remote_epoch;
-                self.progress = progress;
-                Err(e)
-            }
-        }
-    }
-
     // ========================================================================
     // XK Pattern Methods (Session Layer)
     // ========================================================================
@@ -879,39 +846,6 @@ impl<E: EntropySource> HandshakeState<E> {
         Ok(())
     }
 
-    /// Read XK message 2, leaving the handshake untouched when the message
-    /// does not authenticate.
-    ///
-    /// `read_xk_message_2` mixes the sender's ephemeral into the symmetric
-    /// state before it authenticates the encrypted epoch, so a message that
-    /// fails partway leaves a handshake that can never read the genuine msg2
-    /// afterwards. A caller that keeps its session entry across a failed read
-    /// — because the message may be a forgery rather than a real peer's
-    /// corrupt reply — needs the pre-read state back.
-    ///
-    /// The saved set is exactly what `read_xk_message_2` writes:
-    /// `symmetric`, `remote_ephemeral`, `remote_epoch` and `progress`. **That
-    /// mirror is manual.** A later edit that adds a write to
-    /// `read_xk_message_2` without adding it here silently reintroduces the
-    /// poisoning, and no caller can detect it.
-    pub fn try_read_xk_message_2(&mut self, message: &[u8]) -> Result<(), NoiseError> {
-        let symmetric = self.symmetric.clone();
-        let remote_ephemeral = self.remote_ephemeral;
-        let remote_epoch = self.remote_epoch;
-        let progress = self.progress;
-
-        match self.read_xk_message_2(message) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.symmetric = symmetric;
-                self.remote_ephemeral = remote_ephemeral;
-                self.remote_epoch = remote_epoch;
-                self.progress = progress;
-                Err(e)
-            }
-        }
-    }
-
     /// Write XK message 3 (initiator only).
     ///
     /// XK msg3: `-> s, se` + encrypted epoch
@@ -1021,40 +955,6 @@ impl<E: EntropySource> HandshakeState<E> {
         self.progress = HandshakeProgress::Complete;
 
         Ok(())
-    }
-
-    /// Read XK message 3, leaving the handshake untouched when the message
-    /// does not authenticate.
-    ///
-    /// `read_xk_message_3` advances the symmetric state's nonce before the
-    /// first AEAD opens, and a message that fails later has already mixed a
-    /// DH result into the key, so a failed read leaves a handshake that can
-    /// never read the genuine msg3 afterwards. A responder that keeps its
-    /// handshake across a failed read, because the message may be a forgery
-    /// rather than the initiator's corrupt msg3, needs the pre-read state
-    /// back.
-    ///
-    /// The saved set is exactly what `read_xk_message_3` writes:
-    /// `symmetric`, `remote_static`, `remote_epoch` and `progress`. **That
-    /// mirror is manual.** A later edit that adds a write to
-    /// `read_xk_message_3` without adding it here silently reintroduces the
-    /// poisoning, and no caller can detect it.
-    pub fn try_read_xk_message_3(&mut self, message: &[u8]) -> Result<(), NoiseError> {
-        let symmetric = self.symmetric.clone();
-        let remote_static = self.remote_static;
-        let remote_epoch = self.remote_epoch;
-        let progress = self.progress;
-
-        match self.read_xk_message_3(message) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.symmetric = symmetric;
-                self.remote_static = remote_static;
-                self.remote_epoch = remote_epoch;
-                self.progress = progress;
-                Err(e)
-            }
-        }
     }
 
     /// Complete the handshake and return a NoiseSession.

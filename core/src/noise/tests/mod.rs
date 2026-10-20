@@ -706,67 +706,6 @@ fn test_xk_wrong_state_errors() {
     );
 }
 
-/// Drive an XK handshake to the point where the responder is waiting for
-/// msg3, and return the initiator's genuine msg3 with the responder.
-fn xk_responder_awaiting_msg3() -> (HandshakeState, Vec<u8>) {
-    let initiator_keypair = generate_keypair();
-    let responder_keypair = generate_keypair();
-    let mut initiator =
-        HandshakeState::new_xk_initiator(initiator_keypair, responder_keypair.public_key());
-    initiator.set_local_epoch(generate_epoch());
-    let mut responder = HandshakeState::new_xk_responder(responder_keypair);
-    responder.set_local_epoch(generate_epoch());
-
-    let msg1 = initiator.write_xk_message_1().unwrap();
-    responder.read_xk_message_1(&msg1).unwrap();
-    let msg2 = responder.write_xk_message_2().unwrap();
-    initiator.read_xk_message_2(&msg2).unwrap();
-    let msg3 = initiator.write_xk_message_3().unwrap();
-    (responder, msg3)
-}
-
-#[test]
-fn test_a_failed_rolling_back_xk_msg3_read_still_reads_the_genuine_msg3() {
-    let (mut responder, msg3) = xk_responder_awaiting_msg3();
-
-    // Fails at the first AEAD, after the nonce has advanced.
-    assert!(
-        responder
-            .try_read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE])
-            .is_err()
-    );
-    // Fails at the epoch AEAD, after the static was learned and the se DH
-    // mixed into the key.
-    let mut tampered = msg3.clone();
-    let last = tampered.len() - 1;
-    tampered[last] ^= 0x01;
-    assert!(responder.try_read_xk_message_3(&tampered).is_err());
-    assert!(
-        responder.remote_static().is_none(),
-        "a failed read must not leave the static it decrypted behind"
-    );
-    assert!(!responder.is_complete());
-
-    responder
-        .try_read_xk_message_3(&msg3)
-        .expect("the genuine msg3 must still read after two failed reads");
-    assert!(responder.is_complete());
-    assert!(responder.into_session().is_ok());
-}
-
-#[test]
-fn test_a_failed_plain_xk_msg3_read_cannot_read_the_genuine_msg3() {
-    // The control for the rolling-back read: without the rollback, the
-    // failed read leaves a handshake the genuine msg3 no longer opens.
-    let (mut responder, msg3) = xk_responder_awaiting_msg3();
-    assert!(
-        responder
-            .read_xk_message_3(&[0u8; XK_HANDSHAKE_MSG3_SIZE])
-            .is_err()
-    );
-    assert!(responder.read_xk_message_3(&msg3).is_err());
-}
-
 #[test]
 fn test_xk_handshake_hash_differs_from_ik() {
     // XK and IK should produce different handshake hashes (different protocol names)

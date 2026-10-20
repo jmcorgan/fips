@@ -12,7 +12,28 @@ pub use active::{ActivePeer, ConnectivityState};
 
 use crate::NodeAddr;
 use crate::transport::LinkId;
+use fips_core::time::{Clock, Instant};
+use std::time::Duration;
 use thiserror::Error;
+
+/// The clock an active peer measures its rekey timers on: the host's
+/// monotonic clock, so a step of the system clock neither fires nor holds a
+/// rekey timer, and a test moves them all with `crate::time::advance`.
+pub(crate) type PeerClock = crate::time::HostClock;
+
+/// An instant on [`PeerClock`].
+pub(crate) type PeerInstant = <PeerClock as Clock>::Instant;
+
+/// Now on [`PeerClock`].
+pub(crate) fn peer_now() -> PeerInstant {
+    PeerClock::default().now()
+}
+
+/// Time from `earlier` to now on [`PeerClock`], zero when `earlier` is the
+/// later one.
+pub(crate) fn since(earlier: PeerInstant) -> Duration {
+    peer_now().saturating_duration_since(earlier)
+}
 
 // ============================================================================
 // Errors

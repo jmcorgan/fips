@@ -1291,7 +1291,7 @@ impl Node {
         // `rekey_initiator` set holds no pending session, so the two calls
         // are the same action here. Arming as initiator has one caller,
         // `initiate_session_rekey` through `begin_rekey`, and
-        // `set_rekey_state(_, true)` remains only at the restore below;
+        // `set_rekey_state` arms only responder handshakes;
         // `check_session_rekey` never reaches `initiate_session_rekey` for
         // an entry holding a pending session; and `set_pending_session`
         // clears `rekey_state`, so a completed initiator cycle leaves at
@@ -1299,33 +1299,36 @@ impl Node {
         // sites become instances of the epoch discard the responder arm was
         // fixed for.
         if entry.is_established() && entry.has_rekey_in_progress() && entry.is_rekey_initiator() {
-            let mut handshake = match entry.take_rekey_state() {
-                Some(hs) => hs,
+            // Process XK msg2, for the same reason and in the same way as the
+            // primary arm below. Nothing here has been authenticated: the
+            // only tie to our rekey is the datagram's source address, which
+            // the sender chooses. Abandoning would let anyone able to name
+            // the session end the cycle, so the read runs on a fork, the
+            // handshake stays as it was and can still read the genuine ack,
+            // and the refusal is counted. The fork matters because
+            // `read_xk_message_2` mixes the sender's ephemeral in before it
+            // authenticates. Nothing restamps the deadline, which runs from
+            // the setup this node sent, so an unreadable ack cannot hold the
+            // rekey open.
+            let read = match entry.rekey_state() {
+                Some(hs) => hs.fork_xk2(&ack.handshake_payload),
                 None => {
                     self.sessions.insert(*src_addr, entry);
                     return;
                 }
             };
-
-            // Process XK msg2, for the same reason and in the same way as the
-            // primary arm below. Nothing here has been authenticated: the
-            // only tie to our rekey is the datagram's source address, which
-            // the sender chooses. Abandoning would let anyone able to name
-            // the session end the cycle, so the handshake goes back, rolled
-            // back to its pre-read state so it can still read the genuine
-            // ack, and the refusal is counted. The rollback matters because
-            // `read_xk_message_2` mixes the sender's ephemeral in before it
-            // authenticates. The restore does not restamp the deadline, which
-            // runs from the setup this node sent, so an unreadable ack cannot
-            // hold the rekey open.
-            if let Err(e) = handshake.try_read_xk_message_2(&ack.handshake_payload) {
-                debug!(error = %e, "Failed to process rekey XK msg2, keeping the rekey");
-                entry.set_rekey_state(handshake, true);
-                self.sessions.insert(*src_addr, entry);
-                self.stats_mut()
-                    .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
-                return;
-            }
+            let mut handshake = match read {
+                Ok(hs) => hs,
+                Err(e) => {
+                    debug!(error = %e, "Failed to process rekey XK msg2, keeping the rekey");
+                    self.sessions.insert(*src_addr, entry);
+                    self.stats_mut()
+                        .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
+                    return;
+                }
+            };
+            // The read authenticated, so the fork replaces the handshake.
+            entry.clear_rekey_state();
 
             // The three abandons below stay abandons. Each follows a msg2
             // that already authenticated, so they are local failures rather
@@ -1401,34 +1404,37 @@ impl Node {
                 .record_reject(RejectReason::Session(SessionReject::BadState));
             return;
         }
-        let mut handshake = match entry.take_state() {
-            Some(EndToEndState::Initiating(hs)) => hs,
-            _ => unreachable!("checked is_initiating above"),
-        };
-
         // Process XK msg2: read_xk_message_2 (extracts responder's epoch)
         //
         // Nothing here has been authenticated: the only thing tying this
         // message to the initiation is the datagram's source address, an
         // envelope field the sender chooses. Dropping the entry would let
         // anyone able to reach us cancel any initiation in flight, so the
-        // entry goes back with the handshake rolled back to its pre-read
-        // state and the stored msg1 still scheduled for resend. The rollback
-        // is what makes the reinsert worth anything: `read_xk_message_2`
-        // mixes the sender's ephemeral in before it authenticates, so a
-        // handshake put back as it was left could never read the genuine
-        // msg2. A real peer's corrupt ack is covered by the same path — the
-        // responder resends its stored msg2, and the handshake sweep reaps
-        // the entry on its original deadline if none arrives. `touch()` is
-        // deliberately not called, so a spray cannot push that deadline out.
-        if let Err(e) = handshake.try_read_xk_message_2(&ack.handshake_payload) {
-            debug!(error = %e, "Failed to process Noise XK msg2 in SessionAck");
-            entry.set_state(EndToEndState::Initiating(handshake));
-            self.sessions.insert(*src_addr, entry);
-            self.stats_mut()
-                .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
-            return;
-        }
+        // read runs on a fork and the entry goes back with its handshake as
+        // it was and the stored msg1 still scheduled for resend. The fork is
+        // what makes the reinsert worth anything: `read_xk_message_2` mixes
+        // the sender's ephemeral in before it authenticates, so a handshake
+        // read in place could never read the genuine msg2 afterwards. A real
+        // peer's corrupt ack is covered by the same path — the responder
+        // resends its stored msg2, and the handshake sweep reaps the entry on
+        // its original deadline if none arrives. `touch()` is deliberately
+        // not called, so a spray cannot push that deadline out.
+        let read = match entry.state() {
+            EndToEndState::Initiating(hs) => hs.fork_xk2(&ack.handshake_payload),
+            _ => unreachable!("checked is_initiating above"),
+        };
+        let mut handshake = match read {
+            Ok(hs) => hs,
+            Err(e) => {
+                debug!(error = %e, "Failed to process Noise XK msg2 in SessionAck");
+                self.sessions.insert(*src_addr, entry);
+                self.stats_mut()
+                    .record_reject(RejectReason::Session(SessionReject::AckHandshakeFailed));
+                return;
+            }
+        };
+        // The read authenticated, so the fork replaces the initiating state.
+        drop(entry.take_state());
 
         // The three drops below stay drops of our leg. Each is downstream of
         // a msg2 that already authenticated, so they are local failures
@@ -1608,8 +1614,9 @@ impl Node {
         // succeeded and produced a static key matching this session's peer,
         // so a failure here proves nothing about the sender and must not cost
         // the entry anything it would miss. An unreadable msg3 therefore
-        // costs nothing at all: the handshake goes back, rolled back, for the
-        // genuine msg3. Every later failure follows a read that
+        // costs nothing at all: the read runs on a fork, and the handshake
+        // stays as it was for the genuine msg3. Every later failure follows a
+        // read that
         // authenticated its sender and abandons only the handshake. A
         // `pending_new_session` beside the handshake is the epoch the real
         // peer may already have cut over to, and dropping it kills the
@@ -1625,34 +1632,37 @@ impl Node {
         // `peer_new_epoch_confirmed` only stops that retransmission, and
         // `rekey_initiator` is false throughout this arm by its own gate.
         if entry.is_established() && entry.has_rekey_in_progress() && !entry.is_rekey_initiator() {
-            let mut handshake = match entry.take_rekey_state() {
-                Some(hs) => hs,
-                None => {
-                    self.sessions.insert(*src_addr, entry);
-                    return;
-                }
-            };
-
             // Process XK msg3. The only tie between this msg3 and the
             // handshake is the datagram's source address, which the sender
             // chooses, and the peer that read our SessionAck may already hold
             // the new keys. Abandoning here would let anyone able to name the
             // session discard the handshake the peer's genuine msg3 needs,
-            // splitting the session's epochs. So the handshake goes back,
-            // rolled back to its pre-read state, because the read advances
-            // the cipher nonce before it authenticates. The restore leaves
-            // the deadline alone, which runs from the peer's setup, so a
-            // spray cannot hold the handshake open.
-            if let Err(e) = handshake.try_read_xk_message_3(&msg3.handshake_payload) {
-                debug!(
-                    src = %self.peer_display_name(src_addr),
-                    error = %e,
-                    "Failed to process rekey XK msg3, keeping the handshake"
-                );
-                entry.set_rekey_state(handshake, false);
-                self.sessions.insert(*src_addr, entry);
-                return;
-            }
+            // splitting the session's epochs. So the read runs on a fork and
+            // the handshake stays as it was, because the read advances the
+            // cipher nonce before it authenticates. Nothing touches the
+            // deadline, which runs from the peer's setup, so a spray cannot
+            // hold the handshake open.
+            let read = match entry.rekey_state() {
+                Some(hs) => hs.fork_xk3(&msg3.handshake_payload),
+                None => {
+                    self.sessions.insert(*src_addr, entry);
+                    return;
+                }
+            };
+            let handshake = match read {
+                Ok(hs) => hs,
+                Err(e) => {
+                    debug!(
+                        src = %self.peer_display_name(src_addr),
+                        error = %e,
+                        "Failed to process rekey XK msg3, keeping the handshake"
+                    );
+                    self.sessions.insert(*src_addr, entry);
+                    return;
+                }
+            };
+            // The read authenticated, so the fork replaces the handshake.
+            entry.clear_rekey_state();
 
             // The rekey must come from the peer the session was established
             // with. Compare x-only keys: the stored key's parity may be a
@@ -1738,9 +1748,9 @@ impl Node {
         }
 
         // Process XK msg3 (extracts the initiator's static key and epoch)
-        // against each candidate in turn. A candidate the msg3 was not
-        // written for fails at the AEAD on the encrypted static, before any
-        // DH, and is rolled back to its pre-read state.
+        // against each candidate in turn, on a fork of its handshake. A
+        // candidate the msg3 was not written for fails at the AEAD on the
+        // encrypted static, before any DH, and its handshake stays as it was.
         //
         // Nothing here has been authenticated until a read succeeds: the
         // only tie to a half-open candidate is the datagram's source
@@ -1750,24 +1760,24 @@ impl Node {
         // discard the handshake its genuine msg3 and resends need. `touch()`
         // is deliberately not called, so a spray cannot push the handshake
         // sweep's deadline out.
-        let mut candidates = entry.take_candidates();
-        let Some(index) = candidates.iter_mut().position(|c| {
-            c.handshake_mut()
-                .try_read_xk_message_3(&msg3.handshake_payload)
-                .is_ok()
-        }) else {
+        let read = entry.candidates().iter().enumerate().find_map(|(i, c)| {
+            c.handshake()
+                .fork_xk3(&msg3.handshake_payload)
+                .ok()
+                .map(|hs| (i, hs))
+        });
+        let Some((index, handshake)) = read else {
             debug!(
                 src = %self.peer_display_name(src_addr),
-                candidates = candidates.len(),
+                candidates = entry.candidates().len(),
                 reason = "no-candidate-matched",
                 "Failed to process Noise XK msg3 against any candidate, keeping them"
             );
-            entry.restore_candidates(candidates);
             self.sessions.insert(*src_addr, entry);
             return;
         };
-        let handshake = candidates.swap_remove(index).into_handshake();
-        entry.restore_candidates(candidates);
+        // The read authenticated, so the fork replaces its candidate.
+        entry.remove_candidate(index);
 
         // Extract the initiator's static public key (now available after msg3)
         let remote_pubkey = match handshake.remote_static() {

@@ -148,14 +148,9 @@ impl ResponderCandidate {
         }
     }
 
-    /// The responder handshake, to try a msg3 against.
-    pub(crate) fn handshake_mut(&mut self) -> &mut HandshakeState {
-        &mut self.handshake
-    }
-
-    /// Give up the handshake, for a completed msg3.
-    pub(crate) fn into_handshake(self) -> HandshakeState {
-        self.handshake
+    /// The responder handshake, to read a msg3 on a fork of.
+    pub(crate) fn handshake(&self) -> &HandshakeState {
+        &self.handshake
     }
 }
 
@@ -454,7 +449,6 @@ impl SessionEntry {
     }
 
     /// Get the current session state.
-    #[cfg(test)]
     pub(crate) fn state(&self) -> &EndToEndState {
         self.state
             .as_ref()
@@ -600,12 +594,24 @@ impl SessionEntry {
         }
     }
 
-    /// Take every candidate out, to try a msg3 against each.
+    /// The responder candidates, to read a msg3 against.
+    pub(crate) fn candidates(&self) -> &[ResponderCandidate] {
+        &self.candidates
+    }
+
+    /// Remove the candidate at `index`, whose handshake a msg3 completed on
+    /// a fork. The last candidate takes its place.
+    pub(crate) fn remove_candidate(&mut self, index: usize) {
+        self.candidates.swap_remove(index);
+    }
+
+    /// Take every candidate out, to keep them across establishing the
+    /// entry, which drops every candidate.
     pub(crate) fn take_candidates(&mut self) -> Vec<ResponderCandidate> {
         std::mem::take(&mut self.candidates)
     }
 
-    /// Put candidates back after a msg3 was tried against them.
+    /// Put candidates back after establishing the entry.
     pub(crate) fn restore_candidates(&mut self, candidates: Vec<ResponderCandidate>) {
         self.candidates = candidates;
     }
@@ -1111,19 +1117,25 @@ impl SessionEntry {
 
     /// Arm a rekey handshake this node initiated, and stamp its deadline.
     ///
-    /// The only writer of `initiated`. The restore after an unreadable
-    /// SessionAck goes through `set_rekey_state` instead and must stay
-    /// there: a restamping restore would let a stream of forged acks hold
-    /// the rekey open for good.
+    /// The only writer of `initiated`. An unreadable SessionAck is read on a
+    /// fork of the handshake and changes nothing here, and must stay that
+    /// way: a restamping path would let a stream of forged acks hold the
+    /// rekey open for good.
     pub(crate) fn begin_rekey(&mut self, state: HandshakeState, now: SessionInstant) {
         self.rekey_state = Some(state);
         self.rekey_initiator = true;
         self.initiated = Some(now);
     }
 
-    /// Take the rekey state for processing.
-    pub(crate) fn take_rekey_state(&mut self) -> Option<HandshakeState> {
-        self.rekey_state.take()
+    /// The rekey handshake in progress, to read a message on a fork of.
+    pub(crate) fn rekey_state(&self) -> Option<&HandshakeState> {
+        self.rekey_state.as_ref()
+    }
+
+    /// Drop the rekey handshake, once the fork that read its next message
+    /// has replaced it. Every other rekey field is left as it is.
+    pub(crate) fn clear_rekey_state(&mut self) {
+        self.rekey_state = None;
     }
 
     /// Promote the pending session to current (the cutover).

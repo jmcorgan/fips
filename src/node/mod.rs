@@ -2226,6 +2226,8 @@ impl Node {
             peer_aliases: std::sync::Arc::new(self.peer_aliases.clone()),
             acl_status: self.peer_acl_status(),
             peer_meta: std::sync::Arc::new(peer_meta),
+            handshake: self.stats.handshake.snapshot(),
+            session: self.stats.session.snapshot(),
         };
         self.stats_snapshot.store(std::sync::Arc::new(snapshot));
 

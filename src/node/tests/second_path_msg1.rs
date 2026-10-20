@@ -63,9 +63,9 @@ async fn deliver_msg1(
     .await;
 }
 
-/// The node's count of handshake msg1s refused as `BadState`.
-fn bad_state(node: &Node) -> u64 {
-    node.stats().handshake.bad_state
+/// The node's count of handshake msg1s refused off the established link.
+fn off_link(node: &Node) -> u64 {
+    node.stats().handshake.off_link
 }
 
 /// A node peered over UDP transport 1 with a fresh sender at socket A, the
@@ -157,7 +157,7 @@ async fn stop_all(node: &mut Node) {
 async fn second_path_then_genuine_rekey(other_transport: bool) {
     let mut s = second_path(other_transport, |_| Identity::generate()).await;
 
-    let bad_before = bad_state(&s.node);
+    let refused_before = off_link(&s.node);
     let data = craft_msg1_wire(&s.node, &s.sender, s.epoch, SessionIndex::new(0x2222), 2000);
     deliver_msg1(&mut s.node, s.second_transport, &s.addr_b, data, 2000).await;
 
@@ -178,8 +178,8 @@ async fn second_path_then_genuine_rekey(other_transport: bool) {
         "nothing may answer the second-path msg1 at its source"
     );
     assert_eq!(
-        bad_state(&s.node),
-        bad_before + 1,
+        off_link(&s.node),
+        refused_before + 1,
         "the second-path msg1 must be admitted and refused at classification"
     );
 
@@ -236,7 +236,7 @@ async fn a_second_path_msg1_does_not_make_us_abandon_our_own_rekey() {
         "precondition: our rekey is in flight"
     );
 
-    let bad_before = bad_state(&s.node);
+    let refused_before = off_link(&s.node);
     let data = craft_msg1_wire(&s.node, &s.sender, s.epoch, SessionIndex::new(0x2222), 2000);
     deliver_msg1(&mut s.node, s.second_transport, &s.addr_b, data, 2000).await;
 
@@ -255,8 +255,8 @@ async fn a_second_path_msg1_does_not_make_us_abandon_our_own_rekey() {
         "a msg1 off the established link must arm no pending"
     );
     assert_eq!(
-        bad_state(&s.node),
-        bad_before + 1,
+        off_link(&s.node),
+        refused_before + 1,
         "the second-path msg1 must be admitted and refused at classification"
     );
 
@@ -284,7 +284,7 @@ async fn a_copy_of_a_held_rekey_msg1_from_a_second_address_draws_nothing_and_kee
     );
     drain(&s.sock_a).await;
 
-    let bad_before = bad_state(&s.node);
+    let refused_before = off_link(&s.node);
     deliver_msg1(&mut s.node, s.second_transport, &s.addr_b, data, 2000).await;
 
     assert!(
@@ -301,8 +301,8 @@ async fn a_copy_of_a_held_rekey_msg1_from_a_second_address_draws_nothing_and_kee
         "the held pending must be unchanged"
     );
     assert_eq!(
-        bad_state(&s.node),
-        bad_before + 1,
+        off_link(&s.node),
+        refused_before + 1,
         "the copy must be refused at classification"
     );
 
@@ -462,7 +462,7 @@ async fn resend_setup_msg1_12_s_after_promotion(setup: Setup) -> Vec<String> {
     node.get_peer_mut(&sender_addr)
         .expect("precondition: the peering was formed")
         .test_backdate_session_established(Duration::from_secs(12));
-    let bad_before = bad_state(&node);
+    let refused_before = refusals(&node);
 
     deliver_msg1(&mut node, tid, &addr_a, setup_msg1, 3000).await;
 
@@ -478,7 +478,7 @@ async fn resend_setup_msg1_12_s_after_promotion(setup: Setup) -> Vec<String> {
             "{setup:?}: the setup msg1 resend drew no stored msg2"
         ));
     }
-    if bad_state(&node) != bad_before {
+    if refusals(&node) != refused_before {
         found.push(format!("{setup:?}: the setup msg1 resend was refused"));
     }
     stop_all(&mut node).await;

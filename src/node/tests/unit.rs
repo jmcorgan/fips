@@ -3431,12 +3431,12 @@ async fn msg1_reject_arms_do_not_release_another_handshakes_slot() {
     let sender = Identity::generate();
     let sender_node_addr =
         craft_and_send_msg1(&node, &sender, &socket_a, node_udp_addr, 2000).await;
-    let before = node.stats().handshake.bad_state;
+    let before = node.stats().handshake.max_peers;
     pump_one_msg1_into_node(&mut node, &mut packet_rx, 1000)
         .await
         .expect("crafted msg1 must reach packet_rx");
     assert_eq!(
-        node.stats().handshake.bad_state,
+        node.stats().handshake.max_peers,
         before + 1,
         "arm 4 must reach the max_peers cap reject"
     );

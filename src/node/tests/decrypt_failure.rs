@@ -8,6 +8,11 @@
 //! anyone who has seen the index can produce the failures. The warning is
 //! what the integration harnesses grep for, so its once-per-run shape is
 //! part of the contract.
+//!
+//! Also covers the two drops `handle_encrypted_frame` makes before it
+//! resolves a peer, a frame naming an unknown index and one naming an index
+//! left pointing at a removed peer: they reach no peer's failure count, so
+//! the dataplane counters `show_metrics` serves are their only record.
 
 use super::*;
 
@@ -129,4 +134,82 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
         "a second run of failures warns once more"
     );
     drop(guard);
+}
+
+/// The dataplane counters as `show_metrics` serves them:
+/// `(unknown_index, orphaned_index)`.
+fn dataplane_drops(node: &Node) -> (Option<u64>, Option<u64>) {
+    let metrics = crate::control::queries::show_metrics_from_handle(&node.control_read_handle());
+    let family = &metrics["dataplane"];
+    (
+        family["unknown_index"].as_u64(),
+        family["orphaned_index"].as_u64(),
+    )
+}
+
+/// An encrypted frame of a valid length naming `receiver_idx`, whose
+/// ciphertext no session will authenticate.
+fn frame_naming(transport_id: TransportId, receiver_idx: u32) -> ReceivedPacket {
+    use crate::proto::fmp::wire::{build_encrypted, build_established_header};
+
+    let tag = [0u8; 16];
+    let header = build_established_header(SessionIndex::new(receiver_idx), 0, 0, tag.len() as u16);
+    ReceivedPacket::new(
+        transport_id,
+        TransportAddr::from_string("192.0.2.9:2121"),
+        build_encrypted(&header, &tag),
+    )
+}
+
+/// A frame naming an index this node never allocated, and one naming an index
+/// whose entry still points at a peer no longer held, are each counted once in
+/// the dataplane family `show_metrics` serves. Neither reaches the held peer:
+/// its decrypt-failure count, its index entry and the peer table are
+/// unchanged, and the orphaned entry is removed as before.
+#[tokio::test]
+async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_touch_no_peer() {
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let link_id = LinkId::new(1);
+    let identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
+    let node_addr = *identity.node_addr();
+    node.promote_connection(link_id, identity, 2_000).unwrap();
+    let our_index = node
+        .get_peer(&node_addr)
+        .and_then(|p| p.our_index())
+        .expect("promoted peer must have our_index");
+    let key = (transport_id, our_index.as_u32());
+    assert_eq!(dataplane_drops(&node), (Some(0), Some(0)));
+
+    let unknown = our_index.as_u32().wrapping_add(1);
+    assert!(!node.peers_by_index.contains_key(&(transport_id, unknown)));
+    node.handle_encrypted_frame(frame_naming(transport_id, unknown))
+        .await;
+    assert_eq!(
+        dataplane_drops(&node),
+        (Some(1), Some(0)),
+        "a frame naming an unallocated index must be counted as unknown"
+    );
+
+    let orphaned = our_index.as_u32().wrapping_add(2);
+    let gone = NodeAddr::from_bytes([0x77; 16]);
+    node.peers_by_index.insert((transport_id, orphaned), gone);
+    node.handle_encrypted_frame(frame_naming(transport_id, orphaned))
+        .await;
+    assert_eq!(
+        dataplane_drops(&node),
+        (Some(1), Some(1)),
+        "a frame naming an index left on a removed peer must be counted as orphaned"
+    );
+    assert!(
+        !node.peers_by_index.contains_key(&(transport_id, orphaned)),
+        "the orphaned entry is removed with the drop"
+    );
+
+    assert_eq!(
+        held_count(&node, &node_addr, &key, "after both drops"),
+        0,
+        "a frame dropped before its peer is resolved must not count as that peer's failure"
+    );
+    assert_eq!(node.peer_count(), 1, "the peer table is unchanged");
 }

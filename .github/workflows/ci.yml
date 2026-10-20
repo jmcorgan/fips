@@ -77,6 +77,8 @@ jobs:
         run: bash testing/check-action-pins.sh
       - name: Check every source comment resolves in-repo
         run: bash testing/check-comment-refs.sh
+      - name: Check every ignored test against its inventory
+        run: python3 testing/check-ignored-tests.py
       - name: Check no non-test code uses std 64-bit atomics
         run: python3 testing/check-portable-atomics.py
       - name: Check no bind-mount source comes from a bare mktemp
@@ -462,6 +464,12 @@ jobs:
       # runs at least once without it. Mirrored in testing/ci-local.sh.
       - name: Run the no_std core's tests on their own
         run: cargo test -p fips-core
+
+      # Every known-defect test in testing/ignored-tests.txt must still fail,
+      # so the change that fixes one has to un-ignore it. Mirrored in
+      # testing/ci-local.sh.
+      - name: Run the known-defect lane
+        run: bash testing/known-defect-lane.sh
 
       # The bind-success half. Every other unit-test leg runs unprivileged, so
       # `PacketSocket::open` cannot succeed on any of them and everything past

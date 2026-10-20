@@ -540,7 +540,7 @@ impl Node {
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DrivePeerTimers,
                         self.drive_peer_timers(now_ms).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingRekeys,
-                        self.resend_pending_rekeys(now_ms).await);
+                        self.resend_pending_rekeys().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingSessionHandshakes,
                         self.resend_pending_session_handshakes(session_now).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::ResendPendingSessionMsg3,

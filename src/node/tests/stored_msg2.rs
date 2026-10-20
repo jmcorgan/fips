@@ -57,9 +57,9 @@ fn idle_ms(tn: &TestNode, peer: &NodeAddr) -> u64 {
         .idle_time(Node::now_ms())
 }
 
-/// The node's count of handshake msg1s refused as `BadState`.
-fn bad_state(tn: &TestNode) -> u64 {
-    tn.node.stats().handshake.bad_state
+/// The node's count of refused handshake msg1s, whatever the reason.
+fn refused(tn: &TestNode) -> u64 {
+    refusals(&tn.node)
 }
 
 /// `nodes[a]` drops its peer `nodes[b]` without a word and dials it again
@@ -216,13 +216,13 @@ async fn after_our_rekey_cutover_a_peer_silent_for_16_s_that_redials_completes_i
     rekey_to_pending(&mut nodes, b, a).await;
     cutover(&mut nodes[b], &a_addr).await;
     assert!(
-        nodes[b]
-            .node
-            .get_peer(&a_addr)
-            .unwrap()
-            .session_established_at()
-            .elapsed()
-            < Duration::from_secs(30),
+        crate::peer::since(
+            nodes[b]
+                .node
+                .get_peer(&a_addr)
+                .unwrap()
+                .session_established_at()
+        ) < Duration::from_secs(30),
         "precondition: B's session is under 30 s after the cutover"
     );
 
@@ -277,7 +277,7 @@ async fn a_fresh_same_epoch_msg1_from_a_peer_heard_from_within_15_s_is_dropped_u
         let p = nodes[b].node.get_peer(&a_addr).unwrap();
         (p.link_id(), p.our_index(), p.their_index())
     };
-    let bad_before = bad_state(&nodes[b]);
+    let refused_before = refused(&nodes[b]);
 
     drop_and_redial(&mut nodes, a, b).await;
     assert!(
@@ -306,8 +306,8 @@ async fn a_fresh_same_epoch_msg1_from_a_peer_heard_from_within_15_s_is_dropped_u
         "B's peering must keep A's original index"
     );
     assert_eq!(
-        bad_state(&nodes[b]),
-        bad_before + 1,
+        refused(&nodes[b]),
+        refused_before + 1,
         "the dropped msg1 must be counted"
     );
     cleanup_nodes(&mut nodes).await;
@@ -365,7 +365,7 @@ async fn a_copy_of_an_adopted_rekey_msg1_on_a_young_session_is_refused_even_from
             "precondition: A's first frame on the new session promoted B's pending"
         );
         assert!(
-            p.session_established_at().elapsed() < Duration::from_secs(30),
+            crate::peer::since(p.session_established_at()) < Duration::from_secs(30),
             "precondition: B's session is under 30 s after the adoption"
         );
         assert!(
@@ -378,7 +378,7 @@ async fn a_copy_of_an_adopted_rekey_msg1_on_a_young_session_is_refused_even_from
         "precondition: nothing is queued at A"
     );
     let link = nodes[b].node.get_peer(&a_addr).unwrap().link_id();
-    let bad_before = bad_state(&nodes[b]);
+    let refused_before = nodes[b].node.stats().handshake.answered_before;
 
     last_heard(&mut nodes[b], &a_addr, SILENT_MS);
     msg1_at(&mut nodes[b], &source, copy).await;
@@ -398,9 +398,9 @@ async fn a_copy_of_an_adopted_rekey_msg1_on_a_young_session_is_refused_even_from
         "B's peering must keep the adopted index"
     );
     assert_eq!(
-        bad_state(&nodes[b]),
-        bad_before + 1,
-        "the refused copy must be counted"
+        nodes[b].node.stats().handshake.answered_before,
+        refused_before + 1,
+        "the refused copy must be counted as answered before"
     );
     cleanup_nodes(&mut nodes).await;
 }
@@ -431,7 +431,7 @@ async fn a_same_epoch_replacement_stamps_the_shared_dampener_so_a_second_replace
 
     // A second replacement inside the interval.
     let link = nodes[b].node.get_peer(&a_addr).unwrap().link_id();
-    let bad_before = bad_state(&nodes[b]);
+    let refused_before = refused(&nodes[b]);
     last_heard(&mut nodes[b], &a_addr, SILENT_MS);
     drop_and_redial(&mut nodes, a, b).await;
     one_exchange(&mut nodes, a, b).await;
@@ -445,8 +445,8 @@ async fn a_same_epoch_replacement_stamps_the_shared_dampener_so_a_second_replace
         "the refused replacement must not complete at A"
     );
     assert_eq!(
-        bad_state(&nodes[b]),
-        bad_before + 1,
+        refused(&nodes[b]),
+        refused_before + 1,
         "the refused replacement must be counted"
     );
 
@@ -828,7 +828,7 @@ fn maps_index(tn: &TestNode, peer: &NodeAddr, index: SessionIndex) -> bool {
 /// armed a responder pending, retired its expired drain and freed its index,
 /// sent exactly the msg2, and then adopted the session on A's first frame.
 /// Returns what went wrong.
-async fn answered_and_adopted(c: &mut AfterCycle, bad_before: u64) -> Vec<String> {
+async fn answered_and_adopted(c: &mut AfterCycle, refused_before: u64) -> Vec<String> {
     let (a, b, label) = (c.a, c.b, c.label.clone());
     let mut found = Vec::new();
     let pending = {
@@ -847,7 +847,7 @@ async fn answered_and_adopted(c: &mut AfterCycle, bad_before: u64) -> Vec<String
     if maps_index(&c.nodes[b], &c.a_addr, c.p0) {
         found.push(format!("{label}: B still maps the drained session's index"));
     }
-    if bad_state(&c.nodes[b]) != bad_before {
+    if refused(&c.nodes[b]) != refused_before {
         found.push(format!("{label}: B counted the rekey msg1 as refused"));
     }
     let queued = deliver(&mut c.nodes[a]).await;
@@ -907,9 +907,9 @@ async fn a_peers_rekey_msg1_12_s_after_our_last_cutover_on_a_link_older_than_30_
     for (last, b_dialled) in cycle_cases() {
         let mut c = after_cycle(last, b_dialled, Some(Duration::from_secs(12))).await;
         let msg1 = peer_rekeys(&mut c).await;
-        let bad_before = bad_state(&c.nodes[c.b]);
+        let refused_before = refused(&c.nodes[c.b]);
         c.nodes[c.b].node.handle_msg1(msg1).await;
-        found.extend(answered_and_adopted(&mut c, bad_before).await);
+        found.extend(answered_and_adopted(&mut c, refused_before).await);
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -918,7 +918,7 @@ async fn a_peers_rekey_msg1_12_s_after_our_last_cutover_on_a_link_older_than_30_
 /// B has just handled A's rekey msg1 inside the drain window: check it was
 /// dropped, and that B's draining session is still registered. Returns what
 /// went wrong.
-fn dropped_inside_the_drain(c: &AfterCycle, bad_before: u64) -> Vec<String> {
+fn dropped_inside_the_drain(c: &AfterCycle, refused_before: u64) -> Vec<String> {
     let label = &c.label;
     let mut found = Vec::new();
     let p = c.nodes[c.b].node.get_peer(&c.a_addr).unwrap();
@@ -933,7 +933,7 @@ fn dropped_inside_the_drain(c: &AfterCycle, bad_before: u64) -> Vec<String> {
     if !c.nodes[c.a].packet_rx.is_empty() {
         found.push(format!("{label}: B answered the msg1"));
     }
-    if bad_state(&c.nodes[c.b]) != bad_before + 1 {
+    if refused(&c.nodes[c.b]) != refused_before + 1 {
         found.push(format!("{label}: B did not count the dropped msg1"));
     }
     found
@@ -948,9 +948,9 @@ async fn a_peers_rekey_msg1_inside_10_s_of_our_last_cutover_is_dropped_and_leave
     for (last, b_dialled) in cycle_cases() {
         let mut c = after_cycle(last, b_dialled, None).await;
         let msg1 = peer_rekeys(&mut c).await;
-        let bad_before = bad_state(&c.nodes[c.b]);
+        let refused_before = refused(&c.nodes[c.b]);
         c.nodes[c.b].node.handle_msg1(msg1).await;
-        found.extend(dropped_inside_the_drain(&c, bad_before));
+        found.extend(dropped_inside_the_drain(&c, refused_before));
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -968,9 +968,9 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_answered_and_a
         let mut c = after_cycle(last, b_dialled, None).await;
         let msg1 = peer_rekeys(&mut c).await;
         let (source, bytes) = (msg1.remote_addr.clone(), msg1.data.clone());
-        let bad_before = bad_state(&c.nodes[c.b]);
+        let refused_before = refused(&c.nodes[c.b]);
         c.nodes[c.b].node.handle_msg1(msg1).await;
-        let dropped = dropped_inside_the_drain(&c, bad_before);
+        let dropped = dropped_inside_the_drain(&c, refused_before);
         if !dropped.is_empty() {
             found.extend(dropped);
             cleanup_nodes(&mut c.nodes).await;
@@ -982,9 +982,9 @@ async fn a_peers_rekey_msg1_dropped_inside_10_s_of_our_cutover_is_answered_and_a
             p.test_backdate_session_established(Duration::from_secs(12));
             p.test_backdate_drain_started(Duration::from_secs(12));
         }
-        let bad_before = bad_state(&c.nodes[c.b]);
+        let refused_before = refused(&c.nodes[c.b]);
         msg1_at(&mut c.nodes[c.b], &source, bytes).await;
-        found.extend(answered_and_adopted(&mut c, bad_before).await);
+        found.extend(answered_and_adopted(&mut c, refused_before).await);
         cleanup_nodes(&mut c.nodes).await;
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -1012,7 +1012,7 @@ async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_
                 let p = c.nodes[b].node.get_peer(&c.a_addr).unwrap();
                 (p.link_id(), p.our_index())
             };
-            let bad_before = bad_state(&c.nodes[b]);
+            let refused_before = refused(&c.nodes[b]);
             last_heard(&mut c.nodes[b], &c.a_addr, ago_ms);
             let a_identity = c.nodes[a].node.identity().clone();
             let a_epoch = c.nodes[a].node.startup_epoch();
@@ -1041,7 +1041,7 @@ async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_
             if c.nodes[b].node.connection_count() != 0 {
                 found.push(format!("{label}: the msg1 left a connection at B"));
             }
-            if bad_state(&c.nodes[b]) != bad_before + 1 {
+            if refused(&c.nodes[b]) != refused_before + 1 {
                 found.push(format!("{label}: B did not count the refused msg1"));
             }
             if found.len() == before {

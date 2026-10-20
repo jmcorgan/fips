@@ -32,3 +32,4 @@ X" to "X is done".
 | [use-the-native-datagram-api.md](use-the-native-datagram-api.md) | Enable the experimental native datagram API and write a program that sends and receives datagrams by pubkey and port (no IPv6 emulation, no TUN). Read the `fips` group warning first |
 | [write-a-native-api-client.md](write-a-native-api-client.md) | Speak the native datagram API's line protocol directly from C, Python or Go, where there is no client library |
 | [serve-many-peers-on-one-thread.md](serve-many-peers-on-one-thread.md) | Handle every native API flow from one `poll` loop instead of a thread per peer |
+| [migrate-an-embedder-to-v0.6.md](migrate-an-embedder-to-v0.6.md) | Move code that uses the `fips` library crate to v0.6.0: each change that can stop it building, and what to do |

@@ -1593,7 +1593,7 @@ async fn walk_ladder_losing_msg2s(nodes: &mut [TestNode], base_ms: u64) -> usize
     for offset_s in [1u64, 3, 7, 15, 31, 63] {
         nodes[0]
             .node
-            .resend_pending_rekeys(base_ms + offset_s * 1000)
+            .resend_rekeys_at(base_ms + offset_s * 1000)
             .await;
         process_available_packets(&mut nodes[1..]).await;
         while let Ok(packet) = nodes[0].packet_rx.try_recv() {
@@ -1768,10 +1768,10 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
         node1_peer.pending_new_session().is_some(),
         "node 1 must still hold the session it answered with"
     );
-    let node1_rejects_before = nodes[1].node.stats().handshake.bad_state;
+    let node1_rejects_before = nodes[1].node.stats().handshake.rekey_pending;
 
     assert_eq!(
-        walk_ladder_losing_msg2s(&mut nodes, Node::now_ms()).await,
+        walk_ladder_losing_msg2s(&mut nodes, crate::time::mono_ms()).await,
         5,
         "node 1 must answer each of node 0's five resends"
     );
@@ -1792,7 +1792,7 @@ async fn dropped_rekey_msg2_does_not_split_the_link() {
     nodes[1].node.check_rekey().await;
     pump_until_quiet(&mut nodes).await;
     assert_eq!(
-        nodes[1].node.stats().handshake.bad_state - node1_rejects_before,
+        nodes[1].node.stats().handshake.rekey_pending - node1_rejects_before,
         1,
         "node 1 must refuse node 0's re-fired msg1 while it holds the pending"
     );
@@ -1869,7 +1869,7 @@ async fn a_lost_rekey_msg2_is_not_followed_by_a_cutover_or_the_startup_msg2() {
     // node 0's first msg1 resend, delivered to node 1 only.
     nodes[0]
         .node
-        .resend_pending_rekeys(Node::now_ms() + 1000)
+        .resend_rekeys_at(crate::time::mono_ms() + 1000)
         .await;
     assert_eq!(
         process_available_packets(&mut nodes[1..]).await,
@@ -1939,7 +1939,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
     // 2. node 0 walks its ladder to the abandon, losing node 1's answer to
     // every resend, and re-fires; node 1 refuses the re-fired msg1 while it
     // holds the pending.
-    walk_ladder_losing_msg2s(&mut nodes, Node::now_ms()).await;
+    walk_ladder_losing_msg2s(&mut nodes, crate::time::mono_ms()).await;
     nodes[0].node.check_rekey().await;
     pump_until_quiet(&mut nodes).await;
     assert!(
@@ -1997,7 +1997,7 @@ async fn a_responder_retires_an_unadopted_rekey_and_the_next_rekey_completes() {
     // reads the msg2.
     nodes[0]
         .node
-        .resend_pending_rekeys(Node::now_ms() + 1_000)
+        .resend_rekeys_at(crate::time::mono_ms() + 1_000)
         .await;
     pump_until_quiet(&mut nodes).await;
     assert!(
@@ -2086,7 +2086,7 @@ async fn a_resent_rekey_msg1_draws_the_held_msg2_and_the_rekey_completes() {
     // node 0's first resend, at +1 s, reaches node 1 only.
     nodes[0]
         .node
-        .resend_pending_rekeys(Node::now_ms() + 1_000)
+        .resend_rekeys_at(crate::time::mono_ms() + 1_000)
         .await;
     assert_eq!(
         process_available_packets(&mut nodes[1..]).await,
@@ -2187,7 +2187,7 @@ async fn a_held_rekey_msg2_is_resent_only_on_the_peers_established_link() {
     // address, as a spoofed source would.
     nodes[0]
         .node
-        .resend_pending_rekeys(Node::now_ms() + 1_000)
+        .resend_rekeys_at(crate::time::mono_ms() + 1_000)
         .await;
     let mut msg1 = nodes[1]
         .packet_rx
@@ -5225,8 +5225,13 @@ async fn test_path_broken_naming_a_dest_with_no_session_does_not_flush_cached_co
     );
 }
 
+/// A half-open responder entry holds this node's own key as a placeholder
+/// for the peer's, so the identity-cache fill that runs before the signal's
+/// lookup would file that key under the claimed address if the signal were
+/// admitted. With no cached identity for the address beforehand, none may
+/// follow.
 #[tokio::test]
-async fn test_path_broken_naming_a_dest_whose_entry_is_an_unauthenticated_responder_handshake_does_not_flush_cached_coords()
+async fn test_path_broken_naming_a_dest_whose_entry_is_an_unauthenticated_responder_handshake_does_not_flush_cached_coords_or_cache_its_placeholder_key()
  {
     use crate::proto::routing::PathBroken;
 
@@ -5239,6 +5244,7 @@ async fn test_path_broken_naming_a_dest_whose_entry_is_an_unauthenticated_respon
 
     // One forged SessionSetup naming `dest` would leave exactly this entry.
     install_halfopen(&mut node, dest);
+    assert!(!node.has_cached_identity(&dest), "precondition");
 
     let encoded = PathBroken::new(dest, reporter).encode();
     node.handle_path_broken(&reporter, &reporter, &encoded[5..])
@@ -5247,6 +5253,10 @@ async fn test_path_broken_naming_a_dest_whose_entry_is_an_unauthenticated_respon
     assert!(
         node.coord_cache().get(&dest, 1000).is_some(),
         "a half-open entry keyed on a claimed address must not admit the signal"
+    );
+    assert!(
+        !node.has_cached_identity(&dest),
+        "the placeholder key of a half-open entry must not be cached for the address it claims"
     );
     assert_eq!(node.stats().session.unknown_session, 1);
 
@@ -8516,6 +8526,136 @@ async fn test_a_rekey_whose_session_ack_was_lost_is_retired_after_the_handshake_
     );
     assert_eq!(nodes[1].node.stats().session.rekey_unanswered, 0);
 
+    cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// Integration tests: forged setups naming an established peer
+// ============================================================================
+//
+// A SessionSetup carries an ephemeral-only msg1 and names its source in the
+// envelope, so anyone who can reach a node can name the node's established
+// peer. These record what such setups must not be able to do to the pair's
+// key rotation.
+
+/// Deliver to `nodes[victim]` a setup naming `nodes[claimed]`, written by a
+/// stranger, and return how many rekey handshakes the victim has armed.
+async fn forge_rekey_setup(nodes: &mut [TestNode], claimed: usize, victim: usize) -> u64 {
+    let claimed_addr = *nodes[claimed].node.node_addr();
+    let forged = forge_setup_naming(&nodes[claimed], &nodes[victim]);
+    nodes[victim]
+        .node
+        .handle_session_payload(&claimed_addr, &claimed_addr, &forged, 1280, false)
+        .await;
+    nodes[victim].node.stats().session.rekey_armed
+}
+
+/// Forged setups naming each end of an established pair, delivered to the
+/// other end once per handshake timeout, each just after the handshake the
+/// last one armed has expired, must not stop the pair's scheduled rotation:
+/// each end's own rekey trigger fires, and each end completes a rekey with
+/// the other. Today each forged setup arms a responder handshake that vetoes
+/// the trigger and opens the dampening window, and a genuine setup that meets
+/// the other end's armed handshake is dropped, so neither end rotates while
+/// the forger keeps this up.
+#[tokio::test]
+#[ignore = "known defect: an unauthenticated setup naming an established peer arms a handshake that vetoes the node's own rekey and refuses the peer's"]
+async fn forged_setups_at_both_ends_once_per_handshake_timeout_do_not_stop_the_pairs_rotation() {
+    let mut nodes = rekey_pair([true, true], None).await;
+    let addrs = [*nodes[0].node.node_addr(), *nodes[1].node.node_addr()];
+    for from in 0..2 {
+        nodes[from]
+            .node
+            .send_session_data(&addrs[1 - from], 0, 0, b"crosses the rekey trigger")
+            .await
+            .expect("send_session_data failed");
+    }
+    pump_all(&mut nodes).await;
+    let timeout = Duration::from_secs(
+        nodes[0]
+            .node
+            .config()
+            .node
+            .rate_limit
+            .handshake_timeout_secs
+            + 1,
+    );
+
+    let mut initiated = [false; 2];
+    let mut completed = [false; 2];
+    for window in 1..=3u64 {
+        for victim in 0..2 {
+            assert_eq!(
+                forge_rekey_setup(&mut nodes, 1 - victim, victim).await,
+                window,
+                "precondition: the forged setup of window {window} must reach node {victim}"
+            );
+        }
+        for i in 0..2 {
+            nodes[i].node.check_session_rekey().await;
+            initiated[i] |= rekey_initiated(&nodes[i], &addrs[1 - i]);
+        }
+        pump_all(&mut nodes).await;
+        for i in 0..2 {
+            completed[i] |= holds_pending(&nodes[i], &addrs[1 - i]);
+        }
+        crate::time::advance(timeout);
+        for end in nodes.iter_mut() {
+            end.node.check_session_rekey().await;
+        }
+        pump_all(&mut nodes).await;
+    }
+
+    assert_eq!(
+        initiated,
+        [true, true],
+        "each end's scheduled rekey must fire while forged setups name its peer"
+    );
+    assert_eq!(
+        completed,
+        [true, true],
+        "each end must complete a rekey with its peer while forged setups name it"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// At the larger address, with this node's own rekey in flight, a forged
+/// setup naming its peer must leave that rekey in flight, and the rekey then
+/// completes with the peer. Today the larger node abandons its own rekey for
+/// the forged one before reading the forged msg1, so one setup cancels its
+/// rotation.
+#[tokio::test]
+#[ignore = "known defect: at the larger address a forged setup makes the node abandon its own rekey in flight"]
+async fn a_forged_setup_at_the_larger_address_leaves_its_own_rekey_in_flight_to_complete() {
+    let mut nodes = rekey_pair([true, true], None).await;
+    let (small, large) = by_address(&nodes);
+    let small_addr = *nodes[small].node.node_addr();
+    let large_addr = *nodes[large].node.node_addr();
+    // A frame from the smaller node first, so that whichever node opened the
+    // session has heard its peer on it and no longer holds its msg3.
+    nodes[small]
+        .node
+        .send_session_data(&large_addr, 0, 0, b"heard on the session")
+        .await
+        .expect("send_session_data failed");
+    pump_all(&mut nodes).await;
+
+    start_rekey(&mut nodes, large).await;
+    assert_eq!(
+        forge_rekey_setup(&mut nodes, small, large).await,
+        1,
+        "precondition: the forged setup must reach the larger node and be answered"
+    );
+    assert!(
+        rekey_initiated(&nodes[large], &small_addr),
+        "the larger node's own rekey must survive a forged setup naming its peer"
+    );
+
+    pump_all(&mut nodes).await;
+    assert!(
+        holds_pending(&nodes[large], &small_addr) && holds_pending(&nodes[small], &large_addr),
+        "the larger node's own rekey must then complete with its peer"
+    );
     cleanup_nodes(&mut nodes).await;
 }
 
