@@ -1,0 +1,43 @@
+# mod.rs declares a module with no file behind it.
+expect exit 2
+expect declares `mod not_there;` but none of
+=== src/node/tests/mod.rs
+// Fixture tree for testing/check-node-test-groups.py. It is never compiled;
+// the check reads it as text.
+use super::*;
+
+mod big;
+mod helpers;
+mod never_started;
+#[path = "renamed_file.rs"]
+mod pathed;
+mod quiet;
+mod rx_shutdown;
+#[cfg(target_os = "linux")]
+mod sock_direct;
+mod vec_drain;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod via_connected;
+mod via_helper;
+mod via_testutil;
+mod via_two_hops;
+
+/// A root helper with no socket; every module reaches it through `use super::*`.
+pub(super) fn make_node() -> Node {
+    Node::new(Config::new()).unwrap()
+}
+
+/// A root helper that installs a real connect()-ed UDP socket on a peer, as
+/// the dataplane does; a module that calls it holds a socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn install_connected_udp(node: &mut Node, addr: &NodeAddr, transport_id: TransportId) {
+    let local: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let peer_sa: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536)
+        .expect("open a connected UDP socket");
+    let socket = std::sync::Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
+        owned, peer_sa, local,
+    ));
+    node.get_peer_mut(addr).unwrap().set_connected_udp(socket, transport_id);
+}
+mod not_there;

@@ -1,0 +1,7 @@
+# No test takes the lock, as if it were renamed: node-large cannot be checked.
+expect exit 2
+expect CANNOT CHECK no test calls lock_large_network_test()
+=== src/node/tests/mod.rs
+// Fixture: socket modules but no lock holder, as if the lock were renamed.
+mod helpers;
+mod via_helper;

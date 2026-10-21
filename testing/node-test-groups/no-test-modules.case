@@ -1,0 +1,7 @@
+# mod.rs declares no modules, as after a moved directory.
+expect exit 2
+expect CANNOT CHECK
+expect declares no test modules
+=== src/node/tests/mod.rs
+// Fixture: a mod.rs that declares no modules (a moved or emptied directory).
+use super::*;

@@ -1,0 +1,8 @@
+# No module uses a primitive, as if every primitive were renamed: a scan that
+# sees nothing proves nothing.
+expect exit 2
+expect CANNOT CHECK no test module is flagged
+=== src/node/tests/mod.rs
+// Fixture: only socket-free modules, as if the primitives were all renamed.
+mod big;
+mod quiet;

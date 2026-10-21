@@ -62,6 +62,16 @@ RELAY_CONTAINER="fips-nat-relay${FIPS_CI_NAME_SUFFIX:-}"
 STUN_HOST="${NAT_LAN_PREFIX:-172.31.10}.40"
 STUN_PORT=3478
 DEV="eth0"
+# Phases 1 and 3 hold the fault until FAULTED_ATTEMPTS traversal attempts
+# have ended under it at the fault-node, then SURVIVAL_TAIL_SECS more,
+# before the liveness and panic checks; FAULT_WAIT_SECS from the peer's
+# restart bounds both the wait for the fault evidence and that hold (the
+# fixed wait those phases used before). See await_fault_then_survive.
+FAULT_WAIT_SECS=25
+FAULTED_ATTEMPTS=2
+SURVIVAL_TAIL_SECS=3
+# What a STUN fault looks like in the fault-node's log; see stun_fault_logged.
+STUN_FAULT_RE='stun.*(timed? ?out|fail|fallback|unreachable|no address)'
 
 cleanup() {
     # Best-effort tc/iptables cleanup before tearing the stack down.
@@ -206,19 +216,89 @@ assert_no_panic() {
 # LAN-only addresses" at debug when STUN times out. Also accept the
 # generic bootstrap "timed out waiting for" / "no address for" / any
 # log line containing both "stun" and ("timed out" | "fail" | "fallback"
-# | "unreachable").
-assert_stun_fault_observed() {
+# | "unreachable"). Silent, so it can be polled; a log that cannot be read
+# holds no evidence.
+stun_fault_logged() {
     local since="$1"  # seconds back from now
     local logs
     logs="$(docker logs --since "${since}s" "$NODE" 2>&1 || true)"
-    if grep -Eiq 'stun.*(timed? ?out|fail|fallback|unreachable|no address)' <<<"$logs"; then
-        echo "  $NODE: STUN fault evidence observed in logs"
+    grep -Eiq "$STUN_FAULT_RE" <<<"$logs"
+}
+
+# How many traversal attempts the fault-node has seen end under the fault
+# since since_ts, an RFC 3339 time, counted from its first STUN fault line on,
+# printed as "<as initiator> <as responder>". Either side may drive an
+# attempt. As initiator the node logs "NAT traversal failed" (warned or
+# rate-limit suppressed) when its attempt fails; as responder it logs
+# "traversal: answer sent ... accepted=false" when it turns the peer's offer
+# down for want of an address. When both sides start a round at once the node
+# logs both for that one round, so the two are counted apart rather than
+# summed. Counting from the first fault line leaves out an attempt that
+# observed STUN before the fault. Prints "0 0" when the log cannot be read.
+faulted_attempts() {
+    local since_ts="$1" logs first
+    logs="$(docker logs --since "$since_ts" "$NODE" 2>&1)" || { echo "0 0"; return 0; }
+    first="$(grep -Ein -m1 "$STUN_FAULT_RE" <<<"$logs" | cut -d: -f1)" || true
+    if [ -z "$first" ]; then
+        echo "0 0"
         return 0
     fi
-    echo "no STUN fault evidence in $NODE logs (last ${since}s)" >&2
-    echo "--- recent log tail ---" >&2
-    echo "$logs" | tail -40 >&2
-    return 1
+    logs="$(tail -n "+$first" <<<"$logs")"
+    echo "$(grep -c 'NAT traversal failed' <<<"$logs" || true)" \
+        "$(grep -Ec 'traversal: answer sent .*accepted=false' <<<"$logs" || true)"
+}
+
+# Wait for the fault to show in the fault-node's logs, then hold the fault in
+# place until the fault-node has run through it, before the caller's liveness
+# and panic checks.
+#
+# The evidence half is a wait: nothing after it can pass until the fault-node
+# has retried traversal under the fault, and how soon that happens depends on
+# the peer's restart and the auto-connect backoff. It polls for up to
+# timeout_secs from phase_start, the length of the fixed wait it replaced, and
+# its log window reaches 4 s before phase_start as that wait's did.
+#
+# The survival half is an observation window, sized by what it observes: it
+# holds until `attempts` traversal attempts have ended under the fault, with
+# the node as initiator or as responder, then tail_secs more, so the checks
+# read a daemon that has gone through its failure handling more than once
+# rather than one caught the moment it first logged the fault. The fixed 25 s it replaced held two or
+# three such attempts. It ends at timeout_secs from phase_start in any case,
+# where that fixed wait ended, and the checks then run as they did after it.
+#
+# Returns 1, having said why, when the evidence never appears.
+await_fault_then_survive() {
+    local phase_start="$1" timeout_secs="$2" attempts="$3" tail_secs="$4"
+    local since_ts init=0 resp=0
+    since_ts="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+    # SECONDS counts whole seconds, so one more keeps the poll from giving up
+    # before timeout_secs have really passed.
+    local deadline=$(( phase_start + timeout_secs + 1 ))
+    until stun_fault_logged $(( SECONDS - phase_start + 4 )); do
+        if (( SECONDS >= deadline )); then
+            local since=$(( SECONDS - phase_start + 4 ))
+            echo "no STUN fault evidence in $NODE logs (last ${since}s)" >&2
+            echo "--- recent log tail ---" >&2
+            docker logs --since "${since}s" "$NODE" 2>&1 | tail -40 >&2 || true
+            return 1
+        fi
+        sleep 1
+    done
+    echo "  $NODE: STUN fault evidence observed in logs after $(( SECONDS - phase_start ))s"
+    while :; do
+        read -r init resp <<<"$(faulted_attempts "$since_ts")"
+        if (( init >= attempts || resp >= attempts )); then
+            break
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "  $NODE: fewer than $attempts traversal attempts ended under the fault within ${timeout_secs}s ($init as initiator, $resp as responder); checking survival now"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "  $NODE: $attempts traversal attempts ended under the fault after $(( SECONDS - phase_start ))s ($init as initiator, $resp as responder)"
+    sleep "$tail_secs"
+    return 0
 }
 
 # Look for STUN observation success (debug-level) since N seconds ago.
@@ -231,6 +311,28 @@ assert_stun_success_observed() {
         return 0
     fi
     echo "no STUN success evidence in $NODE logs (last ${since}s)" >&2
+    return 1
+}
+
+# Wait until fips is running in both the fault-node and the fault-peer, for up
+# to timeout_secs. Says which container it is missing from when it gives up.
+wait_daemons_running() {
+    local timeout_secs="$1" start=$SECONDS missing c
+    # One more second for the whole-second SECONDS clock, as above.
+    local deadline=$(( SECONDS + timeout_secs + 1 ))
+    while :; do
+        missing=""
+        for c in "$NODE" "$PEER"; do
+            docker exec "$c" pidof fips >/dev/null 2>&1 || missing="$missing $c"
+        done
+        if [ -z "$missing" ]; then
+            echo "  fips daemon running in both containers after $(( SECONDS - start ))s"
+            return 0
+        fi
+        (( SECONDS < deadline )) || break
+        sleep 1
+    done
+    echo "fips daemon failed to start in${missing} within ${timeout_secs}s" >&2
     return 1
 }
 
@@ -291,21 +393,13 @@ run_test() {
         return 1
     }
 
-    # Give the daemons time to come up. Both fault-node and fault-peer
-    # need to start, publish their adverts to the relay, and discover
-    # each other before the fault-node will reach the STUN client.
+    # Wait for both daemons to come up. They then still have to publish
+    # their adverts to the relay and discover each other before the
+    # fault-node reaches the STUN client, which the pre-flight waits for.
     echo ""
     echo "--- waiting for daemons to start ---"
-    sleep 10
-
-    if ! docker exec "$NODE" pidof fips >/dev/null 2>&1; then
+    if ! wait_daemons_running 10; then
         dump_diagnostics
-        echo "fips daemon failed to start in $NODE" >&2
-        return 1
-    fi
-    if ! docker exec "$PEER" pidof fips >/dev/null 2>&1; then
-        dump_diagnostics
-        echo "fips daemon failed to start in $PEER" >&2
         return 1
     fi
 
@@ -313,9 +407,12 @@ run_test() {
     # fault-node successfully reaches the STUN client at least once.
     # Without this guard, a Phase-1 fault-evidence miss could be either
     # the real bug we're testing OR a setup bug (e.g., missing advert).
+    # The pre-flight's 55 s is the 45 s it had plus the 10 s fixed wait
+    # that used to precede it, so the daemons keep the same time from the
+    # lab's start to their first STUN observation.
     echo ""
     echo "=== Phase 0: pre-flight — confirm STUN baseline (no faults) ==="
-    if ! preflight_assert_stun_active 45; then
+    if ! preflight_assert_stun_active 55; then
         dump_diagnostics
         return 1
     fi
@@ -342,18 +439,20 @@ run_test() {
     apply_drop
     docker restart "$PEER" >/dev/null
     local phase_start=$SECONDS
-    # Wait long enough for fault-node to detect peer loss and retry.
-    # Auto-connect backoff is exponential 5s base; first retry ~5s after
-    # detection, second ~10s. Allow ~25s.
-    sleep 25
-    local phase_elapsed=$(( SECONDS - phase_start + 4 ))
+    # The fault-node has to detect the peer loss and retry under the
+    # fault. Auto-connect backoff is exponential 5s base; first retry ~5s
+    # after detection, second ~10s.
+    local p1_rc=0
+    await_fault_then_survive "$phase_start" "$FAULT_WAIT_SECS" \
+        "$FAULTED_ATTEMPTS" "$SURVIVAL_TAIL_SECS" \
+        || p1_rc=$?
 
     assert_process_alive            || { dump_diagnostics; return 1; }
     assert_no_panic                 || { dump_diagnostics; return 1; }
-    assert_stun_fault_observed "$phase_elapsed" || {
+    if [ "$p1_rc" -ne 0 ]; then
         dump_diagnostics
         return 1
-    }
+    fi
     clear_drop
 
     echo ""
@@ -384,15 +483,17 @@ run_test() {
     docker stop "$STUN_CONTAINER" >/dev/null
     docker restart "$PEER" >/dev/null
     local p3_start=$SECONDS
-    sleep 25
-    local p3_elapsed=$(( SECONDS - p3_start + 4 ))
+    local p3_rc=0
+    await_fault_then_survive "$p3_start" "$FAULT_WAIT_SECS" \
+        "$FAULTED_ATTEMPTS" "$SURVIVAL_TAIL_SECS" \
+        || p3_rc=$?
 
     assert_process_alive            || { dump_diagnostics; return 1; }
     assert_no_panic                 || { dump_diagnostics; return 1; }
-    assert_stun_fault_observed "$p3_elapsed" || {
+    if [ "$p3_rc" -ne 0 ]; then
         dump_diagnostics
         return 1
-    }
+    fi
 
     assert_relay "$RELAY_CONTAINER" || return 1
 

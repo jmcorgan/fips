@@ -1,0 +1,13 @@
+# The workflow installs a different nextest version from the one the config
+# requires.
+expect exit 1
+expect installs 'cargo-nextest@0.9.148'; pin it to nextest@0.9.149
+=== .github/workflows/ci.yml
+# Fixture workflow: the check reads only the nextest install step's pin.
+jobs:
+  test:
+    steps:
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
+        with:
+          tool: cargo-nextest@0.9.148

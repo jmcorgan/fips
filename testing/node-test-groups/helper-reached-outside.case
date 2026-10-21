@@ -1,0 +1,26 @@
+# A module that reaches a socket only through an aliased helper import is
+# missing from node-synthetic.
+expect exit 1
+expect FAIL [profile.ci] node::tests::via_helper::reaches_a_socket_through_an_aliased_import runs in no group, needs node-synthetic: module via_helper is flagged (via_helper::reaches_a_socket_through_an_aliased_import calls helpers::bound_transport)
+=== .config/nextest.toml
+nextest-version = { required = "0.9.149" }
+
+[test-groups]
+node-large = { max-threads = 1 }
+node-synthetic = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_testutil|via_two_hops)::/)'
+test-group = 'node-synthetic'
