@@ -19,10 +19,10 @@
 #     two directories (build-apk.sh wraps the maintainer scripts with one
 #     header line, which is not linted separately); the SDK feed Makefile ships
 #     preinst as well. On a router they run under busybox ash.
-#   * install-nak.sh, the three testing/cross-check/ scripts and
-#     testing/check-crate.sh as bash, with no exclusions. They are CI
-#     scripts, not shipped ones, and the sh exclusion set below misfires on
-#     bash.
+#   * install-nak.sh, keep-pinned-toolchain.sh, the three
+#     testing/cross-check/ scripts and testing/check-crate.sh as bash, with
+#     no exclusions. They are CI scripts, not shipped ones, and the sh
+#     exclusion set below misfires on bash.
 #
 # The sh exclusions, with reason:
 #   SC1008  the init scripts' `#!/bin/sh /etc/rc.common` shebang, an
@@ -62,6 +62,7 @@ SH_TARGETS=(
 )
 BASH_TARGETS=(
     ".github/scripts/install-nak.sh"
+    ".github/scripts/keep-pinned-toolchain.sh"
     "testing/cross-check/check.sh"
     "testing/check-crate.sh"
     "testing/cross-check/zig-cc"
