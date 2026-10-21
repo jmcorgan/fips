@@ -386,7 +386,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
-          tool: nextest
+          tool: nextest@0.9.143
 
       # The cache prunes loose files from target/ before it saves, so it should
       # hold no report; remove one anyway so the flaky-test check below reads
@@ -520,7 +520,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
-          tool: nextest
+          tool: nextest@0.9.143
 
       # The cache prunes loose files from target/ before it saves, so it should
       # hold no report; remove one anyway so the flaky-test check below reads
@@ -572,7 +572,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
-          tool: nextest
+          tool: nextest@0.9.143
 
       # The cache prunes loose files from target/ before it saves, so it should
       # hold no report; remove one anyway so the flaky-test check below reads
