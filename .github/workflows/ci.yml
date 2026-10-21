@@ -537,9 +537,11 @@ jobs:
 
       # The `profiling` feature adds a module, a recorder and a writer thread
       # that the default-feature run above never compiles, so its own tests do
-      # not execute there. Mirrored in testing/ci-local.sh.
+      # not execute there. Only the root package has the feature: fips-core's
+      # lib test binary is the same with or without it, and the run above
+      # already ran it. Mirrored in testing/ci-local.sh.
       - name: Run library tests with the tick-body profiler enabled
-        run: cargo test --lib --features profiling
+        run: cargo test -p fips-mesh --lib --features profiling
 
       # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in
       # a release build, so a test calling one without the same gate breaks a
