@@ -431,14 +431,53 @@ jobs:
       - name: Run library tests with the tick-body profiler enabled
         run: cargo test --lib --features profiling
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2a – Library tests in release mode
+#
+# Compiles the library tests with the release profile and runs the one test
+# that only a release build makes meaningful. It needs nothing and nothing
+# needs it: it starts with the run instead of after the Linux unit tests, and
+# a red here reds the run without holding back integration or packaging.
+# Its cache entry is its own, by job id (see "Cargo cache" above).
+# ─────────────────────────────────────────────────────────────────────────────
+  test-release:
+    name: Unit tests (release build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
       # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in
       # a release build, so a test calling one without the same gate breaks a
-      # build no other job performs: every run above compiles the test target
-      # in debug. Compile it in release too. Of what it builds, run only the
-      # leg-slot residue test, which is release-only because only an optimised
-      # build leaves the slot in a state worth measuring; the grep fails the
-      # step if that test did not run, since a name filter that matches
-      # nothing passes. Mirrored in testing/ci-local.sh.
+      # build no other job performs: every other unit-test job compiles the
+      # test target in debug. Compile it in release here. Of what it builds,
+      # run only the leg-slot residue test, which is release-only because only
+      # an optimised build leaves the slot in a state worth measuring; the grep
+      # fails the step if that test did not run, since a name filter that
+      # matches nothing passes. Mirrored in testing/ci-local.sh.
       - name: Compile the library tests in release mode and run the leg-slot residue test
         shell: bash
         env:
