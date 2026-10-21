@@ -1904,16 +1904,34 @@ fi
 # Phase 8: TTL expiration and pool reclamation
 echo ""
 echo "Phase 8: TTL expiration and pool reclamation"
-# Flush conntrack so stale sessions from Phase 5 don't keep the mapping alive.
+# Config uses ttl=5, pool_grace_period=5, and the pool ticks every 10s. A
+# mapping drains at the first tick that finds it with no sessions and more
+# than ttl since it was last referenced, and is freed at the first tick more
+# than the grace period after that, which is the next one. A DNS answer for a
+# name references its mapping, so a mapping answered within ttl of the next
+# tick drains a tick later. Measured on core-vm on 2026-10-21: Phase 6e's
+# query for NPUB_B came 0.5s before the flush, and in 8 of 22 runs that
+# mapping was freed a tick after the other.
+#
+# So answer both names now, then flush conntrack so stale sessions from
+# Phase 5 don't keep the mappings alive. Every mapping's last reference is
+# then within the queries just made, and each is freed at most ttl plus two
+# tick periods, 25s, after them, whatever the tick's phase. The wait allows
+# 2s more for the ~1s poll and for the tick to publish its snapshot. A
+# gateway that frees a mapping a tick late reds here.
+#
+# Two things are polled. The gateway's mapping count is what this phase
+# checks. The kernel's SNAT rules are what Phase 8b's gate reads next: the
+# tick publishes the control socket's snapshot before its removals reach
+# the NAT worker, so a count of zero can be read while the rules are still
+# in the table.
+docker exec "$CLIENT" dig +short AAAA "${NPUB_B}.fips" "@$GW_DNS" >/dev/null 2>&1 || true
+docker exec "$CLIENT2" dig +short AAAA "${NPUB_C}.fips" "@$GW_DNS" >/dev/null 2>&1 || true
+RECLAIM_T0=$SECONDS
 docker exec "$GATEWAY" conntrack -F 2>/dev/null || true
-# Config uses ttl=5, pool_grace_period=5. Pool tick interval is 10s, so:
-#   tick 1 (~10s): TTL expired → Draining (sessions=0 after flush)
-#   tick 2 (~20s): grace expired → freed
-# Wait 25s to ensure two full tick cycles have passed.
-echo "  Waiting 25s for TTL + grace period to expire (two tick cycles)..."
-sleep 25
+RECLAIM_WAIT=27
 
-# Query gateway control socket for mapping count.
+# The gateway's mapping count from its control socket, or "error".
 #
 # The expected value here is zero, so the reader must not be able to
 # produce a zero from a failed query: an error response carries no `data`
@@ -1923,16 +1941,41 @@ sleep 25
 # safe only because it waits for a positive "2". Require the key to exist
 # and exit non-zero if it does not, so the `|| echo "error"` fallback
 # fires and the check reds.
-MAPPING_COUNT=$(docker exec "$GATEWAY" bash -c \
-    'echo "{\"command\":\"show_mappings\"}" | nc -U -w1 /run/fips/gateway.sock 2>/dev/null' \
-    | python3 -c "
+gw_mapping_count() {
+    docker exec "$GATEWAY" bash -c \
+        'echo "{\"command\":\"show_mappings\"}" | nc -U -w1 /run/fips/gateway.sock 2>/dev/null' \
+        | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 data = r.get('data')
 if not isinstance(data, dict) or not isinstance(data.get('mappings'), list):
     sys.exit(1)
 print(len(data['mappings']))
-" 2>/dev/null || echo "error")
+" 2>/dev/null || echo "error"
+}
+
+# The number of SNAT rules in the gateway's table, counted as Phase 8b's
+# gate counts them, or "error" when the table cannot be listed: a listing
+# that failed holds no rules and must not read as zero.
+gw_snat_count() {
+    local nft
+    nft=$(docker exec "$GATEWAY" nft list table inet fips_gateway 2>&1) || { echo "error"; return 0; }
+    grep -cE "saddr [0-9a-f:]+ .*snat" <<< "$nft" || true
+}
+
+echo "  Waiting up to ${RECLAIM_WAIT}s from the last DNS answers for TTL + grace period to expire..."
+while :; do
+    MAPPING_COUNT=$(gw_mapping_count)
+    RECLAIM_SNAT=$(gw_snat_count)
+    if [ "$MAPPING_COUNT" = "0" ] && [ "$RECLAIM_SNAT" = "0" ]; then
+        break
+    fi
+    # SECONDS counts whole seconds: the last read is taken once at least
+    # RECLAIM_WAIT seconds have really passed.
+    [ $((SECONDS - RECLAIM_T0)) -le "$RECLAIM_WAIT" ] || break
+    sleep 1
+done
+echo "  After $((SECONDS - RECLAIM_T0))s: mappings $MAPPING_COUNT, SNAT rules $RECLAIM_SNAT"
 if [ "$MAPPING_COUNT" = "0" ]; then
     check "Mapping reclaimed after TTL+grace" 0
 else

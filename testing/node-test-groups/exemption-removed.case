@@ -1,0 +1,6 @@
+# Without its exemption the never-started transport flags its module, so the
+# exemption is what keeps it out.
+expect exit 1
+expect FAIL [profile.ci] node::tests::never_started::a_dead_transport_fails_to_send runs in no group, needs node-synthetic
+=== exemptions.toml
+# Fixture: no exemptions, so the never-started transport flags its module.

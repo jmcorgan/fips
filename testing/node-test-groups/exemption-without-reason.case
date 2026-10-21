@@ -1,0 +1,8 @@
+# An exemption with a blank reason cannot be accepted.
+expect exit 2
+expect needs fn, a primitive
+=== exemptions.toml
+[[exempt]]
+fn = "never_started::built_but_never_started"
+primitive = "UdpTransport"
+reason = " "

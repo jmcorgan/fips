@@ -1,0 +1,292 @@
+# The healthy tree every case starts from. Socket modules reached directly
+# (sock_direct, with an inline mod), through an aliased import (via_helper),
+# two helpers away (via_two_hops), through a shared helper type in
+# src/testutil.rs (via_testutil), through a #[path] module (pathed), through a
+# mod.rs helper that opens a connected UDP socket (via_connected) and through
+# the shutdown variant of the rx loop (rx_shutdown); lock
+# holders direct, through a helper, and inside a socket module; socket-free
+# modules whose comments, strings, raw strings and Vec methods only look like
+# socket use (quiet, vec_drain); an exempted never-started transport
+# (never_started); and an undeclared file (orphan.rs). It must pass, with
+# exactly these memberships.
+expect exit 0
+expect check-node-test-groups: 8 socket module(s) (9 tests) in node-synthetic, 3 lock holder(s) in node-large, both profiles; nextest pinned to 0.9.149
+expect test modules declared: 12
+expect not flagged (4): big never_started quiet vec_drain
+expect note: exemption for gone::from_this_trunk matches no function in this tree
+expect-absent FAIL
+expect-absent orphan
+=== .config/nextest.toml
+nextest-version = { required = "0.9.149" }
+
+[test-groups]
+node-large = { max-threads = 1 }
+node-synthetic = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'test(slow)'
+slow-timeout = "120s"
+=== .github/workflows/ci.yml
+# Fixture workflow: the check reads only the nextest install step's pin.
+jobs:
+  test:
+    steps:
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
+        with:
+          tool: nextest@0.9.149
+=== Cargo.toml
+# Fixture manifest: the check reads only the package name.
+[package]
+name = "fips-mesh"
+=== exemptions.toml
+[[exempt]]
+fn = "never_started::built_but_never_started"
+primitive = "UdpTransport"
+reason = "Fixture: the transport is constructed and never started, so no socket is bound."
+
+[[exempt]]
+fn = "gone::from_this_trunk"
+primitive = "UdpSocket"
+reason = "Fixture: names a function this tree lacks, which is only a note."
+=== src/node/tests/big.rs
+use super::*;
+
+static LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+pub(super) async fn lock_large_network_test() -> tokio::sync::MutexGuard<'static, ()> {
+    LOCK.lock().await
+}
+
+async fn run_big() {
+    let _guard = lock_large_network_test().await;
+    let _nodes: Vec<Node> = (0..100).map(|_| make_node()).collect();
+}
+
+#[tokio::test]
+async fn test_big_100_nodes() {
+    let _guard = lock_large_network_test().await;
+}
+
+#[tokio::test]
+async fn test_big_via_helper() {
+    run_big().await;
+}
+
+#[test]
+fn small_and_quiet() {
+    let _node = make_node();
+}
+=== src/node/tests/helpers.rs
+use super::*;
+use crate::transport::udp::UdpTransport;
+
+/// A started UDP transport on loopback: binds a real socket.
+pub(super) async fn bound_transport() -> UdpTransport {
+    let mut t = UdpTransport::new(TransportId::new(1), None, UdpConfig::default(), tx());
+    t.start_async().await.unwrap();
+    t
+}
+=== src/node/tests/mod.rs
+// Fixture tree for testing/check-node-test-groups.py. It is never compiled;
+// the check reads it as text.
+use super::*;
+
+mod big;
+mod helpers;
+mod never_started;
+#[path = "renamed_file.rs"]
+mod pathed;
+mod quiet;
+mod rx_shutdown;
+#[cfg(target_os = "linux")]
+mod sock_direct;
+mod vec_drain;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod via_connected;
+mod via_helper;
+mod via_testutil;
+mod via_two_hops;
+
+/// A root helper with no socket; every module reaches it through `use super::*`.
+pub(super) fn make_node() -> Node {
+    Node::new(Config::new()).unwrap()
+}
+
+/// A root helper that installs a real connect()-ed UDP socket on a peer, as
+/// the dataplane does; a module that calls it holds a socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn install_connected_udp(node: &mut Node, addr: &NodeAddr, transport_id: TransportId) {
+    let local: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let peer_sa: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let owned = crate::transport::udp::open_connected_fd(local, peer_sa, 65_536, 65_536)
+        .expect("open a connected UDP socket");
+    let socket = std::sync::Arc::new(crate::transport::udp::ConnectedPeerSocket::from_fd(
+        owned, peer_sa, local,
+    ));
+    node.get_peer_mut(addr).unwrap().set_connected_udp(socket, transport_id);
+}
+=== src/node/tests/never_started.rs
+use super::*;
+
+/// Built and never started, so no socket: exempted in exemptions.toml.
+fn built_but_never_started() -> crate::transport::udp::UdpTransport {
+    crate::transport::udp::UdpTransport::new(TransportId::new(9), None, UdpConfig::default(), tx())
+}
+
+#[test]
+fn a_dead_transport_fails_to_send() {
+    let _t = built_but_never_started();
+}
+=== src/node/tests/orphan.rs
+// Not declared in mod.rs, so not a module: the check must ignore it.
+#[tokio::test]
+async fn never_compiled() {
+    let _ = tokio::net::UdpSocket::bind("127.0.0.1:0").await;
+}
+=== src/node/tests/quiet.rs
+use super::*;
+
+// A comment naming UdpSocket, TcpStream and node.start() is not a use.
+/// Nor is a doc comment: `UdpTransport::new(...).start()`.
+#[test]
+fn loopback_only() {
+    // Inside the body too: a comment naming TcpListener::bind is not a use.
+    /* Nor a block comment /* nested */ naming node.start(). */
+    let _node = make_node();
+    let text = "UdpSocket::bind(\"127.0.0.1:0\") and run_rx_loop() in a string";
+    let raw = r#"he said " TcpListener::bind is text"#;
+    let _ = (text, raw, 'x', '\'');
+}
+
+#[test]
+fn calls_a_local_helper_named_like_a_socket_helper() {
+    bound_transport_free();
+}
+
+/// Same name pattern as a socket helper elsewhere, but its own, socket-free.
+fn bound_transport_free() {}
+=== src/node/tests/renamed_file.rs
+use super::*;
+
+#[tokio::test]
+async fn a_node_started_through_its_config_binds() {
+    let mut node = make_node();
+    node.start().await.unwrap();
+}
+=== src/node/tests/rx_shutdown.rs
+use super::*;
+
+/// Drives the rx loop through its shutdown variant, which is where the
+/// control socket is bound.
+#[tokio::test]
+async fn drives_the_rx_loop_until_shutdown() {
+    let mut node = make_node();
+    let _ = node.run_rx_loop_with_shutdown(std::future::pending()).await;
+}
+=== src/node/tests/sock_direct.rs
+use super::*;
+
+#[tokio::test]
+async fn real_udp_socket() {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    drop(sock);
+}
+
+#[tokio::test]
+async fn test_sock_100_nodes() {
+    let _guard = super::big::lock_large_network_test().await;
+}
+
+mod inner {
+    use super::*;
+
+    #[tokio::test]
+    async fn inner_rx_loop() {
+        let mut node = make_node();
+        let _ = node.run_rx_loop().await;
+    }
+}
+=== src/node/tests/vec_drain.rs
+use super::*;
+
+/// `.drain(` and `.fill(` here are a Vec's and a slice's, not the test
+/// helper type's methods of the same names in testutil.rs.
+#[test]
+fn drains_a_vec() {
+    let mut v = vec![0u8; 4];
+    v.fill(1);
+    let _: Vec<u8> = v.drain(..).collect();
+}
+=== src/node/tests/via_connected.rs
+use super::*;
+
+/// Reaches a socket only through mod.rs's install_connected_udp.
+#[test]
+fn a_connected_socket_survives_the_tick() {
+    let mut node = make_node();
+    let addr = NodeAddr::from_bytes([1; 16]);
+    install_connected_udp(&mut node, &addr, TransportId::new(3));
+}
+=== src/node/tests/via_helper.rs
+use super::*;
+use super::helpers::bound_transport as bound;
+
+#[tokio::test]
+async fn reaches_a_socket_through_an_aliased_import() {
+    let _t = bound().await;
+}
+
+/// Reached from via_two_hops.
+pub(super) async fn wrapper() {
+    let _t = bound().await;
+}
+=== src/node/tests/via_testutil.rs
+use super::*;
+use crate::testutil::Blackhole;
+
+#[test]
+fn reaches_a_socket_through_a_shared_helper_type() {
+    let _bh = Blackhole::open(true);
+}
+=== src/node/tests/via_two_hops.rs
+use super::*;
+
+#[tokio::test]
+async fn reaches_a_socket_two_helpers_away() {
+    super::via_helper::wrapper().await;
+}
+=== src/testutil.rs
+/// A listener nothing reads from.
+pub(crate) struct Blackhole {
+    listener: std::net::TcpListener,
+}
+
+impl Blackhole {
+    pub(crate) fn open(_fill: bool) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        Self { listener }
+    }
+
+    pub(crate) fn drain(&mut self) -> Vec<std::net::TcpStream> {
+        let _ = &self.listener;
+        Vec::new()
+    }
+}

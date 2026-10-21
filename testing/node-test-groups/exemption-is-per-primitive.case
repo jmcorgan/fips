@@ -1,0 +1,18 @@
+# The exempted function also binds a UdpSocket: an exemption covers one
+# primitive, not the function.
+expect exit 1
+expect module never_started is flagged (never_started::built_but_never_started uses UdpSocket (line 6))
+=== src/node/tests/never_started.rs
+use super::*;
+
+/// The exempted function, now also binding a socket of another kind: the
+/// exemption covers UdpTransport only, so this still flags the module.
+fn built_but_never_started() -> crate::transport::udp::UdpTransport {
+    let _peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    crate::transport::udp::UdpTransport::new(TransportId::new(9), None, UdpConfig::default(), tx())
+}
+
+#[test]
+fn a_dead_transport_fails_to_send() {
+    let _t = built_but_never_started();
+}

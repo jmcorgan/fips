@@ -1,0 +1,26 @@
+# A module that drives the rx loop only through run_rx_loop_with_shutdown,
+# where the control socket is bound, is missing from node-synthetic.
+expect exit 1
+expect FAIL [profile.ci] node::tests::rx_shutdown::drives_the_rx_loop_until_shutdown runs in no group, needs node-synthetic: module rx_shutdown is flagged (rx_shutdown::drives_the_rx_loop_until_shutdown uses run_rx_loop
+=== .config/nextest.toml
+nextest-version = { required = "0.9.149" }
+
+[test-groups]
+node-large = { max-threads = 1 }
+node-synthetic = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops)::/)'
+test-group = 'node-synthetic'

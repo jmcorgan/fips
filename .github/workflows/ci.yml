@@ -53,6 +53,35 @@ env:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cargo cache
+#
+# Every job that compiles Rust caches its dependencies with Swatinem/rust-cache,
+# configured identically in each. The entry holds the registry, git checkouts
+# and the dependency artifacts under target/; the action deletes the workspace
+# crates' artifacts and every loose file (binaries, nextest reports) before it
+# saves, so the workspace always compiles from source.
+#
+# The key is the job id, the runner's OS and CPU architecture, a hash of the
+# installed rustc versions (only the pinned one: each job first removes the
+# runner image's own) and CARGO*/RUST*/CC* environment, and a hash of
+# Cargo.lock and the manifests with the workspace packages' versions blanked.
+# A version bump therefore keeps the key, and no two jobs share one. They used
+# to: the build legs, the unit-test jobs and both Linux architectures wrote
+# `<os>-cargo-<lock>`, so whichever saved first owned the entry and the others
+# recompiled every dependency on an exact hit. A Windows unit-test run
+# compiled 285 crates against the release build's entry.
+#
+# Only a push to master saves. Every other branch, pull request and trunk
+# restores master's entry, by exact key or, when its own lock differs, by the
+# key without the lock hash, and compiles the dependencies that differ. One
+# writer keeps the repository's cache within its size limit, which per-ref
+# entries from every branch had pushed it past.
+#
+# cache-bin is off: the tools installed into ~/.cargo/bin (cargo-nextest,
+# cargo-ndk) come from their own install steps, not from a cache.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Job 1 – Build matrix
 #
 # Builds on Linux x86_64, Linux aarch64, and macOS.
@@ -115,6 +144,13 @@ jobs:
       # reports. Kept in step with ci-local.sh's run_nextest_flaky by hand.
       - name: Check the flaky-test reporter against its fixtures
         run: bash testing/nextest-flaky/test.sh
+      # The node test groups in .config/nextest.toml against the source: the
+      # guard's fixtures, then the guard on this tree. Kept in step with
+      # ci-local.sh's run_node_test_groups by hand.
+      - name: Check the node test groups guard against its fixtures
+        run: bash testing/node-test-groups/test.sh
+      - name: Check every socket node test module is in its nextest group
+        run: python3 testing/check-node-test-groups.py
       # The glibc floor check's cases, built from the host's own true
       # executable. Not a matrix suite, so it is kept in step with
       # ci-local.sh's run_glibc_floor by hand.
@@ -155,16 +191,17 @@ jobs:
           components: clippy
           cache: false
           rustflags: ''
-      - name: Cache Cargo registry + build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       - run: cargo clippy --all-targets --all-features -- -D warnings
       # An optional feature means two source trees, and --all-features lints
       # only one of them. The default build is what ships, so lint it
@@ -263,16 +300,17 @@ jobs:
           components: clippy
           cache: false
           rustflags: ''
-      - name: Cache Cargo registry + build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       - name: Install cargo-ndk
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
@@ -323,16 +361,17 @@ jobs:
           cache: false
           rustflags: ''
 
-      - name: Cache Cargo registry + build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
       - name: Build
         # --bins --examples rather than the bare default: the native datagram
@@ -427,25 +466,26 @@ jobs:
           cache: false
           rustflags: ''
 
-      - name: Cache Cargo registry + build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
-          tool: nextest
+          tool: nextest@0.9.143
 
-      # The cache restores target/, including the previous run's report. Remove
-      # it so the flaky-test check below reads only this run's, and reports a
-      # missing one when nextest wrote none.
+      # The cache prunes loose files from target/ before it saves, so it should
+      # hold no report; remove one anyway so the flaky-test check below reads
+      # only this run's, and reports a missing one when nextest wrote none.
       - name: Remove a cached nextest report
         shell: bash
         run: rm -f target/nextest/ci/junit.xml
@@ -537,18 +577,59 @@ jobs:
 
       # The `profiling` feature adds a module, a recorder and a writer thread
       # that the default-feature run above never compiles, so its own tests do
-      # not execute there. Mirrored in testing/ci-local.sh.
+      # not execute there. Only the root package has the feature: fips-core's
+      # lib test binary is the same with or without it, and the run above
+      # already ran it. Mirrored in testing/ci-local.sh.
       - name: Run library tests with the tick-body profiler enabled
-        run: cargo test --lib --features profiling
+        run: cargo test -p fips-mesh --lib --features profiling
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2a – Library tests in release mode
+#
+# Compiles the library tests with the release profile and runs the one test
+# that only a release build makes meaningful. It needs nothing and nothing
+# needs it: it starts with the run instead of after the Linux unit tests, and
+# a red here reds the run without holding back integration or packaging.
+# Its cache entry is its own, by job id (see "Cargo cache" above).
+# ─────────────────────────────────────────────────────────────────────────────
+  test-release:
+    name: Unit tests (release build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ''
+
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
       # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in
       # a release build, so a test calling one without the same gate breaks a
-      # build no other job performs: every run above compiles the test target
-      # in debug. Compile it in release too. Of what it builds, run only the
-      # leg-slot residue test, which is release-only because only an optimised
-      # build leaves the slot in a state worth measuring; the grep fails the
-      # step if that test did not run, since a name filter that matches
-      # nothing passes. Mirrored in testing/ci-local.sh.
+      # build no other job performs: every other unit-test job compiles the
+      # test target in debug. Compile it in release here. Of what it builds,
+      # run only the leg-slot residue test, which is release-only because only
+      # an optimised build leaves the slot in a state worth measuring; the grep
+      # fails the step if that test did not run, since a name filter that
+      # matches nothing passes. Mirrored in testing/ci-local.sh.
       - name: Compile the library tests in release mode and run the leg-slot residue test
         shell: bash
         env:
@@ -576,21 +657,22 @@ jobs:
           cache: false
           rustflags: ''
 
-      - name: Cache Cargo registry + build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
-          tool: nextest
+          tool: nextest@0.9.143
 
       # The Darwin half of the address-less presence contract. The Linux legs
       # pin that `getifaddrs` reports an interface with no addresses as
@@ -617,9 +699,9 @@ jobs:
           # one fails when the fixture is missing instead of skipping silently.
           echo "FIPS_TEST_REQUIRE_FIXTURES=1" >> "$GITHUB_ENV"
 
-      # The cache restores target/, including the previous run's report. Remove
-      # it so the flaky-test check below reads only this run's, and reports a
-      # missing one when nextest wrote none.
+      # The cache prunes loose files from target/ before it saves, so it should
+      # hold no report; remove one anyway so the flaky-test check below reads
+      # only this run's, and reports a missing one when nextest wrote none.
       - name: Remove a cached nextest report
         shell: bash
         run: rm -f target/nextest/ci/junit.xml
@@ -734,25 +816,26 @@ jobs:
           cache: false
           rustflags: ''
 
-      - name: Cache Cargo registry + build
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Only the pinned toolchain may be installed when rust-cache computes its
+      # key; see the script.
+      - name: Remove the runner image's own Rust toolchains
+        shell: bash
+        run: bash .github/scripts/keep-pinned-toolchain.sh
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2
         with:
-          tool: nextest
+          tool: nextest@0.9.143
 
-      # The cache restores target/, including the previous run's report. Remove
-      # it so the flaky-test check below reads only this run's, and reports a
-      # missing one when nextest wrote none.
+      # The cache prunes loose files from target/ before it saves, so it should
+      # hold no report; remove one anyway so the flaky-test check below reads
+      # only this run's, and reports a missing one when nextest wrote none.
       - name: Remove a cached nextest report
         shell: bash
         run: rm -f target/nextest/ci/junit.xml

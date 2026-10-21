@@ -12,6 +12,13 @@
 # few seconds" from the day it was written until then, which nothing had
 # contradicted because no runner had ever invoked it.
 #
+# The clock both the gate and the traces read is SECONDS, which counts whole
+# seconds, so every timing verdict below needs at least a second of margin
+# and most of the run is that margin. The traces were cut on 2026-10-21 to
+# drop the time no assertion reads (a second climb step in cases 1 and 4, a
+# second of stall in the hard-cap cases, two seconds of climb in 7d) without
+# narrowing any margin. That took it from 133 s to about 116 s.
+#
 # Run:
 #   ./wait-converge-test.sh
 # Exits 0 only if every case passes; non-zero if any case fails.
@@ -60,16 +67,16 @@ set_pt() {
     PT=$(( SECONDS - PING_START ))
 }
 
-# Case 1 trace: improves (16 reachable) early, climbs to 18, then holds
+# Case 1 trace: improves (16 reachable) early, climbs to 19, then holds
 # at FAILED=1 (within slack) until late, then fully converges. Mirrors a
 # deep node whose last pair clears only after stacked discovery backoff.
+# With stall_secs=4 the hold arms at t~7, two seconds before convergence;
+# with slack=0 (case 1b) the same stall bails at t~7 instead.
 ping_near_converged_hold() {
     set_pt; local t=$PT
     if (( t < 3 )); then
         PASSED=16; FAILED=4
-    elif (( t < 6 )); then
-        PASSED=18; FAILED=2
-    elif (( t < 12 )); then
+    elif (( t < 9 )); then
         # Stuck within slack: one straggling pair pending.
         PASSED=19; FAILED=1
     else
@@ -92,7 +99,9 @@ ping_far_stall() {
 # Case 3 trace: never converges; always one pair pending and never makes
 # further progress after the first reading. Should hit the hard cap.
 # FAILED stays at exactly 1 here so it is within the default slack=2 and
-# the near-converged hold keeps polling all the way to max_secs.
+# the near-converged hold keeps polling all the way to max_secs. Driven with
+# max_secs=5 and stall_secs=2, so the hold arms at t~2 and is ~3s old at the
+# cap.
 ping_never_converges() {
     PASSED=19; FAILED=1
 }
@@ -103,9 +112,7 @@ ping_backcompat_hold() {
     set_pt; local t=$PT
     if (( t < 3 )); then
         PASSED=16; FAILED=4
-    elif (( t < 6 )); then
-        PASSED=18; FAILED=2
-    elif (( t < 12 )); then
+    elif (( t < 9 )); then
         PASSED=19; FAILED=1
     else
         PASSED=20; FAILED=0
@@ -127,12 +134,12 @@ ping_quick_converge() {
 # PT like the traces above, and each is shaped so its expected verdict holds
 # with at least a second of margin on either side of the accept window.
 
-# 7d: still progressing until t=4, so the hold that follows (armed at t=6
-# with stall_secs=2) has lasted only ~2s when the cap falls at 8s, short of
+# 7d: still progressing until t=2, so the hold that follows (armed at t=4
+# with stall_secs=2) has lasted only ~2s when the cap falls at 6s, short of
 # a 4s accept window.
 ping_late_progress() {
     set_pt; local t=$PT
-    if (( t < 4 )); then
+    if (( t < 2 )); then
         PASSED=$(( 15 + t )); FAILED=$(( 5 - t ))
     else
         PASSED=19; FAILED=1
@@ -235,16 +242,16 @@ echo
 echo "== Case 3: never converges (hard cap) =="
 reset_ping
 start=$SECONDS
-out=$(wait_until_connected ping_never_converges 6 3 1 2); rc=$?
+out=$(wait_until_connected ping_never_converges 5 2 1 2); rc=$?
 elapsed=$((SECONDS - start))
 echo "$out"
 c3_rc_ok=1; [ "$rc" -ne 0 ] && c3_rc_ok=0
 check "case3: returns 1 (never converges)" "$c3_rc_ok" "rc=$rc"
 c3_cap_ok=1; echo "$out" | grep -q "TIMEOUT" && c3_cap_ok=0
 check "case3: hit hard-cap TIMEOUT message" "$c3_cap_ok"
-# Hard cap: must run roughly to max_secs (6s), not bail early.
-c3_dur_ok=1; [ "$elapsed" -ge 6 ] && c3_dur_ok=0
-check "case3: ran to hard cap (~max_secs)" "$c3_dur_ok" "elapsed=${elapsed}s >= 6s"
+# Hard cap: must run roughly to max_secs (5s), not bail early.
+c3_dur_ok=1; [ "$elapsed" -ge 5 ] && c3_dur_ok=0
+check "case3: ran to hard cap (~max_secs)" "$c3_dur_ok" "elapsed=${elapsed}s >= 5s"
 
 # --- Case 4: backward-compat (4 args, default slack=2) ----------------
 echo
@@ -309,7 +316,7 @@ echo
 echo "== Case 6: verdict names which condition failed =="
 
 echo "-- Case 6a: genuinely unconverged tree, hard cap --"
-run_gate ping_never_converges 6 3 1 2; rc=$?
+run_gate ping_never_converges 5 2 1 2; rc=$?
 cat "$VERDICT_OUT"
 c6a_rc_ok=1; [ "$rc" -ne 0 ] && c6a_rc_ok=0
 check "case6a: unconverged tree still reds" "$c6a_rc_ok" "rc=$rc"
@@ -358,7 +365,7 @@ echo
 echo "== Case 7: near-converged acceptance at the hard cap =="
 
 echo "-- Case 7a: held within slack past the accept window, accepted at the cap --"
-run_gate ping_never_converges 6 3 1 2 2; rc=$?
+run_gate ping_never_converges 5 2 1 2 2; rc=$?
 cat "$VERDICT_OUT"
 c7a_rc_ok=1; [ "$rc" -eq 0 ] && c7a_rc_ok=0
 check "case7a: near-converged hold past the window returns 0" "$c7a_rc_ok" "rc=$rc"
@@ -370,13 +377,13 @@ check "case7a: verdict carries the shortfall" "$c7a_cnt_ok" \
     "reached=$CONVERGE_REACHED pending=$CONVERGE_PENDING"
 
 echo "-- Case 7b: the same trace with five arguments, then with an explicit 0 --"
-run_gate ping_never_converges 6 3 1 2; rc=$?
+run_gate ping_never_converges 5 2 1 2; rc=$?
 cat "$VERDICT_OUT"
 c7b_rc_ok=1; [ "$rc" -eq 1 ] && c7b_rc_ok=0
 check "case7b: five arguments still time out" "$c7b_rc_ok" "rc=$rc"
 c7b_out_ok=1; [ "$CONVERGE_OUTCOME" = "timeout" ] && c7b_out_ok=0
 check "case7b: five arguments give verdict timeout" "$c7b_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
-run_gate ping_never_converges 6 3 1 2 0; rc=$?
+run_gate ping_never_converges 5 2 1 2 0; rc=$?
 cat "$VERDICT_OUT"
 c7b0_rc_ok=1; [ "$rc" -eq 1 ] && c7b0_rc_ok=0
 check "case7b: an explicit 0 still times out" "$c7b0_rc_ok" "rc=$rc"
@@ -392,7 +399,7 @@ c7c_out_ok=1; [ "$CONVERGE_OUTCOME" = "stalled" ] && c7c_out_ok=0
 check "case7c: verdict is stalled" "$c7c_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
 
 echo "-- Case 7d: hold shorter than the accept window at the cap --"
-run_gate ping_late_progress 8 2 1 2 4; rc=$?
+run_gate ping_late_progress 6 2 1 2 4; rc=$?
 cat "$VERDICT_OUT"
 c7d_rc_ok=1; [ "$rc" -eq 1 ] && c7d_rc_ok=0
 check "case7d: a hold shorter than the window still times out" "$c7d_rc_ok" "rc=$rc"
@@ -437,12 +444,12 @@ c7h_out_ok=1; [ "$CONVERGE_OUTCOME" = "timeout" ] && c7h_out_ok=0
 check "case7h: verdict is timeout" "$c7h_out_ok" "CONVERGE_OUTCOME=$CONVERGE_OUTCOME"
 
 echo "-- Case 7i: hold armed, but shorter than the window when the cap falls --"
-# The hold arms at t~3 (stall_secs after the first reading) and the cap falls
-# at 6, so it is ~3s old against a 10s window: seven seconds of margin, far
+# The hold arms at t~2 (stall_secs after the first reading) and the cap falls
+# at 5, so it is ~3s old against a 10s window: seven seconds of margin, far
 # above SECONDS' one-second granularity. This is the case that carries the
 # duration condition; 7d and 7h pass even with it removed if their hold
 # happens not to arm.
-run_gate ping_never_converges 6 3 1 2 10; rc=$?
+run_gate ping_never_converges 5 2 1 2 10; rc=$?
 cat "$VERDICT_OUT"
 c7i_rc_ok=1; [ "$rc" -eq 1 ] && c7i_rc_ok=0
 check "case7i: an armed hold shorter than the window still times out" "$c7i_rc_ok" "rc=$rc"

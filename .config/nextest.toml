@@ -1,3 +1,10 @@
+# The nextest version every GitHub runner installs, and the oldest a local host
+# may run (`required` is a minimum). The install-action steps in
+# .github/workflows/ci.yml pin exactly this version, the newest the pinned
+# install-action ships, so no runner falls back to building or fetching another;
+# testing/check-node-test-groups.py fails when the two differ.
+nextest-version = { required = "0.9.143" }
+
 [profile.ci]
 junit = { path = "junit.xml" }
 # Synthetic node tests build 250-edge meshes with one-shot UDP
@@ -24,18 +31,48 @@ junit = { path = "junit.xml" }
 # to surface retried-but-passed tests, not to drop the retries.
 retries = 2
 
+# nextest runs each test in its own process, so an in-process Tokio mutex
+# cannot keep two tests apart. These two groups do it instead, each running
+# one test at a time; the two groups run alongside each other and alongside
+# every other test.
+#
+#   node-large      the tests that take lock_large_network_test(): the
+#                   100-node tests, compute-bound and mutually exclusive.
+#   node-synthetic  the node test modules that open a real socket (a UDP, TCP,
+#                   Ethernet or BLE transport, an OS socket, or a node's
+#                   start() or rx loop, which bind through its Config and
+#                   include the control socket's shared default path). Under
+#                   load the loopback stack can drop a lone one-shot msg1 when
+#                   several such tests flood it at once.
+#
+# The other node tests use the in-process loopback transport and run in
+# parallel. The node-large override comes first in both profiles: nextest
+# takes the group from the first override that matches, so
+# session::test_session_100_nodes, which sits in a socket module, stays in
+# node-large.
+#
+# The module list is the union of what maint, master and next need; a name a
+# branch lacks matches nothing there. testing/check-node-test-groups.py
+# recomputes the membership from the source (ci-parity job and local CI's
+# guards) and fails when a socket module or a lock holder is missing, so add a
+# module here when it starts opening a socket. Filters stay in the one shape
+# it parses: anchored, package-scoped, one alternation.
 [test-groups]
+node-large = { max-threads = 1 }
 node-synthetic = { max-threads = 1 }
 
-# nextest runs each test in a separate process, so in-process Tokio mutexes
-# can't serialize the synthetic localhost UDP node tests on CI. Those tests
-# send one-shot handshakes without production reconnect timers; under runner
-# load even small topologies drop the lone msg1. Group all node tests so
-# they run mutually exclusive — slower CI, reliable assertions.
 [[profile.default.overrides]]
-filter = 'test(node::tests::)'
+filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
-filter = 'test(node::tests::)'
+filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
