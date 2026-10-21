@@ -1,0 +1,13 @@
+# Primitive uses that open no socket, for testing/check-node-test-groups.py.
+#
+# Each entry exempts one primitive in one function, named as the check
+# reports it (<module>[::<inline mod>][::<impl type>]::<fn>). Any other
+# primitive in that function, and any flagged helper it calls, still flags its
+# module. An entry needs a reason saying why no socket is opened; one naming a
+# function this branch lacks is reported as a note, since one file serves
+# maint, master and next.
+
+[[exempt]]
+fn = "heartbeat::a_failing_peer_is_retried_after_the_gap_and_not_before"
+primitive = "UdpTransport"
+reason = "The UDP transport is built and never started, so its send fails with NotStarted before any socket exists; the test's nodes use the in-process loopback transport."

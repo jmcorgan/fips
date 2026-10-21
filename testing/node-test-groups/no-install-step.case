@@ -1,0 +1,6 @@
+# No workflow installs nextest, so the pin cannot be checked.
+expect exit 2
+expect no `tool: nextest` install step
+=== .github/workflows/ci.yml
+# Fixture: a workflow with no nextest install step.
+jobs: {}

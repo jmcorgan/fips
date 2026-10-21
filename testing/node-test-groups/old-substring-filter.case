@@ -1,0 +1,18 @@
+# The unanchored, unscoped substring filter this check replaced.
+expect exit 2
+expect filter 'test(node::tests::)'
+=== .config/nextest.toml
+# Fixture: the configuration this check replaced, one substring filter.
+nextest-version = { required = "0.9.149" }
+
+[test-groups]
+node-synthetic = { max-threads = 1 }
+node-large = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(node::tests::)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'test(node::tests::)'
+test-group = 'node-synthetic'

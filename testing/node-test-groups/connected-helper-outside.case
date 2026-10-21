@@ -1,0 +1,27 @@
+# A module that reaches a socket only through a mod.rs helper opening a
+# connected UDP socket (open_connected_fd) is missing from node-synthetic.
+expect exit 1
+expect FAIL [profile.ci] node::tests::via_connected::a_connected_socket_survives_the_tick runs in no group, needs node-synthetic: module via_connected is flagged (via_connected::a_connected_socket_survives_the_tick calls <mod.rs>::install_connected_udp)
+expect <mod.rs>::install_connected_udp: uses open_connected_fd
+=== .config/nextest.toml
+nextest-version = { required = "0.9.149" }
+
+[test-groups]
+node-large = { max-threads = 1 }
+node-synthetic = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|pathed|sock_direct|via_helper|via_testutil|via_two_hops)::/)'
+test-group = 'node-synthetic'

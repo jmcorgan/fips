@@ -142,6 +142,13 @@ jobs:
       # reports. Kept in step with ci-local.sh's run_nextest_flaky by hand.
       - name: Check the flaky-test reporter against its fixtures
         run: bash testing/nextest-flaky/test.sh
+      # The node test groups in .config/nextest.toml against the source: the
+      # guard's fixtures, then the guard on this tree. Kept in step with
+      # ci-local.sh's run_node_test_groups by hand.
+      - name: Check the node test groups guard against its fixtures
+        run: bash testing/node-test-groups/test.sh
+      - name: Check every socket node test module is in its nextest group
+        run: python3 testing/check-node-test-groups.py
       # The glibc floor check's cases, built from the host's own true
       # executable. Not a matrix suite, so it is kept in step with
       # ci-local.sh's run_glibc_floor by hand.

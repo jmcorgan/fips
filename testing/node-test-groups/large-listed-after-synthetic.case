@@ -1,0 +1,27 @@
+# node-large is listed after node-synthetic in the ci profile, so the lock
+# holder inside a socket module lands in node-synthetic.
+expect exit 1
+expect FAIL [profile.ci] node::tests::sock_direct::test_sock_100_nodes runs in node-synthetic, needs node-large
+expect-absent big::test_big_100_nodes runs
+=== .config/nextest.toml
+nextest-version = { required = "0.9.149" }
+
+[test-groups]
+node-large = { max-threads = 1 }
+node-synthetic = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
+
+[[profile.default.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(helpers|rx_shutdown|via_connected|pathed|sock_direct|via_helper|via_testutil|via_two_hops|on_another_trunk)::/)'
+test-group = 'node-synthetic'
+
+[[profile.ci.overrides]]
+filter = 'package(fips-mesh) & test(/^node::tests::(big::test_big_100_nodes|big::test_big_via_helper|sock_direct::test_sock_100_nodes)$/)'
+test-group = 'node-large'
