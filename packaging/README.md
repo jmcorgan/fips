@@ -150,6 +150,10 @@ runs in `FIPS_RPM_BUILD_IMAGE` (AlmaLinux 9, pinned by digest), which supplies
 two things a build host may lack: rpmbuild itself, and systemd-rpm-macros,
 without which the spec's `%systemd_post` would not expand and the package would
 ship scriptlets that quietly do nothing. Docker is the only host prerequisite.
+Installing those two downloads the whole AlmaLinux repository metadata, so it
+runs through [rpm/dnf-bounded.sh](rpm/dnf-bounded.sh): each of three attempts
+is bounded (`DNF_BOUND`, 720 s), and each prints its time, transfer rates and
+mirrors.
 
 `make rpm-host` packages whatever the host toolchain built. Like `deb-host` it
 is for local iteration and not for anything anyone else installs; nothing

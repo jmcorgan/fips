@@ -172,6 +172,14 @@ recovered from the container-built `.deb` and packaged with
 PATH` supplies that `.deb`, as `ci-local.sh` and the GitHub job do; `--rpm
 PATH` tests a package as given.
 
+Each scenario image holds the package, so its tag carries the run's suffix, as
+the container names do, and the scenario removes it when it ends;
+`check-image-scoping.sh` fails on an unsuffixed `fips-rpm-test` tag. The dnf
+steps that set a scenario up, the packaging tools and the image's packages, go
+through `packaging/rpm/dnf-bounded.sh`, which bounds each attempt and prints
+its time and mirrors. The image keeps its repository metadata, and the
+install, erase and upgrade read it rather than fetching it again.
+
 ### [boringtun/](boringtun/) -- WireGuard Throughput Baseline
 
 Two userspace WireGuard peers running Cloudflare BoringTun, measured

@@ -196,6 +196,13 @@ if [ -n "$FEATURES" ]; then
     esac
 fi
 
+# The bound on each attempt to install the packaging tools, which is mostly the
+# download of the repository metadata. Set from the slow jobs that still passed
+# on GitHub, where this step took up to 9.5 minutes, so those stay green; and
+# low enough that after a stall the second attempt and the rest of an RPM
+# install job still fit inside the job's 25 minutes.
+DNF_BOUND=${DNF_BOUND:-720}
+
 rpm_args=(--no-build --bin-dir /bins --version "$VERSION" --output-dir /out --name-file /name/rpm)
 
 docker run --rm \
@@ -211,17 +218,13 @@ docker run --rm \
         # Retried: this reaches a mirror, and a transient failure here would
         # fail a release build that has nothing wrong with it. The Debian
         # builder image gets the same treatment one layer up, in
-        # testing/lib/image-build.sh.
-        for attempt in 1 2 3; do
-            if dnf install -y --setopt=install_weak_deps=False rpm-build systemd-rpm-macros >/dev/null; then
-                break
-            fi
-            if [ \"\$attempt\" -eq 3 ]; then
-                echo 'could not install rpm-build and systemd-rpm-macros' >&2
-                exit 1
-            fi
-            sleep \$((attempt * 5))
-        done
+        # testing/lib/image-build.sh. Bounded per attempt, because a stalled
+        # mirror does not fail: it holds the step until the job's own limit.
+        bash packaging/rpm/dnf-bounded.sh --attempts 3 --bound $DNF_BOUND -- \\
+            install -y --setopt=install_weak_deps=False rpm-build systemd-rpm-macros || {
+            echo 'could not install rpm-build and systemd-rpm-macros' >&2
+            exit 1
+        }
         packaging/rpm/build-rpm.sh ${rpm_args[*]}
         chown \"\$HOST_UID:\$HOST_GID\" /name/rpm
     " >&2

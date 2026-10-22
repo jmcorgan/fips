@@ -65,6 +65,31 @@ DNF_TIMEOUT=${DNF_TIMEOUT:-600}
 UPGRADE_DNF_TIMEOUT=${UPGRADE_DNF_TIMEOUT:-120}
 UPGRADE_TRANSACTION_CEILING=${UPGRADE_TRANSACTION_CEILING:-45}
 
+# The dnf steps that build the scenario, rather than test the package, are
+# bounded per attempt and retried, through packaging/rpm/dnf-bounded.sh: a
+# stalled mirror holds a step silently and does not fail it. Each bound is set
+# from the slow jobs that still passed on GitHub, so those stay green: the
+# runtime image's dnf took up to 5 minutes there, and DNF_BOUND is the bound
+# build-rpm-container.sh puts on its own dnf, which downloads the same metadata.
+IMAGE_TIMEOUT=${IMAGE_TIMEOUT:-420}
+DNF_BOUND=${DNF_BOUND:-720}
+
+# The test-time dnf calls resolve against the metadata the runtime image kept,
+# however old it is, and go to a mirror only to download a package the image
+# does not already hold. Without this every install, erase and upgrade
+# downloaded the whole repository metadata from a live mirror, and a mirror
+# part-way through a sync failed the test with nothing wrong in the package.
+# The install still resolves the package's requirements against the
+# repositories' metadata, so it still proves they resolve.
+#
+# The option must name every repository (*.metadata_expire): each repository
+# file in the base images sets its own metadata_expire (a day in AlmaLinux, six
+# hours for Fedora updates), and a repository's own value wins over the global
+# one. With the global form, an image layer that BuildKit has cached for longer
+# than that fetches the metadata again. The value is passed quoted, so the
+# shell does not expand the *.
+CACHED_METADATA='--setopt=*.metadata_expire=-1'
+
 ALL_SCENARIOS="almalinux9 fedora no-resolver upgrade"
 
 EL9_IMAGE="almalinux:9"
@@ -216,6 +241,13 @@ check_absent() {
 # Build a runtime image for a scenario, with the package staged under /opt --
 # systemd mounts a fresh /tmp during boot, which would wipe a package copied
 # there.
+#
+# The image keeps its dnf metadata (dnf makecache, not dnf clean all) for the
+# test-time calls; see CACHED_METADATA. Its dnf attempt's report is kept in
+# DNF_REPORT, so a scenario can say what the build's download took even when
+# the build's own output is discarded. Under local CI the image carries the
+# run's label, so the end-of-run reap removes it if the scenario never does.
+DNF_REPORT=/var/log/fips-ci-image-dnf.txt
 build_runtime_image() {
     local image="$1" base_image="$2" with_resolver="$3"
     local rpm_basename
@@ -227,15 +259,24 @@ build_runtime_image() {
         enable_resolved="systemctl enable systemd-resolved && \\"
     fi
 
+    local run_label=""
+    if [ -n "${FIPS_CI_RUN_ID:-}" ]; then
+        run_label="LABEL com.corganlabs.fips-ci=1 com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID}"
+    fi
+
     mkdir -p "$CACHE_DIR"
     cp "$RPM_PATH" "$CACHE_DIR/rpm-for-image"
     build_image "$image" "$(cat <<DOCKERFILE
 FROM ${base_image}
-RUN dnf install -y --setopt=install_weak_deps=False ${packages} && \\
-    dnf clean all && \\
+COPY packaging/rpm/dnf-bounded.sh /usr/local/libexec/dnf-bounded.sh
+RUN /usr/local/libexec/dnf-bounded.sh --bound ${IMAGE_TIMEOUT} --record ${DNF_REPORT} -- \\
+        install -y --setopt=install_weak_deps=False ${packages} && \\
+    /usr/local/libexec/dnf-bounded.sh --bound ${IMAGE_TIMEOUT} -- makecache && \\
+    rm /usr/local/libexec/dnf-bounded.sh && \\
     ${enable_resolved}
     mkdir -p /opt/fips-rpm
 COPY testing/rpm-install/.cache/rpm-for-image /opt/fips-rpm/${rpm_basename}
+${run_label}
 CMD ["/usr/sbin/init"]
 DOCKERFILE
     )"
@@ -257,9 +298,20 @@ boot_scenario() {
     start_systemd_container_with_tun "$name" "$image"
     if ! wait_for_systemd "$name"; then
         fail "systemd did not boot in $name; the checks below would read an unstarted system"
-        cleanup_container "$name"
         return 1
     fi
+    # A cached layer reports the build that made it, with that build's date.
+    cexec "$name" cat "$DNF_REPORT" 2>/dev/null | sed 's/^/  image /' || true
+    return 0
+}
+
+# End a scenario: remove its container and its image. The image tag is this
+# run's own, so nothing else will remove it, and a scenario image holds a
+# package nobody needs once the scenario is over.
+end_scenario() {
+    local name="$1" image="$2"
+    cleanup_container "$name"
+    docker rmi "$image" >/dev/null 2>&1 || true
     return 0
 }
 
@@ -273,7 +325,7 @@ install_package() {
     log "Installing (dnf install /opt/fips-rpm/${rpm_basename})"
     local rc=0 out start=$SECONDS
     out=$(timeout "$DNF_TIMEOUT" docker exec -w /opt/fips-rpm "$name" \
-        dnf install -y --setopt=install_weak_deps=False "./${rpm_basename}" 2>&1) || rc=$?
+        dnf install -y "$CACHED_METADATA" --setopt=install_weak_deps=False "./${rpm_basename}" 2>&1) || rc=$?
     echo "  install took $((SECONDS - start))s"
     if [ "$rc" -ne 0 ]; then
         fail "dnf install exited $rc"
@@ -516,7 +568,7 @@ check_erase() {
     fi
 
     local rc=0 out
-    out=$(timeout "$DNF_TIMEOUT" docker exec "$name" dnf remove -y fips-mesh 2>&1) || rc=$?
+    out=$(timeout "$DNF_TIMEOUT" docker exec "$name" dnf remove -y "$CACHED_METADATA" fips-mesh 2>&1) || rc=$?
     if [ "$rc" -ne 0 ]; then
         fail "dnf remove exited $rc"
         echo "$out" | tail -15
@@ -561,10 +613,11 @@ check_erase() {
 _run_install_scenario() {
     local label="$1" base_image="$2"
     local name="fips-rpm-test-${label}${FIPS_CI_NAME_SUFFIX:-}"
-    local image="fips-rpm-test:${label}"
+    local image="fips-rpm-test:${label}${FIPS_CI_NAME_SUFFIX:-}"
 
     log "RPM install: ${base_image}"
-    boot_scenario "$name" "$image" "$base_image" resolver || return
+    boot_scenario "$name" "$image" "$base_image" resolver \
+        || { end_scenario "$name" "$image"; return; }
 
     if install_package "$name"; then
         check_installed_state "$name"
@@ -573,7 +626,7 @@ _run_install_scenario() {
         fi
         check_erase "$name"
     fi
-    cleanup_container "$name"
+    end_scenario "$name" "$image"
 }
 
 test_almalinux9() { _run_install_scenario almalinux9 "$EL9_IMAGE"; }
@@ -586,10 +639,11 @@ test_fedora()     { _run_install_scenario fedora "$FEDORA_IMAGE"; }
 # else in the tree asserts it.
 test_no_resolver() {
     local name="fips-rpm-test-no-resolver${FIPS_CI_NAME_SUFFIX:-}"
-    local image="fips-rpm-test:no-resolver"
+    local image="fips-rpm-test:no-resolver${FIPS_CI_NAME_SUFFIX:-}"
 
     log "RPM install: ${EL9_IMAGE} with no resolver backend available"
-    boot_scenario "$name" "$image" "$EL9_IMAGE" bare || return
+    boot_scenario "$name" "$image" "$EL9_IMAGE" bare \
+        || { end_scenario "$name" "$image"; return; }
 
     if install_package "$name"; then
         start_unit "$name" fips.service || true
@@ -639,7 +693,7 @@ test_no_resolver() {
             fail "fips0 missing"
         fi
     fi
-    cleanup_container "$name"
+    end_scenario "$name" "$image"
 }
 
 # The package this run built, repacked at a higher Release from the same
@@ -653,9 +707,11 @@ make_next_package() {
     if [ ! -x "$bin_dir/fips" ]; then
         if ! docker run --rm \
             -v "$(dirname "$RPM_PATH")":/rpm:ro -v "$bin_dir":/bin-out \
+            -v "$REPO_ROOT/packaging/rpm/dnf-bounded.sh":/dnf-bounded.sh:ro \
             -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
             "$FIPS_RPM_BUILD_IMAGE" bash -euo pipefail -c "
-                dnf install -y -q --setopt=install_weak_deps=False cpio >/dev/null
+                bash /dnf-bounded.sh --attempts 3 --bound $DNF_BOUND -- \\
+                    install -y --setopt=install_weak_deps=False cpio
                 cd \$(mktemp -d) # mount-tmpdir: runs inside the container, never mounted
                 rpm2cpio /rpm/$(basename "$RPM_PATH") | cpio -idm --quiet
                 for binary in fips fipsctl fipstop fips-gateway; do
@@ -682,20 +738,21 @@ make_next_package() {
 # right: an upgrade is only as good as the scriptlet it upgrades away from.
 test_upgrade() {
     local name="fips-rpm-test-upgrade${FIPS_CI_NAME_SUFFIX:-}"
-    local image="fips-rpm-test:upgrade"
+    local image="fips-rpm-test:upgrade${FIPS_CI_NAME_SUFFIX:-}"
 
     log "RPM upgrade: ${EL9_IMAGE}"
     if ! make_next_package; then
         fail "could not build the higher-Release package for the upgrade"
         return
     fi
-    boot_scenario "$name" "$image" "$EL9_IMAGE" resolver || return
-    install_package "$name" || { cleanup_container "$name"; return; }
+    boot_scenario "$name" "$image" "$EL9_IMAGE" resolver \
+        || { end_scenario "$name" "$image"; return; }
+    install_package "$name" || { end_scenario "$name" "$image"; return; }
 
     start_unit "$name" fips.service || true
     if ! wait_for_service_active "$name" fips.service; then
         fail "fips.service did not start before the upgrade"
-        cleanup_container "$name"
+        end_scenario "$name" "$image"
         return
     fi
     # Both PIDs must be real before they are compared: an empty or 0 one, from a
@@ -705,7 +762,7 @@ test_upgrade() {
     pid_before=$(cexec "$name" systemctl show fips.service -p MainPID --value 2>/dev/null)
     if [ -z "$pid_before" ] || [ "$pid_before" = "0" ]; then
         fail "could not read the daemon's MainPID before the upgrade ('$pid_before')"
-        cleanup_container "$name"
+        end_scenario "$name" "$image"
         return
     fi
 
@@ -730,13 +787,13 @@ test_upgrade() {
 
     local rc=0 out start=$SECONDS secs
     out=$(timeout "$UPGRADE_DNF_TIMEOUT" docker exec -w /opt/fips-rpm "$name" \
-        dnf upgrade -y --setopt=install_weak_deps=False "./$next_basename" 2>&1) || rc=$?
+        dnf upgrade -y "$CACHED_METADATA" --setopt=install_weak_deps=False "./$next_basename" 2>&1) || rc=$?
     secs=$((SECONDS - start))
     echo "  upgrade took ${secs}s"
     if [ "$rc" -ne 0 ]; then
         fail "dnf upgrade exited $rc"
         echo "$out" | tail -15
-        cleanup_container "$name"
+        end_scenario "$name" "$image"
         return
     fi
     pass "dnf upgrade completed"
@@ -783,7 +840,7 @@ test_upgrade() {
     else
         pass "no .rpmnew or .rpmsave left in /etc/fips"
     fi
-    cleanup_container "$name"
+    end_scenario "$name" "$image"
 }
 
 # --- Main -----------------------------------------------------------------
