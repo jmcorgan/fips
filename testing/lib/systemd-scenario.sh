@@ -27,12 +27,12 @@ cleanup_container() {
     docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
-# Build an image from an inline Dockerfile.
+# Build an image from an inline Dockerfile. Arguments after the Dockerfile
+# text go to `docker build`.
 build_image() {
-    local tag="$1"
-    shift
-    local dockerfile="$*"
-    retry_build "docker build -t $tag" build_inline "$tag" "$dockerfile" "$REPO_ROOT" || return
+    local tag="$1" dockerfile="$2"
+    shift 2
+    retry_build "docker build -t $tag" build_inline "$tag" "$dockerfile" "$REPO_ROOT" "$@" || return
     return 0
 }
 
@@ -49,7 +49,7 @@ start_systemd_container_with_tun() {
     cleanup_container "$name"
     run_quiet "docker run $name (with tun)" \
         docker run -d --name "$name" \
-        --label com.corganlabs.fips-ci=1 \
+        "${CI_LABELS[@]}" \
         "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         --device /dev/net/tun \
@@ -71,7 +71,7 @@ wait_for_systemd() {
         # non-zero exit and reject an acceptable state, which timed out the
         # newest distros (they reach `degraded`, older ones reach `running`).
         # Capture the state string and test it directly instead of the pipe.
-        state=$(docker exec "$name" systemctl is-system-running --wait 2>/dev/null || true)
+        state=$(systemd_state "$name")
         case "$state" in
             running | degraded) return 0 ;;
         esac

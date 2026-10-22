@@ -1913,23 +1913,32 @@ echo "Phase 8: TTL expiration and pool reclamation"
 # query for NPUB_B came 0.5s before the flush, and in 8 of 22 runs that
 # mapping was freed a tick after the other.
 #
-# So answer both names now, then flush conntrack so stale sessions from
-# Phase 5 don't keep the mappings alive. Every mapping's last reference is
-# then within the queries just made, and each is freed at most ttl plus two
-# tick periods, 25s, after them, whatever the tick's phase. The wait allows
-# 2s more for the ~1s poll and for the tick to publish its snapshot. A
-# gateway that frees a mapping a tick late reds here.
+# So flush conntrack first, so stale sessions from Phase 5 neither keep the
+# mappings alive nor reference them again, then answer both names. Each
+# mapping's last reference is then its answer, before the time taken below,
+# and the tick frees it at most ttl plus two tick periods, 25s, after that,
+# whatever the tick's phase. A gateway that frees a mapping a tick late
+# frees it more than 25s after its answer.
+#
+# The wait is timed to the millisecond from when both answers are back, and
+# its limit is on when a read begins: a read that begins past the limit and
+# still finds a mapping fails the phase. The read's own length, which grows
+# under load, then never counts against the gateway, and reads begin every
+# 0.2s plus that length. The limit is the 25s bound plus 0.5s for the tick
+# to publish what it freed, which took under 0.05s in the runs measured on
+# core-vm. Timed in whole seconds with a 1s poll, the wait passed a gateway
+# that freed a mapping a tick late in one of three runs.
 #
 # Two things are polled. The gateway's mapping count is what this phase
 # checks. The kernel's SNAT rules are what Phase 8b's gate reads next: the
 # tick publishes the control socket's snapshot before its removals reach
 # the NAT worker, so a count of zero can be read while the rules are still
 # in the table.
+docker exec "$GATEWAY" conntrack -F 2>/dev/null || true
 docker exec "$CLIENT" dig +short AAAA "${NPUB_B}.fips" "@$GW_DNS" >/dev/null 2>&1 || true
 docker exec "$CLIENT2" dig +short AAAA "${NPUB_C}.fips" "@$GW_DNS" >/dev/null 2>&1 || true
-RECLAIM_T0=$SECONDS
-docker exec "$GATEWAY" conntrack -F 2>/dev/null || true
-RECLAIM_WAIT=27
+RECLAIM_T0_MS=$(date +%s%3N)
+RECLAIM_LIMIT_MS=25500
 
 # The gateway's mapping count from its control socket, or "error".
 #
@@ -1963,19 +1972,22 @@ gw_snat_count() {
     grep -cE "saddr [0-9a-f:]+ .*snat" <<< "$nft" || true
 }
 
-echo "  Waiting up to ${RECLAIM_WAIT}s from the last DNS answers for TTL + grace period to expire..."
+# Milliseconds as seconds with one decimal, for the log.
+ms_secs() { printf '%d.%d' $(($1 / 1000)) $(($1 % 1000 / 100)); }
+
+echo "  Answered both names at $(date -u -d "@$((RECLAIM_T0_MS / 1000))" +%H:%M:%S).$(printf '%03d' $((RECLAIM_T0_MS % 1000))) UTC; waiting up to $(ms_secs "$RECLAIM_LIMIT_MS")s for TTL + grace period to expire..."
+RECLAIM_SNAT="not read"
 while :; do
+    RECLAIM_READ_MS=$(( $(date +%s%3N) - RECLAIM_T0_MS ))
     MAPPING_COUNT=$(gw_mapping_count)
-    RECLAIM_SNAT=$(gw_snat_count)
-    if [ "$MAPPING_COUNT" = "0" ] && [ "$RECLAIM_SNAT" = "0" ]; then
-        break
+    if [ "$MAPPING_COUNT" = "0" ]; then
+        RECLAIM_SNAT=$(gw_snat_count)
+        [ "$RECLAIM_SNAT" = "0" ] && break
     fi
-    # SECONDS counts whole seconds: the last read is taken once at least
-    # RECLAIM_WAIT seconds have really passed.
-    [ $((SECONDS - RECLAIM_T0)) -le "$RECLAIM_WAIT" ] || break
-    sleep 1
+    [ "$RECLAIM_READ_MS" -le "$RECLAIM_LIMIT_MS" ] || break
+    sleep 0.2
 done
-echo "  After $((SECONDS - RECLAIM_T0))s: mappings $MAPPING_COUNT, SNAT rules $RECLAIM_SNAT"
+echo "  Read begun after $(ms_secs "$RECLAIM_READ_MS")s: mappings $MAPPING_COUNT, SNAT rules $RECLAIM_SNAT"
 if [ "$MAPPING_COUNT" = "0" ]; then
     check "Mapping reclaimed after TTL+grace" 0
 else

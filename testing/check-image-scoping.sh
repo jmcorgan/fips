@@ -21,10 +21,12 @@
 # because the reintroduction is invisible on any host where a hand build has
 # left an fips-test:latest and a populated testing/docker/ lying around.
 #
-# The install harnesses have the same failure in their own repositories: a
-# scenario image bakes this run's package into it, so a tag two runs share
-# boots whichever run built it last. Those tags carry the run's suffix, as the
-# container names do.
+# The install suites have the same failure in images of their own. Each bakes
+# the run's package or binaries into an image it builds itself, and a tag that
+# is not scoped to the run is rebuilt by a concurrent run between this run's
+# build and its boot, so this run tests the other run's artifact. That
+# happened on the internal builder on 2026-10-07. Those tags carry the run's
+# suffix, as the container names do.
 #
 # What counts as a violation:
 #   * a reference to the shared image name, whether tagged :latest or left
@@ -63,9 +65,13 @@ SHARED_CONTEXT_RE="/docker([[:space:]\"'}]|\$)|^[[:space:]]*(build|context):[[:s
 # must be the run's own. A tag here is the prefix and everything after it up to
 # the next quote or space; container names use a dash after the repository
 # name and do not match. A prefix is read as an extended regular expression in
-# the tag match, so keep it to letters, digits, '-' and ':'.
+# the tag match, so keep it to letters, digits, '-' and ':'. The dns-resolver
+# suite's other fips-dns-test tags hold no artifact of the run and are shared
+# on purpose; only its e2e images hold the run's binaries.
 RUN_SCOPED_TAGS=(
     fips-rpm-test:
+    fips-deb-test:
+    fips-dns-test:e2e-
 )
 RUN_SUFFIX='${FIPS_CI_NAME_SUFFIX:-}'
 

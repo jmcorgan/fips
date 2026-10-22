@@ -9,6 +9,41 @@ use crate::utils::index::IndexAllocator;
 use std::collections::HashMap;
 use tokio::time::{Duration, timeout, timeout_at};
 
+/// How long [`run_until_peered`] waits for two nodes to promote each other.
+///
+/// A wait, not a window: a healthy run returns about one tick after the
+/// handshake, which takes milliseconds. The bound is sized for a loaded host.
+/// It also spans the initiator's first three msg1 resends (about 1, 3 and 7 s
+/// after the dial at the default resend schedule), so a msg1 or msg2 lost on
+/// loopback is resent rather than failing the test.
+const PEERING_BOUND: Duration = Duration::from_secs(10);
+
+/// Run both nodes' rx loops together until each has published one peer, or
+/// until [`PEERING_BOUND`] passes, then drop both loops.
+///
+/// The rx loops borrow the nodes for as long as they run, so progress is read
+/// off each node's control read handle, which the loop's tick publishes. The
+/// caller asserts on the nodes' live state afterwards; on a timeout this
+/// returns normally and those assertions say which side did not promote.
+async fn run_until_peered(node_a: &mut Node, node_b: &mut Node) {
+    let handle_a = node_a.control_read_handle();
+    let handle_b = node_b.control_read_handle();
+    let peered = async {
+        while handle_a.stats().peer_count != 1 || handle_b.stats().peer_count != 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        result = node_a.run_rx_loop() => {
+            panic!("node_a rx loop exited unexpectedly: {:?}", result);
+        }
+        result = node_b.run_rx_loop() => {
+            panic!("node_b rx loop exited unexpectedly: {:?}", result);
+        }
+        _ = timeout(PEERING_BOUND, peered) => {}
+    }
+}
+
 #[tokio::test]
 async fn test_adopted_udp_traversal_completes_handshake() {
     let mut node_a = make_node();
@@ -47,19 +82,7 @@ async fn test_adopted_udp_traversal_completes_handshake() {
     assert_eq!(result.remote_addr, addr_b);
     assert!(node_a.get_transport(&result.transport_id).is_some());
 
-    tokio::select! {
-        result = node_b.run_rx_loop() => {
-            panic!("node_b rx loop exited unexpectedly: {:?}", result);
-        }
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
-
-    tokio::select! {
-        result = node_a.run_rx_loop() => {
-            panic!("node_a rx loop exited unexpectedly: {:?}", result);
-        }
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
+    run_until_peered(&mut node_a, &mut node_b).await;
 
     let peer_a_node_addr =
         *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();
@@ -421,19 +444,7 @@ async fn test_connected_udp_activates_on_an_adopted_traversal_transport_and_on_a
 
     let result = node_a.adopt_established_traversal(handoff).await.unwrap();
 
-    tokio::select! {
-        result = node_b.run_rx_loop() => {
-            panic!("node_b rx loop exited unexpectedly: {:?}", result);
-        }
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
-
-    tokio::select! {
-        result = node_a.run_rx_loop() => {
-            panic!("node_a rx loop exited unexpectedly: {:?}", result);
-        }
-        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-    }
+    run_until_peered(&mut node_a, &mut node_b).await;
 
     let peer_a_node_addr =
         *PeerIdentity::from_pubkey_full(node_a.identity().pubkey_full()).node_addr();

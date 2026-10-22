@@ -51,6 +51,16 @@ BOOT_TIMEOUT=30
 # Timeout for fips to start serving DNS in the e2e scenario
 DAEMON_TIMEOUT=15
 
+# Bound on one run of fips-dns-setup or fips-dns-teardown inside a container.
+# Each reloads or restarts a resolver; far below this on any healthy run.
+SETUP_TIMEOUT=60
+
+# The scenario container in use and the per-run image it was started from, for
+# the trap at the bottom: a run killed mid-scenario never reaches the
+# scenario's own cleanup_container.
+CURRENT_CONTAINER=""
+CURRENT_IMAGE=""
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -69,13 +79,38 @@ cleanup_container() {
     docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
-# Build an image from an inline Dockerfile.
+# Build an image from an inline Dockerfile. Arguments after the Dockerfile
+# text go to `docker build`.
 build_image() {
-    local tag="$1"
-    shift
-    local dockerfile="$*"
-    retry_build "docker build -t $tag" build_inline "$tag" "$dockerfile" "$REPO_ROOT" || return
+    local tag="$1" dockerfile="$2"
+    shift 2
+    retry_build "docker build -t $tag" build_inline "$tag" "$dockerfile" "$REPO_ROOT" "$@" || return
     return 0
+}
+
+# Remove a per-run image. A run that is killed before this leaves the image to
+# ci-local.sh's teardown, which finds it by the run label it was built with.
+remove_image() {
+    docker rmi "$1" >/dev/null 2>&1 || true
+}
+
+# Fail unless the container's fips and fips-gateway are this run's, byte for
+# byte. The e2e image tag is scoped to the run, so another run cannot rebuild
+# it; this is the check that a tag change has not undone that.
+check_holds_binaries() {
+    local name="$1" spec bin src want have rc=0
+    for spec in "fips:$FIPS_BIN_CACHE" "fips-gateway:$FIPS_GATEWAY_BIN_CACHE"; do
+        bin="${spec%%:*}"
+        src="${spec#*:}"
+        want=$(sha256sum "$src" | cut -d' ' -f1)
+        have=$(docker exec "$name" sha256sum "/usr/bin/$bin" 2>/dev/null | cut -d' ' -f1)
+        if [ -z "$want" ] || [ "$want" != "$have" ]; then
+            fail "$name does not hold this run's $bin (sha256 '${have}', want '${want}')"
+            rc=1
+        fi
+    done
+    [ "$rc" -eq 0 ] && pass "$name holds this run's fips and fips-gateway"
+    return "$rc"
 }
 
 # Start a systemd container in the background. Not privileged: see
@@ -83,9 +118,10 @@ build_image() {
 start_systemd_container() {
     local name="$1" image="$2"
     cleanup_container "$name"
+    CURRENT_CONTAINER="$name"
     run_quiet "docker run $name" \
         docker run -d --name "$name" \
-        --label com.corganlabs.fips-ci=1 \
+        "${CI_LABELS[@]}" \
         "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
@@ -105,9 +141,10 @@ start_systemd_container() {
 start_systemd_container_with_tun() {
     local name="$1" image="$2"
     cleanup_container "$name"
+    CURRENT_CONTAINER="$name"
     run_quiet "docker run $name (with tun)" \
         docker run -d --name "$name" \
-        --label com.corganlabs.fips-ci=1 \
+        "${CI_LABELS[@]}" \
         "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         --device /dev/net/tun \
@@ -122,7 +159,9 @@ start_systemd_container_with_tun() {
 # Report why systemd never reached a running state. Every probe is
 # best-effort and captured with its own stderr: the container may have
 # exited, or never have been created at all, and the docker error text
-# saying so is itself the diagnosis.
+# saying so is itself the diagnosis. Each in-container probe is bounded like
+# systemd_state, since a dump that hung on the stall it reports would undo
+# that bound.
 dump_systemd_state() {
     local name="$1" out
     out=$(mktemp)
@@ -130,11 +169,11 @@ dump_systemd_state() {
         echo "== docker ps -a"
         docker ps -a --filter "name=^${name}$" 2>&1
         echo "== systemctl is-system-running"
-        docker exec "$name" systemctl is-system-running 2>&1
+        docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" systemctl is-system-running 2>&1
         echo "== systemctl list-units --failed"
-        docker exec "$name" systemctl list-units --failed --no-pager 2>&1
+        docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" systemctl list-units --failed --no-pager 2>&1
         echo "== journalctl -b (last 100 lines)"
-        docker exec "$name" journalctl -b --no-pager -n 100 2>&1
+        docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" journalctl -b --no-pager -n 100 2>&1
         echo "== docker logs (last 100 lines)"
         docker logs --tail 100 "$name" 2>&1
     } >"$out" 2>&1
@@ -153,7 +192,7 @@ wait_for_systemd() {
         # accept a degraded boot: in a container systemd-modules-load
         # always fails, so every scenario burned the full timeout and
         # warned about a container that had in fact booted.
-        state=$(docker exec "$name" systemctl is-system-running --wait 2>/dev/null)
+        state=$(systemd_state "$name")
         case "$state" in
             *running*|*degraded*) return 0 ;;
         esac
@@ -180,12 +219,19 @@ run_setup() {
     # Exit code may be non-zero due to service reload failures in containers.
     # Most cases test detection and config generation, not service
     # operation; the dnsmasq case also checks that dnsmasq took the config.
-    docker exec "$name" /usr/local/bin/fips-dns-setup 2>&1 || true
+    # The bound is inside the container, so a stall is named and the script
+    # does not run on behind it.
+    local rc=0
+    docker exec "$name" timeout "$SETUP_TIMEOUT" /usr/local/bin/fips-dns-setup 2>&1 || rc=$?
+    [ "$rc" -eq 124 ] && echo "  fips-dns-setup did not finish within ${SETUP_TIMEOUT}s"
+    return 0
 }
 
 run_teardown() {
-    local name="$1"
-    docker exec "$name" /usr/local/bin/fips-dns-teardown 2>&1 || true
+    local name="$1" rc=0
+    docker exec "$name" timeout "$SETUP_TIMEOUT" /usr/local/bin/fips-dns-teardown 2>&1 || rc=$?
+    [ "$rc" -eq 124 ] && echo "  fips-dns-teardown did not finish within ${SETUP_TIMEOUT}s"
+    return 0
 }
 
 get_backend() {
@@ -993,13 +1039,29 @@ EOF'
 #   is "systemd iproute2 dbus dnsutils libdbus-1-3 procps" (no
 #   separate systemd-resolved). Other distros want
 #   "systemd systemd-resolved iproute2 dbus dnsutils libdbus-1-3 procps".
+#
+# The image bakes in this run's binaries, so its tag carries the run's suffix
+# like the container name: under one shared tag, a concurrent run that builds
+# between this run's build and its boot makes this run test the other run's
+# binaries. The image goes when the scenario ends, however it ends.
 _run_e2e_scenario() {
+    local distro_label="$1"
+    local image="fips-dns-test:e2e-${distro_label}${FIPS_CI_NAME_SUFFIX:-}"
+    CURRENT_IMAGE="$image"
+    _e2e_scenario "$distro_label" "$2" "$3" "$image"
+    remove_image "$image"
+    CURRENT_IMAGE=""
+    return 0
+}
+
+# Args: <distro_label> <docker_base_image> <apt_packages> <image tag>
+_e2e_scenario() {
     local distro_label="$1"
     local base_image="$2"
     local apt_packages="$3"
+    local image="$4"
 
     local name="fips-dns-test-e2e-${distro_label}${FIPS_CI_NAME_SUFFIX:-}"
-    local image="fips-dns-test:e2e-${distro_label}"
     log "End-to-end: ${base_image} + systemd-resolved + real fips + fips-gateway + dig"
 
     prepare_binaries || { fail "could not prepare the fips binaries"; return; }
@@ -1025,11 +1087,15 @@ COPY testing/dns-resolver/.cache/fips-gateway-bin-for-image /usr/bin/fips-gatewa
 RUN chmod +x /usr/bin/fips /usr/bin/fips-gateway
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "runtime build failed"; rm -f "$CACHE_DIR/fips-bin-for-image" "$CACHE_DIR/fips-gateway-bin-for-image"; return; }
+    )" "${CI_LABELS[@]}" || { fail "runtime build failed"; rm -f "$CACHE_DIR/fips-bin-for-image" "$CACHE_DIR/fips-gateway-bin-for-image"; return; }
     rm -f "$CACHE_DIR/fips-bin-for-image" "$CACHE_DIR/fips-gateway-bin-for-image"
 
     start_systemd_container_with_tun "$name" "$image"
     wait_for_systemd "$name"
+    check_holds_binaries "$name" || {
+        cleanup_container "$name"
+        return
+    }
 
     # Write a minimal fips.yaml that exercises the new defaults.
     # tun.enabled: true so the daemon creates fips0 itself; identity
@@ -1275,6 +1341,29 @@ if [ $# -eq 0 ]; then
 else
     scenarios="$*"
 fi
+
+# Remove the scenario container in use, and this run's e2e image, however the
+# script ends. ci-local.sh's teardown reaps by run label too, but it runs only
+# after this script has exited, and not at all after a SIGKILL; the internal
+# builder sends TERM and then KILL 30 s later. A container left running holds
+# off the builder's orphan sweep for every run after it.
+cleanup_current() {
+    [ -n "$CURRENT_CONTAINER" ] && cleanup_container "$CURRENT_CONTAINER"
+    [ -n "$CURRENT_IMAGE" ] && remove_image "$CURRENT_IMAGE"
+    return 0
+}
+
+on_signal() {
+    trap '' TERM INT
+    echo "dns-resolver: received SIG$1, removing ${CURRENT_CONTAINER:-no container}" >&2
+    cleanup_current
+    trap - EXIT
+    exit "$2"
+}
+
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
+trap cleanup_current EXIT
 
 for scenario in $scenarios; do
     case "$scenario" in
