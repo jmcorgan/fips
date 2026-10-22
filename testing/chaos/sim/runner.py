@@ -27,7 +27,6 @@ from .compose import generate_compose
 from .config_gen import write_configs
 from .control import (
     query_peers,
-    query_status,
     snapshot_all_congestion,
     snapshot_all_mmp,
     snapshot_all_trees,
@@ -48,9 +47,12 @@ from .veth import VethManager
 
 log = logging.getLogger(__name__)
 
-# Upper bound on the wait for restored nodes' control sockets before the
-# final snapshot. See _wait_control_sockets.
-CONTROL_WAIT_SECS = 60
+# The final snapshot waits until every node answers and this many identical
+# consecutive tree reads, taken this far apart, agree, so the tree must hold
+# still, with every node in it, for two intervals.
+SETTLE_READS = 3
+SETTLE_INTERVAL_SECS = 5
+SETTLE_TIMEOUT_SECS = 90
 
 
 class SimRunner:
@@ -712,11 +714,6 @@ class SimRunner:
                 log.info("Restoring stopped nodes...")
                 self.node_mgr.restore_all()
 
-            # A node restarted just above can take several seconds to open
-            # its control socket, and a snapshot taken before then records
-            # it as absent. Wait for every node to answer first.
-            self._wait_control_sockets(CONTROL_WAIT_SECS)
-
             # Every flapped link and stopped node is back, so the delivery
             # probe measures the restored mesh.
             if self.scenario.assertions.delivery is not None:
@@ -737,7 +734,12 @@ class SimRunner:
                         json.dump(iperf_results, f, indent=2)
                     log.info("Saved %d iperf3 results to %s", len(iperf_results), iperf_path)
 
-            # Take final tree snapshot while nodes are still running
+            # Take final tree snapshot while nodes are still running, once the
+            # tree has stopped moving. A node restored a moment ago is its own
+            # root until it re-parents, so a snapshot taken straight after the
+            # restore reads a mesh still converging. It may not answer at all
+            # yet either, and the settle waits for it.
+            self._settle_tree()
             self._take_snapshot("final")
 
             # Collect logs before stopping containers
@@ -877,31 +879,64 @@ class SimRunner:
 
         return result
 
-    def _wait_control_sockets(self, timeout: float) -> None:
-        """Wait until every node's control socket answers, up to timeout.
+    def _settle_tree(self):
+        """Wait until every node answers and consecutive tree reads agree.
 
-        Bounded, and it never fails the run itself: a node that still does
-        not answer is left to the final snapshot, where the assertions see
-        it as absent.
+        Returns once SETTLE_READS reads in a row, SETTLE_INTERVAL_SECS apart,
+        have each been answered by every node in the topology and show the
+        same root and parent for each, or once SETTLE_TIMEOUT_SECS has passed.
+        The bound is checked after each read, so the settle can return up to
+        one interval and one read past it. A fixed delay would either waste
+        time on a mesh that settled at once or cut off one that had not.
+
+        A read that any node did not answer never counts toward agreement. A
+        node restored at teardown may not have opened its control socket yet,
+        and a tree that holds still without it is not the tree the final
+        snapshot is meant to record.
+
+        Running out is logged, naming any node that still does not answer,
+        and is not a failure in itself: the final snapshot is taken anyway
+        and the assertions judge what it shows. A node that never comes back
+        is therefore reported as absent by the assertions that count nodes.
+        This does not catch a node that answers but stays its own root for
+        longer than the reads span, which is a tree that is stable and
+        wrong, and is left to the assertions.
         """
-        start = time.monotonic()
-        waiting = sorted(self.topology.nodes)
-        while True:
-            waiting = [
-                nid for nid in waiting
-                if query_status(self.topology.container_name(nid)) is None
-            ]
-            elapsed = time.monotonic() - start
-            if not waiting or elapsed >= timeout:
-                break
-            time.sleep(2)
-        if waiting:
-            log.warning(
-                "Control socket wait: %s still not answering after %.1fs",
-                ", ".join(waiting), elapsed,
-            )
-        else:
-            log.info("Control socket wait: all nodes answered after %.1fs", elapsed)
+        started = time.time()
+        previous = None
+        agreeing = 0
+        while not self._interrupted:
+            trees = snapshot_all_trees(self.topology)
+            missing = sorted(set(self.topology.nodes) - trees.keys())
+            shape = {
+                nid: (data.get("root"), data.get("parent"))
+                for nid, data in trees.items()
+            }
+            if missing:
+                agreeing = 0
+            else:
+                agreeing = agreeing + 1 if shape == previous else 1
+            previous = shape
+            waited = time.time() - started
+            if agreeing >= SETTLE_READS:
+                log.info("Tree settled after %.0fs", waited)
+                return
+            if waited >= SETTLE_TIMEOUT_SECS:
+                if missing:
+                    log.warning(
+                        "%s still not answering after %.0fs; "
+                        "taking the final snapshot anyway",
+                        ", ".join(missing),
+                        waited,
+                    )
+                else:
+                    log.warning(
+                        "Tree still changing after %.0fs; "
+                        "taking the final snapshot anyway",
+                        waited,
+                    )
+                return
+            self._sleep(SETTLE_INTERVAL_SECS)
 
     def _read_peers(self, node_id: str, when: str, wait_secs: float) -> dict:
         """Read a node's peers, waiting up to wait_secs for at least one.
