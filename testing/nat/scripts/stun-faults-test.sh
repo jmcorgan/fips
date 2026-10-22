@@ -72,6 +72,15 @@ FAULTED_ATTEMPTS=2
 SURVIVAL_TAIL_SECS=3
 # What a STUN fault looks like in the fault-node's log; see stun_fault_logged.
 STUN_FAULT_RE='stun.*(timed? ?out|fail|fallback|unreachable|no address)'
+# What a successful STUN observation looks like there. The STUN client logs it
+# only when a server answered (src/nostr/stun.rs). The traversal's own
+# "STUN observed" line is no evidence of success: it follows every
+# observation, with reflexive=- when every server failed.
+STUN_SUCCESS_RE='STUN observation succeeded'
+# Phase 2 stays at least this long after clearing the delay, so the attempts
+# still in flight under it, which fail after the clear, have logged their
+# failures well before phase 3's evidence window opens 4 s before its restart.
+P2_CLEAR_HOLD_SECS=10
 
 cleanup() {
     # Best-effort tc/iptables cleanup before tearing the stack down.
@@ -301,17 +310,33 @@ await_fault_then_survive() {
     return 0
 }
 
-# Look for STUN observation success (debug-level) since N seconds ago.
-assert_stun_success_observed() {
-    local since="$1"
-    local logs
-    logs="$(docker logs --since "${since}s" "$NODE" 2>&1 || true)"
-    if grep -Eiq 'STUN observation succeeded|STUN observed' <<<"$logs"; then
-        echo "  $NODE: STUN success observed in logs"
-        return 0
-    fi
-    echo "no STUN success evidence in $NODE logs (last ${since}s)" >&2
-    return 1
+# Whether the fault-node has logged a line matching the extended regex re
+# since since_ts, an RFC 3339 time. Silent, so it can be polled; a log that
+# cannot be read holds no evidence.
+node_logged_since() {
+    local since_ts="$1" re="$2" logs
+    logs="$(docker logs --since "$since_ts" "$NODE" 2>&1)" || return 1
+    grep -Eq "$re" <<<"$logs"
+}
+
+# Wait for the fault-node to log a successful STUN observation after
+# since_ts, an RFC 3339 time, for up to timeout_secs from the call. Only the
+# success line counts (STUN_SUCCESS_RE), and only one logged after since_ts,
+# so neither a failed observation nor a success from before a fault can
+# satisfy it. Returns 1, having said why, when none appears.
+await_stun_success() {
+    local since_ts="$1" timeout_secs="$2" start=$SECONDS
+    # One more second for the whole-second SECONDS clock, as above.
+    local deadline=$(( SECONDS + timeout_secs + 1 ))
+    until node_logged_since "$since_ts" "$STUN_SUCCESS_RE"; do
+        if (( SECONDS >= deadline )); then
+            echo "no successful STUN observation in $NODE logs since $since_ts (waited ${timeout_secs}s)" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    echo "  $NODE: STUN observation succeeded, seen after $(( SECONDS - start ))s"
+    return 0
 }
 
 # Wait until fips is running in both the fault-node and the fault-peer, for up
@@ -337,26 +362,19 @@ wait_daemons_running() {
 }
 
 # Pre-flight: with no fault injected, the fault-node must (a) discover
-# the peer's overlay advert via the relay, and (b) successfully invoke
-# the STUN client at least once. If either is missing, the rest of the
-# test would only show the "no overlay advert" path — i.e. a setup bug,
-# not a real fault-evidence miss. Polls up to `timeout_secs` for a
-# "traversal: initiator STUN observed" or "STUN observation succeeded"
-# log line in the fault-node.
+# the peer's overlay advert via the relay, and (b) observe its reflexive
+# address through the STUN server at least once. If either is missing, the
+# rest of the test would only show the "no overlay advert" path, or a STUN
+# server that never worked, i.e. a setup bug, not a real fault-evidence miss.
+# Polls up to `timeout_secs` for a successful observation logged since
+# since_ts, the lab's start; an observation that failed does not count.
 preflight_assert_stun_active() {
-    local timeout_secs="${1:-45}"
-    local deadline=$(( SECONDS + timeout_secs ))
-    while (( SECONDS < deadline )); do
-        local logs
-        logs="$(docker logs "$NODE" 2>&1 || true)"
-        if grep -Eq 'traversal: initiator STUN observed|STUN observation succeeded' \
-                <<<"$logs"; then
-            echo "  $NODE: pre-flight STUN observation confirmed"
-            return 0
-        fi
-        sleep 2
-    done
-    echo "pre-flight FAIL: $NODE never invoked STUN within ${timeout_secs}s" >&2
+    local timeout_secs="$1" since_ts="$2"
+    if await_stun_success "$since_ts" "$timeout_secs"; then
+        echo "  $NODE: pre-flight STUN observation confirmed"
+        return 0
+    fi
+    echo "pre-flight FAIL: $NODE observed no reflexive address through STUN within ${timeout_secs}s" >&2
     echo "(likely cause: peer advert not yet published, or peer config wrong)" >&2
     echo "--- $NODE recent log tail ---" >&2
     docker logs "$NODE" 2>&1 | tail -40 >&2 || true
@@ -388,6 +406,8 @@ run_test() {
     # start that fails for any other reason is not retried, and a relay fault
     # after the window still fails the run through assert_relay.
     retry_build "compose build ($PROFILE)" "${COMPOSE[@]}" --profile "$PROFILE" build
+    local lab_ts
+    lab_ts="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
     relay_lab_start "$RELAY_CONTAINER" 2 45 start_lab cleanup || {
         dump_diagnostics
         return 1
@@ -412,7 +432,7 @@ run_test() {
     # lab's start to their first STUN observation.
     echo ""
     echo "=== Phase 0: pre-flight — confirm STUN baseline (no faults) ==="
-    if ! preflight_assert_stun_active 55; then
+    if ! preflight_assert_stun_active 55 "$lab_ts"; then
         dump_diagnostics
         return 1
     fi
@@ -457,12 +477,28 @@ run_test() {
 
     echo ""
     echo "=== Phase 2: delay 5000ms then clear (peer restart for clean STUN) ==="
+    local p2_rc=0
     if apply_delay; then
         docker restart "$PEER" >/dev/null
-        # Slow STUN should eventually succeed under 5s delay.
+        # The fault window: the fault-node's traversal attempts observe STUN
+        # under the delay, which outlasts the client's response wait.
         sleep 12
+        local p2_clear_ts p2_clear_ms
+        p2_clear_ts="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+        p2_clear_ms="$(date +%s%3N)"
         clear_delay
-        sleep 10
+        # Recovery: STUN must succeed after the rule is removed. A success
+        # from before the clear does not count, nor does a failed
+        # observation. It comes at the fault-node's next traversal attempt,
+        # 3 to 18 s after the clear in sixteen kept runs; 30 s is a
+        # judgement, not a derived bound.
+        await_stun_success "$p2_clear_ts" 30 || p2_rc=$?
+        # Then hold until P2_CLEAR_HOLD_SECS after the clear, as the fixed
+        # wait this replaced always did.
+        local p2_hold_ms=$(( P2_CLEAR_HOLD_SECS * 1000 - ($(date +%s%3N) - p2_clear_ms) ))
+        if (( p2_rc == 0 && p2_hold_ms > 0 )); then
+            sleep "$(( p2_hold_ms / 1000 )).$(printf '%03d' $(( p2_hold_ms % 1000 )))"
+        fi
     else
         echo "  Phase 2 skipped (no tc netem available); proceeding to Phase 3"
         SKIPPED_PHASES+=("2 (delay): tc netem unavailable")
@@ -470,9 +506,7 @@ run_test() {
 
     assert_process_alive || { dump_diagnostics; return 1; }
     assert_no_panic      || { dump_diagnostics; return 1; }
-    # Recovery assertion: STUN must succeed at least once after the rule
-    # is removed.
-    if ! assert_stun_success_observed 30; then
+    if [ "$p2_rc" -ne 0 ]; then
         echo "Phase 2 recovery assertion failed (no STUN success after delay clear)" >&2
         dump_diagnostics
         return 1
