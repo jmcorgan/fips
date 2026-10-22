@@ -37,7 +37,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LABEL="com.corganlabs.fips-ci=1"
+# For CI_LABELS, the labels every resource below carries.
+# shellcheck source=SCRIPTDIR/../lib/image-build.sh
+. "$SCRIPT_DIR/../lib/image-build.sh"
 NET_A="fips-mdns-net-$$"
 NET_B="fips-mdns-net-b-$$"
 NODE_A="fips-mdns-a-$$"
@@ -102,7 +104,7 @@ RUN apt-get update && \
 COPY fips fipsctl /usr/local/bin/
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl && mkdir -p /run/fips
 DOCKERFILE
-    docker build -t "$BUILT_IMAGE" --label "$LABEL" "$context" --quiet >/dev/null || return 1
+    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "$context" --quiet >/dev/null || return 1
     IMAGE="$BUILT_IMAGE"
     return 0
 }
@@ -136,7 +138,7 @@ YAML
 # start_node <container> <network> <config file>
 start_node() {
     # fips::mdns at debug so a failed run shows what the browser saw.
-    docker create --name "$1" --hostname "$1" --label "$LABEL" --network "$2" \
+    docker create --name "$1" --hostname "$1" "${CI_LABELS[@]}" --network "$2" \
         -e RUST_LOG=info,fips::mdns=debug \
         --entrypoint /usr/local/bin/fips "$IMAGE" --config /fips-mdns.yaml >/dev/null \
         && docker cp "$3" "$1:/fips-mdns.yaml" >/dev/null \
@@ -195,7 +197,7 @@ if [[ "$SPLIT_BRIDGES" == "1" ]]; then
 fi
 log "Two nodes on $where, scopes '$SCOPE_A' and '$SCOPE_B'"
 for net in $(printf '%s\n' "$NET_A" "$net_b" | sort -u); do
-    if ! docker network create --driver bridge --label "$LABEL" "$net" >/dev/null; then
+    if ! docker network create --driver bridge "${CI_LABELS[@]}" "$net" >/dev/null; then
         echo "could not create network $net" >&2
         exit 2
     fi

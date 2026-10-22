@@ -93,7 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Python deps
-        run: pip3 install --quiet pyyaml
+        run: pip3 install --quiet pyyaml jinja2
       - name: Check local and GitHub runners cover the same work
         run: bash testing/check-ci-parity.sh
       - name: Check test log matchers against the strings the crate sources emit
@@ -112,6 +112,8 @@ jobs:
         run: python3 testing/check-portable-atomics.py
       - name: Check no bind-mount source comes from a bare mktemp
         run: python3 testing/check-mount-tmpdir.py
+      - name: Check every CI-labelled docker resource carries the run label
+        run: python3 testing/check-ci-labels.py
       # The OpenWrt Package workflow runs this too, but only on trunk pushes,
       # tags and pull requests; here a branch push sees a finding first.
       # Kept in step with ci-local.sh's run_shellcheck by hand.
@@ -166,6 +168,12 @@ jobs:
       # ci-local.sh's run_fwtable by hand.
       - name: Check the firewall suite's table check against its cases
         run: bash testing/firewall/table-check-test.sh
+      # The chaos runner's veth host-command bound, timeout handling and
+      # NOT SCORED verdict, against a stand-in docker. Hermetic; needs jinja2
+      # for the runner case. Kept in step with ci-local.sh's run_veth_host by
+      # hand.
+      - name: Check the chaos veth host-command bound against its cases
+        run: bash testing/chaos/veth-host-test.sh
 
   fmt:
     name: Format check
@@ -427,6 +435,12 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     needs: [build]
+    # Nothing else bounds a test that never returns, so without this a hang
+    # holds the runner to GitHub's six-hour default. The slowest green run seen
+    # took 54 minutes on a slow runner with a warm cache, 50 of them in steps
+    # this job still runs, so the bound leaves room for a run that slow and
+    # still ends a hang hours short of the default.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -595,6 +609,9 @@ jobs:
   test-release:
     name: Unit tests (release build)
     runs-on: ubuntu-latest
+    # Green runs are cold-cache release builds of 5 to 6 minutes. See the
+    # Linux job's bound above.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -645,6 +662,8 @@ jobs:
     name: Unit tests (macOS)
     runs-on: macos-latest
     needs: [build]
+    # The slowest green run seen took 27 minutes; see the Linux job's bound.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -807,6 +826,8 @@ jobs:
   test-windows:
     name: Unit tests (Windows)
     runs-on: windows-latest
+    # The slowest green run seen took 24 minutes; see the Linux job's bound.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 

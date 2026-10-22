@@ -5,6 +5,7 @@
 #   source "$SCRIPT_DIR/../lib/systemd-container.sh"
 #   docker run -d ... "${SYSTEMD_CAPS[@]}" ... "$image"
 #   check_isolation "$name"
+#   state=$(systemd_state "$name")
 #
 # check_isolation reports through the harness's own pass() and fail(), so
 # those must be defined before it is called.
@@ -44,6 +45,23 @@ SYSTEMD_CAPS=(
     --cap-add NET_ADMIN
     --security-opt apparmor=unconfined
 )
+
+# Print the container's systemd state once boot has finished, or nothing when
+# it has not finished within SYSTEMD_STATE_TIMEOUT seconds or the container
+# cannot be asked. The callers' wait loops call this until it prints
+# `running` or `degraded`.
+#
+# `systemctl is-system-running --wait` blocks until boot finishes, so a boot
+# that never finishes never returns it, and the loop's attempt count bounds
+# nothing: one blocked call holds the whole suite. The bound is inside the
+# container, where `timeout` kills systemctl itself; a bound on the docker
+# client would return and leave the call running there. It only has to stop
+# one call hanging, since the caller loops: a boot slower than this is read
+# again on the next attempt.
+SYSTEMD_STATE_TIMEOUT=5
+systemd_state() {
+    docker exec "$1" timeout "$SYSTEMD_STATE_TIMEOUT" systemctl is-system-running --wait 2>/dev/null || true
+}
 
 # Fail the suite if a running container can reach the host console or write
 # the host's kernel parameters.

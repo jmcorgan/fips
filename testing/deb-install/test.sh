@@ -85,6 +85,29 @@ pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
 
+# Remove a per-run image. A run that is killed before this leaves the image to
+# ci-local.sh's teardown, which finds it by the run label it was built with.
+remove_image() {
+    docker rmi "$1" >/dev/null 2>&1 || true
+}
+
+# Fail unless the container holds this run's package, byte for byte, where the
+# image put it. The image tag is scoped to the run, so another run cannot
+# rebuild it; this is the check that a tag change has not undone that. Two
+# runs of one commit build packages of the same name, so the name alone proves
+# nothing: compare the hash.
+check_holds_package() {
+    local name="$1" deb="$2" path="$3" want have
+    want=$(sha256sum "$deb" | cut -d' ' -f1)
+    have=$(docker exec "$name" sha256sum "$path" 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$want" ] || [ "$want" != "$have" ]; then
+        fail "$name does not hold this run's package at $path (sha256 '${have}', want '${want}')"
+        return 1
+    fi
+    pass "$name holds this run's package (sha256 ${want:0:16})"
+    return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────
 # Build the .deb once through packaging/debian/build-deb-container.sh,
 # whose image is set in packaging/build-floor.env (cached between
@@ -468,12 +491,25 @@ check_purge_clears_dns() {
 # docker_base_image: e.g. "debian:12", "ubuntu:26.04"
 # ─────────────────────────────────────────────────────────────────────
 
+# The image bakes in this run's package, so its tag carries the run's suffix
+# like the container name: under one shared tag, a concurrent run that builds
+# between this run's build and its boot makes this run install the other
+# run's package. The image goes when the scenario ends, however it ends.
 _run_deb_install_scenario() {
     local distro_label="$1"
+    local image="fips-deb-test:${distro_label}${FIPS_CI_NAME_SUFFIX:-}"
+    _deb_install_scenario "$distro_label" "$2" "$image"
+    remove_image "$image"
+    return 0
+}
+
+# Args: <distro_label> <docker_base_image> <image tag>
+_deb_install_scenario() {
+    local distro_label="$1"
     local base_image="$2"
+    local image="$3"
 
     local name="fips-deb-test-${distro_label}${FIPS_CI_NAME_SUFFIX:-}"
-    local image="fips-deb-test:${distro_label}"
     log ".deb install: ${base_image}"
 
     build_deb || { fail ".deb build failed"; return; }
@@ -504,12 +540,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 COPY testing/deb-install/.cache/deb-for-image /opt/fips-deb/${deb_basename}
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "runtime build failed"; rm -f "$CACHE_DIR/deb-for-image"; return; }
+    )" "${CI_LABELS[@]}" || { fail "runtime build failed"; rm -f "$CACHE_DIR/deb-for-image"; return; }
     rm -f "$CACHE_DIR/deb-for-image"
 
     start_systemd_container_with_tun "$name" "$image"
     wait_for_systemd "$name" || {
         fail "systemd did not boot in $name; the install checks below would read an unstarted system"
+        cleanup_container "$name"
+        return
+    }
+    check_holds_package "$name" "$cached_deb" "/opt/fips-deb/${deb_basename}" || {
         cleanup_container "$name"
         return
     }
@@ -1207,7 +1247,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     mkdir -p /opt/fips-deb
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || {
+    )" "${CI_LABELS[@]}" || {
         fail "upgrade image build failed"
         return
     }
@@ -1216,7 +1256,7 @@ DOCKERFILE
     # that scenario's container logs on failure collects these too.
     _upgrade_opted_in "fips-deb-test-${distro_label}-upg-a${FIPS_CI_NAME_SUFFIX:-}" "$image" "$deb"
     _upgrade_not_opted_in "fips-deb-test-${distro_label}-upg-b${FIPS_CI_NAME_SUFFIX:-}" "$image" "$deb"
-    docker rmi "$image" >/dev/null 2>&1 || true
+    remove_image "$image"
     return 0
 }
 

@@ -55,6 +55,21 @@ SETTLE_READS = 3
 SETTLE_INTERVAL_SECS = 5
 SETTLE_TIMEOUT_SECS = 90
 
+# Printed in place of the assertion verdicts when setup aborts, followed by
+# what raised. The mesh never finished forming, so an assertion would score a
+# mesh that was never built: a run whose veth setup timed out printed
+# `FAIL baseline` with four roots for a ring that was never wired. The line
+# names what raised, not whose fault it was: a stalled host command and a node
+# container that died during setup both end here.
+NOT_SCORED = "NOT SCORED: run aborted in setup"
+
+
+def not_scored_line(exc: BaseException) -> str:
+    """The NOT SCORED line for a setup abort: the exception's class and first line."""
+    lines = str(exc).strip().splitlines()
+    cause = type(exc).__name__ + (f": {lines[0]}" if lines else "")
+    return f"{NOT_SCORED} ({cause})"
+
 
 class SimRunner:
     def __init__(self, scenario: Scenario):
@@ -76,6 +91,10 @@ class SimRunner:
         # is logged rather than propagated, so nothing else on the return path
         # of run() carries the fact that the simulation did not complete.
         self.aborted = False
+        # Set with `aborted` when the raise came from setup, to the NOT
+        # SCORED line naming what raised. Teardown then collects the logs but
+        # evaluates no assertions.
+        self.setup_abort: str | None = None
 
         # Whether this run ever owned containers. Teardown runs from a
         # finally, so it runs after a failed setup too, and container names
@@ -169,17 +188,21 @@ class SimRunner:
         signal.signal(signal.SIGTERM, self._handle_sigint)
 
         result = None
+        in_setup = True
         try:
             self._setup()
+            in_setup = False
             self._warmup()
             self._simulation_loop()
-        except Exception:
+        except Exception as exc:
             # Log rather than re-raise: the default excepthook writes to stderr
             # and would not reach the file handler installed in _setup(), so a
             # re-raise would lose the traceback from runner.log, which is the
             # artifact that survives into CI. The flag carries the abort out.
             log.exception("Simulation failed")
             self.aborted = True
+            if in_setup:
+                self.setup_abort = not_scored_line(exc)
         finally:
             result = self._teardown()
 
@@ -702,6 +725,10 @@ class SimRunner:
         result = None
         status = self._run_status()
         try:
+            if self.setup_abort is not None:
+                # Returns through the finally below, which stops the mesh.
+                return self._harvest_unscored()
+
             # Evaluate post-run assertions before doing any teardown so
             # control sockets are still reachable.
             self._evaluate_assertions()
@@ -892,6 +919,49 @@ class SimRunner:
             self._stop_mesh()
             self._release_network()
 
+        return result
+
+    def _harvest_unscored(self) -> AnalysisResult | None:
+        """Teardown for a run whose setup aborted: logs, no verdict.
+
+        The logs are still collected, since they show how far the nodes got,
+        but nothing is restored, settled, snapshotted or asserted. The NOT
+        SCORED line is printed whether or not the logs could be read, and
+        written to assertions.txt where the verdicts would have gone.
+        """
+        result = None
+        try:
+            container_names = [
+                self.topology.container_name(nid) for nid in sorted(self.topology.nodes)
+            ]
+            log.info("Collecting logs from %d containers...", len(container_names))
+            logs = collect_logs(container_names, self.output_dir)
+            result = analyze_logs(logs)
+            with open(os.path.join(self.output_dir, "analysis.txt"), "w") as f:
+                f.write(result.summary())
+            print(result.summary())
+        except Exception:
+            log.exception("Could not collect logs after the aborted setup")
+
+        line = self.setup_abort
+        log.error("%s", line)
+        with open(os.path.join(self.output_dir, "assertions.txt"), "w") as f:
+            f.write(f"{line}\n")
+        print(line)
+        print()
+
+        write_sim_metadata(
+            self.output_dir,
+            scenario_name=self.scenario.name,
+            seed=self.scenario.seed,
+            num_nodes=len(self.topology.nodes),
+            num_edges=len(self.topology.edges),
+            duration_secs=self.scenario.duration_secs,
+            topology=self.topology,
+        )
+        if self.veth_mgr:
+            log.info("Cleaning up veth pairs...")
+            self.veth_mgr.teardown_all()
         return result
 
     def _settle_tree(self):

@@ -133,7 +133,7 @@ start_container() {
     cleanup_container "$name"
     run_quiet "docker run $name" \
         docker run -d --name "$name" \
-        --label com.corganlabs.fips-ci=1 \
+        "${CI_LABELS[@]}" \
         "${SYSTEMD_CAPS[@]}" \
         --cgroupns=host \
         --device /dev/net/tun \
@@ -151,7 +151,7 @@ start_container() {
 wait_for_systemd() {
     local name="$1" state
     for _i in $(seq 1 "$BOOT_TIMEOUT"); do
-        state=$(docker exec "$name" systemctl is-system-running --wait 2>/dev/null || true)
+        state=$(systemd_state "$name")
         case "$state" in
             running | degraded) return 0 ;;
         esac

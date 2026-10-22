@@ -78,13 +78,25 @@ bandwidth:
 # tree.
 #
 # Calibrated 2026-07-26 against fourteen runs that recorded a baseline
-# verdict, read from their assertions.txt files. Every one used this
-# file's fixed seed 42 and therefore an identical chaos schedule, so the
-# spread below is container timing rather than differing scenarios:
+# verdict, read from their assertions.txt files, all with this file's
+# seed 42. The seed fixes the random draws but not the schedule: events
+# are drawn as the run goes, so host timing can change which node is
+# stopped and when.
 #
 #   distinct roots   1 2 3 4 5   -> 2 3 5 3 1 runs
 #   nodes parented   9 8 7 6 5   -> the exact complement, in all 14
 #   sessions         12 to 20, minimum 12
+#
+# Those runs predate the settle that now holds the final snapshot until
+# every node answers and the tree has stopped moving. Their snapshot came
+# a few seconds after teardown restarted the nodes the churn had stopped,
+# probably the mesh's root among them: GitHub's runners stop it in recent
+# runs with this seed, but which node the July runs stopped is not
+# recorded. So the spread of roots above most likely measures a tree
+# still re-converging rather than a settled one. That is inferred from the
+# order of the changes and was not re-run.
+# The numbers must be re-measured against settled runs before any floor
+# here is tightened.
 #
 # The previous ceiling of 4 roots sat at roughly the 93rd percentile of
 # that distribution: one run in fourteen exceeded it and four sat at or
@@ -104,7 +116,7 @@ bandwidth:
 # thin and a future failure there should be read as calibration before
 # it is read as a defect.
 #
-# Tighten any of these only against a larger sample, and against one
+# Tighten any of these only against a larger sample of settled runs,
 # gathered at the invocation CI actually runs.
 #
 # READ THIS BEFORE RETUNING: the numbers above describe the invocation CI
