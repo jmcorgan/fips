@@ -52,7 +52,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LABEL="com.corganlabs.fips-ci=1"
 NODE_NAME="fips-native-api-node-$$"
 GATED_NAME="fips-native-api-gated-$$"
 SURFACE="fips-native-surface-$$"
@@ -202,7 +201,7 @@ COPY native-echo /usr/local/bin/native-echo
 COPY native-surface /usr/local/bin/native-surface
 RUN chmod +x /usr/local/bin/fips /usr/local/bin/native-echo /usr/local/bin/native-surface
 DOCKERFILE
-    docker build -t "$BUILT_IMAGE" --label "$LABEL" "$context" --quiet >/dev/null
+    docker build -t "$BUILT_IMAGE" "${CI_LABELS[@]}" "$context" --quiet >/dev/null
     local status=$?
     rm -rf "$context"
     [[ $status -ne 0 ]] && return 1
@@ -218,7 +217,7 @@ DOCKERFILE
 start_node() {
     local name="$1" config="$2" sockdir="$3"
     docker rm -f "$name" >/dev/null 2>&1
-    docker run -d --name "$name" --label "$LABEL" \
+    docker run -d --name "$name" "${CI_LABELS[@]}" \
         -v "$sockdir:/run/fips" \
         -v "$SCRIPT_DIR/$config:/etc/fips/fips.yaml:ro" \
         --entrypoint /usr/local/bin/fips \
@@ -256,7 +255,7 @@ wait_for_running() {
 
 # Run a client script in its own container against the socket.
 run_client() {
-    docker run --rm --label "$LABEL" \
+    docker run --rm "${CI_LABELS[@]}" \
         -v "$SOCK_DIR:/run/fips" \
         -v "$SCRIPT_DIR:/harness:ro" \
         --entrypoint python3 \
@@ -954,7 +953,7 @@ wait_for_step() {
 # Run a client script against one node's socket directory.
 run_client_at() {
     local sockdir="$1" timeout="$2" script="$3"
-    docker run --rm --label "$LABEL" \
+    docker run --rm "${CI_LABELS[@]}" \
         -v "$sockdir:/run/fips" \
         -v "$SCRIPT_DIR:/harness:ro" \
         --entrypoint python3 \
@@ -970,7 +969,7 @@ run_client_at() {
 # its own and the caller has to remove it.
 run_echo_at() {
     local sockdir="$1" name="$2" port="$3"
-    docker run --rm --name "$name" --label "$LABEL" \
+    docker run --rm --name "$name" "${CI_LABELS[@]}" \
         -v "$sockdir:/run/fips" \
         --entrypoint /usr/local/bin/native-echo \
         "$IMAGE" /run/fips/api.sock "$port"
@@ -1006,7 +1005,7 @@ run_surface_at() {
     local sockdir="$1" name="$2"
     shift 2
     docker rm -f "$name" >/dev/null 2>&1
-    if ! docker run -d --name "$name" --label "$LABEL" \
+    if ! docker run -d --name "$name" "${CI_LABELS[@]}" \
         -v "$sockdir:/run/fips" \
         --entrypoint /usr/local/bin/native-surface \
         "$IMAGE" "$@" >/dev/null; then
@@ -1050,7 +1049,7 @@ query_control() {
     for expectation in "$@"; do
         expects+=(--expect "$expectation")
     done
-    docker run --rm --label "$LABEL" \
+    docker run --rm "${CI_LABELS[@]}" \
         -v "$sockdir:/run/fips" \
         -v "$SCRIPT_DIR:/harness:ro" \
         --entrypoint python3 \
@@ -1105,12 +1104,12 @@ check_end_to_end() {
     write_node_config "$cfg_a" "$nsec_a" "$npub_b" "$NODE_B"
     write_node_config "$cfg_b" "$nsec_b" "$npub_a" "$NODE_A"
 
-    docker network create --label "$LABEL" "$NET" >/dev/null 2>&1
+    docker network create "${CI_LABELS[@]}" "$NET" >/dev/null 2>&1
     local name
     for name in "$NODE_A:$cfg_a:$DIR_A" "$NODE_B:$cfg_b:$DIR_B"; do
         local container="${name%%:*}" rest="${name#*:}"
         docker run -d --name "$container" --hostname "$container" \
-            --label "$LABEL" --network "$NET" \
+            "${CI_LABELS[@]}" --network "$NET" \
             -v "${rest%%:*}/fips.yaml:/etc/fips/fips.yaml:ro" \
             -v "${rest#*:}:/run/fips" \
             --entrypoint /usr/local/bin/fips \

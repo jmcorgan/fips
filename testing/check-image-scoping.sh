@@ -21,11 +21,19 @@
 # because the reintroduction is invisible on any host where a hand build has
 # left an fips-test:latest and a populated testing/docker/ lying around.
 #
+# The install suites have the same failure in images of their own. Each bakes
+# the run's package or binaries into an image it builds itself, and a tag that
+# is not scoped to the run is rebuilt by a concurrent run between this run's
+# build and its boot, so this run tests the other run's artifact. That
+# happened on the internal builder on 2026-10-07.
+#
 # What counts as a violation:
 #   * a reference to the shared image name, whether tagged :latest or left
 #     untagged — docker resolves a bare `fips-test` to fips-test:latest, so
 #     `image: fips-test` reintroduces the identical defect;
 #   * a build context that names the shared testing/docker directory;
+#   * a tag with one of the run-scoped prefixes below that does not end in
+#     ${FIPS_CI_NAME_SUFFIX:-};
 # unless it is a comment, the documented ${FIPS_TEST_IMAGE:-...} or
 # ${FIPS_BUILD_CONTEXT:-...} fallback, or one of the individually justified
 # references listed below.
@@ -50,6 +58,20 @@ SHARED_IMAGE_RE="fips-test(-app)?:latest|fips-test(-app)?([^-:._[:alnum:]]|\$)"
 # the directory as a context, and is not what races. The per-run context is
 # docker-<run-id>, so the terminator class also keeps that from matching.
 SHARED_CONTEXT_RE="/docker([[:space:]\"'}]|\$)|^[[:space:]]*(build|context):[[:space:]]*[\"']?docker/?[\"']?[[:space:]]*\$"
+
+# Tag prefixes, each a repository and the colon (and any fixed start of the tag
+# after it), under which every tag bakes a run's artifact, so every such tag
+# must be the run's own. A tag here is the prefix and everything after it up to
+# the next quote or space; container names use a dash after the repository
+# name and do not match. A prefix is read as an extended regular expression in
+# the tag match, so keep it to letters, digits, '-' and ':'. The dns-resolver
+# suite's other fips-dns-test tags hold no artifact of the run and are shared
+# on purpose; only its e2e images hold the run's binaries.
+RUN_SCOPED_TAGS=(
+    fips-deb-test:
+    fips-dns-test:e2e-
+)
+RUN_SUFFIX='${FIPS_CI_NAME_SUFFIX:-}'
 
 # Individually justified references, as "<path under testing/>::<text the line
 # must contain>". The exemption is scoped to the reference, not to the file: a
@@ -132,6 +154,7 @@ if [[ ${#files[@]} -eq 0 ]]; then
 fi
 
 violations=0
+declare -A tags_seen=()
 
 if grep -qE '^[[:space:]]*docker[[:space:]]' "$SCRIPT_DIR/$GUARD_REL"; then
     echo "FAIL testing/$GUARD_REL runs a docker command."
@@ -186,18 +209,45 @@ for f in "${files[@]}"; do
         echo "     $text"
         violations=$((violations + 1))
     done < <(grep -nE "$SHARED_CONTEXT_RE" "$SCRIPT_DIR/../$f" 2>/dev/null)
+
+    for prefix in "${RUN_SCOPED_TAGS[@]}"; do
+        while IFS= read -r hit; do
+            n="${hit%%:*}"
+            text="${hit#*:}"
+            [[ "$text" =~ ^[[:space:]]*# ]] && continue
+            while IFS= read -r tag; do
+                tags_seen[$prefix]=$(( ${tags_seen[$prefix]:-0} + 1 ))
+                [[ "$tag" == *"$RUN_SUFFIX" ]] && continue
+                echo "FAIL $f:$n tags $prefix without the run suffix:"
+                echo "     $text"
+                violations=$((violations + 1))
+            done < <(grep -oE -- "${prefix}[^\"'[:space:]]*" <<<"$text")
+        done < <(grep -nF -- "$prefix" "$SCRIPT_DIR/../$f" 2>/dev/null)
+    done
+done
+
+# A prefix with no tag found at all means the sweep looked at nothing for it,
+# most likely because the harness renamed the tag, not that every tag is scoped.
+for prefix in "${RUN_SCOPED_TAGS[@]}"; do
+    if [[ -z "${tags_seen[$prefix]:-}" ]]; then
+        echo "check-image-scoping: no tag starting $prefix found under testing/; if the tag" >&2
+        echo "was renamed or removed, update RUN_SCOPED_TAGS, refusing to pass" >&2
+        exit 2
+    fi
 done
 
 if [[ $violations -gt 0 ]]; then
     echo ""
-    echo "check-image-scoping: $violations unscoped reference(s) to the shared test image"
-    echo "or the shared build context."
+    echo "check-image-scoping: $violations unscoped reference(s) to the shared test image,"
+    echo "the shared build context, or a run-scoped tag."
     echo "Read FIPS_TEST_IMAGE (default \${FIPS_TEST_IMAGE:-fips-test:latest}) for the image"
-    echo "and FIPS_BUILD_CONTEXT (default \${FIPS_BUILD_CONTEXT:-../docker}) for the context."
+    echo "and FIPS_BUILD_CONTEXT (default \${FIPS_BUILD_CONTEXT:-../docker}) for the context,"
+    echo "and end a tag starting ${RUN_SCOPED_TAGS[*]} with $RUN_SUFFIX."
     echo "A run that resolves either shared name can execute a concurrent run's binaries"
     echo "and record the verdict against this commit."
     exit 1
 fi
 
-echo "check-image-scoping: no unscoped references to the shared test image or build context"
+echo "check-image-scoping: no unscoped references to the shared test image, build context"
+echo "or run-scoped tags (${RUN_SCOPED_TAGS[*]})"
 exit 0

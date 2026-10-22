@@ -17,9 +17,13 @@
 #
 # For images, "everything" means the run's labelled images and its compose-built
 # fipsci_ images, which is what a run killed with SIGKILL leaves behind. The
-# suites that build under a fixed tag (fips-deb-test, fips-dns-test,
-# fips-tarball-test, fips-interop) are outside it by design: each overwrites one
-# tag rather than adding an image per run.
+# labelled ones include the install suites' per-run images (fips-deb-test,
+# fips-deb-upgrade, and fips-dns-test's e2e tags), which bake in the run's
+# package or binaries and so carry the run's suffix in their tag and the run
+# label. The suites' fixed tags (fips-dns-test's other tags,
+# fips-tarball-test, fips-interop) are outside it by design: those images hold
+# nothing of a run, and each overwrites one tag rather than adding an image
+# per run.
 #
 # The generic CI label is shared by every run on the host, so an unscoped label
 # sweep would tear down a CONCURRENT run's resources. So would an unscoped

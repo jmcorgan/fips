@@ -120,6 +120,7 @@ move_pair() {
 
     docker run --rm \
         --label com.corganlabs.fips-ci=1 \
+        --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}" \
         --privileged \
         --net=host \
         --pid=host \

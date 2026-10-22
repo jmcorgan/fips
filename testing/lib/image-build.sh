@@ -2,12 +2,13 @@
 # Shared helpers for building test images and starting test containers.
 #
 # Source this file to get dump_output(), run_quiet(), build_inline(),
-# retry_build() and shared_tmpdir():
+# retry_build() and shared_tmpdir(), and the CI_LABELS array:
 #   source "$SCRIPT_DIR/../lib/image-build.sh"
 #   echo "$dockerfile" | run_quiet "docker build -t $tag" \
 #       docker build -t "$tag" -f - "$REPO_ROOT"
 #   retry_build "docker build $tag" docker build -t "$tag" "$context"
 #   dir="$(shared_tmpdir --sweep "$REPO_ROOT/target" my-suite)" || exit 2
+#   docker run -d "${CI_LABELS[@]}" --name "$name" "$image"
 #
 # A build or a container start that fails for a reason outside the project,
 # such as a registry timeout, is indistinguishable from one the project caused
@@ -18,6 +19,26 @@
 # of those has timed out or served a truncated file in CI for a few seconds at a
 # time. retry_build runs a whole build again after such a failure, so the base
 # image is resolved again and each RUN step that fetched packages runs again.
+
+# The labels every container, network, volume and per-run image a suite
+# creates must carry. The generic label marks the resource as CI's, and the
+# run label names the run, because the generic one is shared by every run on
+# the host: ci-local.sh's teardown reaps by the run label alone
+# (ci-cleanup.sh --run-id), so a resource with only the generic label outlives
+# a run that ended before the suite's own cleanup ran, and the builder's orphan
+# sweep, which skips while any generic-labelled container is up, then stops
+# for every later run as well. ci-local.sh exports FIPS_CI_RUN_ID; a hand run
+# gets "manual". testing/check-ci-labels.py fails a docker command, or an
+# array of its arguments, that carries the generic label without the run label.
+#
+# Not for an image every run shares under one fixed tag: a concurrent run's
+# teardown would remove that tag from under this run. Label only what is
+# this run's alone.
+# shellcheck disable=SC2034  # read by the sourcing harness, not within this file
+CI_LABELS=(
+    --label com.corganlabs.fips-ci=1
+    --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}"
+)
 
 # Emit a captured output file to stderr, delimited and labelled with the
 # command it came from. Callers use this only on failure: a command that
@@ -51,11 +72,13 @@ run_quiet() {
 
 # Build TAG from the Dockerfile text DOCKERFILE with context CONTEXT, output
 # captured by run_quiet. The text is an argument rather than stdin, so that
-# retry_build can run the build again: a pipe can be read only once.
+# retry_build can run the build again: a pipe can be read only once. Any
+# further arguments go to `docker build`, such as "${CI_LABELS[@]}".
 build_inline() {
     local tag="$1" dockerfile="$2" context="$3"
+    shift 3
     echo "$dockerfile" | run_quiet "docker build -t $tag" \
-        docker build -t "$tag" -f - "$context"
+        docker build -t "$tag" "$@" -f - "$context"
 }
 
 # Run an image build, and run it again after a failure, up to three attempts

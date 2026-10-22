@@ -533,15 +533,18 @@ ci_teardown() {
     # 2. Remove all compose projects + direct-run resources + per-run images
     #    for this run, plus any host veth interface a chaos scenario was
     #    killed part-way through creating. The images are the two built
-    #    above, which --images names, and the fipsci_<run>_<suite>-<service>
+    #    above, which --images names, the fipsci_<run>_<suite>-<service>
     #    images compose builds, which the reap finds by run label and project
-    #    prefix. They go on a red run too: an image is reproducible from the
-    #    commit, so it is never the evidence of a failure. Host interfaces
-    #    carry no docker label, so hand over the suffixes this run's scenarios
-    #    used and let the reap derive their names — a blind sweep would take a
-    #    concurrent run's live interfaces with it. ci-cleanup.sh wraps each
-    #    docker op in `timeout`; bound the whole sweep too so the trap can
-    #    never wedge. Its stdout is routine progress and goes nowhere, but
+    #    prefix, and the install suites' per-run images, which carry the run
+    #    label (each suite removes its own after a scenario, so the reap finds
+    #    only what a killed suite left). They go on a red run too: an image is
+    #    reproducible from the commit, so it is never the evidence of a
+    #    failure. Host interfaces carry no docker label, so hand over the
+    #    suffixes this run's scenarios used and let the reap derive their
+    #    names — a blind sweep would take a concurrent run's live interfaces
+    #    with it. ci-cleanup.sh wraps each docker op in `timeout`; bound the
+    #    whole sweep too so the trap can never wedge. Its stdout is routine
+    #    progress and goes nowhere, but
     #    stderr carries only a skipped sweep, an image it failed to remove, or
     #    a bad option, and a sweep that quietly stops reaping is how
     #    interfaces and images would accumulate unnoticed. Let it through.
@@ -1712,6 +1715,17 @@ run_mount_tmpdir() {
     record "mount-tmpdir" $rc
 }
 
+# Every docker resource a suite gives the generic CI label must carry the run
+# label as well, because the teardown reaps by the run label and a resource
+# with only the generic one outlives a killed run and holds off the builder's
+# orphan sweep. Static, about a second. Mirrored in ci.yml's ci-parity job.
+run_ci_labels() {
+    local rc=0
+    info "[ci-labels] Checking that the generic CI label always comes with the run label"
+    python3 "$SCRIPT_DIR/check-ci-labels.py" || rc=$?
+    record "ci-labels" $rc
+}
+
 # The shell scripts the OpenWrt packages ship, and the nak installer. The
 # OpenWrt Package workflow lints them on GitHub, but only for trunk pushes,
 # tags and pull requests, so this is where a branch first sees a finding.
@@ -1865,6 +1879,7 @@ run_guards() {
     run_comment_refs
     run_portable_atomics
     run_mount_tmpdir
+    run_ci_labels
     run_shellcheck
     run_wait_converge
     run_relay_verdict_test
