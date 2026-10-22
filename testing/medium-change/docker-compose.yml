@@ -93,7 +93,9 @@ services:
     depends_on:
       - router
     environment:
-      - RUST_LOG=info,fips::node::netmon=debug,fips::node::handlers::netmon=debug
+      # MC_RUST_LOG replaces both nodes' filters, for a diagnosis run that
+      # wants session-level logs; see the README.
+      - RUST_LOG=${MC_RUST_LOG:-info,fips::node::netmon=debug,fips::node::handlers::netmon=debug}
       - PRIMARY_PREFIX=${MC_PRIMARY_PREFIX:-172.31.60}
       - SECONDARY_PREFIX=${MC_SECONDARY_PREFIX:-172.31.61}
       - ROUTER_OCTET=254
@@ -117,7 +119,7 @@ services:
     depends_on:
       - router
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=${MC_RUST_LOG:-info}
       - FAR_PREFIX=${MC_FAR_PREFIX:-172.31.62}
       - ROUTER_OCTET=254
       - DEFAULT_VIA=far
