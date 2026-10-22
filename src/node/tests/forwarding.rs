@@ -1645,17 +1645,29 @@ async fn a_session_setup_at_a_full_cache_examines_a_bounded_number_of_entries() 
     // and check its eviction is as cheap.
     node.coord_hint_budget = PeerBudget::coord_hints();
     let now = wall_ms();
-    let mut i = 2_000_000;
-    while node.coord_cache().probation_len() < UNPAID_HINT_ENTRIES as usize {
-        let addr = minted_dest(i);
+    // Each unpaid new key below the segment's bound adds one probation entry,
+    // so the bound is reached in at most UNPAID_HINT_ENTRIES writes. A cache
+    // that refuses unpaid new keys must fail here, not loop forever.
+    let mut writes = 0u32;
+    while writes < UNPAID_HINT_ENTRIES as u32
+        && node.coord_cache().probation_len() < UNPAID_HINT_ENTRIES as usize
+    {
+        let addr = minted_dest(2_000_000 + writes);
         let _ = node.coord_cache_mut().insert_funded(
             addr,
             coords_of_len(addr, root, 2),
             now,
             Funding::Upto(0),
         );
-        i += 1;
+        writes += 1;
     }
+    assert_eq!(
+        node.coord_cache().probation_len(),
+        UNPAID_HINT_ENTRIES as usize,
+        "unpaid new keys were not placed in probation: the segment holds {} after \
+         {writes} unpaid writes, against a bound of {UNPAID_HINT_ENTRIES}",
+        node.coord_cache().probation_len(),
+    );
     let before = node.coord_cache().eviction_examined();
     for i in 0..frames {
         let src = minted_dest(3_000_000 + i);

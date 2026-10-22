@@ -3181,7 +3181,13 @@ mod tests {
         }
         assert!(eventually(|| batches.lock().unwrap().concat().len() == 3));
         assert_eq!(batches.lock().unwrap().concat(), commands);
-        assert_eq!(driver.mapping_count(), 1);
+        // The worker publishes the count after the table records the batch,
+        // so wait for it as for the batches.
+        assert!(
+            eventually(|| driver.mapping_count() == 1),
+            "the worker published a mapping count of {}, not 1",
+            driver.mapping_count()
+        );
     }
 
     #[test]
