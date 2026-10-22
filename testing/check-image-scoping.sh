@@ -92,6 +92,11 @@ ALLOWED_REFS=(
     # directory into a context of its own and builds from that, so it reads the
     # shared directory but never uses it as a context.
     'interop/build-images.sh::DOCKER_CTX_SRC="$REPO_ROOT/testing/docker"'
+
+    # The veth self-test's stand-in docker client: a script it writes into its
+    # scratch directory and puts first on PATH. It is a file named docker, not
+    # a build context, and no image is built or run.
+    'chaos/veth-host-test.sh::SHIM="$WORK/bin/docker"'
 )
 
 # This guard is the one file that must contain the patterns it looks for, so it

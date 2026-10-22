@@ -32,11 +32,14 @@ The helper image is resolved from the running simulation containers
 
 from __future__ import annotations
 
+import enum
 import logging
 import subprocess
 import time
+import uuid
 
 from .docker_exec import DockerExecError, docker_exec, docker_exec_quiet
+from .naming import name_suffix
 from .topology import SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
@@ -51,6 +54,33 @@ OPERSTATE_WAIT_SECS = 15
 # Timeout for each `docker exec` a restore makes. The run blocks on these, and
 # a timeout aborts it, so this errs long: a loaded host is the normal case.
 EXEC_TIMEOUT_SECS = 30
+
+# Bound on one attempt at a host `ip` command, which runs in a helper
+# container. On a GitHub runner one netns move took over 30 s while the six
+# docker calls before it in the same pair took 0.64 s together, and the fixed
+# 30 s bound this replaces aborted the run. Across 964 pairs in 241 GitHub
+# logs the slowest pair took 2.26 s, so this is far above any healthy
+# command, and a command that does run out is checked and tried once more
+# (see `_require_host`).
+HOST_CMD_TIMEOUT_SECS = 90
+
+# Attempts at a host command that times out without taking effect.
+HOST_CMD_ATTEMPTS = 2
+
+# Bound on each docker call made after a helper times out: reading its state,
+# removing it, and looking for the link in the host namespace.
+HELPER_CHECK_TIMEOUT_SECS = 30
+
+# The namespace name `_link_place` reports for the host's own.
+HOST_NS = "host"
+
+
+class HostOutcome(enum.Enum):
+    """How one host command ended."""
+
+    OK = "ok"
+    FAILED = "failed"
+    TIMEOUT = "timed out"
 
 
 class VethSetupError(RuntimeError):
@@ -211,10 +241,16 @@ class VethManager:
 
         _require_host(
             ["ip", "link", "add", host_a, "type", "veth", "peer", "name", host_b],
-            image,
+            image, host_a, HOST_NS,
         )
-        _require_host(["ip", "link", "set", host_a, "netns", str(pid_a)], image)
-        _require_host(["ip", "link", "set", host_b, "netns", str(pid_b)], image)
+        _require_host(
+            ["ip", "link", "set", host_a, "netns", str(pid_a)],
+            image, host_a, container_a,
+        )
+        _require_host(
+            ["ip", "link", "set", host_b, "netns", str(pid_b)],
+            image, host_b, container_b,
+        )
 
         _raise_link(container_a, host_a, final_a)
         _raise_link(container_b, host_b, final_b)
@@ -266,10 +302,88 @@ def _purge_links(container: str, names: list[str]):
     _in_container(container, script, f"deleting stale {', '.join(names)}")
 
 
-def _require_host(cmd: list[str], image: str):
-    """Run a host-namespace ``ip`` command, raising `VethSetupError` on failure."""
-    if not _run_host(cmd, image):
-        raise VethSetupError(f"host command failed: {' '.join(cmd)}")
+def _require_host(cmd: list[str], image: str, link: str, want: str):
+    """Run a host-namespace ``ip`` command, raising `VethSetupError` on failure.
+
+    ``link`` and ``want`` are the command's effect: ``link`` sits in
+    namespace ``want``, which is `HOST_NS` or a container name. A command
+    that fails outright raises at once. One that times out may still have
+    taken effect, since its helper can finish after the client is killed, so
+    the link is looked for first: found where the command puts it, the
+    command is not repeated, because a second move or add of the same link
+    fails. Otherwise it is tried again, up to `HOST_CMD_ATTEMPTS` in all.
+
+    A retry that fails is checked the same way before it raises. A timed-out
+    helper docker did not yet know when it was removed can still start, and
+    if it does so between the check and the retry, its command is the one
+    that takes effect and the retry's fails on the link it moved or made.
+    """
+    text = " ".join(cmd)
+    for attempt in range(1, HOST_CMD_ATTEMPTS + 1):
+        outcome = _run_host(cmd, image)
+        if outcome is HostOutcome.OK:
+            return
+        containers = [] if want == HOST_NS else [want]
+        if outcome is HostOutcome.FAILED:
+            if attempt > 1 and _link_place(link, image, containers) == want:
+                log.warning(
+                    "%s failed on attempt %d, but an earlier attempt's helper "
+                    "had already taken effect",
+                    text, attempt,
+                )
+                return
+            raise VethSetupError(f"host command failed: {text}")
+        place = _link_place(link, image, containers)
+        if place == want:
+            log.warning(
+                "%s has taken effect though attempt %d timed out; not repeated",
+                text, attempt,
+            )
+            return
+    raise VethSetupError(
+        f"host command timed out {HOST_CMD_ATTEMPTS} times, "
+        f"{HOST_CMD_TIMEOUT_SECS:g}s each: {text}"
+    )
+
+
+def _link_place(link: str, image: str, containers: list[str]) -> str:
+    """Find which namespace a link is in, logging the answer.
+
+    Returns a container name from ``containers``, `HOST_NS`, ``"absent"``, or
+    ``"unknown"`` when a read could not be made. The containers are read first,
+    through `docker exec`, and the host only if the link is in none of them,
+    since that read needs another helper container.
+    """
+    unread = []
+    for container in containers:
+        try:
+            answer = docker_exec(
+                container,
+                f"ip link show {link} >/dev/null 2>&1 && echo present || echo absent",
+                timeout=EXEC_TIMEOUT_SECS,
+            ).strip()
+        except (DockerExecError, subprocess.TimeoutExpired) as e:
+            log.warning("could not look for %s in %s: %s", link, container, e)
+            unread.append(container)
+            continue
+        if answer == "present":
+            log.warning("%s is in %s", link, container)
+            return container
+    outcome = _run_host(
+        ["ip", "link", "show", link], image, check=False,
+        timeout=HELPER_CHECK_TIMEOUT_SECS,
+    )
+    if outcome is HostOutcome.OK:
+        log.warning("%s is in the host namespace", link)
+        return HOST_NS
+    if outcome is HostOutcome.TIMEOUT or unread:
+        log.warning("%s could not be found: a read of its namespace failed", link)
+        return "unknown"
+    log.warning(
+        "%s is in neither the host namespace nor %s",
+        link, ", ".join(containers) or "a container",
+    )
+    return "absent"
 
 
 def _raise_link(container: str, temp: str, final: str):
@@ -347,7 +461,12 @@ def _get_mac_in_container(container: str, iface: str) -> str | None:
     return None
 
 
-def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
+def _run_host(
+    cmd: list[str],
+    image: str,
+    check: bool = True,
+    timeout: float | None = None,
+) -> HostOutcome:
     """Run an ``ip`` command via a privileged Docker container.
 
     Uses ``--net=host --pid=host --privileged`` so the container shares
@@ -360,9 +479,18 @@ def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
 
     ``--entrypoint ip`` overrides the image's default entrypoint so the
     simulation entrypoint script is not executed.
+
+    Each helper gets a unique name, so one that times out can be found and
+    removed: the timeout kills only the docker client, and the container
+    goes on running the command. ``timeout`` defaults to
+    `HOST_CMD_TIMEOUT_SECS`.
     """
+    if timeout is None:
+        timeout = HOST_CMD_TIMEOUT_SECS
+    helper = f"fips-ip{name_suffix()}-{uuid.uuid4().hex[:12]}"
     docker_cmd = [
         "docker", "run", "--rm",
+        "--name", helper,
         "--privileged",
         "--net=host",
         "--pid=host",
@@ -374,7 +502,7 @@ def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
             docker_cmd,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
         )
         if check and result.returncode != 0:
             # Warning, not debug: the runner logs at INFO unless asked for
@@ -386,8 +514,41 @@ def _run_host(cmd: list[str], image: str, check: bool = True) -> bool:
                 " ".join(cmd),
                 result.stderr.strip(),
             )
-            return False
-        return result.returncode == 0
+            return HostOutcome.FAILED
+        return HostOutcome.OK if result.returncode == 0 else HostOutcome.FAILED
     except subprocess.TimeoutExpired:
-        log.warning("ip cmd timed out: %s", " ".join(cmd))
-        return False
+        log.warning("ip cmd timed out after %gs: %s (helper %s)", timeout, " ".join(cmd), helper)
+        _remove_helper(helper)
+        return HostOutcome.TIMEOUT
+
+
+def _remove_helper(helper: str) -> None:
+    """Record a timed-out helper's state, then remove it by name.
+
+    The state is read first because it is the evidence for why the command
+    stalled: a helper still being created points at the docker daemon, one
+    running at the kernel. A helper docker does not know may not have been
+    created yet. One that starts after this cannot undo a retry. A late move
+    fails, because the link has left the host. A late add succeeds once the
+    retry has moved both ends out, and leaves a stray pair under the same vh
+    names in the host namespace. It is not one of the run's links: the host
+    delete before the pair's next restore, teardown_all, or ci-cleanup's
+    vh<token> sweep removes it.
+    """
+    state = _docker_quiet(["docker", "inspect", "-f", "{{json .State}}", helper])
+    log.warning("helper %s state at timeout: %s", helper, state)
+    removed = _docker_quiet(["docker", "rm", "-f", helper])
+    log.warning("helper %s removal: %s", helper, removed)
+
+
+def _docker_quiet(cmd: list[str]) -> str:
+    """Run a docker command for the record; return its output or why it failed."""
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=HELPER_CHECK_TIMEOUT_SECS
+        )
+    except subprocess.TimeoutExpired:
+        return f"timed out after {HELPER_CHECK_TIMEOUT_SECS}s"
+    if result.returncode != 0:
+        return f"exit {result.returncode}: {result.stderr.strip()}"
+    return result.stdout.strip() or "ok"

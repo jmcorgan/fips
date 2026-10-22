@@ -324,6 +324,22 @@ The `status` field reads:
 - `teardown-failed` -- the mesh ran but its logs or analysis could not be
   produced
 
+A run whose setup raised after its containers started (`aborted`, exit 4)
+evaluates no assertions. The mesh never finished forming, so a verdict would
+score a mesh that was never built. Its node logs are still collected and
+analysed, and in place of the assertion verdicts it prints, and writes to
+`assertions.txt`, one line naming the exception that ended setup:
+
+```text
+NOT SCORED: run aborted in setup (VethSetupError: <first line of message>)
+```
+
+The parenthesis is the exception's class and the first line of its message,
+such as `host command timed out 2 times, 90s each: ip link set ...`. It says
+what raised, not whose fault it was: a stalled host command and a node
+container that died during setup (which fails the interface checks) both end
+here, so `runner.log` and the node logs decide which.
+
 A `setup-failed` directory holds `runner.log` and `status.txt` and nothing
 else. Nothing is harvested, because container names are global to the host
 and reading them after a failed setup describes whichever run holds them
@@ -351,6 +367,24 @@ A run stopped by a signal exits on this same ladder rather than one of its
 own: what it collected before stopping is still worth reporting, and
 `status.txt` says it was cut short. `chaos.sh` reports 130 for a Ctrl-C of
 its own accord.
+
+## Veth host commands
+
+Ethernet edges are veth pairs made and placed by `ip` commands run in
+short-lived helper containers on the host's network namespace
+(`sim/veth.py`). Each attempt is bounded by `HOST_CMD_TIMEOUT_SECS`, 90 s.
+A timeout kills only the docker client, so the helper, which has a unique
+name, has its state logged and is removed with `docker rm -f`. The link is
+then looked for: if the command took effect it is not repeated, and
+otherwise it is tried once more. A retry that fails is checked the same way,
+since a helper that started late may have done the work. Both attempts timing
+out aborts setup. `runner.log` carries the helper's state and where the link
+was, which is the evidence for why a command stalled.
+
+`veth-host-test.sh` tests this against a stand-in docker
+(`veth-host-test/`), with no containers. Both CI runners run it: the GitHub
+CI parity job and `ci-local.sh`'s guards. It takes about a minute and a half,
+most of it a 31 s stall at the real bound.
 
 ## Creating Custom Scenarios
 

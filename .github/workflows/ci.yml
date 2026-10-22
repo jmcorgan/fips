@@ -93,7 +93,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Python deps
-        run: pip3 install --quiet pyyaml
+        run: pip3 install --quiet pyyaml jinja2
       - name: Check local and GitHub runners cover the same work
         run: bash testing/check-ci-parity.sh
       - name: Check test log matchers against the strings the crate sources emit
@@ -166,6 +166,12 @@ jobs:
       # ci-local.sh's run_fwtable by hand.
       - name: Check the firewall suite's table check against its cases
         run: bash testing/firewall/table-check-test.sh
+      # The chaos runner's veth host-command bound, timeout handling and
+      # NOT SCORED verdict, against a stand-in docker. Hermetic; needs jinja2
+      # for the runner case. Kept in step with ci-local.sh's run_veth_host by
+      # hand.
+      - name: Check the chaos veth host-command bound against its cases
+        run: bash testing/chaos/veth-host-test.sh
 
   fmt:
     name: Format check

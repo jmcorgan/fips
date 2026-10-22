@@ -2205,6 +2205,19 @@ run_fwtable() {
     return 0
 }
 
+# The chaos runner's bound on host `ip` commands in veth setup, against a
+# stand-in docker: a 31 s stall completes, a timed-out helper is removed by
+# name and the command retried once unless it took effect, and an aborted setup
+# prints NOT SCORED. Hermetic, and takes about a minute and a half, most of it
+# the real 31 s stall and the 2 or 3 s bounds of the other cases.
+run_veth_host() {
+    local rc=0
+    info "[veth-host] Checking the chaos veth host-command bound against its cases"
+    bash "$SCRIPT_DIR/chaos/veth-host-test.sh" || rc=$?
+    record "veth-host" $rc
+    return 0
+}
+
 # Every static guard, in order. Each gates every mode except --rerun: a
 # divergence invalidates any claim that a local run means what a GitHub run
 # means, whichever subset was asked for. --rerun skips them because it reruns a
@@ -2228,6 +2241,7 @@ run_guards() {
     run_glibc_floor
     run_ciargs
     run_fwtable
+    run_veth_host
     return 0
 }
 
