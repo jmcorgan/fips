@@ -1382,9 +1382,10 @@ mod platform {
 mod platform {
     use super::TunError;
     use futures::TryStreamExt;
-    use rtnetlink::{Handle, LinkUnspec, RouteMessageBuilder, new_connection};
+    use rtnetlink::packet_route::rule::RuleAttribute;
+    use rtnetlink::{Handle, LinkUnspec, RouteMessageBuilder, RuleAddRequest, new_connection};
     use std::net::Ipv6Addr;
-    use tracing::debug;
+    use tracing::{debug, warn};
 
     /// Check if IPv6 is disabled system-wide.
     pub fn is_ipv6_disabled() -> bool {
@@ -1444,15 +1445,62 @@ mod platform {
         }
     }
 
-    /// Delete a network interface by name.
+    /// Delete the TUN named `name` and the `fd00::/8` policy rule
+    /// `configure_interface` added.
+    ///
+    /// The rule is removed even when the interface cannot be found or
+    /// deleted, and that error is returned afterwards.
     pub async fn delete_interface(name: &str) -> Result<(), TunError> {
         let (connection, handle, _) = new_connection()
             .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
         tokio::spawn(connection);
 
-        let index = get_interface_index(&handle, name).await?;
-        handle.link().del(index).execute().await?;
-        Ok(())
+        let deleted = match get_interface_index(&handle, name).await {
+            Ok(index) => handle
+                .link()
+                .del(index)
+                .execute()
+                .await
+                .map_err(TunError::from),
+            Err(e) => Err(e),
+        };
+        remove_rule(&handle).await;
+        deleted
+    }
+
+    /// The `fd00::/8` policy rule `configure_interface` adds, without its
+    /// `suppress_prefixlength`. The one place the rule's match is written,
+    /// so the add and the delete cannot drift apart.
+    fn mesh_rule(handle: &Handle) -> RuleAddRequest<Ipv6Addr> {
+        let mut req = handle
+            .rule()
+            .add()
+            .v6()
+            .destination_prefix(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8)
+            .table_id(254)
+            .priority(5265);
+        req.message_mut().header.action = 1.into(); // FR_ACT_TO_TBL
+        req
+    }
+
+    /// Delete the `fd00::/8` policy rule, of the current shape or the one
+    /// older versions added without `suppress_prefixlength`: a delete that
+    /// names no `suppress_prefixlength` matches either, one per call. Stops
+    /// at the first failure, `ENOENT` (none left) being the normal end, and
+    /// after a few calls in any case.
+    async fn remove_rule(handle: &Handle) {
+        for _ in 0..8 {
+            let mut req = mesh_rule(handle);
+            let message = req.message_mut().clone();
+            match handle.rule().del(message).execute().await {
+                Ok(()) => {}
+                Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::ENOENT => return,
+                Err(e) => {
+                    debug!("ip6 rule for fd00::/8 not removed: {e}");
+                    return;
+                }
+            }
+        }
     }
 
     /// Configure a network interface with an IPv6 address via netlink.
@@ -1503,16 +1551,31 @@ mod platform {
         // Add ip6 rule to ensure fd00::/8 uses the main table, preventing other
         // routing software (e.g. Tailscale) from intercepting FIPS traffic via
         // catch-all rules in auxiliary routing tables.
-        let mut rule_req = handle
-            .rule()
-            .add()
-            .v6()
-            .destination_prefix(fd_prefix, 8)
-            .table_id(254)
-            .priority(5265);
-        rule_req.message_mut().header.action = 1.into(); // FR_ACT_TO_TBL
-        if let Err(e) = rule_req.execute().await {
-            debug!("ip6 rule for fd00::/8 not added (may already exist): {e}");
+        //
+        // suppress_prefixlength 0 keeps main's default route from answering
+        // through this rule, so the fd00::/8 route above still claims mesh
+        // traffic while the node runs, but a rule left behind by an exit
+        // without stop (a crash or kill) sends other ULA traffic on to the
+        // table that owns it rather than out the default route. Any rule of
+        // either shape an earlier run left is removed first. This comes
+        // after the route add, so a create that fails there (another node's
+        // TUN already owns fd00::/8 in this namespace) leaves that node's
+        // rule alone.
+        remove_rule(&handle).await;
+        let mut rule_req = mesh_rule(&handle);
+        rule_req
+            .message_mut()
+            .attributes
+            .push(RuleAttribute::SuppressPrefixLen(0));
+        match rule_req.execute().await {
+            Ok(()) => {}
+            // A kernel without IPv6 policy routing.
+            Err(rtnetlink::Error::NetlinkError(e))
+                if e.raw_code() == -libc::EAFNOSUPPORT || e.raw_code() == -libc::EOPNOTSUPP =>
+            {
+                debug!("ip6 rule for fd00::/8 not added: {e}");
+            }
+            Err(e) => warn!("ip6 rule for fd00::/8 not added: {e}"),
         }
 
         Ok(())

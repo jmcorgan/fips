@@ -97,6 +97,28 @@ impl PacketSocket {
         self.if_index
     }
 
+    /// The index the kernel has the socket bound to now. It is the index
+    /// given at bind until the interface is unregistered, by a delete or a
+    /// move to another network namespace; the kernel then unhooks the socket
+    /// and reports -1, even after the interface returns with the same index.
+    /// Falls back to the bind-time index if the kernel cannot be asked.
+    pub fn bound_index(&self) -> i32 {
+        let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+        // SAFETY: `sll` and `len` describe a writable sockaddr_ll buffer.
+        let ret = unsafe {
+            libc::getsockname(
+                self.fd,
+                &mut sll as *mut libc::sockaddr_ll as *mut libc::sockaddr,
+                &mut len,
+            )
+        };
+        if ret < 0 {
+            return self.if_index;
+        }
+        sll.sll_ifindex
+    }
+
     /// Get the local MAC address of the bound interface.
     pub fn local_mac(&self) -> Result<[u8; 6], TransportError> {
         get_mac_addr(self.fd, self.if_index)

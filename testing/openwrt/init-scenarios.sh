@@ -8,7 +8,9 @@
 # quickly and procd_running reports nothing running, unless a case installs
 # the ubus stub. The gateway is a stub that records its open descriptors and
 # sleeps until it is signalled; /etc/init.d/network, odhcpd and dnsmasq are
-# recorders that log each call to $CALLS.
+# recorders that log each call to $CALLS. The container cannot create fips0, so
+# ip is a stub that reports fips0 present exactly while $FIPS0 exists and
+# passes every other call to busybox.
 #
 # Seams:
 #   INIT_GATEWAY  the init script under test; default the one built into the
@@ -40,6 +42,7 @@ LOCK=/var/lock/procd_fips-gateway.lock
 CALLS=/tmp/init-calls
 FDS=/tmp/init-gateway-fds
 SUPLOG=/tmp/init-supervise.log
+FIPS0=/tmp/init-fips0
 UBUS_REAL=/tmp/init-ubus.real
 DHCP_STOCK=/tmp/init-dhcp.stock
 INSTROOT=/tmp/init-instroot
@@ -48,7 +51,7 @@ OPERATOR=2001:db8:1::1/64
 
 # The number of cases in the full run, counted by hand from the list at the
 # end of this file. A run that completes fewer exits 2.
-ALL_CASES=10
+ALL_CASES=13
 
 FAILURES=0
 CASES=0
@@ -145,9 +148,28 @@ recorder() {
 	chmod 0755 "$1"
 }
 
+# Install the ip stub at the path the image's ip has. In every pinned image
+# that is a link to busybox, so it is removed first, and the calls the stub
+# does not answer go to busybox's own ip rather than to a saved copy.
+ip_stub() {
+	local p
+	p="$(command -v ip)"
+	[ -n "$p" ] || p=/sbin/ip
+	rm -f "$p"
+	cat > "$p" <<STUB
+#!/bin/sh
+if [ "\$*" = "link show fips0" ]; then
+	[ -e $FIPS0 ]
+	exit \$?
+fi
+exec /bin/busybox ip "\$@"
+STUB
+	chmod 0755 "$p"
+}
+
 # The image as each case starts from: the init script under test, the stub
 # gateway and the recorders, a gateway-enabled fips.yaml, a LAN interface in
-# the network config, no boot links, and the real ubus.
+# the network config, no boot links, the real ubus, and fips0 present.
 reset() {
 	kill_matching "$INIT supervise"
 	kill_matching /usr/bin/fips-gateway
@@ -168,6 +190,8 @@ STUB
 	recorder /etc/init.d/dnsmasq
 	recorder /etc/init.d/fips
 	recorder /usr/bin/logger
+	ip_stub
+	touch "$FIPS0"
 	cp "$DHCP_STOCK" /etc/config/dhcp
 	cat > /etc/fips/fips.yaml <<'YAML'
 gateway:
@@ -187,17 +211,47 @@ UCI
 	return 0
 }
 
-# Start supervise as procd would, and wait for the stub gateway to record its
-# descriptors.
-supervise_start() {
-	"$INIT" supervise > "$SUPLOG" 2>&1 &
-	SUP=$!
+# gateway_within <seconds>: wait up to <seconds> for the stub gateway to
+# record its descriptors, which it does as it starts.
+gateway_within() {
 	local i=0
-	while [ ! -s "$FDS" ] && [ "$i" -lt 10 ]; do
+	while [ ! -s "$FDS" ] && [ "$i" -lt "$1" ]; do
 		sleep 1
 		i=$((i + 1))
 	done
 	[ -s "$FDS" ]
+}
+
+# Start supervise as procd would, in the background, without waiting.
+supervise_spawn() {
+	"$INIT" supervise > "$SUPLOG" 2>&1 &
+	SUP=$!
+}
+
+# Start supervise as procd would, and wait for the stub gateway to record its
+# descriptors.
+supervise_start() {
+	supervise_spawn
+	gateway_within 10
+}
+
+# supervise_exits_within <seconds>: wait for supervise to exit, killing it
+# when it is still running after <seconds>. Fails when it had to be killed.
+supervise_exits_within() {
+	local killer
+	rm -f /tmp/init-timedout
+	(
+		sleep "$1"
+		if kill -0 "$SUP" 2>/dev/null; then
+			touch /tmp/init-timedout
+			kill -KILL "$SUP"
+		fi
+	) &
+	killer=$!
+	wait "$SUP" >/dev/null 2>&1
+	kill "$killer" 2>/dev/null
+	wait "$killer" 2>/dev/null
+	[ ! -e /tmp/init-timedout ]
 }
 
 # Stop supervise as procd would: SIGTERM to the shell, which passes it on,
@@ -445,10 +499,55 @@ restart_of_disabled_gateway_keeps_prefix() {
 	finish
 }
 
+# An upgrade restarts fips and the gateway together, and the gateway exits
+# when fips0 does not exist yet. supervise waits for fips0 before starting it.
+gateway_waits_for_fips0() {
+	begin gateway_waits_for_fips0
+	reset
+	rm -f "$FIPS0"
+	supervise_spawn
+	sleep 3
+	check "W1: the gateway is not started while fips0 is absent" test ! -s "$FDS"
+	touch "$FIPS0"
+	check "W2: the gateway starts within 5 s of fips0 appearing" gateway_within 5
+	supervise_stop
+	finish
+}
+
+# procd's stop arrives while supervise is still waiting for fips0.
+stop_during_the_fips0_wait_starts_nothing() {
+	begin stop_during_the_fips0_wait_starts_nothing
+	reset
+	rm -f "$FIPS0"
+	supervise_spawn
+	sleep 2
+	kill -TERM "$SUP" 2>/dev/null
+	check "W3: supervise exits within 5 s" supervise_exits_within 5
+	check "W4: the gateway was never started" test ! -e "$FDS"
+	supervise_stop
+	finish
+}
+
+# fips0 never appears: the gateway is started once the wait runs out, so its
+# own error is reported and procd's respawn takes over, and the timeout is
+# logged.
+gateway_starts_after_the_fips0_wait_runs_out() {
+	begin gateway_starts_after_the_fips0_wait_runs_out
+	reset
+	rm -f "$FIPS0"
+	mark
+	FIPS0_WAIT=2 "$INIT" supervise > "$SUPLOG" 2>&1 &
+	SUP=$!
+	check "W5: the gateway is started after the bound" gateway_within 5
+	check "W6: the timeout is logged" logged_since "fips0 did not appear"
+	supervise_stop
+	finish
+}
+
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 [ -f "$INIT_GATEWAY" ] || harness_fail "no init script at $INIT_GATEWAY"
-for tool in flock uci pgrep; do
+for tool in flock uci pgrep ip; do
 	command -v "$tool" >/dev/null 2>&1 || harness_fail "$tool is missing from the image"
 done
 for f in /etc/rc.common /lib/functions/procd.sh; do
@@ -467,7 +566,10 @@ disable_of_running_gateway_keeps_prefix
 start_turned_off_in_config_deletes_prefix
 removal_deletes_prefix
 disable_then_stop_deletes_prefix
-restart_of_disabled_gateway_keeps_prefix"
+restart_of_disabled_gateway_keeps_prefix
+gateway_waits_for_fips0
+stop_during_the_fips0_wait_starts_nothing
+gateway_starts_after_the_fips0_wait_runs_out"
 
 if [ -n "$INIT_CASES" ]; then
 	SELECTED="$INIT_CASES"

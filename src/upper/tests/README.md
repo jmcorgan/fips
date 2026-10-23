@@ -20,8 +20,13 @@ can reach the source file's private items.
   link of any kind but TUN is refused and left untouched, a TUN another
   process holds is an error, and an unheld persistent TUN is reopened,
   including one an earlier node left configured by exiting without stopping.
-  It covers the pure kind decision (`existing_link_verdict`) and, in root
-  network-namespace tests, `TunDevice::create` itself.
+  It also covers the `fd00::/8` policy rule (priority 5265) startup adds:
+  both teardown paths (`shutdown_tun_interface` and `TunDevice::shutdown`)
+  remove it, startup replaces an older version's rule rather than adding
+  beside it, and a rule left by an exit without stop does not send another
+  routing table's ULA traffic out the default route. It covers the pure kind
+  decision (`existing_link_verdict`) and, in root network-namespace tests,
+  `TunDevice::create` and teardown themselves.
 
 ## Rules
 

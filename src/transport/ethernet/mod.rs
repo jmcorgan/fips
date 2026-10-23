@@ -22,9 +22,23 @@ use neighbor::{FRAME_TYPE_BEACON, FRAME_TYPE_DATA, NeighborBuffer, build_beacon,
 use stats::EthernetStats;
 
 use secp256k1::XOnlyPublicKey;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
+
+/// How often the receive loop checks whether its interface was recreated.
+const REBIND_CHECK: Duration = Duration::from_secs(5);
+
+/// The transport's current socket. The receive loop replaces it when the
+/// interface is deleted and recreated; every other user reads it per use.
+type SocketSlot = Arc<RwLock<Arc<AsyncPacketSocket>>>;
+
+/// The socket in `slot` now. The lock is held only for the clone, never
+/// across an `.await`.
+fn current(slot: &SocketSlot) -> Arc<AsyncPacketSocket> {
+    slot.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// Ethernet transport for FIPS.
 ///
@@ -40,8 +54,8 @@ pub struct EthernetTransport {
     config: EthernetConfig,
     /// Current state.
     state: TransportState,
-    /// Async socket (None until started).
-    socket: Option<Arc<AsyncPacketSocket>>,
+    /// Async socket (None until started), replaced by a rebind.
+    socket: Option<SocketSlot>,
     /// Channel for delivering received packets to Node.
     packet_tx: PacketTx,
     /// Receive loop task handle.
@@ -132,12 +146,12 @@ impl EthernetTransport {
 
         self.state = TransportState::Starting;
 
-        // Create and bind AF_PACKET socket
-        let raw_socket = PacketSocket::open(&self.config.interface, self.config.ethertype())?;
-
-        // Get local MAC and MTU
-        let local_mac = raw_socket.local_mac()?;
-        let if_mtu = raw_socket.interface_mtu()?;
+        let (async_socket, local_mac, if_mtu) = open_bound(
+            &self.config.interface,
+            self.config.ethertype(),
+            self.config.recv_buf_size(),
+            self.config.send_buf_size(),
+        )?;
 
         // Effective MTU: interface MTU minus 3 bytes for frame header
         // (1 byte frame type + 2 bytes LE payload length)
@@ -150,13 +164,7 @@ impl EthernetTransport {
         self.effective_mtu = effective_mtu;
         self.local_mac = Some(local_mac);
 
-        // Set buffer sizes
-        raw_socket.set_recv_buffer_size(self.config.recv_buf_size())?;
-        raw_socket.set_send_buffer_size(self.config.send_buf_size())?;
-
-        // Wrap in async
-        let async_socket = raw_socket.into_async()?;
-        let socket = Arc::new(async_socket);
+        let socket: SocketSlot = Arc::new(RwLock::new(Arc::new(async_socket)));
         self.socket = Some(socket.clone());
 
         // Spawn receive loop
@@ -167,16 +175,23 @@ impl EthernetTransport {
         let neighbor_buffer = self.neighbor_buffer.clone();
         let stats = self.stats.clone();
         let recv_socket = socket.clone();
+        let rebind = Rebind {
+            interface: self.config.interface.clone(),
+            ethertype: self.config.ethertype(),
+            recv_buf: self.config.recv_buf_size(),
+            send_buf: self.config.send_buf_size(),
+            mtu,
+        };
 
         let recv_task = tokio::spawn(async move {
             ethernet_receive_loop(
                 recv_socket,
                 transport_id,
                 packet_tx,
-                mtu,
                 listen_enabled,
                 neighbor_buffer,
                 stats,
+                rebind,
             )
             .await;
         });
@@ -190,9 +205,6 @@ impl EthernetTransport {
                 let beacon_stats = self.stats.clone();
                 let beacon_transport_id = self.transport_id;
 
-                let beacon_interface = self.config.interface.clone();
-                let beacon_ethertype = self.config.ethertype();
-
                 let beacon_task = tokio::spawn(async move {
                     beacon_sender_loop(
                         beacon_socket,
@@ -200,8 +212,6 @@ impl EthernetTransport {
                         interval_secs,
                         beacon_stats,
                         beacon_transport_id,
-                        beacon_interface,
-                        beacon_ethertype,
                     )
                     .await;
                 });
@@ -247,8 +257,8 @@ impl EthernetTransport {
         // Signal the socket to shut down. On macOS this writes to the
         // shutdown pipe, waking the reader thread's select() immediately.
         // On Linux this is a no-op (AsyncFd cancellation handles it).
-        if let Some(ref socket) = self.socket {
-            socket.shutdown();
+        if let Some(ref slot) = self.socket {
+            current(slot).shutdown();
         }
 
         // Abort tasks. On Linux, safe to await since all I/O is
@@ -306,7 +316,7 @@ impl EthernetTransport {
         }
 
         let dest_mac = parse_mac_addr(addr)?;
-        let socket = self.socket.as_ref().ok_or(TransportError::NotStarted)?;
+        let socket = current(self.socket.as_ref().ok_or(TransportError::NotStarted)?);
 
         // Prepend frame type prefix and 2-byte LE payload length.
         // The length field lets the receiver trim Ethernet minimum-frame padding
@@ -420,23 +430,120 @@ fn data_payload(frame: &[u8]) -> Result<&[u8], DataFrameError> {
     Ok(&frame[3..3 + payload_len])
 }
 
+/// Open a socket bound to `interface`, with the configured buffer sizes,
+/// returning it with the interface's MAC address and MTU.
+fn open_bound(
+    interface: &str,
+    ethertype: u16,
+    recv_buf: usize,
+    send_buf: usize,
+) -> Result<(AsyncPacketSocket, [u8; 6], u16), TransportError> {
+    let raw_socket = PacketSocket::open(interface, ethertype)?;
+    let local_mac = raw_socket.local_mac()?;
+    let if_mtu = raw_socket.interface_mtu()?;
+    raw_socket.set_recv_buffer_size(recv_buf)?;
+    raw_socket.set_send_buffer_size(send_buf)?;
+    Ok((raw_socket.into_async()?, local_mac, if_mtu))
+}
+
+/// What the receive loop needs to reopen its socket on a recreated
+/// interface: the socket parameters `start_async` used, and the effective
+/// MTU the transport advertises.
+struct Rebind {
+    interface: String,
+    ethertype: u16,
+    recv_buf: usize,
+    send_buf: usize,
+    mtu: u16,
+}
+
+impl Rebind {
+    /// Reopen the socket in `slot` when the interface it is bound to was
+    /// unregistered and is back: deleted and recreated, which gives it a new
+    /// index, or moved to another namespace and returned, which can keep the
+    /// index. The kernel unhooks the old socket either way, and on Linux
+    /// then reports it bound to no index, so the two indices differ. Nothing
+    /// happens while the interface is absent or the socket is still bound to
+    /// it. A failed open is retried at the next check.
+    fn check(&self, slot: &SocketSlot, socket: &AsyncPacketSocket, transport_id: TransportId) {
+        let Some(index) = io::interface_index(&self.interface) else {
+            return;
+        };
+        if i64::from(index) == i64::from(socket.get_ref().bound_index()) {
+            return;
+        }
+        let (fresh, mac, if_mtu) = match open_bound(
+            &self.interface,
+            self.ethertype,
+            self.recv_buf,
+            self.send_buf,
+        ) {
+            Ok(opened) => opened,
+            Err(e) => {
+                warn!(
+                    transport_id = %transport_id,
+                    interface = %self.interface,
+                    error = %e,
+                    "Ethernet interface was recreated; reopening its socket failed, will retry"
+                );
+                return;
+            }
+        };
+        *slot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(fresh);
+        socket.shutdown();
+        info!(
+            transport_id = %transport_id,
+            interface = %self.interface,
+            index,
+            mac = %format_mac(&mac),
+            "Ethernet interface was recreated; socket rebound"
+        );
+        if if_mtu.saturating_sub(3) < self.mtu {
+            warn!(
+                transport_id = %transport_id,
+                interface = %self.interface,
+                if_mtu,
+                mtu = self.mtu,
+                "Recreated Ethernet interface has a smaller MTU than the transport advertises"
+            );
+        }
+    }
+}
+
 /// Ethernet receive loop — runs as a spawned task.
+///
+/// Also the one owner of rebinding: every `REBIND_CHECK` it checks whether
+/// the interface was recreated and, if so, replaces the socket every user of
+/// the transport reads.
 async fn ethernet_receive_loop(
-    socket: Arc<AsyncPacketSocket>,
+    slot: SocketSlot,
     transport_id: TransportId,
     packet_tx: PacketTx,
-    mtu: u16,
     listen_enabled: bool,
     neighbor_buffer: Arc<NeighborBuffer>,
     stats: Arc<EthernetStats>,
+    rebind: Rebind,
 ) {
     // Buffer with headroom: frame type prefix + MTU + some extra
-    let mut buf = vec![0u8; mtu as usize + 100];
+    let mut buf = vec![0u8; rebind.mtu as usize + 100];
+    let mut checks =
+        tokio::time::interval_at(tokio::time::Instant::now() + REBIND_CHECK, REBIND_CHECK);
+    checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     debug!(transport_id = %transport_id, "Ethernet receive loop starting");
 
     loop {
-        match socket.recv_from(&mut buf).await {
+        let socket = current(&slot);
+        // recv_from is readiness-based, so dropping it for a check loses
+        // no frame already read.
+        let received = tokio::select! {
+            received = socket.recv_from(&mut buf) => received,
+            _ = checks.tick() => {
+                rebind.check(&slot, &socket, transport_id);
+                continue;
+            }
+        };
+        match received {
             Ok((len, src_mac)) => {
                 if len == 0 {
                     continue;
@@ -531,22 +638,15 @@ async fn ethernet_receive_loop(
 
 /// Periodic beacon sender loop.
 ///
-/// Detects stale AF_PACKET sockets (ENXIO / os error 6) that occur when
-/// the underlying veth interface is destroyed and recreated (e.g., during
-/// node churn in chaos tests). After `REOPEN_THRESHOLD` consecutive send
-/// failures, attempts to open a fresh socket on the same interface.
+/// Sends on the transport's current socket each time, so after the receive
+/// loop rebinds a recreated interface the next beacon goes out on it.
 async fn beacon_sender_loop(
-    mut socket: Arc<AsyncPacketSocket>,
+    slot: SocketSlot,
     pubkey: XOnlyPublicKey,
     interval_secs: u64,
     stats: Arc<EthernetStats>,
     transport_id: TransportId,
-    interface: String,
-    ethertype: u16,
 ) {
-    /// Number of consecutive ENXIO errors before attempting socket reopen.
-    const REOPEN_THRESHOLD: u32 = 3;
-
     let beacon = build_beacon(&pubkey);
     let interval = tokio::time::Duration::from_secs(interval_secs);
 
@@ -557,7 +657,7 @@ async fn beacon_sender_loop(
     );
 
     // Send an initial beacon immediately at startup
-    if let Err(e) = socket.send_to(&beacon, &ETHERNET_BROADCAST).await {
+    if let Err(e) = current(&slot).send_to(&beacon, &ETHERNET_BROADCAST).await {
         warn!(
             transport_id = %transport_id,
             error = %e,
@@ -574,7 +674,7 @@ async fn beacon_sender_loop(
     loop {
         interval_timer.tick().await;
 
-        match socket.send_to(&beacon, &ETHERNET_BROADCAST).await {
+        match current(&slot).send_to(&beacon, &ETHERNET_BROADCAST).await {
             Ok(_) => {
                 if consecutive_errors > 0 {
                     debug!(
@@ -593,8 +693,6 @@ async fn beacon_sender_loop(
                 consecutive_errors += 1;
                 stats.record_send_error();
 
-                let is_enxio = format!("{e}").contains("os error 6");
-
                 // Log only the first error in a streak to avoid log spam
                 if consecutive_errors == 1 {
                     warn!(
@@ -603,49 +701,9 @@ async fn beacon_sender_loop(
                         "Failed to send beacon"
                     );
                 }
-
-                if is_enxio && consecutive_errors >= REOPEN_THRESHOLD {
-                    info!(
-                        transport_id = %transport_id,
-                        consecutive_errors,
-                        interface = %interface,
-                        "Stale veth detected (ENXIO), attempting socket reopen"
-                    );
-                    match reopen_beacon_socket(&interface, ethertype) {
-                        Ok(new_socket) => {
-                            socket = Arc::new(new_socket);
-                            consecutive_errors = 0;
-                            info!(
-                                transport_id = %transport_id,
-                                interface = %interface,
-                                "Beacon socket reopened successfully"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                transport_id = %transport_id,
-                                error = %e,
-                                interface = %interface,
-                                "Failed to reopen beacon socket, will retry"
-                            );
-                        }
-                    }
-                }
             }
         }
     }
-}
-
-/// Attempt to open a fresh AF_PACKET socket for beacon sending.
-///
-/// This is called when the beacon sender detects that the underlying veth
-/// has been recreated and the old socket FD is stale (ENXIO).
-fn reopen_beacon_socket(
-    interface: &str,
-    ethertype: u16,
-) -> Result<AsyncPacketSocket, TransportError> {
-    let raw_socket = PacketSocket::open(interface, ethertype)?;
-    raw_socket.into_async()
 }
 
 // ============================================================================
@@ -682,6 +740,10 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/rebind.rs"]
+mod rebind_tests;
 
 #[cfg(test)]
 mod tests {

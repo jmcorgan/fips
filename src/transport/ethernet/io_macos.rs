@@ -130,6 +130,12 @@ impl PacketSocket {
         self.if_index
     }
 
+    /// The index the device is bound to, for the rebind check. BPF gives no
+    /// sign of an unregister here, so this is the bind-time index.
+    pub fn bound_index(&self) -> i32 {
+        self.if_index
+    }
+
     /// Get the local MAC address of the bound interface.
     pub fn local_mac(&self) -> Result<[u8; 6], TransportError> {
         Ok(self.local_mac)

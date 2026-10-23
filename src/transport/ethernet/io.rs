@@ -21,6 +21,16 @@ mod platform;
 #[cfg(unix)]
 pub use platform::PacketSocket;
 
+/// The current index of the interface named `name`, or `None` when no such
+/// interface exists. A deleted and recreated interface gets a new index.
+#[cfg(unix)]
+pub(crate) fn interface_index(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `name` is a valid NUL-terminated string for the call.
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    (index != 0).then_some(index)
+}
+
 /// Outcome of `send_frame`.
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

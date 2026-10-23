@@ -291,8 +291,10 @@ sight.
   STA must follow whatever channel its upstream AP uses; every other
   interface on that radio follows the STA. A mesh pinned to a
   different channel silently never joins, and it does **not** recover
-  when the STA disconnects — a `wifi reload` (plus a fips restart) is
-  needed. A *roaming* uplink (travel-router / hotspot-chasing setups)
-  is fundamentally incompatible with a fixed-channel mesh on the same
-  radio: dedicate the mesh to the radio the STA never uses, and treat
-  any mesh sharing a STA radio as best-effort.
+  when the STA disconnects — a `wifi reload` is needed (with fips 0.5.3
+  or earlier, also a fips restart, since those versions do not rebind to
+  the recreated mesh interface). A *roaming* uplink (travel-router /
+  hotspot-chasing setups) is fundamentally incompatible with a
+  fixed-channel mesh on the same radio: dedicate the mesh to the radio
+  the STA never uses, and treat any mesh sharing a STA radio as
+  best-effort.

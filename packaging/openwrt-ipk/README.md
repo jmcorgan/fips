@@ -598,9 +598,11 @@ to use these rates already; that has not been checked on a router.
 
 When you reach routers over the mesh, upgrade them one at a time, farthest
 first, and on each run the upgrade, `wifi reload` and a `fips` restart in
-turn. The reload can recreate the mesh interface, and a running `fips` does
-not form links over a recreated interface until it restarts. Over SSH, run
-the three as one detached command, since the session can drop part-way; with
+turn. The reload can recreate the mesh interface. `fips` 0.5.4 and later
+rebind to a recreated interface within a few seconds; earlier versions do not
+form links over it until they restart, and the restart is harmless on a
+version that does not need it. Over SSH, run the three as one detached
+command, since the session can drop part-way; with
 the `.apk`, put the `apk add` command above in place of `opkg install`:
 
 ```bash
