@@ -205,9 +205,14 @@ wait_for_systemd() {
 
 # Create dummy fips0 interface inside the container.
 create_fips0() {
-    local name="$1"
-    docker exec "$name" ip link add fips0 type dummy 2>/dev/null
-    docker exec "$name" ip link set fips0 up 2>/dev/null
+    create_iface "$1" fips0
+}
+
+# Create a dummy interface with the given name inside the container.
+create_iface() {
+    local name="$1" iface="$2"
+    docker exec "$name" ip link add "$iface" type dummy 2>/dev/null
+    docker exec "$name" ip link set "$iface" up 2>/dev/null
 }
 
 # Copy scripts into the container and run setup.
@@ -224,6 +229,8 @@ run_setup() {
     local rc=0
     docker exec "$name" timeout "$SETUP_TIMEOUT" /usr/local/bin/fips-dns-setup 2>&1 || rc=$?
     [ "$rc" -eq 124 ] && echo "  fips-dns-setup did not finish within ${SETUP_TIMEOUT}s"
+    # A scenario that needs the exit status reads this line from the output.
+    echo "setup-exit: $rc"
     return 0
 }
 
@@ -430,12 +437,10 @@ prepare_binaries() {
 # Scenarios — script-behavior tests across distros (no daemon)
 # ─────────────────────────────────────────────────────────────────────
 
-test_debian12_resolved() {
-    local name="fips-dns-test-deb12-resolved${FIPS_CI_NAME_SUFFIX:-}"
-    local image="fips-dns-test:debian12-resolved"
-    log "Debian 12 + systemd-resolved (expects global-drop-in)"
-
-    build_image "$image" "$(cat <<'DOCKERFILE'
+# Build the Debian 12 + systemd-resolved image both resolved scenarios on
+# Debian 12 use.
+build_debian12_resolved() {
+    build_image "$1" "$(cat <<'DOCKERFILE'
 FROM debian:12
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -444,7 +449,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemctl enable systemd-resolved
 CMD ["/lib/systemd/systemd"]
 DOCKERFILE
-    )" || { fail "build failed"; return; }
+    )"
+    return
+}
+
+test_debian12_resolved() {
+    local name="fips-dns-test-deb12-resolved${FIPS_CI_NAME_SUFFIX:-}"
+    local image="fips-dns-test:debian12-resolved"
+    log "Debian 12 + systemd-resolved (expects global-drop-in)"
+
+    build_debian12_resolved "$image" || { fail "build failed"; return; }
 
     start_systemd_container "$name" "$image"
     wait_for_systemd "$name"
@@ -453,6 +467,41 @@ DOCKERFILE
     local output
     output=$(run_setup "$name" 2>&1)
     echo "  output: $output"
+
+    verify_resolved_backend "$name"
+    cleanup_container "$name"
+}
+
+# A host whose daemon config renames the TUN (tun.name: mesh0), so no fips0
+# ever exists. The setup must not wait for fips0: the resolved backends never
+# use the interface, and it must configure the same global drop-in as on a
+# host with the default name, then exit 0.
+test_debian12_resolved_renamed_tun() {
+    local name="fips-dns-test-deb12-renamed${FIPS_CI_NAME_SUFFIX:-}"
+    local image="fips-dns-test:debian12-resolved"
+    log "Debian 12 + systemd-resolved, tun.name mesh0 (expects global-drop-in)"
+
+    build_debian12_resolved "$image" || { fail "build failed"; return; }
+
+    start_systemd_container "$name" "$image"
+    wait_for_systemd "$name"
+    create_iface "$name" mesh0
+    docker exec "$name" bash -c 'mkdir -p /etc/fips && printf "tun:\n  enabled: true\n  name: mesh0\n" > /etc/fips/fips.yaml'
+
+    local output rc
+    output=$(run_setup "$name" 2>&1)
+    echo "  output: $output"
+    rc=$(sed -n 's/^setup-exit: //p' <<<"$output" | tail -n 1)
+    if [ "$rc" = "0" ]; then
+        pass "renamed tun: fips-dns-setup exits 0"
+    else
+        fail "renamed tun: fips-dns-setup exited '${rc:-(no status)}' (want 0)"
+    fi
+    if grep -q "interface not found" <<<"$output"; then
+        fail "renamed tun: fips-dns-setup waited for an interface"
+    else
+        pass "renamed tun: fips-dns-setup did not wait for an interface"
+    fi
 
     verify_resolved_backend "$name"
     cleanup_container "$name"
@@ -1304,7 +1353,7 @@ test_e2e_ubuntu26() { _run_e2e_scenario ubuntu26 ubuntu:26.04    "$_pkgs_with_re
 # Main
 # ─────────────────────────────────────────────────────────────────────
 
-ALL_SCENARIOS="debian12-resolved debian13-resolved ubuntu22-resolved ubuntu24-resolved ubuntu26-resolved dnsmasq nm-dnsmasq no-resolver e2e-debian12 e2e-debian13 e2e-ubuntu22 e2e-ubuntu24 e2e-ubuntu26"
+ALL_SCENARIOS="debian12-resolved debian12-resolved-renamed-tun debian13-resolved ubuntu22-resolved ubuntu24-resolved ubuntu26-resolved dnsmasq nm-dnsmasq no-resolver e2e-debian12 e2e-debian13 e2e-ubuntu22 e2e-ubuntu24 e2e-ubuntu26"
 
 # A missing package is refused here, before any scenario runs, rather
 # than surfacing as a failure of the first e2e scenario.
@@ -1368,6 +1417,7 @@ trap cleanup_current EXIT
 for scenario in $scenarios; do
     case "$scenario" in
         debian12-resolved) test_debian12_resolved ;;
+        debian12-resolved-renamed-tun) test_debian12_resolved_renamed_tun ;;
         debian13-resolved) test_debian13_resolved ;;
         ubuntu22-resolved) test_ubuntu22_resolved ;;
         ubuntu24-resolved) test_ubuntu24_resolved ;;

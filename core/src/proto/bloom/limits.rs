@@ -18,6 +18,13 @@ pub const DEFAULT_FILTER_SIZE_BYTES: usize = DEFAULT_FILTER_SIZE_BITS / 8;
 /// At 400 entries: FPR ~0.05%. At 800 entries: FPR ~0.9%.
 pub const DEFAULT_HASH_COUNT: u8 = 5;
 
+/// The v1 acceptance cap on a filter's false-positive rate.
+///
+/// The default for `node.bloom.max_inbound_fpr`, and the threshold above
+/// which an outgoing filter is held rather than sent, whatever this node's
+/// own inbound cap. 0.20 is fill 0.7248 at k=5, about 2,114 entries.
+pub const ACCEPT_FPR_CAP: f64 = 0.20;
+
 /// Size class for v1 protocol (1 KB filters).
 pub const V1_SIZE_CLASS: u8 = 1;
 

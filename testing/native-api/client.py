@@ -14,13 +14,18 @@ before it expects the close to have taken effect.
 Kinds of step:
 
   RPC step:  {"command": str, "params": {...}?, "expect": {"dotted.key": val}?,
-              "settle": bool?,
+              "settle": bool?, "distinct": [group, "dotted.key"]?,
               "keep_fd": name?, "keep_listener": name?, "keep_flow": name?}
              Sends a command and checks the reply. `keep_fd` stores a flow
              descriptor under that name, `keep_listener` a listener descriptor;
              every reply that carries one must name it, because a descriptor
              nothing named is a flow or a port silently dropped. `keep_flow`
              stores the reply's data.flow_id.
+
+             An expectation whose value is {"between": [low, high]} holds for
+             any number in that inclusive range, for a value the daemon picks
+             at random. `distinct` fails the step if the value at that key was
+             already seen by an earlier step naming the same group.
 
              A parameter or expectation whose value is the string "@name" is
              replaced by the flow identifier stored under `name`. Identifiers
@@ -127,6 +132,7 @@ class Client:
         self.lines: list[list[Any]] = []
         self.fds: dict[str, tuple[socket.socket, str]] = {}
         self.flows: dict[str, int] = {}
+        self.seen: dict[str, list[Any]] = {}
 
     def call(self, command: str, params: dict | None) -> tuple[dict, int | None]:
         """Send one command; return the decoded reply and any descriptor.
@@ -250,14 +256,35 @@ def dig(value: Any, dotted: str) -> Any:
     return value
 
 
+def holds(got: Any, wanted: Any) -> bool:
+    """Whether one value meets one expectation, an exact value or a range."""
+    if isinstance(wanted, dict) and set(wanted) == {"between"}:
+        low, high = wanted["between"]
+        return isinstance(got, int) and low <= got <= high
+    return got == wanted
+
+
 def check(reply: dict, expect: dict) -> list[str]:
     """Return one message per expectation the reply does not satisfy."""
     problems = []
     for dotted, wanted in expect.items():
         got = dig(reply, dotted)
-        if got != wanted:
+        if not holds(got, wanted):
             problems.append(f"{dotted}: wanted {wanted!r}, got {got!r}")
     return problems
+
+
+def distinct(client: Client, step: dict, reply: dict) -> list[str]:
+    """Report a value an earlier step of the same `distinct` group already got."""
+    if "distinct" not in step:
+        return []
+    group, dotted = step["distinct"]
+    got = dig(reply, dotted)
+    seen = client.seen.setdefault(group, [])
+    if got in seen:
+        return [f"{dotted}: {got!r} was already given in group {group!r}"]
+    seen.append(got)
+    return []
 
 
 def store(client: Client, step: dict, body: dict, fd: int | None) -> list[str]:
@@ -331,6 +358,7 @@ def run_rpc(client: Client, step: dict) -> list[str]:
             os.close(fd)
         time.sleep(SETTLE_PAUSE)
 
+    problems += distinct(client, step, reply)
     problems += store(client, step, reply, fd)
 
     if problems:

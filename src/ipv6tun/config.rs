@@ -24,11 +24,14 @@ const DEFAULT_TUN_MTU: u16 = 1280;
 /// reach it, so set one only to serve other hosts (LAN clients, or a
 /// gateway reaching the daemon over IPv4). On Linux, macOS and FreeBSD,
 /// with the daemon's own TUN, the `is_mesh_interface_query` filter drops
-/// queries arriving on the mesh interface, so mesh peers are not served,
-/// unless the daemon logged "Mesh interface index unresolved; DNS mesh
-/// filter disabled" at start; on Windows, or with an application-supplied
-/// TUN, they are. See `packaging/common/fips-dns-setup` for backend
-/// selection.
+/// queries arriving on the mesh interface, so mesh peers are not served.
+/// Where the mesh interface's index is unknown (an application-supplied
+/// TUN, Windows, or a name that did not resolve, which the daemon logs as
+/// "Mesh interface index unresolved") and a TUN is up, `mesh_query` drops
+/// mesh queries by address instead: on unix those addressed to the node's
+/// mesh address, on Windows those from a remote `fd00::/8` source, which
+/// also leaves Windows LAN clients with ULA addresses unanswered. See
+/// `packaging/common/fips-dns-setup` for backend selection.
 const DEFAULT_DNS_BIND_ADDR: &str = "::1";
 
 /// Default DNS responder port.

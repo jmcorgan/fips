@@ -12,6 +12,10 @@ UNIT_START_LIMIT=60
 # daemon that has only just been started, so it gets longer.
 GATEWAY_START_LIMIT=90
 
+# Whether fips-dns.service was enabled when the package was removed, written
+# by prerm's remove, or by preinst for a remove by an older package.
+DNS_REMOVE_RECORD=/var/lib/fips/fips-dns.at-remove
+
 # Set when the daemon or fips-dns does not come up on upgrade; checked at the
 # end.
 start_failed=""
@@ -120,7 +124,15 @@ case "$1" in
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload
             systemctl enable fips.service 2>/dev/null || true
-            systemctl enable fips-dns.service 2>/dev/null || true
+            # fips-dns is enabled on first install, and on an install from
+            # config-files state when it was enabled at the remove. Any
+            # other configure, an upgrade or a reinstall, keeps the
+            # operator's choice.
+            if [ -z "$2" ] ||
+                [ "$(cat "$DNS_REMOVE_RECORD" 2>/dev/null || true)" = enabled ]; then
+                systemctl enable fips-dns.service 2>/dev/null || true
+            fi
+            rm -f "$DNS_REMOVE_RECORD"
 
             # On upgrade, restart services that were running before. Each
             # start is bounded, and a daemon or fips-dns that does not come up

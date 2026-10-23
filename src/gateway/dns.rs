@@ -15,6 +15,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tracing::{debug, info, trace, warn};
 
+use super::net::MESH_INTERFACE;
 use super::pool::{PoolEvent, VirtualIpPool};
 use crate::NodeAddr;
 use crate::config::GatewayDnsConfig;
@@ -192,11 +193,21 @@ pub(crate) fn holder_hint(port: u16) -> &'static str {
 ///
 /// Called before the gateway creates anything it would have to tear down, so
 /// a port that is already taken stops the gateway before it starts.
+///
+/// On an IPv6 listener this also turns on arrival-interface reporting
+/// (`IPV6_RECVPKTINFO`), which [`serve`] needs to refuse queries arriving
+/// on the mesh interface; a failure to turn it on is a bind failure.
 pub async fn bind_listener(listen: &str) -> Result<UdpSocket, ListenError> {
-    UdpSocket::bind(listen).await.map_err(|source| ListenError {
+    let error = |source| ListenError {
         listen: listen.to_string(),
         source,
-    })
+    };
+    let socket = UdpSocket::bind(listen).await.map_err(error)?;
+    if socket.local_addr().map_err(error)?.is_ipv6() {
+        crate::ipv6tun::dns::set_recv_pktinfo_v6(&socket2::SockRef::from(&socket))
+            .map_err(error)?;
+    }
+    Ok(socket)
 }
 
 /// Run the gateway DNS resolver.
@@ -228,20 +239,80 @@ pub async fn run_dns_resolver(
 /// Forwards `.fips` queries to the upstream daemon resolver, allocates
 /// virtual IPs, and returns them to clients. Returns `Ok` on shutdown and
 /// `Err` when receiving from the listener fails.
+///
+/// A query that arrived on the mesh interface ([`MESH_INTERFACE`]) is
+/// dropped unanswered: the resolver serves the LAN and the gateway host, and
+/// a listener on the wildcard address would otherwise let any mesh node fill
+/// the virtual-IP pool and probe host-map aliases. An IPv6 listener must come
+/// from [`bind_listener`], which asks for the arrival interface; without it no
+/// arrival index is known and every query on that socket is dropped.
 pub async fn serve(
     socket: UdpSocket,
     upstream: SocketAddr,
     ttl: u32,
     pool: std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
     event_tx: tokio::sync::mpsc::Sender<PoolEvent>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), std::io::Error> {
+    serve_excluding(
+        socket,
+        upstream,
+        ttl,
+        pool,
+        event_tx,
+        shutdown,
+        MESH_INTERFACE,
+    )
+    .await
+}
+
+/// Whether a query is dropped as arriving from the mesh: it arrived on the
+/// mesh interface (`mesh_ifindex`), or the socket is IPv6 and the kernel did
+/// not say where it arrived. On Linux an IPv6 socket with `IPV6_RECVPKTINFO`
+/// set always gets the arrival index, IPv4 arrivals included, so a missing
+/// one is not expected and is treated as the mesh. An IPv4 socket never
+/// gets one, and is not reachable from the IPv6-only mesh.
+fn mesh_arrival(
+    arrival_ifindex: Option<u32>,
+    mesh_ifindex: Option<u32>,
+    ipv6_socket: bool,
+) -> bool {
+    crate::ipv6tun::dns::is_mesh_interface_query(arrival_ifindex, mesh_ifindex)
+        || (ipv6_socket && arrival_ifindex.is_none())
+}
+
+/// [`serve`], dropping queries that arrive on the interface named `mesh_if`.
+///
+/// The name is resolved to an index for each query rather than once at
+/// start: the gateway only requires the daemon's service, so a daemon that
+/// is restarted under a running gateway recreates its TUN with a new index.
+async fn serve_excluding(
+    socket: UdpSocket,
+    upstream: SocketAddr,
+    ttl: u32,
+    pool: std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
+    event_tx: tokio::sync::mpsc::Sender<PoolEvent>,
     mut shutdown: watch::Receiver<bool>,
+    mesh_if: &str,
 ) -> Result<(), std::io::Error> {
     let mut buf = vec![0u8; dnsmsg::MAX_DATAGRAM];
+    // An unreadable local address counts as IPv6, the form that drops more.
+    let ipv6_socket = socket.local_addr().map_or(true, |a| a.is_ipv6());
 
     loop {
         tokio::select! {
-            result = socket.recv_from(&mut buf) => {
-                let (len, client_addr) = result?;
+            result = crate::ipv6tun::dns::recv_with_pktinfo(&socket, &mut buf) => {
+                let (len, client_addr, arrival) = result?;
+                let mesh_ifindex = rustables::iface_index(mesh_if).ok();
+                if mesh_arrival(arrival.ifindex, mesh_ifindex, ipv6_socket) {
+                    debug!(
+                        src = %client_addr,
+                        ifindex = ?arrival.ifindex,
+                        reason = "mesh-interface",
+                        "DNS query dropped"
+                    );
+                    continue;
+                }
                 let query_bytes = &buf[..len];
 
                 let outcome = respond(
@@ -517,6 +588,10 @@ async fn resolve_query(
 }
 
 #[cfg(test)]
+#[path = "tests/dns.rs"]
+mod mesh_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -524,10 +599,10 @@ mod tests {
     use simple_dns::{Name, Question, RCODE, ResourceRecord};
     use tokio::sync::mpsc;
 
-    const TEST_TTL: u32 = 60;
+    pub(super) const TEST_TTL: u32 = 60;
 
     /// Build a client-facing AAAA query.
-    fn build_query(id: u16, qname: &str) -> Vec<u8> {
+    pub(super) fn build_query(id: u16, qname: &str) -> Vec<u8> {
         build_query_of_type(id, qname, QTYPE::TYPE(TYPE::AAAA))
     }
 
@@ -551,7 +626,7 @@ mod tests {
     }
 
     /// Build an upstream NOERROR AAAA answer.
-    fn build_answer(id: u16, qname: &str, addr: &str) -> Vec<u8> {
+    pub(super) fn build_answer(id: u16, qname: &str, addr: &str) -> Vec<u8> {
         let mut packet = Packet::new_reply(id);
         packet.set_flags(PacketFlag::RESPONSE | PacketFlag::RECURSION_AVAILABLE);
         let name = Name::new_unchecked(qname);
@@ -589,14 +664,14 @@ mod tests {
         })
     }
 
-    fn test_pool() -> std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>> {
+    pub(super) fn test_pool() -> std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>> {
         std::sync::Arc::new(tokio::sync::Mutex::new(
             VirtualIpPool::new("fd01::/112", TEST_TTL as u64, 30).unwrap(),
         ))
     }
 
     /// Assert the response is an AAAA answer whose address came from the pool.
-    fn assert_pool_answer(response: &[u8]) -> Ipv6Addr {
+    pub(super) fn assert_pool_answer(response: &[u8]) -> Ipv6Addr {
         let packet = Packet::parse(response).unwrap();
         assert_eq!(packet.rcode(), RCODE::NoError);
         let addr = extract_aaaa(&packet).expect("expected an AAAA answer");

@@ -12,7 +12,9 @@ mod ble;
 mod bloom;
 mod bloom_echo;
 mod bloom_hold;
+mod bloom_pacing;
 mod bloom_poison;
+mod bloom_send;
 mod bootstrap;
 #[cfg(ble_available)]
 mod claim_dials;
@@ -25,6 +27,7 @@ mod decrypt_failure;
 mod decrypt_forged;
 mod disconnect;
 mod discovery;
+mod dns_mesh;
 mod establish_chartests;
 mod forged_initial_msg2;
 mod forwarding;

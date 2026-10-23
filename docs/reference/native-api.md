@@ -30,6 +30,14 @@ There is no cap on flows per program, and no notion of a program to hang one
 on. One program can reach `max_flows` by itself, and the ceiling is shared
 with every other program on that node.
 
+**One peer can hold at most a quarter of `max_flows` as inbound flows**, 64 at
+the default, counting flows announced on a listener and not yet taken as well
+as those taken. An arrival from a peer at its share is dropped, with the text
+`peer flow limit reached`, until one of that peer's inbound flows closes. Flows
+a program on this node opens to a peer do not count against that peer's share.
+The share bounds one key: a peer that holds sessions under several keys gets a
+share for each.
+
 See [configuration.md](configuration.md#native-datagram-api-nodenative_api)
 for the full YAML reference, and [security.md](security.md#native-datagram-api)
 for what `fips` group membership grants once the API is on.
@@ -83,7 +91,7 @@ tiered.
 
 Nothing reserves the upper range against explicit use. A service that wants a
 fixed port above 49151 may hold one, and ephemeral allocation will not take it
-away, because the sweep skips a port already held.
+away, because the search skips a port already held.
 
 **The refusal applies to the remote port as well as the local one.** A program
 cannot send to a peer's port 256 and inject into its IPv6 plane. By the same
@@ -98,8 +106,14 @@ A local port has exactly one owner, a listener or one connected flow, never
 both. A connected flow owns its local port and frees it when the flow closes.
 A flow accepted from a listener shares the listener's port and does not own it,
 so closing an accepted flow frees no port; the port returns when the listener
-drops. Ephemeral allocation sweeps forward from the last claim and wraps once,
-so a port is not immediately reused after release.
+drops. Ephemeral allocation starts at a random port in the range and probes
+forward, wrapping once, to the first port not held (RFC 6056, Algorithm 1). The
+local port reaches the peer as the flow's source port, and a random start keeps
+two ports given to one peer from telling it how many other flows the node opened
+in between. A port just released can come straight back, with probability
+1/16384 on each allocation; that matters only if the new flow also has the old
+one's peer and remote port, when a late datagram from the old flow would reach
+the new one.
 
 ## The Rust surface
 
@@ -494,7 +508,7 @@ and FreeBSD are not affected. See `recv` above.
 
 ### The drop causes, and what they mean
 
-An inbound datagram can be refused for eight reasons, which render as seven
+An inbound datagram can be refused for nine reasons, which render as eight
 texts: a pending flow's full queue and an established flow's are distinct to a
 counter and alike to a client. The texts are what `DropReason::as_str` produces;
 the counter names are what `fipsctl stats metrics` reports under `native`.
@@ -504,6 +518,7 @@ the counter names are what `fipsctl stats metrics` reports under `native`.
 | `no listener or flow on that port` | `drop_no_port` | Nothing holds the destination port. |
 | `listener backlog full` | `drop_backlog_full` | A listener holds the port but will not hold another pending flow. |
 | `node flow ceiling reached` | `drop_too_many_flows` | The node is at `max_flows`. |
+| `peer flow limit reached` | `drop_peer_share` | The sending peer already holds a quarter of `max_flows` as inbound flows. |
 | `queue full` | `drop_pending_queue_full`, `drop_flow_queue_full` | A flow's queue is full, whether it is pending or established with a client that is not reading. Two counters, one text. |
 | `arrival queue full` | `drop_arrival_queue_full` | The daemon's own queue to a listener's task is full. |
 | `listener not reading arrivals` | `drop_listener_not_reading` | A listener's client is not reading its descriptor, so the arrival could not be written to it. |

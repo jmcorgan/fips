@@ -31,7 +31,9 @@
 //! on the flow or closed the listener, and a flow then reaches end of file once
 //! both the client and that copy have let go. The cost is that a client which
 //! accepts a flow and closes it without writing leaves it open until the
-//! listener closes. See `dgram_probe.rs` for the measurement.
+//! listener closes. See `dgram_probe.rs` for the measurement. One peer can
+//! hold no more than its share of the flow slots this pinning costs: a quarter
+//! of `max_flows` (`registry::PEER_SHARE`).
 //!
 //! **The wire is connected.** A datagram a client writes leaves this node over
 //! FSP, and one arriving on a held port reaches its flow. `max_payload` is the
@@ -1421,14 +1423,14 @@ mod tests {
 
     /// An npub the tests can decode. Any valid one will do; the tests never
     /// reach the peer it names.
-    const PEER: &str = "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m";
+    pub(super) const PEER: &str = "npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m";
 
     /// The npub a test node reports as its own, standing in for the identity a
     /// running daemon would report. A real one, so a reader cannot mistake the
     /// field for something the daemon fabricates.
     pub(super) const NODE: &str = "npub10xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpkge6d";
 
-    fn limits() -> Limits {
+    pub(super) fn limits() -> Limits {
         Limits {
             per_flow: 4,
             backlog: 2,
@@ -1445,7 +1447,7 @@ mod tests {
     /// The task runs the same `link::serve` the daemon's `rx_loop` runs, so
     /// these tests exercise the whole request and reply path rather than a
     /// stand-in for it.
-    fn connect() -> (Connection, mpsc::Receiver<Outbound>) {
+    pub(super) fn connect() -> (Connection, mpsc::Receiver<Outbound>) {
         wire_connection(true)
     }
 
@@ -1471,7 +1473,7 @@ mod tests {
     }
 
     /// Send one command and read the reply as JSON.
-    async fn ask(connection: &mut Connection, line: &str) -> serde_json::Value {
+    pub(super) async fn ask(connection: &mut Connection, line: &str) -> serde_json::Value {
         let (response, fd) = connection.answer(line.as_bytes()).await;
         assert!(fd.is_none(), "this command should carry no descriptor");
         serde_json::to_value(response).unwrap()
@@ -1546,7 +1548,10 @@ mod tests {
     }
 
     /// Bind a listener and keep its descriptor, the way a client does.
-    async fn listen(connection: &mut Connection, port: u16) -> (serde_json::Value, StdUnixStream) {
+    pub(super) async fn listen(
+        connection: &mut Connection,
+        port: u16,
+    ) -> (serde_json::Value, StdUnixStream) {
         open(
             connection,
             &format!(r#"{{"command":"listen","params":{{"local_port":{port}}}}}"#),
@@ -1558,7 +1563,7 @@ mod tests {
     ///
     /// Goes through the same `recvmsg` a client process runs, so what these
     /// tests assert about the ancillary framing is what a client would see.
-    fn accept(listener: &StdUnixStream) -> (serde_json::Value, StdUnixStream) {
+    pub(super) fn accept(listener: &StdUnixStream) -> (serde_json::Value, StdUnixStream) {
         // The listener descriptor comes back from `listen` already bounded, so
         // this recvmsg cannot park: an arrival the test wrote is there, or the
         // read fails and names the listener.
@@ -1577,7 +1582,7 @@ mod tests {
     }
 
     /// The same, naming the peer, so a test can name one that will not decode.
-    fn arrival_from(peer: &str, src: u16, dst: u16, data: &str) -> String {
+    pub(super) fn arrival_from(peer: &str, src: u16, dst: u16, data: &str) -> String {
         format!(
             r#"{{"command":"arrive","params":{{"peer":"{peer}","src_port":{src},"dst_port":{dst},"data":"{data}"}}}}"#
         )
@@ -1907,7 +1912,7 @@ mod tests {
     /// would stop the task it is waiting for. A readable listener means
     /// `hand_over` has finished: it writes the arrival and settles what happens
     /// to the daemon's copy of the descriptor in one synchronous step.
-    async fn readable(listener: &StdUnixStream) {
+    pub(super) async fn readable(listener: &StdUnixStream) {
         for _ in 0..1000 {
             let mut poll = libc::pollfd {
                 fd: listener.as_raw_fd(),
@@ -2766,3 +2771,10 @@ mod tests {
         assert!(!read_command(&mut reader, &mut line).await.unwrap());
     }
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "freebsd", target_os = "macos")
+))]
+#[path = "tests/flows.rs"]
+mod flow_tests;

@@ -653,6 +653,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still the oldest Debian-family distribution, which is no longer the oldest
   distribution outright.
 
+#### Routing and discovery
+
+- A node no longer sends an outgoing bloom filter whose false-positive rate
+  is above 0.20, the cap every v1 receiver applies. It holds the filter,
+  retries at the debounce pace and counts each hold in the bloom stats'
+  `held_over_cap`. Before, it sent the filter, the receiver rejected it, and
+  the sender's record of what the peer held was wrong from then on. A
+  receiver whose `node.bloom.max_inbound_fpr` is set above 0.20 no longer
+  receives filters between 0.20 and its own cap.
+
+#### FreeBSD
+
+- A package upgrade no longer stops the daemon. The running daemon keeps the
+  replaced binary, and the package prints a message saying to run
+  `service fips restart` (and `service fips_dns restart` if it is used).
+  Before, every upgrade left the node with no daemon and without its `.fips`
+  resolver drop-in, because `pkg` ended the daemon the new package started.
+  An upgrade from 0.5.3 still runs 0.5.3's pre-deinstall, which stops the
+  daemon, so it still needs `service fips restart`.
+
 ### Deprecated
 
 #### Library surface and internals
@@ -1148,6 +1168,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package makes the log directory root-owned, and the daemon refuses to open
   the log through a symlink.
 
+#### Linux packages
+
+- `fips-dns-setup` reads the TUN name from `tun.name` instead of waiting for
+  `fips0`, so on a host whose TUN has another name it no longer times out,
+  and upgrading such a host no longer leaves the package half-configured
+  with apt exiting 100.
+- An upgrade or reinstall no longer re-enables a `fips-dns.service` the
+  operator disabled. `fips-dns` is enabled on first install, and on an
+  install after a remove only if it was enabled when it was removed.
+
+#### Windows
+
+- `fips --install-service`, and so `install-service.ps1`, now repoints an
+  existing `fips` service registration at the installed `fips.exe` with
+  `--service`, keeping its start type and account, and says "updated".
+  Before, a service registered from another folder kept starting that
+  folder's `fips.exe` after an install. The service commands it, the script
+  and the ZIP README print are now `sc.exe`: in PowerShell a bare `sc` is the
+  Set-Content alias.
+
+#### OpenWrt
+
+- `.apk` packages are now uploaded to Blossom and announced on Nostr relays
+  on a release, as `.ipk` packages already were. Every upload had been
+  refused for its content type, without failing the release run. A failed
+  upload now raises a warning in the run.
+
+#### Sessions and rekey
+
+- After a path MTU decrease, a destination's later report of the value it
+  had been raising towards is accepted again after the usual three reports.
+  Before, the estimate stayed at the lowered value.
+
 ### Security
 
 #### Links and transports
@@ -1212,6 +1265,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the node give up a rekey still in flight, and `pending_replaced` those
   that displaced a completed rekey of its own still waiting for the peer.
   No message format changes.
+- An `MtuExceeded` from a transit node can only lower the path MTU estimate.
+  Reports from anywhere on the mesh could complete or reset a path MTU
+  increase, and spent the evidence an honest decrease needed.
+- A host can keep sending to an established session peer after the peer's
+  key leaves the bounded identity store. Any mesh node could open sessions
+  under fresh keys to push the entry out, after which the TUN answered
+  traffic to that peer with Destination Unreachable while the peer's own
+  traffic still arrived. Registering into a full store also no longer evicts
+  the entry just added.
 
 #### Routing and discovery
 
@@ -1228,6 +1290,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked. Rejections are counted as `child_role_rejected` in `show_bloom`
   and logged at WARN. The threshold is `node.bloom.child_echo_threshold`
   (default 0.8; 1.0 or above turns the check off).
+- A `FilterAnnounce` whose hash count is not 5 is rejected as non-v1. A peer
+  could announce a nearly full filter with a large hash count, pass the
+  false-positive cap, and have its bits merged into every filter the node
+  sends.
+- Each peer gets its own `FilterAnnounce` sequence, starting from a random
+  offset. A node-wide counter let any direct peer watch the node's announces
+  to its other peers and estimate its uptime.
+- Accepted filters are merged into the outgoing filters once per tick, not on
+  every inbound announce, so one peer can no longer force a full recompute
+  per frame.
+
+#### Native datagram API
+
+- Ephemeral ports start from a random port in the range instead of counting
+  up from 49152, so a peer can no longer tell from two flows' ports how many
+  flows local programs opened in between.
+- One peer's inbound flows are limited to a quarter of
+  `node.native_api.max_flows` (64 at the default). One peer could fill the
+  flow table, after which every native connect failed with EMFILE and every
+  other peer's arrivals were dropped. Arrivals over the share are dropped as
+  `peer flow limit reached` and counted in `drop_peer_share`.
+
+#### DNS
+
+- The gateway's DNS listener drops queries that arrive on `fips0`, including
+  a local resolver forwarding to the `fips0` address. With
+  `listen: "[::]:53"` and no mesh firewall, any mesh node with a session
+  could fill the virtual-IP pool and probe host-map aliases.
+- The daemon's DNS responder now filters mesh queries with an
+  application-supplied TUN and on Windows, where it did not know the mesh
+  interface. Under a non-loopback `dns.bind_addr`, a query addressed to the
+  node's mesh address from another source is dropped; on Windows, a query
+  from any remote `fd00::/8` source is dropped while a TUN is up, so LAN
+  clients with ULA addresses go unanswered under such a bind.
+- With an application-supplied TUN that carries no IPv6 address and a
+  specific non-loopback `dns.bind_addr`, a LAN host forging a mesh source
+  address can no longer have the responder's reply sent into the mesh. In
+  that setup a ULA client reached through a LAN router is no longer
+  answered.
+
+#### TUN
+
+- The daemon no longer deletes (Linux) or brings down (macOS, FreeBSD) an
+  existing interface named `tun.name` at startup. A mistyped name, a second
+  daemon, or any local user under the `setcap` deployment could delete a
+  bridge, a WireGuard link or a NIC, or take the TUN from a running daemon.
+  On Linux an existing TUN that no process holds is reused, with the
+  previous run's mesh address and route removed first; anything else is
+  refused with an error naming it, and the node runs without a TUN.
 
 ## [0.5.3] - 2026-10-16
 

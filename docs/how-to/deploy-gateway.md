@@ -227,7 +227,11 @@ Common cases:
   OpenWrt ipk does automatically. On OpenWrt the init script reads
   `gateway.dns.listen` and points dnsmasq at whatever port it sets.
 - **No other resolver on the host:** set `listen: "[::]:53"`
-  explicitly and LAN clients can query the gateway directly.
+  explicitly and LAN clients can query the gateway directly. Queries
+  that arrive on `fips0` are not answered, so a wildcard listen does
+  not serve the mesh; this includes a local resolver that forwards to
+  the gateway's `fips0` address, so forward to loopback or a LAN
+  address instead.
 - **systemd-resolved is on port 53:** the default already side-steps
   this — leave the listen address at `[::1]:5365` and configure the
   stub or a small forwarder to delegate `.fips` to the gateway. If

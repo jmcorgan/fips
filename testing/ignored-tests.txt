@@ -21,12 +21,26 @@ benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_dns_query_arriving_on_fips0_is_not_answered_and_mints_no_mapping  src/gateway/tests/dns.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_on_a_wildcard_listener_is_still_answered_with_a_pool_address  src/gateway/tests/dns.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_query_arriving_on_a_recreated_fips0_is_still_not_answered  src/gateway/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::tests::a_lan_query_with_a_forged_mesh_source_is_not_answered_into_the_mesh  src/ipv6tun/dns.rs
 environment   fips-mesh  ipv6tun::dns::tests::a_lan_query_with_a_forged_mesh_source_is_not_answered_into_the_mesh_on_a_specific_bind  src/ipv6tun/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_on_a_specific_bind_with_no_mesh_index_is_not_answered_into_the_mesh  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_global_lan_client_on_a_specific_bind_with_no_mesh_index_is_answered  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_local_client_sending_from_the_mesh_address_on_a_specific_bind_is_answered  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::an_on_link_ula_client_on_a_specific_bind_with_no_mesh_index_is_answered  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_query_to_the_node_mesh_address_from_a_mesh_source_is_not_answered_when_the_mesh_index_is_unknown  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_local_process_querying_its_own_mesh_address_is_still_answered_when_the_mesh_index_is_unknown  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_lan_client_on_a_wildcard_bind_is_still_answered_when_the_mesh_index_is_unknown  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_on_a_specific_bind_is_not_answered_into_an_addressless_mesh_interface  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::an_on_link_ula_client_on_a_specific_bind_is_answered_with_an_addressless_mesh_interface  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_still_reaches_a_bare_mesh_interface_when_the_mesh_address_is_on_another_interface  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::startup_refuses_and_keeps_a_dummy_link_that_has_the_configured_tun_name  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::a_second_create_on_a_held_tun_name_fails_and_leaves_the_first_device_in_place  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::startup_reopens_an_unheld_persistent_tun_with_the_configured_name  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::restart_with_the_same_identity_reconfigures_a_persistent_tun_left_by_an_unclean_exit  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::restart_with_a_new_identity_reconfigures_a_persistent_tun_left_by_an_unclean_exit  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  mdns::tests::matched_scope_peers_observe_each_other  src/mdns/tests.rs
 environment   fips-mesh  node::netmon::tests::a_route_change_alone_reaches_the_watcher  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_going_down_is_reported_only_when_a_peer_was_reached_over_it  src/node/netmon/tests.rs

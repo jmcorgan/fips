@@ -7,6 +7,10 @@ use super::nat::{RetryLog, RetryReport};
 use std::net::Ipv6Addr;
 use tracing::{debug, error, info, warn};
 
+/// The name of the FIPS daemon's TUN interface, which the gateway checks at
+/// start and whose DNS queries it refuses.
+pub const MESH_INTERFACE: &str = "fips0";
+
 /// Check if IPv6 forwarding is enabled.
 ///
 /// The gateway is completely non-functional without forwarding — packets

@@ -9638,6 +9638,109 @@ async fn an_initiating_session_refuses_an_uncorroborated_report_and_accepts_a_co
     );
 }
 
+/// The MMP state of an established session installed by
+/// `install_established_session_with_mmp`, for driving its path MTU directly.
+fn session_mmp<'a>(
+    node: &'a mut Node,
+    dest: &NodeAddr,
+) -> &'a mut crate::proto::mmp::MmpSessionState {
+    node.sessions
+        .get_mut(dest)
+        .and_then(|e| e.mmp_mut())
+        .expect("session with MMP must exist")
+}
+
+#[tokio::test]
+async fn an_above_estimate_mtu_exceeded_does_not_count_toward_a_path_mtu_increase() {
+    // A reactive MtuExceeded is unauthenticated and can only ever describe a
+    // hop that is too small. Fed into the destination's two-way notification
+    // path, an above-estimate value became one step of the increase ladder, so
+    // anyone on the mesh supplied a third of an increase that only the
+    // destination may drive.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    session_mmp(&mut node, &dest).path_mtu.seed_source_mtu(1200);
+
+    note_sent_wire_len(&mut node, &dest, 1400);
+    let t0 = crate::time::mono_ms();
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1300);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    let path_mtu = &mut session_mmp(&mut node, &dest).path_mtu;
+    path_mtu.apply_notification(1300, t0 + 10_000);
+    path_mtu.apply_notification(1300, t0 + 25_000);
+
+    assert_eq!(
+        path_mtu.current_mtu(),
+        1200,
+        "two notifications are not an increase; the reactive report must not be the third"
+    );
+}
+
+#[tokio::test]
+async fn an_above_estimate_mtu_exceeded_does_not_reset_a_notification_driven_increase() {
+    // The destination is building an honest increase to 1400. A different
+    // above-estimate value from anywhere on the mesh used to replace the
+    // pending value and restart the ladder, holding the estimate down.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+
+    let path_mtu = &mut session_mmp(&mut node, &dest).path_mtu;
+    path_mtu.seed_source_mtu(1200);
+    path_mtu.apply_notification(1400, 0);
+    path_mtu.apply_notification(1400, 10_000);
+
+    note_sent_wire_len(&mut node, &dest, 1400);
+    let inner = build_mtu_exceeded_inner(&dest, &reporter, 1300);
+    node.handle_mtu_exceeded(&reporter, &inner).await;
+
+    let path_mtu = &mut session_mmp(&mut node, &dest).path_mtu;
+    path_mtu.apply_notification(1400, 25_000);
+    assert_eq!(
+        path_mtu.current_mtu(),
+        1400,
+        "the third matching notification must complete the increase the reactive report interrupted"
+    );
+}
+
+#[tokio::test]
+async fn an_above_estimate_mtu_exceeded_does_not_spend_the_evidence_an_honest_decrease_needs() {
+    // A report that changes nothing must not consume the sent-frame evidence,
+    // or the honest report that follows it is refused as uncorroborated.
+    let mut node = make_node();
+
+    let remote = Identity::generate();
+    install_established_session_with_mmp(&mut node, &remote);
+    let dest = *remote.node_addr();
+    let reporter = NodeAddr::from_bytes([0xBB; 16]);
+    session_mmp(&mut node, &dest).path_mtu.seed_source_mtu(1200);
+
+    note_sent_wire_len(&mut node, &dest, 1400);
+    let above = build_mtu_exceeded_inner(&dest, &reporter, 1300);
+    node.handle_mtu_exceeded(&reporter, &above).await;
+    let below = build_mtu_exceeded_inner(&dest, &reporter, 1100);
+    node.handle_mtu_exceeded(&reporter, &below).await;
+
+    assert_eq!(
+        session_mmp(&mut node, &dest).path_mtu.current_mtu(),
+        1100,
+        "the honest decrease must apply on the evidence the ignored report left unspent"
+    );
+    assert_eq!(
+        node.metrics().errors.mtu_exceeded_uncorroborated.get(),
+        0,
+        "the honest decrease must not be refused as uncorroborated"
+    );
+}
+
 #[tokio::test]
 async fn a_second_reactive_decrease_needs_its_own_corroborating_send() {
     // The evidence is spent on the decrease it vouched for. Otherwise one
@@ -10963,4 +11066,150 @@ async fn a_coords_response_is_admitted_after_a_backward_wall_clock_step() {
          system clock stepped back"
     );
     cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// Integration tests: the identity store and live sessions
+// ============================================================================
+
+/// Whether `packet` is an ICMPv6 Destination Unreachable (next header 58,
+/// type 1).
+fn is_icmpv6_dest_unreachable(packet: &[u8]) -> bool {
+    packet.len() > 40 && packet[6] == 58 && packet[40] == 1
+}
+
+#[tokio::test]
+async fn a_host_reply_to_an_established_session_peer_is_sent_after_the_identity_store_evicts_its_key()
+ {
+    // The identity store is bounded and evicts by age with no regard for the
+    // session table, and the TUN path resolves a destination only through it.
+    // Once registrations by other nodes pushed a live session peer out, the
+    // host could no longer reply to traffic that peer was still delivering.
+    let mut cfg1 = crate::config::Config::new();
+    cfg1.node.cache.identity_size = 3;
+    let configs = vec![crate::config::Config::new(), cfg1];
+    let mut nodes = run_tree_test_with_configs(configs, &[(0, 1)]).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    establish_pair_session(&mut nodes).await;
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    // Age node 0's entry behind the registrations that follow.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for _ in 0..4 {
+        let other = Identity::generate();
+        nodes[1]
+            .node
+            .register_identity(*other.node_addr(), other.pubkey_full());
+    }
+    assert!(
+        !nodes[1].node.has_cached_identity(&node0_addr),
+        "precondition: node 0's key has been evicted from node 1's store"
+    );
+    assert!(
+        nodes[1]
+            .node
+            .get_session(&node0_addr)
+            .is_some_and(|s| s.is_established()),
+        "precondition: node 1's session to node 0 is still established"
+    );
+
+    let (_app_outbound, node0_tun) = nodes[0].node.enable_app_owned_tun();
+    let (tun_tx, node1_tun) = std::sync::mpsc::channel();
+    nodes[1].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+
+    let src = crate::Ipv6Address::from_node_addr(&node1_addr);
+    let dst = crate::Ipv6Address::from_node_addr(&node0_addr);
+    let reply = build_ipv6_packet(&src, &dst, b"reply");
+    nodes[1].node.handle_tun_outbound(reply.clone()).await;
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+
+    let at_node1: Vec<Vec<u8>> = std::iter::from_fn(|| node1_tun.try_recv().ok()).collect();
+    assert!(
+        !at_node1.iter().any(|p| is_icmpv6_dest_unreachable(p)),
+        "node 1 must not answer its own host's reply with Destination Unreachable"
+    );
+    let at_node0: Vec<Vec<u8>> = std::iter::from_fn(|| node0_tun.try_recv().ok()).collect();
+    assert_eq!(
+        at_node0,
+        vec![reply],
+        "the reply must reach node 0 on the established session"
+    );
+    assert!(
+        nodes[1].node.has_cached_identity(&node0_addr),
+        "the session's authenticated key restores node 0's entry in the store"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn the_identity_store_fallback_ignores_a_session_that_is_not_established() {
+    // Only a key the session has authenticated may stand in for a store
+    // entry. A session still in its handshake holds a key nobody has proven.
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_pubkey = nodes[1].node.identity().pubkey_full();
+    nodes[0]
+        .node
+        .initiate_session(node1_addr, node1_pubkey)
+        .await
+        .expect("initiate_session failed");
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|s| !s.is_established()),
+        "precondition: the session is still in its handshake"
+    );
+
+    let mut prefix = [0u8; 15];
+    prefix.copy_from_slice(&node1_addr.as_bytes()[0..15]);
+    nodes[0].node.identity_cache.remove(&prefix);
+
+    assert_eq!(
+        nodes[0].node.lookup_by_fips_prefix(&prefix),
+        None,
+        "a session that is not established must not answer for the store"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[test]
+fn registering_an_identity_into_a_full_store_never_evicts_the_entry_just_registered() {
+    // Eviction picks the entry with the oldest millisecond stamp. When the
+    // others are stamped no older than the new one, as happens whenever
+    // several registrations land in one millisecond, the minimum could be
+    // the entry just inserted, so a registration could undo itself. Stamping
+    // the existing entries later than now makes that the only minimum.
+    let mut config = crate::config::Config::new();
+    config.node.cache.identity_size = 3;
+    let mut node = make_node_with(config);
+    for i in 0..3u64 {
+        let other = Identity::generate();
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&other.node_addr().as_bytes()[0..15]);
+        node.identity_cache.insert(
+            prefix,
+            (*other.node_addr(), other.pubkey_full(), u64::MAX - i),
+        );
+    }
+
+    let newest = Identity::generate();
+    node.register_identity(*newest.node_addr(), newest.pubkey_full());
+
+    assert_eq!(node.identity_cache.len(), 3, "the store stays at its bound");
+    assert!(
+        node.has_cached_identity(newest.node_addr()),
+        "the entry just registered must survive its own eviction pass"
+    );
 }

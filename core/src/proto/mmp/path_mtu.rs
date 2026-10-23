@@ -144,10 +144,7 @@ impl PathMtuState {
         }
 
         if reported_mtu < self.current_mtu {
-            // Decrease: immediate
-            self.current_mtu = reported_mtu;
-            self.consecutive_increase_count = 0;
-            self.first_increase_ms = None;
+            self.decrease_to(reported_mtu);
             return true;
         }
 
@@ -178,6 +175,42 @@ impl PathMtuState {
 
         // No change (equal or increase not yet confirmed)
         false
+    }
+
+    /// Apply a reactive MtuExceeded report from a transit router.
+    ///
+    /// The report is not authenticated end to end and can only ever say that
+    /// some hop is too small, so it is one-way: a value below the current
+    /// estimate lowers it at once, and anything else is ignored. In particular
+    /// a value at or above the estimate leaves the increase ladder that the
+    /// destination's own notifications are building untouched; raising the
+    /// estimate is the destination's decision alone.
+    ///
+    /// A value below [`MIN_ACTIONABLE_PATH_MTU`] is ignored, as in
+    /// [`Self::apply_notification`]. Returns `true` if the effective MTU
+    /// changed.
+    ///
+    /// [`MIN_ACTIONABLE_PATH_MTU`]: super::limits::MIN_ACTIONABLE_PATH_MTU
+    pub fn apply_reactive_decrease(&mut self, reported_mtu: u16) -> bool {
+        if reported_mtu < super::limits::MIN_ACTIONABLE_PATH_MTU || reported_mtu >= self.current_mtu
+        {
+            return false;
+        }
+        self.decrease_to(reported_mtu);
+        true
+    }
+
+    /// Lower the estimate to `mtu` and abandon any increase in progress.
+    ///
+    /// Shared by both decrease paths so they cannot drift apart. The pending
+    /// value is cleared with the rest of the ladder: left behind, it would let
+    /// the first matching notification of a later increase take the
+    /// same-value arm, which never records when the sequence began.
+    fn decrease_to(&mut self, mtu: u16) {
+        self.current_mtu = mtu;
+        self.consecutive_increase_count = 0;
+        self.first_increase_ms = None;
+        self.pending_increase_mtu = 0;
     }
 
     /// Forget the source-side path MTU after the path it described is gone.

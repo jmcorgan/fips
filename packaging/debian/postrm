@@ -61,6 +61,10 @@ case "$1" in
         # Remove runtime directory
         rm -rf /run/fips/
 
+        # Remove the package state prerm keeps across a remove
+        rm -f /var/lib/fips/fips-dns.at-remove
+        rmdir /var/lib/fips 2>/dev/null || true
+
         # Remove fips system group
         if getent group fips >/dev/null 2>&1; then
             groupdel fips 2>/dev/null || true

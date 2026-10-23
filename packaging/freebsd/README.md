@@ -56,13 +56,17 @@ upgrade.
 
 The package creates a `fips` group; members can run `fipsctl` and
 `fipstop` without root (`pw groupmod fips -m <user>`, then re-login).
-On `pkg upgrade` the services are stopped before the binaries are
-replaced, and the package starts them again afterwards if enabled, but
-pkg 2.8.4 ends a daemon that a package script starts once pkg exits
-(measured with `pkg install` of a package file), so that start does not
-last. After an upgrade, run `service fips restart`
-and, if you use it, `service fips_dns restart`. On `pkg delete` the
-services are stopped and the `.fips` resolver drop-in is removed.
+An upgrade (`pkg upgrade`, or `pkg install` of a newer package file)
+leaves the running daemon alone: it keeps running the previous binary
+until you run `service fips restart`, and the package prints that
+instruction. `service fips restart` also starts a daemon that is not
+running. If you use it, run `service fips_dns restart` too. The package
+does not restart the daemon itself because pkg 2.8.4 ends a process that
+a package script starts once pkg exits (measured with `pkg install` of a
+package file). Packages before 0.5.4 stop both services on upgrade, so
+an upgrade from one of them leaves the daemon stopped until the same
+restart. On `pkg delete` the services are stopped and the `.fips`
+resolver drop-in is removed.
 
 ## .fips DNS integration
 
@@ -103,6 +107,15 @@ Field-tested caveats (`fips-dns-setup` detects and warns about each):
 - Never run `local-unbound-setup` with no arguments while resolv.conf
   already points at 127.0.0.1 — it snapshots that as upstream and
   forwards unbound to itself.
+
+## Upgrade test
+
+`test-upgrade.sh` checks that `pkg install` of a newer package leaves a
+running daemon alone, prints the restart instruction, and that
+`service fips restart` then runs the new binary. Run it as root on a
+FreeBSD host with the package from this tree installed; it builds a
+99.0.0 package from the same binaries to upgrade to. The FreeBSD Package
+workflow runs it in its VM leg.
 
 ## Debugging
 

@@ -1221,6 +1221,195 @@ _upgrade_not_opted_in() {
     return 0
 }
 
+# Print the unit's enablement state, or "(unreadable)" when systemctl could
+# not be asked.
+unit_enabled_state() {
+    local name="$1" unit="$2" state
+    state=$(cexec "$name" systemctl is-enabled "$unit" 2>/dev/null) || true
+    echo "${state:-(unreadable)}"
+    return 0
+}
+
+# Pass or fail on a unit's enablement state.
+check_enabled_state() {
+    local name="$1" unit="$2" want="$3" what="$4" have
+    have=$(unit_enabled_state "$name" "$unit")
+    if [ "$have" = "$want" ]; then
+        pass "$what: $unit is $want"
+    else
+        fail "$what: $unit is '$have' (want $want)"
+    fi
+    return 0
+}
+
+# Pass or fail on dpkg's status for the fips package.
+check_pkg_status() {
+    local name="$1" want="$2" what="$3" have
+    have=$(cexec "$name" dpkg-query -W -f='${db:Status-Status}' fips 2>/dev/null) || true
+    if [ "$have" = "$want" ]; then
+        pass "$what: package is $want"
+    else
+        fail "$what: package is '${have:-(unreadable)}' (want $want)"
+    fi
+    return 0
+}
+
+# An operator who disabled fips-dns must find it still disabled after the
+# package is configured again. Then, on a host whose daemon config renames the
+# TUN (tun.name: mesh0), so fips0 never exists, an upgrade must configure
+# cleanly with fips-dns running, because fips-dns-setup takes the name from the
+# config and the resolved backends never wait for the interface. The disable
+# check runs first, on the default name, so that it does not depend on the
+# upgrade's outcome.
+_upgrade_renamed_tun() {
+    local name="$1" image="$2" deb="$3"
+    log "configure with fips-dns disabled, then upgrade with tun.name mesh0 ($name)"
+    upgrade_boot "$name" "$image" "$deb" || { cleanup_container "$name"; return 0; }
+    make_next_package "$name" "$deb" || { cleanup_container "$name"; return 0; }
+
+    cexec "$name" systemctl disable fips-dns.service >/dev/null 2>&1 || true
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" install --reinstall -y "./$deb"
+    echo "  reinstall with fips-dns disabled took ${APT_SECS}s (exit $APT_RC)"
+    if [ "$APT_RC" -eq 0 ]; then
+        pass "fips-dns disabled: reinstall exits 0"
+    else
+        fail "fips-dns disabled: reinstall exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+    fi
+    check_enabled_state "$name" fips-dns.service disabled "fips-dns disabled, after reinstall"
+
+    cexec "$name" systemctl enable fips-dns.service >/dev/null 2>&1 || true
+    if ! cexec "$name" sed -i 's/^  name: fips0$/  name: mesh0/' /etc/fips/fips.yaml ||
+        ! cexec "$name" grep -q '^  name: mesh0$' /etc/fips/fips.yaml; then
+        fail "renamed tun: could not set tun.name to mesh0 in /etc/fips/fips.yaml"
+        cleanup_container "$name"
+        return 0
+    fi
+    cexec "$name" systemctl restart fips.service >/dev/null 2>&1 || true
+    # fips.service reads active as soon as it forks, before the daemon has
+    # created its TUN, so wait for the interface itself.
+    local _i up=0
+    for _i in $(seq 1 "$DAEMON_TIMEOUT"); do
+        if cexec "$name" ip link show mesh0 >/dev/null 2>&1; then
+            up=1
+            break
+        fi
+        sleep 1
+    done
+    if ! wait_for_service_active "$name" fips.service || [ "$up" -ne 1 ]; then
+        fail "renamed tun: the daemon did not come up on mesh0 before the upgrade"
+        cexec "$name" systemctl status --no-pager fips.service 2>&1 | tail -15
+        cleanup_container "$name"
+        return 0
+    fi
+
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" install -y ./next.deb
+    echo "  upgrade took ${APT_SECS}s"
+    if [ "$APT_RC" -eq 0 ]; then
+        pass "renamed tun: upgrade exits 0"
+    else
+        fail "renamed tun: upgrade exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+    fi
+    check_pkg_status "$name" installed "renamed tun, after upgrade"
+    check_active "$name" fips.service "renamed tun, after upgrade"
+    check_active "$name" fips-dns.service "renamed tun, after upgrade"
+
+    cleanup_container "$name"
+    return 0
+}
+
+# Removing the package (not purging it) disables its units, and installing it
+# again from that config-files state must put the operator's enablement back:
+# fips-dns enabled if it was enabled at the remove, disabled if the operator
+# had disabled it. Once restored, a later configure must again respect a
+# disable, so nothing left by the remove outlives the reinstall. A remove by
+# an older package, which recorded nothing, is treated as enabled at remove,
+# as that package's postinst always enabled fips-dns.
+_reinstall_after_remove() {
+    local name="$1" image="$2" deb="$3"
+    log "remove and reinstall ($name)"
+    upgrade_boot "$name" "$image" "$deb" || { cleanup_container "$name"; return 0; }
+
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" remove -y fips
+    if [ "$APT_RC" -ne 0 ]; then
+        fail "reinstall after remove: removing the package exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+        cleanup_container "$name"
+        return 0
+    fi
+    check_pkg_status "$name" config-files "enabled at remove, after remove"
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" install -y "./$deb"
+    if [ "$APT_RC" -eq 0 ]; then
+        pass "enabled at remove: reinstall exits 0"
+    else
+        fail "enabled at remove: reinstall exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+    fi
+    check_enabled_state "$name" fips.service enabled "enabled at remove, after reinstall"
+    check_enabled_state "$name" fips-dns.service enabled "enabled at remove, after reinstall"
+
+    cexec "$name" systemctl disable fips-dns.service >/dev/null 2>&1 || true
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" install --reinstall -y "./$deb"
+    echo "  configure again with fips-dns disabled (exit $APT_RC)"
+    check_enabled_state "$name" fips-dns.service disabled "disabled after the reinstall, configured again"
+
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" remove -y fips
+    if [ "$APT_RC" -ne 0 ]; then
+        fail "disabled at remove: removing the package exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+        cleanup_container "$name"
+        return 0
+    fi
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" install -y "./$deb"
+    if [ "$APT_RC" -eq 0 ]; then
+        pass "disabled at remove: reinstall exits 0"
+    else
+        fail "disabled at remove: reinstall exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+    fi
+    check_enabled_state "$name" fips.service enabled "disabled at remove, after reinstall"
+    check_enabled_state "$name" fips-dns.service disabled "disabled at remove, after reinstall"
+
+    # A package from before the remove kept any record disabled fips-dns
+    # and left nothing under /var/lib/fips, and its postinst enabled
+    # fips-dns on every configure. Deleting what this package's remove
+    # left reproduces that state, and the install must still enable it.
+    cexec "$name" systemctl enable fips-dns.service >/dev/null 2>&1 || true
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" remove -y fips
+    if [ "$APT_RC" -ne 0 ]; then
+        fail "nothing recorded at remove: removing the package exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+        cleanup_container "$name"
+        return 0
+    fi
+    # The unit file is gone with the package, so look for the link itself.
+    local link
+    link=$(cexec "$name" sh -c 'if [ -L /etc/systemd/system/multi-user.target.wants/fips-dns.service ]; then echo linked; else echo unlinked; fi' 2>/dev/null) || true
+    if [ "$link" = unlinked ]; then
+        pass "nothing recorded at remove: the remove disabled fips-dns.service"
+    else
+        fail "nothing recorded at remove: fips-dns.service link after the remove is '${link:-(unreadable)}' (want unlinked)"
+    fi
+    if cexec "$name" sh -c 'ls /var/lib/fips/fips-dns.* >/dev/null 2>&1 && rm -f /var/lib/fips/fips-dns.* && ! ls /var/lib/fips/fips-dns.* >/dev/null 2>&1'; then
+        pass "nothing recorded at remove: deleted the record the remove left"
+    else
+        fail "nothing recorded at remove: the remove left no record to delete, or it could not be deleted"
+    fi
+    run_apt "$name" "$UPGRADE_APT_TIMEOUT" install -y "./$deb"
+    if [ "$APT_RC" -eq 0 ]; then
+        pass "nothing recorded at remove: reinstall exits 0"
+    else
+        fail "nothing recorded at remove: reinstall exited $APT_RC"
+        echo "$APT_OUT" | tail -20
+    fi
+    check_enabled_state "$name" fips.service enabled "nothing recorded at remove, after reinstall"
+    check_enabled_state "$name" fips-dns.service enabled "nothing recorded at remove, after reinstall"
+
+    cleanup_container "$name"
+    return 0
+}
+
 _run_deb_upgrade_scenario() {
     local distro_label="$1"
     local base_image="$2"
@@ -1256,6 +1445,8 @@ DOCKERFILE
     # that scenario's container logs on failure collects these too.
     _upgrade_opted_in "fips-deb-test-${distro_label}-upg-a${FIPS_CI_NAME_SUFFIX:-}" "$image" "$deb"
     _upgrade_not_opted_in "fips-deb-test-${distro_label}-upg-b${FIPS_CI_NAME_SUFFIX:-}" "$image" "$deb"
+    _upgrade_renamed_tun "fips-deb-test-${distro_label}-upg-c${FIPS_CI_NAME_SUFFIX:-}" "$image" "$deb"
+    _reinstall_after_remove "fips-deb-test-${distro_label}-upg-d${FIPS_CI_NAME_SUFFIX:-}" "$image" "$deb"
     remove_image "$image"
     return 0
 }

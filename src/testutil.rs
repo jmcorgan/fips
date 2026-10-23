@@ -342,6 +342,43 @@ impl Blackhole {
     }
 }
 
+/// Run a command and panic unless it succeeds.
+///
+/// For root network-namespace tests, which set up their topology with `ip`
+/// and `nft`; a failed step would otherwise leave a test passing against a
+/// topology it did not build.
+#[cfg(target_os = "linux")]
+pub(crate) fn run_ok(cmd: &str, args: &[&str]) {
+    let out = std::process::Command::new(cmd).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{cmd} {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Run `f` on a thread that has entered the named network namespace
+/// (`/run/netns/<name>`, as `ip netns add` creates it), and return its value.
+///
+/// Any socket or netlink connection `f` creates belongs to that namespace,
+/// and keeps belonging to it after the thread ends, so a socket made here can
+/// be handed to the test's own runtime. Code that reads the namespace at the
+/// time it runs (a route probe, an interface lookup, a TUN create) must run
+/// inside `f`. Needs root.
+#[cfg(target_os = "linux")]
+pub(crate) fn in_netns<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    use std::os::fd::AsRawFd;
+    let path = format!("/run/netns/{name}");
+    std::thread::spawn(move || {
+        let file = std::fs::File::open(&path).expect("open netns");
+        let ret = unsafe { libc::setns(file.as_raw_fd(), libc::CLONE_NEWNET) };
+        assert_eq!(ret, 0, "setns: {}", std::io::Error::last_os_error());
+        f()
+    })
+    .join()
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

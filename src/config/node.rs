@@ -812,7 +812,8 @@ pub struct BloomConfig {
     /// legitimately near their operating ceiling are not rejected before
     /// the network reaches the fixed-filter capacity limit; conceptually
     /// distinct from future autoscaling hysteresis setpoints — same unit,
-    /// different knobs.
+    /// different knobs. Raising it does not admit filters above 0.20 from
+    /// senders that hold outgoing filters at the v1 cap.
     #[serde(default = "BloomConfig::default_max_inbound_fpr")]
     pub max_inbound_fpr: f64,
     /// Child echo guard (`node.bloom.child_echo_threshold`): a tree child's
@@ -841,7 +842,7 @@ impl BloomConfig {
         500
     }
     fn default_max_inbound_fpr() -> f64 {
-        0.20
+        crate::proto::bloom::ACCEPT_FPR_CAP
     }
     fn default_child_echo_threshold() -> f64 {
         0.8
@@ -1081,6 +1082,9 @@ pub struct NativeApiConfig {
     pub backlog: usize,
 
     /// Flows this node holds at once (`node.native_api.max_flows`).
+    ///
+    /// One peer's inbound flows, pending and accepted, may hold no more than a
+    /// quarter of these (`native::registry::PEER_SHARE`).
     #[serde(default = "NativeApiConfig::default_max_flows")]
     pub max_flows: usize,
 

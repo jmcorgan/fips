@@ -72,9 +72,8 @@ mod surface {
 
     /// The lowest port the daemon's ephemeral allocator ever hands out.
     ///
-    /// A floor rather than a value: the allocator is a forward-only cursor
-    /// shared with every check that ran before this one, so the exact port
-    /// depends on run order and only the range is a property of the surface.
+    /// A floor rather than a value: the allocator starts each search at a
+    /// random port, so only the range is a property of the surface.
     const EPHEMERAL: u16 = 49152;
 
     /// The port the walk asks a listener to hold by name.

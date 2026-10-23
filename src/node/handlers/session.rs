@@ -2089,15 +2089,26 @@ impl Node {
             return;
         }
 
-        // Apply to PathMtuState: immediate decrease via apply_notification()
+        // Apply to PathMtuState via apply_reactive_decrease(): a report can
+        // only lower the estimate. One at or above it changes nothing, so it
+        // must neither touch the increase ladder the destination's own
+        // notifications drive nor spend the evidence the next honest decrease
+        // will need.
+        let mut spend = true;
         if let Some(entry) = self.sessions.get_mut(&msg.dest_addr)
             && let Some(mmp) = entry.mmp_mut()
         {
             let old_mtu = mmp.path_mtu.current_mtu();
-            if mmp
-                .path_mtu
-                .apply_notification(msg.mtu, crate::time::mono_ms())
-            {
+            if msg.mtu >= old_mtu {
+                debug!(
+                    dest = %peer_name,
+                    reporter = %msg.reporter,
+                    bottleneck_mtu = msg.mtu,
+                    current_mtu = old_mtu,
+                    "MtuExceeded at or above the current path MTU estimate; not applied"
+                );
+                spend = false;
+            } else if mmp.path_mtu.apply_reactive_decrease(msg.mtu) {
                 let new_mtu = mmp.path_mtu.current_mtu();
                 info!(
                     dest = %peer_name,
@@ -2113,7 +2124,7 @@ impl Node {
         // the next one. An initiating session has no `mmp` and so reaches this
         // with the apply above skipped; the reset belongs to the acceptance,
         // not to the apply.
-        if let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
+        if spend && let Some(entry) = self.sessions.get_mut(&msg.dest_addr) {
             entry.clear_sent_wire_len();
         }
 

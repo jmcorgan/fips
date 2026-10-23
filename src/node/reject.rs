@@ -86,7 +86,8 @@ pub enum BloomReject {
     /// internally inconsistent (`is_valid()` returned false). Tracked
     /// via [`BloomStats::invalid`](crate::node::stats::BloomStats).
     Invalid,
-    /// Announce advertises a non-v1-compliant size class. Tracked via
+    /// Announce advertises a non-v1-compliant size class or hash count.
+    /// Tracked via
     /// [`BloomStats::non_v1`](crate::node::stats::BloomStats).
     NonV1,
     /// Announce arrived from a peer with no `ActivePeer` record on

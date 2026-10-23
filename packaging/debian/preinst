@@ -1,0 +1,23 @@
+#!/bin/sh
+# FIPS pre-install script for Debian/Ubuntu
+set -e
+
+# prerm's remove records here whether fips-dns.service was enabled; see prerm.
+DNS_REMOVE_RECORD=/var/lib/fips/fips-dns.at-remove
+
+case "$1" in
+    install)
+        # An install from config-files state names the removed version in $2.
+        # A package from before the record disabled fips-dns at the remove
+        # and recorded nothing, and its postinst enabled fips-dns on every
+        # configure, so keep that: record it as enabled.
+        if [ -n "$2" ] && [ ! -e "$DNS_REMOVE_RECORD" ]; then
+            mkdir -p /var/lib/fips
+            echo enabled > "$DNS_REMOVE_RECORD"
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

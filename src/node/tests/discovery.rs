@@ -3501,23 +3501,43 @@ async fn a_failed_session_retry_after_a_lookup_answer_leaves_packets_held_behind
 /// A response for `request_id` naming `target` whose proof `forger` signed
 /// with its own key, so the target's key cannot verify it.
 fn forged_response(forger: &Identity, request_id: u64, target: &NodeAddr) -> Vec<u8> {
-    let coords = TreeCoordinate::from_addrs(vec![*target, *forger.node_addr()]).unwrap();
+    forged_response_under(forger, request_id, target, forger.node_addr())
+}
+
+/// As `forged_response`, but placing `target` directly under `root`, so the
+/// forgery names the mesh's real root and only the proof gives it away.
+fn forged_response_under(
+    forger: &Identity,
+    request_id: u64,
+    target: &NodeAddr,
+    root: &NodeAddr,
+) -> Vec<u8> {
+    let addrs = if target == root {
+        vec![*target]
+    } else {
+        vec![*target, *root]
+    };
+    let coords = TreeCoordinate::from_addrs(addrs).unwrap();
     let proof = forger.sign(&LookupResponse::proof_bytes(request_id, target, &coords));
     LookupResponse::new(request_id, *target, coords, proof).encode()
 }
 
 /// Run `origin`'s lookup for `target` one hop per pass. The first time the
 /// node at `forger` holds the request, it answers the neighbour that sent it,
-/// `via`, with a forged response. Returns the number of forgeries sent.
+/// `via`, with `per_id` forged responses for each request id it holds, each
+/// signed by a fresh key and naming the mesh's real root. Returns the number
+/// of forgeries sent.
 async fn lookup_raced_by_a_forger(
     nodes: &mut [spanning_tree::TestNode],
     origin: usize,
     target: usize,
     forger: usize,
     via: usize,
+    per_id: usize,
 ) -> usize {
     let target_addr = *nodes[target].node.node_addr();
     let via_addr = *nodes[via].node.node_addr();
+    let root = *nodes[origin].node.tree_state().root();
     let target_pubkey = nodes[target].node.identity().pubkey_full();
     nodes[origin]
         .node
@@ -3537,15 +3557,17 @@ async fn lookup_raced_by_a_forger(
             .copied()
             .collect();
         if forged == 0 && !ids.is_empty() {
-            let forger_identity = Identity::generate();
             for id in ids {
-                let frame = forged_response(&forger_identity, id, &target_addr);
-                nodes[forger]
-                    .node
-                    .send_encrypted_link_message(&via_addr, &frame)
-                    .await
-                    .expect("the forger reaches its link peer");
-                forged += 1;
+                for _ in 0..per_id {
+                    let frame =
+                        forged_response_under(&Identity::generate(), id, &target_addr, &root);
+                    nodes[forger]
+                        .node
+                        .send_encrypted_link_message(&via_addr, &frame)
+                        .await
+                        .expect("the forger reaches its link peer");
+                    forged += 1;
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3577,7 +3599,7 @@ async fn a_forged_response_does_not_stop_the_genuine_response_being_relayed() {
     let x_addr = *nodes[X].node.node_addr();
     claim_in_filter(&mut nodes[T].node, &x_addr, &d_addr);
 
-    let forged = lookup_raced_by_a_forger(&mut nodes, O, D, X, T).await;
+    let forged = lookup_raced_by_a_forger(&mut nodes, O, D, X, T, 1).await;
 
     assert!(
         forged > 0,
@@ -3621,7 +3643,7 @@ async fn the_genuine_response_survives_a_forgery_two_hops_up() {
     let x_addr = *nodes[X].node.node_addr();
     claim_in_filter(&mut nodes[T2].node, &x_addr, &d_addr);
 
-    let forged = lookup_raced_by_a_forger(&mut nodes, O, D, X, T2).await;
+    let forged = lookup_raced_by_a_forger(&mut nodes, O, D, X, T2, 1).await;
 
     assert!(
         forged > 0,
@@ -3642,6 +3664,53 @@ async fn the_genuine_response_survives_a_forgery_two_hops_up() {
             .contains(&d_addr, wall_clock_ms()),
         "the target's genuine response must still reach the origin after a forgery \
          was relayed two hops up the reverse path"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn the_genuine_response_is_still_accepted_after_eight_forgeries_through_the_same_link_peer() {
+    // O — T — M — D, and X hangs off T claiming D. X answers the request with
+    // eight distinct forgeries; T relays each, so they reach O over the same
+    // link, from T, as D's genuine response does after them. A budget of
+    // failed verifies per link peer at the origin would refuse the genuine
+    // response along with the forgeries, which this guards against.
+    const O: usize = 0;
+    const T: usize = 1;
+    const X: usize = 2;
+    const M: usize = 3;
+    const D: usize = 4;
+    let edges = vec![(O, T), (T, X), (T, M), (M, D)];
+    let mut nodes = run_tree_test(5, &edges, false).await;
+    let d_addr = *nodes[D].node.node_addr();
+    let x_addr = *nodes[X].node.node_addr();
+    claim_in_filter(&mut nodes[T].node, &x_addr, &d_addr);
+
+    let forged = lookup_raced_by_a_forger(&mut nodes, O, D, X, T, 8).await;
+
+    assert_eq!(forged, 8, "precondition: X received the request and forged");
+    assert!(
+        nodes[T].node.metrics().lookup.resp_forwarded.get() > forged as u64,
+        "precondition: T relayed every forgery and the genuine response towards the origin"
+    );
+    // Only "> 0" here: a bound at the origin that stopped verifying the later
+    // forgeries should fail the acceptance assertion below, not this one.
+    assert!(
+        nodes[O].node.metrics().lookup.resp_proof_failed.get() > 0,
+        "precondition: forgeries reached the origin and failed its proof check"
+    );
+    assert!(
+        nodes[D].node.lookup.recent_requests.len() == 1,
+        "precondition: the target received the request and answered it"
+    );
+    assert!(
+        nodes[O]
+            .node
+            .coord_cache()
+            .contains(&d_addr, wall_clock_ms()),
+        "the genuine response, arriving through the same link peer as eight \
+         forgeries, must still be accepted at the origin"
     );
 
     cleanup_nodes(&mut nodes).await;
