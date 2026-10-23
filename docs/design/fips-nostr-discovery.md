@@ -213,11 +213,11 @@ The initiator performs STUN first (see Phase 4), then builds a
 - The STUN server it used, for informational reporting only.
 - An `expiresAt` equal to now + `signal_ttl_secs`.
 
-The offer is sealed to the recipient's npub and published to the peer's
-preferred signaling relays — the node first tries to resolve the peer's
-NIP-17 DM relay list (kind 10050), and falls back to `dm_relays` if
-the inbox-relays fetch fails. Each side also publishes its own inbox
-relay list on startup so dialers can discover it.
+The offer is sealed to the recipient's npub and published to the merge
+of the peer's NIP-17 inbox relay list (kind 10050), the signal relays
+its advert names, and our own `dm_relays`, kept to relays in our own
+relay pool. Each side publishes its own inbox relay list on startup
+and daily so dialers can discover it.
 
 On the receiving side, admission is a pair of bounds taken together: a
 per-sender allowance of `max_concurrent_offers_per_npub`, keyed on the
@@ -367,12 +367,12 @@ relay selection. Redundancy is implicit — a downed relay simply means
 its copy of the advert or signal is unavailable, while other relays
 still serve the same data.
 
-For signaling specifically, the node prefers the recipient's NIP-17
-DM relays when available (the recipient publishes its DM relay list as
-a kind 10050 event to its own DM relays on startup) and falls back to
-the local `dm_relays` list otherwise. This keeps the common case
-off the sender's DM relays when those are different from the
-recipient's, at the cost of one extra NIP-17 fetch per offer.
+For signaling specifically, the node sends to the merge of the
+recipient's NIP-17 inbox relays (the recipient publishes its list as a
+kind 10050 event to its own DM relays on startup and daily), the
+signal relays the recipient's advert names, and the local `dm_relays`
+list, kept to relays already in the node's own pool. The inbox list
+costs one extra NIP-17 fetch per offer.
 
 There is no per-relay rate limiting or health check. The relay model
 assumes that an operator chooses relays they trust to be best-effort

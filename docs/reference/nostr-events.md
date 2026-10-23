@@ -141,10 +141,12 @@ The `TraversalAnswer` echoes `sessionId` and carries:
 
 ### Relay selection
 
-Dialer publishes offers to the recipient's NIP-17 inbox relays (kind
-10050) when available; otherwise to the local
-`node.rendezvous.nostr.dm_relays` list. The responder publishes the
-answer back through the same relay channel.
+Dialer publishes offers to the merge of the recipient's inbox relay
+list (kind 10050), the signal relays its advert names, and the local
+`node.rendezvous.nostr.dm_relays` list, kept to relays already in the
+dialer's own relay pool. The responder, which has no advert for the
+dialer, answers the same way from the dialer's inbox relay list and
+its own `dm_relays`.
 
 ## Kind 10050 — NIP-17 Inbox Relay List
 
@@ -161,15 +163,20 @@ different purposes:
 - Kind 10050 (NIP-17) — relays the recipient prefers for receiving
   DM-shaped (NIP-59 wrapped) events.
 
-FIPS publishes its own kind 10050 on startup so dialers can discover
-where to send traversal offers. When dialing a peer, FIPS first
-fetches the peer's kind 10050 from the peer's `advert_relays`; on
-fetch failure it falls back to the local `dm_relays` list.
+FIPS publishes its own kind 10050 to its `dm_relays` on startup and
+every 24 hours after, so dialers can discover where to send traversal
+offers. When dialing a peer, FIPS fetches the peer's newest kind 10050
+no older than 30 days from its own `dm_relays` and `advert_relays`,
+not from the peer's. It falls back to the local `dm_relays` list when
+the fetch fails or the list is absent or empty.
 
 ### Tags
 
-Standard NIP-17 form: each relay is encoded as an `r` tag whose
-single value is the relay URL.
+FIPS emits each relay as an `r` tag whose single value is the relay
+URL. This is not the NIP-17 form, which is a `relay` tag
+(`["relay", "wss://nos.lol"]`), so other NIP-17 clients do not read a
+list FIPS publishes. FIPS reads both forms; an `r` tag carrying a
+NIP-65 `read` or `write` marker is ignored.
 
 ```text
 ["r", "wss://relay.damus.io"]

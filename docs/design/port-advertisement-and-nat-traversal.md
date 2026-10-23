@@ -241,10 +241,11 @@ long the relay should retain it.
 #### FIPS example: signaling kind 21059
 
 FIPS signaling uses **kind `21059`**. Wraps are addressed by `p`
-tag and published to the responder's NIP-17 inbox relay list (kind
-`10050`) when one is available, falling back to the local
-`dm_relays` configuration otherwise. Each side publishes its own
-inbox relay list on startup so dialers can discover it.
+tag and published to the merge of the responder's NIP-17 inbox relay
+list (kind `10050`), the signal relays its advert names, and the local
+`dm_relays` configuration, kept to relays in the sender's own relay
+pool. Each side publishes its own inbox relay list on startup and
+daily so dialers can discover it.
 
 ### Phase 1: Initiator STUN binding
 
