@@ -6,9 +6,10 @@
 //!
 //! Platform-specific implementations:
 //! - Linux: Uses the `tun` crate with `rtnetlink` for interface configuration
-//! - macOS/FreeBSD: Uses the `tun` crate with `ifconfig`/`route` for interface
-//!   configuration
-//! - Windows: Uses the `wintun` crate for TUN device support
+//! - macOS/FreeBSD: Uses the `tun` crate, with interface ioctls and the
+//!   routing socket for interface configuration
+//! - Windows: Uses the `wintun` crate for TUN device support, with IP Helper
+//!   for interface configuration
 
 #[cfg(windows)]
 use crate::Ipv6Address;
@@ -1634,125 +1635,75 @@ mod platform {
     }
 }
 
+/// Interface configuration on macOS and FreeBSD. Visible to the parent
+/// module so the `bsdnet` root tests can run `configure_interface` a second
+/// time on a configured device.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-mod platform {
+pub(super) mod platform {
     use super::TunError;
+    use crate::ipv6tun::bsdnet;
     use std::net::Ipv6Addr;
-    use tokio::process::Command;
+
+    /// The mesh address space routed into the TUN: `fd00::/8`.
+    const MESH_PREFIX: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8);
 
     /// Check if IPv6 is disabled system-wide.
+    ///
+    /// macOS: `net.inet6.ip6.disabled` is 1 when IPv6 is turned off; a
+    /// kernel without that name, or any failure to read it, counts as
+    /// enabled.
     #[cfg(target_os = "macos")]
     pub fn is_ipv6_disabled() -> bool {
-        // macOS: check via sysctl; if the key doesn't exist, IPv6 is enabled
-        std::process::Command::new("sysctl")
-            .args(["-n", "net.inet6.ip6.disabled"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
-            .unwrap_or(false)
+        matches!(bsdnet::sysctl_int("net.inet6.ip6.disabled"), Ok(1))
     }
 
     /// Check if IPv6 is disabled system-wide.
+    ///
+    /// FreeBSD: `kern.features.inet6` is 1 when the kernel has IPv6 support.
+    /// On a kernel built without INET6 the name is absent (`ENOENT`), so any
+    /// failure to read it, or any other value, means disabled.
     #[cfg(target_os = "freebsd")]
     pub fn is_ipv6_disabled() -> bool {
-        // kern.features.inet6 is 1 when the kernel has IPv6 support. On a
-        // kernel built without INET6 the OID is absent entirely and sysctl
-        // exits nonzero, so a failed lookup means disabled. Only a failure
-        // to run sysctl at all assumes enabled.
-        std::process::Command::new("sysctl")
-            .args(["-n", "kern.features.inet6"])
-            .output()
-            .map(|o| !o.status.success() || String::from_utf8_lossy(&o.stdout).trim() != "1")
-            .unwrap_or(false)
+        !matches!(bsdnet::sysctl_int("kern.features.inet6"), Ok(1))
     }
 
-    /// Shut down a network interface by name.
+    /// Take a network interface down at shutdown, by clearing `IFF_UP`.
     ///
-    /// utun (macOS) and devfs-cloned tun (FreeBSD) devices are
-    /// automatically destroyed by the kernel when the last file
-    /// descriptor closes. Bringing the interface down causes any
-    /// blocking reads to return an error, which unblocks the reader
-    /// thread.
+    /// This does not wake a reader blocked on the device; the shutdown pipe
+    /// does (see `run_tun_reader`).
     pub async fn delete_interface(name: &str) -> Result<(), TunError> {
-        run_cmd("ifconfig", &[name, "down"]).await
+        bsdnet::set_up(name, false)
+            .map_err(|e| TunError::Configure(format!("failed to take {name} down: {e}")))
     }
 
-    /// Configure a network interface with an IPv6 address using ifconfig/route.
-    pub async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(), TunError> {
-        // Add IPv6 address with /128 prefix
-        run_cmd(
-            "ifconfig",
-            &[name, "inet6", &addr.to_string(), "prefixlen", "128"],
-        )
-        .await?;
+    /// Configure the TUN interface: its `/128` address, on FreeBSD IPv6
+    /// enabled on it, the interface up, and the `fd00::/8` route through it.
+    ///
+    /// The MTU was set by the `tun` crate when it created the device.
+    pub async fn configure_interface(
+        name: &str,
+        addr: Ipv6Addr,
+        _mtu: u16,
+    ) -> Result<(), TunError> {
+        bsdnet::add_address(name, addr, 128)
+            .map_err(|e| TunError::Configure(format!("failed to add {addr}/128 to {name}: {e}")))?;
 
         // FreeBSD: a manually-configured interface with no autoconf
         // link-local comes up with ND6_IFF_IFDISABLED set, which silently
         // drops all IPv6.
         #[cfg(target_os = "freebsd")]
-        run_cmd("ifconfig", &[name, "inet6", "-ifdisabled"]).await?;
+        bsdnet::enable_inet6(name)
+            .map_err(|e| TunError::Configure(format!("failed to enable IPv6 on {name}: {e}")))?;
 
-        // Set MTU
-        run_cmd("ifconfig", &[name, "mtu", &mtu.to_string()]).await?;
+        bsdnet::set_up(name, true)
+            .map_err(|e| TunError::Configure(format!("failed to bring {name} up: {e}")))?;
 
-        // Bring interface up
-        run_cmd("ifconfig", &[name, "up"]).await?;
-
-        // Add route for fd00::/8 (mesh IPv6 address space) via this interface
-        #[cfg(target_os = "macos")]
-        run_cmd(
-            "route",
-            &[
-                "add",
-                "-inet6",
-                "-prefixlen",
-                "8",
-                "fd00::",
-                "-interface",
-                name,
-            ],
-        )
-        .await?;
-
-        // FreeBSD: a leftover route from a previous run is not an error.
-        #[cfg(target_os = "freebsd")]
-        {
-            let output = Command::new("route")
-                .args(["-6", "add", "fd00::/8", "-interface", name])
-                .output()
-                .await
-                .map_err(|e| TunError::Configure(format!("route failed: {}", e)))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("File exists") && !stderr.contains("already in table") {
-                    return Err(TunError::Configure(format!(
-                        "route -6 add fd00::/8 failed: {}",
-                        stderr.trim()
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Run a command and return an error if it fails.
-    async fn run_cmd(program: &str, args: &[&str]) -> Result<(), TunError> {
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("{} failed: {}", program, e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TunError::Configure(format!(
-                "{} {} failed: {}",
-                program,
-                args.join(" "),
-                stderr.trim()
-            )));
-        }
-        Ok(())
+        let ifindex = bsdnet::interface_index(name)
+            .map_err(|e| TunError::Configure(format!("no index for {name}: {e}")))?;
+        let (dst, len) = MESH_PREFIX;
+        bsdnet::ensure_route(dst, len, ifindex).map_err(|e| {
+            TunError::Configure(format!("failed to add route {dst}/{len} via {name}: {e}"))
+        })
     }
 }
 

@@ -297,6 +297,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On macOS and FreeBSD the TUN interface is configured by direct kernel calls
+  (interface ioctls, `sysctlbyname` and the routing socket) instead of by
+  running `ifconfig`, `route` and `sysctl`, so whether a step failed is decided
+  by the kernel's error code, and a failure names the step and carries the
+  system's message. A `fd00::/8` route already present through the TUN
+  interface itself is accepted on both platforms (macOS used to fail TUN setup
+  on it); one already present through a different interface now fails TUN
+  setup on both (FreeBSD used to accept it). The MTU is no longer set a second
+  time after the `tun` crate has set it.
 - Each link's rekeys are now decided by the link's rekey machine, which holds
   its sessions: it starts this node's rekeys, resends their msg1, answers the
   peer's, completes on its msg2, cuts over, ends the drain and retires a

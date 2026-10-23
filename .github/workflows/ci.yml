@@ -733,6 +733,36 @@ jobs:
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 
+      # The TUN interface setup's tests, as root: a route added twice through
+      # one interface is accepted, one through another interface is refused, a
+      # utun device created twice in turn comes up with its address and
+      # `fd00::/8` route, and a configured device set up a second time accepts
+      # its own route. Those four are `#[ignore]`d, so the run above skips
+      # them; the unprivileged ones run again here to show the codes the
+      # kernel returns to root, which `--nocapture` prints. Built as the
+      # runner user and only executed under sudo, as the Linux job's
+      # privileged step does and for the same reason. The grep fails the step
+      # unless all fifteen ran and passed: a filter that matches fewer passes
+      # quietly.
+      - name: Run the TUN setup tests as root
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib --no-run
+          BIN=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact")
+                     | select(.executable != null)
+                     | select(.target.kind[0] == "lib")
+                     | select(.target.name == "fips")
+                     | .executable' \
+            | tail -1)
+          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+            echo "could not locate the lib test binary" >&2
+            exit 1
+          fi
+          sudo "$BIN" --include-ignored ipv6tun::bsdnet:: --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/tun-setup-tests.log"
+          grep -qE '^test result: ok\. 15 passed;' "$RUNNER_TEMP/tun-setup-tests.log"
+
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
       # summary, so a flake is seen without failing an unrelated run. The

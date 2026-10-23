@@ -28,14 +28,27 @@ can reach the source file's private items.
   decision (`existing_link_verdict`) and, in root network-namespace tests,
   `TunDevice::create` and teardown themselves.
 
+- `bsdnet.rs` tests `../bsdnet.rs` (macOS and FreeBSD only) as module `tests`:
+  the routing message layout and socket-address padding, the kernel's error
+  codes surfacing for calls it refuses (an unknown sysctl name or interface,
+  a route add the kernel rejects), and, as root, a route added twice through
+  one interface being accepted, one present through another interface being
+  refused with the other interface named, a TUN device created twice in turn
+  coming up with its address, MTU and `fd00::/8` route both times and going
+  down at shutdown with its other flags kept, and a configured device set up
+  a second time accepting its own address and route.
+
 ## Rules
 
 - Older tests in `src/ipv6tun/` stay in their source files' inline `mod tests`
   blocks; new tests go here. A file that already has an inline `tests` module
   declares its file here under a different module name.
-- The network-namespace tests need root. They are `#[ignore]`d, so the normal
+- The network-namespace tests, and the macOS and FreeBSD tests that change
+  routes or create a device, need root. They are `#[ignore]`d, so the normal
   test run skips them; build with `cargo test --lib --no-run` and run the test
-  binary under `sudo` with `--ignored`. They share the namespace harness
+  binary under `sudo` with `--ignored`. The FreeBSD package workflow and the
+  macOS unit-test job run the `bsdnet` tests that way, with
+  `--include-ignored`. They share the namespace harness
   (`ForgedSourceNetns`) with the inline tests in `../dns.rs`, which exposes it
   as `pub(super)`. The generic parts, running a setup command
   (`testutil::run_ok`) and running code inside a named namespace

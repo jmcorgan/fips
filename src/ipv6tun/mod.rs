@@ -5,6 +5,8 @@
 //! responder (.fips domain resolution), and ICMPv6 handling (error
 //! signaling and neighbor discovery).
 
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+mod bsdnet;
 pub mod config;
 pub mod dns;
 pub mod icmp;
