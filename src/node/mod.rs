@@ -3378,12 +3378,14 @@ impl Node {
         prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
         self.identity_cache
             .insert(prefix, (node_addr, pubkey, Self::now_ms()));
-        // LRU eviction
+        // LRU eviction, never of the entry just registered: stamps are in
+        // milliseconds, so it can tie with the oldest.
         let max = self.config().node.cache.identity_size;
         if self.identity_cache.len() > max
             && let Some(oldest_key) = self
                 .identity_cache
                 .iter()
+                .filter(|(key, _)| **key != prefix)
                 .min_by_key(|(_, (_, _, ts))| *ts)
                 .map(|(k, _)| *k)
         {
@@ -3392,16 +3394,28 @@ impl Node {
     }
 
     /// Look up a destination by FipsAddress prefix (bytes 1-15 of the IPv6 address).
+    ///
+    /// The store is bounded and evicts by age without regard to the session
+    /// table, so a live session peer's entry can age out while its traffic is
+    /// still arriving. On a miss, an established session whose address carries
+    /// the prefix answers instead, with the key its handshake proved, and its
+    /// entry is registered again so the next lookup hits the store.
     pub(crate) fn lookup_by_fips_prefix(
         &mut self,
         prefix: &[u8; 15],
     ) -> Option<(NodeAddr, secp256k1::PublicKey)> {
         if let Some(entry) = self.identity_cache.get_mut(prefix) {
             entry.2 = Self::now_ms(); // LRU touch
-            Some((entry.0, entry.1))
-        } else {
-            None
+            return Some((entry.0, entry.1));
         }
+        let (addr, pubkey) = self.sessions.iter().find_map(|(addr, entry)| {
+            if addr.as_bytes()[0..15] != prefix[..] {
+                return None;
+            }
+            entry.proven_pubkey().map(|pk| (*addr, pk))
+        })?;
+        self.register_identity(addr, pubkey);
+        Some((addr, pubkey))
     }
 
     /// Check if a node's identity is in the cache (without LRU touch).

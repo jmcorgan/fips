@@ -417,6 +417,15 @@ impl SessionEntry {
         &self.remote_pubkey
     }
 
+    /// The remote node's public key, if the handshake has proven it.
+    ///
+    /// Only an established session's key is proven: the initiator's by msg2,
+    /// the responder's by msg3 with its address check. Before that, the key is
+    /// one we chose to dial or one a setup merely claimed.
+    pub(crate) fn proven_pubkey(&self) -> Option<PublicKey> {
+        self.is_established().then_some(self.remote_pubkey)
+    }
+
     /// Get the current session state.
     #[cfg(test)]
     pub(crate) fn state(&self) -> &EndToEndState {
