@@ -15,6 +15,13 @@ can reach the source file's private items.
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
   and one known residual case pinned as a test.
+- `tun.rs` tests `../tun.rs` as module `name_tests`: TUN startup never
+  deletes, downs or takes over an existing interface named `tun.name`. A
+  link of any kind but TUN is refused and left untouched, a TUN another
+  process holds is an error, and an unheld persistent TUN is reopened,
+  including one an earlier node left configured by exiting without stopping.
+  It covers the pure kind decision (`existing_link_verdict`) and, in root
+  network-namespace tests, `TunDevice::create` itself.
 
 ## Rules
 
@@ -29,6 +36,9 @@ can reach the source file's private items.
   (`testutil::run_ok`) and running code inside a named namespace
   (`testutil::in_netns`), are crate-wide in `src/testutil.rs` for any
   namespace test.
+- `TunDevice::create` makes its device, and reads links, in the calling
+  thread's network namespace, so the TUN tests run it inside
+  `testutil::in_netns` on a current-thread runtime built in that closure.
 - Anything the responder reads at reply time (its route probe, the interface
   prefixes) is read in the calling thread's network namespace. A namespace
   test therefore runs the responder on a thread inside the node namespace

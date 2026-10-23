@@ -281,8 +281,14 @@ pub struct TunDevice {
 impl TunDevice {
     /// Create or open a TUN device.
     ///
-    /// If the interface already exists, opens it and reconfigures it.
-    /// Otherwise, creates a new TUN device.
+    /// On Linux the device is named `tun.name`. When an interface of that
+    /// name already exists: a persistent TUN that no process holds is
+    /// reopened and reconfigured, first removing any `fd00::/8` /128 address
+    /// and `fd00::/8` route an earlier node left on it by exiting without
+    /// stopping; a TUN another process holds is an error; and any other
+    /// kind of interface is refused and left untouched. Nothing is deleted
+    /// before create. On macOS and FreeBSD the kernel names the device, and
+    /// `tun.name` is not used to find an existing one.
     ///
     /// This requires CAP_NET_ADMIN capability (run with sudo or setcap).
     pub async fn create(config: &TunConfig, address: FipsAddress) -> Result<Self, TunError> {
@@ -291,16 +297,14 @@ impl TunDevice {
             return Err(TunError::Ipv6Disabled);
         }
 
+        #[cfg(target_os = "linux")]
         let name = config.name();
         let mtu = config.mtu();
 
-        // Delete existing interface if present (TUN devices are exclusive)
-        if platform::interface_exists(name).await {
-            debug!(name, "Deleting existing TUN interface");
-            if let Err(e) = platform::delete_interface(name).await {
-                debug!(name, error = %e, "Failed to delete existing interface");
-            }
-        }
+        // An existing interface of this name that is not a TUN belongs to
+        // something else: refuse it rather than take it over.
+        #[cfg(target_os = "linux")]
+        platform::refuse_foreign_link(name).await?;
 
         // Create the TUN device. `mut` is only exercised on linux/macos, where
         // the name/layer/mtu are set below; other unix targets (android) pass
@@ -324,7 +328,16 @@ impl TunDevice {
             tun_config.layer(Layer::L3).mtu(mtu);
         }
 
-        let device = tun::create(&tun_config)?;
+        let device = match tun::create(&tun_config) {
+            // TUNSETIFF on a TUN another process holds.
+            #[cfg(target_os = "linux")]
+            Err(tun::Error::Io(e)) if e.raw_os_error() == Some(libc::EBUSY) => {
+                return Err(TunError::Configure(format!(
+                    "TUN interface {name} is held by another process"
+                )));
+            }
+            other => other?,
+        };
 
         // FreeBSD: enable TUNSIFHEAD. Without it, tunoutput() rejects every
         // non-IPv4 packet with EAFNOSUPPORT, so nothing IPv6 can be sent
@@ -1353,9 +1366,6 @@ mod platform {
     pub fn is_ipv6_disabled() -> bool {
         false
     }
-    pub async fn interface_exists(_name: &str) -> bool {
-        false
-    }
     pub async fn delete_interface(_name: &str) -> Result<(), TunError> {
         Ok(())
     }
@@ -1383,14 +1393,55 @@ mod platform {
             .unwrap_or(false)
     }
 
-    /// Check if a network interface already exists.
-    pub async fn interface_exists(name: &str) -> bool {
-        let Ok((connection, handle, _)) = new_connection() else {
-            return false;
-        };
+    /// Refuse an existing interface named `name` unless it is a TUN.
+    ///
+    /// Passes when no link of that name exists, or when it is a TUN, which
+    /// create then reopens (unheld) or fails on (held). Any other link, or
+    /// one whose kind cannot be read, is refused and left untouched.
+    pub async fn refuse_foreign_link(name: &str) -> Result<(), TunError> {
+        use rtnetlink::packet_route::link::{LinkAttribute, LinkInfo};
+        let (connection, handle, _) = new_connection()
+            .map_err(|e| TunError::Configure(format!("netlink connection failed: {}", e)))?;
         tokio::spawn(connection);
 
-        get_interface_index(&handle, name).await.is_ok()
+        let mut links = handle.link().get().match_name(name.to_string()).execute();
+        let link = match links.try_next().await {
+            Ok(Some(link)) => link,
+            Ok(None) => return Ok(()),
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::ENODEV => {
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let kind = link.attributes.iter().find_map(|attr| match attr {
+            LinkAttribute::LinkInfo(infos) => infos.iter().find_map(|info| match info {
+                LinkInfo::Kind(kind) => Some(kind),
+                _ => None,
+            }),
+            _ => None,
+        });
+        existing_link_verdict(name, kind)
+    }
+
+    /// Whether create may use an existing link named `name` of link kind
+    /// `kind`: only a TUN. A link with no kind (a physical interface) is
+    /// refused along with every other kind.
+    pub fn existing_link_verdict(
+        name: &str,
+        kind: Option<&rtnetlink::packet_route::link::InfoKind>,
+    ) -> Result<(), TunError> {
+        use rtnetlink::packet_route::link::InfoKind;
+        match kind {
+            Some(InfoKind::Tun) => Ok(()),
+            Some(kind) => Err(TunError::Configure(format!(
+                "an interface named {name} already exists and is not a TUN ({kind}); \
+                 refusing to use it"
+            ))),
+            None => Err(TunError::Configure(format!(
+                "an interface named {name} already exists and is not a TUN (no link kind, \
+                 such as a physical interface); refusing to use it"
+            ))),
+        }
     }
 
     /// Delete a network interface by name.
@@ -1412,6 +1463,13 @@ mod platform {
 
         // Get interface index
         let index = get_interface_index(&handle, name).await?;
+
+        let fd_prefix: Ipv6Addr = "fd00::".parse().unwrap();
+        let route = RouteMessageBuilder::<Ipv6Addr>::new()
+            .destination_prefix(fd_prefix, 8)
+            .output_interface(index)
+            .build();
+        clear_mesh_leftovers(&handle, index, route.clone()).await?;
 
         // Add IPv6 address with /128 prefix (point-to-point)
         handle
@@ -1435,11 +1493,6 @@ mod platform {
             .await?;
 
         // Add route for fd00::/8 (FIPS address space) via this interface
-        let fd_prefix: Ipv6Addr = "fd00::".parse().unwrap();
-        let route = RouteMessageBuilder::<Ipv6Addr>::new()
-            .destination_prefix(fd_prefix, 8)
-            .output_interface(index)
-            .build();
         handle
             .route()
             .add(route)
@@ -1462,6 +1515,52 @@ mod platform {
             debug!("ip6 rule for fd00::/8 not added (may already exist): {e}");
         }
 
+        Ok(())
+    }
+
+    /// Remove what an earlier node left on a reopened persistent TUN when it
+    /// exited without stopping (killed or crashed): its `fd00::/8` /128
+    /// mesh addresses and its `fd00::/8` route through this interface.
+    /// Without this the address or route add that follows fails with
+    /// `EEXIST` and the node runs without a TUN. A new TUN has neither, and
+    /// nothing on another interface is touched.
+    async fn clear_mesh_leftovers(
+        handle: &Handle,
+        index: u32,
+        route: rtnetlink::packet_route::route::RouteMessage,
+    ) -> Result<(), TunError> {
+        use rtnetlink::packet_route::address::AddressAttribute;
+        use std::net::IpAddr;
+
+        let leftovers: Vec<_> = handle
+            .address()
+            .get()
+            .set_link_index_filter(index)
+            .set_prefix_length_filter(128)
+            .execute()
+            .try_filter(|msg| {
+                let mesh = msg.attributes.iter().any(|attr| match attr {
+                    AddressAttribute::Address(IpAddr::V6(a)) => a.octets()[0] == 0xfd,
+                    _ => false,
+                });
+                futures::future::ready(mesh)
+            })
+            .try_collect()
+            .await?;
+        for msg in leftovers {
+            debug!("removing a mesh address an earlier run left on TUN index {index}");
+            handle.address().del(msg).execute().await?;
+        }
+
+        match handle.route().del(route).execute().await {
+            Ok(()) => debug!("removed an fd00::/8 route an earlier run left on TUN index {index}"),
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -libc::ESRCH => {}
+            Err(e) => {
+                return Err(TunError::Configure(format!(
+                    "failed to remove a leftover fd00::/8 route: {e}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1505,18 +1604,6 @@ mod platform {
             .args(["-n", "kern.features.inet6"])
             .output()
             .map(|o| !o.status.success() || String::from_utf8_lossy(&o.stdout).trim() != "1")
-            .unwrap_or(false)
-    }
-
-    /// Check if a network interface already exists.
-    pub async fn interface_exists(name: &str) -> bool {
-        Command::new("ifconfig")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
             .unwrap_or(false)
     }
 
@@ -1610,6 +1697,10 @@ mod platform {
         Ok(())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/tun.rs"]
+mod name_tests;
 
 #[cfg(test)]
 mod tests {
