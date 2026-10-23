@@ -410,20 +410,21 @@ If either rule is missing, restart the gateway — the table is rebuilt
 atomically on config load.
 
 **Step 2.** Verify no `forward`-hook rule refuses the connection.
-The mesh firewall baseline (`fips-firewall.service`) hooks `input`
-only, so it neither blocks nor restricts port forwards, and an allow
-rule under `/etc/fips/fips.d/` has no effect on them. A forwarded
-connection is refused only by a `forward`-hook chain: the port-forward
-restriction from
+The mesh firewall baseline (`fips-firewall.service`) accepts port
+forwards in its `forward` chain unless a drop-in under
+`/etc/fips/fips.d/forward/` refuses them; an allow rule in
+`/etc/fips/fips.d/*.nft` has no effect on them. A forwarded connection
+is refused only by a `forward`-hook rule: a forward drop-in from
 [deploy-gateway.md](deploy-gateway.md#compose-with-the-mesh-firewall),
-or another firewall on the host whose `forward` policy is drop. If you
-loaded the restriction, check that it allows the peer's address and the
-forward's target address and port (not `listen_port`), and that its
-`fips_if` is the node's `tun.name`. Its drop counter shows refused
-connections:
+a restriction table of your own, or another firewall on the host whose
+`forward` policy is drop. If you restricted the forward, check that the
+accept line names the peer's address and the forward's target address
+and port (not `listen_port`), that no earlier drop-in file drops it
+first, and that `fips_if` in `/etc/fips/fips.nft` is the node's
+`tun.name`. The drop counters show refused connections:
 
 ```sh
-sudo nft list table inet fips_port_forwards
+sudo nft list chain inet fips forward
 ```
 
 A dropped connection times out on the peer rather than being reset.

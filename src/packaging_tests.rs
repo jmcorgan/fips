@@ -1483,3 +1483,75 @@ fn restarting_units_back_off_between_restarts() {
         "control: expected Restart = \"on-failure\" in both services of {rel}, found {restarting}"
     );
 }
+
+/// Returns the lines of an nftables file with each `#` comment cut off,
+/// trimmed at both ends, without the lines left empty.
+fn nft_code(nft: &str) -> Vec<String> {
+    nft.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Returns the code lines inside `chain <name> {`, up to its closing `}`.
+fn nft_chain(code: &[String], name: &str) -> Vec<String> {
+    let open = format!("chain {name} {{");
+    let start = 1 + code
+        .iter()
+        .position(|l| *l == open)
+        .unwrap_or_else(|| panic!("no `{open}` outside a comment"));
+    let len = code[start..]
+        .iter()
+        .position(|l| l == "}")
+        .unwrap_or_else(|| panic!("`{open}` is never closed"));
+    code[start..start + len].to_vec()
+}
+
+/// A gateway port forward is a DNAT in prerouting, so its traffic takes the
+/// `forward` hook and never reaches the `inbound` chain or its drop-ins. The
+/// packaged baseline must carry a `forward` chain scoped to the mesh interface
+/// that includes the forward drop-ins after the conntrack accept and before
+/// its own rule for port-forwarded connections, so a drop-in's `drop` is
+/// reached by a new forwarded connection. The chain must hold nothing else: a
+/// rule ahead of the include that accepts a forwarded connection would make
+/// every drop-in dead, so the chain is compared line for line. The `inbound`
+/// chain's include must stay a glob of `fips.d` itself, which cannot match the
+/// `forward/` subdirectory's files.
+#[test]
+fn the_packaged_fips_nft_has_a_forward_chain_scoped_to_fips_if_that_includes_the_forward_dropins_before_its_port_forward_default()
+ {
+    const NFT: &str = "packaging/common/fips.nft";
+    let code = nft_code(&repo_file(NFT));
+
+    let inbound = nft_chain(&code, "inbound");
+    let includes: Vec<&String> = inbound
+        .iter()
+        .filter(|l| l.starts_with("include "))
+        .collect();
+    assert_eq!(
+        includes,
+        [r#"include "/etc/fips/fips.d/*.nft""#],
+        "{NFT}: the inbound chain must include only the fips.d drop-ins"
+    );
+
+    let forward = nft_chain(&code, "forward");
+    let expected = [
+        "type filter hook forward priority 0; policy accept;",
+        "iifname != $fips_if return",
+        "ct state established,related accept",
+        r#"include "/etc/fips/fips.d/forward/*.nft""#,
+    ];
+    let defaults = [
+        "ct status dnat counter accept",
+        "ct status dnat counter drop",
+    ];
+    let (last, head) = forward
+        .split_last()
+        .unwrap_or_else(|| panic!("{NFT}: chain forward is empty"));
+    assert!(
+        head == expected && defaults.contains(&last.as_str()),
+        "{NFT}: chain forward must hold exactly {expected:#?} and then one of {defaults:?}, \
+         with nothing ahead of the drop-in include that could decide a forwarded \
+         connection first: {forward:#?}"
+    );
+}

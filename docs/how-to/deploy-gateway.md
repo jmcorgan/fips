@@ -389,77 +389,74 @@ through conntrack.
 ### Compose with the mesh firewall
 
 The mesh firewall baseline (`/etc/fips/fips.nft`, see
-[enable-mesh-firewall.md](enable-mesh-firewall.md)) does **not** gate
-port forwards. The gateway rewrites a forwarded connection's
-destination to the LAN target in its `prerouting` chain, so the kernel
-routes the packet through the `forward` hook to the LAN. The baseline
-hooks `input` only, and drop-ins under `/etc/fips/fips.d/` are included
-into that same `input` chain, so neither sees forwarded traffic. With
-the baseline loaded and nothing else, every mesh node that can reach the
-gateway can reach every configured port forward, and a `fips.d` rule
-such as `ip6 saddr <addr> tcp dport 8080 accept` has no effect on it.
+[enable-mesh-firewall.md](enable-mesh-firewall.md)) has two chains. Its
+`inbound` chain, on the `input` hook, polices traffic addressed to the
+gateway itself, and the drop-ins under `/etc/fips/fips.d/*.nft` are
+included there. A port forward never reaches it: the gateway rewrites a
+forwarded connection's destination to the LAN target in its `prerouting`
+chain, so the kernel routes the packet through the `forward` hook to the
+LAN. The baseline's `forward` chain sees it there, and accepts every
+port-forwarded connection from the mesh unless a drop-in under
+`/etc/fips/fips.d/forward/` refuses it. With the baseline loaded and no
+forward drop-in, every mesh node that can reach the gateway can reach
+every configured port forward, and a `fips.d/*.nft` rule such as
+`ip6 saddr <addr> tcp dport 8080 accept` has no effect on it.
 
-To restrict who can use a port forward, load a table of your own with a
-`forward`-hook chain. For the worked example above, allowing one mesh
-node to use both forwards:
+To restrict who can use a port forward, add a file ending in `.nft` to
+`/etc/fips/fips.d/forward/` (create the directory if it is missing). Its
+lines are included into the `forward` chain after replies are accepted
+and before port-forwarded connections are. For each forward you
+restrict, write one line that accepts the nodes allowed to use it and one
+that drops everyone else. For the worked example above, allowing one
+mesh node to use both forwards:
 
 ```nft
-# /etc/fips/port-forwards.nft
-# The node's tun.name, as in /etc/fips/fips.nft.
-define fips_if = "fips0"
-# The mesh address of each node allowed to use the forwards; replace the
-# example address. `fipsctl address` on that node prints it.
-define allowed_peers = { fd97:1111:2222:3333:4444:5555:6666:7777 }
-
-add table inet fips_port_forwards
-flush table inet fips_port_forwards
-
-table inet fips_port_forwards {
-    chain forward {
-        type filter hook forward priority 0; policy accept;
-
-        # Only connections arriving from the mesh.
-        iifname != $fips_if return
-
-        ct state established,related accept
-
-        # Filter rules see the packet after the gateway rewrote its
-        # destination: match the target address and port, not listen_port.
-        ip6 saddr $allowed_peers ip6 daddr fd12:3456::10 tcp dport 80 accept
-        ip6 saddr $allowed_peers ip6 daddr fd12:3456::10 udp dport 53 accept
-
-        # Every other port-forwarded connection from the mesh.
-        ct status dnat counter drop
-    }
-}
+# /etc/fips/fips.d/forward/port-forwards.nft
+# Rules see the packet after the gateway rewrote its destination: match the
+# target address and port, not listen_port. Replace the example mesh address
+# with the allowed node's; `fipsctl address` on that node prints it.
+ip6 daddr fd12:3456::10 tcp dport 80 ip6 saddr { fd97:1111:2222:3333:4444:5555:6666:7777 } accept
+ip6 daddr fd12:3456::10 tcp dport 80 counter drop
+ip6 daddr fd12:3456::10 udp dport 53 ip6 saddr { fd97:1111:2222:3333:4444:5555:6666:7777 } accept
+ip6 daddr fd12:3456::10 udp dport 53 counter drop
 ```
 
+A forward with no lines stays open to the mesh. Keep each forward's
+accept and drop lines in one file: the files are included in
+alphabetical order and the first matching rule decides, so an accept in
+a later file for a forward an earlier file already drops never matches.
+Write addresses out rather than with `define`; every drop-in is read
+into one ruleset, and two files that define the same name make the whole
+load fail.
+
+Reload the firewall to apply it:
+
+```sh
+sudo systemctl reload-or-restart fips-firewall.service
+```
+
+The drop counters show refused connections:
+
+```sh
+sudo nft list chain inet fips forward
+```
+
+A refused connection times out on the peer rather than being reset.
 Connections from the mesh that the gateway did not translate, and LAN
-clients' own connections out to the mesh and their replies, pass this
+clients' own connections out to the mesh and their replies, pass the
 chain unchanged. A drop in any chain on the `forward` hook is final, so
 the order of this table against the gateway's own `inet fips_gateway`
 table does not matter.
 
-Load it with the firewall service, so it comes and goes with the
-baseline:
-
-```sh
-sudo systemctl edit fips-firewall.service
-```
-
-```ini
-[Service]
-ExecStartPost=/usr/sbin/nft -f /etc/fips/port-forwards.nft
-ExecReload=/usr/sbin/nft -f /etc/fips/port-forwards.nft
-ExecStopPost=-/usr/sbin/nft delete table inet fips_port_forwards
-```
-
-Then `sudo systemctl reload-or-restart fips-firewall.service`. The
-drop counter shows refused connections:
-
-```sh
-sudo nft list table inet fips_port_forwards
-```
+Two cases from earlier releases. If you load a restriction table of your
+own, such as `inet fips_port_forwards` from `/etc/fips/port-forwards.nft`
+through a `fips-firewall.service` drop-in, it keeps working for the same
+reason; to move to the packaged chain, write its accept rules in the
+form above, then remove the service drop-in and delete that table. If
+you kept an edited `/etc/fips/fips.nft` when upgrading, your file has no
+`forward` chain and forward drop-ins are not loaded until you merge in
+the packaged one; `sudo nft list chain inet fips forward` fails until
+then.
 
 On OpenWrt the packaged firewall zone already passes port forwards
 through fw4's forward chain; restrict them there with a `src fips`

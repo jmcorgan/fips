@@ -260,8 +260,9 @@ on every subsequent boot. Confirm:
 sudo nft list table inet fips
 ```
 
-You will see one chain named `inbound` hooked at `input`,
-roughly:
+You will see a chain named `inbound` hooked at `input`, and a
+chain named `forward` that only matters on a gateway with port
+forwards, roughly:
 
 ```text
 table inet fips {
@@ -272,10 +273,17 @@ table inet fips {
         icmpv6 type echo-request accept
         counter packets 0 bytes 0 drop
     }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname != "fips0" return
+        ct state established,related accept
+        ct status dnat counter packets 0 bytes 0 accept
+    }
 }
 ```
 
-The chain admits ICMPv6 echo (so `ping6` from any mesh node
+The `inbound` chain admits ICMPv6 echo (so `ping6` from any mesh node
 still works) and conntrack replies (so your *outbound*
 connections still get their replies back). Everything else
 inbound on `fips0` hits the final `counter ... drop`.

@@ -58,13 +58,9 @@ name and reload:
 sudo systemctl reload-or-restart fips-firewall.service
 ```
 
-If you load the port-forward restriction from
-[deploy-gateway.md](deploy-gateway.md#compose-with-the-mesh-firewall),
-change `fips_if` in `/etc/fips/port-forwards.nft` as well; until you do,
-that chain returns every forwarded connection unrestricted.
-
-Until you do, the baseline filters nothing on the TUN and every listener
-on it is reachable from the mesh. The daemon checks this when it brings
+Until you do, the baseline filters nothing on the TUN, every listener
+on it is reachable from the mesh, and the `forward` chain returns every
+port-forwarded connection unrestricted. The daemon checks this when it brings
 the TUN up and logs a warning naming both interfaces, and `fipstop`'s
 listening panel shows the "all listeners exposed" banner.
 
@@ -75,14 +71,17 @@ systemd tarball's `install.sh` never replaces an existing file and
 writes the new one as `/etc/fips/fips.nft.template`. Keep your file and
 carry over any change you want from the new one.
 
-## Gateway port forwards are outside the baseline
+## Gateway port forwards
 
-The baseline polices traffic addressed to this host (the `input` hook).
-A `fips-gateway` port forward rewrites the destination to a LAN host,
-so its traffic is forwarded, never reaches the `input` hook, and is not
-filtered by the baseline or by any `fips.d` drop-in. To restrict port
-forwards, see [Compose with the mesh
-firewall](deploy-gateway.md#compose-with-the-mesh-firewall).
+The baseline's `inbound` chain polices traffic addressed to this host
+(the `input` hook). A `fips-gateway` port forward rewrites the
+destination to a LAN host, so its traffic is forwarded and never
+reaches that chain or the `fips.d/*.nft` drop-ins. The baseline's
+second chain, `forward`, sees it instead. It accepts port-forwarded
+connections from the mesh unless a drop-in under
+`/etc/fips/fips.d/forward/` refuses them, so with no such drop-in every
+port forward is open to the mesh. To restrict one, see [Compose with
+the mesh firewall](deploy-gateway.md#compose-with-the-mesh-firewall).
 
 ## Folding the baseline into the host's main nftables
 

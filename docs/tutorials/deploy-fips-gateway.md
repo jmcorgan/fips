@@ -424,8 +424,9 @@ A rule that only accepts the allowed peer restricts nothing: every
 other peer falls through to the packaged accept. The Firewall section
 of `packaging/openwrt-ipk/README.md` describes the zone and that
 accept. On a Linux host without fw4, the mesh firewall baseline
-(`fips-firewall.service`) hooks the input chain only and never sees a
-forward to a LAN host; to restrict one there, see
+(`fips-firewall.service`) accepts every port-forwarded connection from
+the mesh unless a drop-in under `/etc/fips/fips.d/forward/` refuses it;
+to restrict one there, see
 [../how-to/deploy-gateway.md](../how-to/deploy-gateway.md#compose-with-the-mesh-firewall).
 
 ## Step 7: Tidy up
