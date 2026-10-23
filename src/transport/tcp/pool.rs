@@ -31,7 +31,9 @@ pub(crate) struct TcpConnection {
     pub(crate) writer: Arc<Mutex<OwnedWriteHalf>>,
     /// Receive task for this connection.
     pub(crate) recv_task: JoinHandle<()>,
-    /// MSS-derived MTU for this connection (used for dynamic MTU re-reading).
+    /// The smaller of `TCP_MAXSEG` and the configured `mtu` at connection
+    /// setup on Linux, the configured `mtu` elsewhere. Logged as a diagnostic
+    /// only; it bounds nothing.
     #[allow(dead_code)]
     pub(crate) mtu: u16,
     /// When the connection was established.

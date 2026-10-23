@@ -4004,6 +4004,22 @@ impl Node {
                     }
                 };
                 if let Some(dest_socket_addr) = socket_addr_opt {
+                    // The worker sends without passing through
+                    // `UdpTransport::send_async`, so its MTU check is made
+                    // here, before a counter is reserved for the frame. The
+                    // forwarding path relies on this error to signal
+                    // MtuExceeded back to the source.
+                    let wire_capacity =
+                        ESTABLISHED_HEADER_SIZE + inner_len + crate::noise::TAG_SIZE;
+                    let udp_mtu = transport.mtu();
+                    if wire_capacity > udp_mtu as usize {
+                        udp.stats().record_mtu_exceeded();
+                        return Err(NodeError::MtuExceeded {
+                            node_addr: *node_addr,
+                            packet_size: wire_capacity,
+                            mtu: udp_mtu,
+                        });
+                    }
                     let counter =
                         session
                             .take_send_counter()
@@ -4012,8 +4028,6 @@ impl Node {
                                 reason: format!("counter reservation failed: {}", e),
                             })?;
                     let header = build_established_header(their_index, counter, flags, payload_len);
-                    let wire_capacity =
-                        ESTABLISHED_HEADER_SIZE + inner_len + crate::noise::TAG_SIZE;
                     let mut wire_buf = Vec::with_capacity(wire_capacity);
                     wire_buf.extend_from_slice(&header);
                     wire_buf.extend_from_slice(&timestamp_ms.to_le_bytes());
