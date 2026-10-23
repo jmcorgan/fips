@@ -5,8 +5,10 @@
 # fetch its publishing tool, over that workflow's Blossom upload helper and
 # its test (.github/scripts/blossom-upload.sh, test-blossom-upload.sh), over
 # the cross-target compile check that ci-local.sh runs (testing/cross-check/),
-# and over the crate publication check that crate.yml runs
-# (testing/check-crate.sh).
+# over the crate publication check that crate.yml runs
+# (testing/check-crate.sh), and over the FreeBSD package's upgrade test
+# (packaging/freebsd/test-upgrade.sh), which the FreeBSD Package workflow runs
+# in its VM.
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -21,6 +23,8 @@
 #     two directories (build-apk.sh wraps the maintainer scripts with one
 #     header line, which is not linted separately); the SDK feed Makefile ships
 #     preinst as well. On a router they run under busybox ash.
+#   * packaging/freebsd/test-upgrade.sh as POSIX sh with the same
+#     exclusions; it runs under FreeBSD's sh, which supports `local` too.
 #   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
 #     keep-pinned-toolchain.sh, the three
 #     testing/cross-check/ scripts and testing/check-crate.sh as bash, with
@@ -62,6 +66,7 @@ SH_TARGETS=(
     "$IPK/scripts/preinst"
     "$IPK/scripts/postinst"
     "$IPK/scripts/prerm"
+    "packaging/freebsd/test-upgrade.sh"
 )
 BASH_TARGETS=(
     ".github/scripts/install-nak.sh"

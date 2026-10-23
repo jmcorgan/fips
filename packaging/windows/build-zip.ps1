@@ -86,13 +86,13 @@ Windows Service:
   # Upgrade: stop the service first, or the installer fails
   # copying fips.exe after it has already changed the config
   # directory. Then rerun the installer and start the service.
-  sc stop fips
+  sc.exe stop fips
   powershell -File install-service.ps1
-  sc start fips
+  sc.exe start fips
 
   # Manage
-  sc start fips
-  sc stop fips
+  sc.exe start fips
+  sc.exe stop fips
 
   # Uninstall
   powershell -File uninstall-service.ps1

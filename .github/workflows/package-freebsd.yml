@@ -237,6 +237,14 @@ jobs:
             service fips onestop
             echo "==> log rotation PASSED"
 
+            # An upgrade over a running, enabled daemon must leave it
+            # running and print the restart instruction, and the restart must
+            # move it onto the new binary. Installs fips 99.0.0 built from the
+            # same binaries; the test stops the daemon and removes that
+            # package file when it ends.
+            sh packaging/freebsd/test-upgrade.sh
+            echo "==> upgrade over a running daemon PASSED"
+
             pkg info fips
             echo "==> pkg smoke-install PASSED"
 

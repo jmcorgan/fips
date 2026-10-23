@@ -140,6 +140,11 @@ jobs:
       # kept in step with ci-local.sh's run_package_versions by hand.
       - name: Check the package versions derived for tags and branches
         run: bash testing/check-package-versions.sh
+      # fips-dns-setup's reading of tun.name from the daemon config, against
+      # fixtures. Hermetic, about a second. Kept in step with ci-local.sh's
+      # run_tun_name by hand.
+      - name: Check fips-dns-setup reads the TUN name from the config
+        run: bash testing/dns-resolver/tun-name-test.sh
       # The unit-test jobs' flaky-test reporter, against recorded nextest
       # reports. Kept in step with ci-local.sh's run_nextest_flaky by hand.
       - name: Check the flaky-test reporter against its fixtures
@@ -1159,7 +1164,7 @@ jobs:
 # that boot a real fips daemon with a real TUN and assert
 # `dig @127.0.0.53 AAAA <npub>.fips` returns AAAA. Pins the production DNS bind
 # path where a loopback-delivered query was once misattributed to the mesh
-# interface and dropped. One leg runs all 13 scenarios sequentially.
+# interface and dropped. One leg runs all 14 scenarios sequentially.
 #
 # A job of its own rather than a leg of the integration matrix: its e2e
 # scenarios run the binaries from the package job 4 built, whose glibc floor is

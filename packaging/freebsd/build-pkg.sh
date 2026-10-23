@@ -114,27 +114,19 @@ pw groupshow fips >/dev/null 2>&1 || pw groupadd fips
     /usr/local/etc/fips/fips.yaml.sample /usr/local/etc/fips/fips.yaml
 [ -f /usr/local/etc/fips/hosts ] || install -m 0644 -o root -g wheel \\
     /usr/local/etc/fips/hosts.sample /usr/local/etc/fips/hosts
-# pkg upgrade runs the old package's pre-deinstall (which stops the
-# services); bring them back up on the new binaries if enabled.
-if [ "\${PKG_UPGRADE:-}" = "true" ]; then
-    if service fips enabled >/dev/null 2>&1; then
-        service fips start >/dev/null 2>&1 || true
-    fi
-    if service fips_dns enabled >/dev/null 2>&1; then
-        service fips_dns start >/dev/null 2>&1 || true
-    fi
-fi
 EOD
   pre-deinstall: <<EOD
-# Stop the services so the daemon binary is never replaced (upgrade) or
-# removed (deinstall) under a running process. fips_dns stop also tears
-# down the .fips resolver drop-in; on upgrade the new package's
-# post-install re-establishes it.
-service fips_dns onestop >/dev/null 2>&1 || true
-service fips onestop >/dev/null 2>&1 || true
+# On upgrade nothing is stopped. pkg ends a process that a package script
+# starts once pkg returns, so a daemon stopped here could not be started
+# again from the new package's post-install, and the node would be left
+# without one. The running daemon keeps its replaced binary open until
+# the operator restarts it, as the upgrade message says.
 if [ "\${PKG_UPGRADE:-}" != "true" ]; then
-    # Removal: clear the resolver drop-in even if the service was never
-    # started through rc.
+    # Removal: stop the services so the daemon binary is never removed
+    # under a running process, and clear the resolver drop-in even if the
+    # service was never started through rc.
+    service fips_dns onestop >/dev/null 2>&1 || true
+    service fips onestop >/dev/null 2>&1 || true
     /usr/local/libexec/fips/fips-dns-teardown 2>/dev/null || true
     for f in fips.yaml hosts; do
         s="/usr/local/etc/fips/\${f}.sample"
@@ -144,6 +136,12 @@ if [ "\${PKG_UPGRADE:-}" != "true" ]; then
 fi
 EOD
 }
+messages: [
+  {
+    type: "upgrade",
+    message: "The fips upgrade leaves a running daemon on the previous binary. Run 'service fips restart' to move it onto the new one; the same command starts it if it is not running. If you use fips_dns, run 'service fips_dns restart' as well."
+  }
+]
 EOF
 
 cat > "${STAGE}/pkg-plist" <<'EOF'

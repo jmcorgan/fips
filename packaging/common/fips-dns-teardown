@@ -6,6 +6,8 @@
 
 set -e
 
+# The resolvectl backend's interface, from the state file's second line;
+# fips0, the daemon's default, when the state does not name one.
 FIPS_INTERFACE="fips0"
 DNS_DELEGATE_FILE="/etc/systemd/dns-delegate.d/fips.dns-delegate"
 RESOLVED_DROPIN_FILE="/etc/systemd/resolved.conf.d/fips.conf"
@@ -67,7 +69,9 @@ teardown_nm_dnsmasq() {
 
 backend=""
 if [ -f "$STATE_FILE" ]; then
-    backend=$(cat "$STATE_FILE")
+    backend=$(sed -n 1p "$STATE_FILE")
+    iface=$(sed -n 2p "$STATE_FILE")
+    [ -n "$iface" ] && FIPS_INTERFACE="$iface"
 fi
 
 case "$backend" in
