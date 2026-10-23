@@ -357,7 +357,8 @@ jobs:
           fi
           shellcheck --version
 
-      # The scripts this package ships, as sh, and install-nak.sh, as bash.
+      # The scripts this package ships, as sh, and install-nak.sh and
+      # blossom-upload.sh, as bash.
       # The guard is the one copy of the lint; ci.yml and ci-local.sh run it
       # too, so a branch push sees a finding before it reaches a trunk.
       - name: Lint shell scripts
@@ -527,40 +528,10 @@ jobs:
         env:
           BLOSSOM_SERVER: "https://blossom.primal.net"
           NSEC: ${{ steps.keys.outputs.nsec }}
-        run: |
-          : ${GITHUB_OUTPUT:=/tmp/github_output}
-
-          FILE_HASH=""
-          for attempt in 1 2 3; do
-            if UPLOAD_RESPONSE=$(nak blossom upload \
-              --server "$BLOSSOM_SERVER" \
-              --sec "$NSEC" \
-              "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null); then
-              echo "Upload response (attempt $attempt):"
-              echo "$UPLOAD_RESPONSE"
-              FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
-              if [ -n "$FILE_HASH" ] && [ "$FILE_HASH" != "null" ]; then
-                break
-              fi
-              echo "Upload response had no sha256 (attempt $attempt)"
-            else
-              echo "Blossom upload timed out or failed (attempt $attempt)"
-            fi
-            FILE_HASH=""
-            [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
-          done
-
-          if [ -z "$FILE_HASH" ] || [ "$FILE_HASH" = "null" ]; then
-            echo "Blossom upload did not succeed after 3 attempts; non-fatal."
-            echo "The package still ships as a GitHub release artifact; only the"
-            echo "supplementary Blossom/nostr distribution is skipped this run."
-            exit 1
-          fi
-
-          BLOSSOM_URL="${BLOSSOM_SERVER}/${FILE_HASH}"
-          echo "url=$BLOSSOM_URL" >> "$GITHUB_OUTPUT"
-          echo "hash=$FILE_HASH" >> "$GITHUB_OUTPUT"
-          echo "Uploaded to Blossom: $BLOSSOM_URL"
+        # A failure warns and adds a run-summary line, and the step's failure
+        # skips the NIP-94 event; continue-on-error keeps the tag run green,
+        # since the package is already on the GitHub release.
+        run: bash .github/scripts/blossom-upload.sh "$BLOSSOM_SERVER" "dist/${{ env.PACKAGE_FILENAME }}"
 
       - name: Publish NIP-94 release event
         id: publish
@@ -871,6 +842,14 @@ jobs:
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
+      # The Blossom upload helper against a stub server on this runner, with
+      # the pinned nak: a .apk must go up with a type the server accepts, and
+      # a refused upload must warn. Runs on every run of this job, not only on
+      # tags, so a regression shows before a release.
+      - name: Test the Blossom upload helper
+        shell: bash
+        run: bash .github/scripts/test-blossom-upload.sh
+
       # Priority: HIVE_CI_NSEC from env (loom job) > repo secret > generate ephemeral
       - name: Resolve signing key
         id: keys
@@ -904,40 +883,10 @@ jobs:
         env:
           BLOSSOM_SERVER: "https://blossom.primal.net"
           NSEC: ${{ steps.keys.outputs.nsec }}
-        run: |
-          : ${GITHUB_OUTPUT:=/tmp/github_output}
-
-          FILE_HASH=""
-          for attempt in 1 2 3; do
-            if UPLOAD_RESPONSE=$(nak blossom upload \
-              --server "$BLOSSOM_SERVER" \
-              --sec "$NSEC" \
-              "dist/${{ env.PACKAGE_FILENAME }}" < /dev/null); then
-              echo "Upload response (attempt $attempt):"
-              echo "$UPLOAD_RESPONSE"
-              FILE_HASH=$(echo "$UPLOAD_RESPONSE" | jq -r '.sha256')
-              if [ -n "$FILE_HASH" ] && [ "$FILE_HASH" != "null" ]; then
-                break
-              fi
-              echo "Upload response had no sha256 (attempt $attempt)"
-            else
-              echo "Blossom upload timed out or failed (attempt $attempt)"
-            fi
-            FILE_HASH=""
-            [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
-          done
-
-          if [ -z "$FILE_HASH" ] || [ "$FILE_HASH" = "null" ]; then
-            echo "Blossom upload did not succeed after 3 attempts; non-fatal."
-            echo "The package still ships as a GitHub release artifact; only the"
-            echo "supplementary Blossom/nostr distribution is skipped this run."
-            exit 1
-          fi
-
-          BLOSSOM_URL="${BLOSSOM_SERVER}/${FILE_HASH}"
-          echo "url=$BLOSSOM_URL" >> "$GITHUB_OUTPUT"
-          echo "hash=$FILE_HASH" >> "$GITHUB_OUTPUT"
-          echo "Uploaded to Blossom: $BLOSSOM_URL"
+        # A failure warns and adds a run-summary line, and the step's failure
+        # skips the NIP-94 event; continue-on-error keeps the tag run green,
+        # since the package is already on the GitHub release.
+        run: bash .github/scripts/blossom-upload.sh "$BLOSSOM_SERVER" "dist/${{ env.PACKAGE_FILENAME }}"
 
       - name: Publish NIP-94 release event
         id: publish

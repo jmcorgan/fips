@@ -2,9 +2,11 @@
 # ── OpenWrt shell-script lint guard ─────────────────────────────────────────
 # Runs shellcheck over the shell scripts the OpenWrt packages ship, over
 # .github/scripts/install-nak.sh, which the OpenWrt Package workflow runs to
-# fetch its publishing tool, over the cross-target compile check that
-# ci-local.sh runs (testing/cross-check/), and over the crate publication
-# check that crate.yml runs (testing/check-crate.sh).
+# fetch its publishing tool, over that workflow's Blossom upload helper and
+# its test (.github/scripts/blossom-upload.sh, test-blossom-upload.sh), over
+# the cross-target compile check that ci-local.sh runs (testing/cross-check/),
+# and over the crate publication check that crate.yml runs
+# (testing/check-crate.sh).
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -19,7 +21,8 @@
 #     two directories (build-apk.sh wraps the maintainer scripts with one
 #     header line, which is not linted separately); the SDK feed Makefile ships
 #     preinst as well. On a router they run under busybox ash.
-#   * install-nak.sh, keep-pinned-toolchain.sh, the three
+#   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
+#     keep-pinned-toolchain.sh, the three
 #     testing/cross-check/ scripts and testing/check-crate.sh as bash, with
 #     no exclusions. They are CI scripts, not shipped ones, and the sh
 #     exclusion set below misfires on bash.
@@ -62,6 +65,8 @@ SH_TARGETS=(
 )
 BASH_TARGETS=(
     ".github/scripts/install-nak.sh"
+    ".github/scripts/blossom-upload.sh"
+    ".github/scripts/test-blossom-upload.sh"
     ".github/scripts/keep-pinned-toolchain.sh"
     "testing/cross-check/check.sh"
     "testing/check-crate.sh"
