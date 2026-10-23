@@ -550,7 +550,8 @@ When no traffic (of any kind) is received from a peer for the
 configured `node.link_dead_timeout_secs` window, the peer is declared dead and
 removed via `remove_active_peer()`. This triggers the full teardown cascade:
 spanning tree parent reselection (if the dead peer was the parent),
-TreeAnnounce propagation, coordinate cache flush, and bloom filter recompute.
+TreeAnnounce propagation, selective coordinate cache invalidation, and bloom
+filter recompute.
 
 If the dead peer is eligible for auto-reconnect (see [Auto-Reconnect]
 (#auto-reconnect)), reconnection is scheduled immediately after removal.

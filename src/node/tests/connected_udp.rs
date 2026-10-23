@@ -17,7 +17,9 @@
 //!
 //! The tests at the end check that datagrams the node receives through a
 //! connected socket's drain, and sends through the encrypt workers on
-//! either kind of socket, are counted once in the UDP transport's stats.
+//! either kind of socket, are counted once in the UDP transport's stats,
+//! and that the encrypt-worker path refuses a frame over the UDP MTU as the
+//! inline path does.
 
 use super::*;
 use crate::noise::NoiseSession;
@@ -480,4 +482,123 @@ async fn a_node_connected_socket_on_an_interface_bound_udp_transport_reads_back_
         crate::transport::udp::io::bound_interface(socket.as_raw_fd()).unwrap(),
         "lo"
     );
+}
+
+/// The UDP transport's MTU in the encrypt-worker fixture. Tests size their
+/// frames from it rather than from the default, so they keep testing the
+/// boundary if the default changes.
+#[cfg(unix)]
+fn udp_mtu(node: &Node) -> u16 {
+    node.transports
+        .get(&TransportId::new(1))
+        .expect("the fixture's UDP transport")
+        .mtu()
+}
+
+/// The established frame around a link message is the 16-byte header, the
+/// 4-byte inner timestamp, the message, and the 16-byte AEAD tag.
+#[cfg(unix)]
+const FRAME_OVERHEAD: usize = 36;
+
+/// A link message whose frame exceeds the UDP transport's MTU is refused on
+/// the encrypt-worker path with `MtuExceeded`, as `UdpTransport::send_async`
+/// refuses it on the inline path, and nothing reaches the peer. A frame of
+/// exactly the MTU is still sent.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_message_over_the_udp_mtu_is_refused_on_the_encrypt_worker_path() {
+    let (mut node, node_addr, stats, remote) = peer_behind_the_encrypt_workers().await;
+    let mtu = udp_mtu(&node);
+    let mut buf = [0u8; 4096];
+
+    let over = vec![0x51u8; mtu as usize + 1 - FRAME_OVERHEAD];
+    let result = node.send_encrypted_link_message(&node_addr, &over).await;
+    match result {
+        Err(NodeError::MtuExceeded {
+            packet_size,
+            mtu: reported,
+            ..
+        }) => {
+            assert_eq!(packet_size, mtu as usize + 1);
+            assert_eq!(reported, mtu);
+        }
+        other => panic!("a frame of mtu + 1 bytes must be refused, got {other:?}"),
+    }
+    assert_eq!(stats.snapshot().mtu_exceeded, 1);
+    remote
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    assert!(
+        remote.recv_from(&mut buf).is_err(),
+        "a refused frame must not reach the peer"
+    );
+
+    let at_mtu = vec![0x51u8; mtu as usize - FRAME_OVERHEAD];
+    node.send_encrypted_link_message(&node_addr, &at_mtu)
+        .await
+        .expect("a frame of exactly the MTU is sent");
+    remote
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (len, _) = remote.recv_from(&mut buf).expect("the peer receives it");
+    assert_eq!(len, mtu as usize);
+    assert_eq!(stats.snapshot().mtu_exceeded, 1);
+
+    for (_, t) in node.transports.iter_mut() {
+        t.stop().await.ok();
+    }
+}
+
+/// A transit forward onto the encrypt-worker path whose frame exceeds the
+/// UDP next hop's MTU is counted as an MTU reject, not as forwarded, and the
+/// source is sent an MtuExceeded signal instead of the oversize frame. The
+/// datagram names the peer as both source and destination so the signal has
+/// a route back over the same link.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_transit_forward_onto_the_encrypt_worker_path_over_the_udp_mtu_signals_mtu_exceeded() {
+    use crate::proto::link::{SESSION_DATAGRAM_HEADER_SIZE, SessionDatagram};
+
+    let (mut node, node_addr, _stats, remote) = peer_behind_the_encrypt_workers().await;
+    let mtu = udp_mtu(&node);
+    let payload_len = mtu as usize + 1 - FRAME_OVERHEAD - SESSION_DATAGRAM_HEADER_SIZE;
+    let encoded = SessionDatagram::new(node_addr, node_addr, vec![0u8; payload_len]).encode();
+    assert_eq!(encoded.len() + FRAME_OVERHEAD, mtu as usize + 1);
+
+    let before = node.metrics().forwarding.snapshot();
+    node.handle_session_datagram(&node_addr, &encoded[1..], false)
+        .await;
+    let after = node.metrics().forwarding.snapshot();
+    assert_eq!(
+        after.drop_mtu_exceeded_packets,
+        before.drop_mtu_exceeded_packets + 1,
+        "the oversize forward must be counted as an MTU reject"
+    );
+    assert_eq!(
+        after.forwarded_packets, before.forwarded_packets,
+        "the oversize forward must not be counted as forwarded"
+    );
+
+    let mut buf = [0u8; 4096];
+    remote
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (len, _) = remote
+        .recv_from(&mut buf)
+        .expect("the source receives the MtuExceeded signal");
+    assert!(
+        len < mtu as usize,
+        "the peer must receive the small MtuExceeded signal, not the {len}-byte frame"
+    );
+    remote
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    assert!(
+        remote.recv_from(&mut buf).is_err(),
+        "nothing else may reach the peer"
+    );
+
+    for (_, t) in node.transports.iter_mut() {
+        t.stop().await.ok();
+    }
 }

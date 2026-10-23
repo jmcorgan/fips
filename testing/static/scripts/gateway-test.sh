@@ -667,6 +667,41 @@ print(tables[0]["handle"], found[0])
 '
 }
 
+# The packet counter of the drop rule for destination port $2 of protocol $1
+# in the mesh firewall's forward chain, from
+# `nft -j list chain inet fips forward`. Fails when the chain has no counted
+# drop for that port, or more than one.
+fwd_drop() {
+    python3 -c '
+import json, sys
+proto, port = sys.argv[1], int(sys.argv[2])
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+dport = {"payload": {"protocol": proto, "field": "dport"}}
+found = []
+for e in doc.get("nftables", []):
+    r = e.get("rule") if isinstance(e, dict) else None
+    if not isinstance(r, dict) or r.get("table") != "fips" or r.get("chain") != "forward":
+        continue
+    exprs = [x for x in r.get("expr", []) if isinstance(x, dict)]
+    if not any("drop" in x for x in exprs):
+        continue
+    if not any(isinstance(x.get("match"), dict) and x["match"].get("op") == "=="
+               and x["match"].get("left") == dport and x["match"].get("right") == port
+               for x in exprs):
+        continue
+    counts = [x["counter"].get("packets") for x in exprs if isinstance(x.get("counter"), dict)]
+    if len(counts) != 1 or not isinstance(counts[0], int):
+        sys.exit(1)
+    found.append(counts[0])
+if len(found) != 1:
+    sys.exit(1)
+print(found[0])
+' "$@"
+}
+
 # Succeeds when $1 and $2 are the same IPv6 address in any written form.
 same_addr() {
     python3 -c '
@@ -964,6 +999,18 @@ print(json.dumps(a))
     gw_case "pool_reject: no reject in chain input" 1 "" "$json_reject_none" pool_reject || fails=$((fails + 1))
     gw_case "pool_reject: a table without the input chain" 1 "" "$json_ok" pool_reject || fails=$((fails + 1))
     gw_case "pool_reject: empty input" 1 "" "" pool_reject || fails=$((fails + 1))
+    # The mesh firewall's forward chain with the how-to's drop-in for one TCP
+    # and one UDP forward, as `nft -j list chain inet fips forward` printed it
+    # on nftables 1.1.3 with counters edited in; json_fwd_nodrop is the same
+    # chain with no drop-in.
+    local json_fwd json_fwd_nodrop
+    json_fwd='{"nftables": [{"metainfo": {"version": "1.1.3", "release_name": "Commodore Bullmoose #4", "json_schema_version": 1}}, {"chain": {"family": "inet", "table": "fips", "name": "forward", "handle": 2, "type": "filter", "hook": "forward", "prio": 0, "policy": "accept"}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 18, "expr": [{"match": {"op": "!=", "left": {"meta": {"key": "iifname"}}, "right": "fips0"}}, {"return": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 19, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["established", "related"]}}, {"accept": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 20, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "daddr"}}, "right": "fd02::20"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 8080}}, {"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "saddr"}}, "right": "fd97::a"}}, {"accept": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 21, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "daddr"}}, "right": "fd02::20"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 8080}}, {"counter": {"packets": 3, "bytes": 240}}, {"drop": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 22, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "daddr"}}, "right": "fd02::20"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": 8081}}, {"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "saddr"}}, "right": "fd97::a"}}, {"accept": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 23, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "daddr"}}, "right": "fd02::20"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": 8081}}, {"counter": {"packets": 1, "bytes": 64}}, {"drop": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 24, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "status"}}, "right": "dnat"}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}]}'
+    json_fwd_nodrop='{"nftables": [{"metainfo": {"version": "1.1.3", "release_name": "Commodore Bullmoose #4", "json_schema_version": 1}}, {"chain": {"family": "inet", "table": "fips", "name": "forward", "handle": 2, "type": "filter", "hook": "forward", "prio": 0, "policy": "accept"}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 18, "expr": [{"match": {"op": "!=", "left": {"meta": {"key": "iifname"}}, "right": "fips0"}}, {"return": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 19, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["established", "related"]}}, {"accept": null}]}}, {"rule": {"family": "inet", "table": "fips", "chain": "forward", "handle": 24, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "status"}}, "right": "dnat"}}, {"counter": {"packets": 0, "bytes": 0}}, {"accept": null}]}}]}'
+    gw_case "fwd_drop: tcp drop counter" 0 3 "$json_fwd" fwd_drop tcp 8080 || fails=$((fails + 1))
+    gw_case "fwd_drop: udp drop counter" 0 1 "$json_fwd" fwd_drop udp 8081 || fails=$((fails + 1))
+    gw_case "fwd_drop: no drop for that protocol" 1 "" "$json_fwd" fwd_drop udp 8080 || fails=$((fails + 1))
+    gw_case "fwd_drop: chain without drop-ins" 1 "" "$json_fwd_nodrop" fwd_drop tcp 8080 || fails=$((fails + 1))
+    gw_case "fwd_drop: empty input" 1 "" "" fwd_drop tcp 8080 || fails=$((fails + 1))
     gw_case "same_addr: two forms of one address" 0 "" "" same_addr fd02:0:0:0::10 fd02::10 || fails=$((fails + 1))
     gw_case "same_addr: different addresses" 1 "" "" same_addr fd01::1 fd02::10 || fails=$((fails + 1))
 
@@ -2223,6 +2270,187 @@ else
 fi
 if [ -z "$P8C_MISSING" ]; then
     gw_responders_stop
+fi
+
+# Phase 8d: Port forwards under the packaged mesh firewall
+#
+# Loads the tree's packaging/common/fips.nft on the gateway with the forward
+# drop-in that docs/how-to/deploy-gateway.md gives, taken from the document
+# and given this topology's addresses and ports: gw-server may use the tcp
+# 18080 and udp 18081 forwards, and no other mesh node may. tcp 18082 has no
+# drop-in line, so it stays open to the whole mesh. gw-server-2 checks that
+# first, which also shows it can reach the gateway before its refused probes'
+# timeouts are read as refusals. Each refused probe must also show on its own
+# drop rule's counter, so a refusal is told apart from a probe that never
+# arrived. The table, the drop-in and the responders are removed at the end
+# whatever the result, and the removal is checked, so Phases 9 to 12 run as
+# before.
+echo ""
+echo "Phase 8d: Port forwards under the packaged mesh firewall"
+P8D_ROOT="$SCRIPT_DIR/../../.."
+P8D_NFT="$P8D_ROOT/packaging/common/fips.nft"
+P8D_HOWTO="$P8D_ROOT/docs/how-to/deploy-gateway.md"
+P8D_DROPIN=/etc/fips/fips.d/forward/port-forwards.nft
+SERVER2_MESH=$(docker exec "$SERVER2" bash -c \
+    "ip -6 -o addr show fips0 | awk '/inet6 fd/ {print \$4}' | cut -d/ -f1 | head -1" \
+    2>/dev/null || echo "")
+
+P8D_MISSING=""
+[ -n "$GW_MESH_IP" ] || P8D_MISSING="gateway mesh address"
+[ -n "$SERVER_MESH" ] || P8D_MISSING="${P8D_MISSING:+$P8D_MISSING and }$SERVER mesh address"
+[ -n "$SERVER2_MESH" ] || P8D_MISSING="${P8D_MISSING:+$P8D_MISSING and }$SERVER2 mesh address"
+
+# The how-to's drop-in, from its marker line to the end of its fenced block,
+# with the example peer, target address and target ports replaced. Each line
+# the probes rely on must be there after the replacement: a failed extraction
+# is a failed check, not a skip.
+P8D_RULES=$(sed -n '/^# \/etc\/fips\/fips\.d\/forward\/port-forwards\.nft$/,/^```$/p' \
+    "$P8D_HOWTO" 2>/dev/null | sed '$d' | sed \
+    -e "s/fd97:1111:2222:3333:4444:5555:6666:7777/$SERVER_MESH/g" \
+    -e "s/fd12:3456::10/$GW_CLIENT_LAN/g" \
+    -e 's/ tcp dport 80 / tcp dport 8080 /g' \
+    -e 's/ udp dport 53 / udp dport 8081 /g') || P8D_RULES=""
+P8D_EXTRACT=0
+for want in \
+    "ip6 daddr $GW_CLIENT_LAN tcp dport 8080 ip6 saddr { $SERVER_MESH } accept" \
+    "ip6 daddr $GW_CLIENT_LAN tcp dport 8080 counter drop" \
+    "ip6 daddr $GW_CLIENT_LAN udp dport 8081 ip6 saddr { $SERVER_MESH } accept" \
+    "ip6 daddr $GW_CLIENT_LAN udp dport 8081 counter drop"; do
+    if ! grep -qF -- "$want" <<< "$P8D_RULES"; then
+        echo "  Drop-in taken from $P8D_HOWTO has no line: $want"
+        P8D_EXTRACT=1
+    fi
+done
+check "Forward drop-in taken from the gateway how-to for $SERVER on tcp 18080 and udp 18081" "$P8D_EXTRACT"
+
+P8D_LOADED=false
+if [ -n "$P8D_MISSING" ]; then
+    check "Packaged fips.nft with the forward drop-in loads (skipped: no $P8D_MISSING)" 1
+elif [ "$P8D_EXTRACT" -ne 0 ]; then
+    check "Packaged fips.nft with the forward drop-in loads (skipped: no drop-in)" 1
+else
+    P8D_RC1=0
+    P8D_RC2=0
+    P8D_ERR=""
+    if docker cp "$P8D_NFT" "$GATEWAY:/etc/fips/fips.nft" >/dev/null 2>&1 \
+        && docker exec "$GATEWAY" mkdir -p /etc/fips/fips.d/forward \
+        && printf '%s\n' "$P8D_RULES" \
+            | docker exec -i "$GATEWAY" sh -c "cat > $P8D_DROPIN"; then
+        # Start, then reload, as fips-firewall.service would.
+        P8D_ERR=$(docker exec "$GATEWAY" nft -f /etc/fips/fips.nft 2>&1) || P8D_RC1=$?
+        P8D_ERR2=$(docker exec "$GATEWAY" nft -f /etc/fips/fips.nft 2>&1) || P8D_RC2=$?
+        P8D_ERR="$P8D_ERR$P8D_ERR2"
+    else
+        P8D_RC1=copy
+    fi
+    if [ "$P8D_RC1" = 0 ] && [ "$P8D_RC2" = 0 ]; then
+        check "Packaged fips.nft with the forward drop-in loads, then reloads" 0
+        P8D_LOADED=true
+    else
+        check "Packaged fips.nft with the forward drop-in loads, then reloads (exit $P8D_RC1, $P8D_RC2: ${P8D_ERR:0:200})" 1
+    fi
+fi
+
+if [ "$P8D_LOADED" = true ]; then
+    # Phase 8c leaves tcp 18080 entries; an established entry would be
+    # accepted ahead of the drop-in.
+    docker exec "$GATEWAY" conntrack -F >/dev/null 2>&1 || true
+    gw_responders_start
+
+    P8D_JSON=$(docker exec "$GATEWAY" nft -j list chain inet fips forward 2>/dev/null) || P8D_JSON=""
+    P8D_TCP0=$(fwd_drop tcp 8080 <<< "$P8D_JSON") || P8D_TCP0=""
+    P8D_UDP0=$(fwd_drop udp 8081 <<< "$P8D_JSON") || P8D_UDP0=""
+
+    # The forward with no drop-in line, from the node the drop-in refuses.
+    P8D_OPEN=$(docker exec "$SERVER2" curl -6 -s --max-time 10 \
+        "http://[${GW_MESH_IP}]:18082/" 2>&1) || true
+    if echo "$P8D_OPEN" | grep -q "inbound-forward-ok-2"; then
+        check "TCP forward 18082, with no drop-in line, open to $SERVER2" 0
+    else
+        check "TCP forward 18082, with no drop-in line, open to $SERVER2 (response: '${P8D_OPEN:0:80}')" 1
+    fi
+
+    P8D_TCP_OK=$(docker exec "$SERVER" curl -6 -s --max-time 10 \
+        "http://[${GW_MESH_IP}]:18080/" 2>&1) || true
+    if echo "$P8D_TCP_OK" | grep -qE '^inbound-forward-ok$'; then
+        check "TCP forward 18080 allowed from $SERVER" 0
+    else
+        check "TCP forward 18080 allowed from $SERVER (response: '${P8D_TCP_OK:0:80}')" 1
+    fi
+
+    # A one-shot UDP client: prints the reply, or TIMEOUT.
+    P8D_UDP_PROBE='
+import socket, sys
+s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+s.settimeout(float(sys.argv[2]))
+s.sendto(b"ping-under-firewall", (sys.argv[1], 18081))
+try:
+    data, _ = s.recvfrom(2048)
+    sys.stdout.write(data.decode("utf-8", "replace"))
+except socket.timeout:
+    sys.stdout.write("TIMEOUT")
+except Exception as e:
+    sys.stdout.write("ERR: " + str(e))
+'
+    P8D_UDP_OK=$(docker exec "$SERVER" python3 -c "$P8D_UDP_PROBE" "$GW_MESH_IP" 5 2>&1) || true
+    if [ "$P8D_UDP_OK" = "udp-forward-ok:ping-under-firewall" ]; then
+        check "UDP forward 18081 allowed from $SERVER" 0
+    else
+        check "UDP forward 18081 allowed from $SERVER (response: '${P8D_UDP_OK:0:80}')" 1
+    fi
+
+    # Refused: a dropped SYN leaves curl waiting until --max-time (exit 28).
+    P8D_TCP_RC=0
+    P8D_TCP_NO=$(docker exec "$SERVER2" curl -6 -s --max-time 3 \
+        "http://[${GW_MESH_IP}]:18080/" 2>&1) || P8D_TCP_RC=$?
+    if [ "$P8D_TCP_RC" -eq 28 ] && ! echo "$P8D_TCP_NO" | grep -q "inbound-forward-ok"; then
+        check "TCP forward 18080 refused to $SERVER2 (curl timed out)" 0
+    else
+        check "TCP forward 18080 refused to $SERVER2 (curl exit $P8D_TCP_RC, response: '${P8D_TCP_NO:0:80}')" 1
+    fi
+
+    P8D_UDP_NO=$(docker exec "$SERVER2" python3 -c "$P8D_UDP_PROBE" "$GW_MESH_IP" 3 2>&1) || true
+    if [ "$P8D_UDP_NO" = "TIMEOUT" ]; then
+        check "UDP forward 18081 refused to $SERVER2 (no reply in 3s)" 0
+    else
+        check "UDP forward 18081 refused to $SERVER2 (response: '${P8D_UDP_NO:0:80}')" 1
+    fi
+
+    # Each refusal must be the drop-in's: its drop rule counted it.
+    P8D_JSON=$(docker exec "$GATEWAY" nft -j list chain inet fips forward 2>/dev/null) || P8D_JSON=""
+    P8D_TCP1=$(fwd_drop tcp 8080 <<< "$P8D_JSON") || P8D_TCP1=""
+    P8D_UDP1=$(fwd_drop udp 8081 <<< "$P8D_JSON") || P8D_UDP1=""
+    if [ -n "$P8D_TCP0" ] && [ -n "$P8D_TCP1" ] && [ "$((P8D_TCP1 - P8D_TCP0))" -ge 1 ]; then
+        check "Forward chain's tcp 8080 drop counted the refused probe ($P8D_TCP0 -> $P8D_TCP1)" 0
+    else
+        check "Forward chain's tcp 8080 drop counted the refused probe (read '$P8D_TCP0' -> '$P8D_TCP1')" 1
+    fi
+    if [ -n "$P8D_UDP0" ] && [ -n "$P8D_UDP1" ] && [ "$((P8D_UDP1 - P8D_UDP0))" -ge 1 ]; then
+        check "Forward chain's udp 8081 drop counted the refused probe ($P8D_UDP0 -> $P8D_UDP1)" 0
+    else
+        check "Forward chain's udp 8081 drop counted the refused probe (read '$P8D_UDP0' -> '$P8D_UDP1')" 1
+    fi
+else
+    for skipped in "TCP forward 18082 open to $SERVER2" "TCP forward 18080 allowed from $SERVER" \
+        "UDP forward 18081 allowed from $SERVER" "TCP forward 18080 refused to $SERVER2" \
+        "UDP forward 18081 refused to $SERVER2" "Forward chain's tcp 8080 drop counted the refused probe" \
+        "Forward chain's udp 8081 drop counted the refused probe"; do
+        check "$skipped (skipped: not loaded)" 1
+    done
+fi
+
+# Always, after any result above: remove what this phase added and confirm
+# it is gone.
+docker exec "$GATEWAY" nft delete table inet fips >/dev/null 2>&1 || true
+docker exec "$GATEWAY" rm -rf /etc/fips/fips.d /etc/fips/fips.nft >/dev/null 2>&1 || true
+gw_responders_stop
+P8D_TABLES_RC=0
+P8D_TABLES=$(docker exec "$GATEWAY" nft list tables 2>&1) || P8D_TABLES_RC=$?
+if [ "$P8D_TABLES_RC" -eq 0 ] && ! grep -qx "table inet fips" <<< "$P8D_TABLES" \
+    && docker exec "$GATEWAY" test ! -e /etc/fips/fips.d; then
+    check "Mesh firewall table and drop-ins removed from the gateway" 0
+else
+    check "Mesh firewall table and drop-ins removed from the gateway (nft rc $P8D_TABLES_RC: ${P8D_TABLES:0:120})" 1
 fi
 
 # Phase 9: SERVFAIL when daemon DNS is down

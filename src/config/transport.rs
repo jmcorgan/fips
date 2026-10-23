@@ -32,8 +32,12 @@ fn parse_bind_port(raw: &str) -> Option<u16> {
 /// Default UDP bind address.
 const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:2121";
 
-/// Default UDP MTU (IPv6 minimum).
-const DEFAULT_UDP_MTU: u16 = 1280;
+/// Default UDP MTU: the IPv6 minimum (1280) plus the 77 bytes FIPS adds to an
+/// IPv6 packet, the smallest value that carries a 1280-byte IPv6 packet. A
+/// smaller transport MTU gives an IPv6 MTU below 1280, and a host ignores a
+/// Packet Too Big reporting less than that (RFC 8201), so every non-TCP
+/// packet between the two sizes would be lost.
+const DEFAULT_UDP_MTU: u16 = 1357;
 
 /// Default UDP receive buffer size (2 MB).
 const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
@@ -61,7 +65,8 @@ pub struct UdpConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_addr: Option<String>,
 
-    /// UDP MTU (`mtu`). Defaults to 1280 (IPv6 minimum).
+    /// UDP MTU (`mtu`). Defaults to 1357, the smallest that carries a
+    /// 1280-byte IPv6 packet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 
@@ -265,7 +270,8 @@ const MIN_BEACON_INTERVAL_SECS: u64 = 10;
 /// Ethernet transport instance configuration.
 ///
 /// EthernetConfig is always compiled (for config parsing on any platform),
-/// but the transport runtime requires Linux (`#[cfg(target_os = "linux")]`).
+/// but the transport runtime is built only for Linux (AF_PACKET) and macOS
+/// (BPF).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EthernetConfig {
@@ -416,7 +422,8 @@ pub struct TcpConfig {
     pub bind_addr: Option<String>,
 
     /// Default MTU for TCP connections. Defaults to 1400.
-    /// Per-connection MTU is derived from TCP_MAXSEG when available.
+    /// TCP reports this configured value to FMP and checks sends against
+    /// it; it does not report a per-connection MTU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 
@@ -564,8 +571,8 @@ const DEFAULT_TOR_ADVERTISED_PORT: u16 = 443;
 ///
 /// Supports three modes:
 /// - `socks5`: Outbound-only connections through a Tor SOCKS5 proxy.
-/// - `control_port`: Full bidirectional support — outbound via SOCKS5
-///   plus inbound via Tor onion service managed through the control port.
+/// - `control_port`: Outbound via SOCKS5, plus control-port monitoring.
+///   No inbound onion service (use `directory` for inbound).
 /// - `directory`: Full bidirectional support — outbound via SOCKS5,
 ///   inbound via a Tor-managed `HiddenServiceDir` onion service. No
 ///   control port needed. Enables Tor `Sandbox 1` mode.

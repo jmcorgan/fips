@@ -239,7 +239,7 @@ impl Node {
             "Processed ReceiverReport"
         );
 
-        // First RTT sample — peer is now eligible for parent selection.
+        // First RTT sample — peer is now eligible for a cost-based switch.
         // Trigger re-evaluation so the node doesn't wait for the next
         // periodic tick or TreeAnnounce.
         if first_rtt {

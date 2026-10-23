@@ -13,10 +13,11 @@ oversize), see the relevant how-to under `docs/how-to/`.
 
 ## The MTU Problem in FIPS
 
-A FIPS path can traverse heterogeneous link types — UDP/IP (1280
-default, IPv6 minimum), Ethernet (interface MTU − 3, typically 1497),
-BLE (per-connection L2CAP CoC MTU, 2048 default), Tor stream (1400
-default), radio (51–222) — within a single end-to-end session.
+A FIPS path can traverse heterogeneous link types — UDP/IP (1357
+default, carries a 1280-byte IPv6 packet), Ethernet (interface
+MTU − 3, typically 1497), BLE (per-connection L2CAP CoC MTU, 2048
+default), Tor stream (1400 default), radio (51–222) — within a single
+end-to-end session.
 The minimum MTU along the path determines the largest datagram a
 session can deliver. Several properties make this harder than in
 classic IP networks:
@@ -31,9 +32,8 @@ classic IP networks:
 - **First-flow race.** The very first SessionDatagram races
   destination discovery — the source has not yet learned the path MTU
   but must pick a payload size for the queued packet.
-- **Variable per-link MTU.** Some transports (BLE, TCP via
-  `TCP_MAXSEG`) report different MTUs for different links rather than
-  a single transport-wide value.
+- **Variable per-link MTU.** Some transports (BLE) report different
+  MTUs for different links rather than a single transport-wide value.
 
 The unified MTU model below combines proactive and reactive
 mechanisms to converge on a working effective MTU within the first
@@ -85,15 +85,14 @@ SessionDatagram and LookupResponse. Per-transport defaults:
 
 | Transport | Default MTU | Per-link MTU source |
 | --------- | ----------- | ------------------- |
-| UDP | 1280 (IPv6 minimum) | uniform (`mtu()` fallback) |
+| UDP | 1357 (carries a 1280-byte IPv6 packet) | uniform (`mtu()` fallback) |
 | Ethernet | interface MTU − 3 (typically 1497) | uniform |
-| TCP | 1400 | derived from `TCP_MAXSEG` per connection |
+| TCP | 1400 | uniform (configured `mtu`) |
 | Tor | 1400 | uniform |
 | BLE | 2048 default; per-connection L2CAP CoC MTU | per-link (overrides `mtu()`) |
 
-For TCP, the per-connection `TCP_MAXSEG` query lets FMP discover the
-actual MSS the kernel negotiated for each connection, rather than
-assuming a single value across all TCP peers.
+TCP reports the configured `mtu` to FMP and checks sends against it;
+it does not report a per-connection MTU.
 
 ## Proactive PMTUD: SessionDatagram path_mtu
 
@@ -200,8 +199,9 @@ consumers:
   TUN-side TCP MSS clamp (`per_flow_max_mss` in
   `src/ipv6tun/tun.rs`) at first-SYN time so outbound TCP flows
   are clamped to the per-destination MTU rather than a generic
-  ceiling. Written from four sites, all using tighter-only
-  semantics — the clamp is never loosened:
+  ceiling. Written from four sites, each keeping the tighter of the
+  stored and the new value, except that a link seed from a different
+  transport than the previous seed replaces the stored value:
   - Discovery's `LookupResponse` handler — reverse-path
     annotated value carried back by the discovery target.
   - `seed_path_mtu_for_link_peer` when a peer is promoted to
@@ -215,9 +215,37 @@ consumers:
     benefits immediately from PMTU knowledge the session has
     already acquired.
 
-All four writers apply the same tighter-only rule, so the mirror
-converges to the smallest MTU any signal has reported for that
-destination and a subsequent looser observation cannot widen it.
+Entries are released when the path they describe is declared gone:
+on `PathBroken` (at most once a second per destination), on peer
+removal, and on session handshake timeout or idle removal. Entries
+learned from discovery responses also expire with the coordinate
+cache TTL (`node.cache.coord_ttl_secs`); values from the session's
+notifications and from `MtuExceeded` are held until a release. A
+release or an expiry restores a direct peer's link MTU rather than
+leaving the entry empty. The mirror therefore holds the smallest
+value reported since the last release, not the smallest value ever
+reported.
+
+### Defences against forged signals
+
+`MtuExceeded`, `PathBroken` and `CoordsRequired` carry no end-to-end
+authentication, and a forged path MTU signal could pin a
+destination's TCP MSS clamp near zero. The receive path limits what
+one can do:
+
+- **Floors.** A `PathMtuNotification` or `LookupResponse` `path_mtu`
+  below 256 bytes (`MIN_ACTIONABLE_PATH_MTU`) is ignored, and so is an
+  `MtuExceeded` bottleneck below `MIN_REACTIVE_PATH_MTU` (also 256).
+- **Admission.** A routing signal is acted on only when it names a
+  destination this node has bound itself, by initiating a session
+  toward it or completing the session handshake with it.
+- **Corroboration.** An `MtuExceeded` bottleneck is accepted only if
+  this node has sent a frame to that destination larger than the
+  claimed value since the last accepted decrease.
+- **Rate-limited release.** `PathBroken` releases the stored value at
+  most once a second per destination, so a stream of forged
+  `PathBroken` signals cannot discard a learned bottleneck as fast as
+  it is relearned.
 
 ## TCP MSS Clamping
 
@@ -230,8 +258,10 @@ clamped_mss = effective_ipv6_mtu - 40 (IPv6 header) - 20 (TCP header)
 
 Clamping is applied in two places:
 
-- **TUN reader** (outbound): clamps MSS on outbound SYN packets
-- **TUN writer** (inbound): clamps MSS on inbound SYN-ACK packets
+- **TUN reader** (outbound): clamps MSS on outbound SYN-flagged
+  segments (SYN and SYN-ACK)
+- **TUN writer** (inbound): clamps MSS on inbound SYN-flagged segments
+  (SYN and SYN-ACK)
 
 Together these ensure both directions of a TCP connection use
 appropriately-sized segments from the start, avoiding the initial
@@ -241,8 +271,8 @@ Packet Too Big alone.
 Clamping is **conditional**: when `per_flow_max_mss` already has an
 entry for the flow, that entry is used; otherwise the clamp falls
 back to a ceiling derived from the most pessimistic effective IPv6
-MTU the adapter knows about (1143 with the typical 1280 transport
-floor). The fallback handles cold-flow first-SYN traffic — the very
+MTU the adapter knows about (1143, from the 1280-byte IPv6
+minimum). The fallback handles cold-flow first-SYN traffic — the very
 first SYN of a flow may arrive before the MMP path-MTU echo and any
 per-flow lookup has been populated, so the conservative ceiling
 prevents the SYN-ACK chain from negotiating a too-large MSS that

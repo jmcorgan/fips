@@ -374,8 +374,9 @@ impl Node {
         // content has not changed.
 
         // Re-evaluate parent selection with current link costs.
-        // Exclude peers without MMP RTT data — they are not yet eligible
-        // as parent candidates (prevents oscillation from optimistic defaults).
+        // Peers without MMP RTT data are left out of the cost map, so they
+        // cannot win a cost-based switch on an optimistic default; they are
+        // still taken to correct the root when no measured peer reaches it.
         let peer_costs: BTreeMap<NodeAddr, f64> = self
             .peers
             .iter()

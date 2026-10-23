@@ -12,8 +12,8 @@ For the operator activation steps and drop-in recipes, see
 ## nftables Baseline
 
 The shipped baseline is `/etc/fips/fips.nft`. It defines a single
-nftables table `inet fips` with one chain hooked at `input`, structured
-as follows:
+nftables table `inet fips` with two chains. The `inbound` chain, hooked
+at `input`, is structured as follows:
 
 | Step | Rule | Effect |
 | ---- | ---- | ------ |
@@ -22,6 +22,16 @@ as follows:
 | 3 | `icmpv6 type echo-request accept` | Allow IPv6 echo (ping6 reachability). |
 | 4 | `include "/etc/fips/fips.d/*.nft"` | Splice in operator drop-ins (empty matches nothing). |
 | 5 | `counter drop` | Default-deny everything else; counter increments on every drop. |
+
+The `forward` chain, hooked at `forward`, sees fips-gateway's port
+forwards, which never reach `input`:
+
+| Step | Rule | Effect |
+| ---- | ---- | ------ |
+| 1 | `iifname != "fips0" return` | Match only traffic arriving on `fips0`. |
+| 2 | `ct state established,related accept` | Allow packets of accepted connections. |
+| 3 | `include "/etc/fips/fips.d/forward/*.nft"` | Splice in port-forward restrictions (a missing directory matches nothing). |
+| 4 | `ct status dnat counter accept` | Accept the remaining port-forwarded connections; other traffic meets the chain's `accept` policy. |
 
 Outbound from `fips0` is unrestricted. The baseline is a documented
 dpkg conffile — operator edits to `/etc/fips/fips.nft` are preserved
@@ -46,6 +56,11 @@ to scan. Examples shipped in the design discussion:
 - `http-from-cluster.nft` — accept TCP/80 from a `/64` mesh-address prefix
 - `dns-public.nft` — accept UDP/53 and TCP/53 from any mesh node
 - `git-from-trusted.nft` — accept TCP/9418 from a set of mesh-node addresses
+
+Port-forward restrictions live under `/etc/fips/fips.d/forward/`, also
+with the `.nft` suffix, and are included into the `forward` chain. They
+match a forward's target address and port, not its `listen_port`; see
+[../how-to/deploy-gateway.md](../how-to/deploy-gateway.md#compose-with-the-mesh-firewall).
 
 After editing, reload via
 `sudo systemctl reload-or-restart fips-firewall.service` (or
@@ -391,7 +406,7 @@ for the metadata-privacy model and the rejection of onion routing.
 
 | Transport | Default Inbound | Default Bind | Opt-in |
 | --------- | --------------- | ------------ | ------ |
-| UDP | None until `bind_addr` set | `0.0.0.0:2121` typical | Operator sets `transports.udp.bind_addr` |
+| UDP | Listens on `0.0.0.0:2121` when a UDP instance is declared without `bind_addr`, unless `outbound_only` | `0.0.0.0:2121` by default | Declaring `transports.udp`; set `bind_addr` to narrow it or `outbound_only` to close it |
 | TCP | None until `bind_addr` set | None — outbound-only without bind | Operator sets `transports.tcp.bind_addr` |
 | Ethernet | Listens on configured interface (raw `AF_PACKET`) | EtherType 0x2121 on selected interface | Per-flag `listen`, `announce`, `auto_connect`, `accept_connections` |
 | Tor | None until `directory_service` configured | `127.0.0.1:8443` (loopback only) | Operator sets `transports.tor.directory_service` and configures `HiddenServiceDir` in `torrc` |

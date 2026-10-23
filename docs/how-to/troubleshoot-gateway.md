@@ -204,12 +204,17 @@ virtual IP. At startup it reads conntrack once, the same way each
 - `Conntrack source: netlink; session pinning is on`: the proc file
   is absent, and sessions are read by dumping the conntrack table over
   netlink, as `conntrack -L` does. The dump needs `CAP_NET_ADMIN`.
-- `No conntrack source is readable; session pinning is off`: no
-  source could be read, and the line carries the error from each
-  source it tried. Every mapping then reads zero sessions, so a
-  mapping is reclaimed on its TTL and grace period alone, even while a
-  client that has not re-queried DNS still has traffic flowing through
-  it.
+- `No conntrack source is readable; session pinning is off, and no
+  mapping counts as carrying traffic until reads succeed`: no source
+  could be read, and the line carries the error from each source it
+  tried. No mapping then counts as having carried traffic, so
+  a re-query does not extend a name: each name expires its TTL and
+  grace period after it was first answered, even while a client still
+  has traffic flowing through it. When the pool is at its ceiling, a
+  new name can replace any mapping. Once conntrack reads succeed for
+  three ticks in a row (logged as `Conntrack evidence restored`),
+  mappings created after that count traffic again; ones created
+  before do not.
 
 The proc file exists only on a kernel built with
 `CONFIG_NF_CONNTRACK_PROCFS`, and only once `nf_conntrack` is loaded.
@@ -405,20 +410,21 @@ If either rule is missing, restart the gateway — the table is rebuilt
 atomically on config load.
 
 **Step 2.** Verify no `forward`-hook rule refuses the connection.
-The mesh firewall baseline (`fips-firewall.service`) hooks `input`
-only, so it neither blocks nor restricts port forwards, and an allow
-rule under `/etc/fips/fips.d/` has no effect on them. A forwarded
-connection is refused only by a `forward`-hook chain: the port-forward
-restriction from
+The mesh firewall baseline (`fips-firewall.service`) accepts port
+forwards in its `forward` chain unless a drop-in under
+`/etc/fips/fips.d/forward/` refuses them; an allow rule in
+`/etc/fips/fips.d/*.nft` has no effect on them. A forwarded connection
+is refused only by a `forward`-hook rule: a forward drop-in from
 [deploy-gateway.md](deploy-gateway.md#compose-with-the-mesh-firewall),
-or another firewall on the host whose `forward` policy is drop. If you
-loaded the restriction, check that it allows the peer's address and the
-forward's target address and port (not `listen_port`), and that its
-`fips_if` is the node's `tun.name`. Its drop counter shows refused
-connections:
+a restriction table of your own, or another firewall on the host whose
+`forward` policy is drop. If you restricted the forward, check that the
+accept line names the peer's address and the forward's target address
+and port (not `listen_port`), that no earlier drop-in file drops it
+first, and that `fips_if` in `/etc/fips/fips.nft` is the node's
+`tun.name`. The drop counters show refused connections:
 
 ```sh
-sudo nft list table inet fips_port_forwards
+sudo nft list chain inet fips forward
 ```
 
 A dropped connection times out on the peer rather than being reset.

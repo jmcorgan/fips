@@ -2789,20 +2789,20 @@ async fn a_native_first_send_through_discovery_is_still_delivered_when_the_tick_
 // ============================================================================
 
 /// Install a TUN sender, so ICMPv6 answers to local packets are observable.
-fn install_tun_channel(node: &mut Node) -> std::sync::mpsc::Receiver<Vec<u8>> {
+pub(super) fn install_tun_channel(node: &mut Node) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (tun_tx, tun_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     node.install_tun(tun_tx);
     tun_rx
 }
 
 /// Everything written to the TUN so far.
-fn drain_tun(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+pub(super) fn drain_tun(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
     std::iter::from_fn(|| rx.try_recv().ok()).collect()
 }
 
 /// A valid IPv6 packet from a local, non-multicast source to `dest`'s FIPS
 /// address, so `should_send_icmp_error` lets an answer through.
-fn tun_packet_to(dest: &NodeAddr) -> Vec<u8> {
+pub(super) fn tun_packet_to(dest: &NodeAddr) -> Vec<u8> {
     let mut pkt = vec![0u8; 40];
     pkt[0] = 0x60;
     pkt[6] = 17;
@@ -2815,7 +2815,7 @@ fn tun_packet_to(dest: &NodeAddr) -> Vec<u8> {
 }
 
 /// Assert `packet` is an ICMPv6 Destination Unreachable, no route.
-fn assert_no_route(packet: &[u8]) {
+pub(super) fn assert_no_route(packet: &[u8]) {
     assert!(packet.len() >= 48, "ICMPv6 answer too short");
     assert_eq!(packet[6], 58, "next header must be ICMPv6");
     assert_eq!(packet[40], 1, "ICMPv6 type must be Destination Unreachable");

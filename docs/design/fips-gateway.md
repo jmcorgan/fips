@@ -834,6 +834,10 @@ half is not in play.
   address to every reachable mesh peer. Inbound port-forwards are
   not gated by any peer ACL beyond what FMP normally enforces;
   treat them with the same care as a public-internet port forward.
+  The mesh firewall baseline's `forward` chain accepts them unless
+  a drop-in under `/etc/fips/fips.d/forward/` restricts a forward
+  to chosen mesh addresses (see
+  [deploy-gateway.md](../how-to/deploy-gateway.md#compose-with-the-mesh-firewall)).
 - **Mesh peer trust.** The LAN target sees connections that have
   been masqueraded to the gateway's LAN address. The target cannot
   distinguish one mesh peer from another, and there is no

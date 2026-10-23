@@ -388,12 +388,46 @@ LAN-routable address, and the response retraced via conntrack.
 > **What you exposed.** With the port-forward active, every mesh
 > peer that can route to your AP can hit `${NPUB}.fips:8080/` and
 > reach this service. That is exactly what the inbound half is
-> for — but if you want to scope visibility to a specific subset
-> of peers, the FIPS mesh firewall is the layer that does it; see
-> [../how-to/enable-mesh-firewall.md](../how-to/enable-mesh-firewall.md).
-> The port-forward rule and the firewall rule are independent: the
-> port-forward installs the rewrite; the firewall decides who is
-> allowed to reach the listen port.
+> for. The package's `fips` firewall zone accepts port forwards from
+> every mesh peer by default, so the forward stays open to all of
+> them until a fw4 rule with `src fips` refuses the ones you do not
+> want.
+
+To let one peer reach the demo and refuse every other, add two fw4
+rules, the accept first: fw4 applies rules in the order they are
+listed, and the packaged port-forward accept comes after both. The
+rules match the target's port (8000), not the listen port, because
+fw4 sees the packet after the gateway rewrites its destination. This
+demo's target is on the AP itself, so the rules name no `dest`; for
+a target on another LAN host, add `dest lan` and the target's
+address as `dest_ip` to each.
+
+```bash
+uci add firewall rule
+uci set firewall.@rule[-1].name=FIPS-demo-allow
+uci set firewall.@rule[-1].src=fips
+uci set firewall.@rule[-1].proto=tcp
+uci set firewall.@rule[-1].dest_port=8000
+uci set firewall.@rule[-1].src_ip=<allowed peer mesh address>
+uci set firewall.@rule[-1].target=ACCEPT
+uci add firewall rule
+uci set firewall.@rule[-1].name=FIPS-demo-refuse
+uci set firewall.@rule[-1].src=fips
+uci set firewall.@rule[-1].proto=tcp
+uci set firewall.@rule[-1].dest_port=8000
+uci set firewall.@rule[-1].target=REJECT
+uci commit firewall
+/etc/init.d/firewall reload
+```
+
+A rule that only accepts the allowed peer restricts nothing: every
+other peer falls through to the packaged accept. The Firewall section
+of `packaging/openwrt-ipk/README.md` describes the zone and that
+accept. On a Linux host without fw4, the mesh firewall baseline
+(`fips-firewall.service`) accepts every port-forwarded connection from
+the mesh unless a drop-in under `/etc/fips/fips.d/forward/` refuses it;
+to restrict one there, see
+[../how-to/deploy-gateway.md](../how-to/deploy-gateway.md#compose-with-the-mesh-firewall).
 
 ## Step 7: Tidy up
 
@@ -448,10 +482,10 @@ peering on the AP itself continues to work.
   `port_forwards[]` block is uniform across hosts, and on every
   distro you still own the decision of which LAN target to expose
   and on which mesh-side port.
-- **The mesh firewall is a separate decision.** Opening a port
-  forward on the gateway side does not open it on the firewall
-  side; if `fips-firewall.service` is enabled, you still need a
-  drop-in that admits the listen port.
+- **The firewall is a separate decision.** A port forward is open
+  to every mesh peer the moment it is configured; restricting it
+  takes fw4 rules with `src fips` that refuse the peers you do not
+  want, as in Step 6.
 
 ## Troubleshooting
 
@@ -465,7 +499,7 @@ groups the common failures by symptom:
 | `dig` succeeds with a pool address but `ping6` times out | Pool route or proxy NDP. See "Virtual IP unreachable from client". |
 | `ping6` works but TCP times out | NAT pipeline or mesh-side firewall. See "Ping works but TCP does not". |
 | Gateway service won't start | "No gateway section in configuration" recipe. |
-| Inbound `curl` hits the listen port but never reaches the LAN target | Mesh-side firewall first, then the port-forward rule. |
+| Inbound `curl` hits the listen port but never reaches the LAN target | A fw4 rule with `src fips` that refuses it, or fw4's `auto_includes` turned off (which drops the packaged port-forward accept), then the port-forward rule. |
 
 The first thing the troubleshoot guide does in any of these cases is
 ask the gateway directly via `show_gateway` and `show_mappings`. If

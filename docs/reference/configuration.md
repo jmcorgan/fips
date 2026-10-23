@@ -501,8 +501,8 @@ Controls tree construction and parent selection.
 | `node.tree.hold_down_secs`             | u64   | `30`    | Suppress non-mandatory re-evaluation after parent switch |
 | `node.tree.reeval_interval_secs`       | u64   | `60`    | Periodic cost-based parent re-evaluation interval (0 = disabled) |
 | `node.tree.flap_threshold`             | u32   | `4`     | Parent switches in window before dampening engages  |
-| `node.tree.flap_window_secs`           | u64   | `60`    | Sliding window for counting parent switches          |
-| `node.tree.flap_dampening_secs`        | u64   | `120`   | Extended hold-down duration when flap threshold exceeded |
+| `node.tree.flap_window_secs`           | u64   | `60`    | Fixed window, opened by the first switch, for counting parent switches |
+| `node.tree.flap_dampening_secs`        | u64   | `120`   | Extended hold-down duration once the flap threshold is reached |
 
 ### Bloom Filter (`node.bloom.*`)
 
@@ -683,9 +683,10 @@ names no local port is given one from 49152 upward.
 
 `debug_commands` is a separate gate on three commands that exist only so the
 test harness can drive the receive and dispatch paths without a wire.
-`inject` makes the daemon write bytes the client chose into one of that
-client's own flows, and `arrive` makes it dispatch a datagram as though a peer
-had sent it, reaching any listener this node holds. A node with the key off
+`inject` addresses a flow node-wide by id, so it writes bytes the client chose
+into any flow on the node, including one another client opened or a listener
+accepted. `arrive` makes the daemon dispatch a datagram as though a peer had
+sent it, reaching any listener this node holds. A node with the key off
 refuses each by name, so a client can tell "this node will not do that" from
 "this build has no such command". Leave it off outside the test harness.
 
@@ -747,7 +748,7 @@ adding entries and the precedence rules:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port. Ignored when `outbound_only: true` (kernel-assigned ephemeral port is used regardless). |
-| `transports.udp.mtu` | u16 | `1280` | Transport MTU |
+| `transports.udp.mtu` | u16 | `1357` | Transport MTU; the default is the smallest that carries a 1280-byte IPv6 packet |
 | `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
 | `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
 | `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts. Implicitly forced false when `outbound_only: true`. |
@@ -879,7 +880,7 @@ overhead.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:8443"`). If omitted, outbound-only mode. |
-| `transports.tcp.mtu` | u16 | `1400` | Default MTU. Per-connection MTU derived from `TCP_MAXSEG` when available. |
+| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. |
 | `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
 | `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
 | `transports.tcp.keepalive_secs` | u64 | `30` | TCP keepalive interval in seconds (0 = disabled) |
@@ -1450,7 +1451,7 @@ node:
     hold_down_secs: 30                  # suppress re-evaluation after switch
     reeval_interval_secs: 60            # periodic cost-based re-evaluation (0 = disabled)
     flap_threshold: 4                    # parent switches before dampening
-    flap_window_secs: 60                 # sliding window for flap detection
+    flap_window_secs: 60                 # fixed window for flap detection
     flap_dampening_secs: 120             # extended hold-down on flap
   bloom:
     update_debounce_ms: 500
@@ -1507,7 +1508,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:2121"
-    mtu: 1280
+    mtu: 1357
     recv_buf_size: 2097152           # 2 MB (kernel doubles to 4 MB actual)
     send_buf_size: 2097152           # 2 MB
   # ethernet:                        # uncomment to enable (requires CAP_NET_RAW)

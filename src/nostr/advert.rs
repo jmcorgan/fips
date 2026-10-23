@@ -30,16 +30,21 @@ use super::types::{
 
 /// What the async driver should do to satisfy a publish request. Returned
 /// by [`AdvertMachine::plan_publish`]; the machine performs the pure
-/// decision (which advert body, or a delete, or nothing) and the driver
-/// executes the corresponding relay I/O.
+/// decision (which advert body, or nothing) and the driver executes the
+/// corresponding relay I/O. [`PublishPlan::Delete`] is
+/// never produced by a running node; see its doc.
 #[derive(Debug, Clone)]
 pub(super) enum PublishPlan {
     /// Nothing to publish (advertising disabled with no prior event, no
     /// local advert yet, or the advert has no publicly usable endpoints).
     Nothing,
-    /// Advertising is disabled but a prior advert event exists; the driver
-    /// should emit a NIP-09 delete for `EventId` then call
-    /// [`AdvertMachine::clear_event_id`].
+    /// Advertising is disabled but a prior advert event id is recorded; the
+    /// driver would emit a NIP-09 delete for `EventId` then call
+    /// [`AdvertMachine::clear_event_id`]. This variant is
+    /// never produced by a running node: an id is recorded only after a
+    /// successful publish, which needs `advertise`, and `advertise` is fixed
+    /// for the machine's life. A stopped advert is left to NIP-40 expiration
+    /// instead.
     Delete(EventId),
     /// Publish this fully-prepared advert body. The driver builds the
     /// tags/expiration, signs, sends, then records the new event id via
@@ -183,8 +188,9 @@ pub(super) struct AdvertMachine {
     latch: Mutex<BoundLatch>,
     /// The advert body we currently want to publish, if any.
     local_advert: Mutex<Option<OverlayAdvert>>,
-    /// Id of our most recently published advert event (for NIP-09 delete
-    /// on withdrawal).
+    /// Id of our most recently published advert event. Only the
+    /// [`PublishPlan::Delete`] arm uses it, and a running node never
+    /// reaches that arm; shutdown discards it.
     current_event_id: Mutex<Option<EventId>>,
 }
 
@@ -464,9 +470,10 @@ impl AdvertMachine {
         }
     }
 
-    /// Build the publish decision: which advert body to publish, a delete
-    /// to emit, or nothing. Pure logic — the driver performs the relay I/O
-    /// and event signing.
+    /// Build the publish decision: which advert body to publish, or nothing.
+    /// The `Delete` arm is unreachable in a running node (see
+    /// [`PublishPlan::Delete`]). Pure logic — the driver performs the relay
+    /// I/O and event signing.
     pub(super) fn plan_publish(&self) -> Result<PublishPlan, BootstrapError> {
         let previous_event_id = *self.lock_event_id();
         if !self.advertise {
@@ -522,14 +529,15 @@ impl AdvertMachine {
         Ok(PublishPlan::Publish(advert))
     }
 
-    // --- current advert event id (NIP-09 delete-on-withdraw) -----------
+    // --- current advert event id -----------------------------------------
 
     /// Record the id of a just-published advert event.
     pub(super) fn set_event_id(&self, event_id: EventId) {
         *self.lock_event_id() = Some(event_id);
     }
 
-    /// Clear the recorded advert event id (after emitting a delete).
+    /// Clear the recorded advert event id. Used only by the driver's
+    /// [`PublishPlan::Delete`] arm, which a running node never reaches.
     pub(super) fn clear_event_id(&self) {
         *self.lock_event_id() = None;
     }

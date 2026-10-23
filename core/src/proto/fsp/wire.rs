@@ -48,7 +48,7 @@ pub const FSP_VERSION: u8 = 0;
 /// Phase value for established (encrypted or plaintext error) messages.
 pub const FSP_PHASE_ESTABLISHED: u8 = 0x0;
 
-/// Phase value for SessionSetup (Noise IK message 1).
+/// Phase value for SessionSetup (Noise XX message 1).
 pub const FSP_PHASE_MSG1: u8 = 0x1;
 
 /// Phase value for SessionAck (Noise handshake message 2).

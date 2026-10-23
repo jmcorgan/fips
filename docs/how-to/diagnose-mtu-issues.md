@@ -38,8 +38,9 @@ fipsctl show sessions | jq '.sessions[] | {display_name, state, mmp: .mmp.path_m
 `mmp.path_mtu` is the value the session-layer MMP currently believes
 is in force end-to-end. It updates on each PathMtuNotification echo
 from the destination — immediately on decrease, with hysteresis on
-increase. A field that starts at `1280` (the IPv6 floor) and then
-climbs to a higher value as echoes arrive is healthy; one that
+increase. A field that starts at the local transport MTU (`1357` at
+the default UDP MTU) and then settles at the path's value as echoes
+arrive is healthy; one that
 oscillates between two values may indicate a flapping path.
 
 ### `fipsctl show transports`
@@ -102,7 +103,8 @@ and are worth restating here:
   **before** the daemon's TCP MSS clamp at the TUN boundary. The
   packet may be larger than the daemon will let leave the node.
 - RX direction (inbound to a local app): tcpdump sees the packet
-  **after** the daemon's MSS clamp on inbound SYN-ACKs. The clamp
+  **after** the daemon's MSS clamp on inbound SYN-flagged segments
+  (SYN and SYN-ACK). The clamp
   fires only when `max_mss < kernel-natural-MSS`; otherwise it is a
   silent no-op.
 

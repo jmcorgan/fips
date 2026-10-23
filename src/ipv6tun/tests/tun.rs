@@ -1,6 +1,8 @@
 //! Tests that TUN startup never deletes, downs or takes over an interface
 //! that already has the configured `tun.name`, other than reopening an
-//! unheld persistent TUN of that name.
+//! unheld persistent TUN of that name; and that the `fd00::/8` policy rule
+//! startup adds is removed at stop, replaces an older rule rather than
+//! sitting beside it, and is harmless when an exit without stop leaves it.
 //!
 //! The namespace tests need root, so no CI job runs them: they are run by
 //! hand under `sudo` with `--ignored`, and that run is the only coverage of
@@ -12,6 +14,9 @@ use super::*;
 
 /// The interface name the namespace tests configure.
 const NAME: &str = "fipst0";
+
+/// The priority of the `fd00::/8` policy rule startup adds.
+const RULE_PRIORITY: &str = "5265";
 
 /// A root network namespace of its own, deleted on drop. Needs root.
 struct TunNetns(String);
@@ -106,6 +111,69 @@ impl TunNetns {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Run `ip -n <ns> <args>`, failing the test when it fails.
+    fn ip(&self, args: &[&str]) {
+        let mut full = vec!["-n", self.0.as_str()];
+        full.extend_from_slice(args);
+        crate::testutil::run_ok("ip", &full);
+    }
+
+    /// Stop the TUN as the daemon's stop does, through
+    /// `shutdown_tun_interface`, inside the namespace.
+    fn stop(&self) -> Result<(), TunError> {
+        crate::testutil::in_netns(&self.0, move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tun runtime");
+            runtime.block_on(shutdown_tun_interface(NAME))
+        })
+    }
+
+    /// Shut `device` down through `TunDevice::shutdown` inside the
+    /// namespace, then drop it.
+    fn shutdown(&self, device: TunDevice) -> Result<(), TunError> {
+        crate::testutil::in_netns(&self.0, move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tun runtime");
+            let result = runtime.block_on(device.shutdown());
+            drop(device);
+            result
+        })
+    }
+
+    /// The IPv6 policy rules at the mesh rule's priority, as `ip -6 rule`
+    /// prints them.
+    fn mesh_rules(&self) -> Vec<String> {
+        let out = std::process::Command::new("ip")
+            .args(["-n", &self.0, "-6", "rule", "show", "pref", RULE_PRIORITY])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ip -6 rule show failed");
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The device `ip -6 route get <dst>` sends `dst` out of.
+    fn route_dev(&self, dst: &str) -> String {
+        let out = std::process::Command::new("ip")
+            .args(["-n", &self.0, "-j", "-6", "route", "get", dst])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ip -6 route get {dst} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let routes: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        routes[0]["dev"].as_str().unwrap_or("").to_string()
     }
 
     /// A persistent `fipst0` that a node configured as `old` and then left
@@ -328,4 +396,126 @@ fn existing_link_verdict_refuses_every_kind_but_tun() {
             "{kind:?}: the error names {NAME} and {named}: {err}"
         );
     }
+}
+
+/// Stopping the node, as the daemon's stop does, removes the `fd00::/8`
+/// policy rule startup added, so it does not outlive the TUN.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn stopping_the_tun_removes_the_fd00_rule_it_added() {
+    let ns = TunNetns::new();
+    let device = ns.create().expect("the TUN is created");
+    let rules = ns.mesh_rules();
+    assert!(
+        rules.len() == 1 && rules[0].contains("to fd00::/8 lookup main"),
+        "precondition: startup adds one fd00::/8 rule: {rules:?}"
+    );
+
+    ns.stop().expect("stop succeeds");
+    drop(device);
+    assert_eq!(
+        ns.mesh_rules(),
+        Vec::<String>::new(),
+        "the fd00::/8 rule outlived the stopped TUN"
+    );
+}
+
+/// `TunDevice::shutdown`, the other public way to tear the TUN down, removes
+/// the rule too.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn a_tun_device_shutdown_removes_the_fd00_rule() {
+    let ns = TunNetns::new();
+    let device = ns.create().expect("the TUN is created");
+    assert_eq!(
+        ns.mesh_rules().len(),
+        1,
+        "precondition: startup adds one fd00::/8 rule"
+    );
+
+    ns.shutdown(device).expect("shutdown succeeds");
+    assert_eq!(
+        ns.mesh_rules(),
+        Vec::<String>::new(),
+        "the fd00::/8 rule outlived the shut-down TUN"
+    );
+}
+
+/// A node that exits without stopping (killed or crashed) leaves its rule
+/// behind. While it ran, every `fd00::/8` destination went to the TUN; once
+/// the TUN is gone, a ULA network another routing table owns (here one laid
+/// out like Tailscale's, table 52 at priority 5270) must be routed through
+/// that table, not out the main table's default route.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn a_rule_left_by_an_exit_without_stop_sends_other_ula_traffic_to_its_own_table() {
+    let ns = TunNetns::new();
+    ns.ip(&["link", "add", "lan0", "type", "dummy"]);
+    ns.ip(&["link", "set", "lan0", "up"]);
+    ns.ip(&["-6", "route", "add", "default", "dev", "lan0"]);
+    ns.ip(&["link", "add", "ts0", "type", "dummy"]);
+    ns.ip(&["link", "set", "ts0", "up"]);
+    ns.ip(&[
+        "-6",
+        "route",
+        "add",
+        "fd7a:115c:a1e0::/48",
+        "dev",
+        "ts0",
+        "table",
+        "52",
+    ]);
+    ns.ip(&["-6", "rule", "add", "pref", "5270", "lookup", "52"]);
+
+    let device = ns.create().expect("the TUN is created");
+    assert_eq!(
+        ns.route_dev("fd7a:115c:a1e0::1"),
+        NAME,
+        "while the node runs, fd00::/8 goes to the TUN"
+    );
+    assert_eq!(
+        ns.route_dev("fd12::1"),
+        NAME,
+        "while the node runs, fd00::/8 goes to the TUN"
+    );
+
+    // A non-persistent TUN goes when its descriptor closes, as at a crash.
+    drop(device);
+    assert_eq!(ns.link(), None, "precondition: the TUN is gone");
+    assert_eq!(
+        ns.mesh_rules().len(),
+        1,
+        "precondition: the exit left the rule behind"
+    );
+    assert_eq!(
+        ns.route_dev("fd7a:115c:a1e0::1"),
+        "ts0",
+        "the leftover rule sends another table's ULA traffic out the default route"
+    );
+}
+
+/// A host that ran an older version has its `fd00::/8` rule, without
+/// `suppress_prefixlength`. Startup replaces it, leaving one rule, rather
+/// than adding the new one beside it.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn startup_replaces_an_older_rule_rather_than_adding_beside_it() {
+    let ns = TunNetns::new();
+    ns.ip(&[
+        "-6",
+        "rule",
+        "add",
+        "to",
+        "fd00::/8",
+        "lookup",
+        "main",
+        "pref",
+        RULE_PRIORITY,
+    ]);
+    let _device = ns.create().expect("the TUN is created");
+    let rules = ns.mesh_rules();
+    assert!(
+        rules.len() == 1 && rules[0].contains("suppress_prefixlength 0"),
+        "one fd00::/8 rule, of the new shape: {rules:?}"
+    );
 }

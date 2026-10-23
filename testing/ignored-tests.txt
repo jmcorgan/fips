@@ -41,6 +41,13 @@ environment   fips-mesh  ipv6tun::tun::name_tests::a_second_create_on_a_held_tun
 environment   fips-mesh  ipv6tun::tun::name_tests::startup_reopens_an_unheld_persistent_tun_with_the_configured_name  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::restart_with_the_same_identity_reconfigures_a_persistent_tun_left_by_an_unclean_exit  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::restart_with_a_new_identity_reconfigures_a_persistent_tun_left_by_an_unclean_exit  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::stopping_the_tun_removes_the_fd00_rule_it_added  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::a_tun_device_shutdown_removes_the_fd00_rule  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::a_rule_left_by_an_exit_without_stop_sends_other_ula_traffic_to_its_own_table  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::startup_replaces_an_older_rule_rather_than_adding_beside_it  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  transport::ethernet::rebind_tests::beacons_resume_and_frames_are_received_after_the_interface_is_recreated  src/transport/ethernet/tests/rebind.rs
+environment   fips-mesh  transport::ethernet::rebind_tests::a_recreated_interface_is_rebound_for_sending_and_receiving_with_announce_off  src/transport/ethernet/tests/rebind.rs
+environment   fips-mesh  transport::ethernet::rebind_tests::an_interface_that_returns_with_the_same_index_is_rebound  src/transport/ethernet/tests/rebind.rs
 environment   fips-mesh  mdns::tests::matched_scope_peers_observe_each_other  src/mdns/tests.rs
 environment   fips-mesh  node::netmon::tests::a_route_change_alone_reaches_the_watcher  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_going_down_is_reported_only_when_a_peer_was_reached_over_it  src/node/netmon/tests.rs

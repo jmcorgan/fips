@@ -27,6 +27,11 @@
 #                         • ICMPv6 echo-request (ping6 reachability)
 #                         • rules in /etc/fips/fips.d/*.nft drop-ins
 #
+#   FORWARDED from mesh (gateway port forwards):
+#                       ACCEPT, except connections refused by
+#                       rules in /etc/fips/fips.d/forward/*.nft
+#                       drop-ins
+#
 #   OUTBOUND from mesh: unrestricted
 #
 # Why default-deny: services binding to 0.0.0.0 or [::] accept
@@ -75,6 +80,28 @@
 # Note: an empty /etc/fips/fips.d/ is fine — the include glob simply
 # matches nothing and the baseline policy applies as-is.
 #
+# ─── RESTRICTING GATEWAY PORT FORWARDS ──────────────────────────────
+#
+# A fips-gateway port forward rewrites the destination to a LAN host,
+# so its traffic takes the forward hook and never reaches the
+# `inbound` chain or the drop-ins above. The `forward` chain below
+# accepts every port-forwarded connection from the mesh, unless a
+# drop-in in /etc/fips/fips.d/forward/ ending in .nft refuses it.
+# Rules there see the packet after the rewrite, so they match the
+# forward's target address and port, not its listen_port. For each
+# restricted forward, accept the allowed sources, then drop the rest:
+#
+#   /etc/fips/fips.d/forward/port-forwards.nft
+#   ──────────────────────────────────────────
+#   ip6 daddr fd12:3456::10 tcp dport 80 ip6 saddr { fd97:... } accept
+#   ip6 daddr fd12:3456::10 tcp dport 80 counter drop
+#
+# A forward with no lines stays open to the mesh. Keep each forward's
+# lines in one file: files are included in alphabetical order and the
+# first matching rule decides. Write addresses out rather than with
+# `define`, since two drop-ins defining the same name fail the whole
+# load. A missing /etc/fips/fips.d/forward/ is fine, as above.
+#
 # ─── DEBUGGING / DROP VISIBILITY ────────────────────────────────────
 #
 # To see drops in the systemd journal:
@@ -93,15 +120,16 @@
 #                          running (separate concern from this file).
 #                          See the fips-gateway design doc for details.
 #                          Its port forwards are forwarded traffic, which
-#                          this input chain never sees; to restrict them,
-#                          see docs/how-to/deploy-gateway.md.
+#                          the `forward` chain in this table sees; to
+#                          restrict them, see "RESTRICTING GATEWAY PORT
+#                          FORWARDS" above.
 #
 #   ip / ip6 family     — Docker, /etc/nftables.conf, etc.
 #                          Independent of this table.
 #
 # All hook at standard filter priority (0). Order between same-family
 # same-priority tables is determined by load order, but the early-
-# return for non-mesh traffic makes this chain a no-op for anything
+# return for non-mesh traffic makes both chains a no-op for anything
 # not on the mesh interface, so coexistence is safe.
 
 # The mesh interface this table polices. Must equal `tun.name`.
@@ -139,6 +167,23 @@ table inet fips {
         # Default deny on fips0 inbound. Counter visible via
         # `nft list table inet fips`.
         counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy accept;
+
+        # Only traffic arriving on the mesh interface.
+        iifname != $fips_if return
+
+        ct state established,related accept
+
+        # Operator-supplied port-forward restrictions from drop-in
+        # files. See "RESTRICTING GATEWAY PORT FORWARDS" in the header.
+        include "/etc/fips/fips.d/forward/*.nft"
+
+        # Port-forwarded connections the drop-ins did not refuse.
+        # Counter visible via `nft list chain inet fips forward`.
+        ct status dnat counter accept
     }
 }
 

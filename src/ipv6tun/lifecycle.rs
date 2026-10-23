@@ -250,7 +250,7 @@ impl Handles {
         };
 
         // Create writer (dups the fd for independent write access).
-        // Pass path_mtu_lookup so inbound SYN-ACK clamp can read
+        // Pass path_mtu_lookup so the inbound SYN clamp can read
         // per-destination path MTU learned via discovery.
         let (writer, tun_tx) = device.create_writer(max_mss.clone(), path_mtu_lookup.clone())?;
 

@@ -996,8 +996,9 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
     // Actually, they need bloom filter hits to route, so let's also ensure
     // bloom filters are converged (which they should be from run_tree_test).
 
-    // But nodes 1 and 2 need cached coords to make loop-free forwarding
-    // decisions. Without coords, find_next_hop returns None.
+    // But nodes 1 and 2 need cached coords for the self-distance check
+    // (strict progress by each node's view). Without coords, find_next_hop
+    // returns None.
     // This is exactly what the SessionSetup cache warming solves!
     // Populate enough so nodes can route to their adjacent peers,
     // but NOT the distant endpoint coords.

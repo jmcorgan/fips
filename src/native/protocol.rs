@@ -110,11 +110,11 @@ pub struct Arrive {
 /// Parameters of the debug `inject` command, after validation.
 ///
 /// This command exists so the receive direction is testable without a peer
-/// sending anything. It can only write into a flow the same connection opened,
-/// so it grants that client nothing it does not already have, but it makes the
-/// daemon emit bytes the client chose on a path a reader cannot distinguish
-/// from the mesh. It is therefore gated on
-/// `node.native_api.debug_commands` and off in a packaged node.
+/// sending anything. It addresses a flow node-wide by id, so it writes bytes
+/// the client chose into any flow on the node, including one another client
+/// opened or a listener accepted, on a path a reader cannot distinguish from
+/// the mesh. It is therefore gated on `node.native_api.debug_commands` and off
+/// in a packaged node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inject {
     /// Which flow to write into.

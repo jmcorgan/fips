@@ -250,6 +250,8 @@ pub fn show_peers(node: &Node) -> Value {
     // Cold-start gate for effective_depth, mirroring `evaluate_parent`: when any
     // peer has an SRTT measurement, unmeasured peers are excluded; during cold
     // start (no peer has SRTT) every peer uses the default link cost of 1.0.
+    // `evaluate_parent` still takes an unmeasured peer to correct the root when
+    // no measured peer reaches it; the display keeps `null` for such a peer.
     let any_peer_has_srtt = node.peers().any(|p| p.has_srtt());
 
     let now = now_ms();

@@ -973,12 +973,11 @@ mod tests {
         assert_eq!(flow.read_timeout().unwrap(), None, "none is the default");
         assert_eq!(flow.write_timeout().unwrap(), None);
 
-        flow.set_read_timeout(Some(Duration::from_millis(1500)))
-            .unwrap();
-        assert_eq!(
-            flow.read_timeout().unwrap(),
-            Some(Duration::from_millis(1500))
-        );
+        // Whole seconds only. Linux keeps the deadline in jiffies and rounds
+        // the sub-second part up, so 1.5s reads back as 1.503333s on an
+        // HZ=300 kernel (Arch's default). Whole seconds are exact at any HZ.
+        flow.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        assert_eq!(flow.read_timeout().unwrap(), Some(Duration::from_secs(3)));
 
         // The two directions are separate options; setting one must not set
         // the other, which a copied constant would.
@@ -989,7 +988,7 @@ mod tests {
         assert_eq!(flow.write_timeout().unwrap(), Some(Duration::from_secs(2)));
         assert_eq!(
             flow.read_timeout().unwrap(),
-            Some(Duration::from_millis(1500)),
+            Some(Duration::from_secs(3)),
             "recv keeps its own"
         );
 

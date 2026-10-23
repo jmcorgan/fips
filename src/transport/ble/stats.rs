@@ -121,7 +121,7 @@ impl BleStats {
         self.connect_errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a pool eviction (non-static peer displaced).
+    /// Record a pool eviction (an unverified link past its grace displaced by a newcomer).
     pub fn record_pool_eviction(&self) {
         self.pool_evictions.fetch_add(1, Ordering::Relaxed);
     }

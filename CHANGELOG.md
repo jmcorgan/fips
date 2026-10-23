@@ -797,6 +797,17 @@ with v0.5.x or earlier peers.
   receiver whose `node.bloom.max_inbound_fpr` is set above 0.20 no longer
   receives filters between 0.20 and its own cap.
 
+#### Transports
+
+- The UDP transport's default `mtu` is now 1357 bytes, up from 1280, the
+  smallest that carries a 1280-byte IPv6 packet. At the old default, IPv6
+  packets of 1204 to 1280 bytes other than TCP were dropped, and the
+  sending host kept resending them at the same size. A node using the
+  default now needs an underlay path that carries 1385-byte IPv4 packets,
+  or 1405-byte IPv6 packets; on a narrower path set `transports.udp.mtu`
+  to fit. The node now warns at start-up when its transports cannot carry
+  a 1280-byte IPv6 packet, naming the `mtu` needed.
+
 #### FreeBSD
 
 - A package upgrade no longer stops the daemon. The running daemon keeps the
@@ -1431,12 +1442,85 @@ with v0.5.x or earlier peers.
   on a release, as `.ipk` packages already were. Every upload had been
   refused for its content type, without failing the release run. A failed
   upload now raises a warning in the run.
+- `fips-gateway` waits up to 30 seconds for `fips0` before it starts, so its
+  first start after a package upgrade no longer fails and leaves the gateway
+  down until procd restarts it.
 
 #### Sessions and rekey
 
 - After a path MTU decrease, a destination's later report of the value it
   had been raising towards is accepted again after the usual three reports.
   Before, the estimate stayed at the lowered value.
+- A path MTU estimate lowered to a new first hop's smaller link MTU after an
+  accepted increase rises again when the destination reports the higher
+  value. Before, it stayed at the lowered value until the session was
+  rebuilt.
+
+#### Identity and config
+
+- A start that changes the node's identity now says so in its log, naming
+  the old npub as `previous_npub` and the new one as `npub`. An ephemeral
+  start that moves `fips.key` aside to `fips.key.unused` warns "Node identity
+  changed" and names the npub that key holds. A persistent start that finds
+  no key file and generates one while `fips.key.unused` is present warns the
+  same way, names that key's npub and says how to return to it, including
+  when the new key cannot be saved and the node falls back to an ephemeral
+  identity. When only `fips.pub` names another npub, the start logs it at
+  info instead, since every ephemeral start writes `fips.pub` and switching
+  an ephemeral node to persistent always finds one. Before, the only sign was
+  a new npub turning up at the node's peers, where ACL rejections and hosts
+  entries that no longer resolved read as an attack or a network fault.
+  Anything in `fips.pub` that is not an npub is logged as "unreadable", so
+  an nsec put there by mistake does not reach the log.
+
+#### Routing and discovery
+
+- When no peer with a round-trip measurement reaches the smallest visible
+  root, a node now adopts that root through an unmeasured peer, and on
+  losing its parent it takes such a peer rather than making itself root.
+  Before, a node in MMP mode `minimal` that was the only link between two
+  parts of a mesh left them on separate roots, and a newly connected peer
+  on a smaller root was not adopted until its first measurement.
+- FIPS nodes now read each other's kind 10050 inbox relay lists. FIPS
+  publishes `r` tags and the lookup kept only `relay` tags, so every list
+  read as empty and peers' inbox lists never took part in signal relay
+  selection. The list is now published again every 24 hours, so a node up
+  longer than 30 days stays inside its peers' lookup window.
+
+#### Transports
+
+- On Linux, a TCP link no longer resets on the first full-size frame where
+  the local MSS is below the configured `mtu`, as over WireGuard, Tailscale
+  or an MSS-clamping middlebox. Received frames are bounded by the configured
+  `mtu`, the bound senders use. Two peers configured with different `mtu`
+  values can still reset their link on frames between the two.
+- On Linux, macOS and FreeBSD, a frame to a UDP next hop larger than the UDP
+  MTU is refused on the encrypt-worker send path as on the inline one. A
+  transit node forwarding onto a smaller UDP link now signals `MtuExceeded`
+  to the source instead of sending the frame oversize and counting it as
+  forwarded. The node's own link messages are held to the UDP `mtu` the
+  same way. A frame slightly over it used to get through, so on a UDP
+  transport with `mtu` below 1,071 bytes bloom filters (`FilterAnnounce`)
+  no longer reach UDP peers; keep `transports.udp.mtu` at 1,071 or above.
+
+#### TUN
+
+- On Linux, the `fd00::/8` IPv6 policy rule is removed when the node stops,
+  and is added with `suppress_prefixlength 0`, so a rule left by a crash no
+  longer sends other ULA traffic, such as Tailscale's `fd7a:115c:a1e0::/48`,
+  out the default route. Startup replaces a rule left by an earlier
+  version.
+
+#### Documentation
+
+- Reference and design documents that disagreed with the code are
+  corrected: wire sizes, traversal signaling, advert withdrawal, the
+  spanning tree, bloom filters, forwarding, path MTU and FSP restart
+  handling. Three corrections change what an operator should expect: a
+  declared UDP instance listens on `0.0.0.0:2121` by default unless
+  `outbound_only` is set, the debug `inject` command can write into any
+  flow on the node, and Tor `control_port` mode runs no inbound onion
+  service.
 
 ### Security
 
@@ -1567,6 +1651,12 @@ with v0.5.x or earlier peers.
   every inbound announce, so one peer can no longer force a full recompute
   per frame.
 
+#### OpenWrt
+
+- The OpenWrt gateway tutorial no longer says the mesh firewall restricts
+  who reaches a port forward. On OpenWrt a port forward is open to every
+  mesh peer until fw4 rules with `src fips` refuse the others.
+
 #### Native datagram API
 
 - Ephemeral ports start from a random port in the range instead of counting
@@ -1605,6 +1695,16 @@ with v0.5.x or earlier peers.
   On Linux an existing TUN that no process holds is reused, with the
   previous run's mesh address and route removed first; anything else is
   refused with an error naming it, and the node runs without a TUN.
+
+#### Mesh firewall
+
+- The packaged mesh firewall (`fips.nft`) has a `forward` chain that sees
+  fips-gateway's port forwards, which its `input` chain never did. Port
+  forwards stay open to the mesh by default; a forward can be restricted to
+  chosen mesh addresses with rules in `/etc/fips/fips.d/forward/*.nft`,
+  matching its target address and port. A host that kept an edited
+  `fips.nft` on upgrade gets the chain only after merging in the packaged
+  file.
 
 ## [0.5.3] - 2026-10-16
 

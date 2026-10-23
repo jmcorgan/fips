@@ -50,8 +50,8 @@ operator has to think about.
 ## The Default-Deny Baseline
 
 The shipped baseline is `/etc/fips/fips.nft`. It defines a single
-nftables table, `inet fips`, with one chain hooked at `input`. The
-chain:
+nftables table, `inet fips`, with two chains: `inbound`, hooked at
+`input`, and `forward`, hooked at `forward`. The `inbound` chain:
 
 1. Returns immediately for any packet not arriving on `fips0`. This
    makes the table a no-op for every other interface — Docker, Tor,
@@ -65,6 +65,15 @@ chain:
    directory is fine — the include glob simply matches nothing.
 5. Falls through to `counter drop`. Every dropped packet increments
    the counter, visible via `nft list table inet fips`.
+
+The `forward` chain sees fips-gateway's port forwards, which the
+gateway rewrites to a LAN target before routing, so they never reach
+`input`. It returns for anything not arriving on `fips0`, accepts
+`established` and `related` packets, includes operator drop-ins from
+`/etc/fips/fips.d/forward/*.nft`, and then accepts port-forwarded
+connections with a counter. A port forward is already an explicit
+operator action, so it stays open to the mesh until a drop-in
+restricts it to chosen mesh addresses.
 
 Outbound from `fips0` is unrestricted. The baseline is concerned only
 with what the mesh host accepts, not what it sends.
@@ -103,7 +112,8 @@ every zone meets the firewall's default policy, which accepts input on
 stock OpenWrt 22.03. So the OpenWrt package does configure the firewall
 at install: it gives `fips0` a zone of its own, `fips`, with the inbound
 posture `fips.nft` gives a Linux host, expressed in fw4's terms. Unlike
-`fips.nft`, which has only an input hook, the zone also governs forwarding.
+`fips.nft`, whose forward chain filters only port forwards arriving
+from the mesh, the zone also governs forwarding into the mesh.
 
 - Inbound connections from FIPS peers to the router are refused (input
   REJECT, where `fips.nft` drops), except replies to the router's own

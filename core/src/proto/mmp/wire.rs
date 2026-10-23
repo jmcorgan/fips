@@ -370,9 +370,10 @@ impl SessionReceiverReport {
 
 /// Path MTU notification (msg_type 0x13).
 ///
-/// Sent by a node that discovers a path MTU value (from transit router
-/// feedback or ICMP Packet Too Big). Allows the remote endpoint to
-/// adjust its sending MTU.
+/// Sent by a session's destination, echoing the forward-path minimum it
+/// observed in the SessionDatagram envelope's `path_mtu` field, so the
+/// source can adjust its sending MTU. A received `MtuExceeded` updates only
+/// local state and does not produce one of these.
 ///
 /// ## Wire Format (2 bytes body, after inner header stripped)
 ///

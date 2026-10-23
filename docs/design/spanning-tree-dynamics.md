@@ -555,7 +555,10 @@ purely by tree depth without link quality consideration.
    `peer_costs` (MMP-derived). During cold start, when no peer has MMP data
    yet (`peer_costs` is empty), unmeasured candidates default to 1.0; once
    any peer has MMP data, unmeasured candidates are skipped so a freshly
-   connected peer cannot win on its default cost. Candidates whose ancestry
+   connected peer cannot win on its default cost. If that leaves no
+   candidate on the smallest root, the unmeasured ones are ranked at 1.0
+   and may still be taken to correct the root, but never to win a
+   cost-based switch. Candidates whose ancestry
    already contains the local node are also rejected, preventing an
    alternating two-node loop. The best candidate is the peer with the
    lowest effective depth, with ties broken by numerically smallest
@@ -934,8 +937,9 @@ The primary stability mechanisms are implemented:
 - **Periodic re-evaluation** (`reeval_interval_secs = 60`): catches link
   degradation after tree stabilization independent of TreeAnnounce traffic
 - **Flap dampening** (`flap_threshold = 4`, `flap_window_secs = 60`,
-  `flap_dampening_secs = 120`): if a node switches parents more than 4
-  times within 60s, an extended 120s hold-down is imposed. Mandatory
+  `flap_dampening_secs = 120`): if a node switches parents 4 or more
+  times within a fixed 60s window opened by the first switch, an
+  extended 120s hold-down is imposed. Mandatory
   switches (parent loss, root change) bypass dampening. The flap counter
   resets when the window expires and again when a dampening episode lapses,
   so each episode requires a fresh threshold of switches within one window.
