@@ -13,9 +13,11 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
 use super::config::{DnsConfig, TunConfig};
+use super::core::{Applied, MeshState, run_link};
 use super::dns::{DnsIdentityRx, MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
+use super::link::{Attach, FromMesh, IPV6_PORT, MeshLink};
 use super::tun::{
     MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
     shutdown_tun_interface,
@@ -43,9 +45,22 @@ const DNS_MESH_FALLBACK: &str = "the mesh source address";
 /// before start through `Node::enable_app_owned_tun`, without a device name.
 pub(crate) struct Handles {
     /// This node's IPv6 address, the source of the Destination Unreachable
-    /// replies sent to the host. The node's identity never changes, so it is
-    /// derived once.
+    /// replies sent to the host. Set when the node is built and again from
+    /// the node's key when it attaches us; the node's identity never
+    /// changes, so the two agree.
     our_addr: Ipv6Addr,
+    /// What the node has told us over the link: the node-wide payload limit
+    /// the TUN threads clamp by.
+    mesh: MeshState,
+    /// Our end of the link, held from the attach until the task that applies
+    /// the node's later messages starts.
+    link: Option<MeshLink>,
+    /// The task applying the node's messages, from when it starts until the
+    /// node detaches us.
+    link_task: Option<tokio::task::JoinHandle<()>>,
+    /// Whether the node has attached us since it last detached us. Neither
+    /// the device nor its threads may start before the attach.
+    attached: bool,
     /// TUN device state, as reported by `Node::tun_state`.
     tun_state: TunState,
     /// Per-source limiter of the Packet Too Big replies sent to the host.
@@ -85,11 +100,6 @@ pub(crate) struct Handles {
 
 /// What the TUN threads take from the node when they start.
 pub(crate) struct TunThreads {
-    /// Shared TCP MSS ceiling, already refreshed by the node. Both threads
-    /// read it per packet from then on.
-    pub(crate) ceiling: MssCeiling,
-    /// The node's effective IPv6 MTU at start, logged with the ceiling.
-    pub(crate) effective: u16,
     /// Per-destination path MTU, read by the clamp in both threads.
     pub(crate) path_mtu: PathMtuLookup,
     /// Capacity of the host-to-mesh channel (`node.buffers.tun_channel`).
@@ -110,6 +120,10 @@ impl Handles {
                 TunState::Disabled
             },
             icmp_limiter: IcmpRateLimiter::new(),
+            mesh: MeshState::new(),
+            link: None,
+            link_task: None,
+            attached: false,
             tun_name: None,
             tun_tx: None,
             tun_outbound_rx: None,
@@ -135,6 +149,90 @@ impl Handles {
         IcmpContext::new(self.tun_tx.as_ref(), self.our_addr, &mut self.icmp_limiter)
     }
 
+    /// What to ask the node for when it attaches us: port 256 while the TUN
+    /// is enabled, and nothing otherwise.
+    pub(crate) fn attach_request(&self) -> Attach {
+        let tun = self.tun_state != TunState::Disabled;
+        Attach {
+            port: tun.then_some(IPV6_PORT),
+        }
+    }
+
+    /// Take our end of the link from the node's attach, applying everything
+    /// up to the end of its replay now, before any device opens.
+    pub(crate) fn attached(&mut self, link: MeshLink) {
+        self.attached = true;
+        self.link = Some(link);
+        while let Some(message) = self.next_queued() {
+            match self.mesh.apply(message) {
+                Applied::Attached(addr) => self.our_addr = addr,
+                Applied::Synced => break,
+                Applied::State => {}
+            }
+        }
+    }
+
+    /// Apply every message the node has queued so far.
+    fn catch_up(&mut self) {
+        while let Some(message) = self.next_queued() {
+            if let Applied::Attached(addr) = self.mesh.apply(message) {
+                self.our_addr = addr;
+            }
+        }
+    }
+
+    /// The next message already queued on the held link, if any.
+    fn next_queued(&mut self) -> Option<FromMesh> {
+        self.link.as_mut()?.from_mesh.try_recv().ok()
+    }
+
+    /// Start the task that applies the node's messages from now on, unless
+    /// it already runs. The node's start calls this once its children are
+    /// up; starting the TUN threads calls it earlier.
+    pub(crate) fn run_link(&mut self) {
+        self.catch_up();
+        if let Some(link) = self.link.take() {
+            self.link_task = Some(tokio::spawn(run_link(link, self.mesh.clone())));
+        }
+    }
+
+    /// Wait for the node's messages to stop, once the node has dropped its
+    /// end of the link: the task applies what is still queued and ends.
+    ///
+    /// The next attach replaces our copy, so nothing a previous start
+    /// queued may be applied after it; waiting here is what rules that out.
+    pub(crate) async fn detached(&mut self) {
+        self.attached = false;
+        self.link = None;
+        if let Some(task) = self.link_task.take()
+            && let Err(e) = task.await
+        {
+            debug!(error = %e, "IPv6 adapter link task ended abnormally");
+        }
+    }
+
+    /// What the TUN threads clamp by: the ceiling and the node-wide IPv6
+    /// MTU, with every message the node has queued so far applied first, so
+    /// neither thread starts on older values.
+    fn clamp_inputs(&mut self) -> (MssCeiling, u16) {
+        self.catch_up();
+        (self.mesh.ceiling(), self.mesh.ipv6_mtu())
+    }
+
+    /// The state the node's messages have left so far, without applying
+    /// anything still queued, for tests.
+    #[cfg(test)]
+    pub(crate) fn mesh(&self) -> &MeshState {
+        &self.mesh
+    }
+
+    /// The state once every queued message is applied, as the TUN threads
+    /// would start with it, for tests.
+    #[cfg(test)]
+    pub(crate) fn applied(&mut self) -> (MssCeiling, u16) {
+        self.clamp_inputs()
+    }
+
     /// Install the channels of a TUN the embedder owns, which makes the TUN
     /// active without a device.
     pub(crate) fn install_app_tun(&mut self, tun_tx: TunTx, outbound_rx: TunOutboundRx) {
@@ -152,6 +250,7 @@ impl Handles {
         config: &TunConfig,
         address: Ipv6Address,
     ) -> Option<TunDevice> {
+        debug_assert!(self.attached, "the TUN device opened before the attach");
         match TunDevice::create(config, address).await {
             Ok(device) => {
                 info!("TUN device active:");
@@ -217,13 +316,16 @@ impl Handles {
         device: TunDevice,
         threads: TunThreads,
     ) -> Result<(), TunError> {
+        debug_assert!(self.attached, "the TUN threads started before the attach");
         let TunThreads {
-            ceiling: max_mss,
-            effective: effective_mtu,
             path_mtu: path_mtu_lookup,
             channel: tun_channel_size,
             exit_tx,
         } = threads;
+        // Everything the node has said so far, including the limit it
+        // published just before calling this, is in place before either
+        // thread reads it.
+        let (max_mss, effective_mtu) = self.clamp_inputs();
         let mtu = device.mtu();
         let name = device.name().to_string();
         let our_addr = *device.address();
@@ -324,6 +426,7 @@ impl Handles {
             self.tun_shutdown_fd = Some(shutdown_write_fd);
         }
         self.tun_state = TunState::Active;
+        self.run_link();
         Ok(())
     }
 

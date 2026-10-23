@@ -15,6 +15,19 @@ can reach the source file's private items.
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
   and one known residual case pinned as a test.
+- `core.rs` tests `../core.rs`: that the payload limit the node publishes
+  gives the same TCP MSS ceiling as the transport MTU it comes from, for
+  every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
+  packet fits either way, and the limit reports 33); the state before any
+  attach; and how each message from the node changes the shared state.
+- `link.rs` tests `../link.rs`: a peer key names the address its node
+  address has, and every message field is of a type allowed to cross the
+  link. The second is a scan of the source of `../link.rs` itself that skips
+  comments, attributes, and string and char literals (raw strings included),
+  then reads every struct and enum whatever its visibility, with named, tuple
+  and unit fields; forged definitions of each shape, of one placed after a
+  literal holding a lone quote, and of one placed after an attribute whose
+  literal holds an unbalanced bracket, show the scan refuses a node address.
 - `tun.rs` tests `../tun.rs` as module `name_tests`: TUN startup never
   deletes, downs or takes over an existing interface named `tun.name`. A
   link of any kind but TUN is refused and left untouched, a TUN another

@@ -555,6 +555,9 @@ impl Node {
                         self.compute_mesh_size());
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::RecordStatsHistory,
                         self.record_stats_history());
+                        // Catches any change to the node's egress limit that
+                        // no transport-change site saw, within one tick.
+                        self.publish_mtu();
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckMmpReports,
                         self.check_mmp_reports().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckSessionMmpReports,

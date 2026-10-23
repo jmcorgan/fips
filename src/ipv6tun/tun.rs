@@ -37,33 +37,33 @@ use tun::Layer;
 
 use crate::node::path_mtu::PathMtuLookup;
 
-/// The node-global TCP MSS ceiling, shared live with the TUN reader and
-/// writer threads.
+/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
+/// this large, so an MSS derived from it fits anywhere.
 ///
-/// Shared rather than copied because the value it is derived from moves at
-/// runtime. `Node::transport_mtu()` is the minimum across *bound* transports,
-/// and since dynamic interface binding a transport can bind minutes after
-/// start or unbind mid-operation — so a narrow interface appearing must
-/// tighten the clamp, and its departure must release it. Every other consumer
-/// of `transport_mtu()` already reads it live (`show_status`, the snapshot,
-/// the session-layer fragmentation check); these two threads captured a `u16`
-/// at spawn and were the only place left where the daemon could report one
-/// effective MTU and clamp to another.
+/// Three uses, and they must not disagree: the cold-flow fallback in
+/// [`per_flow_max_mss`], and the two seeds of the node-wide limit before any
+/// transport has bound, the adapter's (`MeshState::new`) and the node's record
+/// of what it has published (`NodeMtuFeed::new`). It is also the value
+/// `Node::transport_mtu()` falls back to when nothing is bound.
+pub const IPV6_MIN_MTU: u16 = 1280;
+
+/// The TCP MSS ceiling the IPv6 adapter derives from the node-wide payload
+/// limit, shared live with the TUN reader and writer threads.
+///
+/// Shared rather than copied because the limit moves at runtime. The node
+/// publishes it from `Node::transport_mtu()`, the minimum across *bound*
+/// transports, and a transport can bind minutes after start or unbind
+/// mid-operation: a narrow interface appearing must tighten the clamp, and
+/// its departure must release it. The adapter stores the ceiling of each
+/// limit the node pushes over the link here (`MeshState` in `core.rs`), so
+/// the threads clamp by the limit last published rather than one captured
+/// at spawn.
 ///
 /// A relaxed load per packet, beside the `PathMtuLookup` read that already
 /// happens on the same packet — strictly the cheaper of the two. Ordering is
 /// irrelevant: this is a clamp, and a packet that reads the previous value
 /// during the store is clamped by the ceiling that was correct a microsecond
 /// earlier. The per-flow ceiling has always had that property.
-/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
-/// this large, so an MSS derived from it fits anywhere.
-///
-/// Two callers, and they must not disagree: the cold-flow fallback in
-/// [`per_flow_max_mss`], and the seed for the node's [`MssCeiling`] before any
-/// transport has bound — which is the same value `Node::transport_mtu()` falls
-/// back to when nothing is bound.
-pub const IPV6_MIN_MTU: u16 = 1280;
-
 pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
 
 /// Compute the effective TCP MSS ceiling for a packet given its peer

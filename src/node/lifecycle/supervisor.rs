@@ -818,6 +818,10 @@ pub(crate) struct Supervisor {
     /// sender.
     pub(in crate::node) ipv6tun: crate::ipv6tun::lifecycle::Handles,
 
+    /// The node's end of the link to the IPv6 adapter: `Some` from the
+    /// attach in `start()` until teardown drops the packet channels.
+    pub(in crate::node) host_link: Option<crate::ipv6tun::link::HostLink>,
+
     /// Sender for each UDP listen socket the transport spawn binds — its raw
     /// fd and the instance name it was configured under — armed by
     /// [`Node::enable_app_owned_udp_fd`](crate::Node::enable_app_owned_udp_fd)
@@ -894,6 +898,7 @@ impl Supervisor {
             state: NodeState::Created,
             packet_tx: None,
             ipv6tun,
+            host_link: None,
             #[cfg(unix)]
             udp_fd_tx: None,
             nostr_rendezvous: crate::nostr::RendezvousDriver::default(),
