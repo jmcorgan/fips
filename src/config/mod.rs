@@ -786,40 +786,85 @@ fn aside_key_path(key_path: &Path) -> Option<PathBuf> {
     Some(key_path.with_file_name(name))
 }
 
-/// The largest file [`key_file_npub`] and [`pub_file_npub`] will read. A bech32
+/// The largest file [`read_identity_file`] will read. A bech32
 /// key is under 100 bytes; anything far larger is not one.
 const IDENTITY_FILE_READ_LIMIT: u64 = 4096;
 
-/// Whether `path` is a small regular file, judged without following a symlink.
+/// Read `path` if it is a small regular file, opened without following a
+/// symlink and without blocking.
 ///
 /// The npubs read here only label a log line, so they are read only from a
-/// file that cannot hold up the start: a symlink is not followed, since its
-/// target could be a FIFO that blocks the open or a device that never ends,
-/// and an oversized file is not read whole. Anything else reads as unknown.
-fn is_small_regular_file(path: &Path) -> bool {
-    path.symlink_metadata()
-        .is_ok_and(|m| m.is_file() && m.len() <= IDENTITY_FILE_READ_LIMIT)
+/// file that cannot hold up the start. The file is opened once and judged on
+/// the open handle, so nothing can be swapped in between the check and the
+/// read: on Unix the open carries `O_NOFOLLOW`, so a symlink is not followed,
+/// and `O_NONBLOCK`, so a FIFO does not block the open; anything but a regular
+/// file is then refused, and no more than [`IDENTITY_FILE_READ_LIMIT`] bytes
+/// are read, so a file that never ends is not read whole. Anything else reads
+/// as unknown. The contents may be a secret key, so they are cleared on drop.
+///
+/// Coverage gap: on Windows the symlink is refused by a check on the path
+/// before the open, which a swap between the two can get past.
+fn read_identity_file(path: &Path) -> std::io::Result<Zeroizing<String>> {
+    use std::io::Read;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    if path.symlink_metadata()?.file_type().is_symlink() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let mut contents = Zeroizing::new(Vec::with_capacity(IDENTITY_FILE_READ_LIMIT as usize + 1));
+    file.take(IDENTITY_FILE_READ_LIMIT + 1)
+        .read_to_end(&mut contents)?;
+    if contents.len() as u64 > IDENTITY_FILE_READ_LIMIT {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let text = std::str::from_utf8(&contents).map_err(|_| std::io::ErrorKind::InvalidData)?;
+    Ok(Zeroizing::new(text.to_string()))
 }
 
 /// The npub of the key in a key file, or `None` when it cannot be read; see
-/// [`is_small_regular_file`] for what is not read.
+/// [`read_identity_file`] for what is not read.
 fn key_file_npub(path: &Path) -> Option<String> {
-    if !is_small_regular_file(path) {
-        return None;
-    }
-    let nsec = Zeroizing::new(read_key_file(path).ok()?);
-    Identity::from_secret_str(&nsec).ok().map(|id| id.npub())
+    let contents = read_identity_file(path).ok()?;
+    Identity::from_secret_str(contents.trim())
+        .ok()
+        .map(|id| id.npub())
 }
 
-/// The npub a public key file names, or `None` when there is none to read;
-/// see [`is_small_regular_file`] for what is not read.
+/// The npub a public key file names: `None` when there is no file or it is
+/// empty, and `"unreadable"` when it holds anything but an npub; see
+/// [`read_identity_file`] for what is not read.
+///
+/// Only a decoded npub is returned. The file is the operator's to edit, and an
+/// nsec put there by mistake would otherwise reach the journal at info.
 fn pub_file_npub(path: &Path) -> Option<String> {
-    if !is_small_regular_file(path) {
+    let contents = match read_identity_file(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("unreadable".to_string()),
+    };
+    let npub = contents.trim();
+    if npub.is_empty() {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
-    let npub = text.trim();
-    (!npub.is_empty()).then(|| npub.to_string())
+    let npub = if crate::decode_npub(npub).is_ok() {
+        npub
+    } else {
+        "unreadable"
+    };
+    Some(npub.to_string())
 }
 
 /// Report a persistent start that has generated an identity while traces of an
@@ -3434,7 +3479,7 @@ node:
         let key_path = temp_dir.path().join("fips.key");
         let target = temp_dir.path().join("real.key");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         let identity = crate::Identity::generate();
         write_key_file(
             &target,
@@ -3466,7 +3511,7 @@ node:
         let config_path = temp_dir.path().join("fips.yaml");
         let key_path = temp_dir.path().join("fips.key");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         fs::write(&key_path, "not a key\n").unwrap();
 
         let config = Config::load_file(&config_path).unwrap();
@@ -3660,7 +3705,7 @@ node:
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("fips.yaml");
 
-        fs::write(&config_path, "node:\n  identity: {}\n").unwrap();
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
         let config = Config::load_file(&config_path).unwrap();
         let ephemeral = resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap();
         assert!(matches!(ephemeral.source, IdentitySource::Ephemeral));
@@ -3686,6 +3731,90 @@ node:
                 && l.contains(&format!(" npub={:?}", resolved_npub(&resolved)))),
             "expected an info line naming the ephemeral and the new npub, got {lines:?}"
         );
+    }
+
+    /// `fips.pub` is the operator's to edit. An nsec put there by mistake must
+    /// not reach the journal as the previous npub.
+    #[test]
+    fn persistent_start_does_not_log_an_nsec_found_in_the_public_key_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+        let pub_path = temp_dir.path().join("fips.pub");
+
+        fs::write(&config_path, "node:\n  identity:\n    persistent: true\n").unwrap();
+        let nsec = crate::encode_nsec(&crate::Identity::generate().keypair().secret_key());
+        fs::write(&pub_path, format!("{nsec}\n")).unwrap();
+
+        let config = Config::load_file(&config_path).unwrap();
+        let (resolved, logs) =
+            capture_logs(|| resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap());
+
+        assert!(matches!(resolved.source, IdentitySource::Generated(_)));
+        let lines = logs.lines();
+        assert!(
+            !lines.iter().any(|l| l.contains(&nsec)),
+            "the nsec in fips.pub must not be logged, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Generated a new identity")
+                && l.contains("previous_npub=\"unreadable\"")),
+            "expected the public key file to be called unreadable, got {lines:?}"
+        );
+    }
+
+    /// A key padded past the read limit is not read, even though trimming
+    /// would leave a valid nsec.
+    #[test]
+    fn ephemeral_start_does_not_read_a_key_file_over_the_size_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("fips.yaml");
+        let key_path = temp_dir.path().join("fips.key");
+
+        fs::write(&config_path, EPHEMERAL_CONFIG).unwrap();
+        let identity = crate::Identity::generate();
+        let nsec = crate::encode_nsec(&identity.keypair().secret_key());
+        let padding = " ".repeat(IDENTITY_FILE_READ_LIMIT as usize);
+        fs::write(&key_path, format!("{nsec}{padding}")).unwrap();
+
+        let config = Config::load_file(&config_path).unwrap();
+        let (resolved, logs) =
+            capture_logs(|| resolve_identity(&config, std::slice::from_ref(&config_path)).unwrap());
+
+        assert!(matches!(resolved.source, IdentitySource::Ephemeral));
+        let warnings = logs.warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("Node identity changed")
+                && w.contains("previous_npub=\"unreadable\"")),
+            "an oversized key file must not be read to name its npub, got {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains(&identity.npub())),
+            "the oversized key's npub must not be read, got {warnings:?}"
+        );
+    }
+
+    /// A FIFO with no writer blocks a plain open for ever. Reading a key
+    /// file's npub only labels a log line and must not hold up the start.
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_key_files_npub_does_not_block_on_a_fifo() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let fifo = temp_dir.path().join("fips.key");
+        let c_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let (report, collected) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = report.send(key_file_npub(&fifo));
+        });
+
+        let npub = collected
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading the npub blocked on a FIFO");
+        assert_eq!(npub, None);
     }
 
     #[cfg(unix)]

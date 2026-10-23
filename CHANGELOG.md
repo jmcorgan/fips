@@ -64,6 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had been raising towards is accepted again after the usual three reports.
   Before, the estimate stayed at the lowered value.
 
+#### Identity and config
+
+- A start that changes the node's identity now says so in its log, naming
+  the old npub as `previous_npub` and the new one as `npub`. An ephemeral
+  start that moves `fips.key` aside to `fips.key.unused` warns "Node identity
+  changed" and names the npub that key holds. A persistent start that finds
+  no key file and generates one while `fips.key.unused` is present warns the
+  same way, names that key's npub and says how to return to it, including
+  when the new key cannot be saved and the node falls back to an ephemeral
+  identity. When only `fips.pub` names another npub, the start logs it at
+  info instead, since every ephemeral start writes `fips.pub` and switching
+  an ephemeral node to persistent always finds one. Before, the only sign was
+  a new npub turning up at the node's peers, where ACL rejections and hosts
+  entries that no longer resolved read as an attack or a network fault.
+  Anything in `fips.pub` that is not an npub is logged as "unreadable", so
+  an nsec put there by mistake does not reach the log.
+
 ### Security
 
 #### Routing and discovery
@@ -310,18 +327,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade, so check the files on the search path for values you did not mean
   to apply. Services started with `--config`, or on Windows with
   `FIPS_CONFIG` set, were not affected.
-- A start that changes the node's identity now says so in its log, naming
-  the old npub as `previous_npub` and the new one as `npub`. An ephemeral
-  start that moves `fips.key` aside to `fips.key.unused` warns "Node identity
-  changed" and names the npub that key holds. A persistent start that finds
-  no key file and generates one while `fips.key.unused` is present warns the
-  same way, names that key's npub and says how to return to it, including
-  when the new key cannot be saved and the node falls back to an ephemeral
-  identity. When only `fips.pub` names another npub, the start logs it at
-  info instead, since every ephemeral start writes `fips.pub` and switching
-  an ephemeral node to persistent always finds one. Before, the only sign was
-  a new npub turning up at the node's peers, where ACL rejections and hosts
-  entries that no longer resolved read as an attack or a network fault.
 
 #### Gateway
 
