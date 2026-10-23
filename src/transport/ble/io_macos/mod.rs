@@ -275,6 +275,153 @@ impl AdvertThrottle {
 }
 
 // ============================================================================
+// L2CAP listener bookkeeping
+// ============================================================================
+
+/// Consecutive failed publishes after which the peripheral manager is
+/// replaced, in the hope that a new one gets a fresh allocation from
+/// bluetoothd.
+pub const PUBLISH_RECREATE_AFTER: u32 = 6;
+
+/// Consecutive failed publishes between repeated warnings about them. At one
+/// retry per `PUBLISH_RETRY` (10 s), about every ten minutes.
+pub const PUBLISH_WARN_EVERY: u32 = 60;
+
+/// What became of a publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// The listener is up on `psm`, after `failures` failed attempts.
+    Up { psm: u16, failures: u32 },
+    /// It failed again, `failures` times in a row now. `warn` is whether to
+    /// say so loudly, and `recreate` whether to replace the peripheral
+    /// manager before trying again.
+    Failed {
+        failures: u32,
+        warn: bool,
+        recreate: bool,
+    },
+    /// The answer to a publish this side no longer awaits, from before a
+    /// power-off. A PSM it carries is now stale.
+    Stray,
+}
+
+/// The state of the L2CAP listener, apart from the CoreBluetooth calls that
+/// change it.
+///
+/// The one fact CoreBluetooth does not handle for us: a publication outlives
+/// the peripheral manager reporting powered off. Apple documents that power
+/// off stops advertising and clears the GATT database; it says nothing of L2CAP
+/// listeners, and bluetoothd keeps them. A Mac sleeping and waking reports
+/// off and on dozens of times a day, and each new publish was handed the next
+/// PSM up (194, 195, 198, … 212) until bluetoothd refused any more with "No
+/// resources available for L2CAP". So every PSM this side was given is kept
+/// until it has been unpublished, which needs the manager powered on.
+#[derive(Debug, Default)]
+pub struct Listener {
+    /// `None` until a publish completes after power-on; `Some(0)` if it
+    /// failed.
+    published: Option<u16>,
+    publishing: bool,
+    /// Publish once the (new) manager is powered on, although the last
+    /// attempt's failure is still what `published` holds.
+    publish_on_power_on: bool,
+    /// PSMs this side was given and has not unpublished.
+    stale: Vec<u16>,
+    /// Failed publishes in a row.
+    failures: u32,
+    /// A delayed retry is scheduled.
+    retry_pending: bool,
+}
+
+impl Listener {
+    /// The listener PSM, `Some(0)` if publishing failed, `None` if no
+    /// publish has completed since power-on.
+    pub fn published(&self) -> Option<u16> {
+        self.published
+    }
+
+    /// The live PSM, if there is a listener.
+    pub fn psm(&self) -> Option<u16> {
+        self.published.filter(|&p| p != 0)
+    }
+
+    /// The peripheral manager left powered-on. Its publication is kept as
+    /// stale, to be unpublished once it is back.
+    pub fn power_off(&mut self) {
+        if let Some(psm) = self.psm() {
+            self.stale.push(psm);
+        }
+        self.published = None;
+        self.publishing = false;
+    }
+
+    /// The peripheral manager was replaced; publish again once the new one
+    /// is powered on.
+    pub fn manager_replaced(&mut self) {
+        self.publishing = false;
+        self.publish_on_power_on = true;
+    }
+
+    /// Whether a powered-on manager should publish now.
+    pub fn wants_publish(&self) -> bool {
+        !self.publishing && (self.published.is_none() || self.publish_on_power_on)
+    }
+
+    /// Whether a failed listener may be published again now.
+    pub fn may_republish(&self) -> bool {
+        self.published == Some(0) && !self.publishing
+    }
+
+    /// A publish is being issued. Returns the stale PSMs to unpublish first.
+    pub fn begin(&mut self) -> Vec<u16> {
+        self.publishing = true;
+        self.publish_on_power_on = false;
+        std::mem::take(&mut self.stale)
+    }
+
+    /// The stale PSMs, to unpublish now.
+    pub fn take_stale(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.stale)
+    }
+
+    /// CoreBluetooth answered a publish: `psm` on success, or an error.
+    pub fn on_published(&mut self, psm: u16, ok: bool) -> PublishOutcome {
+        if !self.publishing {
+            if ok && psm != 0 {
+                self.stale.push(psm);
+            }
+            return PublishOutcome::Stray;
+        }
+        self.publishing = false;
+        if ok && psm != 0 {
+            if let Some(old) = self.psm() {
+                self.stale.push(old);
+            }
+            self.published = Some(psm);
+            let failures = std::mem::take(&mut self.failures);
+            return PublishOutcome::Up { psm, failures };
+        }
+        self.published = Some(0);
+        self.failures += 1;
+        PublishOutcome::Failed {
+            failures: self.failures,
+            warn: self.failures == 1 || self.failures.is_multiple_of(PUBLISH_WARN_EVERY),
+            recreate: self.failures.is_multiple_of(PUBLISH_RECREATE_AFTER),
+        }
+    }
+
+    /// Whether to schedule a delayed retry: `false` if one already is.
+    pub fn schedule_retry(&mut self) -> bool {
+        !std::mem::replace(&mut self.retry_pending, true)
+    }
+
+    /// The delayed retry ran.
+    pub fn retry_fired(&mut self) {
+        self.retry_pending = false;
+    }
+}
+
+// ============================================================================
 // Stream pumps
 // ============================================================================
 
@@ -781,5 +928,164 @@ mod tests {
             write_all(&mut Stuck, b"x").unwrap_err().kind(),
             io::ErrorKind::WriteZero
         );
+    }
+
+    // --- L2CAP listener ----------------------------------------------------
+
+    /// A listener published and up.
+    fn listener_up(psm: u16) -> Listener {
+        let mut l = Listener::default();
+        assert!(l.wants_publish());
+        assert!(l.begin().is_empty());
+        assert_eq!(
+            l.on_published(psm, true),
+            PublishOutcome::Up { psm, failures: 0 }
+        );
+        l
+    }
+
+    /// The leak that exhausted bluetoothd: a power cycle must not forget a
+    /// PSM, but unpublish it before the next publish.
+    #[test]
+    fn a_power_cycle_unpublishes_the_old_psm_before_publishing_again() {
+        let mut l = listener_up(194);
+        l.power_off();
+        assert_eq!(l.published(), None);
+        assert!(l.wants_publish());
+        assert_eq!(l.begin(), vec![194]);
+        assert_eq!(
+            l.on_published(195, true),
+            PublishOutcome::Up {
+                psm: 195,
+                failures: 0
+            }
+        );
+        l.power_off();
+        assert_eq!(l.begin(), vec![195]);
+        // Each one is unpublished once.
+        assert!(l.take_stale().is_empty());
+    }
+
+    /// Power cycles with no publish in between keep every PSM.
+    #[test]
+    fn stale_psms_accumulate_until_a_publish() {
+        let mut l = listener_up(200);
+        l.power_off();
+        l.power_off();
+        assert_eq!(l.begin(), vec![200]);
+    }
+
+    /// A publish answered after the power-off that abandoned it: its PSM is
+    /// held by bluetoothd all the same.
+    #[test]
+    fn a_late_publish_answer_is_stale() {
+        let mut l = Listener::default();
+        l.begin();
+        l.power_off();
+        assert_eq!(l.on_published(201, true), PublishOutcome::Stray);
+        assert_eq!(l.published(), None);
+        assert!(l.wants_publish());
+        assert_eq!(l.begin(), vec![201]);
+    }
+
+    /// While a publish is in flight nothing publishes again.
+    #[test]
+    fn one_publish_at_a_time() {
+        let mut l = Listener::default();
+        l.begin();
+        assert!(!l.wants_publish());
+        assert!(!l.may_republish());
+    }
+
+    /// Failures warn once, then only every `PUBLISH_WARN_EVERY`, and ask for
+    /// a new manager every `PUBLISH_RECREATE_AFTER`.
+    #[test]
+    fn repeated_failures_are_rate_limited_and_recreate_the_manager() {
+        let mut l = Listener::default();
+        let mut warned = Vec::new();
+        let mut recreated = Vec::new();
+        for _ in 0..PUBLISH_WARN_EVERY {
+            if l.published().is_none() {
+                l.begin();
+            } else {
+                assert!(l.may_republish());
+                l.begin();
+            }
+            match l.on_published(0, false) {
+                PublishOutcome::Failed {
+                    failures,
+                    warn,
+                    recreate,
+                } => {
+                    if warn {
+                        warned.push(failures);
+                    }
+                    if recreate {
+                        recreated.push(failures);
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(l.published(), Some(0));
+            assert_eq!(l.psm(), None);
+        }
+        assert_eq!(warned, vec![1, PUBLISH_WARN_EVERY]);
+        assert_eq!(
+            recreated.len() as u32,
+            PUBLISH_WARN_EVERY / PUBLISH_RECREATE_AFTER
+        );
+        assert_eq!(recreated[0], PUBLISH_RECREATE_AFTER);
+
+        // Success reports how many failures it ended, and resets the count.
+        l.begin();
+        assert_eq!(
+            l.on_published(192, true),
+            PublishOutcome::Up {
+                psm: 192,
+                failures: PUBLISH_WARN_EVERY
+            }
+        );
+        l.power_off();
+        l.begin();
+        assert!(matches!(
+            l.on_published(0, false),
+            PublishOutcome::Failed {
+                failures: 1,
+                warn: true,
+                ..
+            }
+        ));
+    }
+
+    /// A replaced manager publishes again on power-on, while the failed
+    /// listener keeps the radio reported up meanwhile.
+    #[test]
+    fn a_replaced_manager_publishes_on_power_on() {
+        let mut l = Listener::default();
+        l.begin();
+        l.on_published(0, false);
+        assert!(!l.wants_publish());
+        l.manager_replaced();
+        assert_eq!(l.published(), Some(0));
+        assert!(l.wants_publish());
+        l.begin();
+        assert!(!l.wants_publish());
+        assert_eq!(
+            l.on_published(193, true),
+            PublishOutcome::Up {
+                psm: 193,
+                failures: 1
+            }
+        );
+    }
+
+    /// Only one delayed retry is outstanding at a time.
+    #[test]
+    fn retries_do_not_stack() {
+        let mut l = Listener::default();
+        assert!(l.schedule_retry());
+        assert!(!l.schedule_retry());
+        l.retry_fired();
+        assert!(l.schedule_retry());
     }
 }
