@@ -2389,6 +2389,8 @@ impl Node {
         // if any peer has an SRTT measurement, unmeasured peers are excluded
         // (their effective_depth is `None`); during cold start (no peer has
         // SRTT) every peer falls back to the default link cost of 1.0.
+        // `evaluate_parent` still takes an unmeasured peer to correct the root
+        // when no measured peer reaches it; the display keeps `None` for it.
         let any_peer_has_srtt = self.peers().any(|p| p.has_srtt());
 
         let now_ms = Self::now_ms();

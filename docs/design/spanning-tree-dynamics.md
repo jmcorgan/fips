@@ -555,7 +555,10 @@ purely by tree depth without link quality consideration.
    `peer_costs` (MMP-derived). During cold start, when no peer has MMP data
    yet (`peer_costs` is empty), unmeasured candidates default to 1.0; once
    any peer has MMP data, unmeasured candidates are skipped so a freshly
-   connected peer cannot win on its default cost. Candidates whose ancestry
+   connected peer cannot win on its default cost. If that leaves no
+   candidate on the smallest root, the unmeasured ones are ranked at 1.0
+   and may still be taken to correct the root, but never to win a
+   cost-based switch. Candidates whose ancestry
    already contains the local node are also rejected, preventing an
    alternating two-node loop. The best candidate is the peer with the
    lowest effective depth, with ties broken by numerically smallest

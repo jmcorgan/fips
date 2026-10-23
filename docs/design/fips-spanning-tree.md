@@ -75,7 +75,9 @@ quality.
    measurements default to `link_cost = 1.0`, preserving pure depth-based
    behavior. Once any peer has MMP data, unmeasured candidates are excluded
    so that a freshly connected peer cannot win parent selection on the
-   default cost alone.
+   default cost alone. An unmeasured peer is still taken to correct the
+   root when no measured peer reaches the smallest root, but never to win
+   a cost-based switch.
 3. Apply **hysteresis**: switch parents only when the best candidate's
    effective depth is significantly better than the current parent's:
    `best_eff_depth < current_eff_depth * (1.0 - parent_hysteresis)`

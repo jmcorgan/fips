@@ -437,6 +437,12 @@ impl TreeState {
     ///
     /// `skip_peers` contains peers that should not be considered as parent
     /// candidates (e.g., non-routing and leaf nodes that don't forward transit).
+    ///
+    /// Once any peer is measured (`peer_costs` non-empty), only measured peers
+    /// compete, so a fresh peer at the neutral cost cannot look artificially
+    /// cheap. When no measured peer reaches the smallest root, the unmeasured
+    /// peers on it are ranked at 1.0 and may still be taken to correct the
+    /// root (a `Mandatory` result), but never to win a cost-based switch.
     pub(crate) fn evaluate_parent(
         &self,
         peer_costs: &BTreeMap<NodeAddr, f64>,
@@ -478,39 +484,16 @@ impl TreeState {
             return ParentEval::None;
         }
 
-        // Among peers that reach the smallest root, find the lowest effective_depth.
-        // effective_depth(peer) = peer.depth + link_cost_to_peer
-        let mut best_peer: Option<(NodeAddr, f64)> = None; // (peer_addr, effective_depth)
-        for (peer_id, coords) in &self.peer_ancestry {
-            if *coords.root_id() != smallest_root {
-                continue;
-            }
-            // Skip non-routing/leaf peers (can't forward transit)
-            if skip_peers.contains(peer_id) {
-                continue;
-            }
-            // Reject candidates whose ancestry contains us (would create a loop)
-            if coords.contains(&self.my_node_addr) {
-                continue;
-            }
-            // If any peer has MMP cost data, only consider measured peers.
-            // This prevents freshly connected peers (no SRTT, default cost 1.0)
-            // from appearing artificially cheap. During cold start (no peer has
-            // MMP data, peer_costs is empty), fall back to default cost 1.0.
-            let cost = match peer_costs.get(peer_id) {
-                Some(&c) => c,
-                None if peer_costs.is_empty() => 1.0,
-                None => continue,
-            };
-            let eff_depth = coords.depth() as f64 + cost;
-            match &best_peer {
-                None => best_peer = Some((*peer_id, eff_depth)),
-                Some((best_id, best_eff)) => {
-                    if eff_depth < *best_eff || (eff_depth == *best_eff && peer_id < best_id) {
-                        best_peer = Some((*peer_id, eff_depth));
-                    }
-                }
-            }
+        // Among peers that reach the smallest root, find the lowest effective
+        // depth. Once any peer is measured, only measured peers compete. If none
+        // of them reaches the smallest root, fall back to the unmeasured ones so
+        // the root can still be corrected (mandatory switches only, below).
+        let measured_only = !peer_costs.is_empty();
+        let mut best_peer =
+            self.best_candidate(smallest_root, peer_costs, skip_peers, measured_only);
+        let fallback = best_peer.is_none() && measured_only;
+        if fallback {
+            best_peer = self.best_candidate(smallest_root, peer_costs, skip_peers, false);
         }
 
         let (best_peer_id, best_eff_depth) = match best_peer {
@@ -567,6 +550,11 @@ impl TreeState {
             return ParentEval::Mandatory(best_peer_id);
         }
 
+        // An unmeasured candidate may correct the root, never win on cost.
+        if fallback {
+            return ParentEval::None;
+        }
+
         // --- Discretionary switches (the caller applies the veto before taking) ---
         //
         // Same root, cost-aware comparison with hysteresis. Everything below is
@@ -599,6 +587,38 @@ impl TreeState {
         }
 
         ParentEval::None
+    }
+
+    /// The lowest effective-depth candidate on `root`, ties going to the
+    /// smaller address. Skipped peers and peers whose path contains us are
+    /// never candidates. With `measured_only`, a peer missing from
+    /// `peer_costs` is not a candidate; otherwise it is costed at 1.0.
+    fn best_candidate(
+        &self,
+        root: NodeAddr,
+        peer_costs: &BTreeMap<NodeAddr, f64>,
+        skip_peers: &BTreeSet<NodeAddr>,
+        measured_only: bool,
+    ) -> Option<(NodeAddr, f64)> {
+        let mut best: Option<(NodeAddr, f64)> = None;
+        for (peer_id, coords) in &self.peer_ancestry {
+            if *coords.root_id() != root
+                || skip_peers.contains(peer_id)
+                || coords.contains(&self.my_node_addr)
+            {
+                continue;
+            }
+            let cost = match peer_costs.get(peer_id) {
+                Some(&c) => c,
+                None if !measured_only => 1.0,
+                None => continue,
+            };
+            let eff = coords.depth() as f64 + cost;
+            if best.is_none_or(|(id, b)| eff < b || (eff == b && *peer_id < id)) {
+                best = Some((*peer_id, eff));
+            }
+        }
+        best
     }
 
     /// Handle loss of current parent.
