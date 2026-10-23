@@ -85,7 +85,7 @@ impl Node {
         };
 
         // O(1) session lookup by our receiver index
-        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        let key = header.receiver_idx.as_u32();
         let node_addr = match self.peers_by_index.get(&key) {
             Some(id) => *id,
             None => {
@@ -130,7 +130,7 @@ impl Node {
         // so a frame naming one is opened by the link's rekey machine below.
         #[cfg(unix)]
         {
-            let cache_key = (packet.transport_id, header.receiver_idx.as_u32());
+            let cache_key = header.receiver_idx.as_u32();
             if let Some(workers) = self.supervisor.decrypt_workers.as_ref().cloned()
                 && self.decrypt_registered_sessions.contains(&cache_key)
             {
@@ -209,7 +209,7 @@ impl Node {
                 &packet.remote_addr,
                 trial,
             );
-            self.handle_decrypt_failure(&node_addr);
+            self.charge_decrypt_failure(&node_addr, packet.transport_id);
             return;
         };
         if let Some(peer) = self.peers.get_mut(&node_addr) {
@@ -271,6 +271,7 @@ impl Node {
             }
             address_changed =
                 peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
+            peer.note_path_rx(packet.transport_id, now_ms);
             peer.link_stats_mut()
                 .record_recv(packet.data.len(), packet.timestamp_ms);
             first_frame = !peer.heard();
@@ -312,8 +313,14 @@ impl Node {
         }
 
         // Dispatch to link message handler
-        self.dispatch_authentic(&node_addr, slot, link_message, ce_flag)
-            .await;
+        self.dispatch_authentic(
+            &node_addr,
+            slot,
+            link_message,
+            ce_flag,
+            (packet.transport_id, &packet.remote_addr),
+        )
+        .await;
     }
 
     /// Dispatch the link message of an authenticated frame. A ReceiverReport
@@ -327,6 +334,7 @@ impl Node {
         slot: LinkSlot,
         link_message: &[u8],
         ce_flag: bool,
+        arrival: (TransportId, &TransportAddr),
     ) {
         if slot == LinkSlot::Previous
             && link_message.first() == Some(&(LinkMessageType::ReceiverReport as u8))
@@ -337,7 +345,7 @@ impl Node {
             );
             return;
         }
-        self.dispatch_link_message(node_addr, link_message, ce_flag)
+        self.dispatch_link_message(node_addr, link_message, ce_flag, arrival)
             .await;
     }
 
@@ -441,6 +449,7 @@ impl Node {
                 prior = peer.transport_id().zip(peer.current_addr().cloned());
             }
             address_changed = peer.set_current_addr(transport_id, remote_addr.clone());
+            peer.note_path_rx(transport_id, now_ms);
             peer.link_stats_mut()
                 .record_recv(packet_len, packet_timestamp_ms);
             first_frame = !peer.heard();
@@ -483,8 +492,14 @@ impl Node {
             self.relink(node_addr, prior, Some(link)).await;
         }
         let link_message = &fmp_plaintext[INNER_TIMESTAMP_LEN..];
-        self.dispatch_authentic(node_addr, slot, link_message, ce_flag)
-            .await;
+        self.dispatch_authentic(
+            node_addr,
+            slot,
+            link_message,
+            ce_flag,
+            (transport_id, remote_addr),
+        )
+        .await;
     }
 
     /// Process a decrypt-worker bounce (FMP plaintext only — the
@@ -586,7 +601,7 @@ impl Node {
             peer.record_failed(idx);
         }
         if self.past_threshold(&report.source_node_addr) {
-            self.handle_decrypt_failure(&report.source_node_addr);
+            self.charge_decrypt_failure(&report.source_node_addr, report.transport_id);
             return;
         }
         let keys = KeyView::of(self.peers.get(&report.source_node_addr), Some(idx));
@@ -605,7 +620,7 @@ impl Node {
             pending_epoch = %keys.pending_epoch,
             "Worker FMP AEAD decryption failed"
         );
-        self.handle_decrypt_failure(&report.source_node_addr);
+        self.charge_decrypt_failure(&report.source_node_addr, report.transport_id);
     }
 
     /// Dispatch a decrypt-worker event (plaintext bounce or failure
@@ -639,10 +654,7 @@ impl Node {
     /// Node's `decrypt_registered_sessions` set would grow monotonically
     /// per rekey on long-lived peers.
     #[cfg(unix)]
-    pub(in crate::node) fn unregister_decrypt_worker_session(
-        &mut self,
-        cache_key: (crate::transport::TransportId, u32),
-    ) {
+    pub(in crate::node) fn unregister_decrypt_worker_session(&mut self, cache_key: u32) {
         if let Some(workers) = self.supervisor.decrypt_workers.as_ref() {
             workers.unregister_session(cache_key);
         }
@@ -658,6 +670,47 @@ impl Node {
         self.peers
             .get(node_addr)
             .is_some_and(|p| p.consecutive_decrypt_failures() >= DECRYPT_FAILURE_THRESHOLD)
+    }
+
+    /// Count a decryption failure against the peer, but only if it arrived on
+    /// a transport the peer is actually on.
+    ///
+    /// The demux is by index alone, so a frame naming a known `receiver_idx`
+    /// reaches this peer's session from *any* bound transport. Counting
+    /// those would let garbage frames carrying a sniffed index, from any
+    /// transport, run up the failure count `fipsctl` reports and trip the
+    /// warning. The same rule covers a stale in-flight frame landing on an
+    /// index the allocator has already handed to a new owner: index reuse is
+    /// immediate, with no quarantine.
+    ///
+    /// Only a path the peer has proven counts: the active one, or one the
+    /// peer has acknowledged a probe on. A `Probing` path is an address we
+    /// were *told* about — a beacon, a config entry, a handshake source —
+    /// and until the peer answers there, garbage arriving on its transport
+    /// says nothing about the peer.
+    ///
+    /// A peer with no transport bound yet is counted unconditionally.
+    pub(in crate::node) fn charge_decrypt_failure(
+        &mut self,
+        node_addr: &crate::NodeAddr,
+        transport_id: crate::transport::TransportId,
+    ) {
+        let on_path = self.peers.get(node_addr).is_some_and(|peer| {
+            peer.paths().is_empty()
+                || peer.transport_id() == Some(transport_id)
+                || peer
+                    .path_on(transport_id)
+                    .is_some_and(|path| path.acked_once())
+        });
+        if !on_path {
+            trace!(
+                peer = %self.peer_display_name(node_addr),
+                transport_id = %transport_id,
+                "Decrypt failure on a transport the peer is not on, not counted"
+            );
+            return;
+        }
+        self.handle_decrypt_failure(node_addr);
     }
 
     /// Count a decryption failure and warn once when the count reaches the

@@ -258,14 +258,20 @@ async fn a_flood_of_unknown_link_message_types_logs_a_bounded_number_of_lines() 
     let mut node = make_node();
     let sizes = map_sizes(&node);
 
+    let arrival = TransportAddr::from_string("127.0.0.1:9");
     let (logs, guard) = capture_logs_scoped();
     for i in 0..=MESSAGES {
         if i == MESSAGES {
             tokio::time::sleep(REFILL).await;
         }
         let from = make_node_addr((i % 251) as u8);
-        node.dispatch_link_message(&from, &[UNASSIGNED_TYPE, 0, 0], false)
-            .await;
+        node.dispatch_link_message(
+            &from,
+            &[UNASSIGNED_TYPE, 0, 0],
+            false,
+            (TransportId::new(1), &arrival),
+        )
+        .await;
     }
     drop(guard);
 
@@ -277,9 +283,15 @@ async fn a_flood_of_unknown_link_message_types_logs_a_bounded_number_of_lines() 
 async fn an_unknown_link_message_type_names_the_peer_that_sent_it() {
     let mut node = make_node();
     let from = make_node_addr(0x42);
+    let arrival = TransportAddr::from_string("127.0.0.1:9");
     let (logs, guard) = capture_logs_scoped();
-    node.dispatch_link_message(&from, &[UNASSIGNED_TYPE, 0, 0], false)
-        .await;
+    node.dispatch_link_message(
+        &from,
+        &[UNASSIGNED_TYPE, 0, 0],
+        false,
+        (TransportId::new(1), &arrival),
+    )
+    .await;
     drop(guard);
 
     let line = expect_line(&logs, "Unknown link message type");

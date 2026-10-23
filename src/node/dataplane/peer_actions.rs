@@ -337,8 +337,9 @@ impl Node {
                                         "executor CrossConnectionLost is unreachable on \
                                          driven net-new establish paths"
                                     );
-                                    // Close this (losing) connection, drop its link,
-                                    // and restore `addr_to_link` to the winner.
+                                    // Close this connection, drop its link, and
+                                    // point `addr_to_link` for the new address at the
+                                    // winner, so a msg1 from it is recognised.
                                     if let Some(transport) =
                                         self.transports.get(&ambient.transport_id)
                                     {
@@ -465,10 +466,10 @@ impl Node {
                     // machine's `index` payload.
                 }
                 PeerAction::UnregisterDecryptSession { index } => {
-                    // Executor supplies `transport_id` from ambient; keyed by
-                    // (tid, index) like `remove_active_peer` / the rekey drain path.
+                    // Keyed by index alone, like `remove_active_peer` and the rekey
+                    // drain path.
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((ambient.transport_id, index.as_u32()));
+                    self.unregister_decrypt_worker_session(index.as_u32());
                     #[cfg(not(unix))]
                     let _ = index;
                 }

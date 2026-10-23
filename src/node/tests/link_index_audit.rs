@@ -69,10 +69,7 @@ pub(super) fn audit(node: &Node, step: &str) {
             "{step}: the workers must hold exactly the sessions the machines delegated"
         );
         for peer in node.peers.values() {
-            let current = (
-                peer.transport_id().unwrap(),
-                peer.our_index().unwrap().as_u32(),
-            );
+            let current = peer.our_index().unwrap().as_u32();
             assert!(
                 delegated.contains(&current),
                 "{step}: the workers must hold every current session"

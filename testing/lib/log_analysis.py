@@ -40,6 +40,7 @@ class AnalysisResult:
     peers_promoted: list[tuple[str, str]] = field(default_factory=list)
     peer_removals: list[tuple[str, str]] = field(default_factory=list)
     parent_switches: list[tuple[str, str]] = field(default_factory=list)
+    path_switches: list[tuple[str, str]] = field(default_factory=list)
     mmp_link_metrics: list[tuple[str, str]] = field(default_factory=list)
     mmp_session_metrics: list[tuple[str, str]] = field(default_factory=list)
     handshake_timeouts: list[tuple[str, str]] = field(default_factory=list)
@@ -70,6 +71,7 @@ class AnalysisResult:
             f"Peers promoted:        {len(self.peers_promoted)}",
             f"Peer removals:         {len(self.peer_removals)}",
             f"Parent switches:       {len(self.parent_switches)}",
+            f"Path switches:         {len(self.path_switches)}",
             f"Handshake timeouts:    {len(self.handshake_timeouts)}",
             f"MMP link samples:      {len(self.mmp_link_metrics)}",
             f"MMP session samples:   {len(self.mmp_session_metrics)}",
@@ -160,6 +162,13 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         # Parent switches
         if "Parent switched" in line:
             result.parent_switches.append((source, line))
+        # Path switches: a peer's traffic moved to another transport under
+        # the same session. Three emitters, one per trigger (selection, the
+        # presence edge, a peer's PathClose); all say "session kept".
+        if "session kept" in line and (
+            "Path switched" in line or "traffic moved to the standby" in line
+        ):
+            result.path_switches.append((source, line))
         # Handshake timeouts
         if "timed out" in line and ("handshake" in line.lower() or "Handshake" in line):
             result.handshake_timeouts.append((source, line))
