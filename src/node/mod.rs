@@ -798,11 +798,15 @@ pub struct Node {
     last_mesh_size_log: Option<std::time::Instant>,
 
     // === Bloom Self-Plausibility ===
-    /// Rate-limit state for the self-plausibility WARN. Fires at most
-    /// once per 60s globally when our own outgoing FilterAnnounce has
-    /// an FPR above `node.bloom.max_inbound_fpr`, signalling either
-    /// aggregation drift or an ingress bypass.
+    /// Rate-limit state for the held-filter WARN. Fires at most once per
+    /// 60s globally when an outgoing FilterAnnounce is held because its
+    /// FPR is above the v1 acceptance cap.
     last_self_warn: Option<std::time::Instant>,
+
+    // === FilterAnnounce sequence ===
+    /// Random offset and start instant from which a new peer's first
+    /// FilterAnnounce sequence is derived (`seq_floor`).
+    seq_origin: (u64, std::time::Instant),
 
     // === Display Names ===
     /// Human-readable names for configured peers (alias or short npub).
@@ -1049,6 +1053,7 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             last_self_warn: None,
+            seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
@@ -1214,6 +1219,7 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             last_self_warn: None,
+            seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,

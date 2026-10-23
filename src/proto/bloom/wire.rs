@@ -63,9 +63,14 @@ impl FilterAnnounce {
             && self.filter.hash_count() == self.hash_count
     }
 
-    /// Check if this is a v1-compliant filter (size_class=1).
+    /// Check if this is a v1-compliant filter: size_class 1 and
+    /// hash_count 5.
+    ///
+    /// The receive-side FPR cap is computed with the declared hash_count, so
+    /// accepting any other value would let a peer pass a nearly full filter
+    /// under the cap by declaring a large k.
     pub fn is_v1_compliant(&self) -> bool {
-        self.size_class == super::V1_SIZE_CLASS
+        self.size_class == super::V1_SIZE_CLASS && self.hash_count == super::DEFAULT_HASH_COUNT
     }
 
     /// Minimum payload size after msg_type is stripped:

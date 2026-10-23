@@ -92,3 +92,18 @@ fn test_filter_announce_decode_rejects_truncated() {
     let result = FilterAnnounce::decode(&[0u8; 5]);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_filter_announce_with_hash_count_other_than_five_is_not_v1_compliant() {
+    for k in [1u8, 4, 6, 255] {
+        let filter = BloomFilter::with_params(1024 * 8, k).unwrap();
+        let announce = FilterAnnounce::new(filter, 1);
+        assert!(announce.is_valid(), "k={k}: announce is self-consistent");
+        assert!(
+            !announce.is_v1_compliant(),
+            "k={k}: only hash_count 5 is v1-compliant"
+        );
+    }
+    let announce = FilterAnnounce::new(BloomFilter::with_params(1024 * 8, 5).unwrap(), 1);
+    assert!(announce.is_v1_compliant(), "k=5 is v1-compliant");
+}

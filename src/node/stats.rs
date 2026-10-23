@@ -409,6 +409,7 @@ pub struct BloomStatsSnapshot {
     pub received: u64,
     pub decode_error: u64,
     pub invalid: u64,
+    /// Announces rejected for a size class or hash count other than v1's.
     pub non_v1: u64,
     pub unknown_peer: u64,
     pub stale: u64,
@@ -417,6 +418,8 @@ pub struct BloomStatsSnapshot {
     pub sent: u64,
     pub debounce_suppressed: u64,
     pub send_failed: u64,
+    /// Outgoing announces held because the filter was above the v1 cap.
+    pub held_over_cap: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

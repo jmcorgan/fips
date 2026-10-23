@@ -438,6 +438,8 @@ pub struct BloomMetrics {
     pub sent: Counter,
     pub debounce_suppressed: Counter,
     pub send_failed: Counter,
+    /// Outgoing announces held because the filter was above the v1 cap.
+    pub held_over_cap: Counter,
 }
 
 impl BloomMetrics {
@@ -469,6 +471,7 @@ impl BloomMetrics {
             sent: self.sent.get(),
             debounce_suppressed: self.debounce_suppressed.get(),
             send_failed: self.send_failed.get(),
+            held_over_cap: self.held_over_cap.get(),
         }
     }
 }

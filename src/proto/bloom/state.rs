@@ -23,12 +23,23 @@ pub struct BloomState {
     last_update_sent: BTreeMap<NodeAddr, u64>,
     /// Peers that need a filter update.
     pending_updates: BTreeSet<NodeAddr>,
-    /// Current sequence number for outgoing filters.
+    /// Count of outgoing announces built since start. Local only: the value
+    /// sent to a peer comes from `peer_sequences`.
     sequence: u64,
+    /// Last FilterAnnounce sequence sent to each current peer. Dropped with
+    /// the peer, so it holds one entry per peer rather than one per address
+    /// ever seen; a returning peer is reseeded from a later floor.
+    peer_sequences: BTreeMap<NodeAddr, u64>,
     /// Last outgoing filter sent to each peer (for change detection).
     last_sent_filters: BTreeMap<NodeAddr, BloomFilter>,
     /// Per-peer delivery tracking for sent announces.
     acks: Acks,
+    /// Set when an accepted inbound filter may have changed outgoing
+    /// filters; the recompute runs once on the next send pass.
+    inbound_dirty: bool,
+    /// Number of `mark_changed` passes run, each a full outgoing-filter
+    /// recompute. Read by tests to check recompute pacing.
+    inbound_recomputes: u64,
 }
 
 impl BloomState {
@@ -42,8 +53,11 @@ impl BloomState {
             last_update_sent: BTreeMap::new(),
             pending_updates: BTreeSet::new(),
             sequence: 0,
+            peer_sequences: BTreeMap::new(),
             last_sent_filters: BTreeMap::new(),
             acks: Acks::new(),
+            inbound_dirty: false,
+            inbound_recomputes: 0,
         }
     }
 
@@ -64,15 +78,27 @@ impl BloomState {
         self.is_leaf_only
     }
 
-    /// Get the current sequence number.
+    /// Number of outgoing announces built since start, across all peers.
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
 
-    /// Increment and return the next sequence number.
-    pub fn next_sequence(&mut self) -> u64 {
+    /// Take the sequence for the next FilterAnnounce to `peer`.
+    ///
+    /// A peer with no entry starts at `floor`; after that each value is one
+    /// more than the last sent to that peer, so a peer sees no gap for
+    /// announces built for other peers. The caller supplies a floor that
+    /// grows with time faster than any one peer's sequence can, so a peer
+    /// removed and re-established is reseeded above every value it was sent
+    /// before.
+    pub fn next_sequence(&mut self, peer: &NodeAddr, floor: u64) -> u64 {
         self.sequence += 1;
-        self.sequence
+        let next = match self.peer_sequences.get(peer) {
+            Some(&last) => last.saturating_add(1),
+            None => floor,
+        };
+        self.peer_sequences.insert(*peer, next);
+        next
     }
 
     /// Get the update debounce interval in milliseconds.
@@ -152,10 +178,36 @@ impl BloomState {
         self.pending_updates.remove(&peer_id);
     }
 
+    /// Defer a pending update to a peer without sending it: stamp the
+    /// attempt so the next one waits out the debounce, and keep the peer
+    /// pending.
+    pub fn defer_update(&mut self, peer_id: NodeAddr, current_time_ms: u64) {
+        self.last_update_sent.insert(peer_id, current_time_ms);
+    }
+
     /// Read back the time of the last update sent to a peer, if any.
     #[cfg(test)]
     pub(crate) fn last_update_sent(&self, peer_id: &NodeAddr) -> Option<u64> {
         self.last_update_sent.get(peer_id).copied()
+    }
+
+    /// Note that an accepted inbound filter may have changed outgoing filters.
+    ///
+    /// The recompute is deferred to the next send pass, so a burst of
+    /// announces costs one recompute instead of one each.
+    pub fn note_inbound_change(&mut self) {
+        self.inbound_dirty = true;
+    }
+
+    /// Whether an inbound change is waiting to be recomputed, clearing it.
+    pub fn take_inbound_change(&mut self) -> bool {
+        core::mem::take(&mut self.inbound_dirty)
+    }
+
+    /// Number of outgoing-filter recomputes `mark_changed` has run.
+    #[cfg(test)]
+    pub(crate) fn inbound_recomputes(&self) -> u64 {
+        self.inbound_recomputes
     }
 
     /// Clear all pending updates.
@@ -183,6 +235,7 @@ impl BloomState {
         self.last_sent_filters.remove(peer_id);
         self.last_update_sent.remove(peer_id);
         self.pending_updates.remove(peer_id);
+        self.peer_sequences.remove(peer_id);
         self.acks.remove(peer_id);
     }
 
@@ -279,6 +332,7 @@ impl BloomState {
         targets: &[NodeAddr],
         peer_filters: &BTreeMap<NodeAddr, BloomFilter>,
     ) {
+        self.inbound_recomputes += 1;
         for (peer_addr, new_filter) in self.compute_outgoing_filters(targets, peer_filters) {
             let changed = match self.last_sent_filters.get(&peer_addr) {
                 Some(last) => *last != new_filter,

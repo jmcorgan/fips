@@ -4,8 +4,8 @@
 //! including debounced propagation to peers.
 
 use crate::NodeAddr;
-use crate::proto::bloom::BloomFilter;
 use crate::proto::bloom::FilterAnnounce;
+use crate::proto::bloom::{ACCEPT_FPR_CAP, BloomFilter};
 use crate::proto::mmp::delivery::{LinkEvidence, RrCounters};
 
 use super::reject::BloomReject;
@@ -13,7 +13,34 @@ use super::{Node, NodeError};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
+/// Draw the origin of this node's FilterAnnounce sequence floor: a random
+/// offset in `[1, 2^62)` and the instant it was drawn.
+///
+/// The offset hides the node's uptime, which a peer's first sequence would
+/// otherwise reveal.
+pub(super) fn new_seq_origin() -> (u64, std::time::Instant) {
+    use rand::RngExt;
+    (
+        rand::rng().random_range(1..1u64 << 62),
+        std::time::Instant::now(),
+    )
+}
+
 impl Node {
+    /// The sequence a peer with no sequence entry starts from: the origin's
+    /// offset plus 256 per microsecond since the origin.
+    ///
+    /// One peer's sequence grows by one per announce, and announces to a
+    /// peer go out at most once per tick, so a peer that is removed and
+    /// re-established (which takes a full handshake) is seeded above every
+    /// value it was sent before. 2^62 plus a century of microseconds times
+    /// 256 stays below 2^63.
+    pub(super) fn seq_floor(&self) -> u64 {
+        let (offset, start) = self.seq_origin;
+        let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        offset.saturating_add(micros.saturating_mul(256))
+    }
+
     /// Collect inbound filters from all peers for outgoing filter computation.
     ///
     /// Returns a map of (peer_node_addr -> filter) for peers that
@@ -38,7 +65,10 @@ impl Node {
     /// only through them).
     ///
     /// If the peer is rate-limited, the update stays pending for
-    /// delivery on the next tick cycle.
+    /// delivery on the next tick cycle. A filter whose FPR is above the v1
+    /// acceptance cap is held the same way: a v1 receiver would reject it,
+    /// so nothing is sent, no sequence is taken, and the update stays
+    /// pending until the debounce allows another attempt.
     pub(super) async fn send_filter_announce_to_peer(
         &mut self,
         peer_addr: &NodeAddr,
@@ -55,8 +85,21 @@ impl Node {
             return Ok(());
         }
 
+        // Hold a filter a v1 receiver would reject. The threshold is the v1
+        // cap, not this node's own inbound cap, so the hold is the same on
+        // every sender. The peer keeps the last filter it accepted, and the
+        // last-sent record keeps matching it.
+        if filter.fpr() > ACCEPT_FPR_CAP {
+            self.metrics().bloom.held_over_cap.inc();
+            self.warn_held(peer_addr, &filter);
+            self.bloom_state.defer_update(*peer_addr, now_ms);
+            return Ok(());
+        }
+
         // Build and encode
-        let announce = FilterAnnounce::new(filter, self.bloom_state.next_sequence());
+        let floor = self.seq_floor();
+        let seq = self.bloom_state.next_sequence(peer_addr, floor);
+        let announce = FilterAnnounce::new(filter, seq);
         let sent_filter = announce.filter.clone();
         let encoded = announce.encode().map_err(|e| NodeError::SendFailed {
             node_addr: *peer_addr,
@@ -85,38 +128,11 @@ impl Node {
             );
         }
 
-        // Self-plausibility check: WARN if our own outgoing filter is
-        // above the antipoison cap. Independent detection signal if
-        // aggregation drift or an ingress-check bypass pushes us over
-        // despite M1. Rate-limited to once per 60s globally — outgoing
-        // cadence can be per-tick during churn, and we want the
-        // operator to see one clear message, not spam.
-        let max_fpr = self.config().node.bloom.max_inbound_fpr;
-        let out_fill = sent_filter.fill_ratio();
-        let out_fpr = sent_filter.fpr();
-        if out_fpr > max_fpr {
-            let now = std::time::Instant::now();
-            let should_warn = self
-                .last_self_warn
-                .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(60))
-                .unwrap_or(true);
-            if should_warn {
-                self.last_self_warn = Some(now);
-                warn!(
-                    to = %self.peer_display_name(peer_addr),
-                    fill = format_args!("{:.3}", out_fill),
-                    fpr = format_args!("{:.4}", out_fpr),
-                    cap = format_args!("{:.4}", max_fpr),
-                    "Outgoing filter above FPR cap — aggregation drift or missed ingress?"
-                );
-            }
-        }
-
         // Record send and store the filter for change detection
         debug!(
             peer = %self.peer_display_name(peer_addr),
             seq = announce.sequence,
-            est_entries = match sent_filter.estimated_count(max_fpr) {
+            est_entries = match sent_filter.estimated_count(self.config().node.bloom.max_inbound_fpr) {
                 Some(n) => format!("{:.0}", n),
                 None => "—".to_string(),
             },
@@ -134,8 +150,49 @@ impl Node {
         Ok(())
     }
 
+    /// Mark every peer whose outgoing filter changed because of inbound
+    /// filters accepted since the last pass.
+    ///
+    /// Inbound announces only note the change, so a burst from one peer costs
+    /// one recompute here rather than one per announce. Several peers may have
+    /// announced, so every peer is a target; a peer is still marked only when
+    /// its outgoing filter differs from what was last sent to it.
+    pub(super) fn flush_inbound_changes(&mut self) {
+        if !self.bloom_state.take_inbound_change() {
+            return;
+        }
+        let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
+        let peer_filters = self.peer_inbound_filters();
+        self.bloom_state.mark_changed(&peer_addrs, &peer_filters);
+    }
+
+    /// WARN that an outgoing filter to `peer_addr` is held above the v1 cap.
+    ///
+    /// Rate-limited to once per 60s globally: a held update is retried at
+    /// the debounce pace, and the operator needs one clear message, not one
+    /// per attempt.
+    fn warn_held(&mut self, peer_addr: &NodeAddr, filter: &BloomFilter) {
+        let now = std::time::Instant::now();
+        let should_warn = self
+            .last_self_warn
+            .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(60));
+        if !should_warn {
+            return;
+        }
+        self.last_self_warn = Some(now);
+        warn!(
+            to = %self.peer_display_name(peer_addr),
+            fill = format_args!("{:.3}", filter.fill_ratio()),
+            fpr = format_args!("{:.4}", filter.fpr()),
+            cap = format_args!("{:.4}", ACCEPT_FPR_CAP),
+            "Outgoing filter above the v1 FPR cap — held, not sent"
+        );
+    }
+
     /// Send pending rate-limited filter announces whose debounce has expired.
     pub(super) async fn send_pending_filter_announces(&mut self) {
+        self.flush_inbound_changes();
+
         // Monotonic: the debounce compares two reads, and a wall-clock step
         // back would hold announces for the size of the step.
         let now_ms = crate::time::mono_ms();
@@ -179,7 +236,8 @@ impl Node {
     /// 1. Decode and validate the message
     /// 2. Check sequence freshness (reject stale/replay)
     /// 3. Store the filter on the peer
-    /// 4. Mark other peers for outgoing filter update
+    /// 4. Note the change; the next send pass marks the peers whose outgoing
+    ///    filter it changed
     pub(super) async fn handle_filter_announce(&mut self, from: &NodeAddr, payload: &[u8]) {
         self.metrics().bloom.received.inc();
 
@@ -200,7 +258,12 @@ impl Node {
         }
         if !announce.is_v1_compliant() {
             self.metrics().bloom.record_reject(BloomReject::NonV1);
-            debug!(from = %self.peer_display_name(from), size_class = announce.size_class, "Non-v1 FilterAnnounce rejected");
+            debug!(
+                from = %self.peer_display_name(from),
+                size_class = announce.size_class,
+                hash_count = announce.hash_count,
+                "Non-v1 FilterAnnounce rejected"
+            );
             return;
         }
 
@@ -275,13 +338,10 @@ impl Node {
             peer.update_filter(announce.filter, announce.sequence, now_ms);
         }
 
-        // Check which peers' outgoing filters actually changed.
-        // All peers receive filters, but only tree peers' inbound filters
-        // are merged into outgoing computation (tree-only propagation).
-        let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
-        let peer_filters = self.peer_inbound_filters();
-        self.bloom_state
-            .mark_changed_peers(from, &peer_addrs, &peer_filters);
+        // Which peers' outgoing filters changed is decided once per send
+        // pass (`flush_inbound_changes`), not per announce, so a peer cannot
+        // force a full recompute with every announce it sends.
+        self.bloom_state.note_inbound_change();
     }
 
     /// Read what `peer_addr`'s link shows about delivery of our frames: the

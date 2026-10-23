@@ -9,7 +9,9 @@ mod acl;
 #[cfg(ble_available)]
 mod ble;
 mod bloom;
+mod bloom_pacing;
 mod bloom_poison;
+mod bloom_send;
 mod bootstrap;
 #[cfg(ble_available)]
 mod claim_dials;
