@@ -167,3 +167,78 @@ async fn test_m1_sequence_not_advanced_allows_recovery() {
     assert_eq!(node.metrics().bloom.fill_exceeded.get(), 1);
     assert_eq!(node.metrics().bloom.accepted.get(), 1);
 }
+
+/// Send `announce` to a fresh node's synthetic peer and assert it was
+/// rejected as non-v1: nothing accepted, nothing stored, sequence not
+/// advanced.
+async fn assert_rejected_as_non_v1(announce: &FilterAnnounce) {
+    let mut node = make_node();
+    let peer_addr = inject_peer(&mut node);
+
+    let before_accepted = node.metrics().bloom.accepted.get();
+    let before_non_v1 = node.metrics().bloom.non_v1.get();
+
+    node.handle_filter_announce(&peer_addr, &encode_payload(announce))
+        .await;
+
+    assert_eq!(
+        node.metrics().bloom.accepted.get(),
+        before_accepted,
+        "accepted must not increment for a hash_count other than {DEFAULT_HASH_COUNT}"
+    );
+    assert_eq!(
+        node.metrics().bloom.non_v1.get(),
+        before_non_v1 + 1,
+        "non_v1 must count the rejection"
+    );
+    let peer = node.get_peer(&peer_addr).expect("peer still present");
+    assert!(
+        peer.inbound_filter().is_none(),
+        "no filter may be stored for a non-v1 hash_count"
+    );
+    assert_eq!(
+        peer.filter_sequence(),
+        0,
+        "filter_sequence must not advance for a non-v1 hash_count"
+    );
+}
+
+#[tokio::test]
+async fn test_m1_rejects_a_nearly_full_filter_announced_with_hash_count_255() {
+    // 8,136 of 8,192 bits set. At k=255 its FPR is about 0.174, under the
+    // default 0.20 cap; at k=5 the same bits would be about 0.966.
+    let mut bytes = vec![0xFFu8; 1017];
+    bytes.extend_from_slice(&[0x00u8; 7]);
+    let filter = BloomFilter::from_bytes(bytes, 255).unwrap();
+    assert_eq!(filter.count_ones(), 8136);
+
+    let cap = make_node().config().node.bloom.max_inbound_fpr;
+    assert!(
+        filter.fpr() < cap,
+        "setup: the k=255 FPR ({}) must pass the cap ({cap}) so only the hash_count can reject it",
+        filter.fpr()
+    );
+
+    let announce = FilterAnnounce::new(filter, 1);
+    assert!(
+        announce.is_valid(),
+        "setup: the announce is self-consistent"
+    );
+    assert_rejected_as_non_v1(&announce).await;
+}
+
+#[tokio::test]
+async fn test_m1_rejects_a_sparse_filter_announced_with_hash_count_other_than_five() {
+    let mut filter = BloomFilter::with_params(DEFAULT_FILTER_SIZE_BITS, 7).unwrap();
+    for i in 0..50u8 {
+        let mut bytes = [0u8; 16];
+        bytes[0] = i;
+        filter.insert(&NodeAddr::from_bytes(bytes));
+    }
+    let announce = FilterAnnounce::new(filter, 1);
+    assert!(
+        announce.is_valid(),
+        "setup: the announce is self-consistent"
+    );
+    assert_rejected_as_non_v1(&announce).await;
+}

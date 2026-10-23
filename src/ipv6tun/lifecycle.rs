@@ -13,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
 use super::config::{DnsConfig, TunConfig};
-use super::dns::{DnsIdentityRx, bind_dns_socket, lookup_mesh_ifindex, run_responder};
+use super::dns::{DnsIdentityRx, MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
 use super::tun::{
@@ -26,6 +26,13 @@ use crate::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader};
 use crate::node::lifecycle::supervisor::Child;
 use crate::node::lifecycle::{report_exit, report_thread};
 use crate::node::path_mtu::PathMtuLookup;
+
+/// What the DNS mesh filter judges by when the mesh interface's index is
+/// unknown, as the start-up warning names it.
+#[cfg(unix)]
+const DNS_MESH_FALLBACK: &str = "the destination address";
+#[cfg(not(unix))]
+const DNS_MESH_FALLBACK: &str = "the mesh source address";
 
 /// State and runtime handles of the TUN and DNS children, held by the
 /// node's supervisor.
@@ -181,10 +188,22 @@ impl Handles {
     /// the kernel's name rather than the configured one. Returns `None` when
     /// no TUN is up, which disables the DNS responder's mesh-interface
     /// filter: with no mesh interface there is no mesh exposure to defend.
-    /// An app-owned TUN also leaves the name unset, so the filter stays off
-    /// there even though a mesh interface exists.
+    /// An app-owned TUN also leaves the name unset, so the index is unknown
+    /// there; the responder then filters by address (see
+    /// [`Self::dns_mesh_side`]).
     pub(crate) fn mesh_ifindex(&self) -> Option<u32> {
         self.tun_name.as_deref().and_then(lookup_mesh_ifindex)
+    }
+
+    /// What the DNS responder needs to know of the mesh side: the mesh
+    /// interface's index, and the node's own mesh address while a TUN is up,
+    /// the daemon's own or an application-supplied one. The address lets the
+    /// responder recognise a mesh query where the index is unknown.
+    pub(crate) fn dns_mesh_side(&self) -> MeshSide {
+        MeshSide {
+            ifindex: self.mesh_ifindex(),
+            addr: (self.tun_state == TunState::Active).then_some(self.our_addr),
+        }
     }
 
     /// Start the TUN reader and writer threads on an opened device and keep
@@ -380,9 +399,13 @@ impl Handles {
         // that can reach it. On Linux, macOS and FreeBSD, with the
         // daemon's own TUN, that same mesh-interface filter drops
         // queries arriving on the mesh interface, so mesh peers are
-        // not served, unless the daemon logs "Mesh interface index
-        // unresolved; DNS mesh filter disabled" at start; on
-        // Windows, or with an application-supplied TUN, they are.
+        // not served. Where the mesh index is unknown (an
+        // application-supplied TUN, Windows, or a name that did not
+        // resolve) and a TUN is up, the responder drops mesh
+        // queries by address instead: those addressed to the
+        // node's mesh address on unix, and those from a remote
+        // fd00::/8 source on Windows (`mesh_query` in
+        // src/ipv6tun/dns.rs).
         // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
         // 127.0.0.1 still reach us regardless of kernel sysctl
         // defaults — but only when bind is on a wildcard / IPv6 path.
@@ -415,17 +438,18 @@ impl Handles {
                         // of their own choosing and the configured
                         // name resolves to nothing there, which left
                         // the filter permanently off.
-                        let mesh_ifindex = self.mesh_ifindex();
-                        if self.tun_name.is_some() && mesh_ifindex.is_none() {
+                        let mesh = self.dns_mesh_side();
+                        if self.tun_name.is_some() && mesh.ifindex.is_none() {
                             warn!(
                                 device = ?self.tun_name,
-                                "Mesh interface index unresolved; DNS mesh filter disabled"
+                                "Mesh interface index unresolved; DNS mesh filter falls back to {}",
+                                DNS_MESH_FALLBACK
                             );
                         }
                         info!(
                             bind = %local_addr,
                             hosts = reloader.hosts().len(),
-                            mesh_ifindex = ?mesh_ifindex,
+                            mesh_ifindex = ?mesh.ifindex,
                             "DNS responder started for .fips domain (auto-reload enabled)"
                         );
                         // Self-report on exit so the supervisor FSM
@@ -444,7 +468,7 @@ impl Handles {
                                 dns_ttl,
                                 reloader,
                                 Some(aliases_rx),
-                                mesh_ifindex,
+                                mesh,
                             ),
                             exit_tx,
                         ));

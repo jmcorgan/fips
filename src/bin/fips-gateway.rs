@@ -316,7 +316,7 @@ async fn main() {
     net::check_ipv6_forwarding();
 
     // Check fips0 interface exists
-    if let Err(e) = net::check_interface_exists("fips0").await {
+    if let Err(e) = net::check_interface_exists(net::MESH_INTERFACE).await {
         error!(error = %e, "fips0 interface not found — is the FIPS daemon running?");
         std::process::exit(1);
     }

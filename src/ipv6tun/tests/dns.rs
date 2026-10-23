@@ -56,6 +56,102 @@ fn reply_path_without_a_strict_pin_sends_mesh_source_replies_only_where_they_ret
     }
 }
 
+/// Where the mesh interface's index is unknown and a TUN is up, a mesh query
+/// is recognised by address: addressed to the node's mesh address from any
+/// other source, or, where the destination is not reported (Windows), from a
+/// remote non-v4-mapped `fd00::/8` source. A known index keeps the interface
+/// rule alone, and with no TUN nothing is dropped. Runs on every target; it
+/// is the Windows coverage.
+#[test]
+fn a_mesh_query_is_recognised_by_destination_or_mesh_source_when_the_mesh_index_is_unknown() {
+    let own: Ipv6Addr = "fd99::1".parse().unwrap();
+    let at = |ip: &str| std::net::SocketAddr::new(ip.parse().unwrap(), 4444);
+    let arrived = |ifindex: Option<u32>, dst: Option<&str>| Arrival {
+        ifindex,
+        dst: dst.map(|d| d.parse().unwrap()),
+    };
+    let known = MeshSide {
+        ifindex: Some(3),
+        addr: Some(own),
+    };
+    let unknown = MeshSide {
+        ifindex: None,
+        addr: Some(own),
+    };
+    let no_tun = MeshSide::default();
+    let cases = [
+        // Index known: the interface rule alone, no address fallback.
+        (arrived(Some(3), Some("fd99::1")), "fd11::7", known, true),
+        (arrived(Some(2), Some("fd99::1")), "fd11::7", known, false),
+        (arrived(None, None), "fd11::7", known, false),
+        // No TUN: never drops.
+        (arrived(Some(2), Some("fd99::1")), "fd11::7", no_tun, false),
+        (arrived(None, None), "fd11::7", no_tun, false),
+        // Destination known.
+        (arrived(Some(2), Some("fd99::1")), "fd11::7", unknown, true),
+        (
+            arrived(Some(2), Some("fd99::1")),
+            "2001:db8::2",
+            unknown,
+            true,
+        ),
+        (arrived(Some(1), Some("fd99::1")), "fd99::1", unknown, false),
+        (
+            arrived(Some(2), Some("2001:db8:1::1")),
+            "fd11::7",
+            unknown,
+            false,
+        ),
+        (arrived(Some(2), Some("fdab::1")), "fdab::2", unknown, false),
+        (
+            arrived(Some(2), Some("::ffff:192.0.2.1")),
+            "192.0.2.2",
+            unknown,
+            false,
+        ),
+        // Destination unknown (Windows).
+        (arrived(None, None), "fd11::7", unknown, true),
+        (arrived(None, None), "fdab::2", unknown, true),
+        (arrived(None, None), "2001:db8::2", unknown, false),
+        (arrived(None, None), "::ffff:192.0.2.2", unknown, false),
+        (arrived(None, None), "192.0.2.2", unknown, false),
+        (arrived(None, None), "fd99::1", unknown, false),
+    ];
+    for (arrival, src, mesh, dropped) in cases {
+        assert_eq!(
+            mesh_query(arrival, at(src), mesh),
+            dropped,
+            "arrival {arrival:?}, source {src}, mesh {mesh:?}"
+        );
+    }
+}
+
+/// The receive path reports a datagram's destination address with its
+/// arrival interface. Runs without root.
+#[cfg(unix)]
+#[tokio::test]
+async fn recv_with_pktinfo_reports_the_destination_address() {
+    let server =
+        tokio::net::UdpSocket::from_std(super::tests::bind_pktinfo("[::1]:0".parse().unwrap()))
+            .unwrap();
+    let client = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+    client
+        .send_to(b"hello", server.local_addr().unwrap())
+        .await
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let (len, _, arrival) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        recv_with_pktinfo(&server, &mut buf),
+    )
+    .await
+    .expect("the datagram arrives")
+    .unwrap();
+    assert_eq!(&buf[..len], b"hello");
+    assert_eq!(arrival.dst, Some(Ipv6Addr::LOCALHOST));
+    assert!(arrival.ifindex.is_some());
+}
+
 /// A returning reply to a local destination is delivered: the probe picks
 /// the destination itself as the source. Runs without root on any target.
 #[tokio::test]
@@ -68,6 +164,7 @@ async fn a_returning_reply_to_a_local_address_is_delivered() {
         b"returning",
         dst,
         ReplyPath::Returning(0x7fff_fff0),
+        None,
     )
     .await
     .unwrap();
@@ -88,7 +185,7 @@ async fn a_withheld_reply_is_not_sent_on_any_target() {
     let sender = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
     let receiver = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
     let dst = receiver.local_addr().unwrap();
-    let sent = send_reply(&sender, b"withheld", dst, ReplyPath::Withheld)
+    let sent = send_reply(&sender, b"withheld", dst, ReplyPath::Withheld, None)
         .await
         .unwrap();
     assert_eq!(sent, 0);
@@ -110,11 +207,35 @@ fn returns_by_is_true_only_for_a_source_on_the_arrival_interface() {
         (ip("fdab::1"), 64, Some(2)),
         (ip("fd99::1"), 128, Some(3)),
     ]);
-    assert!(returns_by(ip("fdab::1"), ip("fdab::2"), 2, &prefixes));
-    assert!(returns_by(ip("2001:db8:1::1"), ip("fdab::2"), 2, &prefixes));
-    assert!(!returns_by(ip("fd99::1"), ip("fd11:2233::7"), 2, &prefixes));
-    assert!(returns_by(ip("fd99::1"), ip("fd11:2233::7"), 3, &prefixes));
-    assert!(!returns_by(ip("fdab::1"), ip("fdab::2"), 7, &prefixes));
+    assert!(returns_by(ip("fdab::1"), ip("fdab::2"), 2, &prefixes, None));
+    assert!(returns_by(
+        ip("2001:db8:1::1"),
+        ip("fdab::2"),
+        2,
+        &prefixes,
+        None
+    ));
+    assert!(!returns_by(
+        ip("fd99::1"),
+        ip("fd11:2233::7"),
+        2,
+        &prefixes,
+        None
+    ));
+    assert!(returns_by(
+        ip("fd99::1"),
+        ip("fd11:2233::7"),
+        3,
+        &prefixes,
+        None
+    ));
+    assert!(!returns_by(
+        ip("fdab::1"),
+        ip("fdab::2"),
+        7,
+        &prefixes,
+        None
+    ));
 }
 
 /// A reply whose probe source is its own destination is delivered locally,
@@ -122,12 +243,13 @@ fn returns_by_is_true_only_for_a_source_on_the_arrival_interface() {
 #[test]
 fn returns_by_is_true_when_the_reply_is_delivered_locally() {
     let prefixes = OnLinkPrefixes::from_indexed([(ip("fd99::1"), 128, Some(3))]);
-    assert!(returns_by(ip("fd99::1"), ip("fd99::1"), 2, &prefixes));
+    assert!(returns_by(ip("fd99::1"), ip("fd99::1"), 2, &prefixes, None));
     assert!(returns_by(
         ip("fd99::1"),
         ip("fd99::1"),
         2,
-        &OnLinkPrefixes::default()
+        &OnLinkPrefixes::default(),
+        None
     ));
 }
 
@@ -136,8 +258,73 @@ fn returns_by_is_true_when_the_reply_is_delivered_locally() {
 #[test]
 fn returns_by_is_false_for_an_empty_or_failed_prefix_set() {
     for prefixes in [OnLinkPrefixes::default(), OnLinkPrefixes::failed()] {
-        assert!(!returns_by(ip("fdab::1"), ip("fdab::2"), 2, &prefixes));
+        assert!(!returns_by(
+            ip("fdab::1"),
+            ip("fdab::2"),
+            2,
+            &prefixes,
+            None
+        ));
     }
+}
+
+/// When no interface holds the node's mesh address, the picked source says
+/// nothing about egress, so a reply returns only to a destination on one of
+/// the arrival interface's own prefixes, or one delivered locally. With the
+/// mesh address held, or no mesh address, the source rule is unchanged. Runs
+/// on every target; it is the FreeBSD, macOS and Android coverage.
+#[test]
+fn returns_by_with_an_addressless_mesh_interface_returns_only_to_an_on_link_destination() {
+    let mesh = Some("fd99::1".parse().unwrap());
+    let held = OnLinkPrefixes::from_indexed([
+        (ip("2001:db8:1::1"), 64, Some(2)),
+        (ip("fdab::1"), 64, Some(2)),
+        (ip("fd99::1"), 128, Some(3)),
+    ]);
+    let bare = OnLinkPrefixes::from_indexed([
+        (ip("2001:db8:1::1"), 64, Some(2)),
+        (ip("fdab::1"), 64, Some(2)),
+    ]);
+    // Mesh address held by an interface: the source rule, unchanged.
+    assert!(!returns_by(
+        ip("fd99::1"),
+        ip("fd11:2233::7"),
+        2,
+        &held,
+        mesh
+    ));
+    assert!(returns_by(ip("fdab::1"), ip("fdab::2"), 2, &held, mesh));
+    // Mesh address on no interface, destination on the arrival interface.
+    assert!(returns_by(ip("fdab::1"), ip("fdab::2"), 2, &bare, mesh));
+    assert!(returns_by(
+        ip("2001:db8:1::1"),
+        ip("2001:db8:1::2"),
+        2,
+        &bare,
+        mesh
+    ));
+    // The same with an off-link destination whose picked source is on the
+    // arrival interface: the reply may leave by the bare mesh interface.
+    assert!(!returns_by(
+        ip("fdab::1"),
+        ip("fd11:2233::7"),
+        2,
+        &bare,
+        mesh
+    ));
+    assert!(!returns_by(ip("fdab::1"), ip("fdab:1::9"), 2, &bare, mesh));
+    // An on-link destination on another interface than the arrival one.
+    assert!(!returns_by(ip("fdab::1"), ip("fdab::2"), 7, &bare, mesh));
+    // Delivered locally.
+    assert!(returns_by(ip("fdab::1"), ip("fdab::1"), 2, &bare, mesh));
+    // No mesh address: the source rule, unchanged.
+    assert!(returns_by(
+        ip("fdab::1"),
+        ip("fd11:2233::7"),
+        2,
+        &bare,
+        None
+    ));
 }
 
 /// A responder running on its own thread inside a node namespace, stopped
@@ -167,11 +354,7 @@ impl ForgedSourceNetns {
     /// node namespace, with its own current-thread runtime, so everything it
     /// does at reply time (sockets, interface reads) sees that namespace's
     /// routes and interfaces rather than the host's.
-    fn spawn_responder(
-        &self,
-        bind: std::net::SocketAddr,
-        mesh_ifindex: Option<u32>,
-    ) -> NetnsResponder {
+    fn spawn_responder(&self, bind: std::net::SocketAddr, mesh: MeshSide) -> NetnsResponder {
         use std::os::fd::AsRawFd;
         let path = format!("/run/netns/{}", self.node);
         let (identity_tx, identities) = tokio::sync::mpsc::channel(16);
@@ -194,7 +377,7 @@ impl ForgedSourceNetns {
                 );
                 ready_tx.send(()).unwrap();
                 tokio::select! {
-                    _ = run_responder(server, identity_tx, 300, reloader, None, mesh_ifindex) => {}
+                    _ = run_responder(server, identity_tx, 300, reloader, None, mesh) => {}
                     _ = stopped => {}
                 }
             });
@@ -256,7 +439,7 @@ async fn a_forged_mesh_source_on_a_specific_bind_with_no_mesh_index_is_not_answe
     let ns = ForgedSourceNetns::new();
     assert_probe_sees_the_node_namespace(&ns);
     let target: std::net::SocketAddr = LAN_BIND.parse().unwrap();
-    let mut responder = ns.spawn_responder(target, None);
+    let mut responder = ns.spawn_responder(target, MeshSide::default());
     let forged = client_in(&ns.lan, "[fd11:2233::7]:4444");
 
     send_unanswered(&forged, target, &mut responder.identities).await;
@@ -278,7 +461,7 @@ async fn a_global_lan_client_on_a_specific_bind_with_no_mesh_index_is_answered()
     let ns = ForgedSourceNetns::new();
     assert_probe_sees_the_node_namespace(&ns);
     let target: std::net::SocketAddr = LAN_BIND.parse().unwrap();
-    let mut responder = ns.spawn_responder(target, None);
+    let mut responder = ns.spawn_responder(target, MeshSide::default());
     let client = client_in(&ns.lan, "[2001:db8:1::2]:4443");
     expect_answer(
         &client,
@@ -300,7 +483,7 @@ async fn an_on_link_ula_client_on_a_specific_bind_with_no_mesh_index_is_answered
     let ns = ForgedSourceNetns::new();
     assert_probe_sees_the_node_namespace(&ns);
     let target: std::net::SocketAddr = LAN_BIND.parse().unwrap();
-    let mut responder = ns.spawn_responder(target, None);
+    let mut responder = ns.spawn_responder(target, MeshSide::default());
     let client = client_in(&ns.lan, "[fdab::2]:4445");
     expect_answer(
         &client,
@@ -322,7 +505,7 @@ async fn a_local_client_sending_from_the_mesh_address_on_a_specific_bind_is_answ
     let ns = ForgedSourceNetns::new();
     assert_probe_sees_the_node_namespace(&ns);
     let target: std::net::SocketAddr = LAN_BIND.parse().unwrap();
-    let mut responder = ns.spawn_responder(target, None);
+    let mut responder = ns.spawn_responder(target, MeshSide::default());
     let client = client_in(&ns.node, "[fd99::1]:4446");
     expect_answer(
         &client,
@@ -332,4 +515,221 @@ async fn a_local_client_sending_from_the_mesh_address_on_a_specific_bind_is_answ
     )
     .await;
     assert_eq!(ns.mesh_replies(), 0);
+}
+
+/// The node namespace's mesh address, on its `fips0`.
+#[cfg(target_os = "linux")]
+const MESH_ADDR: &str = "fd99::1";
+
+/// Run the responder in the node namespace as the daemon starts it with an
+/// application-supplied TUN up: the mesh interface's index is unknown, and
+/// the node's mesh address is known.
+#[cfg(target_os = "linux")]
+fn spawn_with_app_owned_tun(ns: &ForgedSourceNetns, bind: &str) -> NetnsResponder {
+    let mesh = MeshSide {
+        ifindex: None,
+        addr: Some(MESH_ADDR.parse().unwrap()),
+    };
+    ns.spawn_responder(bind.parse().unwrap(), mesh)
+}
+
+/// Send an AAAA query for a fresh npub from `client` to `to`, and report
+/// whether any reply came back within 500 ms.
+#[cfg(target_os = "linux")]
+async fn answered(client: &tokio::net::UdpSocket, to: &str) -> bool {
+    let to: std::net::SocketAddr = to.parse().unwrap();
+    let query = super::tests::build_test_query(
+        &format!("{}.fips", crate::Identity::generate().npub()),
+        simple_dns::TYPE::AAAA,
+    );
+    client.send_to(&query, to).await.unwrap();
+    let mut buf = [0u8; 512];
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        client.recv_from(&mut buf),
+    )
+    .await
+    .is_ok()
+}
+
+/// A query addressed to the node's own mesh address from a remote mesh
+/// source is how a mesh peer's query arrives through the node's TUN. With
+/// the mesh interface's index unknown (an application-supplied TUN) the
+/// arrival filter cannot see it, so the responder must recognise it by its
+/// destination. Here it arrives on the LAN veth by a route the LAN namespace
+/// holds for the mesh address, standing in for a TUN the node cannot index;
+/// the node namespace holds a route back to the peer by the same veth, as a
+/// TUN's `fd00::/8` route takes a reply back out of the TUN. Without it the
+/// reply, pinned to the arrival interface, has no route and is never sent.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_query_to_the_node_mesh_address_from_a_mesh_source_is_not_answered_when_the_mesh_index_is_unknown()
+ {
+    let ns = ForgedSourceNetns::new();
+    crate::testutil::run_ok(
+        "ip",
+        &[
+            "-n",
+            &ns.lan,
+            "route",
+            "add",
+            "fd99::1/128",
+            "via",
+            "fdab::1",
+        ],
+    );
+    crate::testutil::run_ok(
+        "ip",
+        &[
+            "-n",
+            &ns.node,
+            "route",
+            "add",
+            "fd11:2233::7/128",
+            "via",
+            "fdab::2",
+            "dev",
+            "a0",
+        ],
+    );
+    let _responder = spawn_with_app_owned_tun(&ns, "[::]:5354");
+    let peer = client_in(&ns.lan, "[fd11:2233::7]:4444");
+    assert!(
+        !answered(&peer, "[fd99::1]:5354").await,
+        "a query to the node's mesh address from mesh source fd11:2233::7 was answered \
+         with the mesh index unknown"
+    );
+}
+
+/// A local process sending from the node's own mesh address to that address
+/// is not a mesh peer, and is still answered with the mesh index unknown.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_local_process_querying_its_own_mesh_address_is_still_answered_when_the_mesh_index_is_unknown()
+ {
+    let ns = ForgedSourceNetns::new();
+    let _responder = spawn_with_app_owned_tun(&ns, "[::]:5354");
+    let local = client_in(&ns.node, "[fd99::1]:4446");
+    assert!(
+        answered(&local, "[fd99::1]:5354").await,
+        "a local process querying its own mesh address was not answered"
+    );
+}
+
+/// A LAN client querying the node's LAN address on a wildcard bind is still
+/// answered with the mesh index unknown.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_lan_client_on_a_wildcard_bind_is_still_answered_when_the_mesh_index_is_unknown() {
+    let ns = ForgedSourceNetns::new();
+    let _responder = spawn_with_app_owned_tun(&ns, "[::]:5354");
+    let client = client_in(&ns.lan, "[2001:db8:1::2]:4443");
+    assert!(
+        answered(&client, "[2001:db8:1::1]:5354").await,
+        "a LAN client on a wildcard bind was not answered"
+    );
+}
+
+/// With an application-supplied TUN that carries no IPv6 address, the
+/// kernel picks a reply's source from another interface, so the source no
+/// longer says which interface the reply leaves by. A LAN host that forges a
+/// mesh source address on a specific bind must still not draw the reply into
+/// the mesh by the TUN's `fd00::/8` route.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_forged_mesh_source_on_a_specific_bind_is_not_answered_into_an_addressless_mesh_interface()
+ {
+    let ns = ForgedSourceNetns::with_addressless_mesh();
+    let source = ForgedSourceNetns::enter(&ns.node, || {
+        probe_source("[fd11:2233::7]:4444".parse().unwrap()).unwrap()
+    });
+    assert_eq!(
+        source,
+        ip("fdab::1"),
+        "with fips0 bare, the probe picks the arrival interface's address for the forged source"
+    );
+    let mut responder = spawn_with_app_owned_tun(&ns, LAN_BIND);
+    let forged = client_in(&ns.lan, "[fd11:2233::7]:4444");
+    send_unanswered(
+        &forged,
+        LAN_BIND.parse().unwrap(),
+        &mut responder.identities,
+    )
+    .await;
+    let into_mesh = ns.mesh_replies();
+    drop(responder);
+    assert_eq!(
+        into_mesh, 0,
+        "with fips0 carrying no address, a LAN query from forged source fd11:2233::7 \
+         was answered into the mesh: {into_mesh} UDP packet(s) from port 5354 left by fips0"
+    );
+}
+
+/// On the same setup an on-link ULA client is answered, and nothing leaves
+/// by the mesh interface.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn an_on_link_ula_client_on_a_specific_bind_is_answered_with_an_addressless_mesh_interface() {
+    let ns = ForgedSourceNetns::with_addressless_mesh();
+    let mut responder = spawn_with_app_owned_tun(&ns, LAN_BIND);
+    let client = client_in(&ns.lan, "[fdab::2]:4445");
+    expect_answer(
+        &client,
+        LAN_BIND.parse().unwrap(),
+        &mut responder.identities,
+        "the on-link ULA client is answered",
+    )
+    .await;
+    assert_eq!(ns.mesh_replies(), 0);
+}
+
+/// A known residual, pinned so a change to it is noticed: when the node's
+/// mesh address sits on some other non-loopback interface while the
+/// application-supplied TUN carries no address, the rule takes the mesh
+/// interface to be addressed and judges by the picked source, which comes
+/// from the arrival interface; so a forged mesh source's reply is still
+/// routed into the bare TUN. If this starts failing, update the doc comments
+/// of `is_mesh_interface_query` and `returns_by`, which name this case.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_forged_mesh_source_still_reaches_a_bare_mesh_interface_when_the_mesh_address_is_on_another_interface()
+ {
+    let ns = ForgedSourceNetns::with_addressless_mesh();
+    for args in [
+        vec!["-n", &ns.node, "link", "add", "other0", "type", "dummy"],
+        vec!["-n", &ns.node, "link", "set", "other0", "up"],
+        vec![
+            "-n",
+            &ns.node,
+            "addr",
+            "add",
+            "fd99::1/128",
+            "dev",
+            "other0",
+            "nodad",
+        ],
+    ] {
+        crate::testutil::run_ok("ip", &args);
+    }
+    let mut responder = spawn_with_app_owned_tun(&ns, LAN_BIND);
+    let forged = client_in(&ns.lan, "[fd11:2233::7]:4444");
+    send_unanswered(
+        &forged,
+        LAN_BIND.parse().unwrap(),
+        &mut responder.identities,
+    )
+    .await;
+    let into_mesh = ns.mesh_replies();
+    drop(responder);
+    assert_eq!(
+        into_mesh, 1,
+        "the residual case changed: with fd99::1 on other0 and fips0 bare, {into_mesh} \
+         replies left by fips0"
+    );
 }

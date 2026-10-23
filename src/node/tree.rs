@@ -364,8 +364,8 @@ impl Node {
 
         // Bloom filter exchange initiation is handled at handshake completion
         // ([handshake.rs] mark_update_needed on the new peer), on actual
-        // content changes via [bloom.rs::handle_filter_announce]'s
-        // `mark_changed_peers`, and above when this peer starts or stops
+        // content changes noted by [bloom.rs::handle_filter_announce] and
+        // marked on the next send pass, and above when this peer starts or stops
         // naming us as parent (marked by content change only, and only on
         // the flip). Marking the peer on every received TreeAnnounce
         // is redundant — and under high TreeAnnounce churn (rapid mid-chain

@@ -111,6 +111,11 @@ so a listener that never accepts is bounded by its send buffer and by
 asserts the change; the drop paths behind the new bound are covered by the
 daemon's own tests, because neither is a number a shell check can produce.
 
+**One peer is held to a quarter of `max_flows` as inbound flows**, 64 at the
+default. `check_one_peer_is_held_to_its_share` accepts each arrival as it is
+announced and closes it unwritten, which the daemon pins until the listener
+closes, so the share rather than the send buffer decides the 65th arrival.
+
 **Flow identifiers are assigned by the node and keep counting up for its
 lifetime.** A check must capture one with `keep_flow` rather than assume a
 literal, or it holds only for the first flow the daemon ever made.
@@ -126,11 +131,9 @@ daemon in the crate's unit tests. That stand-in has already hidden a real defect
 once, by being kinder than the daemon, which is why the walk talks to the real
 one.
 
-It runs last because `check_ephemeral_allocation` asserts 49152, 49153 and 49154
-as the first three ports the node ever hands out and the allocator is a
-forward-only cursor. The walk therefore asserts only that its own ephemeral
-ports are `>= 49152`, and takes its named ports from the otherwise unused
-4800-4809 band.
+The node starts each ephemeral port search at a random port, so the walk
+asserts only that its own ephemeral ports are `>= 49152`, and takes its named
+ports from the otherwise unused 4800-4809 band.
 
 **The check asserts three things, not one:** that the container exited 0, that
 its completion line is there, and that the count in that line equals

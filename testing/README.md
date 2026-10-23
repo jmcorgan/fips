@@ -145,6 +145,10 @@ through the configured backend. The end-to-end scenarios run the
 binaries from a Debian package: `--deb PATH` supplies one, and without
 it the suite builds one through `packaging/debian/build-deb-container.sh`.
 
+`tun-name-test.sh` beside it checks, with no containers, how
+`fips-dns-setup` reads the TUN name (`tun.name`) from the daemon config.
+Both runners run it with the other static checks.
+
 ### [deb-install/](deb-install/) -- Debian Package Install
 
 Installs the built `.deb` in systemd containers for each

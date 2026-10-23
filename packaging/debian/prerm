@@ -8,6 +8,17 @@ case "$1" in
             # The gateway requires the daemon, so it goes first.
             systemctl stop fips-gateway.service 2>/dev/null || true
             systemctl disable fips-gateway.service 2>/dev/null || true
+            # Removing the package disables fips-dns, so record whether it
+            # was enabled: postinst enables it again when the package is
+            # installed again from config-files state only if it was, so a
+            # disable the operator made survives the reinstall. preinst
+            # reads a missing record as a remove by an older package.
+            mkdir -p /var/lib/fips
+            if systemctl is-enabled --quiet fips-dns.service 2>/dev/null; then
+                echo enabled > /var/lib/fips/fips-dns.at-remove
+            else
+                echo disabled > /var/lib/fips/fips-dns.at-remove
+            fi
             systemctl stop fips-dns.service 2>/dev/null || true
             systemctl disable fips-dns.service 2>/dev/null || true
             systemctl stop fips.service 2>/dev/null || true

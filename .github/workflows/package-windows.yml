@@ -137,6 +137,68 @@ jobs:
           Write-Host ""
           Write-Host "All expected files present."
 
+          # The service control command is sc.exe. In PowerShell, where the
+          # README tells the operator to run these, a bare `sc` is the
+          # Set-Content alias, so `sc stop fips` writes a file instead.
+          $bareSc = Select-String -Path (Join-Path $extractDir "README.txt") -Pattern '^\s*sc (start|stop|query)\b'
+          if ($bareSc) {
+            $bareSc | ForEach-Object { Write-Host "FAIL: README.txt line $($_.LineNumber): $($_.Line)" }
+            Write-Error "README.txt names the service command as a bare sc, not sc.exe"
+            exit 1
+          }
+          Write-Host "PASS: README.txt names sc.exe, not a bare sc"
+
+      # A service registered from another folder must be repointed at the
+      # installed fips.exe when install-service.ps1 runs, or the node keeps
+      # starting the old binary. Runner jobs are elevated and the VM is thrown
+      # away, so this registers and removes a real service. The installer runs
+      # under Windows PowerShell, the edition it targets. It runs whenever the
+      # ZIP was extracted, so a failed README check above does not hide it.
+      - name: Installer repoints an existing service registration at the installed fips.exe
+        if: ${{ !cancelled() && hashFiles('verify-extract/fips.exe') != '' }}
+        shell: pwsh
+        run: |
+          function Get-BinaryPath {
+            $qc = & sc.exe qc fips
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "sc.exe qc fips exited $LASTEXITCODE`n$($qc -join "`n")"
+              exit 1
+            }
+            $line = $qc | Where-Object { $_ -match '^\s*BINARY_PATH_NAME\s*:' } | Select-Object -First 1
+            if (-not $line) {
+              Write-Error "sc.exe qc fips printed no BINARY_PATH_NAME`n$($qc -join "`n")"
+              exit 1
+            }
+            return ($line -replace '^\s*BINARY_PATH_NAME\s*:\s*', '')
+          }
+
+          $old = "C:\fips-old"
+          New-Item -ItemType Directory -Force -Path $old | Out-Null
+          Copy-Item verify-extract\fips.exe "$old\fips.exe" -Force
+          & "$old\fips.exe" --install-service
+          if ($LASTEXITCODE -ne 0) { Write-Error "registering the service from $old exited $LASTEXITCODE"; exit 1 }
+          $before = Get-BinaryPath
+          Write-Host "Registered from ${old}: $before"
+          # Precondition: the registration this check repoints exists and
+          # names the old folder.
+          if ($before -notlike "*$old\fips.exe*") {
+            Write-Error "precondition failed: the service does not name $old\fips.exe"
+            exit 1
+          }
+
+          powershell -File verify-extract\install-service.ps1
+          $installRc = $LASTEXITCODE
+          $after = Get-BinaryPath
+          Write-Host "After install-service.ps1: $after"
+          $want = "$env:ProgramFiles\fips\fips.exe"
+          & "$want" --uninstall-service
+          if ($installRc -ne 0) { Write-Error "install-service.ps1 exited $installRc"; exit 1 }
+          if (($after -notlike "*$want*") -or ($after -notlike "*--service*")) {
+            Write-Error "install-service.ps1 left the service at $after; want $want --service"
+            exit 1
+          }
+          Write-Host "PASS: install-service.ps1 repointed the service at $after"
+
       - name: SHA-256 hash
         shell: pwsh
         run: |

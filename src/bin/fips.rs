@@ -587,7 +587,7 @@ mod service {
     use windows_service::{
         define_windows_service,
         service::{
-            ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl,
+            Service, ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl,
             ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus,
             ServiceType,
         },
@@ -710,26 +710,36 @@ mod service {
             account_password: None,
         };
 
-        let service = match manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG) {
-            Ok(s) => s,
-            Err(windows_service::Error::Winapi(ref e)) if e.raw_os_error() == Some(0x431) => {
-                // ERROR_SERVICE_EXISTS (1073) — open the existing service instead
-                println!(
-                    "Service '{}' already exists, updating configuration...",
-                    SERVICE_NAME
-                );
-                manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?
-            }
-            Err(e) => return Err(format!("Failed to create service: {}", e).into()),
-        };
+        let (service, existed) =
+            match manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG) {
+                Ok(s) => (s, false),
+                Err(windows_service::Error::Winapi(ref e)) if e.raw_os_error() == Some(0x431) => {
+                    // ERROR_SERVICE_EXISTS (1073): update the existing service.
+                    println!(
+                        "Service '{}' already exists, updating configuration...",
+                        SERVICE_NAME
+                    );
+                    let service = manager.open_service(
+                        SERVICE_NAME,
+                        ServiceAccess::CHANGE_CONFIG | ServiceAccess::QUERY_CONFIG,
+                    )?;
+                    repoint_service(&service, service_info)?;
+                    (service, true)
+                }
+                Err(e) => return Err(format!("Failed to create service: {}", e).into()),
+            };
 
         // set_description is non-critical — don't fail the install over it
         if let Err(e) = service.set_description(SERVICE_DESCRIPTION) {
             eprintln!("Warning: could not set service description: {}", e);
         }
 
-        println!("Service '{}' installed successfully.", SERVICE_NAME);
-        println!("Start it with: sc start {}", SERVICE_NAME);
+        if existed {
+            println!("Service '{}' updated.", SERVICE_NAME);
+        } else {
+            println!("Service '{}' installed successfully.", SERVICE_NAME);
+        }
+        println!("Start it with: sc.exe start {}", SERVICE_NAME);
         println!();
         let dir = std::path::Path::new(fips::config::SYSTEM_CONFIG_DIR);
         println!(
@@ -742,6 +752,30 @@ mod service {
             "Logs: the service writes {}",
             dir.join("fips.log").display()
         );
+        Ok(())
+    }
+
+    /// Point an existing service registration at this executable.
+    ///
+    /// A registration made from another folder, by hand or by an older
+    /// install, would otherwise keep starting that folder's binary. The
+    /// binary path, arguments, display name, type and error control are
+    /// rewritten; the start type is kept, so a service the operator set to
+    /// manual start stays manual, and the account is left as it is.
+    fn repoint_service(
+        service: &Service,
+        mut info: ServiceInfo,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let before = service.query_config()?;
+        info.start_type = before.start_type;
+        service
+            .change_config(&info)
+            .map_err(|e| format!("Failed to update the existing service: {}", e))?;
+        let after = service.query_config()?;
+        if before.executable_path != after.executable_path {
+            println!("  Binary path was: {}", before.executable_path.display());
+            println!("  Binary path now: {}", after.executable_path.display());
+        }
         Ok(())
     }
 

@@ -333,15 +333,20 @@ peer had sent it, reaching any listener on this node under any peer identity
 the caller names. Leave it off outside a test harness; a packaged node does
 not enable it.
 
-**A remote peer can fill the node's flow ceiling through a server that
-refuses flows by dropping them.** Until a program first sends on a flow it
-accepted, the daemon keeps its own copy of that flow's descriptor, so a flow
-accepted and dropped unanswered keeps its slot against the node-wide
-`node.native_api.max_flows` until its listener is dropped. A peer that opens
-flows to such a listener from many source ports can therefore exhaust the
-ceiling, and every other program on the node then gets `EMFILE` on `connect`
-and silently loses arrivals on its listeners. This is the accepted cost of
-keeping a flow alive while its descriptor is on the way to the program; see
+**A remote peer holding sessions under several keys can fill the node's flow
+ceiling through a server that refuses flows by dropping them.** Until a
+program first sends on a flow it accepted, the daemon keeps its own copy of
+that flow's descriptor, so a flow accepted and dropped unanswered keeps its
+slot against the node-wide `node.native_api.max_flows` until its listener is
+dropped. One key's inbound flows, pending and accepted, are held to a quarter
+of `max_flows`; an arrival past that share is dropped as
+`peer flow limit reached` and counted in `drop_peer_share`. A single peer
+opening flows from many source ports therefore stops at its share, but a peer
+with sessions under four or more keys can still exhaust the ceiling, and
+every other program on the node then gets `EMFILE` on `connect` and silently
+loses arrivals on its listeners. The flows that make up a share stay pinned
+until the listener is dropped. This is the accepted cost of keeping a flow
+alive while its descriptor is on the way to the program; see
 [../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md)
 for what releases the daemon's copy.
 

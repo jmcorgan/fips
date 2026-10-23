@@ -160,6 +160,8 @@ pub enum DropReason {
     BacklogFull,
     /// The node is at its flow ceiling.
     TooManyFlows,
+    /// The peer already holds its share of the node's inbound flows.
+    PeerShare,
     /// A flow awaiting accept will hold no more datagrams.
     PendingQueueFull,
     /// An established flow's client is not draining its descriptor.
@@ -186,6 +188,7 @@ impl From<DropCause> for DropReason {
             DropCause::BacklogFull => DropReason::BacklogFull,
             DropCause::TooManyFlows => DropReason::TooManyFlows,
             DropCause::QueueFull => DropReason::PendingQueueFull,
+            DropCause::PeerShare => DropReason::PeerShare,
         }
     }
 }
@@ -202,6 +205,7 @@ impl DropReason {
             DropReason::NoPort => "no listener or flow on that port",
             DropReason::BacklogFull => "listener backlog full",
             DropReason::TooManyFlows => "node flow ceiling reached",
+            DropReason::PeerShare => "peer flow limit reached",
             DropReason::PendingQueueFull | DropReason::FlowQueueFull => "queue full",
             DropReason::ArrivalQueueFull => "arrival queue full",
             DropReason::ListenerNotReading => "listener not reading arrivals",

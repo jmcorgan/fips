@@ -765,7 +765,11 @@ half is not in play.
   `.fips` and route to the pool CIDR can reach mesh destinations.
   There is no per-client authentication; access restriction is a
   network-level concern, enforced with firewall rules on the LAN
-  interface or on the gateway host itself. Only traffic arriving on
+  interface or on the gateway host itself. The DNS listener does not
+  answer queries that arrive on `fips0`, so a wildcard listen does not
+  open the pool or the host map to the mesh; a local resolver that
+  forwards `.fips` to the gateway's `fips0` address is refused the same
+  way. Only traffic arriving on
   `lan_interface`, and the gateway host's own, is translated onto the
   mesh. Traffic into `fips0` from any other interface (a WAN port, a
   VPN interface, a container or VM bridge on the gateway host) is

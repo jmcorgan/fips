@@ -10,6 +10,7 @@
       "drop_listener_not_reading": 0,
       "drop_no_port": 0,
       "drop_oversize": 0,
+      "drop_peer_share": 0,
       "drop_pending_queue_full": 0,
       "drop_too_many_flows": 0,
       "flows_accepted": 0,

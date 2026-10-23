@@ -913,11 +913,15 @@ pub struct Node {
     last_mesh_size_log: Option<std::time::Instant>,
 
     // === Bloom Self-Plausibility ===
-    /// Rate-limit state for the self-plausibility WARN. Fires at most
-    /// once per 60s globally when our own outgoing FilterAnnounce has
-    /// an FPR above `node.bloom.max_inbound_fpr`, signalling either
-    /// aggregation drift or an ingress bypass.
+    /// Rate-limit state for the held-filter WARN. Fires at most once per
+    /// 60s globally when an outgoing FilterAnnounce is held because its
+    /// FPR is above the v1 acceptance cap.
     last_self_warn: Option<std::time::Instant>,
+
+    // === FilterAnnounce sequence ===
+    /// Random offset and start instant from which a new peer's first
+    /// FilterAnnounce sequence is derived (`seq_floor`).
+    seq_origin: (u64, std::time::Instant),
 
     // === Display Names ===
     /// Human-readable names for configured peers (alias or short npub).
@@ -1174,6 +1178,7 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             last_self_warn: None,
+            seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
@@ -1357,6 +1362,7 @@ impl Node {
             estimated_mesh_size: None,
             last_mesh_size_log: None,
             last_self_warn: None,
+            seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
@@ -3703,12 +3709,14 @@ impl Node {
         prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
         self.identity_cache
             .insert(prefix, (node_addr, pubkey, Self::now_ms()));
-        // LRU eviction
+        // LRU eviction, never of the entry just registered: stamps are in
+        // milliseconds, so it can tie with the oldest.
         let max = self.config().node.cache.identity_size;
         if self.identity_cache.len() > max
             && let Some(oldest_key) = self
                 .identity_cache
                 .iter()
+                .filter(|(key, _)| **key != prefix)
                 .min_by_key(|(_, (_, _, ts))| *ts)
                 .map(|(k, _)| *k)
         {
@@ -3717,16 +3725,30 @@ impl Node {
     }
 
     /// Look up a destination by Ipv6Address prefix (bytes 1-15 of the IPv6 address).
+    ///
+    /// The store is bounded and evicts by age without regard to the session
+    /// table, so a live session peer's entry can age out while its traffic is
+    /// still arriving. On a miss, an established session whose address carries
+    /// the prefix answers instead, with the key its handshake proved, and its
+    /// entry is registered again so the next lookup hits the store.
     pub(crate) fn lookup_by_fips_prefix(
         &mut self,
         prefix: &[u8; 15],
     ) -> Option<(NodeAddr, secp256k1::PublicKey)> {
         if let Some(entry) = self.identity_cache.get_mut(prefix) {
             entry.2 = Self::now_ms(); // LRU touch
-            Some((entry.0, entry.1))
-        } else {
-            None
+            return Some((entry.0, entry.1));
         }
+        let (addr, pubkey) = self.sessions.iter().find_map(|(addr, entry)| {
+            if addr.as_bytes()[0..15] != prefix[..] {
+                return None;
+            }
+            entry
+                .peer_key()
+                .map(|key| (*addr, key.public_key(secp256k1::Parity::Even)))
+        })?;
+        self.register_identity(addr, pubkey);
+        Some((addr, pubkey))
     }
 
     /// Check if a node's identity is in the cache (without LRU touch).

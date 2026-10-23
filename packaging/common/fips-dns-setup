@@ -19,12 +19,16 @@
 #   4. dnsmasq (standalone)
 #   5. NetworkManager with dnsmasq plugin
 #   6. Warning with manual instructions
-
-set -e
+#
+# Only the resolvectl backend uses the TUN interface. Its name is the daemon's
+# tun.name, read from the daemon's config (FIPS_CONFIG), and fips0 when the
+# config does not set one, as in the daemon.
 
 FIPS_DNS_PORT="5354"
 FIPS_DNS_LOOPBACK_V6="::1"
-FIPS_INTERFACE="fips0"
+FIPS_CONFIG="${FIPS_CONFIG:-/etc/fips/fips.yaml}"
+FIPS_DEFAULT_INTERFACE="fips0"
+FIPS_INTERFACE="$FIPS_DEFAULT_INTERFACE"
 
 DNS_DELEGATE_DIR="/etc/systemd/dns-delegate.d"
 DNS_DELEGATE_FILE="${DNS_DELEGATE_DIR}/fips.dns-delegate"
@@ -39,12 +43,51 @@ STATE_FILE="${STATE_DIR}/dns-backend"
 
 log() { echo "fips-dns: $*"; }
 
+# Record the backend on the state file's first line, and for a backend that
+# configured an interface, that interface on the second.
 save_backend() {
     mkdir -p "$STATE_DIR"
-    echo "$1" > "$STATE_FILE"
+    printf '%s\n' "$@" > "$STATE_FILE"
 }
 
-# Wait for fips0 interface (up to 30s).
+# Print the TUN interface name the daemon uses: `name:` directly under the
+# top-level `tun:` block of FIPS_CONFIG, unquoted and without a trailing
+# comment, or fips0 when the file, the block or the key is absent. This reads
+# the block layout the shipped config uses; it is not a YAML parser, and a
+# layout it does not read (flow style, anchors) gives fips0.
+tun_name() {
+    local name=""
+    if [ -r "$FIPS_CONFIG" ]; then
+        name=$(awk -v sq="'" '
+            function value(v,   q, end) {
+                sub(/^[ \t]+/, "", v)
+                q = substr(v, 1, 1)
+                if (q == "\"" || q == sq) {
+                    end = index(substr(v, 2), q)
+                    return end ? substr(v, 2, end - 1) : ""
+                }
+                sub(/[ \t]+#.*$/, "", v)
+                sub(/[ \t\r]+$/, "", v)
+                return v
+            }
+            /^[ \t]*(#.*)?\r?$/ { next }
+            /^[^ \t]/ { in_tun = ($0 ~ /^tun:[ \t]*(#.*)?\r?$/); indent = -1; next }
+            in_tun {
+                match($0, /^[ \t]*/)
+                if (indent < 0) indent = RLENGTH
+                if (RLENGTH == indent && $0 ~ /^[ \t]*name:/) {
+                    v = $0
+                    sub(/^[ \t]*name:/, "", v)
+                    print value(v)
+                    exit
+                }
+            }
+        ' "$FIPS_CONFIG" 2>/dev/null) || name=""
+    fi
+    echo "${name:-$FIPS_DEFAULT_INTERFACE}"
+}
+
+# Wait for the TUN interface (up to 30s).
 wait_for_interface() {
     for i in $(seq 1 30); do
         ip link show "$FIPS_INTERFACE" >/dev/null 2>&1 && return 0
@@ -54,7 +97,7 @@ wait_for_interface() {
     return 1
 }
 
-# Wait for fips0 to have a global IPv6 address assigned (up to 30s).
+# Wait for the TUN interface to have a global IPv6 address assigned (up to 30s).
 # Returns the address on stdout, or empty string if timeout.
 wait_for_fips_addr() {
     for i in $(seq 1 30); do
@@ -154,6 +197,7 @@ EOF
 try_resolvectl() {
     command -v resolvectl >/dev/null 2>&1 || return 1
     is_active systemd-resolved.service || return 1
+    wait_for_interface || return 1
 
     local fips_addr
     fips_addr=$(wait_for_fips_addr)
@@ -165,7 +209,7 @@ try_resolvectl() {
     log "Configuring via resolvectl (DNS=[${fips_addr}]:${FIPS_DNS_PORT})"
     resolvectl dns "$FIPS_INTERFACE" "[${fips_addr}]:${FIPS_DNS_PORT}"
     resolvectl domain "$FIPS_INTERFACE" "~fips"
-    save_backend "resolvectl"
+    save_backend "resolvectl" "$FIPS_INTERFACE"
     return 0
 }
 
@@ -215,20 +259,29 @@ EOF
 
 # --- Main ---
 
-wait_for_interface || exit 1
+main() {
+    FIPS_INTERFACE=$(tun_name)
 
-try_dns_delegate && exit 0
-try_global_drop_in && exit 0
-try_resolvectl && exit 0
-try_dnsmasq && exit 0
-try_nm_dnsmasq && exit 0
+    try_dns_delegate && exit 0
+    try_global_drop_in && exit 0
+    try_resolvectl && exit 0
+    try_dnsmasq && exit 0
+    try_nm_dnsmasq && exit 0
 
-log "WARNING: No supported DNS resolver detected."
-log "To resolve .fips domains, configure your DNS resolver to forward"
-log "the .fips domain to [${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT} (matches the daemon's default bind)."
-log ""
-log "Examples:"
-log "  systemd-resolved: install it if needed (a separate package on some distributions), run 'sudo systemctl enable --now systemd-resolved', then 'sudo systemctl restart fips-dns.service'"
-log "  dnsmasq:          echo 'server=/fips/${FIPS_DNS_LOOPBACK_V6}#${FIPS_DNS_PORT}' | sudo tee /etc/dnsmasq.d/fips.conf"
-save_backend "none"
-exit 0
+    log "WARNING: No supported DNS resolver detected."
+    log "To resolve .fips domains, configure your DNS resolver to forward"
+    log "the .fips domain to [${FIPS_DNS_LOOPBACK_V6}]:${FIPS_DNS_PORT} (matches the daemon's default bind)."
+    log ""
+    log "Examples:"
+    log "  systemd-resolved: install it if needed (a separate package on some distributions), run 'sudo systemctl enable --now systemd-resolved', then 'sudo systemctl restart fips-dns.service'"
+    log "  dnsmasq:          echo 'server=/fips/${FIPS_DNS_LOOPBACK_V6}#${FIPS_DNS_PORT}' | sudo tee /etc/dnsmasq.d/fips.conf"
+    save_backend "none"
+    exit 0
+}
+
+# Sourced (by testing/dns-resolver/tun-name-test.sh), only the functions are
+# defined.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    set -e
+    main
+fi
