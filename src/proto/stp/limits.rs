@@ -6,9 +6,9 @@
 //! - **Hold-down**: after a parent switch, non-mandatory re-evaluation is
 //!   suppressed for a configurable window (`0` = disabled). Mandatory
 //!   switches (parent lost, smaller root found) bypass it.
-//! - **Flap dampening**: if more than `flap_threshold` switches occur within
-//!   `flap_window`, further non-mandatory switches are suppressed for
-//!   `flap_dampening_duration`.
+//! - **Flap dampening**: if switches reach `flap_threshold` within a fixed
+//!   `flap_window` opened by the first switch, further non-mandatory
+//!   switches are suppressed for `flap_dampening_duration`.
 //!
 //! The monotonic clock is injected: every timing method takes a `now_ms: u64`
 //! (monotonic milliseconds, read by the shell from `crate::time::mono_ms`), and
@@ -39,11 +39,12 @@ pub(crate) struct FlapDampener {
     flap_window_start: Option<u64>,
     /// If dampened, suppressed until this monotonic ms.
     flap_dampening_until: Option<u64>,
-    /// Flap threshold: max switches before dampening engages.
+    /// Flap threshold: the switch count within one window at which
+    /// dampening engages.
     flap_threshold: u32,
     /// Flap window duration, in ms.
     flap_window: u64,
-    /// Dampening duration when threshold exceeded, in ms.
+    /// Dampening duration once the threshold is reached, in ms.
     flap_dampening_duration: u64,
 }
 

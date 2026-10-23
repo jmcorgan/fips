@@ -11,7 +11,8 @@ use super::runtime::{
 };
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
-    estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
+    estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
+    validate_traversal_answer_for_offer,
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
 #[cfg(target_os = "linux")]
@@ -428,6 +429,95 @@ fn validates_offer_answer_pair() {
             "npub1client",
         )
         .is_ok()
+    );
+}
+
+/// An answer's `inReplyTo` names the offer's `nonce`, not the offer's event
+/// id. `validates_offer_answer_pair` is the control: the same pair with the
+/// nonce is accepted.
+#[test]
+fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_refused_as_a_session_mismatch()
+ {
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000,
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        Some(addr("203.0.113.10", 62000)),
+        vec![addr("192.168.1.10", 62000)],
+        Some("stun:example.org:3478".to_string()),
+    );
+    let offer_event_id = "ab".repeat(32);
+    let answer = create_traversal_answer(
+        "sess-1".to_string(),
+        1_700_000_000_500,
+        60_000,
+        "answer-1".to_string(),
+        "npub1server".to_string(),
+        "npub1client".to_string(),
+        offer_event_id,
+        true,
+        Some(addr("198.51.100.20", 63000)),
+        vec![addr("192.168.1.20", 63000)],
+        Some("stun:example.org:3478".to_string()),
+        Some(PunchHint {
+            start_at_ms: 1_700_000_002_000,
+            interval_ms: 200,
+            duration_ms: 10_000,
+        }),
+        None,
+        Some(1_700_000_000_400),
+    );
+
+    match validate_traversal_answer_for_offer(
+        &offer,
+        &answer,
+        1_700_000_000_900,
+        60_000,
+        "npub1server",
+        "npub1client",
+    ) {
+        Err(BootstrapError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
+        other => panic!("expected a session-mismatch refusal, got {other:?}"),
+    }
+}
+
+/// The kind 21059 wrap is signed by a one-time key, so relays do not see the
+/// sender; the seal inside it is signed by the sender's identity key, which
+/// the receiver recovers on unwrapping.
+#[tokio::test]
+async fn the_signal_wrap_is_signed_by_a_one_time_key_and_the_seal_by_the_identity_key() {
+    let identity = nostr::Keys::generate();
+    let receiver = nostr::Keys::generate();
+    let rumor = EventBuilder::private_msg_rumor(receiver.public_key(), "hello".to_string())
+        .build(identity.public_key());
+
+    let event = build_signal_event(
+        &identity,
+        receiver.public_key(),
+        rumor,
+        Timestamp::from(Timestamp::now().as_secs() + 30),
+    )
+    .await
+    .expect("signal event should build");
+
+    assert_ne!(
+        event.pubkey,
+        identity.public_key(),
+        "the wrap must not be signed by the identity key"
+    );
+    assert_ne!(event.pubkey, receiver.public_key());
+    event.verify().expect("the wrap carries a valid signature");
+
+    let unwrapped = unwrap_signal_event(&receiver, &event)
+        .await
+        .expect("the receiver can unwrap the signal");
+    assert_eq!(
+        unwrapped.sender,
+        identity.public_key(),
+        "the seal must be signed by the identity key"
     );
 }
 

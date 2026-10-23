@@ -204,12 +204,17 @@ virtual IP. At startup it reads conntrack once, the same way each
 - `Conntrack source: netlink; session pinning is on`: the proc file
   is absent, and sessions are read by dumping the conntrack table over
   netlink, as `conntrack -L` does. The dump needs `CAP_NET_ADMIN`.
-- `No conntrack source is readable; session pinning is off`: no
-  source could be read, and the line carries the error from each
-  source it tried. Every mapping then reads zero sessions, so a
-  mapping is reclaimed on its TTL and grace period alone, even while a
-  client that has not re-queried DNS still has traffic flowing through
-  it.
+- `No conntrack source is readable; session pinning is off, and no
+  mapping counts as carrying traffic until reads succeed`: no source
+  could be read, and the line carries the error from each source it
+  tried. No mapping then counts as having carried traffic, so
+  a re-query does not extend a name: each name expires its TTL and
+  grace period after it was first answered, even while a client still
+  has traffic flowing through it. When the pool is at its ceiling, a
+  new name can replace any mapping. Once conntrack reads succeed for
+  three ticks in a row (logged as `Conntrack evidence restored`),
+  mappings created after that count traffic again; ones created
+  before do not.
 
 The proc file exists only on a kernel built with
 `CONFIG_NF_CONNTRACK_PROCFS`, and only once `nf_conntrack` is loaded.

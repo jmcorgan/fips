@@ -38,10 +38,10 @@ A higher-level summary that includes typical sizes and forwarding category:
 | LookupResponse | ~400 bytes | Response to discovery | Yes (reverse-path) |
 | SessionDatagram + SessionSetup | ~232–402 bytes | Session establishment | Yes (routed) |
 | SessionDatagram + SessionAck | ~170 bytes | Session confirmation | Yes (routed) |
-| SessionDatagram + Data (minimal) | 77 bytes + IPv6 payload | Bulk IPv6 traffic (compressed) | Yes (routed) |
-| SessionDatagram + Data (with CP) | 77 + coords + IPv6 payload | Warmup/recovery (compressed) | Yes (routed) |
-| SessionDatagram + CoordsRequired | 70 bytes | Cache miss error | Yes (routed) |
-| SessionDatagram + PathBroken | 70+ bytes | Dead-end error | Yes (routed) |
+| SessionDatagram + Data (minimal) | 77 bytes + IPv6 payload (with link overhead) | Bulk IPv6 traffic (compressed) | Yes (routed) |
+| SessionDatagram + Data (with CP) | 77 + coords + IPv6 payload (with link overhead) | Warmup/recovery (compressed) | Yes (routed) |
+| SessionDatagram + CoordsRequired | 74 bytes (110 with link overhead) | Cache miss error | Yes (routed) |
+| SessionDatagram + PathBroken | 76 + 16n bytes (112 + 16n with link overhead) | Dead-end error | Yes (routed) |
 | Disconnect | 2 bytes | Link teardown | No (peer-to-peer) |
 
 ## Encoding Rules
@@ -202,7 +202,10 @@ Common prefix: ver=0, phase=0x2, flags=0, payload_len=65 (4 + 4 + 57).
 | 0 | ephemeral_pubkey | 33 bytes | Responder's ephemeral key (compressed secp256k1) |
 | 33 | encrypted_epoch | 24 bytes | Startup epoch (8) + AEAD tag (16) |
 
-Noise pattern: `<- e, ee, se` with epoch payload
+Noise pattern: `<- e, ee` plus a second mix of the msg1 `es` value
+(responder static with initiator ephemeral), with epoch payload. The
+second DH is not Noise IK's `se`: the initiator's static key enters the
+keys only through `ss`. This is the FMP v1 wire format.
 
 After msg2, both parties derive identical symmetric session keys. The
 encrypted epoch in msg1 and msg2 enables peer restart detection — if a
@@ -239,12 +242,12 @@ Spanning tree state announcement, exchanged between direct peers only.
 | ------ | ----- | ---- | ----------- |
 | 0 | msg_type | 1 byte | 0x10 |
 | 1 | version | 1 byte | 0x01 (v1) |
-| 2 | sequence | 8 bytes LE | Monotonic counter, increments on parent change |
+| 2 | sequence | 8 bytes LE | Monotonic counter, increments on parent switch, on becoming root, and on an ancestry change under the same parent |
 | 10 | timestamp | 8 bytes LE | Unix seconds |
 | 18 | parent | 16 bytes | NodeAddr of selected parent (self = root) |
 | 34 | ancestry_count | 2 bytes LE | Number of AncestryEntry records |
 | 36 | ancestry | 32 x n bytes | AncestryEntry array (self -> root) |
-| 36 + 32n | signature | 64 bytes | Schnorr signature over entire message |
+| 36 + 32n | signature | 64 bytes | Schnorr signature over SHA-256 of the 48-byte declaration (node_addr, parent, sequence, timestamp); version and ancestry are not signed |
 
 **AncestryEntry** (32 bytes):
 
@@ -261,10 +264,13 @@ includes self)
 
 | Tree Depth | Payload | With Link Overhead |
 | ---------- | ------- | ------------------ |
-| 0 (root) | 132 bytes | 169 bytes |
-| 3 | 228 bytes | 265 bytes |
-| 5 | 292 bytes | 329 bytes |
-| 10 | 452 bytes | 489 bytes |
+| 0 (root) | 132 bytes | 168 bytes |
+| 3 | 228 bytes | 264 bytes |
+| 5 | 292 bytes | 328 bytes |
+| 10 | 452 bytes | 488 bytes |
+
+Link overhead is 36 bytes (16 header, 4 timestamp, 16 tag); the payload
+already counts `msg_type`.
 
 ### FilterAnnounce (0x20)
 
@@ -290,7 +296,7 @@ Bloom filter reachability update, exchanged between direct peers only.
 | 3 | 4,096 | 32,768 | Reserved |
 
 **v1 payload**: 1,035 bytes (11 header + 1,024 filter).
-With link overhead: 1,072 bytes.
+With link overhead: 1,071 bytes (16 header + 4 timestamp + 16 tag).
 
 ### LookupRequest (0x30)
 
@@ -730,7 +736,7 @@ CP-flagged message: `src_coords_count(2) + src_coords(16×n) +
 dest_coords_count(2) + dest_coords(16×m)`.
 
 **Typical size** (depth-3 tree): 12 + (2+64+2+64) + 22 = **166 bytes** FSP
-payload. With SessionDatagram + link overhead: 166 + 36 + 37 = **239 bytes**
+payload. With SessionDatagram + link overhead: 166 + 35 + 37 = **238 bytes**
 on the wire.
 
 ### CoordsRequired (0x20)
@@ -913,7 +919,7 @@ endpoint session keys).
 | PathMtuNotification | 12 + 6 + 2 + 16 bytes | MTU signal |
 | CoordsWarmup | 12 + coords + 6 + 16 bytes | Standalone warmup (empty body) |
 | CoordsRequired | 38 bytes | Fixed (prefix + msg_type + body) |
-| PathBroken | 35 + 16n bytes | Includes stale coords |
+| PathBroken | 40 + 16n bytes | Includes stale coords |
 | MtuExceeded | 40 bytes | Fixed (prefix + msg_type + body) |
 
 ### Complete Packet Sizes (link + session)
@@ -925,7 +931,7 @@ endpoint session keys).
 | SessionDatagram + IPv6 Data (minimal) | 110 + 7 + upper_payload − 34 | 77 + IPv6 payload (compressed) |
 | SessionDatagram + Data (with coords) | 110 + coords + payload | Coords vary with tree depth |
 | SessionDatagram + SessionSetup | ~275 bytes | Depth-3, both dirs |
-| SessionDatagram + CoordsRequired | 37 + 36 + 38 = 111 bytes | Including link overhead |
+| SessionDatagram + CoordsRequired | 37 + 35 + 38 = 110 bytes | Including link overhead |
 
 ## References
 

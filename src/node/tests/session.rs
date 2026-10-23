@@ -3110,6 +3110,65 @@ async fn test_tun_outbound_unknown_destination() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// Pins what `Node::enable_app_owned_tun` documents for an embedder: a packet
+/// pushed to an off-mesh destination is not filtered out, but answered with
+/// ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the node's
+/// own mesh address, and a multicast destination gets no answer.
+///
+/// It calls `handle_tun_outbound` directly, so it pins the handler and not the
+/// `run_rx_loop` hop that carries `app_outbound_tx` to it.
+#[tokio::test]
+async fn an_app_owned_tun_answers_an_off_mesh_unicast_destination_with_destination_unreachable_on_app_inbound_rx()
+ {
+    let mut node = make_node();
+    let (_app_outbound_tx, app_inbound_rx) = node.enable_app_owned_tun();
+    let our_fips = crate::FipsAddress::from_node_addr(node.node_addr());
+
+    let mut packet = vec![0u8; 48];
+    packet[0] = 0x60;
+    packet[5] = 8; // payload length
+    packet[6] = 59; // No Next Header
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(our_fips.as_bytes());
+    let off_mesh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    packet[24..40].copy_from_slice(&off_mesh.octets());
+    assert_ne!(packet[24], crate::identity::FIPS_ADDRESS_PREFIX);
+
+    node.handle_tun_outbound(packet).await;
+
+    let delivered: Vec<Vec<u8>> = std::iter::from_fn(|| app_inbound_rx.try_recv().ok()).collect();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "an off-mesh destination must be answered on app_inbound_rx, not dropped"
+    );
+    let reply = &delivered[0];
+    assert!(reply.len() >= 48, "ICMPv6 reply too short");
+    assert_eq!(reply[6], 58, "next header must be ICMPv6");
+    assert_eq!(reply[40], 1, "ICMPv6 type must be Destination Unreachable");
+    assert_eq!(reply[41], 0, "ICMPv6 code must be No Route");
+    assert_eq!(
+        &reply[8..24],
+        our_fips.as_bytes(),
+        "the reply must come from the node's own mesh address"
+    );
+
+    let mut multicast = vec![0u8; 40];
+    multicast[0] = 0x60;
+    multicast[6] = 59;
+    multicast[7] = 64;
+    multicast[8..24].copy_from_slice(our_fips.as_bytes());
+    let all_nodes: std::net::Ipv6Addr = "ff02::1".parse().unwrap();
+    multicast[24..40].copy_from_slice(&all_nodes.octets());
+
+    node.handle_tun_outbound(multicast).await;
+
+    assert!(
+        app_inbound_rx.try_recv().is_err(),
+        "a multicast destination must get no ICMPv6 answer"
+    );
+}
+
 #[tokio::test]
 async fn test_tun_outbound_3node_forwarded() {
     // A—B—C: TUN packet from A destined for C, forwarded through B

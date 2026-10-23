@@ -15,8 +15,11 @@ FIPS uses three Nostr event kinds:
 | 21059 | Traversal signaling | NIP-44 inside NIP-59 gift wrap | Ephemeral | Carry `TraversalOffer`/`TraversalAnswer` payloads |
 | 10050 | NIP-17 inbox relay list | None (signed only) | Replaceable | Tell dialers where to publish offers |
 
-All three are signed with the node's FIPS identity key (the same
-secp256k1 keypair Nostr uses); there is no separate Nostr key.
+Kinds 37195 and 10050 are signed with the node's FIPS identity key
+(the same secp256k1 keypair Nostr uses); there is no separate Nostr
+key. A kind 21059 event carries a seal signed with that key inside a
+wrap signed by a one-time key, so relays do not see the sender (see
+[Encryption envelope](#encryption-envelope)).
 
 ## Kind 37195 — Overlay Advert
 
@@ -76,10 +79,14 @@ identity.
 
 ### Replacement and deletion
 
-Because kind 37195 is replaceable, publishing a new advert replaces
-the prior one in the same `(pubkey, d-tag)` slot. To withdraw an
-advert without publishing a successor, the node publishes a NIP-9
-kind 5 delete event referencing the prior advert.
+Because kind 37195 is replaceable, a new advert replaces the prior
+one in the same `(pubkey, d-tag)` slot. The node sends no NIP-09 deletion
+for its advert. An advert it stops publishing (advertising turned off
+at a restart, no publicly usable endpoint left, or shutdown) stays on
+relays until its NIP-40 expiration, `advert_ttl_secs` after it was
+published, unless a newer advert replaces it first. A deletion is not
+sent because, on relays that apply it strictly, it can also remove
+the replacement the next start publishes.
 
 ## Kind 21059 — Traversal Signaling
 
@@ -125,15 +132,19 @@ The `TraversalAnswer` echoes `sessionId` and carries:
 
 - `type`, `senderNpub`, `recipientNpub`, `issuedAt`, `expiresAt`,
   `nonce` — same shape as the offer.
-- `inReplyTo` — the offer's event id.
+- `inReplyTo` — the offer's `nonce`; an answer naming anything else
+  is refused.
 - `accepted` — boolean; false when the responder has no usable
   addresses.
 - `reflexiveAddress` and `localAddresses` — the responder's
   candidates, in the same shape as the offer.
 - `stunServer` — informational.
-- `punch` — a `PunchHint { startAtMs, intervalMs, durationMs }`
-  telling both sides when to begin probing and how aggressively.
-  Absent on rejected offers.
+- `punch` — a `PunchHint { startAtMs, intervalMs, durationMs }`: the
+  responder's own probing schedule, which the responder probes on. The
+  initiator does not read the hint; it starts its own probing when the
+  answer arrives, on its local `punch_start_delay_ms`,
+  `punch_interval_ms` and `punch_duration_ms`. Absent on rejected
+  offers.
 - `reason` — optional rejection string when `accepted` is false.
 - `offerReceivedAt` — optional responder wall-clock (Unix ms) at
   the moment it received the offer; the initiator uses this to

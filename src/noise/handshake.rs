@@ -561,11 +561,18 @@ impl HandshakeState {
         ee.zeroize();
         sk.non_secure_erase();
 
-        // <- se: DH(s, re), mix into key
+        // <- es again: DH(s, re), mix into key
+        // This pairs the same keys as msg1's es (responder static, initiator
+        // ephemeral), so it mixes the msg1 es value a second time. It is not
+        // Noise IK's se, DH(initiator static, responder ephemeral), which
+        // nothing here computes; the initiator's static key enters the keys
+        // only through ss. This is the FMP v1 wire format: changing it breaks
+        // every v1 peer. It leaves FMP v1 open to key compromise
+        // impersonation (FRC-1201 Section 9.3).
         let mut sk = self.static_keypair.secret_key();
-        let mut se = self.ecdh(&sk, &re);
-        self.symmetric.mix_key(&se);
-        se.zeroize();
+        let mut es2 = self.ecdh(&sk, &re);
+        self.symmetric.mix_key(&es2);
+        es2.zeroize();
         sk.non_secure_erase();
 
         // <- epoch: encrypt startup epoch for restart detection
@@ -615,13 +622,16 @@ impl HandshakeState {
         ee.zeroize();
         sk.non_secure_erase();
 
-        // <- se: DH(e, rs), mix into key
-        // (initiator uses their ephemeral with responder's static)
+        // <- es again: DH(e, rs), mix into key
+        // The initiator's ephemeral with the responder's static is msg1's es
+        // pairing, so this mixes the msg1 es value a second time. It is not
+        // Noise IK's se; see write_message_2 for why the FMP v1 wire format
+        // keeps it.
         let rs = self.remote_static.expect("initiator has remote static");
         let mut sk = ephemeral.secret_key();
-        let mut se = self.ecdh(&sk, &rs);
-        self.symmetric.mix_key(&se);
-        se.zeroize();
+        let mut es2 = self.ecdh(&sk, &rs);
+        self.symmetric.mix_key(&es2);
+        es2.zeroize();
         sk.non_secure_erase();
 
         // <- epoch: decrypt responder's startup epoch
@@ -813,7 +823,7 @@ impl HandshakeState {
         ee.zeroize();
         sk.non_secure_erase();
 
-        // <- epoch: encrypt startup epoch for restart detection
+        // <- epoch: encrypt startup epoch (FSP carries it but does not act on it)
         let encrypted_epoch = self.symmetric.encrypt_and_hash(&epoch)?;
         debug_assert_eq!(encrypted_epoch.len(), EPOCH_ENCRYPTED_SIZE);
         message.extend_from_slice(&encrypted_epoch);
@@ -951,7 +961,7 @@ impl HandshakeState {
         se.zeroize();
         sk.non_secure_erase();
 
-        // -> epoch: encrypt startup epoch for restart detection
+        // -> epoch: encrypt startup epoch (FSP carries it but does not act on it)
         let encrypted_epoch = self.symmetric.encrypt_and_hash(&epoch)?;
         debug_assert_eq!(encrypted_epoch.len(), EPOCH_ENCRYPTED_SIZE);
         message.extend_from_slice(&encrypted_epoch);

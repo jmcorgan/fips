@@ -16,7 +16,8 @@
 //! ```text
 //!   <- s                    (pre-message: responder's static known)
 //!   -> e, es, s, ss         (msg1: ephemeral + encrypted static)
-//!   <- e, ee, se            (msg2: ephemeral)
+//!   <- e, ee, es            (msg2: ephemeral; the second DH repeats msg1's es,
+//!                            not Noise's se)
 //! ```
 //!
 //! ## XK Handshake Pattern (Session Layer)

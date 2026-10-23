@@ -107,7 +107,9 @@ The IK pattern is chosen because:
   then responds with their own ephemeral key
 
 After the two-message handshake completes, both parties share symmetric
-session keys derived from four DH operations (es, ss, ee, se). The handshake
+session keys derived from four DH mixes (es, ss, ee, and es again). msg2's
+second DH repeats msg1's `es` pairing rather than computing Noise IK's `se`,
+so the initiator's static key enters the keys only through `ss`. The handshake
 provides mutual authentication, forward secrecy, and identity hiding for the
 initiator.
 
@@ -453,7 +455,8 @@ When no traffic (of any kind) is received from a peer for the
 configured `node.link_dead_timeout_secs` window, the peer is declared dead and
 removed via `remove_active_peer()`. This triggers the full teardown cascade:
 spanning tree parent reselection (if the dead peer was the parent),
-TreeAnnounce propagation, coordinate cache flush, and bloom filter recompute.
+TreeAnnounce propagation, selective coordinate cache invalidation, and bloom
+filter recompute.
 
 If the dead peer is eligible for auto-reconnect (see [Auto-Reconnect]
 (#auto-reconnect)), reconnection is scheduled immediately after removal.

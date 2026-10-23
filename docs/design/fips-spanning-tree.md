@@ -34,7 +34,10 @@ ancestry path from itself to the root. These coordinates enable:
 - Distance calculation between any two nodes without global topology
   knowledge
 - Greedy routing where each hop reduces distance to the destination
-- Loop-free forwarding guaranteed by strictly-decreasing distance
+- Strict-progress forwarding: each hop forwards only to a peer closer to
+  the destination by its own view of the destination's coordinates (when
+  hops hold different coordinates this does not rule out a loop; the TTL
+  bounds it)
 
 ## Root Discovery
 
@@ -107,9 +110,10 @@ immediate parent reselection:
   reason to switch parent or become root it re-broadcasts the unchanged
   declaration.
 - **Flap dampening** (`flap_threshold` / `flap_window_secs` /
-  `flap_dampening_secs`): If a node switches parents more than
-  `flap_threshold` times (default 4) within `flap_window_secs` (default
-  60s), an extended hold-down of `flap_dampening_secs` (default 120s) is
+  `flap_dampening_secs`): If a node's parent switches reach
+  `flap_threshold` (default 4) within a fixed window of
+  `flap_window_secs` (default 60s) opened by the first switch, an
+  extended hold-down of `flap_dampening_secs` (default 120s) is
   imposed. This reduces TreeAnnounce storms from link flapping without
   delaying legitimate reconvergence. Mandatory switches (parent loss,
   root change) bypass dampening.
@@ -129,8 +133,9 @@ When a node changes its parent:
 2. Recompute its coordinates from the new ancestry path
 3. Sign a new TreeAnnounce declaration
 4. Announce to all peers
-5. Flush the coordinate cache (cached coordinates are relative to the old
-   position and may be invalid for routing)
+5. Drop cached coordinates that route through this node (parent switch
+   or ancestry change) or sit under another root (becoming root); both on
+   parent loss or loop detection. Other cached entries are kept.
 
 ## Coordinate Computation
 
@@ -279,10 +284,11 @@ When two partitions rejoin:
 1. Nodes at the boundary exchange TreeAnnounce messages with new peers
 2. Both segments discover each other's root
 3. The globally-smaller root wins; the other segment's nodes switch parents
-4. Coordinate caches are flushed at switching nodes (stale cross-partition
-   coordinates)
-5. Bloom filters update within ~500ms per hop, restoring reachability
-   information
+4. Switching nodes drop cached coordinates that route through them or sit
+   under the losing root (stale cross-partition coordinates)
+5. Bloom filters update within about one `node.tick_interval_secs` per
+   hop (1 s at the default; the 500 ms debounce is a floor, the tick sets
+   the cadence), restoring reachability information
 
 ## Bounded State
 
@@ -313,8 +319,8 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | HOLD_DOWN_SECS | 30s | Suppress non-mandatory re-evaluation after parent switch |
 | REEVAL_INTERVAL_SECS | 60s | Periodic cost-based parent re-evaluation interval |
 | FLAP_THRESHOLD | 4 | Parent switches in window before dampening engages |
-| FLAP_WINDOW_SECS | 60s | Sliding window for counting parent switches |
-| FLAP_DAMPENING_SECS | 120s | Extended hold-down duration when flap threshold exceeded |
+| FLAP_WINDOW_SECS | 60s | Fixed window, opened by the first switch, for counting parent switches |
+| FLAP_DAMPENING_SECS | 120s | Extended hold-down duration once the flap threshold is reached |
 | ANNOUNCE_MIN_INTERVAL | 500ms | Minimum between announcements to same peer |
 
 ## Implementation Status
@@ -330,7 +336,7 @@ Example: In a 1000-node network with depth 10 and 5 peers, a node stores
 | Signature verification (outer) | **Implemented** |
 | Sequence-based freshness | **Implemented** |
 | Rate limiting (500ms per peer) | **Implemented** |
-| Coord cache flush on parent change | **Implemented** |
+| Selective coord cache invalidation on parent change | **Implemented** |
 | Flap dampening (extended hold-down on rapid switches) | **Implemented** |
 | Loop rejection (ancestry self-check in `evaluate_parent`) | **Implemented** |
 | Mid-chain ancestor swap propagation | **Implemented** |

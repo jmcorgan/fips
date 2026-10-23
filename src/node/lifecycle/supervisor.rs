@@ -716,7 +716,7 @@ pub(crate) struct Supervisor {
     /// adopted from NAT-traversal handoffs.
     pub(in crate::node) nostr_rendezvous: crate::nostr::RendezvousDriver,
     /// mDNS / DNS-SD responder + browser for local-link peer discovery.
-    /// Identity is unverified at this layer — the Noise XX handshake
+    /// Identity is unverified at this layer — the Noise IK handshake
     /// initiated against an mDNS-observed endpoint is what proves the
     /// peer holds the matching private key.
     pub(in crate::node) lan_rendezvous: Option<Arc<crate::mdns::LanRendezvous>>,

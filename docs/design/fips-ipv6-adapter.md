@@ -179,8 +179,8 @@ enforcement integration.
 For IPv6 traffic, FSP port multiplexing adds 4 bytes (port header)
 while IPv6 header compression saves 33 bytes (40-byte header →
 7-byte format + residual), yielding a net `FIPS_IPV6_OVERHEAD` of
-77 bytes on top of the base `FIPS_OVERHEAD` (106 bytes) protocol
-envelope. The full encapsulation breakdown lives in
+77 bytes, which includes the 106-byte `FIPS_OVERHEAD` protocol
+envelope: 106 + 4 + 7 - 40. The full encapsulation breakdown lives in
 [fips-mtu.md](fips-mtu.md#encapsulation-overhead).
 
 ### Effective IPv6 MTU
@@ -195,8 +195,8 @@ For typical deployments:
 
 | Transport MTU | Effective IPv6 MTU | Notes |
 | ------------- | ------------------ | ----- |
-| 1472 (UDP/Ethernet) | 1395 | Standard deployment |
-| 1280 (UDP minimum) | 1203 | Below IPv6 minimum |
+| 1280 | 1203 | UDP default (`transports.udp.mtu`); below the IPv6 minimum |
+| 1472 | 1395 | UDP set to `mtu: 1472`, e.g. over 1500-byte Ethernet |
 
 IPv6 mandates that every link support at least 1280 bytes. The minimum
 transport path MTU for the IPv6 adapter is therefore:
@@ -234,8 +234,10 @@ clamped_mss = effective_ipv6_mtu - 40 (IPv6 header) - 20 (TCP header)
 
 Clamping is applied in two places:
 
-- **TUN reader** (outbound): Clamps MSS on outbound SYN packets
-- **TUN writer** (inbound): Clamps MSS on inbound SYN-ACK packets
+- **TUN reader** (outbound): clamps MSS on outbound SYN-flagged
+  segments (a local initiator's SYN, a local listener's SYN-ACK)
+- **TUN writer** (inbound): clamps MSS on inbound SYN-flagged segments
+  (a remote initiator's SYN as well as the SYN-ACK answering a local one)
 
 Together, these ensure both directions of a TCP connection use
 appropriately sized segments from the start, avoiding the initial
@@ -246,10 +248,10 @@ fallback) and the rationale for `max_mss` semantics are in
 
 ### ICMP Rate Limiting
 
-ICMPv6 error generation is rate-limited per source address using a
-token bucket (100ms interval). This matches the standard ICMP rate
-limiting approach and prevents amplification when an application sends
-a burst of oversized packets.
+Packet Too Big is limited per source address to one message per 100 ms
+(a minimum interval, not a token bucket), which prevents a storm when an
+application sends a burst of oversized packets.
+Destination Unreachable is not rate-limited.
 
 ## TUN Interface
 
@@ -293,22 +295,27 @@ A single writer thread services an mpsc queue of outbound packets:
 - Inbound mesh traffic on port 256 (IPv6 header reconstructed from session
   context + residual fields, then delivered as complete IPv6 packets)
 - ICMPv6 error responses (Packet Too Big, Destination Unreachable)
-- TCP MSS-clamped SYN-ACK packets
+- Self-addressed packets the reader hairpins back (macOS; see
+  [Self-Addressed Packets](#self-addressed-packets))
 
-The queue-based design eliminates contention on TUN writes and cleanly
+The writer clamps TCP MSS on every SYN-flagged segment it writes, whatever
+its source. The queue-based design eliminates contention on TUN writes and cleanly
 separates concerns. New packet sources can be added by cloning the sender
 handle.
 
-### Local Address Guarantee
+### Self-Addressed Packets
 
 The Linux kernel routing table processes rules in priority order:
 
 1. **Local table**: Intercepts traffic to addresses assigned to this machine
 2. **Main table**: Routes `fd00::/8` to the TUN device
 
-This means every packet arriving at the TUN reader is guaranteed to be for a
-*remote* FIPS destination. No "is this for me?" check is needed on the read
-path.
+On Linux, then, traffic to the node's own mesh address goes through `lo` and
+never reaches the TUN reader. macOS `utun` interfaces do send self-addressed
+traffic down the tunnel, so the reader checks every packet's destination
+against the node's own address and, on a match, hands it to the writer,
+which writes it back to the TUN (`handle_tun_packet`). The check is
+unconditional on every platform.
 
 ### Configuration
 
@@ -345,11 +352,17 @@ With the channels installed, `start()` skips system-TUN creation (it gates on
 `tun_tx` being unset), so FIPS does no `CAP_NET_ADMIN` operations.
 
 Because packets enter via `app_outbound_tx` rather than the Reader Thread, they
-**bypass `handle_tun_packet`** — the `fd00::/8` destination filter, the ICMPv6
-Destination Unreachable for off-mesh dests (see [Reader Thread](#reader-thread)),
-and the [TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping). The embedder is
-therefore responsible for routing only `fd00::/8` to its TUN (so only mesh-bound
-packets arrive) and for clamping TCP MSS on outbound SYNs.
+**bypass `handle_tun_packet`**: FIPS does not filter them by the `fd00::/8`
+prefix, and it clamps no TCP MSS in either direction, since the
+[TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping) is done only by the
+system TUN's reader and writer. Nor does FIPS refuse an off-mesh destination up
+front: `handle_tun_outbound` looks up bytes 1 to 15 of any destination in the
+identity cache, and on a miss answers with ICMPv6
+Destination Unreachable on `app_inbound_rx`, sourced from the node's own mesh
+address. An oversize packet gets Packet Too Big on the same channel. The
+embedder is therefore responsible for routing only `fd00::/8` to its TUN, for
+expecting ICMPv6 errors on `app_inbound_rx`, and for clamping TCP MSS on
+SYN-flagged segments in both directions.
 
 ### App-Owned DNS Path (embedded hosts)
 

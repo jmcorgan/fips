@@ -207,7 +207,6 @@ New filter content is sent only on these events, never periodically:
 - Peer disconnects (filter must exclude the departed peer's entries)
 - A peer's inbound filter changes (outbound filters to other peers must
   be recomputed)
-- Local state changes (new identity, leaf-only dependent changes)
 - The tree changes around this node: it switches parent or becomes
   root, or a peer starts or stops naming it as parent, which changes
   the set of tree peers whose filters are merged
@@ -264,8 +263,11 @@ coalesced into a single announcement.
 Filters propagate transitively through tree edges only. Since the spanning
 tree is a connected subgraph covering all nodes, every reachable
 destination still appears in at least one tree peer's filter at steady
-state. New nodes propagate through the tree within O(depth × 500ms) where
-depth is the tree depth.
+state. New nodes propagate through the tree within
+O(depth × `node.tick_interval_secs`), about 1 s per hop at the default,
+where depth is the tree depth: announces leave only on the node's
+maintenance tick, so the 500 ms debounce is a floor and the tick sets the
+cadence.
 
 Mesh shortcuts provide single-hop filter visibility (the mesh peer's own
 filter) but do not contribute to transitive propagation. This bounds the

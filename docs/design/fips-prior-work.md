@@ -192,17 +192,17 @@ end-to-end PathMtuNotification echo back to the source.
   adapts this for overlay networks using transit-node min()
   propagation.*
 
-## Session Restart and Simultaneous Initiation
+## Simultaneous Initiation
 
-FSP's epoch-based peer restart detection mirrors IKEv2's
-INITIAL_CONTACT notification, and its lowest-address-wins
-simultaneous-initiation tie-breaker mirrors IKEv2's resolution rule.
+FSP's lowest-address-wins simultaneous-initiation tie-breaker mirrors
+IKEv2's resolution rule. FSP exchanges a startup epoch in its handshake
+but does not act on it, so it has no counterpart to IKEv2's
+INITIAL_CONTACT peer restart detection.
 
 - Kaufman, C., Hoffman, P., Nir, Y., Eronen, P., Kivinen, T.
   [RFC 7296](https://datatracker.ietf.org/doc/html/rfc7296):
   "Internet Key Exchange Protocol Version 2 (IKEv2)". 2014.
-  *Simultaneous initiation resolution (§2.8) and INITIAL_CONTACT peer
-  restart detection (§2.4).*
+  *Simultaneous initiation resolution (§2.8).*
 
 ## Hybrid Coordinate Warmup
 
@@ -334,7 +334,7 @@ The protocol builds on these foundations and adds several new elements:
 | [TCP SRTT/RTO (RFC 6298)](https://www.rfc-editor.org/rfc/rfc6298) | Jacobson/Karels SRTT |
 | [ECN (RFC 3168)](https://www.rfc-editor.org/rfc/rfc3168) | CE echo |
 | [DTLS 1.2 (RFC 6347)](https://datatracker.ietf.org/doc/html/rfc6347) | replay window |
-| [IKEv2 (RFC 7296)](https://datatracker.ietf.org/doc/html/rfc7296) | INITIAL_CONTACT, simultaneous-initiation tie-breaker |
+| [IKEv2 (RFC 7296)](https://datatracker.ietf.org/doc/html/rfc7296) | simultaneous-initiation tie-breaker |
 | [PMTUD (RFC 1191)](https://datatracker.ietf.org/doc/html/rfc1191) | adapted PMTUD |
 | [ETX paper, De Couto et al.](https://pdos.csail.mit.edu/papers/grid:mobicom03/paper.pdf) | ETX metric |
 | [OLSR](https://en.wikipedia.org/wiki/Optimized_Link_State_Routing_Protocol) | ETX in mesh routing |

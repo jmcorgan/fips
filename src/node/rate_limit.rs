@@ -917,9 +917,9 @@ mod tests {
 /// Signatures one link peer may buy in a burst before the refill paces it.
 ///
 /// Sized for the case that actually produces a burst: a topology change
-/// flushes correspondents' coordinate caches and they all look this node up
-/// at once, through whichever few link peers lead here, each retrying on the
-/// `node.discovery.attempt_timeouts_secs` ladder. Lowering this makes a
+/// invalidates correspondents' cached coordinates for this node and they all
+/// look this node up at once, through whichever few link peers lead here,
+/// each retrying on the `node.discovery.attempt_timeouts_secs` ladder. Lowering this makes a
 /// genuinely popular node intermittently unresolvable, which is the same
 /// symptom as the flood it defends against; raising it raises the worst-case
 /// signing burst one neighbour can force.

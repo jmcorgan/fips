@@ -106,9 +106,12 @@ impl Node {
     /// Send one datagram a native API client wrote to its descriptor.
     ///
     /// Mirrors `handle_tun_outbound` with three differences: the destination
-    /// comes from the flow rather than from a parsed IPv6 header, an error is
-    /// reported to the client rather than as an ICMPv6 message, and the flow's
-    /// own ports are used instead of the shim's.
+    /// comes from the flow rather than from a parsed IPv6 header; where the TUN
+    /// path would answer with ICMPv6, nothing is reported to the client (an
+    /// oversize datagram is counted in `drop_oversize` and dropped, a send or
+    /// session-initiation failure is logged at debug, and a datagram beyond the
+    /// pending-queue bounds is dropped); and the flow's own ports are used
+    /// instead of the shim's.
     pub(in crate::node) async fn handle_native_outbound(
         &mut self,
         key: FlowKey,

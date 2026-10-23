@@ -141,10 +141,11 @@ and SessionMsg3:
    session keys and the session is established.
 
 Each side's epoch (an 8-byte random value generated at startup) is
-exchanged encrypted in msg2 and msg3. On subsequent handshakes, an epoch
-mismatch indicates the peer has restarted, triggering session
-re-establishment — similar to IKEv2's INITIAL_CONTACT notification for
-peer restart detection (RFC 7296 §2.4).
+exchanged encrypted in msg2 and msg3, but FSP does not act on it. A
+restarted peer simply opens a new session: a SessionSetup naming a peer
+that already has an established session only arms a handshake beside the
+running session, and the new keys are adopted at msg3 only when the
+authenticated static key matches the one the session was opened with.
 
 Packets that trigger session establishment are queued (with bounded buffer)
 while a session or a coordinate lookup is in progress for the destination,
@@ -432,8 +433,8 @@ cache rationale, eviction policy, and population mechanics.
 
 The coordinate cache maps `NodeAddr → TreeCoordinate` and is the critical
 data structure that enables efficient multi-hop routing. Without cached
-coordinates for a destination, FMP cannot make forwarding decisions and must
-either fall back to bloom-filter-only routing or signal CoordsRequired.
+coordinates for a destination, `find_next_hop` returns no next hop, and the
+caller signals CoordsRequired.
 
 ### Unified Cache
 
@@ -480,10 +481,11 @@ transit, CP-flagged data packets, LookupResponse — write to the same cache.
   handshakes make (the SessionAck's source coordinates) and verified lookup
   results are not charged. The `coord_hint_unfunded` counter counts unpaid
   writes
-- **Flush on parent change**: When the local node's tree parent changes, the
-  entire coordinate cache is flushed. Tree parent changes mean the node's own
-  coordinates have changed, making cached coordinates for other nodes
-  potentially stale for routing purposes.
+- **Invalidation on parent change**: When the local node's tree position
+  changes, it drops cached coordinates that route through this node (parent
+  switch or ancestry change) or sit under another root (becoming root); both
+  on parent loss or loop detection. Other entries are kept, since their
+  coordinates do not depend on this node's position.
 
 ### Timer Ordering
 
@@ -532,7 +534,7 @@ reactive PMTUD mechanism.
 | Feature | Status |
 | ------- | ------ |
 | Session establishment (Noise XK) | **Implemented** |
-| Peer restart detection (epoch exchange) | **Implemented** |
+| Peer restart handling (rekey beside the running session) | **Implemented** |
 | MtuExceeded handling | **Implemented** |
 | End-to-end encryption (ChaCha20-Poly1305) | **Implemented** |
 | Explicit counter replay protection | **Implemented** |
@@ -545,7 +547,7 @@ reactive PMTUD mechanism.
 | CoordsRequired handling | **Implemented** |
 | PathBroken handling | **Implemented** |
 | Simultaneous initiation tie-breaker | **Implemented** |
-| Flush coord cache on parent change | **Implemented** |
+| Selective coord cache invalidation on parent change | **Implemented** |
 | Rekey | **Implemented** |
 | Port-based service multiplexing | **Implemented** |
 | IPv6 header compression (shim on port 256) | **Implemented** |

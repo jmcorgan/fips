@@ -34,8 +34,10 @@ and self-healing.
 For routing purposes, the spanning tree provides each node with a
 coordinate (its ancestry path from itself to the root) plus a way to
 compute distance between any two nodes (hops to their lowest common
-ancestor). The strictly-decreasing distance invariant gives greedy
-forwarding its loop-freedom.
+ancestor). Each hop forwards only to a peer strictly closer to the
+destination by its own cached view of the destination's coordinates.
+That does not guarantee loop freedom when hops hold different
+coordinates; the TTL bounds any loop.
 
 The tree forms through distributed parent selection — root is the
 smallest node_addr (no election), and each node picks the peer with
@@ -68,9 +70,9 @@ peer reliably indicates which subtree contains the destination, and
 tree-coordinate distance ranks competing matches.
 
 FilterAnnounce updates are event-driven (peer changes, tree
-restructuring, local identity changes) and rate-limited to prevent
-storms. False positives at large scale never cause loops — the
-self-distance check at each hop guarantees forward progress, and
+restructuring) and rate-limited to prevent storms. False positives at
+large scale never cause loops — the self-distance check at each hop
+guarantees forward progress, and
 mismatched bloom matches fall through to greedy tree routing.
 
 For the filter computation, split-horizon merge rules, FPR analysis,
@@ -123,14 +125,12 @@ greedy tree routing — functional but suboptimal.
 When bloom filters identify multiple candidate peers, they are ranked by a
 composite key:
 
-1. **link_cost** — Per-link quality metric derived from ETX (Expected
-   Transmission Count), computed from bidirectional delivery ratios in MMP
-   metrics. In practice this is an uncommon tie-breaker: most forwarding
-   decisions are resolved by tree distance alone, and link_cost only
-   differentiates candidates when multiple peers offer the same tree distance
-   to the destination.
+1. **link_cost** — Per-link quality metric (RTT-weighted ETX, Expected
+   Transmission Count), computed from MMP metrics. It is compared first:
+   among the peers strictly closer to the destination than this node, the
+   lowest link cost wins.
 2. **tree_distance** — Coordinate-based distance to destination through this
-   peer
+   peer; breaks ties in link cost
 3. **node_addr** — Deterministic tie-breaker
 
 A peer with a bloom filter hit but no entry in the peer ancestry table
@@ -145,9 +145,9 @@ invisible to routing.
 
 The routing decision enforces strict progress: a packet is only forwarded
 to a peer that is strictly closer (by tree distance) to the destination than
-the current node. This self-distance check prevents routing loops even with
-stale coordinates, because each transit node evaluates using its own
-freshly-computed coordinates.
+the current node. Each hop judges this on its own cached coordinates for the
+destination, so the self-distance check does not guarantee loop freedom when
+hops hold different coordinates for it; the TTL bounds any loop.
 
 If no peer is closer than the current node (a local minimum in the tree
 distance metric), `find_next_hop()` returns None and the caller generates a
@@ -157,8 +157,8 @@ PathBroken error.
 
 The coordinate cache maps `NodeAddr → TreeCoordinate` and is the
 critical data structure for multi-hop routing. The session layer owns
-this cache (its eviction policy, TTL/refresh semantics, parent-change
-flush, and timer ordering with session idle timeout); see
+this cache (its eviction policy, TTL/refresh semantics, selective
+invalidation on parent change, and timer ordering with session idle timeout); see
 [fips-session-layer.md](fips-session-layer.md#coordinate-cache) for
 the canonical treatment.
 
@@ -617,7 +617,7 @@ recovery).
 | FilterAnnounce gossip | **Implemented** |
 | find_next_hop() priority chain | **Implemented** |
 | Coordinate cache (unified, TTL + refresh) | **Implemented** |
-| Flush coord cache on parent change | **Implemented** |
+| Selective coord cache invalidation on parent change | **Implemented** |
 | LookupRequest/LookupResponse discovery | **Implemented** |
 | SessionSetup self-bootstrapping | **Implemented** |
 | Hybrid coordinate warmup (CP + CoordsWarmup) | **Implemented** |

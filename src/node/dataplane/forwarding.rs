@@ -212,22 +212,6 @@ impl Node {
         Some(NextHop { addr, link_mtu })
     }
 
-    /// Attempt to warm the coordinate cache from session-layer payload headers.
-    ///
-    /// Transit routers parse the 4-byte FSP common prefix to identify message
-    /// type, then extract plaintext coordinate fields from:
-    /// - SessionSetup (phase 0x1): src_coords + dest_coords
-    /// - SessionAck (phase 0x2): src_coords
-    /// - Encrypted with CP flag (phase 0x0): cleartext coords between header and ciphertext
-    ///
-    /// Decode failures are logged and silently ignored — they don't block
-    /// forwarding.
-    ///
-    /// `outer_len` is the length of the msg_type-stripped `SessionDatagram`
-    /// buffer this view was decoded from. It is carried in rather than
-    /// reconstructed from the header size so the malformed-frame byte counter
-    /// measures the same population as its siblings — which are charged the
-    /// outer slice — instead of the inner FSP payload.
     /// Warm one coordinate-cache entry from a plaintext session header, paid
     /// for by `from`, the authenticated link peer the frame arrived over.
     ///
@@ -283,6 +267,22 @@ impl Node {
         }
     }
 
+    /// Attempt to warm the coordinate cache from session-layer payload headers.
+    ///
+    /// Transit routers parse the 4-byte FSP common prefix to identify message
+    /// type, then extract plaintext coordinate fields from:
+    /// - SessionSetup (phase 0x1): src_coords + dest_coords
+    /// - SessionAck (phase 0x2): src_coords
+    /// - Encrypted with CP flag (phase 0x0): cleartext coords between header and ciphertext
+    ///
+    /// Decode failures are logged and silently ignored — they don't block
+    /// forwarding.
+    ///
+    /// `outer_len` is the length of the msg_type-stripped `SessionDatagram`
+    /// buffer this view was decoded from. It is carried in rather than
+    /// reconstructed from the header size so the malformed-frame byte counter
+    /// measures the same population as its siblings — which are charged the
+    /// outer slice — instead of the inner FSP payload.
     fn try_warm_coord_cache_ref(
         &mut self,
         from: &NodeAddr,

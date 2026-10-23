@@ -256,7 +256,8 @@ const MIN_BEACON_INTERVAL_SECS: u64 = 10;
 /// Ethernet transport instance configuration.
 ///
 /// EthernetConfig is always compiled (for config parsing on any platform),
-/// but the transport runtime requires Linux (`#[cfg(target_os = "linux")]`).
+/// but the transport runtime is built only for Linux (AF_PACKET) and macOS
+/// (BPF).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EthernetConfig {
@@ -379,7 +380,8 @@ pub struct TcpConfig {
     pub bind_addr: Option<String>,
 
     /// Default MTU for TCP connections. Defaults to 1400.
-    /// Per-connection MTU is derived from TCP_MAXSEG when available.
+    /// TCP reports this configured value to FMP and checks sends against
+    /// it; it does not report a per-connection MTU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 
@@ -514,8 +516,8 @@ const DEFAULT_TOR_ADVERTISED_PORT: u16 = 443;
 ///
 /// Supports three modes:
 /// - `socks5`: Outbound-only connections through a Tor SOCKS5 proxy.
-/// - `control_port`: Full bidirectional support — outbound via SOCKS5
-///   plus inbound via Tor onion service managed through the control port.
+/// - `control_port`: Outbound via SOCKS5, plus control-port monitoring.
+///   No inbound onion service (use `directory` for inbound).
 /// - `directory`: Full bidirectional support — outbound via SOCKS5,
 ///   inbound via a Tor-managed `HiddenServiceDir` onion service. No
 ///   control port needed. Enables Tor `Sandbox 1` mode.

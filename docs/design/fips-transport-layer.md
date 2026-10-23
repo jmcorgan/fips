@@ -351,7 +351,7 @@ optional `TcpListener` for inbound connections.
 | -------- | ----- |
 | Addressing | host:port — IP address or DNS hostname |
 | Default MTU | 1400 bytes |
-| Per-link MTU | Derived from `TCP_MAXSEG` socket option |
+| Per-link MTU | None: TCP reports the configured `mtu` to FMP and checks sends against it |
 | Framing | FMP header-based (zero overhead) |
 | Connection model | Non-blocking connect, connect-on-send fallback, optional listener |
 | Platform | Cross-platform (no `#[cfg]` gates) |
@@ -1018,7 +1018,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | Transport | Status | Notes |
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, AsyncFd/recvmsg, SO_RXQ_OVFL kernel drop detection |
-| TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect, per-connection MSS MTU |
+| TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect |
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, neighbor beacons; Linux (AF_PACKET) and macOS (BPF) |
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |

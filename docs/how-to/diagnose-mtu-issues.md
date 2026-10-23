@@ -102,7 +102,8 @@ and are worth restating here:
   **before** the daemon's TCP MSS clamp at the TUN boundary. The
   packet may be larger than the daemon will let leave the node.
 - RX direction (inbound to a local app): tcpdump sees the packet
-  **after** the daemon's MSS clamp on inbound SYN-ACKs. The clamp
+  **after** the daemon's MSS clamp on inbound SYN-flagged segments
+  (SYN and SYN-ACK). The clamp
   fires only when `max_mss < kernel-natural-MSS`; otherwise it is a
   silent no-op.
 

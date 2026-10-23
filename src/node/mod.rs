@@ -1678,7 +1678,8 @@ impl Node {
         if let Some(mtu) = min_operational {
             return mtu;
         }
-        // Fallback to config: try UDP first, then Ethernet
+        // Fallback to config: a configured UDP instance's MTU (an arbitrary
+        // one when several are named), else the IPv6 minimum.
         if let Some((_, cfg)) = self.config().transports.udp.iter().next() {
             return cfg.mtu();
         }
@@ -3528,25 +3529,6 @@ impl Node {
         is_tree_peer_of(&self.tree_state, self.node_addr(), peer_addr)
     }
 
-    /// Find next hop for a destination node address.
-    ///
-    /// Routing priority:
-    /// 1. Destination is self → `None` (local delivery)
-    /// 2. Destination is a direct peer → that peer
-    /// 3. Bloom filter candidates with cached dest coords → among peers whose
-    ///    bloom filter contains the destination, pick the one that minimizes
-    ///    tree distance to the destination, with
-    ///    `(link_cost, tree_distance_to_dest, node_addr)` tie-breaking.
-    ///    The self-distance check ensures only peers strictly closer to the
-    ///    destination than us are considered (prevents routing loops).
-    /// 4. Greedy tree routing fallback (requires cached dest coords)
-    /// 5. No route → `None`
-    ///
-    /// Both the bloom filter and tree routing paths require cached destination
-    /// coordinates (checked in `coord_cache`). Without coordinates, the node
-    /// cannot make loop-free forwarding decisions. The caller should signal
-    /// `CoordsRequired` back to the source when `None` is returned for a
-    /// non-local destination.
     /// Write one unauthenticated coordinate hint, counting the outcome.
     ///
     /// Every production hint write goes through here, so the precedence rule
@@ -3556,12 +3538,12 @@ impl Node {
     /// `CoordCache::insert_verified` directly and says so.
     ///
     /// **Foreign root: refused.** A coordinate under a root other than ours
-    /// can never route. `StpState::find_next_hop` returns `None` outright on a
-    /// root mismatch, and the bloom fallback compares against a `my_distance`
-    /// of `usize::MAX`, so no candidate is ever strictly closer. Caching one
-    /// therefore buys nothing and costs something real: the entry's presence
-    /// is what `synth_routing_error` reads to choose `PathBroken` over
-    /// `CoordsRequired`, so a foreign-root plant turns this node into a
+    /// cannot be reached by greedy tree routing: `StpState::find_next_hop`
+    /// returns `None` outright on a root mismatch. The bloom step would select
+    /// only a peer advertising coordinates under that root, which a planted
+    /// hint cannot make useful. Caching one costs something real: the entry's
+    /// presence is what `synth_routing_error` reads to choose `PathBroken`
+    /// over `CoordsRequired`, so a foreign-root plant turns this node into a
     /// one-packet reflector aimed at whatever source the datagram claimed.
     /// `CoordCache::invalidate_other_roots` already applies this same
     /// invariant whenever our own tree position moves; this applies it at
@@ -3597,6 +3579,26 @@ impl Node {
         Some(placed)
     }
 
+    /// Find next hop for a destination node address.
+    ///
+    /// Routing priority:
+    /// 1. Destination is self → `None` (local delivery)
+    /// 2. Destination is a direct peer → that peer
+    /// 3. Bloom filter candidates with cached dest coords → among peers whose
+    ///    bloom filter contains the destination and that are strictly closer
+    ///    to it than us, pick by `(link_cost, tree_distance_to_dest,
+    ///    node_addr)`: link cost first, then tree distance and address to
+    ///    break ties. The self-distance check is strict progress by this
+    ///    node's view of the destination's coordinates; it does not guarantee
+    ///    loop freedom when hops hold different cached coordinates, and the
+    ///    TTL bounds any loop.
+    /// 4. Greedy tree routing fallback (requires cached dest coords)
+    /// 5. No route → `None`
+    ///
+    /// Both the bloom filter and tree routing paths require cached destination
+    /// coordinates (checked in `coord_cache`); without them this returns
+    /// `None` before either step. The caller should signal `CoordsRequired`
+    /// back to the source when `None` is returned for a non-local destination.
     pub fn find_next_hop(&mut self, dest_node_addr: &NodeAddr) -> Option<&ActivePeer> {
         // 1. Local delivery
         if dest_node_addr == self.node_addr() {
@@ -3622,7 +3624,8 @@ impl Node {
             .get_and_touch(dest_node_addr, now_ms)?
             .clone();
 
-        // 3. Bloom filter candidates — requires dest_coords for loop-free selection.
+        // 3. Bloom filter candidates — requires dest_coords for the
+        //    self-distance check (strict progress by this node's view).
         //    If no candidate is strictly closer, fall through to tree routing.
         //    The sans-IO core enumerates borrowed peers over the `RoutingView`
         //    seam, applies the bloom/send/progress filters, and tracks the
@@ -3702,10 +3705,15 @@ impl Node {
     ///
     /// With this set, [`Self::start`] skips system-TUN creation (it gates on
     /// `tun_tx` being unset). Packets pushed into `app_outbound_tx` bypass the
-    /// system-TUN reader's `handle_tun_packet`, so the embedder must do what that
-    /// path otherwise would: push only `fd::/8`-destined IPv6 packets — FIPS no
-    /// longer filters the destination or emits ICMPv6 unreachable for off-mesh
-    /// dests — and clamp TCP MSS on outbound SYNs.
+    /// system-TUN reader's `handle_tun_packet`, so FIPS does not filter them by
+    /// the `fd00::/8` prefix and clamps no TCP MSS in either direction. It does
+    /// not refuse an off-mesh destination up front either: it looks up bytes 1
+    /// to 15 of any destination in the identity cache and, on a miss, answers
+    /// with ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the
+    /// node's own mesh address; an oversize packet gets Packet Too Big on the
+    /// same channel. The embedder should push only `fd00::/8`-destined IPv6
+    /// packets, expect ICMPv6 errors on `app_inbound_rx`, and clamp TCP MSS on
+    /// SYN-flagged segments in both directions.
     pub fn enable_app_owned_tun(&mut self) -> (TunOutboundTx, std::sync::mpsc::Receiver<Vec<u8>>) {
         let tun_channel_size = self.config().node.buffers.tun_channel;
         // app → mesh: the app pushes; `run_rx_loop` drains `tun_outbound_rx`.

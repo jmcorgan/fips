@@ -450,7 +450,7 @@ impl TunDevice {
     /// `max_mss` is the global TCP MSS ceiling derived from the local
     /// `transport_mtu()` floor. `path_mtu_lookup` is a read-only handle to
     /// the per-destination path MTU map populated by discovery; the writer
-    /// reads it on each inbound SYN-ACK to compute a per-flow ceiling that
+    /// reads it on each inbound SYN to compute a per-flow ceiling that
     /// honors learned narrow paths through the mesh.
     pub fn create_writer(
         &self,
@@ -524,7 +524,7 @@ fn parse_utun_af_prefix(buf: &[u8]) -> Option<u32> {
 /// Services a queue of outbound packets and writes them to the TUN device.
 /// Multiple producers can send packets via the TunTx channel.
 ///
-/// Also performs TCP MSS clamping on inbound SYN-ACK packets.
+/// Also performs TCP MSS clamping on inbound SYN-flagged packets (SYN and SYN-ACK).
 #[cfg(unix)]
 pub struct TunWriter {
     file: File,
@@ -555,12 +555,12 @@ impl TunWriter {
             } else {
                 self.max_mss
             };
-            // Clamp TCP MSS on inbound SYN-ACK packets
+            // Clamp TCP MSS on inbound SYN-flagged packets
             if clamp_tcp_mss(&mut packet, effective_max_mss) {
                 trace!(
                     name = %self.name,
                     max_mss = effective_max_mss,
-                    "Clamped TCP MSS in inbound SYN-ACK packet"
+                    "Clamped TCP MSS in inbound SYN packet"
                 );
             }
 
@@ -1127,7 +1127,7 @@ mod windows_tun {
     /// session. Uses `allocate_send_packet()` / `send_packet()` instead of
     /// file I/O.
     ///
-    /// Also performs TCP MSS clamping on inbound SYN-ACK packets.
+    /// Also performs TCP MSS clamping on inbound SYN-flagged packets (SYN and SYN-ACK).
     pub struct TunWriter {
         session: Arc<wintun::Session>,
         rx: mpsc::Receiver<Vec<u8>>,
@@ -1154,12 +1154,12 @@ mod windows_tun {
                 } else {
                     self.max_mss
                 };
-                // Clamp TCP MSS on inbound SYN-ACK packets
+                // Clamp TCP MSS on inbound SYN-flagged packets
                 if clamp_tcp_mss(&mut packet, effective_max_mss) {
                     trace!(
                         name = %self.name,
                         max_mss = effective_max_mss,
-                        "Clamped TCP MSS in inbound SYN-ACK packet"
+                        "Clamped TCP MSS in inbound SYN packet"
                     );
                 }
 

@@ -686,7 +686,8 @@ pub struct TreeConfig {
     /// tree has stabilized. Set to 0 to disable.
     #[serde(default = "TreeConfig::default_reeval_interval_secs")]
     pub reeval_interval_secs: u64,
-    /// Flap dampening: max parent switches before extended hold-down (`node.tree.flap_threshold`).
+    /// Flap dampening: parent switches within one window at which the
+    /// extended hold-down engages (`node.tree.flap_threshold`).
     #[serde(default = "TreeConfig::default_flap_threshold")]
     pub flap_threshold: u32,
     /// Flap dampening: window in seconds for counting switches (`node.tree.flap_window_secs`).
@@ -1015,12 +1016,13 @@ pub struct NativeApiConfig {
     ///
     /// **Off by default, and not a supported interface.** The three commands
     /// it admits (`inject`, `stats`, `arrive`) exist so the test harness can
-    /// drive the receive and dispatch paths without a wire. `inject` makes
-    /// the daemon write bytes the client chose into one of that client's own
-    /// flows, and `arrive` makes it dispatch a datagram as though a peer had
-    /// sent it, which reaches any listener this node holds. None of the three
-    /// belongs in a packaged node, so this key is what the test harness turns
-    /// on and nothing else does.
+    /// drive the receive and dispatch paths without a wire. `inject`
+    /// addresses a flow node-wide by id, so it writes bytes the client chose
+    /// into any flow on the node, including one another client opened or a
+    /// listener accepted. `arrive` makes the daemon dispatch a datagram as
+    /// though a peer had sent it, which reaches any listener this node holds.
+    /// None of the three belongs in a packaged node, so this key is what the
+    /// test harness turns on and nothing else does.
     #[serde(default = "NativeApiConfig::default_debug_commands")]
     pub debug_commands: bool,
 }

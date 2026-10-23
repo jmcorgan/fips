@@ -377,8 +377,8 @@ Controls tree construction and parent selection.
 | `node.tree.hold_down_secs`             | u64   | `30`    | Suppress non-mandatory re-evaluation after parent switch |
 | `node.tree.reeval_interval_secs`       | u64   | `60`    | Periodic cost-based parent re-evaluation interval (0 = disabled) |
 | `node.tree.flap_threshold`             | u32   | `4`     | Parent switches in window before dampening engages  |
-| `node.tree.flap_window_secs`           | u64   | `60`    | Sliding window for counting parent switches          |
-| `node.tree.flap_dampening_secs`        | u64   | `120`   | Extended hold-down duration when flap threshold exceeded |
+| `node.tree.flap_window_secs`           | u64   | `60`    | Fixed window, opened by the first switch, for counting parent switches |
+| `node.tree.flap_dampening_secs`        | u64   | `120`   | Extended hold-down duration once the flap threshold is reached |
 
 ### Bloom Filter (`node.bloom.*`)
 
@@ -520,9 +520,10 @@ names no local port is given one from 49152 upward.
 
 `debug_commands` is a separate gate on three commands that exist only so the
 test harness can drive the receive and dispatch paths without a wire.
-`inject` makes the daemon write bytes the client chose into one of that
-client's own flows, and `arrive` makes it dispatch a datagram as though a peer
-had sent it, reaching any listener this node holds. A node with the key off
+`inject` addresses a flow node-wide by id, so it writes bytes the client chose
+into any flow on the node, including one another client opened or a listener
+accepted. `arrive` makes the daemon dispatch a datagram as though a peer had
+sent it, reaching any listener this node holds. A node with the key off
 refuses each by name, so a client can tell "this node will not do that" from
 "this build has no such command". Leave it off outside the test harness.
 
@@ -641,7 +642,7 @@ overhead.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:8443"`). If omitted, outbound-only mode. |
-| `transports.tcp.mtu` | u16 | `1400` | Default MTU. Per-connection MTU derived from `TCP_MAXSEG` when available. |
+| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. |
 | `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
 | `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
 | `transports.tcp.keepalive_secs` | u64 | `30` | TCP keepalive interval in seconds (0 = disabled) |
@@ -1197,7 +1198,7 @@ node:
     hold_down_secs: 30                  # suppress re-evaluation after switch
     reeval_interval_secs: 60            # periodic cost-based re-evaluation (0 = disabled)
     flap_threshold: 4                    # parent switches before dampening
-    flap_window_secs: 60                 # sliding window for flap detection
+    flap_window_secs: 60                 # fixed window for flap detection
     flap_dampening_secs: 120             # extended hold-down on flap
   bloom:
     update_debounce_ms: 500
