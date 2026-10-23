@@ -585,7 +585,7 @@ adding entries and the precedence rules:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port. Ignored when `outbound_only: true` (kernel-assigned ephemeral port is used regardless). |
-| `transports.udp.mtu` | u16 | `1280` | Transport MTU |
+| `transports.udp.mtu` | u16 | `1357` | Transport MTU; the default is the smallest that carries a 1280-byte IPv6 packet |
 | `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
 | `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
 | `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts. Implicitly forced false when `outbound_only: true`. |
@@ -1256,7 +1256,7 @@ dns:
 transports:
   udp:
     bind_addr: "0.0.0.0:2121"
-    mtu: 1280
+    mtu: 1357
     recv_buf_size: 2097152           # 2 MB (kernel doubles to 4 MB actual)
     send_buf_size: 2097152           # 2 MB
   # ethernet:                        # uncomment to enable (requires CAP_NET_RAW)

@@ -1796,6 +1796,12 @@ async fn test_initiate_peer_connections_schedules_retry_on_no_transport() {
 
 /// Helper: spawn a UdpTransport with the given mtu, started and operational.
 async fn make_udp_transport_with_mtu(id: u32, mtu: u16) -> TransportHandle {
+    udp_transport(id, Some(mtu)).await
+}
+
+/// Helper: spawn a started, operational UdpTransport; `None` leaves `mtu`
+/// unset so the transport takes the configuration default.
+async fn udp_transport(id: u32, mtu: Option<u16>) -> TransportHandle {
     let (packet_tx, _packet_rx) = packet_channel(64);
     let transport_id = TransportId::new(id);
     let mut udp = UdpTransport::new(
@@ -1803,7 +1809,7 @@ async fn make_udp_transport_with_mtu(id: u32, mtu: u16) -> TransportHandle {
         Some(format!("udp{}", id)),
         crate::config::UdpConfig {
             bind_addr: Some("127.0.0.1:0".to_string()),
-            mtu: Some(mtu),
+            mtu,
             ..Default::default()
         },
         packet_tx,
@@ -1847,6 +1853,132 @@ async fn test_transport_mtu_fallback_when_no_operational_transports() {
     // No transports configured at all → falls back to 1280 (IPv6 minimum).
     let node = make_node();
     assert_eq!(node.transport_mtu(), 1280);
+}
+
+// ============================================================================
+// Default MTUs carry every IPv6 packet up to the IPv6 minimum
+// ============================================================================
+
+/// An IPv6 packet from `tun_packet_to(dest)` padded to `len` bytes, with its
+/// payload length field set to match.
+fn sized_packet(dest: &NodeAddr, len: usize) -> Vec<u8> {
+    use super::discovery::tun_packet_to;
+
+    let mut pkt = tun_packet_to(dest);
+    pkt.resize(len, 0);
+    let payload = u16::try_from(len - 40).unwrap();
+    pkt[4..6].copy_from_slice(&payload.to_be_bytes());
+    pkt
+}
+
+#[tokio::test]
+async fn test_node_with_a_default_udp_transport_forwards_a_1280_byte_ipv6_packet_and_reports_at_least_1280_for_a_larger_one()
+ {
+    use super::discovery::{assert_no_route, drain_tun, install_tun_channel};
+
+    let mut node = make_node();
+    let udp = udp_transport(1, None).await;
+    assert!(
+        udp.is_operational(),
+        "setup: the inserted transport must be operational, so transport_mtu reads it and not the fallback"
+    );
+    node.transports.insert(TransportId::new(1), udp);
+    assert_eq!(
+        node.transport_mtu(),
+        crate::config::UdpConfig::default().mtu(),
+        "setup: the node's transport MTU is the UDP default"
+    );
+    let rx = install_tun_channel(&mut node);
+
+    // A destination absent from the identity cache: a packet that passes the
+    // size check is refused only for want of a route.
+    let dest = *Identity::generate().node_addr();
+
+    node.handle_tun_outbound(sized_packet(&dest, 1280)).await;
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "exactly one answer to the 1280-byte packet"
+    );
+    assert_ne!(
+        answers[0][40],
+        2,
+        "a 1280-byte IPv6 packet drew Packet Too Big reporting {}",
+        u32::from_be_bytes([
+            answers[0][44],
+            answers[0][45],
+            answers[0][46],
+            answers[0][47]
+        ])
+    );
+    assert_no_route(&answers[0]);
+
+    node.handle_tun_outbound(sized_packet(&dest, 1281)).await;
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "exactly one answer to the 1281-byte packet"
+    );
+    assert_eq!(answers[0][40], 2, "ICMPv6 type must be Packet Too Big");
+    let reported = u32::from_be_bytes([
+        answers[0][44],
+        answers[0][45],
+        answers[0][46],
+        answers[0][47],
+    ]);
+    assert!(
+        reported >= 1280,
+        "Packet Too Big must report at least the IPv6 minimum, got {reported}"
+    );
+
+    for transport in node.transports.values_mut() {
+        transport.stop().await.ok();
+    }
+}
+
+#[test]
+fn test_node_with_only_a_default_udp_config_reports_an_ipv6_mtu_of_at_least_1280() {
+    // Not started: transport_mtu takes the configured UDP instance's mtu().
+    let node = make_healthy_node();
+    assert!(
+        node.transports.values().all(|t| !t.is_operational()),
+        "setup: no transport is operational, so the config fallback is read"
+    );
+    let mtu = node.effective_ipv6_mtu();
+    assert!(mtu >= 1280, "effective IPv6 MTU at the default is {mtu}");
+}
+
+#[tokio::test]
+async fn test_ipv6_shortfall_names_the_bytes_a_transport_below_1357_is_short_and_nothing_at_or_above_it()
+ {
+    let cases: [(Option<u16>, Option<u16>); 4] = [
+        (Some(1280), Some(77)),
+        (Some(1356), Some(1)),
+        (Some(1357), None),
+        (None, None),
+    ];
+    for (mtu, expected) in cases {
+        let mut node = make_node();
+        let udp = udp_transport(1, mtu).await;
+        assert!(udp.is_operational(), "setup: transport operational");
+        node.transports.insert(TransportId::new(1), udp);
+        assert_eq!(
+            node.ipv6_shortfall(),
+            expected,
+            "transport mtu {mtu:?}: effective IPv6 MTU {}",
+            node.effective_ipv6_mtu()
+        );
+        for transport in node.transports.values_mut() {
+            transport.stop().await.ok();
+        }
+    }
+
+    // Nothing operational: nothing bound to judge, even though the
+    // transport_mtu fallback would give an effective MTU below 1280.
+    let node = make_node();
+    assert_eq!(node.ipv6_shortfall(), None);
 }
 
 #[tokio::test]
@@ -3308,6 +3440,39 @@ async fn start_skips_system_tun_when_app_owned() {
     assert_eq!(node.tun_state(), crate::upper::tun::TunState::Active);
 
     node.stop().await.unwrap();
+}
+
+/// An app-owned TUN spawns no Tun child, so `start()` itself must warn when
+/// the transports cannot carry a 1280-byte IPv6 packet, once, and stay quiet
+/// at the default UDP MTU.
+#[tokio::test]
+async fn test_start_with_an_app_owned_tun_warns_once_when_the_udp_mtu_is_too_small_for_a_1280_byte_ipv6_packet_and_not_at_the_default()
+ {
+    for (mtu, expected) in [(Some(1280), 1), (None, 0)] {
+        let mut config = crate::Config::new();
+        config.transports.udp =
+            crate::config::TransportInstances::Single(crate::config::UdpConfig {
+                bind_addr: Some("127.0.0.1:0".to_string()),
+                mtu,
+                ..Default::default()
+            });
+        config.dns.enabled = false;
+        config.tun.enabled = true;
+        let mut node = make_node_with(config);
+        let (_outbound_tx, _tun_rx) = node.enable_app_owned_tun();
+
+        let (logs, guard) = crate::testutil::capture_logs_scoped();
+        node.start().await.unwrap();
+        drop(guard);
+
+        let warnings = logs.warnings();
+        let hits = warnings
+            .iter()
+            .filter(|line| line.contains("too small for the IPv6 minimum"))
+            .count();
+        assert_eq!(hits, expected, "udp mtu {mtu:?}: {warnings:?}");
+        node.stop().await.unwrap();
+    }
 }
 
 /// Config for the app-owned-UDP-fd tests: one loopback UDP transport on an

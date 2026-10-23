@@ -38,8 +38,9 @@ fipsctl show sessions | jq '.sessions[] | {display_name, state, mmp: .mmp.path_m
 `mmp.path_mtu` is the value the session-layer MMP currently believes
 is in force end-to-end. It updates on each PathMtuNotification echo
 from the destination — immediately on decrease, with hysteresis on
-increase. A field that starts at `1280` (the IPv6 floor) and then
-climbs to a higher value as echoes arrive is healthy; one that
+increase. A field that starts at the local transport MTU (`1357` at
+the default UDP MTU) and then settles at the path's value as echoes
+arrive is healthy; one that
 oscillates between two values may indicate a flapping path.
 
 ### `fipsctl show transports`

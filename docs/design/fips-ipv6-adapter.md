@@ -195,7 +195,8 @@ For typical deployments:
 
 | Transport MTU | Effective IPv6 MTU | Notes |
 | ------------- | ------------------ | ----- |
-| 1280 | 1203 | UDP default (`transports.udp.mtu`); below the IPv6 minimum |
+| 1280 | 1203 | Below the IPv6 minimum |
+| 1357 | 1280 | UDP default (`transports.udp.mtu`); carries the IPv6 minimum |
 | 1472 | 1395 | UDP set to `mtu: 1472`, e.g. over 1500-byte Ethernet |
 
 IPv6 mandates that every link support at least 1280 bytes. The minimum

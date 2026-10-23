@@ -80,6 +80,11 @@ impl PathMtuEntry {
 /// address).
 pub type PathMtuLookup = Arc<RwLock<HashMap<FipsAddress, PathMtuEntry>>>;
 
+/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
+/// this large, so an MSS derived from it fits anywhere, and a node whose
+/// effective IPv6 MTU is below it cannot carry every packet a host may send.
+pub const IPV6_MIN_MTU: u16 = 1280;
+
 /// Compute the effective TCP MSS ceiling for a packet given its peer
 /// address bytes (a 16-byte IPv6 destination on outbound, source on
 /// inbound). Returns `min(global_max_mss, learned_path_max_mss)` when
@@ -115,7 +120,6 @@ pub(crate) fn per_flow_max_mss(
     // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
     // payload (1203) → TCP segment after IPv6+TCP headers (1143).
     // Used as the conservative ceiling for empty-lookup destinations.
-    const IPV6_MIN_MTU: u16 = 1280;
     let conservative_max_mss = mss_ceiling(IPV6_MIN_MTU);
     let empty_lookup_ceiling = std::cmp::min(global_max_mss, conservative_max_mss);
 

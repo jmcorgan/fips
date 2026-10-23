@@ -32,8 +32,12 @@ fn parse_bind_port(raw: &str) -> Option<u16> {
 /// Default UDP bind address.
 const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:2121";
 
-/// Default UDP MTU (IPv6 minimum).
-const DEFAULT_UDP_MTU: u16 = 1280;
+/// Default UDP MTU: the IPv6 minimum (1280) plus the 77 bytes FIPS adds to an
+/// IPv6 packet, the smallest value that carries a 1280-byte IPv6 packet. A
+/// smaller transport MTU gives an IPv6 MTU below 1280, and a host ignores a
+/// Packet Too Big reporting less than that (RFC 8201), so every non-TCP
+/// packet between the two sizes would be lost.
+const DEFAULT_UDP_MTU: u16 = 1357;
 
 /// Default UDP receive buffer size (2 MB).
 const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
@@ -52,7 +56,8 @@ pub struct UdpConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_addr: Option<String>,
 
-    /// UDP MTU (`mtu`). Defaults to 1280 (IPv6 minimum).
+    /// UDP MTU (`mtu`). Defaults to 1357, the smallest that carries a
+    /// 1280-byte IPv6 packet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 

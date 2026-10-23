@@ -11611,3 +11611,175 @@ fn registering_an_identity_into_a_full_store_never_evicts_the_entry_just_registe
         "the entry just registered must survive its own eviction pass"
     );
 }
+
+// ============================================================================
+// Characterization: the default UDP MTU across a 1280-byte forwarder
+// ============================================================================
+
+/// Build a converged three-node chain with the given MTUs and an established
+/// session from node 0 to node 2, warmed past the coordinate piggyback.
+async fn session_chain(mtus: [u16; 3]) -> Vec<TestNode> {
+    let mut nodes = run_tree_test_with_mtus(&mtus, &[(0, 1), (1, 2)]).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    let c_addr = *nodes[2].node.node_addr();
+    let c_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(c_addr, c_pubkey);
+    nodes[0]
+        .node
+        .initiate_session(c_addr, c_pubkey)
+        .await
+        .unwrap();
+    drain_to_quiescence(&mut nodes).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&c_addr)
+            .unwrap()
+            .state()
+            .is_established(),
+        "setup: session A to C established"
+    );
+    let a_fips = crate::FipsAddress::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::FipsAddress::from_node_addr(&c_addr);
+    for _ in 0..5 {
+        let small = build_ipv6_packet(&a_fips, &c_fips, &[0u8; 10]);
+        nodes[0].node.handle_tun_outbound(small).await;
+    }
+    drain_to_quiescence(&mut nodes).await;
+    nodes
+}
+
+/// A's view of the path to C: the session's path MTU and the TCP clamp's
+/// lookup entry.
+fn path_state(nodes: &[TestNode]) -> (u16, Option<u16>) {
+    let c_addr = *nodes[2].node.node_addr();
+    let c_fips = crate::FipsAddress::from_node_addr(&c_addr);
+    let entry = nodes[0].node.get_session(&c_addr).unwrap();
+    let session_mtu = entry.mmp().expect("MMP state").path_mtu.current_mtu();
+    (session_mtu, nodes[0].node.path_mtu_lookup_get(&c_fips))
+}
+
+/// What one 1280-byte IPv6 packet from A's TUN to C produced: the packet
+/// sizes C's TUN received, A's ICMPv6 answers as (type, reported MTU), and
+/// A's path state and TCP clamp toward C afterwards.
+#[derive(Debug, PartialEq)]
+struct Round {
+    delivered: Vec<usize>,
+    answers: Vec<(u8, u32)>,
+    path: (u16, Option<u16>),
+    clamp: u16,
+}
+
+/// Send `rounds` 1280-byte IPv6 packets from A's TUN toward C, spaced past
+/// the ICMP rate limit, and record what each produced. Also returns the TCP
+/// clamp toward C before the first packet.
+async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>) {
+    let a_fips = crate::FipsAddress::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::FipsAddress::from_node_addr(nodes[2].node.node_addr());
+    let c_bytes = c_fips.to_ipv6().octets();
+    let (a_tx, a_rx) = std::sync::mpsc::channel();
+    nodes[0].node.supervisor.tun_tx = Some(a_tx);
+    let (c_tx, c_rx) = std::sync::mpsc::channel();
+    nodes[2].node.supervisor.tun_tx = Some(c_tx);
+    let global = crate::upper::icmp::mss_ceiling(nodes[0].node.transport_mtu());
+    let clamp = |nodes: &[TestNode]| {
+        crate::upper::tun::per_flow_max_mss(&nodes[0].node.path_mtu_lookup, &c_bytes, global)
+    };
+
+    let before = clamp(nodes);
+    let mut out = Vec::new();
+    for _ in 0..rounds {
+        let pkt = build_ipv6_packet(&a_fips, &c_fips, &[0xAB; 1240]);
+        assert_eq!(pkt.len(), 1280);
+        nodes[0].node.handle_tun_outbound(pkt).await;
+        drain_to_quiescence(nodes).await;
+        out.push(Round {
+            delivered: std::iter::from_fn(|| c_rx.try_recv().ok())
+                .map(|p| p.len())
+                .collect(),
+            answers: std::iter::from_fn(|| a_rx.try_recv().ok())
+                .map(|p| (p[40], u32::from_be_bytes([p[44], p[45], p[46], p[47]])))
+                .collect(),
+            path: path_state(nodes),
+            clamp: clamp(nodes),
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    (before, out)
+}
+
+#[tokio::test]
+async fn test_a_chain_of_default_udp_mtu_nodes_delivers_1280_byte_ipv6_packets_end_to_end() {
+    let default_mtu = crate::config::UdpConfig::default().mtu();
+    let mut nodes = session_chain([default_mtu; 3]).await;
+
+    let (_, rounds) = send_rounds(&mut nodes, 2).await;
+    for round in &rounds {
+        assert_eq!(round.delivered, vec![1280], "{rounds:?}");
+        assert!(round.answers.is_empty(), "{rounds:?}");
+    }
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Characterization, not a requirement: records what a default node does
+/// toward a destination behind a forwarder whose transport MTU is 1280 (one
+/// still at the old default, or set by hand). Every packet between 1204 and
+/// 1280 bytes is lost on that path, as it is today: the first silently at the
+/// forwarder, whose `MtuExceeded` tightens the sender's path MTU to 1280; each
+/// later one answered with a Packet Too Big reporting 1203, which a host
+/// ignores (RFC 8201). The TCP clamp shows which flows that reaches: a cold
+/// destination clamps to 1143 and its segments fit the forwarder; one whose
+/// path MTU was learned at 1357 over an all-default path clamps to 1220, so
+/// a flow opened before the path changed sends 1280-byte segments that are
+/// lost there, while flows opened after the `MtuExceeded` clamp to 1143.
+#[tokio::test]
+async fn characterize_a_default_node_behind_a_1280_byte_forwarder_loses_1280_byte_packets_and_answers_ptb_1203()
+ {
+    let default_mtu = crate::config::UdpConfig::default().mtu();
+    let narrowed = Round {
+        delivered: vec![],
+        answers: vec![(2, 1203)],
+        path: (1280, Some(1280)),
+        clamp: 1143,
+    };
+
+    for learned in [None, Some(default_mtu)] {
+        let mut nodes = session_chain([default_mtu, 1280, default_mtu]).await;
+        assert_eq!(
+            path_state(&nodes),
+            (default_mtu, None),
+            "setup: nothing learned yet"
+        );
+        if let Some(mtu) = learned {
+            // As a discovery over an all-default path would have left it.
+            let c_fips = crate::FipsAddress::from_node_addr(nodes[2].node.node_addr());
+            nodes[0].node.path_mtu_lookup_insert(c_fips, mtu);
+        }
+
+        let (before, rounds) = send_rounds(&mut nodes, 3).await;
+        let expected_before = match learned {
+            None => 1143,
+            Some(_) => 1220,
+        };
+        assert_eq!(
+            before, expected_before,
+            "TCP clamp before, learned {learned:?}"
+        );
+        assert_eq!(
+            rounds[0],
+            Round {
+                delivered: vec![],
+                answers: vec![],
+                path: (1280, Some(1280)),
+                clamp: 1143,
+            },
+            "first packet, learned {learned:?}"
+        );
+        assert_eq!(rounds[1], narrowed, "second packet, learned {learned:?}");
+        assert_eq!(rounds[2], narrowed, "third packet, learned {learned:?}");
+
+        cleanup_nodes(&mut nodes).await;
+    }
+}

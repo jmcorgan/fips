@@ -13,10 +13,11 @@ oversize), see the relevant how-to under `docs/how-to/`.
 
 ## The MTU Problem in FIPS
 
-A FIPS path can traverse heterogeneous link types — UDP/IP (1280
-default, IPv6 minimum), Ethernet (interface MTU − 3, typically 1497),
-BLE (per-connection L2CAP CoC MTU, 2048 default), Tor stream (1400
-default), radio (51–222) — within a single end-to-end session.
+A FIPS path can traverse heterogeneous link types — UDP/IP (1357
+default, carries a 1280-byte IPv6 packet), Ethernet (interface
+MTU − 3, typically 1497), BLE (per-connection L2CAP CoC MTU, 2048
+default), Tor stream (1400 default), radio (51–222) — within a single
+end-to-end session.
 The minimum MTU along the path determines the largest datagram a
 session can deliver. Several properties make this harder than in
 classic IP networks:
@@ -84,7 +85,7 @@ SessionDatagram and LookupResponse. Per-transport defaults:
 
 | Transport | Default MTU | Per-link MTU source |
 | --------- | ----------- | ------------------- |
-| UDP | 1280 (IPv6 minimum) | uniform (`mtu()` fallback) |
+| UDP | 1357 (carries a 1280-byte IPv6 packet) | uniform (`mtu()` fallback) |
 | Ethernet | interface MTU − 3 (typically 1497) | uniform |
 | TCP | 1400 | uniform (configured `mtu`) |
 | Tor | 1400 | uniform |
@@ -270,8 +271,8 @@ Packet Too Big alone.
 Clamping is **conditional**: when `per_flow_max_mss` already has an
 entry for the flow, that entry is used; otherwise the clamp falls
 back to a ceiling derived from the most pessimistic effective IPv6
-MTU the adapter knows about (1143 with the typical 1280 transport
-floor). The fallback handles cold-flow first-SYN traffic — the very
+MTU the adapter knows about (1143, from the 1280-byte IPv6
+minimum). The fallback handles cold-flow first-SYN traffic — the very
 first SYN of a flow may arrive before the MMP path-MTU echo and any
 per-flow lookup has been populated, so the conservative ceiling
 prevents the SYN-ACK chain from negotiating a too-large MSS that

@@ -52,7 +52,7 @@ determine how much payload can fit in a single packet after link-layer
 encryption overhead.
 
 MTU is fundamentally a per-link property. A transport with a fixed MTU
-(Ethernet effective 1497, UDP default 1280) returns the same value for every
+(Ethernet effective 1497, UDP default 1357) returns the same value for every
 link — this is the degenerate case. Transports that negotiate MTU
 per-connection (e.g., the BLE L2CAP CoC MTU) report the negotiated value
 for each link individually.

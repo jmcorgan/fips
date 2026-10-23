@@ -1654,6 +1654,38 @@ impl Node {
         crate::upper::icmp::effective_ipv6_mtu(self.transport_mtu())
     }
 
+    /// How many bytes the effective IPv6 MTU falls short of the IPv6
+    /// minimum (1280), or `None` when it does not.
+    ///
+    /// A host never lowers its path MTU below 1280 on a Packet Too Big, so
+    /// with a shortfall every non-TCP IPv6 packet between the effective MTU
+    /// and 1280 bytes is lost. Returns `None` while no transport is
+    /// operational: there is nothing bound to judge, and the configured
+    /// fallback in [`Self::transport_mtu`] would otherwise report one before
+    /// any transport has come up.
+    pub(crate) fn ipv6_shortfall(&self) -> Option<u16> {
+        if !self.transports.values().any(|h| h.is_operational()) {
+            return None;
+        }
+        let short = crate::upper::tun::IPV6_MIN_MTU.saturating_sub(self.effective_ipv6_mtu());
+        (short > 0).then_some(short)
+    }
+
+    /// Warn when the bound transports cannot carry a 1280-byte IPv6 packet.
+    ///
+    /// Logged once where the TUN comes up; the TUN still comes up.
+    pub(crate) fn warn_shortfall(&self) {
+        if let Some(short) = self.ipv6_shortfall() {
+            tracing::warn!(
+                transport_mtu = self.transport_mtu(),
+                effective_ipv6_mtu = self.effective_ipv6_mtu(),
+                short_by = short,
+                "Transport MTU too small for the IPv6 minimum: IPv6 packets above the effective MTU and up to 1280 bytes will be dropped for every protocol except TCP; set each transport's mtu to at least {}",
+                crate::upper::tun::IPV6_MIN_MTU + crate::upper::icmp::FIPS_IPV6_OVERHEAD
+            );
+        }
+    }
+
     /// Get the transport MTU governing the global TUN-boundary MSS clamp.
     ///
     /// Returns the **minimum** MTU across all operational transports, or
