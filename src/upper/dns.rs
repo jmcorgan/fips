@@ -148,12 +148,13 @@ fn answer(query: &Query<'_>, ttl: u32, hosts: &HostMap) -> (Vec<u8>, Option<DnsR
     }
 }
 
-/// Decide whether a received DNS query should be dropped as mesh-originated.
+/// Whether a received DNS query arrived on the mesh interface.
 ///
-/// A query is dropped iff we have a configured mesh interface index
-/// (`mesh_ifindex`) and the packet arrived on that interface
-/// (`arrival_ifindex`). Queries arriving on any other interface — loopback,
-/// LAN, or unknown (no PKTINFO cmsg) — are not dropped.
+/// True iff the mesh interface's index (`mesh_ifindex`) is known and the
+/// packet arrived on that interface (`arrival_ifindex`). Queries arriving on
+/// any other interface (loopback, LAN, or unknown, with no PKTINFO cmsg) are
+/// not matched. Where the mesh index is unknown, [`mesh_query`] recognises
+/// mesh queries by address instead.
 ///
 /// The arrival-interface check is robust regardless of source address. LAN
 /// segments using RFC 4193 ULA prefixes (`fd00::/8`, common with OpenWrt
@@ -172,20 +173,87 @@ fn answer(query: &Query<'_>, ttl: u32, hosts: &HostMap) -> (Vec<u8>, Option<DnsR
 /// source is sent only under that same routing-table check, on either bind.
 /// So a query arriving on another interface with a forged mesh source
 /// address is not answered into the mesh by this socket. The check reads
-/// the egress interface from the source address the kernel picks, so it
-/// relies on the mesh interface carrying an address of the reply's family
-/// (the daemon's TUN does; an application-supplied TUN without an IPv6
-/// address would not); and source-based policy routing on Linux can route
-/// the bound socket differently from the check. A node that forwards IPv6
+/// the egress interface from the source address the kernel picks, which
+/// relies on the mesh interface carrying an address of the reply's family.
+/// When no interface holds the node's mesh address (an
+/// application-supplied TUN with no IPv6 address), the check instead sends
+/// the reply only to a destination on one of the arrival interface's own
+/// prefixes, or delivered locally (see [`returns_by`]). That stands in for
+/// "the mesh interface has no address": an embedder that puts the mesh
+/// address on some other interface while leaving its TUN bare is judged by
+/// the picked source, which then says nothing about the TUN, and is not
+/// covered. Source-based policy routing on Linux can also route the bound
+/// socket differently from the check. A node that forwards IPv6
 /// from that interface into the mesh can still have the reply routed back
 /// to it and forward it into the mesh, as it would any packet from that
 /// network to a mesh address. On Windows the arrival interface is not read,
-/// so the reply is routed. Measured on Linux and FreeBSD; macOS and Android
-/// follow the same code path but were not run.
-fn is_mesh_interface_query(arrival_ifindex: Option<u32>, mesh_ifindex: Option<u32>) -> bool {
+/// so the reply is routed; there, while a TUN is up, [`mesh_query`] refuses
+/// every query from a remote mesh source address, so a forged one gets no
+/// reply either. Measured on Linux and FreeBSD; macOS and Android follow the
+/// same code path but were not run.
+pub(crate) fn is_mesh_interface_query(
+    arrival_ifindex: Option<u32>,
+    mesh_ifindex: Option<u32>,
+) -> bool {
     match (arrival_ifindex, mesh_ifindex) {
         (Some(arrival), Some(mesh)) => arrival == mesh,
         _ => false,
+    }
+}
+
+/// What the responder knows of this node's mesh side: the mesh interface's
+/// index, when it resolved, and the node's own mesh address, when a TUN is
+/// up (the daemon's own or an application-supplied one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct MeshSide {
+    /// Index of the mesh interface; `None` with an application-supplied TUN,
+    /// on Windows, or when the device name did not resolve.
+    pub(crate) ifindex: Option<u32>,
+    /// The node's own mesh address (`fd00::/8`); `None` when no TUN is up.
+    pub(crate) addr: Option<Ipv6Addr>,
+}
+
+/// Whether a query from `src` that arrived as `arrival` came from the mesh
+/// and must be dropped unanswered.
+///
+/// Where the mesh interface's index is known, this is exactly
+/// [`is_mesh_interface_query`]. Where it is not (an application-supplied
+/// TUN, an unresolved device name, or Windows) but a TUN is up, the query is
+/// recognised by address. Every packet the node delivers from the mesh into
+/// its TUN carries the remote node's `fd00::/8` address as source and this
+/// node's own mesh address as destination. So a query whose destination is
+/// the node's mesh address and whose source is not is dropped; where the
+/// destination is not reported (Windows), a query from any remote
+/// non-v4-mapped `fd00::/8` source is dropped. A local process sending from
+/// the node's own mesh address is always answered. With no TUN up there is
+/// no mesh to filter, and nothing is dropped.
+///
+/// The cost of the address rule: with the mesh index unknown, a LAN client
+/// that queries the node's mesh address directly is dropped, and on Windows a
+/// LAN client with a ULA (`fd00::/8`) source gets no answer while a TUN is
+/// up.
+pub(crate) fn mesh_query(arrival: Arrival, src: std::net::SocketAddr, mesh: MeshSide) -> bool {
+    if is_mesh_interface_query(arrival.ifindex, mesh.ifindex) {
+        return true;
+    }
+    if mesh.ifindex.is_some() {
+        return false;
+    }
+    let Some(own) = mesh.addr else {
+        return false;
+    };
+    let src = match src.ip() {
+        std::net::IpAddr::V6(ip) => Some(ip),
+        std::net::IpAddr::V4(_) => None,
+    };
+    if src == Some(own) {
+        return false;
+    }
+    match arrival.dst {
+        Some(dst) => dst == own,
+        None => src.is_some_and(|ip| {
+            ip.octets()[0] == FIPS_ADDRESS_PREFIX && ip.to_ipv4_mapped().is_none()
+        }),
     }
 }
 
@@ -274,7 +342,8 @@ fn reply_path(
 
 /// Whether a reply whose route the kernel gives source address `source`
 /// stays out of the mesh: true when the reply goes back out of interface
-/// `arrival`, or is delivered locally.
+/// `arrival`, or is delivered locally. `mesh_addr` is the node's own mesh
+/// address while a TUN is up.
 ///
 /// `source` is what [`probe_source`] reports for the reply's `destination`,
 /// and `prefixes` holds this node's interface prefixes. The egress interface
@@ -289,13 +358,31 @@ fn reply_path(
 /// destination's family. The daemon's TUN does (its mesh address); an
 /// application-supplied TUN with no IPv6 address does not, and a reply
 /// routed into it would be judged by the LAN source the kernel then picks.
+/// So when the node's mesh address is known and no interface prefix holds
+/// it, the picked source says nothing about egress, and the reply is judged
+/// by its destination instead: it returns only when the destination lies in
+/// one of the arrival interface's own prefixes, whose connected route is
+/// more specific than the mesh's `fd00::/8`. A ULA client reached through a
+/// LAN router then gets no reply. A TUN carrying some other address than the
+/// node's mesh address is treated as bare, which errs toward withholding.
+/// The mesh address on another non-loopback interface while the TUN is bare
+/// is not caught: the mesh interface is then taken to be addressed.
 fn returns_by(
     source: std::net::IpAddr,
     destination: std::net::IpAddr,
     arrival: u32,
     prefixes: &OnLinkPrefixes,
+    mesh_addr: Option<Ipv6Addr>,
 ) -> bool {
-    source == destination || prefixes.contains_on(source, &[arrival])
+    if source == destination {
+        return true;
+    }
+    match mesh_addr {
+        Some(mesh) if !prefixes.contains(std::net::IpAddr::V6(mesh)) => {
+            prefixes.contains_on(destination, &[arrival])
+        }
+        _ => prefixes.contains_on(source, &[arrival]),
+    }
 }
 
 /// The source address the kernel picks for a datagram to `destination` by
@@ -319,14 +406,19 @@ fn probe_source(destination: std::net::SocketAddr) -> std::io::Result<std::net::
 /// Whether a [`ReplyPath::Returning`] reply to `dst`, whose query arrived on
 /// interface `arrival`, may be sent: `Ok(())` when the routing table takes
 /// it back out of `arrival` or delivers it locally, otherwise the reason it
-/// is withheld. A failed probe or interface read withholds.
-fn check_returning(dst: std::net::SocketAddr, arrival: u32) -> Result<(), &'static str> {
+/// is withheld. A failed probe or interface read withholds. `mesh_addr` is
+/// the node's own mesh address while a TUN is up.
+fn check_returning(
+    dst: std::net::SocketAddr,
+    arrival: u32,
+    mesh_addr: Option<Ipv6Addr>,
+) -> Result<(), &'static str> {
     let source = probe_source(dst).map_err(|_| "reply-route-probe-failed")?;
     let prefixes = OnLinkPrefixes::read_system();
     if prefixes.read_failed() {
         return Err("interface-read-failed");
     }
-    if returns_by(source, dst.ip(), arrival, &prefixes) {
+    if returns_by(source, dst.ip(), arrival, &prefixes, mesh_addr) {
         Ok(())
     } else {
         Err("reply-route-leaves-by-another-interface")
@@ -353,7 +445,9 @@ fn wildcard_bind(local: std::io::Result<std::net::SocketAddr>) -> bool {
 /// probe `/etc/fips/hosts` aliases via dictionary attack. The check
 /// requires `IPV6_RECVPKTINFO` to be enabled on the socket (done in
 /// `Node::bind_dns_socket`); if it is not, arrival ifindex is unknown
-/// and no filter is applied.
+/// and no filter is applied. This entry point does not know the node's mesh
+/// address, so with `mesh_ifindex` `None` nothing is filtered; the daemon
+/// starts the responder with its mesh address as well (see [`mesh_query`]).
 pub async fn run_dns_responder(
     socket: tokio::net::UdpSocket,
     identity_tx: DnsIdentityTx,
@@ -361,7 +455,11 @@ pub async fn run_dns_responder(
     reloader: HostMapReloader,
     mesh_ifindex: Option<u32>,
 ) {
-    run_responder(socket, identity_tx, ttl, reloader, None, mesh_ifindex).await
+    let mesh = MeshSide {
+        ifindex: mesh_ifindex,
+        addr: None,
+    };
+    run_responder(socket, identity_tx, ttl, reloader, None, mesh).await
 }
 
 /// Run the DNS responder UDP server loop, taking peer-alias base updates.
@@ -370,31 +468,35 @@ pub async fn run_dns_responder(
 /// `Some`, applies the newest peer-alias base sent on it before answering
 /// each query, so aliases follow the node's peer list when it is replaced
 /// at runtime. The hosts file stays merged over the new base and still wins.
+/// Queries from the mesh, as [`mesh_query`] judges them against `mesh`, are
+/// dropped unanswered.
 pub(crate) async fn run_responder(
     socket: tokio::net::UdpSocket,
     identity_tx: DnsIdentityTx,
     ttl: u32,
     mut reloader: HostMapReloader,
     mut aliases: Option<tokio::sync::watch::Receiver<HostMap>>,
-    mesh_ifindex: Option<u32>,
+    mesh: MeshSide,
 ) {
     let mut buf = vec![0u8; dnsmsg::MAX_DATAGRAM];
     let wildcard = wildcard_bind(socket.local_addr());
 
     loop {
-        let (len, src, arrival_ifindex) = match recv_with_pktinfo(&socket, &mut buf).await {
+        let (len, src, arrival) = match recv_with_pktinfo(&socket, &mut buf).await {
             Ok(result) => result,
             Err(e) => {
                 debug!(error = %e, "DNS socket recv error");
                 continue;
             }
         };
+        let arrival_ifindex = arrival.ifindex;
 
-        if is_mesh_interface_query(arrival_ifindex, mesh_ifindex) {
+        if mesh_query(arrival, src, mesh) {
             trace!(
                 src = %src,
                 ifindex = ?arrival_ifindex,
-                "DNS query arrived on mesh interface, dropping"
+                dst = ?arrival.dst,
+                "DNS query from the mesh, dropping"
             );
             continue;
         }
@@ -428,8 +530,8 @@ pub(crate) async fn run_responder(
         }
 
         let strict_pin = cfg!(target_os = "linux");
-        let path = reply_path(src, arrival_ifindex, mesh_ifindex, wildcard, strict_pin);
-        if let Err(e) = send_reply(&socket, &response_bytes, src, path).await {
+        let path = reply_path(src, arrival_ifindex, mesh.ifindex, wildcard, strict_pin);
+        if let Err(e) = send_reply(&socket, &response_bytes, src, path, mesh.addr).await {
             debug!(error = %e, "DNS send error");
         }
     }
@@ -439,20 +541,23 @@ pub(crate) async fn run_responder(
 /// (Linux), or dropped when withheld. A `Returning` reply is routed when the
 /// table takes it back out of its arrival interface or delivers it locally,
 /// and dropped otherwise. [`reply_path`] gives `Pinned` only on Linux; on any
-/// other target a `Pinned` path is treated as `Returning`.
+/// other target a `Pinned` path is treated as `Returning`. `mesh_addr` is the
+/// node's own mesh address while a TUN is up, which a `Returning` check
+/// uses.
 async fn send_reply(
     socket: &tokio::net::UdpSocket,
     buf: &[u8],
     dst: std::net::SocketAddr,
     path: ReplyPath,
+    mesh_addr: Option<Ipv6Addr>,
 ) -> std::io::Result<usize> {
     match path {
         ReplyPath::Routed => socket.send_to(buf, dst).await,
-        ReplyPath::Returning(arrival) => send_returning(socket, buf, dst, arrival).await,
+        ReplyPath::Returning(arrival) => send_returning(socket, buf, dst, arrival, mesh_addr).await,
         #[cfg(target_os = "linux")]
         ReplyPath::Pinned(ifindex) => send_pinned(socket, buf, dst, ifindex).await,
         #[cfg(not(target_os = "linux"))]
-        ReplyPath::Pinned(arrival) => send_returning(socket, buf, dst, arrival).await,
+        ReplyPath::Pinned(arrival) => send_returning(socket, buf, dst, arrival, mesh_addr).await,
         ReplyPath::Withheld => {
             debug!(
                 src = %dst,
@@ -471,8 +576,9 @@ async fn send_returning(
     buf: &[u8],
     dst: std::net::SocketAddr,
     arrival: u32,
+    mesh_addr: Option<Ipv6Addr>,
 ) -> std::io::Result<usize> {
-    match check_returning(dst, arrival) {
+    match check_returning(dst, arrival, mesh_addr) {
         Ok(()) => socket.send_to(buf, dst).await,
         Err(reason) => {
             debug!(
@@ -605,20 +711,58 @@ fn refresh_hosts(
     reloader.check_reload();
 }
 
+/// Where a received datagram arrived, as far as the socket reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Arrival {
+    /// The index of the interface the datagram arrived on, from
+    /// `IPV6_PKTINFO`; `None` when the kernel gave no such message.
+    pub(crate) ifindex: Option<u32>,
+    /// The datagram's destination address, from the same message (v4-mapped
+    /// for an IPv4 arrival on a dual-stack socket); `None` when the kernel
+    /// gave no such message, and always on Windows.
+    pub(crate) dst: Option<Ipv6Addr>,
+}
+
+/// Enable `IPV6_RECVPKTINFO` on an IPv6 UDP socket.
+///
+/// After this setsockopt, each `recvmsg()` call on the socket receives
+/// an `IPV6_PKTINFO` control message containing the arrival interface
+/// index, which the DNS responder uses for its mesh-interface filter.
+#[cfg(unix)]
+pub(crate) fn set_recv_pktinfo_v6(sock: &socket2::Socket) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    let enable: libc::c_int = 1;
+    let ret = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Receive a UDP datagram with arrival-interface info via `IPV6_PKTINFO`.
 ///
-/// Returns `(len, src, arrival_ifindex)`. The ifindex is `Some` when the
-/// kernel delivered an `IPV6_PKTINFO` control message, which Linux does for
-/// IPv4 arrivals on a dual-stack socket too; `None` otherwise (for example
-/// `IPV6_RECVPKTINFO` not enabled). A `None` ifindex disables filtering
-/// for that packet — fail-open on unknown arrival — and leaves its reply
-/// routed, except a reply to a mesh source on a socket bound to a specific
-/// address with a known mesh interface, which [`reply_path`] withholds.
+/// Returns `(len, src, arrival)`. The arrival ifindex and destination are
+/// `Some` when the kernel delivered an `IPV6_PKTINFO` control message, which
+/// Linux does for IPv4 arrivals on a dual-stack socket too; `None` otherwise
+/// (for example `IPV6_RECVPKTINFO` not enabled, or on Windows, which reads
+/// neither). A `None` ifindex disables the interface filter for that packet
+/// (fail-open on unknown arrival; [`mesh_query`] then judges by address when
+/// the node's mesh address is known) and leaves its reply routed, except a
+/// reply to a mesh source on a socket bound to a specific address with a
+/// known mesh interface, which [`reply_path`] withholds.
 #[cfg(unix)]
-async fn recv_with_pktinfo(
+pub(crate) async fn recv_with_pktinfo(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
-) -> std::io::Result<(usize, std::net::SocketAddr, Option<u32>)> {
+) -> std::io::Result<(usize, std::net::SocketAddr, Arrival)> {
     use std::os::fd::AsRawFd;
     loop {
         socket.readable().await?;
@@ -634,12 +778,12 @@ async fn recv_with_pktinfo(
 }
 
 #[cfg(not(unix))]
-async fn recv_with_pktinfo(
+pub(crate) async fn recv_with_pktinfo(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
-) -> std::io::Result<(usize, std::net::SocketAddr, Option<u32>)> {
+) -> std::io::Result<(usize, std::net::SocketAddr, Arrival)> {
     let (len, src) = socket.recv_from(buf).await?;
-    Ok((len, src, None))
+    Ok((len, src, Arrival::default()))
 }
 
 /// Blocking `recvmsg` wrapper that extracts `IPV6_PKTINFO` ifindex.
@@ -650,7 +794,7 @@ async fn recv_with_pktinfo(
 fn recvmsg_with_pktinfo(
     fd: std::os::fd::RawFd,
     buf: &mut [u8],
-) -> std::io::Result<(usize, std::net::SocketAddr, Option<u32>)> {
+) -> std::io::Result<(usize, std::net::SocketAddr, Arrival)> {
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr() as *mut _,
         iov_len: buf.len(),
@@ -675,25 +819,28 @@ fn recvmsg_with_pktinfo(
     let n = n as usize;
 
     let src = sockaddr_storage_to_socket_addr(&src_store, msg.msg_namelen)?;
-    let ifindex = extract_pktinfo_ifindex(&msg);
 
-    Ok((n, src, ifindex))
+    Ok((n, src, extract_pktinfo(&msg)))
 }
 
-/// Walk the cmsg chain and return the `IPV6_PKTINFO` ifindex, if present.
+/// Walk the cmsg chain and return the `IPV6_PKTINFO` ifindex and destination
+/// address, if present.
 #[cfg(unix)]
-fn extract_pktinfo_ifindex(msg: &libc::msghdr) -> Option<u32> {
+fn extract_pktinfo(msg: &libc::msghdr) -> Arrival {
     let mut cmsg_ptr = unsafe { libc::CMSG_FIRSTHDR(msg) };
     while !cmsg_ptr.is_null() {
         let cmsg = unsafe { &*cmsg_ptr };
         if cmsg.cmsg_level == libc::IPPROTO_IPV6 && cmsg.cmsg_type == libc::IPV6_PKTINFO {
             let data_ptr = unsafe { libc::CMSG_DATA(cmsg_ptr) } as *const libc::in6_pktinfo;
             let pktinfo: libc::in6_pktinfo = unsafe { std::ptr::read_unaligned(data_ptr) };
-            return Some(pktinfo.ipi6_ifindex as u32);
+            return Arrival {
+                ifindex: Some(pktinfo.ipi6_ifindex as u32),
+                dst: Some(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)),
+            };
         }
         cmsg_ptr = unsafe { libc::CMSG_NXTHDR(msg, cmsg_ptr) };
     }
-    None
+    Arrival::default()
 }
 
 /// Convert a populated `sockaddr_storage` to `SocketAddr`.
@@ -1260,7 +1407,7 @@ mod tests {
         client.send_to(b"hello", server_addr).await.unwrap();
 
         let mut buf = [0u8; 32];
-        let (len, src, ifindex) = tokio::time::timeout(
+        let (len, src, arrival) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             recv_with_pktinfo(&server, &mut buf),
         )
@@ -1271,7 +1418,7 @@ mod tests {
         assert_eq!(&buf[..len], b"hello");
         assert!(src.ip().is_loopback(), "source should be loopback");
         assert_eq!(
-            ifindex,
+            arrival.ifindex,
             Some(lo),
             "IPV6_PKTINFO should report loopback ifindex"
         );
@@ -1400,7 +1547,7 @@ mod tests {
         let sender = bind_loopback_v6_with_pktinfo();
         let receiver = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
         let dst = receiver.local_addr().unwrap();
-        send_reply(&sender, b"withheld", dst, ReplyPath::Withheld)
+        send_reply(&sender, b"withheld", dst, ReplyPath::Withheld, None)
             .await
             .unwrap();
         let mut buf = [0u8; 16];
@@ -1420,7 +1567,7 @@ mod tests {
         let sender = bind_loopback_v6_with_pktinfo();
         let receiver = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
         let dst = receiver.local_addr().unwrap();
-        send_reply(&sender, b"routed", dst, ReplyPath::Routed)
+        send_reply(&sender, b"routed", dst, ReplyPath::Routed, None)
             .await
             .unwrap();
         let mut buf = [0u8; 16];
@@ -1453,7 +1600,7 @@ mod tests {
             300,
             reloader,
             None,
-            None,
+            MeshSide::default(),
         ));
 
         for (client, server) in [("[::1]:0", "[::1]"), ("127.0.0.1:0", "127.0.0.1")] {
@@ -1541,6 +1688,18 @@ mod tests {
 
         /// Create and configure both namespaces.
         pub(super) fn new() -> Self {
+            Self::build(true)
+        }
+
+        /// As [`Self::new`], but `fips0` carries no address, only the
+        /// `fd00::/8` route, as an application-supplied TUN may.
+        pub(super) fn with_addressless_mesh() -> Self {
+            Self::build(false)
+        }
+
+        /// Create and configure both namespaces, with `fd99::1` on `fips0`
+        /// when `mesh_addr` is set.
+        fn build(mesh_addr: bool) -> Self {
             // Tests run in parallel in one process, so each pair gets its own
             // sequence number.
             static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1608,7 +1767,10 @@ mod tests {
                 ],
                 vec!["-n", a, "route", "add", "fd00::/8", "dev", "fips0"],
             ] {
-                run_ok("ip", &args);
+                if !mesh_addr && args.contains(&"fd99::1/128") {
+                    continue;
+                }
+                crate::testutil::run_ok("ip", &args);
             }
             let rule = format!(
                 "oifname \"fips0\" udp sport {} counter name refl",
@@ -1622,7 +1784,7 @@ mod tests {
             ] {
                 let mut args = vec!["netns", "exec", a, "nft"];
                 args.extend(cmd.split(' '));
-                run_ok("ip", &args);
+                crate::testutil::run_ok("ip", &args);
             }
             ns
         }
@@ -1633,16 +1795,7 @@ mod tests {
             name: &str,
             f: impl FnOnce() -> T + Send + 'static,
         ) -> T {
-            use std::os::fd::AsRawFd;
-            let path = format!("/run/netns/{name}");
-            std::thread::spawn(move || {
-                let file = std::fs::File::open(&path).expect("open netns");
-                let ret = unsafe { libc::setns(file.as_raw_fd(), libc::CLONE_NEWNET) };
-                assert_eq!(ret, 0, "setns: {}", std::io::Error::last_os_error());
-                f()
-            })
-            .join()
-            .unwrap()
+            crate::testutil::in_netns(name, f)
         }
 
         /// Index of the responder side's `fips0`.
@@ -1681,17 +1834,6 @@ mod tests {
                     .status();
             }
         }
-    }
-
-    /// Run a command and panic unless it succeeds.
-    #[cfg(target_os = "linux")]
-    pub(super) fn run_ok(cmd: &str, args: &[&str]) {
-        let out = std::process::Command::new(cmd).args(args).output().unwrap();
-        assert!(
-            out.status.success(),
-            "{cmd} {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
     }
 
     /// A LAN host that forges a mesh source address must not make this node
@@ -1742,7 +1884,10 @@ mod tests {
             300,
             reloader,
             None,
-            Some(mesh_ifindex),
+            MeshSide {
+                ifindex: Some(mesh_ifindex),
+                addr: None,
+            },
         ));
 
         let target: std::net::SocketAddr = "[2001:db8:1::1]:5354".parse().unwrap();
@@ -1813,7 +1958,10 @@ mod tests {
             300,
             reloader,
             None,
-            Some(mesh_ifindex),
+            MeshSide {
+                ifindex: Some(mesh_ifindex),
+                addr: None,
+            },
         ));
 
         expect_answer(

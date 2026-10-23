@@ -87,6 +87,18 @@ it against the arrival interface of each incoming UDP DNS query. When
 they match — meaning the query came from another mesh node, not from a
 local socket — the responder discards the query without replying.
 
+Where the index is unknown but a TUN is up (an application-supplied TUN,
+Windows, or a device name that did not resolve), the responder recognises
+a mesh query by address instead, in
+[`mesh_query`](../../src/upper/dns.rs). Every packet the node delivers
+from the mesh into its TUN carries the remote node's `fd00::/8` address
+as source and the node's own mesh address as destination. On unix a
+query addressed to the node's mesh address from any other source is
+dropped; on Windows, which reports no destination, a query from any
+remote `fd00::/8` source is dropped, so Windows LAN clients with ULA
+addresses go unanswered on a non-loopback bind while a TUN is up. A local
+process sending from the node's own mesh address is always answered.
+
 The check is implemented in
 [`is_mesh_interface_query`](../../src/upper/dns.rs) and prevents two
 classes of misbehaviour: a peer asking the daemon to resolve `.fips`
@@ -348,8 +360,8 @@ cannot bind — and it points the resolver *into* the tunnel, so `.fips` queries
 surface as IPv6/UDP packets on the app's own fd rather than at any socket FIPS
 holds. The [DNS responder](#dns-integration) itself needs no changes for this:
 its bind is a plain UDP socket, and with no system TUN the
-[mesh-interface filter](#mesh-interface-query-filter) self-disables because the
-interface name does not resolve.
+[mesh-interface filter](#mesh-interface-query-filter) has no interface index
+and falls back to recognising mesh queries by the node's own mesh address.
 
 `Node::dns_local_addr()` closes the gap. It reports the address read back off the
 bound socket — so a `dns.port = 0` config yields the port the kernel assigned —
