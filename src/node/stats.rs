@@ -493,9 +493,9 @@ pub struct CongestionStatsSnapshot {
 
 /// Native datagram API counters.
 ///
-/// Eight of the `drop_*` fields are one per
+/// Nine of the `drop_*` fields are one per
 /// [`DropReason`](crate::native::link::DropReason) variant, so a variant added
-/// later has nowhere to hide. `drop_oversize` is the ninth and has no reason
+/// later has nowhere to hide. `drop_oversize` is the tenth and has no reason
 /// because it is refused on the send side, before the registry sees the
 /// datagram.
 ///
@@ -515,6 +515,7 @@ pub struct NativeStatsSnapshot {
     pub drop_no_port: u64,
     pub drop_backlog_full: u64,
     pub drop_too_many_flows: u64,
+    pub drop_peer_share: u64,
     pub drop_pending_queue_full: u64,
     pub drop_flow_queue_full: u64,
     pub drop_arrival_queue_full: u64,

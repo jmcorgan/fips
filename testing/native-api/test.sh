@@ -324,16 +324,18 @@ check_ephemeral_allocation() {
     # but the reply to learn the port it got, which is getsockname after bind(2)
     # with port 0.
     #
-    # The three ports asserted are the first three the node ever hands out: the
-    # allocator is a cursor on the node that only moves forward, so this check
-    # has to run before anything else that asks for an ephemeral port.
+    # The node starts each search at a random port in the range, so only the
+    # range is asserted, and that the three ports, all held at once, differ.
     local script='[
       {"command":"connect","params":{"peer":"'"$PEER"'","remote_port":4242},
-       "keep_fd":"a","expect":{"status":"ok","data.local_port":49152}},
+       "keep_fd":"a","distinct":["eph","data.local_port"],
+       "expect":{"status":"ok","data.local_port":{"between":[49152,65535]}}},
       {"command":"connect","params":{"peer":"'"$PEER"'","remote_port":4242,"local_port":0},
-       "keep_fd":"b","expect":{"status":"ok","data.local_port":49153}},
+       "keep_fd":"b","distinct":["eph","data.local_port"],
+       "expect":{"status":"ok","data.local_port":{"between":[49152,65535]}}},
       {"command":"listen","params":{"local_port":0},"keep_listener":"L",
-       "expect":{"status":"ok","data.local_port":49154}}
+       "distinct":["eph","data.local_port"],
+       "expect":{"status":"ok","data.local_port":{"between":[49152,65535]}}}
     ]'
     if run_client "$script"; then
         pass "connect and listen both allocate from the ephemeral range"
@@ -722,6 +724,36 @@ check_refusing_a_flow_frees_it() {
     fi
 }
 
+check_one_peer_is_held_to_its_share() {
+    log "One peer holds no more than a quarter of max_flows as inbound flows"
+    # Every new source port is a new flow key, so without a share of its own one
+    # peer could fill the node's table and refuse every connect and every other
+    # peer's arrival. At the default max_flows of 256 the share is 64.
+    #
+    # Each arrival is accepted as soon as it is announced and its descriptor
+    # closed without a write. The daemon keeps its own copy of such a flow
+    # until the listener closes, so all 64 stay counted against the peer, while
+    # the listener never holds more than one unread arrival and its send buffer
+    # cannot be what refuses. A flow from PEER left over from an earlier check
+    # would make an earlier arrival drop, and the check fail, rather than pass.
+    local steps='[{"command":"listen","params":{"local_port":4306},"keep_listener":"L","expect":{"status":"ok"}}'
+    local port
+    for port in $(seq 7000 7063); do
+        steps="$steps,{\"command\":\"arrive\",\"params\":{\"peer\":\"$PEER\",\"src_port\":$port,\"dst_port\":4306,\"data\":\"aa\"},\"expect\":{\"data.outcome\":\"announced\"}}"
+        steps="$steps,{\"accept\":\"L\",\"keep_fd\":\"f$port\"},{\"fd\":\"f$port\",\"close\":true}"
+    done
+    steps="$steps,{\"command\":\"arrive\",\"params\":{\"peer\":\"$PEER\",\"src_port\":7064,\"dst_port\":4306,\"data\":\"aa\"},\"expect\":{\"data.outcome\":\"dropped: peer flow limit reached\"}}"
+    steps="$steps,{\"command\":\"arrive\",\"params\":{\"peer\":\"$PEER2\",\"src_port\":7000,\"dst_port\":4306,\"data\":\"aa\"},\"expect\":{\"data.outcome\":\"announced\"}}"
+    steps="$steps]"
+
+    if run_client "$steps" >/dev/null; then
+        pass "64 arrivals from one peer announced, the 65th dropped for its share, another peer still announced"
+    else
+        fail "one peer was not held to its share of the flow table"
+        run_client "$steps" 2>&1 | grep -A 3 FAILED | head -8
+    fi
+}
+
 # The refusal a gated debug command earns, one per command name.
 gate_refusal() {
     printf "'%s' is a debug command and is disabled; set node.native_api.debug_commands to enable it" "$1"
@@ -802,11 +834,9 @@ JSON
 # the unit tests' hand-written stand-in daemon. A stand-in kinder than the real
 # thing has already hidden a defect once, so the walk runs against the daemon.
 #
-# It runs last among the single-node checks. check_ephemeral_allocation asserts
-# 49152, 49153 and 49154 as the first three ports this node ever hands out and
-# the allocator is a forward-only cursor, so the walk goes after it and asserts
-# only that its own ephemeral ports are >= 49152. Its named ports come from the
-# otherwise unused 4800-4809 band.
+# It runs last among the single-node checks. The node starts each ephemeral port
+# search at a random port, so the walk asserts only that its own ephemeral ports
+# are >= 49152. Its named ports come from the otherwise unused 4800-4809 band.
 check_surface_walk() {
     log "The client's whole public surface holds against a live daemon"
 
@@ -1379,6 +1409,7 @@ check_control_reports_the_flow() {
     elif query_control "$DIR_B" show_native_flows \
         "data.stats.drop_backlog_full=0" \
         "data.stats.drop_too_many_flows=0" \
+        "data.stats.drop_peer_share=0" \
         "data.stats.drop_pending_queue_full=0" \
         "data.stats.drop_flow_queue_full=0" \
         "data.stats.drop_arrival_queue_full=0" \
@@ -1447,6 +1478,7 @@ if check_socket_appears; then
     check_dispatch_order
     check_backlog_is_not_the_clients_bound
     check_refusing_a_flow_frees_it
+    check_one_peer_is_held_to_its_share
     check_debug_commands_gated
     check_surface_walk
 fi

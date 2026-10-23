@@ -10,9 +10,11 @@
 //! the caller passes the time in and performs whatever the decision names. That
 //! is what lets the delivery rule be tested without a wire, and it is why the
 //! same [`Registry::deliver`] serves both the debug arrival command and, once it
-//! exists, the real FSP receive path.
+//! exists, the real FSP receive path. The one thing it draws from outside is
+//! where an ephemeral port search starts, which comes from the thread RNG.
 
 use crate::identity::NodeAddr;
+use rand::RngExt;
 use secp256k1::XOnlyPublicKey;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -61,6 +63,14 @@ pub struct Arrival {
     pub pubkey: XOnlyPublicKey,
 }
 
+/// The fraction of [`Limits::max_flows`] one peer's inbound flows may hold,
+/// as a divisor.
+///
+/// A quarter: 64 flows at the default ceiling of 256, which leaves an honest
+/// peer room for many concurrent flows to one node while keeping a single key
+/// from taking the whole table.
+pub const PEER_SHARE: usize = 4;
+
 /// Bounds on what the registry will hold.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -70,6 +80,16 @@ pub struct Limits {
     pub backlog: usize,
     /// Flows this node holds at once, across every client.
     pub max_flows: usize,
+}
+
+impl Limits {
+    /// Inbound flows one peer may hold at once, pending and accepted.
+    ///
+    /// Derived rather than configured, so the struct keeps its shape. Never
+    /// zero, or a small table would refuse every peer.
+    pub fn per_peer(&self) -> usize {
+        (self.max_flows / PEER_SHARE).max(1)
+    }
 }
 
 /// Why a registry request was refused.
@@ -142,6 +162,8 @@ pub enum DropCause {
     TooManyFlows,
     /// The flow is pending accept and its queue is full.
     QueueFull,
+    /// The peer already holds its share of the node's inbound flows.
+    PeerShare,
 }
 
 /// What holds a local port.
@@ -172,6 +194,10 @@ struct Flow {
     /// records its announcement time; an established one needs its own, or an
     /// observer cannot tell a flow opened an hour ago from one opened just now.
     at: u64,
+    /// Whether a peer opened it by arriving at a listener, as opposed to a
+    /// local client connecting out. Only inbound flows count against a peer's
+    /// share.
+    inbound: bool,
 }
 
 /// A flow announced to a listener and awaiting the client's answer.
@@ -233,7 +259,6 @@ pub struct Registry {
     pending: HashMap<u64, Pending>,
     limits: Limits,
     next_flow: u64,
-    next_ephemeral: u16,
 }
 
 impl Registry {
@@ -247,7 +272,6 @@ impl Registry {
             pending: HashMap::new(),
             limits,
             next_flow: 1,
-            next_ephemeral: PORT_EPHEMERAL_MIN,
         }
     }
 
@@ -402,6 +426,7 @@ impl Registry {
                 pubkey: peer,
                 sink,
                 at: now,
+                inbound: false,
             },
         );
         self.by_id.insert(id, key);
@@ -415,22 +440,21 @@ impl Registry {
 
     /// Claim a free port from the ephemeral range.
     ///
-    /// Sweeps forward from where the last claim left off and wraps once, so a
-    /// port is not reused immediately after it is released.
+    /// Starts at a random port in the range and probes forward, wrapping once,
+    /// to the first one not held (RFC 6056, Algorithm 1). The start is random
+    /// because the local port reaches the peer as the flow's source port: from
+    /// a cursor that only moved forward, a peer given two flows could subtract
+    /// their ports and count the allocations every local program made in
+    /// between, including those to other peers. The cost is that a port just
+    /// released comes back with probability 1/16384 on each claim.
     fn take_ephemeral(&mut self) -> Result<u16, RegistryError> {
         let span = u32::from(u16::MAX - PORT_EPHEMERAL_MIN) + 1;
-        for _ in 0..span {
-            let port = self.next_ephemeral;
-            self.next_ephemeral = if port == u16::MAX {
-                PORT_EPHEMERAL_MIN
-            } else {
-                port + 1
-            };
-            if !self.ports.contains_key(&port) {
-                return Ok(port);
-            }
-        }
-        Err(RegistryError::NoPort)
+        let start = rand::rng().random_range(0..span);
+        (0..span)
+            .map(|step| (start + step) % span + u32::from(PORT_EPHEMERAL_MIN))
+            .map(|port| u16::try_from(port).expect("the probe stays inside the ephemeral range"))
+            .find(|port| !self.ports.contains_key(port))
+            .ok_or(RegistryError::NoPort)
     }
 
     /// Decide where an inbound datagram goes.
@@ -476,6 +500,9 @@ impl Registry {
         if self.flow_count() >= self.limits.max_flows {
             return Delivery::Drop(DropCause::TooManyFlows);
         }
+        if self.inbound_from(peer) >= self.limits.per_peer() {
+            return Delivery::Drop(DropCause::PeerShare);
+        }
         {
             let listener = self.listeners.get(&dst).expect("checked above");
             if listener.pending.len() >= self.limits.backlog {
@@ -517,6 +544,25 @@ impl Registry {
         true
     }
 
+    /// How many inbound flows `peer` holds, pending and accepted.
+    ///
+    /// A scan over at most `max_flows` entries, reached only for a key that is
+    /// neither pending nor established, so traffic on an existing flow does
+    /// not pay for it.
+    fn inbound_from(&self, peer: NodeAddr) -> usize {
+        let accepted = self
+            .flows
+            .iter()
+            .filter(|(key, flow)| flow.inbound && key.peer == peer)
+            .count();
+        let pending = self
+            .pending
+            .values()
+            .filter(|entry| entry.key.peer == peer)
+            .count();
+        accepted + pending
+    }
+
     /// The pending flow carrying `key`, if one was announced.
     fn pending_for(&self, key: &FlowKey) -> Option<u64> {
         self.pending
@@ -549,6 +595,7 @@ impl Registry {
                 pubkey: entry.pubkey,
                 sink,
                 at: now,
+                inbound: true,
             },
         );
         self.by_id.insert(flow, entry.key);
@@ -635,11 +682,19 @@ impl Registry {
 }
 
 #[cfg(test)]
+#[path = "tests/registry.rs"]
+mod alloc_tests;
+
+#[cfg(test)]
+#[path = "tests/registry_share.rs"]
+mod share_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    fn limits() -> Limits {
+    pub(super) fn limits() -> Limits {
         Limits {
             per_flow: 4,
             backlog: 2,
@@ -650,21 +705,21 @@ mod tests {
     /// A distinct peer key per byte. The address is derived from it rather
     /// than invented, so a test cannot pair a key with an address the wire
     /// would never have carried together.
-    fn key(byte: u8) -> XOnlyPublicKey {
+    pub(super) fn key(byte: u8) -> XOnlyPublicKey {
         crate::identity::Identity::from_secret_bytes(&[byte; 32])
             .expect("a non-zero secret is a valid key")
             .pubkey()
     }
 
-    fn peer(byte: u8) -> NodeAddr {
+    pub(super) fn peer(byte: u8) -> NodeAddr {
         NodeAddr::from_pubkey(&key(byte))
     }
 
-    fn sink() -> (Sender<Datagram>, mpsc::Receiver<Datagram>) {
+    pub(super) fn sink() -> (Sender<Datagram>, mpsc::Receiver<Datagram>) {
         mpsc::channel(16)
     }
 
-    fn arrivals() -> (Sender<Arrival>, mpsc::Receiver<Arrival>) {
+    pub(super) fn arrivals() -> (Sender<Arrival>, mpsc::Receiver<Arrival>) {
         mpsc::channel(16)
     }
 

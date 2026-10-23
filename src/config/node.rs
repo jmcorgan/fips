@@ -1005,6 +1005,9 @@ pub struct NativeApiConfig {
     pub backlog: usize,
 
     /// Flows this node holds at once (`node.native_api.max_flows`).
+    ///
+    /// One peer's inbound flows, pending and accepted, may hold no more than a
+    /// quarter of these (`native::registry::PEER_SHARE`).
     #[serde(default = "NativeApiConfig::default_max_flows")]
     pub max_flows: usize,
 

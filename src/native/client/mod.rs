@@ -683,7 +683,8 @@ impl FipsListener {
     /// flow is then refused rather than leaked. A refused flow that was never
     /// sent on still holds its port and its slot against the node's flow limit
     /// until this listener is dropped, because the daemon keeps its own copy of
-    /// the descriptor until then.
+    /// the descriptor until then. It also counts against its peer's share of
+    /// that limit, a quarter of it, so one peer cannot fill the node's table.
     pub fn accept(&self) -> io::Result<(FipsStream, FipsAddr)> {
         let mut buf = [0u8; CHUNK];
         let chunk = fdpass::recv(self.fd.as_raw_fd(), &mut buf)?;
