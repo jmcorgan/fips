@@ -2072,7 +2072,6 @@ impl Node {
                             self.refresh_tun_mss_ceiling();
                             self.warn_shortfall();
                             let threads = TunThreads {
-                                path_mtu: self.path_mtu_lookup.clone(),
                                 channel: self.config().node.buffers.tun_channel,
                                 exit_tx: self.child_exit_tx.clone(),
                             };

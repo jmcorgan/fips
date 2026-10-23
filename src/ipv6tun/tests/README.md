@@ -15,8 +15,8 @@ can reach the source file's private items.
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
   and one known residual case pinned as a test.
-- `core.rs` tests `../core.rs`: that the payload limit the node publishes
-  gives the same TCP MSS ceiling as the transport MTU it comes from, for
+- `core.rs` tests `../core.rs`: that the payload limits the node publishes
+  give the same TCP MSS ceiling as the transport MTU they come from, for
   every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
   packet fits either way, and the limit reports 33); the state before any
   attach; and how each message from the node changes the shared state.

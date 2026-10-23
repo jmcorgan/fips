@@ -20,7 +20,11 @@ under the new keys), and starts a repair rekey if its last copy goes
 unheard. Who the peer is stays the claimed address until a completion
 bonds its key (`identity`, `peer_key`), and the shell caches, uses and
 reports a peer key only from there: the control socket shows an unproved
-session with no `npub` and `identity: "unproven"` (`identity_status`).
+session with no `npub` and `identity: "unproven"` (`identity_status`). The
+one exception is the key this node opened the session toward
+(`opened_key`, read through `key()`): before a completion the shell uses it
+only to name the destination of its own path MTU entries, whose address
+that key derives.
 
 Once established, the machine owns the current, pending and previous key
 epochs, seals every frame, runs every inbound frame through its rows
@@ -58,6 +62,8 @@ the session. The entry keeps no handshake or rekey state of its own.
   prompt seal, the query the half-open share of the session table is
   charged by (`grows`), and the session clock aliases. Test builds add
   constructors of an established, an opened and an answering session.
+  `key()` gives the peer's key as far as this node knows it: proven by a
+  completion, or else the key it opened the session toward.
   The process-wide epoch tag source and the thread-RNG jitter source here
   serve the link rekey machines too (`with_tags`, `ThreadJitter`), so no
   epoch tag repeats across the two layers.

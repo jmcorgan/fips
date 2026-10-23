@@ -35,7 +35,7 @@ use tracing::{error, warn};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 use tun::Layer;
 
-use crate::node::path_mtu::PathMtuLookup;
+use super::core::PathMtuReplica;
 
 /// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
 /// this large, so an MSS derived from it fits anywhere.
@@ -59,7 +59,7 @@ pub const IPV6_MIN_MTU: u16 = 1280;
 /// the threads clamp by the limit last published rather than one captured
 /// at spawn.
 ///
-/// A relaxed load per packet, beside the `PathMtuLookup` read that already
+/// A relaxed load per packet, beside the `PathMtuReplica` read that already
 /// happens on the same packet — strictly the cheaper of the two. Ordering is
 /// irrelevant: this is a clamp, and a packet that reads the previous value
 /// during the store is clamped by the ceiling that was correct a microsecond
@@ -89,13 +89,15 @@ pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
 /// per-destination value, which can be larger (when path supports
 /// it) or smaller (when path is observed-tighter than the IPv6 min).
 ///
-/// Path MTU bytes-on-wire to TCP MSS: subtract 77 bytes of FIPS encap
-/// overhead, then 40 bytes IPv6 + 20 bytes TCP headers.
+/// The node reports each learned path as a payload limit; the shim turns it
+/// into an IPv6 MTU, and the 40-byte IPv6 and 20-byte TCP headers come off
+/// that (see [`tcp_mss`](super::core::tcp_mss)).
 pub(crate) fn per_flow_max_mss(
-    lookup: &PathMtuLookup,
+    lookup: &PathMtuReplica,
     addr_bytes: &[u8],
     global_max_mss: u16,
 ) -> u16 {
+    use super::core::tcp_mss;
     use super::icmp::mss_ceiling;
 
     // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
@@ -130,7 +132,7 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
-    let Some(entry) = map.get(&fips_addr).copied() else {
+    let Some(payload_limit) = map.get(&fips_addr).copied() else {
         trace!(
             fips_addr = %fips_addr,
             global_max_mss,
@@ -140,8 +142,7 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
-    let path_mtu = entry.mtu;
-    let path_max_mss = mss_ceiling(path_mtu);
+    let path_max_mss = tcp_mss(payload_limit);
     // The actionable floor deliberately does not apply here. Every value a
     // remote party supplies is refused before it can reach this map, at the
     // path MTU state machine, the reactive `MtuExceeded` write and the
@@ -155,7 +156,7 @@ pub(crate) fn per_flow_max_mss(
     // flow would stall with no feedback.
     //
     // What no provenance rescues is the arithmetic degenerating. At a stored
-    // MTU of 137 or less not one payload byte fits alongside the IPv6 and TCP
+    // MTU of 137 or less (a payload limit of 27 or less) not one payload byte fits alongside the IPv6 and TCP
     // headers, and `clamp_tcp_mss` refuses a ceiling of zero, which would
     // leave the SYN carrying the kernel-natural MSS instead. Fall back to the
     // conservative ceiling there; any positive result is by construction the
@@ -168,7 +169,7 @@ pub(crate) fn per_flow_max_mss(
     if path_max_mss == 0 {
         trace!(
             fips_addr = %fips_addr,
-            path_mtu,
+            payload_limit,
             empty_lookup_ceiling,
             "per_flow_max_mss: stored path_mtu leaves no room for a TCP payload byte, using conservative ceiling"
         );
@@ -177,7 +178,7 @@ pub(crate) fn per_flow_max_mss(
     let result = std::cmp::min(global_max_mss, path_max_mss);
     trace!(
         fips_addr = %fips_addr,
-        path_mtu,
+        payload_limit,
         path_max_mss,
         global_max_mss,
         result,
@@ -432,16 +433,17 @@ impl TunDevice {
     /// can happen independently on separate threads. Returns the writer and
     /// a channel sender for submitting packets to be written.
     ///
-    /// `max_mss` is the global TCP MSS ceiling derived from the local
-    /// `transport_mtu()` floor, shared live so a transport that binds or
+    /// `max_mss` is the adapter's TCP MSS ceiling, derived from the
+    /// node-wide payload limit and shared live so a transport that binds or
     /// unbinds after start moves it (see [`MssCeiling`]). `path_mtu_lookup`
-    /// is a read-only handle to the per-destination path MTU map populated by
-    /// discovery; the writer reads both on each inbound SYN to compute a
-    /// per-flow ceiling that honors learned narrow paths through the mesh.
+    /// is the adapter's copy of the per-peer payload limits, filled from the
+    /// node's messages on the link; the writer reads both on each inbound
+    /// SYN to compute a per-flow ceiling that honors learned narrow paths
+    /// through the mesh.
     pub fn create_writer(
         &self,
         max_mss: MssCeiling,
-        path_mtu_lookup: PathMtuLookup,
+        path_mtu_lookup: PathMtuReplica,
     ) -> Result<(TunWriter, TunTx), TunError> {
         let fd = self.device.as_raw_fd();
 
@@ -517,7 +519,7 @@ pub struct TunWriter {
     rx: mpsc::Receiver<Vec<u8>>,
     name: String,
     max_mss: MssCeiling,
-    path_mtu_lookup: PathMtuLookup,
+    path_mtu_lookup: PathMtuReplica,
 }
 
 #[cfg(unix)]
@@ -629,7 +631,7 @@ pub fn run_tun_reader(
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
     max_mss: MssCeiling,
-    path_mtu_lookup: PathMtuLookup,
+    path_mtu_lookup: PathMtuReplica,
 ) {
     let (name, mut buf) = tun_reader_setup(device.name(), mtu, &max_mss);
 
@@ -692,7 +694,7 @@ pub fn run_tun_reader(
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
     max_mss: MssCeiling,
-    path_mtu_lookup: PathMtuLookup,
+    path_mtu_lookup: PathMtuReplica,
     shutdown_fd: std::os::unix::io::RawFd,
 ) {
     let _shutdown_fd = ShutdownFd(shutdown_fd);
@@ -809,7 +811,7 @@ fn handle_tun_packet(
     our_addr: Ipv6Address,
     tun_tx: &TunTx,
     outbound_tx: &TunOutboundTx,
-    path_mtu_lookup: &PathMtuLookup,
+    path_mtu_lookup: &PathMtuReplica,
 ) -> bool {
     use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
     use super::tcp_mss::{clamp_tcp_mss, recalculate_l4_checksum};
@@ -1075,14 +1077,15 @@ mod windows_tun {
         /// packets independently. Returns the writer and a channel sender for
         /// submitting packets to be written.
         ///
-        /// `max_mss` is the global TCP MSS ceiling, shared live so a transport
-        /// that binds or unbinds after start moves it (see [`MssCeiling`]).
-        /// `path_mtu_lookup` is a read-only handle to per-destination path MTU
-        /// learned via discovery.
+        /// `max_mss` is the adapter's TCP MSS ceiling, shared live so a
+        /// transport that binds or unbinds after start moves it (see
+        /// [`MssCeiling`]). `path_mtu_lookup` is the adapter's copy of the
+        /// per-peer payload limits, filled from the node's messages on the
+        /// link.
         pub fn create_writer(
             &self,
             max_mss: MssCeiling,
-            path_mtu_lookup: PathMtuLookup,
+            path_mtu_lookup: PathMtuReplica,
         ) -> Result<(TunWriter, TunTx), TunError> {
             let (tx, rx) = mpsc::channel();
             Ok((
@@ -1120,7 +1123,7 @@ mod windows_tun {
         rx: mpsc::Receiver<Vec<u8>>,
         name: String,
         max_mss: MssCeiling,
-        path_mtu_lookup: PathMtuLookup,
+        path_mtu_lookup: PathMtuReplica,
     }
 
     impl TunWriter {
@@ -1196,7 +1199,7 @@ mod windows_tun {
         tun_tx: TunTx,
         outbound_tx: TunOutboundTx,
         max_mss: MssCeiling,
-        path_mtu_lookup: PathMtuLookup,
+        path_mtu_lookup: PathMtuReplica,
     ) {
         let (name, mut buf) = super::tun_reader_setup(device.name(), mtu, &max_mss);
 
@@ -1677,7 +1680,6 @@ mod name_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::path_mtu::PathMtuEntry;
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -1701,8 +1703,13 @@ mod tests {
         Ipv6Address::from_bytes(bytes).unwrap()
     }
 
-    fn empty_lookup() -> PathMtuLookup {
+    fn empty_lookup() -> PathMtuReplica {
         Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    /// The payload limit the node reports for a stored path MTU of `mtu`.
+    fn held(mtu: u16) -> u16 {
+        crate::node::path_mtu::payload_limit(mtu)
     }
 
     #[test]
@@ -1736,10 +1743,7 @@ mod tests {
         // = min(1360, 1143) = 1143.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, PathMtuEntry::held(1280));
+        lookup.write().unwrap().insert(addr, held(1280));
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1143);
     }
 
@@ -1749,10 +1753,7 @@ mod tests {
         // global 1143 (the smaller of the two).
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, PathMtuEntry::held(1452));
+        lookup.write().unwrap().insert(addr, held(1452));
         // global=1143 (UDP-1280-derived); path_max = 1452-77-60 = 1315.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1143), 1143);
     }
@@ -1766,10 +1767,7 @@ mod tests {
         // learned value governs.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, PathMtuEntry::held(1452));
+        lookup.write().unwrap().insert(addr, held(1452));
         // global=1360, path_max = 1452-77-60 = 1315; min(1360, 1315) = 1315.
         // 1315 > 1143, so the conservative ceiling did NOT clamp here.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1315);
@@ -1785,10 +1783,7 @@ mod tests {
         for stored in [0u16, 1, 100, 137] {
             let lookup = empty_lookup();
             let addr = fips_addr_with_node_byte(0x42);
-            lookup
-                .write()
-                .unwrap()
-                .insert(addr, PathMtuEntry::held(stored));
+            lookup.write().unwrap().insert(addr, held(stored));
             assert_eq!(
                 per_flow_max_mss(&lookup, addr.as_bytes(), 1360),
                 1143,
@@ -1822,10 +1817,7 @@ mod tests {
             .map(|&(stored, _)| {
                 let lookup = empty_lookup();
                 let addr = fips_addr_with_node_byte(0x42);
-                lookup
-                    .write()
-                    .unwrap()
-                    .insert(addr, PathMtuEntry::held(stored));
+                lookup.write().unwrap().insert(addr, held(stored));
                 (stored, per_flow_max_mss(&lookup, addr.as_bytes(), 1360))
             })
             .collect();
@@ -1845,10 +1837,10 @@ mod tests {
         // sub-floor table above.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(
-            addr,
-            PathMtuEntry::held(crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU),
-        );
+        lookup
+            .write()
+            .unwrap()
+            .insert(addr, held(crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU));
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 119);
     }
 
@@ -1877,8 +1869,8 @@ mod tests {
         let lookup = empty_lookup();
         let a = fips_addr_with_node_byte(0x10);
         let b = fips_addr_with_node_byte(0x20);
-        lookup.write().unwrap().insert(a, PathMtuEntry::held(1280));
-        lookup.write().unwrap().insert(b, PathMtuEntry::held(1452));
+        lookup.write().unwrap().insert(a, held(1280));
+        lookup.write().unwrap().insert(b, held(1452));
         assert_eq!(per_flow_max_mss(&lookup, a.as_bytes(), 1360), 1143);
         assert_eq!(per_flow_max_mss(&lookup, b.as_bytes(), 1360), 1315);
     }

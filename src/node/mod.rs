@@ -563,10 +563,9 @@ pub struct Node {
     /// Address -> coordinates cache (from session setup and discovery).
     coord_cache: CoordCache,
     /// Per-destination path MTU lookup, keyed by Ipv6Address (mirrors
-    /// `coord_cache.entries[*].path_mtu`). Sync read-only access from
-    /// the TUN reader/writer threads at TCP MSS clamp time so the
-    /// SYN/SYN-ACK clamp can use the smaller of the local-egress floor
-    /// and the learned per-destination path MTU.
+    /// `coord_cache.entries[*].path_mtu`). Every change is published to the
+    /// IPv6 adapter, whose SYN/SYN-ACK clamp uses the smaller of the
+    /// local-egress floor and the learned per-destination path MTU.
     path_mtu_lookup: crate::node::path_mtu::PathMtuLookup,
     /// What this node has published to the IPv6 adapter of its node-wide
     /// payload limit, and the TCP MSS ceiling it last logged.
@@ -1160,7 +1159,7 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_lookup: Arc::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
@@ -1337,7 +1336,7 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_lookup: Arc::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
@@ -3538,6 +3537,19 @@ impl Node {
             .and_then(|map| map.get(fips_addr).copied())
     }
 
+    /// The per-peer limits the IPv6 adapter would hold for this node's map,
+    /// built from the map directly, for tests of the clamp that do not
+    /// attach an adapter.
+    #[cfg(test)]
+    pub(crate) fn test_replica(&self) -> crate::ipv6tun::core::PathMtuReplica {
+        let map = self.path_mtu_lookup.read().unwrap();
+        let limits = map
+            .iter()
+            .map(|(addr, e)| (*addr, crate::node::path_mtu::payload_limit(e.mtu)))
+            .collect();
+        std::sync::Arc::new(std::sync::RwLock::new(limits))
+    }
+
     /// Write a path_mtu_lookup entry directly (for tests that pre-seed the map).
     ///
     /// Writes a held entry, which is what a locally derived seed or a
@@ -3547,7 +3559,7 @@ impl Node {
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_insert(&self, fips_addr: crate::Ipv6Address, mtu: u16) {
         if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
+            map.insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
         }
     }
 
@@ -3561,7 +3573,7 @@ impl Node {
         at_ms: u64,
     ) {
         if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert(
+            map.insert_unkeyed(
                 fips_addr,
                 crate::node::path_mtu::PathMtuEntry::learned(mtu, at_ms),
             );
@@ -3652,7 +3664,8 @@ impl Node {
             && let Some(transport_id) = peer.transport_id()
             && let Some(transport_addr) = peer.current_addr().cloned()
         {
-            self.seed_path_mtu_for_link_peer(addr, transport_id, &transport_addr);
+            let key = crate::ipv6tun::link::PeerKey::new(peer.pubkey());
+            self.seed_path_mtu_for_link_peer(addr, key, transport_id, &transport_addr);
         }
     }
 

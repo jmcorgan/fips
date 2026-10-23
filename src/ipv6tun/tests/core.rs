@@ -46,13 +46,16 @@ fn before_any_attach_the_state_is_the_ipv6_minimum() {
         mss_ceiling(IPV6_MIN_MTU)
     );
     assert_eq!(state.ipv6_mtu(), effective_ipv6_mtu(IPV6_MIN_MTU));
+    assert!(state.paths().read().unwrap().is_empty());
 }
 
 #[test]
 fn applying_the_node_messages_updates_the_shared_state() {
     let state = MeshState::new();
     let ceiling = state.ceiling();
+    let paths = state.paths();
     let us = PeerKey::any();
+    let peer = PeerKey::any();
 
     assert_eq!(
         state.apply(FromMesh::Attached {
@@ -63,11 +66,25 @@ fn applying_the_node_messages_updates_the_shared_state() {
     );
     assert_eq!(ceiling.load(Ordering::Relaxed), mss_ceiling(1357));
 
+    state.apply(FromMesh::PathMtu {
+        peer,
+        payload_limit: Some(payload_limit(1280)),
+    });
+    assert_eq!(
+        paths.read().unwrap().get(&peer.address()).copied(),
+        Some(payload_limit(1280))
+    );
+
     state.apply(FromMesh::NodeMtu {
         payload_limit: payload_limit(1500),
     });
     assert_eq!(ceiling.load(Ordering::Relaxed), mss_ceiling(1500));
     assert_eq!(state.ipv6_mtu(), effective_ipv6_mtu(1500));
 
+    state.apply(FromMesh::PathMtu {
+        peer,
+        payload_limit: None,
+    });
+    assert!(paths.read().unwrap().is_empty());
     assert_eq!(state.apply(FromMesh::Synced), Applied::Synced);
 }

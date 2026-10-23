@@ -12,8 +12,8 @@ fn a_peer_key_names_the_address_its_node_address_has() {
 /// Field types a message may carry: integers, flags, strings, bytes, the
 /// peer key, and the message types this file defines.
 const ALLOWED: &[&str] = &[
-    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "String", "PeerKey", "Attach",
-    "FromMesh",
+    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "String", "PeerKey", "Feeds",
+    "Attach", "FromMesh",
 ];
 
 /// The items in the link's source that are not messages: the two link ends,
@@ -337,14 +337,16 @@ fn refused(source: &str) -> Vec<(String, String)> {
 #[test]
 fn messages_carry_only_owned_data_of_the_allowed_types() {
     let (items, fields) = message_fields(include_str!("../link.rs"));
-    for item in ["Attach", "FromMesh", "MeshLink", "HostLink", "PeerKey"] {
+    for item in [
+        "Feeds", "Attach", "FromMesh", "MeshLink", "HostLink", "PeerKey",
+    ] {
         assert!(
             items.iter().any(|i| i == item),
             "the scan must find {item}, found {items:?}"
         );
     }
     assert!(
-        fields.len() >= 4,
+        fields.len() >= 8,
         "the scan must find the message fields, found {fields:?}"
     );
     assert_eq!(

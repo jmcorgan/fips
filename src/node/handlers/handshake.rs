@@ -2379,6 +2379,9 @@ impl Node {
         let peer_node_addr = *verified_identity.node_addr();
         let is_outbound = carrier_is_outbound;
 
+        // The key both promotion paths seed the path MTU map under.
+        let peer_key = crate::ipv6tun::link::PeerKey::new(verified_identity.pubkey());
+
         // Check for cross-connection
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {
             let existing_link_id = existing_peer.link_id();
@@ -2428,7 +2431,12 @@ impl Node {
                     );
                 }
 
-                self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);
+                self.seed_path_mtu_for_link_peer(
+                    &peer_node_addr,
+                    peer_key,
+                    transport_id,
+                    &current_addr,
+                );
 
                 let (mut new_peer, out) = self.keyed_peer(
                     link_id,
@@ -2530,7 +2538,12 @@ impl Node {
                 .get(&peer_node_addr)
                 .map(|p| p.last_tree_announce_sent_ms());
 
-            self.seed_path_mtu_for_link_peer(&peer_node_addr, transport_id, &current_addr);
+            self.seed_path_mtu_for_link_peer(
+                &peer_node_addr,
+                peer_key,
+                transport_id,
+                &current_addr,
+            );
 
             let remote_addr = current_addr.clone();
             let epoch = diag::epoch_tag(&noise_session);

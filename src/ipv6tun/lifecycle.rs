@@ -13,11 +13,11 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
 use super::config::{DnsConfig, TunConfig};
-use super::core::{Applied, MeshState, run_link};
+use super::core::{Applied, MeshState, PathMtuReplica, run_link};
 use super::dns::{DnsIdentityRx, MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::link::{Attach, FromMesh, IPV6_PORT, MeshLink};
+use super::link::{Attach, Feeds, FromMesh, IPV6_PORT, MeshLink};
 use super::tun::{
     MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
     shutdown_tun_interface,
@@ -27,7 +27,6 @@ use crate::config::PeerConfig;
 use crate::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader};
 use crate::node::lifecycle::supervisor::Child;
 use crate::node::lifecycle::{report_exit, report_thread};
-use crate::node::path_mtu::PathMtuLookup;
 
 /// What the DNS mesh filter judges by when the mesh interface's index is
 /// unknown, as the start-up warning names it.
@@ -49,8 +48,8 @@ pub(crate) struct Handles {
     /// the node's key when it attaches us; the node's identity never
     /// changes, so the two agree.
     our_addr: Ipv6Addr,
-    /// What the node has told us over the link: the node-wide payload limit
-    /// the TUN threads clamp by.
+    /// What the node has told us over the link: the payload limits the TUN
+    /// threads clamp by.
     mesh: MeshState,
     /// Our end of the link, held from the attach until the task that applies
     /// the node's later messages starts.
@@ -100,8 +99,6 @@ pub(crate) struct Handles {
 
 /// What the TUN threads take from the node when they start.
 pub(crate) struct TunThreads {
-    /// Per-destination path MTU, read by the clamp in both threads.
-    pub(crate) path_mtu: PathMtuLookup,
     /// Capacity of the host-to-mesh channel (`node.buffers.tun_channel`).
     pub(crate) channel: usize,
     /// Sender each TUN thread reports `Child::Tun` on when it exits.
@@ -149,12 +146,13 @@ impl Handles {
         IcmpContext::new(self.tun_tx.as_ref(), self.our_addr, &mut self.icmp_limiter)
     }
 
-    /// What to ask the node for when it attaches us: port 256 while the TUN
-    /// is enabled, and nothing otherwise.
+    /// What to ask the node for when it attaches us: port 256 and the path
+    /// MTU feed while the TUN is enabled, and nothing otherwise.
     pub(crate) fn attach_request(&self) -> Attach {
         let tun = self.tun_state != TunState::Disabled;
         Attach {
             port: tun.then_some(IPV6_PORT),
+            feeds: Feeds { path_mtu: tun },
         }
     }
 
@@ -199,8 +197,9 @@ impl Handles {
     /// Wait for the node's messages to stop, once the node has dropped its
     /// end of the link: the task applies what is still queued and ends.
     ///
-    /// The next attach replaces our copy, so nothing a previous start
-    /// queued may be applied after it; waiting here is what rules that out.
+    /// The next attach clears and replays our copy, so nothing a previous
+    /// start queued may be applied after it; waiting here is what rules
+    /// that out.
     pub(crate) async fn detached(&mut self) {
         self.attached = false;
         self.link = None;
@@ -211,12 +210,12 @@ impl Handles {
         }
     }
 
-    /// What the TUN threads clamp by: the ceiling and the node-wide IPv6
-    /// MTU, with every message the node has queued so far applied first, so
-    /// neither thread starts on older values.
-    fn clamp_inputs(&mut self) -> (MssCeiling, u16) {
+    /// What the TUN threads clamp by: the ceiling, the node-wide IPv6 MTU
+    /// and the per-peer limits, with every message the node has queued so
+    /// far applied first, so neither thread starts on older values.
+    fn clamp_inputs(&mut self) -> (MssCeiling, u16, PathMtuReplica) {
         self.catch_up();
-        (self.mesh.ceiling(), self.mesh.ipv6_mtu())
+        (self.mesh.ceiling(), self.mesh.ipv6_mtu(), self.mesh.paths())
     }
 
     /// The state the node's messages have left so far, without applying
@@ -229,7 +228,7 @@ impl Handles {
     /// The state once every queued message is applied, as the TUN threads
     /// would start with it, for tests.
     #[cfg(test)]
-    pub(crate) fn applied(&mut self) -> (MssCeiling, u16) {
+    pub(crate) fn applied(&mut self) -> (MssCeiling, u16, PathMtuReplica) {
         self.clamp_inputs()
     }
 
@@ -318,14 +317,13 @@ impl Handles {
     ) -> Result<(), TunError> {
         debug_assert!(self.attached, "the TUN threads started before the attach");
         let TunThreads {
-            path_mtu: path_mtu_lookup,
             channel: tun_channel_size,
             exit_tx,
         } = threads;
         // Everything the node has said so far, including the limit it
         // published just before calling this, is in place before either
         // thread reads it.
-        let (max_mss, effective_mtu) = self.clamp_inputs();
+        let (max_mss, effective_mtu, path_mtu_lookup) = self.clamp_inputs();
         let mtu = device.mtu();
         let name = device.name().to_string();
         let our_addr = *device.address();
@@ -352,8 +350,8 @@ impl Handles {
         };
 
         // Create writer (dups the fd for independent write access).
-        // Pass path_mtu_lookup so the inbound SYN clamp can read
-        // per-destination path MTU learned via discovery.
+        // Pass the per-peer payload limits so the inbound SYN clamp can
+        // honor a narrower path the node has learned.
         let (writer, tun_tx) = device.create_writer(max_mss.clone(), path_mtu_lookup.clone())?;
 
         // Spawn writer thread. On exit, including a panic,

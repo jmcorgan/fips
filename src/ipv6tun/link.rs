@@ -41,11 +41,21 @@ impl PeerKey {
     }
 }
 
+/// Which state feeds an attach asks the node to replay and keep pushing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Feeds {
+    /// The per-peer path MTU feed: one [`FromMesh::PathMtu`] per entry at
+    /// attach, then one per change.
+    pub(crate) path_mtu: bool,
+}
+
 /// The adapter's request to attach to the node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Attach {
     /// The FSP port the adapter serves, `Some(256)` while the TUN is enabled.
     pub(crate) port: Option<u16>,
+    /// The state feeds the adapter wants.
+    pub(crate) feeds: Feeds,
 }
 
 /// Everything the node sends the adapter, in the order it sends it.
@@ -65,6 +75,13 @@ pub(crate) enum FromMesh {
     NodeMtu {
         /// The largest payload, in bytes, the node sends to any peer.
         payload_limit: u16,
+    },
+    /// The node learned or released a per-peer payload limit.
+    PathMtu {
+        /// The peer the limit applies to.
+        peer: PeerKey,
+        /// The limit in bytes, or `None` when the node released it.
+        payload_limit: Option<u16>,
     },
 }
 

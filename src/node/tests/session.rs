@@ -4825,11 +4825,13 @@ async fn test_path_broken_resets_the_session_source_path_mtu() {
 /// that transport's link MTU for a remote address. The remote is deliberately
 /// *not* registered in `node.peers`: a test that wants the expiry pass to
 /// reseed it must add the `ActivePeer` itself, so that the two tests below
-/// can tell "restored by the reseed" apart from "never a candidate".
+/// can tell "restored by the reseed" apart from "never a candidate". The
+/// remote's identity comes back too, for the `ActivePeer` such a test adds.
 async fn node_with_link_seed(
     mtu: u16,
 ) -> (
     Node,
+    Identity,
     crate::NodeAddr,
     crate::Ipv6Address,
     TransportId,
@@ -4864,9 +4866,21 @@ async fn node_with_link_seed(
     let remote_fips = crate::Ipv6Address::from_node_addr(&remote_addr);
     let transport_addr = TransportAddr::from_string("127.0.0.1:2121");
 
-    node.seed_path_mtu_for_link_peer(&remote_addr, transport_id, &transport_addr);
+    node.seed_path_mtu_for_link_peer(
+        &remote_addr,
+        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        transport_id,
+        &transport_addr,
+    );
 
-    (node, remote_addr, remote_fips, transport_id, transport_addr)
+    (
+        node,
+        remote,
+        remote_addr,
+        remote_fips,
+        transport_id,
+        transport_addr,
+    )
 }
 
 #[tokio::test]
@@ -4878,10 +4892,9 @@ async fn test_expired_path_mtu_keeps_the_link_peer_seed() {
     // overwrites a direct peer's link MTU under keep-tighter, so expiring it
     // with a bare removal would silently drop that peer to the conservative
     // ceiling until its link re-handshakes.
-    let (mut node, remote_addr, remote_fips, transport_id, transport_addr) =
+    let (mut node, remote, remote_addr, remote_fips, transport_id, transport_addr) =
         node_with_link_seed(1452).await;
 
-    let remote = Identity::generate();
     let peer_identity = PeerIdentity::from_pubkey_full(remote.pubkey_full());
     let mut peer = ActivePeer::new(peer_identity, LinkId::new(7), 0);
     peer.set_current_addr(transport_id, transport_addr);
@@ -4923,7 +4936,8 @@ async fn test_local_path_mtu_seed_never_expires() {
     // candidate for expiry". Here the remote is not in `node.peers`, so there
     // is no reseed to mask the difference: a seed that carried a deadline
     // would be removed and stay removed.
-    let (mut node, _remote_addr, remote_fips, _tid, _taddr) = node_with_link_seed(1452).await;
+    let (mut node, _remote, _remote_addr, remote_fips, _tid, _taddr) =
+        node_with_link_seed(1452).await;
     assert_eq!(
         node.path_mtu_lookup_get(&remote_fips),
         Some(1452),
@@ -5633,7 +5647,12 @@ async fn test_idle_session_purge_keeps_link_peer_path_mtu_seed() {
     peer.set_current_addr(transport_id, transport_addr.clone());
     node.peers.insert(remote_addr, peer);
 
-    node.seed_path_mtu_for_link_peer(&remote_addr, transport_id, &transport_addr);
+    node.seed_path_mtu_for_link_peer(
+        &remote_addr,
+        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        transport_id,
+        &transport_addr,
+    );
     assert_eq!(
         node.path_mtu_lookup_get(&remote_fips),
         Some(1452),
@@ -11340,7 +11359,7 @@ async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>)
     nodes[2].node.supervisor.ipv6tun.tun_tx = Some(c_tx);
     let global = crate::ipv6tun::icmp::mss_ceiling(nodes[0].node.transport_mtu());
     let clamp = |nodes: &[TestNode]| {
-        crate::ipv6tun::tun::per_flow_max_mss(&nodes[0].node.path_mtu_lookup, &c_bytes, global)
+        crate::ipv6tun::tun::per_flow_max_mss(&nodes[0].node.test_replica(), &c_bytes, global)
     };
 
     let before = clamp(nodes);
