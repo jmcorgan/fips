@@ -297,6 +297,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On Windows the TUN adapter's address, IPv6 MTU and `fd00::/8` route are set
+  through the IP Helper API instead of `netsh`, and a failure of any of them now
+  fails TUN setup, so the node continues without a TUN as on the other
+  platforms instead of reporting an active TUN that lacks its address, route or
+  MTU. An address or route already present is recognised by its error code,
+  whatever the system's language. Setup waits up to five seconds for a new
+  adapter to appear in the IPv6 stack instead of a fixed half second, and a
+  failed route removal at stop is logged instead of ignored.
 - On macOS and FreeBSD the TUN interface is configured by direct kernel calls
   (interface ioctls, `sysctlbyname` and the routing socket) instead of by
   running `ifconfig`, `route` and `sysctl`, so whether a step failed is decided

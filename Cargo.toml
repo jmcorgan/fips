@@ -122,9 +122,15 @@ dispatch2 = "0.3"
 [target.'cfg(windows)'.dependencies]
 wintun = "0.5"
 windows-service = "0.8.1"
-# For WSAIoctl(SIO_UDP_CONNRESET) on the UDP socket. The version socket2 and
-# tokio already pull in, so the lock file gains no package.
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_System_IO"] }
+# For WSAIoctl(SIO_UDP_CONNRESET) on the UDP socket, and IP Helper for the TUN
+# adapter's address, MTU and route. The version socket2 and tokio already pull
+# in, so the lock file gains no package.
+windows-sys = { version = "0.61", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
 
 [package.metadata.deb]
 # cargo-deb otherwise names the package after the crate, `fips-mesh`.

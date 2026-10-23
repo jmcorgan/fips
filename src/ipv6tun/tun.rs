@@ -939,8 +939,15 @@ mod windows_tun {
     use crate::TunConfig;
     use std::sync::Arc;
 
-    /// The Windows adapter name visible in network settings and used in netsh commands.
+    /// The Windows adapter name visible in network settings.
     pub(crate) const ADAPTER_NAME: &str = "FIPS";
+
+    /// The mesh address space routed into the adapter: `fd00::/8`.
+    const MESH_PREFIX: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8);
+
+    /// How long a new adapter may take to appear in the IPv6 stack before
+    /// setup gives up.
+    const IPV6_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// Wintun ring buffer capacity in bytes. Must be a power of 2 between
     /// 0x20000 (128 KiB) and 0x4000000 (64 MiB). 2 MiB balances memory
@@ -958,6 +965,8 @@ mod windows_tun {
     pub struct TunDevice {
         session: Arc<wintun::Session>,
         _adapter: Arc<wintun::Adapter>,
+        /// The adapter's LUID, the key of its IP Helper rows.
+        luid: u64,
         name: String,
         mtu: u16,
         address: Ipv6Address,
@@ -968,7 +977,7 @@ mod windows_tun {
         ///
         /// Loads the wintun DLL, creates (or reopens) a named adapter, starts
         /// a session with a 2 MiB ring buffer, and configures the interface
-        /// via netsh. Requires Administrator privileges.
+        /// through IP Helper. Requires Administrator privileges.
         pub async fn create(config: &TunConfig, address: Ipv6Address) -> Result<Self, TunError> {
             let name = config.name();
             let mtu = config.mtu();
@@ -1007,14 +1016,14 @@ mod windows_tun {
 
             let session = Arc::new(session);
 
-            // Configure the IPv6 address and route via netsh.
-            // Use the adapter name (ADAPTER_NAME) not the tunnel type name.
-            let ipv6_addr = address.to_ipv6();
-            configure_windows_interface(ADAPTER_NAME, ipv6_addr, mtu).await?;
+            // SAFETY: every bit pattern of the LUID union is a valid u64.
+            let luid = unsafe { adapter.get_luid().Value };
+            configure_windows_interface(luid, address.to_ipv6(), mtu).await?;
 
             Ok(Self {
                 session,
                 _adapter: adapter,
+                luid,
                 name: name.to_string(),
                 mtu,
                 address,
@@ -1057,18 +1066,7 @@ mod windows_tun {
         /// The wintun adapter and session are cleaned up when dropped.
         pub async fn shutdown(&self) -> Result<(), TunError> {
             debug!(name = %self.name, "Shutting down TUN device");
-            let _ = tokio::process::Command::new("netsh")
-                .args([
-                    "interface",
-                    "ipv6",
-                    "delete",
-                    "route",
-                    "fd00::/8",
-                    &format!("interface={}", ADAPTER_NAME),
-                ])
-                .output()
-                .await;
-            Ok(())
+            drop_route(self.luid)
         }
 
         /// Create a TunWriter for this device.
@@ -1231,118 +1229,83 @@ mod windows_tun {
 
     /// Shutdown and delete a TUN interface by name (Windows).
     ///
-    /// Removes the fd00::/8 route via netsh. The wintun adapter itself
-    /// is cleaned up when the `Adapter` handle is dropped.
+    /// Removes the fd00::/8 route from the adapter named [`ADAPTER_NAME`].
+    /// The wintun adapter itself is cleaned up when the `Adapter` handle is
+    /// dropped. An adapter that is already gone is not an error.
     pub async fn shutdown_tun_interface(name: &str) -> Result<(), TunError> {
         debug!("Shutting down TUN interface {}", name);
-        let _ = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "delete",
-                "route",
-                "fd00::/8",
-                &format!("interface={}", ADAPTER_NAME),
-            ])
-            .output()
-            .await;
-        let _ = name; // name is the tunnel type, not the adapter name
+        // `name` is the tunnel type; the adapter is found by its alias. The
+        // lookup's one documented failure is an invalid parameter, which
+        // for this fixed alias means no interface carries it.
+        match super::super::winnet::alias_luid(ADAPTER_NAME) {
+            Ok(luid) => drop_route(luid)?,
+            Err(e) => debug!("no adapter named {ADAPTER_NAME} ({e}); no route to remove"),
+        }
         debug!("TUN interface {} stopped", name);
         Ok(())
     }
 
-    /// Configure the Windows network interface with IPv6 address, MTU, and route.
+    /// Remove the fd00::/8 route from adapter `luid`; its absence is not an
+    /// error.
+    fn drop_route(luid: u64) -> Result<(), TunError> {
+        let (dst, len) = MESH_PREFIX;
+        super::super::winnet::delete_route(luid, dst, len)
+            .map(|_| ())
+            .map_err(|e| TunError::Configure(format!("failed to delete route {dst}/{len}: {e}")))
+    }
+
+    /// Configure the Windows network interface with IPv6 address, MTU, and
+    /// route, through IP Helper.
     ///
-    /// Uses `netsh` commands to configure the wintun adapter. A brief delay
-    /// is inserted before configuration to allow Windows to fully register
-    /// the adapter in its network stack.
-    ///
-    /// `adapter_name` must be the Windows adapter name (e.g. "FIPS"), not the
-    /// wintun tunnel type name.
+    /// Waits, for up to [`IPV6_WAIT`], for the new adapter to appear in the
+    /// IPv6 stack. The address or route already present is not an error;
+    /// any other failure is, with the Win32 error code in the message, so
+    /// that `open_tun` continues without a TUN as on the other platforms.
     async fn configure_windows_interface(
-        adapter_name: &str,
+        luid: u64,
         addr: Ipv6Addr,
         mtu: u16,
     ) -> Result<(), TunError> {
-        // Brief delay to let Windows fully register the adapter
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        use super::super::winnet::{self, Created};
 
-        // Set IPv6 address
-        let output = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "add",
-                "address",
-                adapter_name,
-                &format!("{}/128", addr),
-            ])
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("netsh add address failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stderr.contains("already") && !stdout.contains("already") {
-                warn!(
-                    "netsh add address failed: stdout={} stderr={}",
-                    stdout.trim(),
-                    stderr.trim()
-                );
+        let start = std::time::Instant::now();
+        loop {
+            match winnet::ipv6_present(luid) {
+                Ok(true) => break,
+                Ok(false) if start.elapsed() < IPV6_WAIT => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Ok(false) => {
+                    return Err(TunError::Configure(format!(
+                        "adapter {ADAPTER_NAME} has no IPv6 interface after {IPV6_WAIT:?}; is IPv6 enabled on it?"
+                    )));
+                }
+                Err(e) => {
+                    return Err(TunError::Configure(format!(
+                        "failed to read the IPv6 interface of {ADAPTER_NAME}: {e}"
+                    )));
+                }
             }
         }
 
-        // Set MTU
-        let output = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "set",
-                "subinterface",
-                adapter_name,
-                &format!("mtu={}", mtu),
-            ])
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("netsh set mtu failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            warn!(
-                "netsh set mtu failed: stdout={} stderr={}",
-                stdout.trim(),
-                stderr.trim()
-            );
+        let fail =
+            |what: String| move |e: std::io::Error| TunError::Configure(format!("{what}: {e}"));
+        if winnet::add_address(luid, addr, 128)
+            .map_err(fail(format!("failed to add {addr}/128 to {ADAPTER_NAME}")))?
+            == Created::Exists
+        {
+            debug!("{addr}/128 already on {ADAPTER_NAME}");
         }
-
-        // Add route for fd00::/8 (mesh IPv6 address space) via this adapter
-        let output = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "add",
-                "route",
-                "fd00::/8",
-                adapter_name,
-            ])
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("netsh add route failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stderr.contains("already") && !stdout.contains("already") {
-                warn!(
-                    "netsh add route failed: stdout={} stderr={}",
-                    stdout.trim(),
-                    stderr.trim()
-                );
-            }
+        winnet::set_mtu(luid, u32::from(mtu)).map_err(fail(format!(
+            "failed to set the IPv6 MTU of {ADAPTER_NAME} to {mtu}"
+        )))?;
+        let (dst, len) = MESH_PREFIX;
+        if winnet::add_route(luid, dst, len).map_err(fail(format!(
+            "failed to add route {dst}/{len} via {ADAPTER_NAME}"
+        )))? == Created::Exists
+        {
+            debug!("route {dst}/{len} already on {ADAPTER_NAME}");
         }
-
         Ok(())
     }
 }

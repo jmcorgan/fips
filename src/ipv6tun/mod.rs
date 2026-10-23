@@ -16,3 +16,5 @@ pub(crate) mod lifecycle;
 pub(crate) mod outbound;
 pub mod tcp_mss;
 pub mod tun;
+#[cfg(windows)]
+mod winnet;

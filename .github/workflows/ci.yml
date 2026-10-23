@@ -899,6 +899,36 @@ jobs:
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 
+      # wintun.dll for the adapter test below, from the Wintun project's own
+      # release, checked against its published SHA-256. Put on PATH, which is
+      # on the DLL search path `wintun::load` uses.
+      - name: Fetch wintun.dll
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'wintun-0.14.1.zip'
+          Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($hash -ne '07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51') {
+            throw "wintun-0.14.1.zip SHA-256 is $hash"
+          }
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'wintun')
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP 'wintun\wintun\bin\amd64')
+
+      # The TUN adapter setup's Administrator-only tests: a route and an
+      # address added twice on the loopback interface are accepted, the
+      # loopback's IPv6 MTU is changed through its interface row, and the
+      # Wintun adapter created twice in turn comes up with its address, MTU
+      # and `fd00::/8` route. They are `#[ignore]`d, so the run above skips
+      # them; the runner is elevated. The unprivileged ones run again so that
+      # `--nocapture` prints the codes IP Helper returns. The grep fails the
+      # step unless all ten ran and passed.
+      - name: Run the TUN setup tests as Administrator
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib -- --include-ignored ipv6tun::winnet:: --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/tun-setup-tests.log"
+          grep -qE '^test result: ok\. 10 passed;' "$RUNNER_TEMP/tun-setup-tests.log"
+
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
       # summary, so a flake is seen without failing an unrelated run. The

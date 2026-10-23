@@ -37,6 +37,13 @@ can reach the source file's private items.
   coming up with its address, MTU and `fd00::/8` route both times and going
   down at shutdown with its other flags kept, and a configured device set up
   a second time accepting its own address and route.
+- `winnet.rs` tests `../winnet.rs` (Windows only) as module `tests`: IP
+  Helper's Win32 codes surfacing for an interface that does not exist, a
+  stop with no `FIPS` adapter present succeeding, and, as Administrator, a route and an address added twice on the loopback
+  interface being accepted, the loopback's IPv6 MTU being changed through its
+  interface row, and a Wintun adapter created twice in turn coming up with
+  its address, MTU and `fd00::/8` route (this one needs `wintun.dll` on the
+  DLL search path).
 
 ## Rules
 
@@ -48,7 +55,8 @@ can reach the source file's private items.
   test run skips them; build with `cargo test --lib --no-run` and run the test
   binary under `sudo` with `--ignored`. The FreeBSD package workflow and the
   macOS unit-test job run the `bsdnet` tests that way, with
-  `--include-ignored`. They share the namespace harness
+  `--include-ignored`, and the Windows unit-test job, whose runner is
+  elevated, the `winnet` ones. They share the namespace harness
   (`ForgedSourceNetns`) with the inline tests in `../dns.rs`, which exposes it
   as `pub(super)`. The generic parts, running a setup command
   (`testutil::run_ok`) and running code inside a named namespace
