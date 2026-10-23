@@ -1430,6 +1430,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous run's mesh address and route removed first; anything else is
   refused with an error naming it, and the node runs without a TUN.
 
+#### Mesh firewall
+
+- The packaged mesh firewall (`fips.nft`) has a `forward` chain that sees
+  fips-gateway's port forwards, which its `input` chain never did. Port
+  forwards stay open to the mesh by default; a forward can be restricted to
+  chosen mesh addresses with rules in `/etc/fips/fips.d/forward/*.nft`,
+  matching its target address and port. A host that kept an edited
+  `fips.nft` on upgrade gets the chain only after merging in the packaged
+  file.
+
 ## [0.5.3] - 2026-10-16
 
 ### Added
