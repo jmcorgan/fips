@@ -15,8 +15,11 @@ FIPS uses three Nostr event kinds:
 | 21059 | Traversal signaling | NIP-44 inside NIP-59 gift wrap | Ephemeral | Carry `TraversalOffer`/`TraversalAnswer` payloads |
 | 10050 | NIP-17 inbox relay list | None (signed only) | Replaceable | Tell dialers where to publish offers |
 
-All three are signed with the node's FIPS identity key (the same
-secp256k1 keypair Nostr uses); there is no separate Nostr key.
+Kinds 37195 and 10050 are signed with the node's FIPS identity key
+(the same secp256k1 keypair Nostr uses); there is no separate Nostr
+key. A kind 21059 event carries a seal signed with that key inside a
+wrap signed by a one-time key, so relays do not see the sender (see
+[Encryption envelope](#encryption-envelope)).
 
 ## Kind 37195 — Overlay Advert
 
@@ -76,10 +79,14 @@ identity.
 
 ### Replacement and deletion
 
-Because kind 37195 is replaceable, publishing a new advert replaces
-the prior one in the same `(pubkey, d-tag)` slot. To withdraw an
-advert without publishing a successor, the node publishes a NIP-9
-kind 5 delete event referencing the prior advert.
+Because kind 37195 is replaceable, a new advert replaces the prior
+one in the same `(pubkey, d-tag)` slot. The node sends no NIP-09 deletion
+for its advert. An advert it stops publishing (advertising turned off
+at a restart, no publicly usable endpoint left, or shutdown) stays on
+relays until its NIP-40 expiration, `advert_ttl_secs` after it was
+published, unless a newer advert replaces it first. A deletion is not
+sent because, on relays that apply it strictly, it can also remove
+the replacement the next start publishes.
 
 ## Kind 21059 — Traversal Signaling
 
@@ -125,15 +132,19 @@ The `TraversalAnswer` echoes `sessionId` and carries:
 
 - `type`, `senderNpub`, `recipientNpub`, `issuedAt`, `expiresAt`,
   `nonce` — same shape as the offer.
-- `inReplyTo` — the offer's event id.
+- `inReplyTo` — the offer's `nonce`; an answer naming anything else
+  is refused.
 - `accepted` — boolean; false when the responder has no usable
   addresses.
 - `reflexiveAddress` and `localAddresses` — the responder's
   candidates, in the same shape as the offer.
 - `stunServer` — informational.
-- `punch` — a `PunchHint { startAtMs, intervalMs, durationMs }`
-  telling both sides when to begin probing and how aggressively.
-  Absent on rejected offers.
+- `punch` — a `PunchHint { startAtMs, intervalMs, durationMs }`: the
+  responder's own probing schedule, which the responder probes on. The
+  initiator does not read the hint; it starts its own probing when the
+  answer arrives, on its local `punch_start_delay_ms`,
+  `punch_interval_ms` and `punch_duration_ms`. Absent on rejected
+  offers.
 - `reason` — optional rejection string when `accepted` is false.
 - `offerReceivedAt` — optional responder wall-clock (Unix ms) at
   the moment it received the offer; the initiator uses this to
@@ -141,10 +152,12 @@ The `TraversalAnswer` echoes `sessionId` and carries:
 
 ### Relay selection
 
-Dialer publishes offers to the recipient's NIP-17 inbox relays (kind
-10050) when available; otherwise to the local
-`node.rendezvous.nostr.dm_relays` list. The responder publishes the
-answer back through the same relay channel.
+Dialer publishes offers to the merge of the recipient's inbox relay
+list (kind 10050), the signal relays its advert names, and the local
+`node.rendezvous.nostr.dm_relays` list, kept to relays already in the
+dialer's own relay pool. The responder, which has no advert for the
+dialer, answers the same way from the dialer's inbox relay list and
+its own `dm_relays`.
 
 ## Kind 10050 — NIP-17 Inbox Relay List
 
@@ -161,15 +174,20 @@ different purposes:
 - Kind 10050 (NIP-17) — relays the recipient prefers for receiving
   DM-shaped (NIP-59 wrapped) events.
 
-FIPS publishes its own kind 10050 on startup so dialers can discover
-where to send traversal offers. When dialing a peer, FIPS first
-fetches the peer's kind 10050 from the peer's `advert_relays`; on
-fetch failure it falls back to the local `dm_relays` list.
+FIPS publishes its own kind 10050 to its `dm_relays` on startup and
+every 24 hours after, so dialers can discover where to send traversal
+offers. When dialing a peer, FIPS fetches the peer's newest kind 10050
+no older than 30 days from its own `dm_relays` and `advert_relays`,
+not from the peer's. It falls back to the local `dm_relays` list when
+the fetch fails or the list is absent or empty.
 
 ### Tags
 
-Standard NIP-17 form: each relay is encoded as an `r` tag whose
-single value is the relay URL.
+FIPS emits each relay as an `r` tag whose single value is the relay
+URL. This is not the NIP-17 form, which is a `relay` tag
+(`["relay", "wss://nos.lol"]`), so other NIP-17 clients do not read a
+list FIPS publishes. FIPS reads both forms; an `r` tag carrying a
+NIP-65 `read` or `write` marker is ignored.
 
 ```text
 ["r", "wss://relay.damus.io"]

@@ -3,7 +3,9 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::util::{add_peer, make_coords, make_costs, make_node_addr, make_tree_state};
-use crate::proto::stp::{ParentDeclaration, ParentEval, TreeCoordinate, TreeState};
+use crate::proto::stp::{
+    ParentDeclaration, ParentEval, Stp, TreeCoordinate, TreeDecision, TreeState,
+};
 use alloc::vec::Vec;
 
 // ===== ParentDeclaration Tests =====
@@ -1128,4 +1130,116 @@ fn test_single_peer_no_reeval_benefit() {
         .evaluate_parent(&bad_costs, &BTreeSet::new())
         .switch_target();
     assert_eq!(result, None);
+}
+
+// ===== Unmeasured peers on a smaller root =====
+
+fn switches_to(decision: &TreeDecision, to: u8) -> bool {
+    matches!(decision, TreeDecision::Switch { new_parent, .. } if *new_parent == make_node_addr(to))
+}
+
+/// Node 50 under measured parent 60 on root 40; peer 70 is on root 10 and has
+/// no round-trip measurement.
+fn bridged_state() -> TreeState {
+    let mut state = TreeState::new(make_node_addr(50), 1000);
+    add_peer(&mut state, 60, &[60, 40]);
+    add_peer(&mut state, 70, &[70, 10]);
+    state.set_parent(make_node_addr(60), 2, 1000, 1000);
+    state.recompute_coords();
+    assert_eq!(*state.root(), make_node_addr(40));
+    state
+}
+
+#[test]
+fn an_unmeasured_peer_on_a_smaller_root_is_adopted_when_no_measured_peer_reaches_it() {
+    let state = bridged_state();
+    let none = BTreeSet::new();
+
+    // Precondition: with no measurements at all the fixture reaches the switch.
+    let cold = BTreeMap::new();
+    assert!(switches_to(
+        &Stp::classify_periodic(&state, &cold, &none, false),
+        70
+    ));
+
+    // Only the current parent is measured: the root must still be corrected.
+    let costs = make_costs(&[(60, 1.0)]);
+    assert!(switches_to(
+        &Stp::classify_periodic(&state, &costs, &none, false),
+        70
+    ));
+    assert!(switches_to(
+        &Stp::classify_announce(&state, make_node_addr(70), &costs, &none, false),
+        70
+    ));
+    // The switch is mandatory, so an active veto does not hold it back.
+    assert!(switches_to(
+        &Stp::classify_periodic(&state, &costs, &none, true),
+        70
+    ));
+}
+
+#[test]
+fn parent_loss_takes_the_unmeasured_peer_on_a_smaller_root_rather_than_self_rooting() {
+    let mut state = TreeState::new(make_node_addr(50), 1000);
+    add_peer(&mut state, 60, &[60, 40]);
+    add_peer(&mut state, 61, &[61, 40]);
+    add_peer(&mut state, 70, &[70, 10]);
+    state.set_parent(make_node_addr(60), 2, 1000, 1000);
+    state.recompute_coords();
+
+    state.remove_peer(&make_node_addr(60));
+    let costs = make_costs(&[(61, 1.0)]);
+    assert!(state.recover(&costs, 2000, 2000).changed);
+
+    assert!(!state.is_root());
+    assert_eq!(*state.my_declaration().parent_id(), make_node_addr(70));
+    assert_eq!(*state.root(), make_node_addr(10));
+
+    // Stable afterwards.
+    let none = BTreeSet::new();
+    assert!(matches!(
+        Stp::classify_periodic(&state, &costs, &none, false),
+        TreeDecision::PeriodicRebroadcast
+    ));
+    assert!(matches!(
+        Stp::classify_announce(&state, make_node_addr(61), &costs, &none, false),
+        TreeDecision::NoChange
+    ));
+}
+
+#[test]
+fn a_measured_peer_on_the_smallest_root_still_beats_a_shallower_unmeasured_one() {
+    let mut state = TreeState::new(make_node_addr(50), 1000);
+    add_peer(&mut state, 60, &[60, 62, 10]);
+    add_peer(&mut state, 70, &[70, 10]);
+    add_peer(&mut state, 80, &[80, 40]);
+    state.set_parent(make_node_addr(80), 2, 1000, 1000);
+    state.recompute_coords();
+
+    // 60 is at effective depth 5.0; 70 would be 2.0 if it were ranked.
+    let costs = make_costs(&[(60, 3.0), (80, 1.0)]);
+    assert!(switches_to(
+        &Stp::classify_periodic(&state, &costs, &BTreeSet::new(), false),
+        60
+    ));
+}
+
+#[test]
+fn an_unmeasured_candidate_never_wins_a_cost_based_switch() {
+    // On root 10 under unmeasured 70 (deep); unmeasured 71 is shallower on the
+    // same root, and measured 60 is on root 40.
+    let mut state = TreeState::new(make_node_addr(50), 1000);
+    add_peer(&mut state, 60, &[60, 40]);
+    add_peer(&mut state, 70, &[70, 72, 73, 10]);
+    add_peer(&mut state, 71, &[71, 10]);
+    state.set_parent(make_node_addr(70), 2, 1000, 1000);
+    state.recompute_coords();
+    assert_eq!(*state.root(), make_node_addr(10));
+
+    let costs = make_costs(&[(60, 1.0)]);
+    assert!(matches!(
+        state.evaluate_parent(&costs, &BTreeSet::new()),
+        ParentEval::None
+    ));
 }

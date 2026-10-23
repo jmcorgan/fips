@@ -564,10 +564,12 @@ other over UDP (a pass-in rule on the tun interface loaded into pf's
 the link authenticated, `ping6` across the mesh ran 200 packets of 56
 bytes and 100 of 1100 bytes each way with no loss, and 10 MiB by TCP each
 way arrived byte-exact. Packets above the daemon's effective MTU (1203
-bytes over the 1280-byte UDP transport) are answered with ICMPv6 Packet
-Too Big and TCP is MSS-clamped, as the no-fragmentation policy in
-`docs/design/fips-mtu.md` says, so a fixed-size `ping6 -s 1160` or larger
-shows loss by design on every platform. What the VMs did not cover:
+bytes over the 1280-byte UDP transport that was then the default) were
+answered with ICMPv6 Packet Too Big and TCP was MSS-clamped, as the
+no-fragmentation policy in `docs/design/fips-mtu.md` says, so a
+fixed-size `ping6 -s 1160` or larger showed loss by design. At the
+current 1357-byte UDP default the effective MTU is 1280, the IPv6
+minimum, so every packet up to 1280 bytes is carried. What the VMs did not cover:
 physical hardware, and CE 2.9.0 (no installer at hand).
 The CE 2.8.1 (FreeBSD 15) package carries the same binaries and is
 install-smoked on plain FreeBSD 15.1 in CI; it cannot be run on pfSense

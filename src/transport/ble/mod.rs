@@ -1006,7 +1006,8 @@ impl<I: BleIo> Transport for BleTransport<I> {
 
 /// Pre-handshake pubkey exchange prefix byte.
 ///
-/// Distinguishes the identity exchange from FMP packets (version ≥ 0x01).
+/// FMP packets also begin with version 0, so the framer cannot tell them
+/// apart; see the caution below.
 /// Temporary — removed when FMP switches from IK to XX handshake.
 ///
 /// Caution: this prefix is *not* distinguishable from an FMP packet by the

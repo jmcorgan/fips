@@ -611,8 +611,10 @@ fn classify_request_drops_our_own_request_looped_back_to_us() {
     // Regression, request side of the same defect. Our flood reaches a peer
     // that circulates it back; the only identity test is `target == my_addr`,
     // which a lookup we originated never satisfies. Recording it would file
-    // our own request_id as a transit entry and hand the eventual answer to
-    // the looping peer, so the copy is dropped as the duplicate it is.
+    // our own request_id as a transit entry and forward the copy again, so
+    // it is dropped as the duplicate it is. The answer is accepted by the
+    // originator-first check either way; keeping the id out of the transit
+    // record also leaves a response after completion with nothing to relay.
     let mut lookup = empty_lookup();
     let looping_peer = make_node_addr(0x01);
     let my_addr = make_node_addr(0x99);
@@ -649,6 +651,20 @@ fn classify_request_drops_our_own_request_looped_back_to_us() {
     assert!(matches!(
         classify_response(&mut lookup, 77, &target, &responder(), DIGEST),
         ResponseRoute::Originator
+    ));
+    // Once the lookup completes, a later response for the same id finds no
+    // pending lookup and no transit record, so nothing relays it anywhere.
+    on_response_accepted(
+        &mut lookup,
+        77,
+        &target,
+        TreeCoordinate::root(target),
+        2000,
+        1280,
+    );
+    assert!(matches!(
+        classify_response(&mut lookup, 77, &target, &responder(), DIGEST),
+        ResponseRoute::Unsolicited
     ));
 }
 

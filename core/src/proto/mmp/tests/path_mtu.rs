@@ -221,3 +221,52 @@ fn apply_reactive_decrease_lets_the_previously_pending_value_be_accepted_later()
         "a reactive decrease must clear the pending value so a later increase to it completes"
     );
 }
+
+#[test]
+fn apply_notification_accepted_increase_then_a_seed_decrease_lets_the_same_value_be_accepted_again()
+{
+    // The outbound transport seed lowers the estimate without touching the
+    // increase ladder. If an accepted increase left its value pending, the
+    // next report of that value took the same-value arm, which never records
+    // when the sequence began, and the estimate stayed at the seeded value.
+    let t0 = 100_000u64;
+    let mut state = PathMtuState::new();
+    state.seed_source_mtu(1200);
+    state.apply_notification(1400, t0);
+    state.apply_notification(1400, t0 + 10_000);
+    assert!(
+        state.apply_notification(1400, t0 + 21_000),
+        "control: the first increase to 1400 is accepted"
+    );
+    assert_eq!(state.current_mtu(), 1400);
+
+    state.seed_source_mtu(1000);
+    assert_eq!(state.current_mtu(), 1000);
+
+    let t1 = t0 + 30_000;
+    for i in 0..4u64 {
+        state.apply_notification(1400, t1 + i * 11_000);
+    }
+    assert_eq!(
+        state.current_mtu(),
+        1400,
+        "an estimate lowered by the seed must recover when 1400 is reported again"
+    );
+}
+
+#[test]
+fn seed_decrease_during_a_pending_increase_keeps_the_ladder() {
+    // A seed decrease leaves an increase in progress alone: the sequence that
+    // began before it still completes on schedule.
+    let t0 = 100_000u64;
+    let mut state = PathMtuState::new();
+    state.seed_source_mtu(1200);
+    assert!(!state.apply_notification(1400, t0), "1400 is only pending");
+
+    state.seed_source_mtu(1000);
+    assert_eq!(state.current_mtu(), 1000);
+
+    state.apply_notification(1400, t0 + 10_000);
+    assert!(state.apply_notification(1400, t0 + 21_000));
+    assert_eq!(state.current_mtu(), 1400);
+}

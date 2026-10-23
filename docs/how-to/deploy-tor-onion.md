@@ -11,8 +11,8 @@ For the full `transports.tor.*` config knob inventory, see
 
 ## Inbound modes
 
-FIPS supports two inbound Tor modes. (A third mode, `socks5`, is
-outbound-only and not covered here.)
+FIPS has one inbound Tor mode, `directory`. The other two modes are
+outbound-only and not covered here.
 
 - **`directory` mode** *(recommended)*. Tor manages the onion
   service via `HiddenServiceDir` and `HiddenServicePort` directives
@@ -22,19 +22,13 @@ outbound-only and not covered here.)
   makes this mode compatible with Tor's `Sandbox 1` seccomp-bpf
   hardening.
   - **`torrc` requires:** `HiddenServiceDir` + `HiddenServicePort`.
-- **`control_port` mode**. FIPS speaks to Tor's control port to
-  create an ephemeral onion service at startup (`ADD_ONION`). The
-  onion key lives only for the lifetime of the FIPS daemon's
-  control-port session. This mode is **incompatible** with
-  `Sandbox 1` — the sandbox forbids control-port-driven onion
-  service management.
-  - **`torrc` requires:** `ControlPort` (typically the Unix socket
-    `/run/tor/control`) and a usable auth method
-    (`CookieAuthentication 1` is the common choice).
+- **`control_port` mode** is not an inbound mode. It adds
+  control-port monitoring to SOCKS5 outbound and creates no onion
+  service, so it accepts no inbound connections. Use `directory` for
+  inbound.
+- **`socks5` mode** is outbound-only.
 
-Pick `directory` unless you have a specific reason to prefer
-`control_port`. The rest of this guide covers `directory` mode
-end-to-end.
+The rest of this guide covers `directory` mode end-to-end.
 
 ## Prerequisites
 
@@ -191,9 +185,9 @@ appears in this node's published advert. See
 ## Troubleshooting
 
 - **Tor refuses to start with `Sandbox 1` and onion-service errors.**
-  `Sandbox 1` requires `directory` mode and forbids creating onion
-  services through the control port. Verify your `torrc` uses
-  `HiddenServiceDir` (this guide), not `ADD_ONION` via control port.
+  `Sandbox 1` forbids creating onion services through the control
+  port. FIPS never does that, so check that nothing else configures one
+  that way and that your `torrc` uses `HiddenServiceDir` (this guide).
 - **FIPS daemon fails to bind `127.0.0.1:8444`.** Another process is
   already bound to that port. Either stop the conflicting process or
   pick a different port and update both `torrc`'s

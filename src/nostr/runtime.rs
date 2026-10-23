@@ -5,11 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use nostr::nips::nip17;
 use nostr::nips::nip19::ToBech32;
 use nostr::prelude::{
     Alphabet, Event, EventBuilder, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag,
-    Tag, TagKind, Timestamp,
+    Tag, TagKind, TagStandard, Timestamp,
 };
 use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
 use serde::Serialize;
@@ -240,6 +239,11 @@ struct CachedPublicUdpAddr {
 const PUBLIC_UDP_ADDR_FAILURE_TTL: Duration = Duration::from_secs(60);
 const RELAY_STARTUP_OP_TIMEOUT: Duration = Duration::from_secs(5);
 const ADVERT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How far back a peer's kind 10050 inbox relay list is looked up.
+pub(super) const INBOX_LOOKBACK: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// How often our own inbox relay list is republished, well inside
+/// `INBOX_LOOKBACK` so peers always find a current one.
+const INBOX_REPUBLISH: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct NostrRendezvous {
     client: Client,
@@ -257,6 +261,10 @@ pub struct NostrRendezvous {
     /// tests can observe what was sent.
     #[cfg(test)]
     sent_signals: std::sync::Mutex<Vec<String>>,
+    /// Every inbox relay list `publish_inbox_relays` sent, with the tokio time
+    /// it was sent, so unit tests can observe when it is published.
+    #[cfg(test)]
+    inbox_sent: std::sync::Mutex<Vec<(tokio::time::Instant, Event)>>,
     admission: OfferAdmission,
     signal_gate: SignalGate,
     /// Limits the suspicious-offer warning to one a minute.
@@ -307,9 +315,10 @@ impl NostrRendezvous {
     /// Deliberately *not* watched: `connect_task` and `relay_startup_task`.
     /// `Client::connect()` only spawns a per-relay background connection task
     /// and returns, so `connect_task` finishes moments after start on a
-    /// perfectly healthy node; `relay_startup_task` breaks out of its retry loop
-    /// on the first successful subscribe. Watching either reports Degraded on
-    /// every node forever.
+    /// perfectly healthy node; watching it reports Degraded on every node
+    /// forever. `relay_startup_task` does not return once its retry loop has
+    /// subscribed (it goes on republishing the inbox relay list), but a list
+    /// that fails to publish is not a loss of liveness.
     ///
     /// Each handle is `Some` for the engine's whole running life (installed in
     /// `start`); `shutdown` takes them all, leaving `None` — a taken handle
@@ -399,6 +408,8 @@ impl NostrRendezvous {
             inflight_offers: Mutex::new(HashMap::new()),
             #[cfg(test)]
             sent_signals: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            inbox_sent: std::sync::Mutex::new(Vec::new()),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
@@ -1064,20 +1075,7 @@ impl NostrRendezvous {
                             false
                         }
                     };
-                match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.publish_inbox_relays())
-                    .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => {
-                        warn!(error = %err, "failed to publish Nostr inbox relay list");
-                    }
-                    Err(_) => {
-                        warn!(
-                            timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
-                            "Nostr inbox relay publish timed out"
-                        );
-                    }
-                }
+                self.publish_inbox().await;
 
                 self.request_publish_advert();
 
@@ -1088,7 +1086,35 @@ impl NostrRendezvous {
                 tokio::time::sleep(retry_delay).await;
                 retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(60));
             }
+
+            // Peers only look up lists younger than INBOX_LOOKBACK, and a relay
+            // that was down at startup has not seen ours at all.
+            let mut republish = tokio::time::interval_at(
+                tokio::time::Instant::now() + INBOX_REPUBLISH,
+                INBOX_REPUBLISH,
+            );
+            republish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                republish.tick().await;
+                self.publish_inbox().await;
+            }
         })
+    }
+
+    /// Publish our inbox relay list, warning on failure or timeout.
+    async fn publish_inbox(&self) {
+        match tokio::time::timeout(RELAY_STARTUP_OP_TIMEOUT, self.publish_inbox_relays()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(error = %err, "failed to publish Nostr inbox relay list");
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = RELAY_STARTUP_OP_TIMEOUT.as_millis() as u64,
+                    "Nostr inbox relay publish timed out"
+                );
+            }
+        }
     }
 
     fn spawn_connect_loop(self: Arc<Self>) -> JoinHandle<()> {
@@ -1157,27 +1183,16 @@ impl NostrRendezvous {
     }
 
     async fn publish_inbox_relays(&self) -> Result<(), BootstrapError> {
-        let tags = self
-            .config
-            .dm_relays
-            .iter()
-            .filter_map(|relay| RelayUrl::parse(relay).ok())
-            .map(|relay| {
-                Tag::custom(
-                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::R)),
-                    [relay.to_string()],
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let event = EventBuilder::new(Kind::InboxRelays, "")
-            .tags(tags)
-            .sign_with_keys(&self.keys)
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
+        let event = inbox_list(&self.keys, &self.config.dm_relays)?;
         self.client
             .send_event_to(self.config.dm_relays.clone(), &event)
             .await
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
+        #[cfg(test)]
+        self.inbox_sent
+            .lock()
+            .expect("inbox_sent lock")
+            .push((tokio::time::Instant::now(), event));
         Ok(())
     }
 
@@ -1801,6 +1816,10 @@ impl NostrRendezvous {
         Ok(usable)
     }
 
+    /// The relays `target_pubkey`'s newest kind 10050 inbox relay list names,
+    /// looked up on our own DM and advert relays among lists no older than
+    /// `INBOX_LOOKBACK`. Falls back to our `dm_relays` when the fetch fails or
+    /// no non-empty list is found.
     async fn find_recipient_inbox_relays(
         &self,
         target_pubkey: PublicKey,
@@ -1819,7 +1838,9 @@ impl NostrRendezvous {
                     .author(target_pubkey)
                     .kind(Kind::InboxRelays)
                     .since(Timestamp::from(
-                        Timestamp::now().as_secs().saturating_sub(30 * 24 * 60 * 60),
+                        Timestamp::now()
+                            .as_secs()
+                            .saturating_sub(INBOX_LOOKBACK.as_secs()),
                     )),
                 Duration::from_millis(1500),
             )
@@ -1833,9 +1854,7 @@ impl NostrRendezvous {
         };
         let newest = Self::newest_event_by_author(events.iter(), target_pubkey);
         if let Some(event) = newest {
-            let relays = nip17::extract_relay_list(event)
-                .map(|relay| relay.to_string())
-                .collect::<Vec<_>>();
+            let relays = inbox_relays(event);
             if !relays.is_empty() {
                 return Ok(relays);
             }
@@ -2052,6 +2071,52 @@ impl NostrRendezvous {
     }
 }
 
+/// Build our kind 10050 inbox relay list: one `["r", url]` tag per relay that
+/// parses, signed with `keys`.
+pub(super) fn inbox_list(keys: &nostr::Keys, relays: &[String]) -> Result<Event, BootstrapError> {
+    let tags = relays
+        .iter()
+        .filter_map(|relay| RelayUrl::parse(relay).ok())
+        .map(|relay| {
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::R)),
+                [relay.to_string()],
+            )
+        })
+        .collect::<Vec<_>>();
+    EventBuilder::new(Kind::InboxRelays, "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| BootstrapError::Nostr(e.to_string()))
+}
+
+/// The relays a kind 10050 inbox relay list names, in order, each once.
+///
+/// Both the NIP-17 `["relay", url]` form and the bare `["r", url]` form are
+/// read: every deployed FIPS node publishes the `r` form. An `r` tag with a
+/// read or write marker is a NIP-65 entry and has no meaning here.
+pub(super) fn inbox_relays(event: &Event) -> Vec<String> {
+    if event.kind != Kind::InboxRelays {
+        return Vec::new();
+    }
+    let mut seen: HashSet<&RelayUrl> = HashSet::new();
+    let mut relays = Vec::new();
+    for tag in event.tags.iter() {
+        let url = match tag.as_standardized() {
+            Some(TagStandard::Relay(url)) => url,
+            Some(TagStandard::RelayMetadata {
+                relay_url,
+                metadata: None,
+            }) => relay_url,
+            _ => continue,
+        };
+        if seen.insert(url) {
+            relays.push(url.to_string());
+        }
+    }
+    relays
+}
+
 /// Retain only the candidates the client pool actually holds.
 ///
 /// `send_event_to` rejects the whole send with `RelayNotFound` if any single URL
@@ -2109,6 +2174,11 @@ impl NostrRendezvous {
     /// `advert_cache` and `npub` are usable. Intended for cache-injection
     /// tests of consumers (e.g. `Node::run_open_discovery_sweep`).
     pub(crate) fn new_for_test() -> Self {
+        Self::new_for_test_with_config(NostrRendezvousConfig::default())
+    }
+
+    /// As [`Self::new_for_test`], with `config` in place of the default.
+    pub(crate) fn new_for_test_with_config(config: NostrRendezvousConfig) -> Self {
         let keys = nostr::Keys::generate();
         let pubkey = keys.public_key();
         let npub = pubkey.to_bech32().expect("bech32 encode");
@@ -2116,7 +2186,6 @@ impl NostrRendezvous {
             .signer(keys.clone())
             .opts(ClientOptions::new().autoconnect(false))
             .build();
-        let config = NostrRendezvousConfig::default();
         let admission = OfferAdmission::new(
             config.max_concurrent_incoming_offers,
             config.max_concurrent_offers_per_npub,
@@ -2144,6 +2213,7 @@ impl NostrRendezvous {
             pending_answers: Mutex::new(HashMap::new()),
             inflight_offers: Mutex::new(HashMap::new()),
             sent_signals: std::sync::Mutex::new(Vec::new()),
+            inbox_sent: std::sync::Mutex::new(Vec::new()),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
@@ -2210,6 +2280,21 @@ impl NostrRendezvous {
     /// pool fails.
     pub(crate) async fn add_unconnected_relay_for_test(&self, url: &str) {
         self.client.add_relay(url).await.expect("add relay");
+    }
+
+    /// Spawn the relay-startup task as `start` does, and return its handle.
+    pub(crate) fn spawn_relay_startup_loop_for_test(self: Arc<Self>) -> JoinHandle<()> {
+        self.spawn_relay_startup_loop()
+    }
+
+    /// Publish our inbox relay list once.
+    pub(crate) async fn publish_inbox_relays_for_test(&self) -> Result<(), BootstrapError> {
+        self.publish_inbox_relays().await
+    }
+
+    /// Every inbox relay list published so far, with the tokio time of each.
+    pub(crate) fn inbox_sent_for_test(&self) -> Vec<(tokio::time::Instant, Event)> {
+        self.inbox_sent.lock().expect("inbox_sent lock").clone()
     }
 
     /// This runtime's own npub.

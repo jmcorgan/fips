@@ -465,8 +465,8 @@ cache rationale, eviction policy, and population mechanics.
 
 The coordinate cache maps `NodeAddr → TreeCoordinate` and is the critical
 data structure that enables efficient multi-hop routing. Without cached
-coordinates for a destination, FMP cannot make forwarding decisions and must
-either fall back to bloom-filter-only routing or signal CoordsRequired.
+coordinates for a destination, `find_next_hop` returns no next hop, and the
+caller signals CoordsRequired.
 
 ### Unified Cache
 
@@ -513,10 +513,11 @@ transit, CP-flagged data packets, LookupResponse — write to the same cache.
   handshakes make (the SessionAck's source coordinates) and verified lookup
   results are not charged. The `coord_hint_unfunded` counter counts unpaid
   writes
-- **Flush on parent change**: When the local node's tree parent changes, the
-  entire coordinate cache is flushed. Tree parent changes mean the node's own
-  coordinates have changed, making cached coordinates for other nodes
-  potentially stale for routing purposes.
+- **Invalidation on parent change**: When the local node's tree position
+  changes, it drops cached coordinates that route through this node (parent
+  switch or ancestry change) or sit under another root (becoming root); both
+  on parent loss or loop detection. Other entries are kept, since their
+  coordinates do not depend on this node's position.
 
 ### Timer Ordering
 
@@ -578,7 +579,7 @@ reactive PMTUD mechanism.
 | CoordsRequired handling | **Implemented** |
 | PathBroken handling | **Implemented** |
 | Simultaneous initiation tie-breaker | **Implemented** |
-| Flush coord cache on parent change | **Implemented** |
+| Selective coord cache invalidation on parent change | **Implemented** |
 | Rekey | **Implemented** |
 | Port-based service multiplexing | **Implemented** |
 | IPv6 header compression (shim on port 256) | **Implemented** |

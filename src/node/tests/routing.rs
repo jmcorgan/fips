@@ -686,7 +686,7 @@ async fn test_routing_reachability_100_nodes() {
     // Populate coord caches: every node learns every other node's coordinates.
     // In production this happens via SessionSetup/LookupResponse; here we
     // inject them directly. Bloom filter routing requires cached dest_coords
-    // for loop-free forwarding — without coords, find_next_hop returns None.
+    // for the self-distance check — without coords, find_next_hop returns None.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -890,7 +890,8 @@ async fn test_routing_stops_after_peer_removal() {
     // Greedy tree routing may still have stale coords cached, but without
     // bloom filter hits, routing should stop at node 1 (which lost its
     // peer to the other side). If stale coords exist, greedy routing could
-    // still attempt forwarding — but the self-distance check prevents loops.
+    // still attempt forwarding — the self-distance check is strict progress by
+    // each node's own view, and the TTL bounds any loop.
     // Either NoRoute or Loop-with-stale-coords is acceptable here; what
     // matters is that delivery does NOT succeed.
     match simulate_forwarding(&mut nodes, &addr_index, 0, 3) {
@@ -968,7 +969,7 @@ async fn test_routing_bloom_only_transit() {
     // work in the current implementation because find_next_hop gates bloom
     // filter candidate selection on having cached dest_coords. Transit
     // routers without coords return None, which is the correct behavior
-    // (prevents loops) but means the SessionSetup must carry coords to
+    // (no strict-progress check is possible without them) but means the SessionSetup must carry coords to
     // warm transit router caches before data packets can flow.
     assert!(
         hop_at_1.is_none(),
@@ -999,7 +1000,7 @@ async fn test_routing_bloom_only_transit() {
 /// ties.
 ///
 /// This test reveals the boundary: in a converged network, bloom filter
-/// routing needs dest_coords at each hop for loop-free forwarding through
+/// routing needs dest_coords at each hop for the self-distance check through
 /// non-adjacent nodes. Direct peer adjacency handles the last hop.
 #[tokio::test]
 async fn test_routing_source_only_coords_100_nodes() {

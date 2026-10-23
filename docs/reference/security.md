@@ -390,7 +390,7 @@ for the metadata-privacy model and the rejection of onion routing.
 
 | Transport | Default Inbound | Default Bind | Opt-in |
 | --------- | --------------- | ------------ | ------ |
-| UDP | None until `bind_addr` set | `0.0.0.0:2121` typical | Operator sets `transports.udp.bind_addr` |
+| UDP | Listens on `0.0.0.0:2121` when a UDP instance is declared without `bind_addr`, unless `outbound_only` | `0.0.0.0:2121` by default | Declaring `transports.udp`; set `bind_addr` to narrow it or `outbound_only` to close it |
 | TCP | None until `bind_addr` set | None — outbound-only without bind | Operator sets `transports.tcp.bind_addr` |
 | Ethernet | Listens on configured interface (raw `AF_PACKET`) | EtherType 0x2121 on selected interface | Per-flag `listen`, `announce`, `auto_connect`, `accept_connections` |
 | Tor | None until `directory_service` configured | `127.0.0.1:8443` (loopback only) | Operator sets `transports.tor.directory_service` and configures `HiddenServiceDir` in `torrc` |

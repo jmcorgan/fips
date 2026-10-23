@@ -3,16 +3,16 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use nostr::nips::nip17;
 use nostr::prelude::{EventBuilder, Kind, RelayUrl, Tag, Timestamp};
 
 use super::runtime::{
-    NostrRendezvous, adversarial_offer_reject, is_unroutable_direct_advert_ip, short_id,
-    signal_relays,
+    INBOX_LOOKBACK, NostrRendezvous, adversarial_offer_reject, inbox_relays,
+    is_unroutable_direct_advert_ip, short_id, signal_relays,
 };
 use super::signal::{
     FreshnessOutcome, build_signal_event, create_traversal_answer, create_traversal_offer,
-    estimate_clock_skew, validate_offer_freshness, validate_traversal_answer_for_offer,
+    estimate_clock_skew, unwrap_signal_event, validate_offer_freshness,
+    validate_traversal_answer_for_offer,
 };
 use super::stun::{parse_stun_binding_success, parse_stun_url};
 #[cfg(target_os = "linux")]
@@ -275,9 +275,7 @@ fn inbox_relay_selection_ignores_relay_lists_not_signed_by_the_target() {
 
     let selected = NostrRendezvous::newest_event_by_author(events.iter(), peer_keys.public_key())
         .expect("the peer's own relay list should be selected");
-    let relays = nip17::extract_relay_list(selected)
-        .map(|relay| relay.to_string())
-        .collect::<Vec<_>>();
+    let relays = inbox_relays(selected);
     assert_eq!(relays, vec!["wss://genuine.example/".to_string()]);
 }
 
@@ -431,6 +429,95 @@ fn validates_offer_answer_pair() {
             "npub1client",
         )
         .is_ok()
+    );
+}
+
+/// An answer's `inReplyTo` names the offer's `nonce`, not the offer's event
+/// id. `validates_offer_answer_pair` is the control: the same pair with the
+/// nonce is accepted.
+#[test]
+fn an_answer_whose_in_reply_to_is_the_offer_event_id_rather_than_its_nonce_is_refused_as_a_session_mismatch()
+ {
+    let offer = create_traversal_offer(
+        "sess-1".to_string(),
+        1_700_000_000_000,
+        60_000,
+        "offer-1".to_string(),
+        "npub1client".to_string(),
+        "npub1server".to_string(),
+        Some(addr("203.0.113.10", 62000)),
+        vec![addr("192.168.1.10", 62000)],
+        Some("stun:example.org:3478".to_string()),
+    );
+    let offer_event_id = "ab".repeat(32);
+    let answer = create_traversal_answer(
+        "sess-1".to_string(),
+        1_700_000_000_500,
+        60_000,
+        "answer-1".to_string(),
+        "npub1server".to_string(),
+        "npub1client".to_string(),
+        offer_event_id,
+        true,
+        Some(addr("198.51.100.20", 63000)),
+        vec![addr("192.168.1.20", 63000)],
+        Some("stun:example.org:3478".to_string()),
+        Some(PunchHint {
+            start_at_ms: 1_700_000_002_000,
+            interval_ms: 200,
+            duration_ms: 10_000,
+        }),
+        None,
+        Some(1_700_000_000_400),
+    );
+
+    match validate_traversal_answer_for_offer(
+        &offer,
+        &answer,
+        1_700_000_000_900,
+        60_000,
+        "npub1server",
+        "npub1client",
+    ) {
+        Err(BootstrapError::Protocol(reason)) => assert_eq!(reason, "session-mismatch"),
+        other => panic!("expected a session-mismatch refusal, got {other:?}"),
+    }
+}
+
+/// The kind 21059 wrap is signed by a one-time key, so relays do not see the
+/// sender; the seal inside it is signed by the sender's identity key, which
+/// the receiver recovers on unwrapping.
+#[tokio::test]
+async fn the_signal_wrap_is_signed_by_a_one_time_key_and_the_seal_by_the_identity_key() {
+    let identity = nostr::Keys::generate();
+    let receiver = nostr::Keys::generate();
+    let rumor = EventBuilder::private_msg_rumor(receiver.public_key(), "hello".to_string())
+        .build(identity.public_key());
+
+    let event = build_signal_event(
+        &identity,
+        receiver.public_key(),
+        rumor,
+        Timestamp::from(Timestamp::now().as_secs() + 30),
+    )
+    .await
+    .expect("signal event should build");
+
+    assert_ne!(
+        event.pubkey,
+        identity.public_key(),
+        "the wrap must not be signed by the identity key"
+    );
+    assert_ne!(event.pubkey, receiver.public_key());
+    event.verify().expect("the wrap carries a valid signature");
+
+    let unwrapped = unwrap_signal_event(&receiver, &event)
+        .await
+        .expect("the receiver can unwrap the signal");
+    assert_eq!(
+        unwrapped.sender,
+        identity.public_key(),
+        "the seal must be signed by the identity key"
     );
 }
 
@@ -2206,12 +2293,12 @@ fn live_handle() -> tokio::task::JoinHandle<()> {
     tokio::spawn(std::future::pending::<()>())
 }
 
-/// The regression case: `connect_task` and `relay_startup_task` both return by
-/// design (`Client::connect()` only kicks off per-relay connection tasks;
-/// the startup loop breaks on the first successful subscribe), so a healthy
-/// node has two finished handles and must still report live.
+/// The regression case: `connect_task` returns by design (`Client::connect()`
+/// only kicks off per-relay connection tasks), and `relay_startup_task` is
+/// unwatched because a failed inbox relay list publish is not a loss of
+/// liveness, so a node with both handles finished must still report live.
 #[tokio::test]
-async fn nostr_liveness_ignores_the_tasks_that_return_by_design() {
+async fn nostr_liveness_ignores_the_connect_and_relay_startup_tasks() {
     let runtime = NostrRendezvous::new_for_test();
     runtime
         .install_tasks_for_test(
@@ -2723,4 +2810,148 @@ fn nostr_config_with_refresh(secs: u64) -> crate::config::NostrRendezvousConfig 
         advert_refresh_secs: secs,
         ..Default::default()
     }
+}
+
+/// A kind 10050 inbox relay list carrying `tags`, signed by a fresh key.
+fn inbox_list_with_tags(tags: Vec<Tag>) -> nostr::Event {
+    EventBuilder::new(Kind::InboxRelays, "")
+        .tags(tags)
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap()
+}
+
+/// `url` as the relay pool normalizes it.
+fn normalized(url: &str) -> String {
+    RelayUrl::parse(url).unwrap().to_string()
+}
+
+/// The inbox relay list this node publishes must be readable by the lookup
+/// every other node runs on it, or a peer's list never takes part in choosing
+/// the relays a traversal signal goes to.
+#[tokio::test]
+async fn the_inbox_relay_list_this_node_publishes_is_read_back_as_its_dm_relays() {
+    let relays = vec![
+        UNCONNECTED_RELAY.to_string(),
+        "ws://127.0.0.1:2".to_string(),
+    ];
+    let runtime = NostrRendezvous::new_for_test_with_config(crate::config::NostrRendezvousConfig {
+        dm_relays: relays.clone(),
+        ..Default::default()
+    });
+    for relay in &relays {
+        runtime.add_unconnected_relay_for_test(relay).await;
+    }
+
+    runtime
+        .publish_inbox_relays_for_test()
+        .await
+        .expect("a send to pooled relays succeeds");
+    let sent = runtime.inbox_sent_for_test();
+    assert_eq!(sent.len(), 1, "one list should have been published");
+    let event = &sent[0].1;
+    assert_eq!(event.kind, Kind::InboxRelays);
+    assert_eq!(event.tags.len(), 2, "the list should name both DM relays");
+
+    let expected = relays.iter().map(|r| normalized(r)).collect::<Vec<_>>();
+    assert_eq!(inbox_relays(event), expected);
+}
+
+/// Peers look up inbox relay lists no older than `INBOX_LOOKBACK`, so a node
+/// that publishes its list only at startup drops out of their lookup once it
+/// has run that long. No gap between publishes may reach the window.
+#[tokio::test(start_paused = true)]
+async fn the_inbox_relay_list_is_republished_before_it_ages_out_of_the_lookup_window() {
+    use std::time::Duration;
+    let runtime = std::sync::Arc::new(NostrRendezvous::new_for_test_with_config(
+        crate::config::NostrRendezvousConfig {
+            dm_relays: vec![UNCONNECTED_RELAY.to_string()],
+            advert_relays: vec![UNCONNECTED_RELAY.to_string()],
+            ..Default::default()
+        },
+    ));
+    runtime
+        .add_unconnected_relay_for_test(UNCONNECTED_RELAY)
+        .await;
+    let start = tokio::time::Instant::now();
+    let task = runtime.clone().spawn_relay_startup_loop_for_test();
+
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(
+        runtime.inbox_sent_for_test().len(),
+        1,
+        "setup: the first subscribe succeeds, so startup publishes exactly once"
+    );
+
+    for _ in 0..31 {
+        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+    }
+    let now = tokio::time::Instant::now();
+    let sent = runtime.inbox_sent_for_test();
+    task.abort();
+
+    assert!(sent.len() >= 2, "the list should have been published again");
+    let mut last = start;
+    for (at, _) in &sent {
+        assert!(
+            at.duration_since(last) < INBOX_LOOKBACK,
+            "a gap between publishes reached the lookup window"
+        );
+        last = *at;
+    }
+    assert!(
+        now.duration_since(last) < INBOX_LOOKBACK,
+        "the newest list has aged out of the lookup window"
+    );
+    assert_eq!(
+        sent.len(),
+        32,
+        "one startup publish and one a day for 31 days"
+    );
+}
+
+/// The NIP-17 `relay` tag form is read.
+#[test]
+fn an_inbox_relay_list_in_the_nip17_relay_form_is_still_read() {
+    let event = signed_inbox_relay_event(
+        &nostr::Keys::generate(),
+        Timestamp::now().as_secs(),
+        "wss://relay.example",
+    );
+    assert_eq!(
+        inbox_relays(&event),
+        vec![normalized("wss://relay.example")]
+    );
+}
+
+/// A relay named in both tag forms is listed once.
+#[test]
+fn an_inbox_relay_list_naming_one_relay_in_both_tag_forms_lists_it_once() {
+    let url = "wss://relay.example";
+    let event = inbox_list_with_tags(vec![
+        Tag::relay(RelayUrl::parse(url).unwrap()),
+        Tag::parse(["r", url]).unwrap(),
+    ]);
+    assert_eq!(inbox_relays(&event), vec![normalized(url)]);
+}
+
+/// An `r` tag with a read or write marker is a NIP-65 relay entry, not an
+/// inbox relay, and is not read.
+#[test]
+fn an_r_tag_carrying_a_marker_is_not_read_as_an_inbox_relay() {
+    let event = inbox_list_with_tags(vec![
+        Tag::parse(["r", "wss://relay.example", "write"]).unwrap(),
+    ]);
+    assert!(inbox_relays(&event).is_empty());
+}
+
+/// Only a kind 10050 event is read as an inbox relay list. A relay can answer
+/// the lookup with another event the target signed, such as its NIP-65 relay
+/// list (kind 10002), whose bare `r` tags would otherwise read as inbox relays.
+#[test]
+fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
+    let event = EventBuilder::new(Kind::RelayList, "")
+        .tags(vec![Tag::parse(["r", "wss://relay.example"]).unwrap()])
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+    assert!(inbox_relays(&event).is_empty());
 }

@@ -332,8 +332,10 @@ impl RouteClass {
 /// Enumerates borrowed peers through [`RoutingView`], applies the bloom filter,
 /// and tracks the best hop inline without allocating candidate vectors or
 /// cloning coordinates. Only peers strictly closer to the destination than we
-/// are (`my_coords`) are eligible — the self-distance check that prevents
-/// routing loops.
+/// are (`my_coords`) are eligible — the self-distance check: strict progress by
+/// this node's view of `dest_coords`. It does not guarantee loop freedom when
+/// hops hold different cached coordinates for the destination; the TTL bounds
+/// any loop.
 ///
 /// Ordering: `(link_cost, distance_to_dest, node_addr)`. Returns the winning
 /// peer's address, or `None` when no candidate is strictly closer to the
@@ -362,7 +364,7 @@ pub fn select_best_candidate(
             .unwrap_or(usize::MAX);
 
         // Self-distance check: only consider peers strictly closer
-        // to the destination than we are (prevents routing loops)
+        // to the destination than we are (strict progress by this node's view)
         if dist >= my_distance {
             return;
         }

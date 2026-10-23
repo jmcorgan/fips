@@ -1496,6 +1496,10 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
 // Tests
 // ============================================================================
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/rebind.rs"]
+mod rebind_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

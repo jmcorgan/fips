@@ -504,7 +504,7 @@ impl TcpTransport {
 
     /// Establish a new TCP connection to the given address.
     ///
-    /// Configures socket options, reads TCP_MAXSEG for MTU, splits the
+    /// Configures socket options, reads TCP_MAXSEG for the logs, splits the
     /// stream, spawns a receive task, and stores in the pool.
     async fn connect(&self, addr: &TransportAddr) -> Result<mpsc::Sender<Vec<u8>>, TransportError> {
         let socket_addrs: Vec<_> = resolve_socket_addrs(addr).await?.collect();
@@ -531,7 +531,7 @@ impl TcpTransport {
             .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
         configure_socket(&std_stream, &self.config)?;
 
-        // Read TCP_MAXSEG for per-connection MTU
+        // Read TCP_MAXSEG for the logs; it bounds nothing
         let mss_mtu = read_mss_mtu(&std_stream, self.config.mtu());
 
         // Convert back to tokio
@@ -548,7 +548,9 @@ impl TcpTransport {
         let key = PoolKey::outbound(addr.clone());
         let recv_key = key.clone();
         let send_key = key.clone();
-        let mtu = mss_mtu;
+        // Frames are bounded by the configured MTU, the bound the sender's
+        // `check_mtu` applies; a stream does not tie a frame to a segment.
+        let mtu = self.config.mtu();
         let id = next_conn_id();
         let msg2_sent = Arc::new(AtomicBool::new(false));
         let recv_msg2_sent = msg2_sent.clone();
@@ -604,7 +606,7 @@ impl TcpTransport {
         debug!(
             transport_id = %self.transport_id,
             remote_addr = %addr,
-            mtu = mss_mtu,
+            mss_mtu,
             "TCP connection established (connect-on-send)"
         );
 
@@ -726,7 +728,7 @@ impl TcpTransport {
                 .map_err(|e| TransportError::StartFailed(format!("into_std: {}", e)))?;
             configure_socket(&std_stream, &config)?;
 
-            // Read TCP_MAXSEG for per-connection MTU
+            // Read TCP_MAXSEG for the logs; it bounds nothing
             let mss_mtu = read_mss_mtu(&std_stream, config.mtu());
 
             // Convert back to tokio
@@ -846,6 +848,7 @@ impl TcpTransport {
         let id = next_conn_id();
         let msg2_sent = Arc::new(AtomicBool::new(false));
         let recv_msg2_sent = msg2_sent.clone();
+        let mtu = self.config.mtu();
 
         let recv_task = tokio::spawn(async move {
             tcp_receive_loop(
@@ -855,7 +858,7 @@ impl TcpTransport {
                 id,
                 packet_tx,
                 pool,
-                mss_mtu,
+                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // Outbound connections hold no inbound slot and are not
@@ -897,7 +900,7 @@ impl TcpTransport {
         debug!(
             transport_id = %self.transport_id,
             remote_addr = %addr,
-            mtu = mss_mtu,
+            mss_mtu,
             "TCP connection established (background connect)"
         );
     }
@@ -921,9 +924,8 @@ impl Transport for TcpTransport {
     }
 
     fn link_mtu(&self, _addr: &TransportAddr) -> u16 {
-        // Per-link MTU would require synchronous pool access.
-        // For now, return the configured default. The async send path
-        // uses the per-connection MSS-derived MTU for validation.
+        // Every TCP link uses the configured MTU: the send path checks
+        // against it and each receive loop bounds frames by it.
         self.config.mtu()
     }
 
@@ -1134,8 +1136,8 @@ async fn accept_loop(
                     continue;
                 }
 
-                // Read MSS for per-connection MTU
-                let conn_mtu = read_mss_mtu(&std_stream, mtu);
+                // Read TCP_MAXSEG for the logs; it bounds nothing
+                let mss_mtu = read_mss_mtu(&std_stream, mtu);
 
                 let stream = match TcpStream::from_std(std_stream) {
                     Ok(s) => s,
@@ -1178,7 +1180,7 @@ async fn accept_loop(
                         id,
                         recv_packet_tx,
                         recv_pool,
-                        conn_mtu,
+                        mtu,
                         recv_stats,
                         Direction::Inbound,
                         Some(deadline),
@@ -1205,7 +1207,7 @@ async fn accept_loop(
                     send_tx,
                     send_task,
                     recv_task,
-                    mtu: conn_mtu,
+                    mtu: mss_mtu,
                     established_at: Instant::now(),
                     direction: Direction::Inbound,
                     id,
@@ -1228,7 +1230,7 @@ async fn accept_loop(
                     transport_id = %transport_id,
                     remote_addr = %remote_addr,
                     local_addr = %local_addr,
-                    mtu = conn_mtu,
+                    mss_mtu,
                     open_from_source,
                     open_total = stats.pool_inbound_count(),
                     "Accepted inbound TCP connection"
@@ -1686,7 +1688,12 @@ fn configure_accepted_socket(
     Ok(())
 }
 
-/// Read TCP_MAXSEG and derive per-connection MTU, falling back to default.
+/// The smaller of the socket's `TCP_MAXSEG` and the configured `mtu` on
+/// Linux, and the configured `mtu` elsewhere or if the read fails.
+///
+/// Recorded per connection and logged as a diagnostic only. It bounds
+/// nothing: a TCP stream does not tie a frame to a segment, so every
+/// connection sends and receives frames up to the configured `mtu`.
 fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
     // Try to read TCP_MAXSEG. Not all platforms support this.
     #[cfg(target_os = "linux")]
@@ -1721,6 +1728,10 @@ fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/mss.rs"]
+mod mss_tests;
 
 #[cfg(test)]
 mod tests {

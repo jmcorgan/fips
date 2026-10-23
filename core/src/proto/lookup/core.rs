@@ -345,12 +345,13 @@ pub fn classify_request(
     // A request this node originated, flooded to every bloom-matching tree
     // peer and circulated back to us by one of them. The only identity test
     // below is `request.target == *my_addr`, and for a lookup we originated
-    // the target is someone else, so without this the copy is filed as an
-    // ordinary transit entry keyed on our own `request_id` — and the answer,
-    // when it comes, is reverse-path forwarded to the peer that looped the
-    // request instead of being accepted here. Dropping it as the duplicate it
-    // is also stops the copy being forwarded a second time: our flood already
-    // reached the peers that could carry it.
+    // the target is someone else, so without this the copy would be filed as
+    // an ordinary transit entry keyed on our own `request_id` and forwarded a
+    // second time. Dropping it as the duplicate it is keeps our own id out of
+    // the transit record: the answer is accepted by the originator-first
+    // check in `classify_response`, and a response arriving after the lookup
+    // completes finds no transit record to be relayed by. Our flood already
+    // reached the peers that could carry the request.
     //
     // `request.origin` looks like the cheaper identity test and cannot be
     // used. It is unsigned and set by whoever sends the frame, so a peer

@@ -27,7 +27,12 @@ pub struct PathMtuState {
     /// Time (injected `u64` ms) of the first notification in the current
     /// increase sequence.
     first_increase_ms: Option<u64>,
-    /// The MTU value being proposed for increase.
+    /// The MTU value being proposed for increase, or 0 when none is.
+    ///
+    /// Nonzero exactly when `first_increase_ms` is set: every path that ends
+    /// an increase sequence (accepting it, a decrease, a reset) clears both,
+    /// so a report equal to this value always continues a sequence whose start
+    /// time is known.
     pending_increase_mtu: u16,
 }
 
@@ -168,6 +173,7 @@ impl PathMtuState {
                     self.current_mtu = reported_mtu;
                     self.consecutive_increase_count = 0;
                     self.first_increase_ms = None;
+                    self.pending_increase_mtu = 0;
                     return true;
                 }
             }
@@ -203,9 +209,11 @@ impl PathMtuState {
     /// Lower the estimate to `mtu` and abandon any increase in progress.
     ///
     /// Shared by both decrease paths so they cannot drift apart. The pending
-    /// value is cleared with the rest of the ladder: left behind, it would let
-    /// the first matching notification of a later increase take the
-    /// same-value arm, which never records when the sequence began.
+    /// value is cleared with the rest of the ladder, as on an accepted
+    /// increase: left behind, it would let the first matching notification of
+    /// a later increase take the same-value arm, which never records when the
+    /// sequence began. [`Self::seed_source_mtu`] lowers the estimate without
+    /// touching the ladder, so a stale value would outlive it.
     fn decrease_to(&mut self, mtu: u16) {
         self.current_mtu = mtu;
         self.consecutive_increase_count = 0;

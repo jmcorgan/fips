@@ -883,6 +883,14 @@ install_supervise_env() {
     install_uci_stub
     printf '#!/bin/sh\nexit 0\n' > "$STUB_BIN/logger"
     chmod 0755 "$STUB_BIN/logger"
+    # supervise starts the gateway once fips0 exists, which this container
+    # cannot create: report it present and pass every other call to busybox.
+    cat > "$STUB_BIN/ip" <<'IP'
+#!/bin/sh
+[ "$*" = "link show fips0" ] && exit 0
+exec busybox ip "$@"
+IP
+    chmod 0755 "$STUB_BIN/ip"
 
     rm -rf "$GW_STUB"
     mkdir -p "$GW_STUB" /etc/fips /usr/bin

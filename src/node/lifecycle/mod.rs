@@ -1826,6 +1826,7 @@ impl Node {
         // `tun_tx` via `enable_app_owned_tun`) — FIPS does no system-TUN ops;
         // the channels installed before `start` carry both directions.
         let tun = self.config().tun.enabled && self.supervisor.ipv6tun.tun_tx.is_none();
+        let app_tun = self.supervisor.ipv6tun.tun_tx.is_some();
         let dns = self.config().dns.enabled;
 
         // Worker-pool booleans + counts. Unix only — the workers issue
@@ -2064,6 +2065,7 @@ impl Node {
                             // the clamp instead of leaving it at this instant's
                             // value — see `crate::ipv6tun::tun::MssCeiling`.
                             self.refresh_tun_mss_ceiling();
+                            self.warn_shortfall();
                             let threads = TunThreads {
                                 ceiling: self.tun_mss_ceiling.clone(),
                                 effective: self.effective_ipv6_mtu(),
@@ -2212,6 +2214,12 @@ impl Node {
             self.supervisor.netmon_task = Some(task);
         } else {
             crate::node::handlers::netmon::warn_detection_disabled();
+        }
+
+        // An app-owned TUN spawns no Tun child, so the check the Tun child
+        // makes runs here, once the transports are up.
+        if app_tun {
+            self.warn_shortfall();
         }
 
         info!("Node started:");
@@ -3676,14 +3684,17 @@ impl Node {
         // unnamed `Single` listener, so single- and named-listener configs
         // both inherit cleanly.
         //
-        // Tradeoff: `UdpConfig::default()` sets MTU 1280 (IPv6 minimum), the
-        // only value guaranteed to survive arbitrary middlebox paths.
-        // Inheriting a higher operator-chosen MTU means NAT-traversed flows
-        // initially attempt that MTU and may black-hole on tighter paths
-        // until reactive `MtuExceeded` recovery kicks in. Operators who
-        // raise the primary MTU based on known-clean topology accept that
-        // tradeoff; the silent drop on a too-low default was strictly
-        // worse for the common case where the primary MTU is reachable.
+        // Tradeoff: with no operator UDP config the transport takes
+        // `UdpConfig::default()`, MTU 1357: the smallest that carries a
+        // 1280-byte IPv6 packet, needing an underlay path of 1385 bytes over
+        // IPv4 (1405 over IPv6). A NAT-traversed flow crosses middleboxes
+        // nobody vetted, so at that default, or at a higher operator-chosen
+        // MTU it inherits, it may black-hole on a tighter path until the
+        // underlay's own path-MTU discovery recovers, which it cannot where
+        // the ICMP it relies on is filtered. Operators who raise the
+        // primary MTU based on known-clean topology accept that tradeoff;
+        // the silent drop on a too-low default was strictly worse for the
+        // common case where the primary MTU is reachable.
         //
         // Bind / external address fields are cleared since the socket is
         // already bound.

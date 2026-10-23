@@ -233,7 +233,8 @@ impl Node {
     ///
     /// Processing steps:
     /// 1. Decode and validate
-    /// 2. Check recent_requests to determine if we originated or are forwarding
+    /// 2. `pending_lookups` decides originator status; `recent_requests` is read
+    ///    only for transit
     /// 3. If originator: verify proof signature, then cache target_coords and path_mtu in coord_cache
     /// 4. If transit: apply path_mtu min(outgoing_link_mtu), reverse-path forward to from_peer
     pub(in crate::node) async fn handle_lookup_response(

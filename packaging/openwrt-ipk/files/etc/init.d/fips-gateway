@@ -36,6 +36,10 @@ GW_PIDFILE=/var/run/fips-gateway.pid
 GW_KILL_AFTER=3
 # Left by the package's preinst when the gateway is not enabled; see below.
 INSTALL_HOLD=/var/run/fips-gateway-install-hold
+# Seconds supervise waits for the daemon's fips0 before starting the gateway,
+# which exits when fips0 is missing; 30 as in the Debian unit. Overridable
+# from the environment for the init script scenarios.
+FIPS0_WAIT="${FIPS0_WAIT:-30}"
 
 # Global-scope IPv6 prefix assigned to br-lan so Android/Chrome clients
 # believe they have full IPv6 and actually send AAAA queries. An unassigned
@@ -154,7 +158,7 @@ reload_service() {
 # seconds later is killed, because procd kills only this shell. The exit
 # status is the gateway's, so procd's respawn sees the gateway's failures.
 supervise() {
-	local port pid="" watcher rc stopping="" killer=""
+	local port pid="" watcher rc stopping="" killer="" waited=0
 
 	# rc.common took procd's service lock on fd 1000 when it sourced
 	# procd.sh. Held for the gateway's lifetime, it would make every later
@@ -167,6 +171,23 @@ supervise() {
 	# Set before the gateway starts, so a stop that arrives first still
 	# reaches it.
 	trap 'stopping=1; gateway_stop' TERM INT
+
+	# An upgrade restarts fips and this service together, so the daemon may
+	# not have created fips0 yet. The wait is here rather than in
+	# start_service, which runs under procd's service lock. When it runs out
+	# the gateway starts anyway, reports the missing fips0 itself, and
+	# procd's respawn takes over.
+	while [ -z "$stopping" ] && ! ip link show fips0 >/dev/null 2>&1; do
+		if [ "$waited" -ge "$FIPS0_WAIT" ]; then
+			logger -t fips-gateway "fips0 did not appear within ${FIPS0_WAIT}s; starting the gateway anyway"
+			break
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	# Stopped while waiting: nothing was started and dnsmasq was not touched.
+	[ -n "$stopping" ] && return 0
+
 	"$PROG" --config "$CONFIG" &
 	pid=$!
 	mkdir -p "${GW_PIDFILE%/*}" 2>/dev/null

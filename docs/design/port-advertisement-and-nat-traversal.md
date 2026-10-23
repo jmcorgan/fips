@@ -103,8 +103,9 @@ falls in the application-defined replaceable range
   the responder's pubkey.
 
 The replaceable semantics let the responder update the advert in
-place under the same `d` tag. A NIP-09 deletion event removes the
-advert when the responder permanently retires.
+place under the same `d` tag. A responder may delete the advert with a
+NIP-09 deletion when it retires for good; FIPS does not, and relies on the NIP-40
+expiration instead (see the FIPS example below).
 
 ```json
 {
@@ -161,7 +162,14 @@ takes one of `udp`, `tcp` or `tor`, and `addr` carries the rest:
 
 FIPS publishes the advert with `expiration` set to `now +
 advert_ttl_secs` (default 1 hour) and refreshes it every
-`advert_refresh_secs` (default 30 minutes).
+`advert_refresh_secs` (default 30 minutes). It sends no NIP-09
+deletion: an advert it stops publishing stays on relays until that
+expiration, unless a newer advert replaces it first.
+
+FIPS emits only the `d`, `protocol`, `version` and `expiration` tags,
+not the generic `relays` and `stun` tags. It carries its signaling
+relays and STUN servers in the content instead, as `signalRelays` and
+`stunServers`, present only when an endpoint is `udp:nat`.
 
 ### Public-IP discovery on advertisement
 
@@ -241,10 +249,11 @@ long the relay should retain it.
 #### FIPS example: signaling kind 21059
 
 FIPS signaling uses **kind `21059`**. Wraps are addressed by `p`
-tag and published to the responder's NIP-17 inbox relay list (kind
-`10050`) when one is available, falling back to the local
-`dm_relays` configuration otherwise. Each side publishes its own
-inbox relay list on startup so dialers can discover it.
+tag and published to the merge of the responder's NIP-17 inbox relay
+list (kind `10050`), the signal relays its advert names, and the local
+`dm_relays` configuration, kept to relays in the sender's own relay
+pool. Each side publishes its own inbox relay list on startup and
+daily so dialers can discover it.
 
 ### Phase 1: Initiator STUN binding
 
@@ -313,9 +322,11 @@ advertised signaling relays. On receiving an offer:
    STUN query.
 5. Constructs an answer payload that echoes `sessionId`, carries
    the responder's reflexive and local addresses, includes a
-   `PunchHint { startAtMs, intervalMs, durationMs }` telling both
-   sides when to begin probing and how aggressively, and is
-   wrapped, encrypted, and published the same way as the offer.
+   `PunchHint { startAtMs, intervalMs, durationMs }` giving the
+   responder's own probing schedule, and is wrapped, encrypted, and
+   published the same way as the offer. In FIPS the initiator
+   does not read the hint: it starts its own probing when the answer
+   arrives, on its local configuration.
 
 ```json
 {
@@ -326,7 +337,7 @@ advertised signaling relays. On receiving an offer:
   "nonce": "<random_nonce>",
   "senderNpub": "<responder_npub>",
   "recipientNpub": "<initiator_npub>",
-  "inReplyTo": "<offer_event_id>",
+  "inReplyTo": "<offer_nonce>",
   "accepted": true,
   "reflexiveAddress": {"protocol":"udp","ip":"<ip>","port":<port>},
   "localAddresses": [{"protocol":"udp","ip":"<ip>","port":<port>}],

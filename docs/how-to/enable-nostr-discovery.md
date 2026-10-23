@@ -201,7 +201,9 @@ peers:
 What this achieves: the node publishes a `udp:nat` endpoint plus its
 signaling relays in the advert. When either side initiates, an
 encrypted offer is sealed to the peer's npub, a matching answer
-comes back, and both sides punch at the negotiated time. On success,
+comes back, and each side starts punching on its own schedule: the
+responder at the time its answer names, the initiator on its local
+`punch_*` settings once the answer arrives. On success,
 the punch socket is adopted as an FMP UDP transport and Noise IK
 proceeds normally.
 

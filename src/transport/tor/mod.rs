@@ -121,8 +121,9 @@ enum Direction {
 ///
 /// Provides connection-oriented, reliable byte stream delivery over Tor.
 /// In `socks5` mode, outbound-only through a SOCKS5 proxy. In
-/// `control_port` mode, also manages an onion service for inbound
-/// connections via the Tor control port.
+/// `control_port` mode, outbound via SOCKS5 plus control-port monitoring,
+/// with no inbound onion service. In `directory` mode, outbound via SOCKS5
+/// plus inbound through a Tor-managed `HiddenServiceDir` onion service.
 pub struct TorTransport {
     /// Unique transport identifier.
     transport_id: TransportId,

@@ -52,7 +52,7 @@ determine how much payload can fit in a single packet after link-layer
 encryption overhead.
 
 MTU is fundamentally a per-link property. A transport with a fixed MTU
-(Ethernet effective 1497, UDP default 1280) returns the same value for every
+(Ethernet effective 1497, UDP default 1357) returns the same value for every
 link — this is the degenerate case. Transports that negotiate MTU
 per-connection (e.g., the BLE L2CAP CoC MTU) report the negotiated value
 for each link individually.
@@ -351,7 +351,7 @@ optional `TcpListener` for inbound connections.
 | -------- | ----- |
 | Addressing | host:port — IP address or DNS hostname |
 | Default MTU | 1400 bytes |
-| Per-link MTU | Derived from `TCP_MAXSEG` socket option |
+| Per-link MTU | None: TCP reports the configured `mtu` to FMP and checks sends against it |
 | Framing | FMP header-based (zero overhead) |
 | Connection model | Non-blocking connect, connect-on-send fallback, optional listener |
 | Platform | Cross-platform (no `#[cfg]` gates) |
@@ -1397,7 +1397,7 @@ while the daemon is running.
 | Transport | Status | Notes |
 | --------- | ------ | ----- |
 | UDP/IP | **Implemented** | Primary transport, AsyncFd/recvmsg, SO_RXQ_OVFL kernel drop detection |
-| TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect, per-connection MSS MTU |
+| TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect |
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, neighbor beacons; Linux (AF_PACKET) and macOS (BPF) |
 | WiFi | **Implemented** (via Ethernet transport, infrastructure mode) | mac80211 translates 802.11↔802.3; broadcast beacons unreliable through APs |
 | Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |

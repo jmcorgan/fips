@@ -48,7 +48,7 @@ pub const FSP_VERSION: u8 = 0;
 /// Phase value for established (encrypted or plaintext error) messages.
 pub const FSP_PHASE_ESTABLISHED: u8 = 0x0;
 
-/// Phase value for SessionSetup (Noise IK message 1).
+/// Phase value for SessionSetup (Noise XK message 1).
 pub const FSP_PHASE_MSG1: u8 = 0x1;
 
 /// Phase value for SessionAck (Noise handshake message 2).
@@ -596,7 +596,7 @@ pub struct SessionSetup {
     pub dest_coords: TreeCoordinate,
     /// Session options.
     pub flags: SessionFlags,
-    /// Noise IK handshake message 1.
+    /// Noise XK handshake message 1.
     pub handshake_payload: Vec<u8>,
 }
 
@@ -710,7 +710,7 @@ pub struct SessionAck {
     pub dest_coords: TreeCoordinate,
     /// Reserved flags byte (for forward compatibility).
     pub flags: u8,
-    /// Noise IK handshake message 2.
+    /// Noise XK handshake message 2.
     pub handshake_payload: Vec<u8>,
 }
 

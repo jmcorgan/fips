@@ -155,8 +155,11 @@ schema).
 Publication happens on startup, again whenever the set of advertised
 endpoints changes (for example, when a Tor onion hostname first
 becomes available), and on a refresh timer every `advert_refresh_secs`.
-If the `advertise` flag is turned off, the previous advert event is
-deleted using a NIP-9 kind 5 delete event. Advert publication is
+The node sends no NIP-09 deletion for its advert: one it stops
+publishing stays on relays until its NIP-40 expiration, unless a newer
+advert replaces it first (see
+[../reference/nostr-events.md](../reference/nostr-events.md#replacement-and-deletion)).
+Advert publication is
 fan-out: the same event is sent to every relay in `advert_relays` with
 no explicit failover — relay redundancy is implicit.
 
@@ -213,11 +216,11 @@ The initiator performs STUN first (see Phase 4), then builds a
 - The STUN server it used, for informational reporting only.
 - An `expiresAt` equal to now + `signal_ttl_secs`.
 
-The offer is sealed to the recipient's npub and published to the peer's
-preferred signaling relays — the node first tries to resolve the peer's
-NIP-17 DM relay list (kind 10050), and falls back to `dm_relays` if
-the inbox-relays fetch fails. Each side also publishes its own inbox
-relay list on startup so dialers can discover it.
+The offer is sealed to the recipient's npub and published to the merge
+of the peer's NIP-17 inbox relay list (kind 10050), the signal relays
+its advert names, and our own `dm_relays`, kept to relays in our own
+relay pool. Each side publishes its own inbox relay list on startup
+and daily so dialers can discover it.
 
 On the receiving side, admission is a pair of bounds taken together: a
 per-sender allowance of `max_concurrent_offers_per_npub`, keyed on the
@@ -237,8 +240,10 @@ entries valid for `replay_window_secs`) rejects duplicates.
 
 The responder runs its own STUN query and replies with a
 `TraversalAnswer` carrying its reflexive and local addresses plus a
-`PunchHint { startAtMs, intervalMs, durationMs }` that tells both sides
-when to begin probing and how aggressively. If the responder has no
+`PunchHint { startAtMs, intervalMs, durationMs }` giving its own
+probing schedule, which the responder probes on. The initiator
+does not read the hint: it starts its own probing when the answer
+arrives, on its local `punch_*` settings. If the responder has no
 usable addresses at all, it replies with `accepted: false` and a
 `reason` string.
 
@@ -273,8 +278,11 @@ builds a candidate-pair plan that tries, in priority order:
 3. **Mixed.** Reflexive on one side, local on the other — catches
    hairpin and one-side-public scenarios.
 
-At `startAtMs` both sides begin sending 24-byte probe packets on the
-candidate pair(s) at `intervalMs` cadence for up to `durationMs`. A
+Each side then sends 24-byte probe packets on the candidate pair(s)
+on its own schedule. The responder follows the hint it sent: it starts
+at `startAtMs` and probes every `intervalMs` for up to `durationMs`.
+The initiator starts `punch_start_delay_ms` after it has the answer
+and uses its own `punch_interval_ms` and `punch_duration_ms`. A
 probe carries a 4-byte magic (`NPTC`), a 4-byte sequence, and the
 first 16 bytes of `SHA256(sessionId)`; both sides can compute the same
 session hash independently from the public `sessionId`, so no shared
@@ -367,12 +375,12 @@ relay selection. Redundancy is implicit — a downed relay simply means
 its copy of the advert or signal is unavailable, while other relays
 still serve the same data.
 
-For signaling specifically, the node prefers the recipient's NIP-17
-DM relays when available (the recipient publishes its DM relay list as
-a kind 10050 event to its own DM relays on startup) and falls back to
-the local `dm_relays` list otherwise. This keeps the common case
-off the sender's DM relays when those are different from the
-recipient's, at the cost of one extra NIP-17 fetch per offer.
+For signaling specifically, the node sends to the merge of the
+recipient's NIP-17 inbox relays (the recipient publishes its list as a
+kind 10050 event to its own DM relays on startup and daily), the
+signal relays the recipient's advert names, and the local `dm_relays`
+list, kept to relays already in the node's own pool. The inbox list
+costs one extra NIP-17 fetch per offer.
 
 There is no per-relay rate limiting or health check. The relay model
 assumes that an operator chooses relays they trust to be best-effort
@@ -548,12 +556,6 @@ not hold the matching static key — and the half-open link is dropped.
 The mDNS advert is therefore a routing hint, never an identity
 assertion, exactly as a Nostr advert is treated (a successful contact
 is not trusted until FMP's Noise IK handshake completes).
-
-> Note: stale source doc-comments at `src/mdns/mod.rs:14, 76, 153`
-> describe this path as a "Noise XX" handshake. Those comments are
-> inaccurate — the path uses Noise IK as described above. They are
-> flagged for a separate source fix and do not reflect actual
-> behavior.
 
 ### Scope filtering
 
