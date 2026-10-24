@@ -5672,3 +5672,71 @@ fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_shor
         "timers the machine refuses fall back to the link defaults"
     );
 }
+
+/// The first packet to a name the DNS responder has just resolved is held
+/// behind session setup, not answered with no route, even when the receive
+/// loop reaches the packet before the resolved identity.
+#[tokio::test]
+async fn the_first_packet_to_a_name_just_resolved_is_held_even_when_it_reaches_the_loop_before_the_identity()
+ {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.tun.enabled = true;
+    config.dns.enabled = true;
+    config.dns.bind_addr = Some("::1".to_string());
+    config.dns.port = Some(0);
+    config.node.control.enabled = false;
+    let mut node = make_node_with(config);
+    let (app_outbound, app_inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    let dns_addr = node.dns_local_addr().expect("responder is up");
+
+    // Resolve a name, as the host's resolver would, while the receive loop
+    // is not running: the identity is left waiting for it.
+    let peer = Identity::generate();
+    let query = {
+        use simple_dns::{CLASS, Name, Packet, QCLASS, QTYPE, Question, TYPE};
+        let mut packet = Packet::new_query(0x4242);
+        packet.questions.push(Question::new(
+            Name::new_unchecked(&format!("{}.fips", peer.npub())).into_owned(),
+            QTYPE::TYPE(TYPE::AAAA),
+            QCLASS::CLASS(CLASS::IN),
+            false,
+        ));
+        packet.build_bytes_vec().unwrap()
+    };
+    let client = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+    client.send_to(&query, dns_addr).await.unwrap();
+    let mut buf = [0u8; 512];
+    tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("answered")
+        .unwrap();
+
+    // The host's first packet to the address it was given.
+    let mut packet = vec![0u8; 80];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&40u16.to_be_bytes());
+    packet[6] = 17;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(node.identity().address().as_bytes());
+    packet[24..40].copy_from_slice(peer.address().as_bytes());
+    app_outbound.send(packet).await.unwrap();
+
+    let _ = tokio::time::timeout(Duration::from_millis(300), node.run_rx_loop()).await;
+    let answers: Vec<Vec<u8>> = std::iter::from_fn(|| app_inbound.try_recv().ok()).collect();
+    assert!(
+        answers.is_empty(),
+        "the first packet must be held, not answered: {answers:?}"
+    );
+    assert!(node.has_cached_identity(peer.node_addr()));
+    assert_eq!(
+        node.pending_tun_total_packets(),
+        1,
+        "held behind session setup"
+    );
+    node.stop().await.unwrap();
+}

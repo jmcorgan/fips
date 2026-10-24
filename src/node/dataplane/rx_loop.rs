@@ -419,11 +419,15 @@ impl Node {
                     }
                 }
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {
+                    // A name the DNS responder resolved is registered before
+                    // any packet that follows it, though its arm comes later.
+                    self.register_resolved(&mut dns_identity_rx);
                     self.handle_tun_outbound(ipv6_packet).await;
                     let mut drained = 0;
                     while drained < 256 {
                         match tun_outbound_rx.try_recv() {
                             Ok(p) => {
+                                self.register_resolved(&mut dns_identity_rx);
                                 self.handle_tun_outbound(p).await;
                                 drained += 1;
                             }
@@ -432,11 +436,7 @@ impl Node {
                     }
                 }
                 Some(identity) = dns_identity_rx.recv() => {
-                    debug!(
-                        node_addr = %identity.node_addr,
-                        "Registering identity from DNS resolution"
-                    );
-                    self.register_identity(identity.node_addr, identity.pubkey);
+                    self.register_dns_identity(identity);
                 }
                 // A transport medium change (WLAN -> LAN -> 5G, a BLE adapter
                 // arriving or leaving). Placed after the hot inbound path so
@@ -752,5 +752,27 @@ impl Node {
                 );
             }
         }
+    }
+}
+
+impl Node {
+    /// Register every identity the DNS responder resolved that is still
+    /// waiting, so a packet the host sent after the answer finds it.
+    ///
+    /// The responder queues the identity before it answers, so by the time
+    /// the host's first packet to the name is read, its identity is here.
+    fn register_resolved(&mut self, rx: &mut crate::ipv6tun::dns::DnsIdentityRx) {
+        while let Ok(identity) = rx.try_recv() {
+            self.register_dns_identity(identity);
+        }
+    }
+
+    /// Register one identity the DNS responder resolved.
+    fn register_dns_identity(&mut self, identity: crate::ipv6tun::dns::DnsResolvedIdentity) {
+        debug!(
+            node_addr = %identity.node_addr,
+            "Registering identity from DNS resolution"
+        );
+        self.register_identity(identity.node_addr, identity.pubkey);
     }
 }
