@@ -79,11 +79,22 @@ impl Node {
         let mut drain_deadline: Option<tokio::time::Instant> = None;
         let mut packet_rx = self.packet_rx.take().ok_or(NodeError::NotStarted)?;
 
-        // Take the TUN outbound receiver, or create a dummy channel that never
-        // produces messages (when TUN is disabled). Holding the sender prevents
-        // the channel from closing.
+        // Take the receiver of an app-owned TUN's packets, or create a dummy
+        // channel that never produces messages (when the embedder owns no
+        // TUN). Holding the sender prevents the channel from closing.
         let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.ipv6tun.tun_outbound_rx.take()
         {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
+        // Take the receiver of the IPv6 adapter's datagrams, or create a
+        // dummy channel (when no start attached the adapter). Same pattern
+        // as TUN outbound.
+        let (mut datagram_rx, _datagram_guard) = match self.supervisor.datagram_rx.take() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -418,17 +429,32 @@ impl Node {
                         }
                     }
                 }
-                Some(ipv6_packet) = tun_outbound_rx.recv() => {
+                Some(datagram) = datagram_rx.recv() => {
                     // A name the DNS responder resolved is registered before
                     // any packet that follows it, though its arm comes later.
                     self.register_waiting(&mut learned_rx);
-                    self.handle_tun_outbound(ipv6_packet).await;
+                    self.handle_datagram(datagram).await;
+                    let mut drained = 0;
+                    while drained < 256 {
+                        match datagram_rx.try_recv() {
+                            Ok(next) => {
+                                self.register_waiting(&mut learned_rx);
+                                self.handle_datagram(next).await;
+                                drained += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                Some(ipv6_packet) = tun_outbound_rx.recv() => {
+                    self.register_waiting(&mut learned_rx);
+                    self.handle_app(&ipv6_packet).await;
                     let mut drained = 0;
                     while drained < 256 {
                         match tun_outbound_rx.try_recv() {
                             Ok(p) => {
                                 self.register_waiting(&mut learned_rx);
-                                self.handle_tun_outbound(p).await;
+                                self.handle_app(&p).await;
                                 drained += 1;
                             }
                             Err(_) => break,
@@ -558,6 +584,7 @@ impl Node {
                         // Catches any change to the node's egress limit that
                         // no transport-change site saw, within one tick.
                         self.publish_mtu();
+                        self.sweep_identities();
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckMmpReports,
                         self.check_mmp_reports().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::CheckSessionMmpReports,
@@ -756,6 +783,14 @@ impl Node {
 }
 
 impl Node {
+    /// Run the IPv6 adapter's host half for one packet an embedder that
+    /// owns the TUN sent, and handle the datagram it produces.
+    async fn handle_app(&mut self, packet: &[u8]) {
+        if let Some(datagram) = self.supervisor.ipv6tun.outbound(packet) {
+            self.handle_datagram(datagram).await;
+        }
+    }
+
     /// Register every key the DNS responder reported that is still waiting,
     /// so a packet the host sent after the answer finds it.
     ///
@@ -768,7 +803,7 @@ impl Node {
     }
 
     /// Register a key the adapter's DNS responder handed to the host, with
-    /// the even-parity lift its npub names.
+    /// the even-parity lift its npub names, and note the report handled.
     pub(in crate::node) fn register_learned(&mut self, report: crate::ipv6tun::link::Learned) {
         let key = report.peer.key();
         let node_addr = crate::NodeAddr::from_pubkey(&key);
@@ -777,5 +812,6 @@ impl Node {
             "Registering identity from DNS resolution"
         );
         self.register_identity(node_addr, key.public_key(secp256k1::Parity::Even));
+        self.identity_cache.handled(report.seq);
     }
 }

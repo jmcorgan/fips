@@ -3,10 +3,18 @@ use super::*;
 #[test]
 fn a_peer_key_names_the_address_its_node_address_has() {
     let key = PeerKey::any();
+    assert_eq!(key.node_addr(), NodeAddr::from_pubkey(&key.key()));
     assert_eq!(
         key.address(),
-        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&key.0))
+        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&key.key()))
     );
+}
+
+#[test]
+fn a_peer_key_is_its_key_and_nothing_else() {
+    // The scan below takes the peer key on trust; anything added beside the
+    // key, such as an address, would cross the link unscanned.
+    assert_eq!(std::mem::size_of::<PeerKey>(), 32);
 }
 
 /// Field types a message may carry: integers, flags, strings, bytes, the
@@ -17,7 +25,8 @@ const ALLOWED: &[&str] = &[
 ];
 
 /// The items in the link's source that are not messages: the two link ends,
-/// and the peer key, whose inner key is the one opaque field the link allows.
+/// and the peer key, whose key bytes are the one field the link allows
+/// (`a_peer_key_is_its_key_and_nothing_else` keeps it the only one).
 const NOT_MESSAGES: &[&str] = &["MeshLink", "HostLink", "PeerKey"];
 
 /// Whether `ty` is an allowed field type, or an `Option` or `Vec` of one.
@@ -458,14 +467,21 @@ fn the_allow_list_check_refuses_a_node_address_after_an_attribute_whose_raw_stri
 #[test]
 fn the_scan_reads_the_outbound_messages_and_their_fields() {
     let (items, fields) = message_fields(include_str!("../link.rs"));
-    assert!(
-        items.iter().any(|i| i == "Learned"),
-        "the scan must find Learned, found {items:?}"
-    );
-    assert!(
-        fields
-            .iter()
-            .any(|(o, t)| o.starts_with("Learned") && t == "PeerKey"),
-        "the scan must read Learned's PeerKey field, found {fields:?}"
-    );
+    for item in ["Datagram", "Learned", "Refusal"] {
+        assert!(
+            items.iter().any(|i| i == item),
+            "the scan must find {item}, found {items:?}"
+        );
+    }
+    for (owner, ty) in [
+        ("Datagram", "Vec<u8>"),
+        ("Learned", "u64"),
+        ("Refusal", "Vec<Vec<u8>>"),
+        ("FromMesh", "u64"),
+    ] {
+        assert!(
+            fields.iter().any(|(o, t)| o.starts_with(owner) && t == ty),
+            "the scan must read {owner}'s {ty} field, found {fields:?}"
+        );
+    }
 }

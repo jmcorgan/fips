@@ -2039,9 +2039,11 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     // dst = target's IPv6 representation (not strictly required, just non-multicast)
     let target_ipv6 = crate::Ipv6Address::from_node_addr(&target_addr).to_ipv6();
     ipv6_pkt[24..40].copy_from_slice(&target_ipv6.octets());
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(ipv6_pkt);
-    node.pending_tun_packets.insert(target_addr, queue);
+    node.test_hold(
+        target_addr,
+        crate::ipv6tun::link::PeerKey::new(target_identity.pubkey()),
+        ipv6_pkt,
+    );
 
     // Inject a PendingLookup directly: attempt=1, last_sent_ms=0. This
     // mirrors the post-condition of a successful `maybe_initiate_lookup`
@@ -2991,8 +2993,13 @@ async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_pa
     // (i) no cached identity
     let mut node = make_node();
     let rx = install_tun_channel(&mut node);
-    let dest = *Identity::generate().node_addr();
-    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    let unknown = Identity::generate();
+    let dest = *unknown.node_addr();
+    node.test_hold(
+        dest,
+        crate::ipv6tun::link::PeerKey::new(unknown.pubkey()),
+        tun_packet_to(&dest),
+    );
     node.retry_session_after_discovery(dest).await;
     let no_identity = (drain_tun(&rx), node.pending_tun_destinations());
 

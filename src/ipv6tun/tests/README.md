@@ -19,15 +19,29 @@ can reach the source file's private items.
   give the same TCP MSS ceiling as the transport MTU they come from, for
   every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
   packet fits either way, and the limit reports 33); the state before any
-  attach; and how each message from the node changes the shared state.
+  attach; how each message from the node changes the shared state; and the
+  key map: known keys in, forgotten keys out, a key the DNS responder learned
+  after the node decided to forget it kept, and an attach starting it empty.
+- `outbound.rs` tests `../outbound.rs` as module `host_tests`: the host half
+  turns a packet to a key the adapter holds into a datagram carrying the
+  compressed packet, answers a packet to a prefix no key names with
+  Destination Unreachable and one over the published limit with Packet Too
+  Big, both built from the packet itself; and every refusal the node hands
+  back is answered byte for byte as the packet the host sent would have been
+  when the host sent it from our address. A compressed payload keeps neither
+  the source address, the destination's first byte nor the length field, so
+  a packet from a foreign source is answered as if sent from ours, and one
+  to a destination outside `fd00::/8` or with a wrong length field (which
+  only an embedder that owns the TUN can send) is quoted as rebuilt.
 - `link.rs` tests `../link.rs`: a peer key names the address its node
-  address has, and every message field is of a type allowed to cross the
-  link. The second is a scan of the source of `../link.rs` itself that skips
-  comments, attributes, and string and char literals (raw strings included),
-  then reads every struct and enum whatever its visibility, with named, tuple
-  and unit fields; forged definitions of each shape, of one placed after a
-  literal holding a lone quote, and of one placed after an attribute whose
-  literal holds an unbalanced bracket, show the scan refuses a node address.
+  address has and holds its key and nothing else, and every message field is
+  of a type allowed to cross the link. The last is a scan of the source of
+  `../link.rs` itself that skips comments, attributes, and string and char
+  literals (raw strings included), then reads every struct and enum whatever
+  its visibility, with named, tuple and unit fields; forged definitions of
+  each shape, of one placed after a literal holding a lone quote, and of one
+  placed after an attribute whose literal holds an unbalanced bracket, show
+  the scan refuses a node address.
 - `tun.rs` tests `../tun.rs` as module `name_tests`: TUN startup never
   deletes, downs or takes over an existing interface named `tun.name`. A
   link of any kind but TUN is refused and left untouched, a TUN another

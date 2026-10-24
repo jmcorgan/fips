@@ -821,6 +821,10 @@ pub(crate) struct Supervisor {
     /// attach in `start()` until teardown drops the packet channels.
     pub(in crate::node) host_link: Option<crate::ipv6tun::link::HostLink>,
 
+    /// The node's receiver of the adapter's datagrams: `Some` from the
+    /// attach until the receive loop takes it, or teardown drops it.
+    pub(in crate::node) datagram_rx: Option<crate::ipv6tun::link::DatagramRx>,
+
     /// The node's receiver of the keys the adapter learned: `Some` from the
     /// attach until the receive loop takes it, or teardown drops it.
     pub(in crate::node) learned_rx: Option<crate::ipv6tun::link::LearnedRx>,
@@ -902,6 +906,7 @@ impl Supervisor {
             packet_tx: None,
             ipv6tun,
             host_link: None,
+            datagram_rx: None,
             learned_rx: None,
             #[cfg(unix)]
             udp_fd_tx: None,

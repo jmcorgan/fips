@@ -7,8 +7,7 @@
 
 use crate::NodeAddr;
 use crate::cache::Funding;
-use crate::ipv6tun::icmp::IcmpContext;
-use crate::ipv6tun::outbound::{Mesh, Outcome, Route};
+use crate::ipv6tun::link::{PeerKey, Refusal};
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{RejectReason, SessionReject};
@@ -247,6 +246,46 @@ enum Restamp {
     LookupRidden,
     /// A session to the destination was started.
     SessionStarted,
+}
+
+/// The IPv6 adapter's datagrams held for one destination while its session
+/// is set up, with the key the adapter sent them to: a refusal names it, and
+/// the destination's node address does not lead back to it.
+#[derive(Debug)]
+pub(in crate::node) struct HeldTun {
+    /// The destination's key.
+    pub(in crate::node) peer: PeerKey,
+    /// The compressed datagrams, oldest first.
+    pub(in crate::node) payloads: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl HeldTun {
+    /// An empty queue for `peer`.
+    pub(in crate::node) fn new(peer: PeerKey) -> Self {
+        Self {
+            peer,
+            payloads: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// The number of datagrams held.
+    pub(in crate::node) fn len(&self) -> usize {
+        self.payloads.len()
+    }
+
+    /// Whether nothing is held.
+    #[allow(dead_code)]
+    pub(in crate::node) fn is_empty(&self) -> bool {
+        self.payloads.is_empty()
+    }
+
+    /// The refusal that answers every datagram held.
+    fn no_route(self) -> Refusal {
+        Refusal::NoRoute {
+            peer: self.peer,
+            payloads: self.payloads.into(),
+        }
+    }
 }
 
 /// Whether [`Node::queue_pending_packet`] held the packet.
@@ -2812,10 +2851,21 @@ impl Node {
         }
     }
 
-    /// Send an IPv6 packet through the IPv6 shim (port 256) with header compression.
-    ///
-    /// Compresses the IPv6 header (format 0x00), then sends via `send_session_data`
-    /// with `src_port=256, dst_port=256`.
+    /// Send one of the IPv6 adapter's datagrams, already compressed, on the
+    /// IPv6 shim port (256): `send_session_data` with `src_port=256,
+    /// dst_port=256`.
+    pub(in crate::node) async fn send_shim(
+        &mut self,
+        dest_addr: &NodeAddr,
+        payload: &[u8],
+    ) -> Result<(), NodeError> {
+        self.send_session_data(dest_addr, FSP_PORT_IPV6_SHIM, FSP_PORT_IPV6_SHIM, payload)
+            .await
+    }
+
+    /// Compress an IPv6 packet as the adapter does and send it on the shim
+    /// port, for tests that hand the node a whole packet.
+    #[cfg(test)]
     pub(in crate::node) async fn send_ipv6_packet(
         &mut self,
         dest_addr: &NodeAddr,
@@ -2828,13 +2878,7 @@ impl Node {
                     reason: "IPv6 header compression failed".into(),
                 }
             })?;
-        self.send_session_data(
-            dest_addr,
-            FSP_PORT_IPV6_SHIM,
-            FSP_PORT_IPV6_SHIM,
-            &compressed,
-        )
-        .await
+        self.send_shim(dest_addr, &compressed).await
     }
 
     /// Send a non-data session message (reports, notifications) over an established session.
@@ -3054,46 +3098,33 @@ impl Node {
 
     // === TUN Outbound (Data Plane) ===
 
-    /// Handle an outbound IPv6 packet from the TUN reader.
-    ///
-    /// The host-side checks and ICMPv6 replies are in
-    /// [`crate::ipv6tun::outbound::forward`], which reaches back into the
-    /// node through its [`Mesh`] impl: the destination prefix is resolved
-    /// in the identity cache, and the packet is sent on an established
-    /// session or queued while one is set up.
-    ///
-    /// Also performs MTU checking: if the packet (plus FIPS overhead) exceeds
-    /// the transport MTU, an ICMP Packet Too Big message is sent back to the
-    /// source and the packet is dropped.
-    pub(in crate::node) async fn handle_tun_outbound(&mut self, ipv6_packet: Vec<u8>) {
-        crate::ipv6tun::outbound::forward(self, ipv6_packet).await;
-    }
-
-    /// Send a TUN packet to a resolved destination, or queue it while the
-    /// destination's session is set up.
+    /// Send one of the IPv6 adapter's datagrams to `dest_addr`, whose key is
+    /// `dest_pubkey` as cached and `peer` as the adapter named it, or queue
+    /// it while the destination's session is set up.
     ///
     /// Sends through an established session, queues behind one still being
     /// set up, and otherwise initiates a session and queues. When the
     /// initiation fails it starts discovery and queues while a lookup is
-    /// running or routing is still converging. Otherwise it hands the packet
-    /// back as `Outcome::NoRoute` to be answered, or, when the destination
-    /// has a route and only the setup failed, drops it unanswered for a
-    /// retransmit to retry. Refuses the packet, handing it back, when a new
-    /// session would exceed the session table.
-    async fn send_outbound(
+    /// running or routing is still converging. Otherwise it answers the
+    /// datagram as having no route, or, when the destination has a route and
+    /// only the setup failed, drops it unanswered for a retransmit to retry.
+    /// Refuses the datagram when a new session would exceed the session
+    /// table.
+    pub(in crate::node) async fn send_outbound(
         &mut self,
         dest_addr: NodeAddr,
         dest_pubkey: PublicKey,
-        ipv6_packet: Vec<u8>,
-    ) -> Outcome {
+        peer: PeerKey,
+        payload: Vec<u8>,
+    ) {
         // Check for established session
         if let Some(entry) = self.sessions.get(&dest_addr) {
             if entry.is_established() {
-                if let Err(e) = self.send_ipv6_packet(&dest_addr, &ipv6_packet).await {
+                if let Err(e) = self.send_shim(&dest_addr, &payload).await {
                     debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
                     self.relookup_lost_route(&dest_addr).await;
                 }
-                return Outcome::Sent;
+                return;
             }
             // Session exists but not yet established — queue the packet. A
             // refusal from a full table stays a silent drop: the session's own
@@ -3107,8 +3138,8 @@ impl Node {
                 self.initiate_behind_candidates(dest_addr, dest_pubkey)
                     .await;
             }
-            let _ = self.queue_pending_packet(dest_addr, ipv6_packet);
-            return Outcome::Queued;
+            let _ = self.queue_pending_packet(dest_addr, peer, payload);
+            return;
         }
 
         // No session, so this one would grow the table. Answer the local
@@ -3118,7 +3149,8 @@ impl Node {
         // queued packet, which is outbound traffic on a node already at its
         // limit.
         if !self.admit_new_session(&dest_addr) {
-            return Outcome::TableFull(ipv6_packet);
+            self.refuse(Refusal::TableFull { peer, payload });
+            return;
         }
 
         // No session: initiate one and queue the packet.
@@ -3144,7 +3176,11 @@ impl Node {
                         reason = "no-lookup",
                         "No lookup pending for destination, answering no route"
                     );
-                    return Outcome::NoRoute(ipv6_packet);
+                    self.refuse(Refusal::NoRoute {
+                        peer,
+                        payloads: vec![payload],
+                    });
+                    return;
                 }
                 HeldFate::Discard => {
                     debug!(
@@ -3158,7 +3194,7 @@ impl Node {
                     // A refusal from a full table stays a silent drop: a
                     // lookup is in flight or routing is converging, and a
                     // retransmit is held once a slot frees.
-                    let _ = self.queue_pending_packet(dest_addr, ipv6_packet);
+                    let _ = self.queue_pending_packet(dest_addr, peer, payload);
                     // Age the destination from the lookup that can settle
                     // it, not from a packet held earlier inside the hold.
                     match kind {
@@ -3172,15 +3208,14 @@ impl Node {
                     }
                 }
             }
-            return Outcome::Queued;
+            return;
         }
         // A refusal stays a silent drop, as behind a session being set up
         // above: this session's establishment or timeout settles the flow.
-        let _ = self.queue_pending_packet(dest_addr, ipv6_packet);
+        let _ = self.queue_pending_packet(dest_addr, peer, payload);
         // The destination may already have been held before this session
         // started; age it from the start.
         self.restamp_held(&dest_addr, Restamp::SessionStarted);
-        Outcome::Queued
     }
 
     /// Start this node's own attempt toward `dest_addr` beside the
@@ -3220,11 +3255,18 @@ impl Node {
     /// Returns how many were released, for the caller's log.
     pub(in crate::node) fn release_held_tun(&mut self, dest: &NodeAddr) -> usize {
         self.pending_tun_since.remove(dest);
-        let Some(packets) = self.pending_tun_packets.remove(dest) else {
+        let Some(held) = self.pending_tun_packets.remove(dest) else {
             return 0;
         };
-        self.host_icmp().no_route(&packets);
-        packets.len()
+        let released = held.len();
+        self.refuse(held.no_route());
+        released
+    }
+
+    /// Answer the lookup timeout for `dest`'s held datagrams, as a final
+    /// lookup timeout gives: no route for each.
+    pub(in crate::node) fn answer_held(&mut self, held: HeldTun) {
+        self.refuse(held.no_route());
     }
 
     /// Release `dest`'s held TUN packets as [`Self::release_held_tun`] does,
@@ -3253,10 +3295,10 @@ impl Node {
             .restart(cause, now);
     }
 
-    /// Borrow the host-facing ICMPv6 sender: the TUN channel, our address
-    /// and the Packet Too Big rate limiter.
-    pub(in crate::node) fn host_icmp(&mut self) -> IcmpContext<'_> {
-        self.supervisor.ipv6tun.icmp()
+    /// Hand the IPv6 adapter a datagram it sent, or datagrams held for one
+    /// destination, that the node will not send, for it to answer the host.
+    pub(in crate::node) fn refuse(&mut self, refusal: Refusal) {
+        self.supervisor.ipv6tun.answer(refusal);
     }
 
     /// Queue a packet while waiting for session establishment.
@@ -3264,7 +3306,12 @@ impl Node {
     /// Refuses, dropping the packet, when the destination is new and
     /// `node.session.pending_max_destinations` destinations already have
     /// packets held.
-    fn queue_pending_packet(&mut self, dest_addr: NodeAddr, packet: Vec<u8>) -> Held {
+    fn queue_pending_packet(
+        &mut self,
+        dest_addr: NodeAddr,
+        peer: PeerKey,
+        packet: Vec<u8>,
+    ) -> Held {
         let max_dests = self.config().node.session.pending_max_destinations;
         let is_new = !self.pending_tun_packets.contains_key(&dest_addr);
         if is_new && self.pending_tun_packets.len() >= max_dests {
@@ -3290,19 +3337,22 @@ impl Node {
                 .insert(dest_addr, HeldStamp::new(std::time::Instant::now()));
         }
         let per_dest = self.config().node.session.pending_packets_per_dest;
-        let queue = self.pending_tun_packets.entry(dest_addr).or_default();
-        crate::proto::fsp::push_bounded_pending(queue, packet, per_dest);
+        let queue = self
+            .pending_tun_packets
+            .entry(dest_addr)
+            .or_insert_with(|| HeldTun::new(peer));
+        crate::proto::fsp::push_bounded_pending(&mut queue.payloads, packet, per_dest);
         Held::Queued
     }
 
     /// Flush pending packets for a destination whose session just reached Established.
     async fn flush_pending_packets(&mut self, dest_addr: &NodeAddr) {
         let packets = match self.pending_tun_packets.remove(dest_addr) {
-            Some(q) => q,
+            Some(q) => q.payloads,
             None => return,
         };
         for packet in packets {
-            if let Err(e) = self.send_ipv6_packet(dest_addr, &packet).await {
+            if let Err(e) = self.send_shim(dest_addr, &packet).await {
                 debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
                 break;
             }
@@ -3375,39 +3425,6 @@ impl Node {
                 );
             }
         }
-    }
-}
-
-/// The mesh side of TUN outbound forwarding.
-impl Mesh for Node {
-    type Dest = (NodeAddr, PublicKey);
-
-    fn ipv6_mtu(&self) -> u16 {
-        self.effective_ipv6_mtu()
-    }
-
-    fn resolve(&mut self, prefix: &[u8; 15]) -> Option<Route<Self::Dest>> {
-        // Look up in identity cache
-        let (dest_addr, dest_pubkey) = self.lookup_by_fips_prefix(prefix)?;
-        let path_mtu = self
-            .sessions
-            .get(&dest_addr)
-            .filter(|entry| entry.is_established())
-            .and_then(|entry| entry.mmp())
-            .map(|mmp| mmp.path_mtu.current_mtu());
-        Some(Route {
-            dest: (dest_addr, dest_pubkey),
-            path_mtu,
-        })
-    }
-
-    fn send(&mut self, dest: Self::Dest, packet: Vec<u8>) -> impl Future<Output = Outcome> + Send {
-        let (dest_addr, dest_pubkey) = dest;
-        self.send_outbound(dest_addr, dest_pubkey, packet)
-    }
-
-    fn icmp(&mut self) -> IcmpContext<'_> {
-        self.host_icmp()
     }
 }
 

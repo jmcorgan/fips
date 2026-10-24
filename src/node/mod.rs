@@ -16,6 +16,7 @@ pub(crate) mod diag;
 #[cfg(unix)]
 pub(crate) mod encrypt_worker;
 mod handlers;
+pub(crate) mod identities;
 pub(crate) mod lifecycle;
 pub(crate) mod metrics;
 pub(crate) mod netmon;
@@ -675,12 +676,13 @@ pub struct Node {
     // === Identity Cache ===
     /// Maps Ipv6Address prefix bytes (bytes 1-15) to (NodeAddr, PublicKey).
     /// Enables reverse lookup from IPv6 destination to session/routing identity.
-    identity_cache: HashMap<[u8; 15], (NodeAddr, secp256k1::PublicKey, u64)>,
+    identity_cache: identities::IdentityCache,
 
     // === Pending TUN Packets ===
-    /// Packets queued while waiting for session establishment.
+    /// The IPv6 adapter's datagrams queued while waiting for session
+    /// establishment, compressed, with the key they were sent to.
     /// Keyed by destination NodeAddr, bounded per-dest and total.
-    pending_tun_packets: HashMap<NodeAddr, VecDeque<Vec<u8>>>,
+    pending_tun_packets: HashMap<NodeAddr, handlers::session::HeldTun>,
     /// When each destination in `pending_tun_packets` was first held or last
     /// had a lookup or session started for it; read only by the held-packet
     /// backstop. Monotonic, so a clock step neither underflows the age nor
@@ -1083,7 +1085,7 @@ impl Node {
             peer_timers: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
-            identity_cache: HashMap::new(),
+            identity_cache: identities::IdentityCache::new(),
             pending_tun_packets: HashMap::new(),
             pending_tun_since: HashMap::new(),
             routing_hold: handlers::session::RoutingHold::default(),
@@ -1263,7 +1265,7 @@ impl Node {
             peer_timers: HashMap::new(),
             peers: HashMap::new(),
             sessions: HashMap::new(),
-            identity_cache: HashMap::new(),
+            identity_cache: identities::IdentityCache::new(),
             pending_tun_packets: HashMap::new(),
             pending_tun_since: HashMap::new(),
             routing_hold: handlers::session::RoutingHold::default(),
@@ -3713,9 +3715,8 @@ impl Node {
         &mut self,
         prefix: &[u8; 15],
     ) -> Option<(NodeAddr, secp256k1::PublicKey)> {
-        if let Some(entry) = self.identity_cache.get_mut(prefix) {
-            entry.2 = Self::now_ms(); // LRU touch
-            return Some((entry.0, entry.1));
+        if let Some(found) = self.identity_cache.touch(prefix, Self::now_ms()) {
+            return Some(found);
         }
         let (addr, pubkey) = self.sessions.iter().find_map(|(addr, entry)| {
             if addr.as_bytes()[0..15] != prefix[..] {
@@ -3782,12 +3783,40 @@ impl Node {
 
     /// Queue a TUN packet for a destination directly (for tests that need a
     /// pending queue without driving the whole outbound path).
+    ///
+    /// The queue holds datagrams as the IPv6 adapter sends them: `packet`
+    /// is compressed when it is an IPv6 packet and queued as it is
+    /// otherwise, under the key cached for `dest` or held by its session.
     #[cfg(test)]
     pub(crate) fn queue_pending_tun_packet_for_test(&mut self, dest: NodeAddr, packet: Vec<u8>) {
+        let mut prefix = [0u8; 15];
+        prefix.copy_from_slice(&dest.as_bytes()[0..15]);
+        let key = self
+            .identity_cache
+            .iter()
+            .find(|(p, _)| **p == prefix)
+            .map(|(_, entry)| entry.1.x_only_public_key().0)
+            .or_else(|| self.sessions.get(&dest).and_then(|s| s.key()))
+            .expect("the destination's key is cached or held by its session; use test_hold");
+        self.test_hold(dest, crate::ipv6tun::link::PeerKey::new(key), packet);
+    }
+
+    /// Queue `packet` for `dest` under `peer`, as
+    /// [`Self::queue_pending_tun_packet_for_test`] does, for a destination
+    /// whose key nothing on the node holds.
+    #[cfg(test)]
+    pub(crate) fn test_hold(
+        &mut self,
+        dest: NodeAddr,
+        peer: crate::ipv6tun::link::PeerKey,
+        packet: Vec<u8>,
+    ) {
+        let payload = crate::ipv6tun::ipv6_shim::compress_ipv6(&packet).unwrap_or(packet);
         self.pending_tun_packets
             .entry(dest)
-            .or_default()
-            .push_back(packet);
+            .or_insert_with(|| handlers::session::HeldTun::new(peer))
+            .payloads
+            .push_back(payload);
     }
 
     /// Move the start of the routing hold back by `by`, after noting the

@@ -2072,7 +2072,6 @@ impl Node {
                             self.refresh_tun_mss_ceiling();
                             self.warn_shortfall();
                             let threads = TunThreads {
-                                channel: self.config().node.buffers.tun_channel,
                                 exit_tx: self.child_exit_tx.clone(),
                             };
                             self.supervisor.ipv6tun.spawn_tun(device, threads)?;

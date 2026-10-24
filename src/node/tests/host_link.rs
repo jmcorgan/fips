@@ -480,3 +480,687 @@ async fn a_restart_applies_no_node_limit_the_previous_start_left_queued_on_its_l
         .insert(crate::transport::TransportId::new(1), udp);
     stop_transports(&mut node).await;
 }
+
+// ============================================================================
+// Outbound through the link: datagrams, refusals and the identity feed
+// ============================================================================
+
+/// An IPv6 packet of `len` bytes from our address to `dst`, with a payload
+/// that differs per byte.
+fn host_packet(node: &Node, dst: &crate::Ipv6Address, len: usize) -> Vec<u8> {
+    let mut p = vec![0u8; len];
+    p[0] = 0x60;
+    p[4..6].copy_from_slice(&((len - 40) as u16).to_be_bytes());
+    p[6] = 17;
+    p[7] = 64;
+    p[8..24].copy_from_slice(node.identity().address().as_bytes());
+    p[24..40].copy_from_slice(dst.as_bytes());
+    for (i, byte) in p[40..].iter_mut().enumerate() {
+        *byte = (i * 13) as u8;
+    }
+    p
+}
+
+/// The keys the adapter holds once it has applied everything queued.
+fn adapter_keys(node: &mut Node) -> std::collections::BTreeSet<[u8; 32]> {
+    node.supervisor.ipv6tun.settle();
+    node.supervisor
+        .ipv6tun
+        .mesh()
+        .keys()
+        .iter()
+        .map(|k| k.key().serialize())
+        .collect()
+}
+
+/// The x-only keys of the node's identity cache.
+fn cached_keys(node: &Node) -> std::collections::BTreeSet<[u8; 32]> {
+    node.identity_cache
+        .values()
+        .map(|(_, pk, _)| pk.x_only_public_key().0.serialize())
+        .collect()
+}
+
+/// A node with the TUN enabled, a TUN channel installed, and the adapter
+/// attached with the identity feed.
+fn fed_node(config: Config) -> (Node, std::sync::mpsc::Receiver<Vec<u8>>) {
+    let mut node = make_node_with(config);
+    let rx = super::discovery::install_tun_channel(&mut node);
+    node.attach_host();
+    (node, rx)
+}
+
+/// The TUN-enabled configuration with an identity cache of `size`.
+fn identity_config(size: usize) -> Config {
+    let mut config = Config::new();
+    config.tun.enabled = true;
+    config.dns.enabled = false;
+    config.node.cache.identity_size = size;
+    config
+}
+
+#[tokio::test]
+async fn the_adapter_key_map_follows_the_identity_cache_through_registration_and_eviction() {
+    // The replay, each registration, and an eviction at the cache's bound,
+    // with and without a session holding the key.
+    let mut node = make_node_with(identity_config(3));
+    let early = Identity::generate();
+    node.register_identity(*early.node_addr(), early.pubkey_full());
+    let _rx = super::discovery::install_tun_channel(&mut node);
+    node.attach_host();
+    assert_eq!(
+        adapter_keys(&mut node),
+        cached_keys(&node),
+        "after the replay"
+    );
+
+    let held = Identity::generate();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    node.register_identity(*held.node_addr(), held.pubkey_full());
+    install_established(&mut node, &held);
+    assert_eq!(
+        adapter_keys(&mut node),
+        cached_keys(&node),
+        "after a registration"
+    );
+
+    // Push `early` and then `held` out; `held` stays with the adapter while
+    // its session holds it, `early` goes at the next sweep.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let other = Identity::generate();
+        node.register_identity(*other.node_addr(), other.pubkey_full());
+    }
+    assert!(!node.has_cached_identity(early.node_addr()));
+    assert!(!node.has_cached_identity(held.node_addr()));
+    let before_sweep = adapter_keys(&mut node);
+    assert!(
+        before_sweep.contains(&early.pubkey().serialize()),
+        "kept until a sweep"
+    );
+    node.sweep_identities();
+    let swept = adapter_keys(&mut node);
+    let mut expected = cached_keys(&node);
+    expected.insert(held.pubkey().serialize());
+    assert_eq!(swept, expected, "a session's key stays, an unheld one goes");
+
+    node.sessions.remove(held.node_addr());
+    node.sweep_identities();
+    assert_eq!(
+        adapter_keys(&mut node),
+        cached_keys(&node),
+        "after the session ended"
+    );
+}
+
+#[tokio::test]
+async fn a_key_the_dns_responder_handed_out_survives_a_forget_decided_before_its_report() {
+    // The node decides to forget a key, then the responder hands the same
+    // key to the host before the node has seen that report. The forget
+    // carries the number of the last report the node handled, so the
+    // adapter keeps the key.
+    let mut node = make_node_with(identity_config(1));
+    let _rx = super::discovery::install_tun_channel(&mut node);
+    node.attach_host();
+    let peer = Identity::generate();
+    node.register_identity(*peer.node_addr(), peer.pubkey_full());
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let other = Identity::generate();
+    node.register_identity(*other.node_addr(), other.pubkey_full());
+    assert!(!node.has_cached_identity(peer.node_addr()));
+
+    let learner = node.supervisor.ipv6tun.learner().expect("attached");
+    learner.learn(PeerKey::new(peer.pubkey())).await;
+    node.sweep_identities();
+    assert!(
+        adapter_keys(&mut node).contains(&peer.pubkey().serialize()),
+        "a forget decided before the report must not remove the learned key"
+    );
+
+    // Once the node handles the report it registers the key again.
+    let learned = node.supervisor.learned_rx.as_mut().unwrap();
+    let report = learned.try_recv().expect("the report waits on the link");
+    node.register_learned(report);
+    assert!(node.has_cached_identity(peer.node_addr()));
+}
+
+#[tokio::test]
+async fn a_packet_to_a_key_the_node_has_forgotten_but_the_adapter_has_not_is_answered_as_before() {
+    // Between an eviction and the sweep that tells the adapter, the adapter
+    // still sends datagrams to the key. The node resolves them exactly as
+    // the TUN path did, so a destination nothing answers for is told no
+    // route, byte for byte as the raw packet would have been.
+    let (mut node, rx) = fed_node(identity_config(1));
+    let gone = Identity::generate();
+    node.register_identity(*gone.node_addr(), gone.pubkey_full());
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let other = Identity::generate();
+    node.register_identity(*other.node_addr(), other.pubkey_full());
+    assert!(adapter_keys(&mut node).contains(&gone.pubkey().serialize()));
+
+    let packet = host_packet(&node, gone.address(), 120);
+    node.handle_tun_outbound(packet.clone()).await;
+
+    let expected = crate::ipv6tun::icmp::build_dest_unreachable(
+        &packet,
+        crate::ipv6tun::icmp::DestUnreachableCode::NoRoute,
+        node.identity().address().to_ipv6(),
+    )
+    .unwrap();
+    assert_eq!(super::discovery::drain_tun(&rx), vec![expected]);
+    assert!(
+        !node.has_cached_identity(gone.node_addr()),
+        "nothing registered it"
+    );
+
+    // The node-wide size check still comes before the key is resolved, so
+    // an oversized packet to the same key gets Packet Too Big at the live
+    // limit, not no route.
+    let ipv6_mtu = node.effective_ipv6_mtu();
+    let oversized = host_packet(&node, gone.address(), usize::from(ipv6_mtu) + 1);
+    node.handle_tun_outbound(oversized.clone()).await;
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![
+            crate::ipv6tun::icmp::build_packet_too_big(
+                &oversized,
+                u32::from(ipv6_mtu),
+                gone.address().to_ipv6()
+            )
+            .unwrap()
+        ],
+        "the size check comes first"
+    );
+}
+
+#[tokio::test]
+async fn a_key_the_attach_replays_only_for_a_session_is_forgotten_once_the_session_ends() {
+    // The attach tells the adapter of every key a session holds, cached or
+    // not. One that is not cached must still leave the adapter at the first
+    // sweep after its session ends, as a removed key does.
+    let mut node = make_node_with(identity_config(100));
+    let _rx = super::discovery::install_tun_channel(&mut node);
+    let remote = Identity::generate();
+    install_established(&mut node, &remote);
+    node.attach_host();
+    let key = remote.pubkey().serialize();
+    assert!(adapter_keys(&mut node).contains(&key), "replayed at attach");
+    node.sweep_identities();
+    assert!(
+        adapter_keys(&mut node).contains(&key),
+        "kept while the session holds it"
+    );
+
+    node.sessions.remove(remote.node_addr());
+    node.sweep_identities();
+    assert!(!node.has_cached_identity(remote.node_addr()));
+    assert!(
+        !adapter_keys(&mut node).contains(&key),
+        "forgotten once the session ended"
+    );
+}
+
+#[test]
+fn the_path_refusal_matches_the_tun_paths_packet_too_big_for_every_path_mtu_and_length() {
+    // The TUN path compared the IPv6 length with
+    // `path_mtu - 77` when that was below the node-wide `t - 77`, and
+    // answered Packet Too Big at `path_mtu - 77`. The node now compares the
+    // payload, 33 bytes shorter, with `path_mtu - 110`, and the adapter
+    // answers at the limit plus 33.
+    for t in [110u16, 576, 1280, 1357, 1452, 1500, 9000] {
+        let limit = payload_limit(t);
+        for path_mtu in 110..=u16::MAX {
+            let old_path = effective_ipv6_mtu(path_mtu) as usize;
+            let old_node = effective_ipv6_mtu(t) as usize;
+            let boundary = old_path.max(40);
+            for len in [
+                40,
+                boundary.saturating_sub(1).max(40),
+                boundary,
+                boundary + 1,
+            ] {
+                let old = (old_path < old_node && len > old_path).then_some(old_path as u32);
+                let new =
+                    super::super::handlers::host_link::path_refusal(len - 33, path_mtu, limit)
+                        .map(|l| u32::from(crate::ipv6tun::core::ipv6_mtu(l)));
+                assert_eq!(new, old, "t {t}, path MTU {path_mtu}, length {len}");
+            }
+        }
+    }
+}
+
+/// A node with a session whose path MTU is 1000 to a fresh destination,
+/// which it returns, at most one session allowed.
+fn narrow_node() -> (Node, std::sync::mpsc::Receiver<Vec<u8>>, Identity) {
+    let mut config = identity_config(100);
+    config.node.limits.max_sessions = 1;
+    let (mut node, rx) = fed_node(config);
+    let narrow = Identity::generate();
+    node.register_identity(*narrow.node_addr(), narrow.pubkey_full());
+    install_established(&mut node, &narrow);
+    node.sessions
+        .get_mut(narrow.node_addr())
+        .unwrap()
+        .mmp_mut()
+        .unwrap()
+        .path_mtu
+        .seed_source_mtu(1000);
+    (node, rx, narrow)
+}
+
+#[tokio::test]
+async fn refusals_reach_the_host_byte_for_byte_as_the_tun_path_answered_them() {
+    // Through the node: the node-wide limit, a session's
+    // path MTU, and a full session table, each on its own node since Packet
+    // Too Big is rate limited per source.
+    use crate::ipv6tun::icmp::{DestUnreachableCode, build_dest_unreachable, build_packet_too_big};
+
+    let (mut node, rx, narrow) = narrow_node();
+    let ipv6_mtu = node.effective_ipv6_mtu();
+    let over_node = host_packet(&node, narrow.address(), usize::from(ipv6_mtu) + 1);
+    node.handle_tun_outbound(over_node.clone()).await;
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![
+            build_packet_too_big(&over_node, u32::from(ipv6_mtu), narrow.address().to_ipv6())
+                .unwrap()
+        ],
+        "the node-wide limit"
+    );
+
+    let (mut node, rx, narrow) = narrow_node();
+    let over_path = host_packet(&node, narrow.address(), 1000 - 77 + 1);
+    let fits_path = host_packet(&node, narrow.address(), 1000 - 77);
+    node.handle_tun_outbound(fits_path).await;
+    node.handle_tun_outbound(over_path.clone()).await;
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![build_packet_too_big(&over_path, 1000 - 77, narrow.address().to_ipv6()).unwrap()],
+        "the session's path MTU"
+    );
+
+    let (mut node, rx, _) = narrow_node();
+    let crowded = Identity::generate();
+    node.register_identity(*crowded.node_addr(), crowded.pubkey_full());
+    let to_crowded = host_packet(&node, crowded.address(), 80);
+    node.handle_tun_outbound(to_crowded.clone()).await;
+    let us = node.identity().address().to_ipv6();
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![build_dest_unreachable(&to_crowded, DestUnreachableCode::NoRoute, us).unwrap()],
+        "a full session table"
+    );
+}
+
+#[tokio::test]
+async fn a_lookup_that_times_out_for_a_destination_evicted_while_it_waited_answers_each_held_packet()
+ {
+    // The held queue keeps the key it was sent to, so its packets are
+    // answered even after the identity cache let the entry go.
+    let (mut node, rx) = fed_node(identity_config(1));
+    let target = Identity::generate();
+    node.register_identity(*target.node_addr(), target.pubkey_full());
+    let first = host_packet(&node, target.address(), 60);
+    let second = host_packet(&node, target.address(), 70);
+    node.handle_tun_outbound(first.clone()).await;
+    node.handle_tun_outbound(second.clone()).await;
+    assert_eq!(node.pending_tun_total_packets(), 2, "held behind discovery");
+    assert!(super::discovery::drain_tun(&rx).is_empty());
+
+    let other = Identity::generate();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    node.register_identity(*other.node_addr(), other.pubkey_full());
+    assert!(!node.has_cached_identity(target.node_addr()));
+
+    // A lookup sent at time 0 times out finally at 15 s.
+    node.lookup.pending_lookups.insert(
+        *target.node_addr(),
+        crate::proto::lookup::PendingLookup::new(0),
+    );
+    for at in [1_100, 3_100, 7_100, 15_100] {
+        node.check_pending_lookups(at).await;
+    }
+    assert!(node.lookup.pending_lookups.is_empty(), "timed out");
+
+    use crate::ipv6tun::icmp::{DestUnreachableCode, build_dest_unreachable};
+    let us = node.identity().address().to_ipv6();
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![
+            build_dest_unreachable(&first, DestUnreachableCode::NoRoute, us).unwrap(),
+            build_dest_unreachable(&second, DestUnreachableCode::NoRoute, us).unwrap(),
+        ]
+    );
+}
+
+/// A started-ready configuration: the TUN enabled for an app-owned TUN, one
+/// loopback UDP transport, no DNS responder and no control socket.
+fn app_config() -> Config {
+    let mut config = identity_config(100);
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.node.control.enabled = false;
+    config
+}
+
+#[tokio::test]
+async fn a_packet_to_a_name_the_responder_just_resolved_is_held_even_when_it_overtakes_the_report()
+{
+    // The first-packet race: the responder has handed the host a key and
+    // reported it, and the host's packet reaches the node's receive loop
+    // before the report does. The node must hold the packet behind
+    // discovery, not answer it with no route.
+    let mut node = make_node_with(app_config());
+    let (app_outbound, app_inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    let peer = Identity::generate();
+    let learner = node.supervisor.ipv6tun.learner().expect("attached");
+    learner.learn(PeerKey::new(peer.pubkey())).await;
+    app_outbound
+        .send(host_packet(&node, peer.address(), 80))
+        .await
+        .unwrap();
+
+    // Both are waiting when the receive loop starts; the packet's arm is
+    // polled first.
+    let _ = tokio::time::timeout(Duration::from_millis(300), node.run_rx_loop()).await;
+
+    let answers: Vec<Vec<u8>> = std::iter::from_fn(|| app_inbound.try_recv().ok()).collect();
+    assert!(
+        answers.is_empty(),
+        "the packet must not be answered: {answers:?}"
+    );
+    assert!(node.has_cached_identity(peer.node_addr()));
+    assert_eq!(node.pending_tun_total_packets(), 1, "held behind discovery");
+    node.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_datagram_from_the_system_tun_reader_to_a_name_just_resolved_is_held_even_when_it_overtakes_the_report()
+ {
+    // The same race on the system TUN path, where the reader thread runs the
+    // host half and sends the datagram on the link. The test stands in for
+    // the reader: it runs the adapter's host half on the packet and sends
+    // the datagram on the link's datagram channel, then the receive loop
+    // finds the datagram and the report both waiting, the datagram's arm
+    // first.
+    let mut node = make_node_with(app_config());
+    let (_app_outbound, app_inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    let peer = Identity::generate();
+    let learner = node.supervisor.ipv6tun.learner().expect("attached");
+    learner.learn(PeerKey::new(peer.pubkey())).await;
+    let datagram = node
+        .supervisor
+        .ipv6tun
+        .outbound(&host_packet(&node, peer.address(), 80))
+        .expect("the adapter names the key the responder recorded");
+    let datagrams = node.supervisor.ipv6tun.datagram_sender().expect("attached");
+    datagrams.send(datagram).await.unwrap();
+
+    let _ = tokio::time::timeout(Duration::from_millis(300), node.run_rx_loop()).await;
+
+    let answers: Vec<Vec<u8>> = std::iter::from_fn(|| app_inbound.try_recv().ok()).collect();
+    assert!(
+        answers.is_empty(),
+        "the datagram must not be answered: {answers:?}"
+    );
+    assert!(node.has_cached_identity(peer.node_addr()));
+    assert_eq!(node.pending_tun_total_packets(), 1, "held behind discovery");
+    node.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_send_to_a_cached_key_initiates_with_the_parity_the_cache_holds() {
+    // The key in the cache, not its even-parity lift.
+    let (mut node, _rx) = fed_node(identity_config(100));
+    let dest = (1u8..=64)
+        .map(|n| {
+            let mut secret = [0u8; 32];
+            secret[31] = n;
+            Identity::from_secret_bytes(&secret).unwrap()
+        })
+        .find(|id| id.pubkey_full().x_only_public_key().1 == secp256k1::Parity::Odd)
+        .unwrap();
+    node.register_identity(*dest.node_addr(), dest.pubkey_full());
+    // A direct peer, so the destination has a route and the initiation
+    // registers the key it is given before it opens the session (with no
+    // route it fails before registering anything). The open itself fails
+    // here, with no transport, which does not matter.
+    let link = crate::transport::LinkId::new(1);
+    let mut peer =
+        crate::peer::ActivePeer::new(crate::PeerIdentity::from_pubkey(dest.pubkey()), link, 0);
+    peer.touch(1);
+    node.peers.insert(*dest.node_addr(), peer);
+    node.handle_tun_outbound(host_packet(&node, dest.address(), 80))
+        .await;
+
+    let mut prefix = [0u8; 15];
+    prefix.copy_from_slice(&dest.node_addr().as_bytes()[0..15]);
+    let (_, cached) = node.lookup_by_fips_prefix(&prefix).unwrap();
+    assert_eq!(cached, dest.pubkey_full(), "the cached parity is kept");
+}
+
+#[tokio::test]
+async fn a_packet_sent_once_the_adapter_has_applied_a_new_key_is_forwarded() {
+    // Until the adapter applies the key the node pushed, it answers no
+    // route itself: the one channel hop a new key takes to reach it.
+    let (mut node, rx) = fed_node(identity_config(100));
+    let dest = Identity::generate();
+    let packet = host_packet(&node, dest.address(), 80);
+    assert!(
+        node.supervisor.ipv6tun.outbound(&packet).is_none(),
+        "unknown to the adapter: answered there"
+    );
+    assert_eq!(super::discovery::drain_tun(&rx).len(), 1);
+
+    node.register_identity(*dest.node_addr(), dest.pubkey_full());
+    node.handle_tun_outbound(packet).await;
+    assert!(super::discovery::drain_tun(&rx).is_empty(), "not answered");
+    assert_eq!(node.pending_tun_total_packets(), 1, "held behind discovery");
+}
+
+#[tokio::test]
+async fn at_start_a_packet_to_a_configured_peer_is_held_not_answered() {
+    // The attach replays the keys peer connect registered,
+    // before the receive loop runs.
+    let peer = Identity::generate();
+    let mut config = app_config();
+    config.peers.push(crate::config::PeerConfig::new(
+        peer.npub(),
+        "udp",
+        "127.0.0.1:9".to_string(),
+    ));
+    let mut node = make_node_with(config);
+    let (app_outbound, app_inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    app_outbound
+        .send(host_packet(&node, peer.address(), 80))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_millis(300), node.run_rx_loop()).await;
+    let answers: Vec<Vec<u8>> = std::iter::from_fn(|| app_inbound.try_recv().ok()).collect();
+    assert!(
+        answers.is_empty(),
+        "the packet must not be answered: {answers:?}"
+    );
+    node.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_lower_limit_the_adapter_has_not_applied_is_enforced_by_the_node_at_the_live_value() {
+    // The adapter still judges by the last published limit; the node checks
+    // the live one, so a decrease is answered exactly as the TUN path did.
+    let (mut node, rx) = fed_node(identity_config(100));
+    with_udp(&mut node, 1000).await;
+    let dest = Identity::generate();
+    node.register_identity(*dest.node_addr(), dest.pubkey_full());
+    node.supervisor.ipv6tun.settle();
+    let live = node.effective_ipv6_mtu();
+    assert_eq!(live, 1000 - 77);
+    assert!(
+        node.supervisor.ipv6tun.mesh().ipv6_mtu() > live,
+        "precondition: stale"
+    );
+
+    let packet = host_packet(&node, dest.address(), usize::from(live) + 1);
+    let datagram = node
+        .supervisor
+        .ipv6tun
+        .outbound(&packet)
+        .expect("the adapter lets it through");
+    node.handle_datagram(datagram).await;
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![
+            crate::ipv6tun::icmp::build_packet_too_big(
+                &packet,
+                u32::from(live),
+                dest.address().to_ipv6()
+            )
+            .unwrap()
+        ]
+    );
+    stop_transports(&mut node).await;
+}
+
+#[tokio::test]
+async fn a_lower_limit_the_adapter_has_not_applied_answers_an_unknown_destination_as_unreachable() {
+    // A packet to a destination the adapter cannot name, between a lowered
+    // live limit and the limit the adapter last applied, is answered
+    // Destination Unreachable where the TUN path answered Packet Too Big at
+    // the live limit, until the next tick or datagram publishes the new
+    // limit.
+    let (mut node, rx) = fed_node(identity_config(100));
+    with_udp(&mut node, 1000).await;
+    node.supervisor.ipv6tun.settle();
+    let live = node.effective_ipv6_mtu();
+    assert!(
+        node.supervisor.ipv6tun.mesh().ipv6_mtu() > live,
+        "precondition: stale"
+    );
+    let stranger = Identity::generate();
+    let packet = host_packet(&node, stranger.address(), usize::from(live) + 1);
+
+    assert!(node.supervisor.ipv6tun.outbound(&packet).is_none());
+    let replies = super::discovery::drain_tun(&rx);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0][40], 1, "Destination Unreachable");
+
+    node.publish_mtu();
+    assert!(node.supervisor.ipv6tun.outbound(&packet).is_none());
+    let replies = super::discovery::drain_tun(&rx);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0][40], 2, "Packet Too Big once the adapter has it");
+    assert_eq!(
+        u32::from_be_bytes(replies[0][44..48].try_into().unwrap()),
+        u32::from(live)
+    );
+    stop_transports(&mut node).await;
+}
+
+#[tokio::test]
+async fn a_higher_limit_the_adapter_has_not_applied_is_used_for_a_destination_it_knows() {
+    // Until the adapter applies a raised limit, it still sends a packet to a
+    // destination it knows to the node, which judges it by the live limit
+    // as the TUN path did.
+    let (mut node, rx) = fed_node(identity_config(100));
+    with_udp(&mut node, 1500).await;
+    let dest = Identity::generate();
+    node.register_identity(*dest.node_addr(), dest.pubkey_full());
+    node.supervisor.ipv6tun.settle();
+    let stale = node.supervisor.ipv6tun.mesh().ipv6_mtu();
+    assert!(node.effective_ipv6_mtu() > stale, "precondition: stale");
+
+    let packet = host_packet(&node, dest.address(), usize::from(stale) + 1);
+    let datagram = node
+        .supervisor
+        .ipv6tun
+        .outbound(&packet)
+        .expect("sent to the node");
+    node.handle_datagram(datagram).await;
+    assert!(super::discovery::drain_tun(&rx).is_empty(), "not refused");
+    assert_eq!(node.pending_tun_total_packets(), 1, "held behind discovery");
+    stop_transports(&mut node).await;
+}
+
+#[tokio::test]
+async fn a_higher_limit_the_adapter_has_not_applied_answers_an_unknown_destination_at_the_last_published_value()
+ {
+    // A packet to a destination the adapter cannot name, between the limit
+    // it last applied and a raised live limit, is answered Packet Too Big at
+    // the old limit where the TUN path answered Destination Unreachable,
+    // until the next tick or datagram publishes the new limit.
+    let (mut node, rx) = fed_node(identity_config(100));
+    with_udp(&mut node, 1500).await;
+    node.supervisor.ipv6tun.settle();
+    let stale = node.supervisor.ipv6tun.mesh().ipv6_mtu();
+    assert!(node.effective_ipv6_mtu() > stale, "precondition: stale");
+    let stranger = Identity::generate();
+    let packet = host_packet(&node, stranger.address(), usize::from(stale) + 1);
+
+    assert!(node.supervisor.ipv6tun.outbound(&packet).is_none());
+    let replies = super::discovery::drain_tun(&rx);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0][40], 2, "Packet Too Big");
+    assert_eq!(
+        u32::from_be_bytes(replies[0][44..48].try_into().unwrap()),
+        u32::from(stale)
+    );
+
+    node.publish_mtu();
+    assert!(node.supervisor.ipv6tun.outbound(&packet).is_none());
+    assert_eq!(
+        super::discovery::drain_tun(&rx)[0][40],
+        1,
+        "Destination Unreachable once the adapter has the live limit"
+    );
+    stop_transports(&mut node).await;
+}
+
+#[tokio::test]
+async fn the_tick_tells_the_adapter_to_forget_an_evicted_key_no_session_holds() {
+    // The sweep runs on every tick of the receive loop; the first tick fires
+    // at once.
+    let mut config = app_config();
+    config.node.cache.identity_size = 1;
+    let mut node = make_node_with(config);
+    let (_app_outbound, _app_inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    let gone = Identity::generate();
+    node.register_identity(*gone.node_addr(), gone.pubkey_full());
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let kept = Identity::generate();
+    node.register_identity(*kept.node_addr(), kept.pubkey_full());
+    let state = node.supervisor.ipv6tun.mesh().clone();
+    let gone_key = PeerKey::new(gone.pubkey());
+    let kept_key = PeerKey::new(kept.pubkey());
+
+    // Both keys reach the adapter before the receive loop, and so before
+    // any sweep, runs; otherwise the wait below could pass on a key that
+    // had not arrived yet.
+    let told = async {
+        while !(state.keys().contains(&gone_key) && state.keys().contains(&kept_key)) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), told)
+        .await
+        .expect("the adapter was never told of both keys");
+
+    let forgotten = async {
+        while state.keys().contains(&gone_key) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result = node.run_rx_loop() => panic!("the rx loop exited: {result:?}"),
+        within = tokio::time::timeout(Duration::from_secs(10), forgotten) => {
+            within.expect("the adapter never forgot the evicted key");
+        }
+    }
+    assert!(state.keys().contains(&kept_key));
+    node.stop().await.unwrap();
+}
