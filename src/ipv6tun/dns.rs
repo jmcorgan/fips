@@ -27,8 +27,32 @@ pub struct DnsResolvedIdentity {
 /// Channel sender for DNS → Node identity registration.
 pub type DnsIdentityTx = tokio::sync::mpsc::Sender<DnsResolvedIdentity>;
 
-/// Channel receiver consumed by the Node RX event loop.
+/// Channel receiver of the identities a responder started by
+/// [`run_dns_responder`] resolves.
 pub type DnsIdentityRx = tokio::sync::mpsc::Receiver<DnsResolvedIdentity>;
+
+/// Where a running responder puts each identity it resolves, before it
+/// sends the answer.
+pub(crate) trait IdentitySink {
+    /// Take `identity`, waiting for room if the sink is full.
+    fn resolved(
+        &self,
+        identity: DnsResolvedIdentity,
+    ) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl IdentitySink for DnsIdentityTx {
+    async fn resolved(&self, identity: DnsResolvedIdentity) {
+        let _ = self.send(identity).await;
+    }
+}
+
+impl IdentitySink for super::lifecycle::Learner {
+    async fn resolved(&self, identity: DnsResolvedIdentity) {
+        let key = identity.pubkey.x_only_public_key().0;
+        self.learn(super::link::PeerKey::new(key)).await;
+    }
+}
 
 /// Extract the label before `.fips` from a DNS query name.
 ///
@@ -472,7 +496,7 @@ pub async fn run_dns_responder(
 /// dropped unanswered.
 pub(crate) async fn run_responder(
     socket: tokio::net::UdpSocket,
-    identity_tx: DnsIdentityTx,
+    identity_tx: impl IdentitySink,
     ttl: u32,
     mut reloader: HostMapReloader,
     mut aliases: Option<tokio::sync::watch::Receiver<HostMap>>,
@@ -526,7 +550,7 @@ pub(crate) async fn run_responder(
                 node_addr = %id.node_addr,
                 "DNS resolved .fips name, registering identity"
             );
-            let _ = identity_tx.send(id).await;
+            identity_tx.resolved(id).await;
         }
 
         let strict_pin = cfg!(target_os = "linux");

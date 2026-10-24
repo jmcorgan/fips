@@ -91,10 +91,10 @@ impl Node {
             }
         };
 
-        // Take the DNS identity receiver, or create a dummy channel (when DNS
-        // is disabled). Same pattern as TUN outbound.
-        let (mut dns_identity_rx, _dns_guard) = match self.supervisor.ipv6tun.dns_identity_rx.take()
-        {
+        // Take the receiver of the keys the IPv6 adapter's DNS responder
+        // learned, or create a dummy channel (when no start attached the
+        // adapter). Same pattern as TUN outbound.
+        let (mut learned_rx, _learned_guard) = match self.supervisor.learned_rx.take() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -421,13 +421,13 @@ impl Node {
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {
                     // A name the DNS responder resolved is registered before
                     // any packet that follows it, though its arm comes later.
-                    self.register_resolved(&mut dns_identity_rx);
+                    self.register_waiting(&mut learned_rx);
                     self.handle_tun_outbound(ipv6_packet).await;
                     let mut drained = 0;
                     while drained < 256 {
                         match tun_outbound_rx.try_recv() {
                             Ok(p) => {
-                                self.register_resolved(&mut dns_identity_rx);
+                                self.register_waiting(&mut learned_rx);
                                 self.handle_tun_outbound(p).await;
                                 drained += 1;
                             }
@@ -435,8 +435,8 @@ impl Node {
                         }
                     }
                 }
-                Some(identity) = dns_identity_rx.recv() => {
-                    self.register_dns_identity(identity);
+                Some(report) = learned_rx.recv() => {
+                    self.register_learned(report);
                 }
                 // A transport medium change (WLAN -> LAN -> 5G, a BLE adapter
                 // arriving or leaving). Placed after the hot inbound path so
@@ -756,23 +756,26 @@ impl Node {
 }
 
 impl Node {
-    /// Register every identity the DNS responder resolved that is still
-    /// waiting, so a packet the host sent after the answer finds it.
+    /// Register every key the DNS responder reported that is still waiting,
+    /// so a packet the host sent after the answer finds it.
     ///
-    /// The responder queues the identity before it answers, so by the time
-    /// the host's first packet to the name is read, its identity is here.
-    fn register_resolved(&mut self, rx: &mut crate::ipv6tun::dns::DnsIdentityRx) {
-        while let Ok(identity) = rx.try_recv() {
-            self.register_dns_identity(identity);
+    /// The responder reports the key before it answers, so by the time the
+    /// host's first packet to the name is read, the report is here.
+    fn register_waiting(&mut self, rx: &mut crate::ipv6tun::link::LearnedRx) {
+        while let Ok(report) = rx.try_recv() {
+            self.register_learned(report);
         }
     }
 
-    /// Register one identity the DNS responder resolved.
-    fn register_dns_identity(&mut self, identity: crate::ipv6tun::dns::DnsResolvedIdentity) {
+    /// Register a key the adapter's DNS responder handed to the host, with
+    /// the even-parity lift its npub names.
+    pub(in crate::node) fn register_learned(&mut self, report: crate::ipv6tun::link::Learned) {
+        let key = report.peer.key();
+        let node_addr = crate::NodeAddr::from_pubkey(&key);
         debug!(
-            node_addr = %identity.node_addr,
+            node_addr = %node_addr,
             "Registering identity from DNS resolution"
         );
-        self.register_identity(identity.node_addr, identity.pubkey);
+        self.register_identity(node_addr, key.public_key(secp256k1::Parity::Even));
     }
 }

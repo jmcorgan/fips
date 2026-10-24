@@ -454,3 +454,18 @@ fn the_allow_list_check_refuses_a_node_address_after_an_attribute_whose_raw_stri
         );
     }
 }
+
+#[test]
+fn the_scan_reads_the_outbound_messages_and_their_fields() {
+    let (items, fields) = message_fields(include_str!("../link.rs"));
+    assert!(
+        items.iter().any(|i| i == "Learned"),
+        "the scan must find Learned, found {items:?}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(o, t)| o.starts_with("Learned") && t == "PeerKey"),
+        "the scan must read Learned's PeerKey field, found {fields:?}"
+    );
+}

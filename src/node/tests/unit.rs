@@ -4532,7 +4532,7 @@ mod test_radio {
 /// 1. `dns_local_addr()` publishes where to send — read back off the bound
 ///    socket, so a `port = 0` config reports the assigned port, not 0.
 /// 2. The responder answers a proxied query with the right AAAA.
-/// 3. The resolved identity reaches `dns_identity_rx` — the channel
+/// 3. The resolved key reaches the link's report channel — the channel
 ///    `run_rx_loop` drains into `register_identity`. This is the leg that
 ///    populates the identity cache, without which the first packet to a
 ///    freshly-resolved `<npub>.fips` is rejected with ICMPv6 "No route".
@@ -4608,18 +4608,20 @@ async fn dns_responder_serves_a_proxying_embedder() {
     let identity = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         node.supervisor
-            .ipv6tun
-            .dns_identity_rx
+            .learned_rx
             .as_mut()
-            .expect("responder installed the identity receiver")
+            .expect("the attach installed the identity receiver")
             .recv(),
     )
     .await
     .expect("identity published within the timeout")
     .expect("channel is open");
 
-    assert_eq!(identity.node_addr, *peer.node_addr());
-    node.register_identity(identity.node_addr, identity.pubkey);
+    assert_eq!(
+        crate::NodeAddr::from_pubkey(&identity.peer.key()),
+        *peer.node_addr()
+    );
+    node.register_learned(identity);
     assert!(
         node.has_cached_identity(peer.node_addr()),
         "resolving a name must warm the identity cache, or the first packet \

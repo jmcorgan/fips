@@ -14,10 +14,10 @@ use tracing::{debug, info, warn};
 
 use super::config::{DnsConfig, TunConfig};
 use super::core::{Applied, MeshState, PathMtuReplica, run_link};
-use super::dns::{DnsIdentityRx, MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
+use super::dns::{MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::link::{Attach, Feeds, FromMesh, IPV6_PORT, MeshLink};
+use super::link::{Attach, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, PeerKey};
 use super::tun::{
     MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
     shutdown_tun_interface,
@@ -60,6 +60,9 @@ pub(crate) struct Handles {
     /// Whether the node has attached us since it last detached us. Neither
     /// the device nor its threads may start before the attach.
     attached: bool,
+    /// Where the DNS responder reports the keys it learned: the node's end,
+    /// from the attach.
+    learned: Option<Sender<Learned>>,
     /// TUN device state, as reported by `Node::tun_state`.
     tun_state: TunState,
     /// Per-source limiter of the Packet Too Big replies sent to the host.
@@ -83,8 +86,6 @@ pub(crate) struct Handles {
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     pub(crate) tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
 
-    /// Receiver for resolved identities from the DNS responder.
-    pub(crate) dns_identity_rx: Option<DnsIdentityRx>,
     /// DNS responder task handle.
     pub(crate) dns_task: Option<tokio::task::JoinHandle<()>>,
     /// Address the DNS responder actually bound, read back from the socket
@@ -121,6 +122,7 @@ impl Handles {
             link: None,
             link_task: None,
             attached: false,
+            learned: None,
             tun_name: None,
             tun_tx: None,
             tun_outbound_rx: None,
@@ -128,7 +130,6 @@ impl Handles {
             tun_writer_handle: None,
             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             tun_shutdown_fd: None,
-            dns_identity_rx: None,
             dns_task: None,
             dns_local_addr: None,
             dns_aliases: None,
@@ -160,6 +161,7 @@ impl Handles {
     /// up to the end of its replay now, before any device opens.
     pub(crate) fn attached(&mut self, link: MeshLink) {
         self.attached = true;
+        self.learned = Some(link.learned.clone());
         self.link = Some(link);
         while let Some(message) = self.next_queued() {
             match self.mesh.apply(message) {
@@ -202,6 +204,7 @@ impl Handles {
     /// that out.
     pub(crate) async fn detached(&mut self) {
         self.attached = false;
+        self.learned = None;
         self.link = None;
         if let Some(task) = self.link_task.take()
             && let Err(e) = task.await
@@ -475,17 +478,20 @@ impl Handles {
     /// whether it came up. A failure is logged and is not fatal to the node.
     ///
     /// `peers` seeds the responder's own hosts map, which it reloads from
-    /// the hosts file on its own; `channel` is the capacity of the identity
-    /// channel back to the node (`node.buffers.dns_channel`). Reads the TUN
-    /// device name for the mesh-interface filter, so the TUN child, when
-    /// enabled, starts first.
+    /// the hosts file on its own. The keys it hands out go to the node on
+    /// the link, whose channel the node bounded at `node.buffers.dns_channel`
+    /// when it attached us. Reads the TUN device name for the mesh-interface
+    /// filter, so the TUN child, when enabled, starts first.
     pub(crate) fn start_dns(
         &mut self,
         config: &DnsConfig,
         peers: &[PeerConfig],
-        channel: usize,
         exit_tx: Option<Sender<Child>>,
     ) -> bool {
+        let Some(learned) = self.learned.clone() else {
+            warn!("DNS responder not started: the node has not attached the IPv6 adapter");
+            return false;
+        };
         // Initialize DNS responder (independent of TUN).
         //
         // Default bind_addr is "::1" (IPv6 loopback). The shipped
@@ -522,7 +528,7 @@ impl Handles {
                         // and this is the address an embedder that
                         // proxies queries to us has to dial.
                         let local_addr = socket.local_addr().unwrap_or(bind);
-                        let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(channel);
+                        let keys = Learner { learned };
                         let dns_ttl = config.ttl();
                         let base_hosts = HostMap::from_peer_configs(peers);
                         let hosts_path = PathBuf::from(DEFAULT_HOSTS_PATH);
@@ -563,17 +569,9 @@ impl Handles {
                         // `Running`.
                         let handle = tokio::spawn(report_exit(
                             Child::Dns,
-                            run_responder(
-                                socket,
-                                identity_tx,
-                                dns_ttl,
-                                reloader,
-                                Some(aliases_rx),
-                                mesh,
-                            ),
+                            run_responder(socket, keys, dns_ttl, reloader, Some(aliases_rx), mesh),
                             exit_tx,
                         ));
-                        self.dns_identity_rx = Some(identity_rx);
                         self.dns_task = Some(handle);
                         self.dns_aliases = Some(aliases_tx);
                         self.dns_local_addr = Some(local_addr);
@@ -612,5 +610,19 @@ impl Handles {
         // the listener, so an embedder polling `dns_local_addr()`
         // never dials a socket that is already gone.
         self.dns_local_addr.take();
+    }
+}
+
+/// Where the DNS responder puts a key it hands to the host: to the node,
+/// which registers it.
+pub(crate) struct Learner {
+    /// The node's end of the link.
+    pub(crate) learned: Sender<Learned>,
+}
+
+impl Learner {
+    /// Report `peer` to the node, waiting for room on the link.
+    pub(crate) async fn learn(&self, peer: PeerKey) {
+        let _ = self.learned.send(Learned { peer }).await;
     }
 }

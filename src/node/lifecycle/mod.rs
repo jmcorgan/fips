@@ -2090,7 +2090,6 @@ impl Node {
                     let up = self.supervisor.ipv6tun.start_dns(
                         &config.dns,
                         config.peers(),
-                        config.node.buffers.dns_channel,
                         self.child_exit_tx.clone(),
                     );
                     if up {

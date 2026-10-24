@@ -9,9 +9,15 @@
 //!
 //! A remote end is named by its x-only public key, never by a node address
 //! or an `fd00::/8` prefix; the adapter derives addresses itself.
+//!
+//! Two channels carry the messages: down, one unbounded channel of
+//! [`FromMesh`] in the order the node sends them; up, one bounded channel of
+//! the keys the adapter's DNS responder learned.
 
 use secp256k1::XOnlyPublicKey;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{
+    Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
+};
 
 use crate::{Ipv6Address, NodeAddr};
 
@@ -32,6 +38,11 @@ impl PeerKey {
     #[cfg(test)]
     pub(crate) fn any() -> Self {
         Self(crate::Identity::generate().pubkey())
+    }
+
+    /// The peer's x-only public key.
+    pub(crate) fn key(&self) -> XOnlyPublicKey {
+        self.0
     }
 
     /// The peer's IPv6 address: the `fd00::/8` form of the node address its
@@ -85,10 +96,24 @@ pub(crate) enum FromMesh {
     },
 }
 
-/// The adapter's end of the link: the receiver of everything the node sends.
+/// A key the adapter's DNS responder handed to the host, for the node to
+/// register before the host's first packet to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Learned {
+    /// The peer the name resolved to.
+    pub(crate) peer: PeerKey,
+}
+
+/// The node's receiver of the keys the adapter learned.
+pub(crate) type LearnedRx = Receiver<Learned>;
+
+/// The adapter's end of the link: the receiver of everything the node
+/// sends, and the sender of the keys the adapter learned.
 pub(crate) struct MeshLink {
     /// Messages from the node, in order.
     pub(crate) from_mesh: UnboundedReceiver<FromMesh>,
+    /// The keys the adapter learned, to the node.
+    pub(crate) learned: Sender<Learned>,
 }
 
 /// The node's end of the link: the sender of everything the adapter receives.
@@ -109,11 +134,21 @@ impl HostLink {
     }
 }
 
-/// A connected pair of link ends. Only the node's attach step calls this,
-/// so holding a [`MeshLink`] is what an attach was granted.
-pub(crate) fn pair() -> (MeshLink, HostLink) {
+/// A connected pair of link ends, with the node's receiver of the keys the
+/// adapter learned. Only the node's attach step calls this, so holding a
+/// [`MeshLink`] is what an attach was granted. `learned` bounds the channel
+/// up.
+pub(crate) fn pair(learned: usize) -> (MeshLink, HostLink, LearnedRx) {
     let (to_host, from_mesh) = unbounded_channel();
-    (MeshLink { from_mesh }, HostLink { to_host })
+    let (learned_tx, learned_rx) = channel(learned);
+    (
+        MeshLink {
+            from_mesh,
+            learned: learned_tx,
+        },
+        HostLink { to_host },
+        learned_rx,
+    )
 }
 
 #[cfg(test)]

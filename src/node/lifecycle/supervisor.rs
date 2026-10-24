@@ -814,13 +814,16 @@ pub(crate) struct Supervisor {
     /// TUN and DNS child state and handles: our address, the TUN state and
     /// the ICMPv6 rate limiter; the TUN device name, channels, reader and
     /// writer threads and (macOS/FreeBSD) shutdown pipe; and the DNS
-    /// responder task, identity receiver, bound address and peer-alias
-    /// sender.
+    /// responder task, bound address and peer-alias sender.
     pub(in crate::node) ipv6tun: crate::ipv6tun::lifecycle::Handles,
 
     /// The node's end of the link to the IPv6 adapter: `Some` from the
     /// attach in `start()` until teardown drops the packet channels.
     pub(in crate::node) host_link: Option<crate::ipv6tun::link::HostLink>,
+
+    /// The node's receiver of the keys the adapter learned: `Some` from the
+    /// attach until the receive loop takes it, or teardown drops it.
+    pub(in crate::node) learned_rx: Option<crate::ipv6tun::link::LearnedRx>,
 
     /// Sender for each UDP listen socket the transport spawn binds — its raw
     /// fd and the instance name it was configured under — armed by
@@ -899,6 +902,7 @@ impl Supervisor {
             packet_tx: None,
             ipv6tun,
             host_link: None,
+            learned_rx: None,
             #[cfg(unix)]
             udp_fd_tx: None,
             nostr_rendezvous: crate::nostr::RendezvousDriver::default(),

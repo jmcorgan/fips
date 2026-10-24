@@ -4,8 +4,10 @@
 //! node answers in line: who it is, the payload limit it last published, the
 //! replay of every per-peer limit the adapter asked for, and the end of the
 //! replay. From then on the node pushes the node-wide limit whenever it moves
-//! and each per-peer change as the path MTU map makes it. The link ends at
-//! the teardown step that drops the packet channels.
+//! and each per-peer change as the path MTU map makes it. Up the link come
+//! the keys the adapter's DNS responder handed to the host, which the
+//! receive loop registers. The link ends at the teardown step that drops the
+//! packet channels.
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -56,7 +58,7 @@ impl Node {
         let Attach { port, feeds } = self.supervisor.ipv6tun.attach_request();
         // Port 256 is the adapter's by construction; nothing else can ask.
         debug_assert!(port.is_none_or(|p| p == link::IPV6_PORT));
-        let (mesh_link, host_link) = link::pair();
+        let (mesh_link, host_link, learned) = link::pair(self.config().node.buffers.dns_channel);
         host_link.send(FromMesh::Attached {
             node: PeerKey::new(self.identity().pubkey()),
             payload_limit: self.node_mtu.published.load(Ordering::Relaxed),
@@ -68,6 +70,7 @@ impl Node {
         }
         host_link.send(FromMesh::Synced);
         self.supervisor.host_link = Some(host_link);
+        self.supervisor.learned_rx = Some(learned);
         self.supervisor.ipv6tun.attached(mesh_link);
     }
 
@@ -75,6 +78,7 @@ impl Node {
     /// on it: its receiver closes once both senders go.
     pub(in crate::node) async fn detach_host(&mut self) {
         self.supervisor.host_link = None;
+        self.supervisor.learned_rx = None;
         // The map's sender must go even if a writer panicked holding the
         // lock, or the adapter's task would never see the link close.
         self.path_mtu_lookup
