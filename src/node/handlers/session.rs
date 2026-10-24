@@ -1533,6 +1533,9 @@ impl Node {
             }
         };
 
+        // Session MMP runs only on an established session, so its peer has a
+        // proven key.
+        let peer_key = entry.key().map(crate::ipv6tun::link::PeerKey::new);
         let Some(mmp) = entry.mmp_mut() else {
             return;
         };
@@ -1571,8 +1574,8 @@ impl Node {
             "Path MTU changed via notification"
         );
 
-        // Mirror the new effective MTU into the Ipv6Address-keyed lookup used
-        // by the TUN reader/writer at TCP MSS clamp time. Without this, new
+        // Mirror the new effective MTU into the Ipv6Address-keyed lookup, which
+        // publishes it to the IPv6 adapter's TCP MSS clamp. Without this, new
         // TCP flows opened on a path the proactive end-to-end echo has
         // already tightened keep getting clamped by the staler discovery-
         // time value until a reactive MtuExceeded happens to fire. Keep the
@@ -1605,7 +1608,12 @@ impl Node {
                         // path takes the unchanged early-return above and never
                         // rewrites the entry, so an expiring one would vanish
                         // and stay gone.
-                        map.insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
+                        let held = crate::node::path_mtu::PathMtuEntry::held(mtu);
+                        debug_assert!(peer_key.is_some(), "a session path MTU with no peer key");
+                        match peer_key {
+                            Some(key) => map.insert(fips_addr, key, held),
+                            None => map.insert_unkeyed(fips_addr, held),
+                        };
                         debug!(
                             dest = %peer_name,
                             fips_addr = %fips_addr,
@@ -2145,8 +2153,8 @@ impl Node {
             entry.clear_sent_wire_len();
         }
 
-        // Mirror the bottleneck into the Ipv6Address-keyed lookup used by
-        // the TUN reader/writer at TCP MSS clamp time. Discovery's reverse-
+        // Mirror the bottleneck into the Ipv6Address-keyed lookup, which
+        // publishes it to the IPv6 adapter's TCP MSS clamp. Discovery's reverse-
         // path response can carry a value too generous for the actual
         // forward path; the reactive signal from a forwarder that actually
         // dropped a packet is authoritative for "what fits". Keep the
@@ -2155,6 +2163,13 @@ impl Node {
         // The admission gate above, not this block, is what restricts which
         // addresses can be written here.
         let fips_addr = crate::Ipv6Address::from_node_addr(&msg.dest_addr);
+        // The admission gate requires a session this node opened or one a
+        // completion proved, so the destination's key is known either way.
+        let peer_key = self
+            .sessions
+            .get(&msg.dest_addr)
+            .and_then(|e| e.key())
+            .map(crate::ipv6tun::link::PeerKey::new);
         match self.path_mtu_lookup.write() {
             Ok(mut map) => {
                 // Read existing, decide, and apply the write under one guard so
@@ -2180,7 +2195,12 @@ impl Node {
                         // re-sends the signal once traffic is sized to fit, so a
                         // deadline would drop a genuine persistent bottleneck
                         // and start the next flow at the conservative ceiling.
-                        map.insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
+                        let held = crate::node::path_mtu::PathMtuEntry::held(mtu);
+                        debug_assert!(peer_key.is_some(), "a session path MTU with no peer key");
+                        match peer_key {
+                            Some(key) => map.insert(fips_addr, key, held),
+                            None => map.insert_unkeyed(fips_addr, held),
+                        };
                         debug!(
                             dest = %peer_name,
                             fips_addr = %fips_addr,

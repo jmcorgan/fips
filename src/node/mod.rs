@@ -583,21 +583,17 @@ pub struct Node {
     /// Address -> coordinates cache (from session setup and discovery).
     coord_cache: CoordCache,
     /// Per-destination path MTU lookup, keyed by Ipv6Address (mirrors
-    /// `coord_cache.entries[*].path_mtu`). Sync read-only access from
-    /// the TUN reader/writer threads at TCP MSS clamp time so the
-    /// SYN/SYN-ACK clamp can use the smaller of the local-egress floor
-    /// and the learned per-destination path MTU.
+    /// `coord_cache.entries[*].path_mtu`). Every change is published to the
+    /// IPv6 adapter, whose SYN/SYN-ACK clamp uses the smaller of the
+    /// local-egress floor and the learned per-destination path MTU.
     path_mtu_lookup: crate::node::path_mtu::PathMtuLookup,
-    /// Node-global TCP MSS ceiling, shared live with the TUN reader and writer
-    /// threads and recomputed whenever the set of *bound* transports changes.
+    /// What this node has published to the IPv6 adapter of its node-wide
+    /// payload limit, and the TCP MSS ceiling it last logged.
     ///
-    /// Sits beside `path_mtu_lookup` because it answers the other half of the
-    /// same question at the same moment: that map supplies the per-destination
-    /// ceiling, this supplies the local-egress one, and the clamp takes the
-    /// smaller. Both have to be read live — a transport that binds after start
-    /// can be the narrow one, and one that unbinds can be the reason the node
-    /// was clamped at all.
-    tun_mss_ceiling: crate::ipv6tun::tun::MssCeiling,
+    /// Sits beside `path_mtu_lookup` because the two answer halves of the
+    /// same question: that map supplies the per-destination limit, this the
+    /// local-egress one, and the adapter's clamp takes the smaller.
+    node_mtu: handlers::host_link::NodeMtuFeed,
     /// Which transport last supplied a *link seed* into `path_mtu_lookup`,
     /// per destination.
     ///
@@ -1182,13 +1178,11 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_lookup: Arc::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
-            tun_mss_ceiling: Arc::new(std::sync::atomic::AtomicU16::new(
-                crate::ipv6tun::icmp::mss_ceiling(crate::ipv6tun::tun::IPV6_MIN_MTU),
-            )),
+            node_mtu: handlers::host_link::NodeMtuFeed::new(),
             path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
             netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
@@ -1366,13 +1360,11 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_lookup: Arc::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
-            tun_mss_ceiling: Arc::new(std::sync::atomic::AtomicU16::new(
-                crate::ipv6tun::icmp::mss_ceiling(crate::ipv6tun::tun::IPV6_MIN_MTU),
-            )),
+            node_mtu: handlers::host_link::NodeMtuFeed::new(),
             path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
             netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
@@ -1847,22 +1839,26 @@ impl Node {
         crate::ipv6tun::icmp::effective_ipv6_mtu(self.transport_mtu())
     }
 
-    /// The TCP MSS ceiling the TUN threads are currently clamping to.
+    /// The TCP MSS ceiling last logged at a transport change. The adapter
+    /// holds the same value once it has applied the push that followed, but
+    /// a tick push can move the adapter's ceiling without moving this one.
     #[cfg(test)]
     pub(crate) fn tun_mss_ceiling(&self) -> u16 {
-        self.tun_mss_ceiling
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.node_mtu.logged()
     }
 
-    /// Recompute the shared TUN MSS ceiling from the currently bound
-    /// transports, and log it if it moved.
+    /// Publish the node-wide payload limit to the IPv6 adapter after a
+    /// change to the bound transports, and log the TCP MSS ceiling if it
+    /// moved.
     ///
     /// Called wherever the bound set can change — the presence edges that
     /// bind and unbind an interface-bound transport, a child exiting, a NAT
     /// traversal transport being adopted (and removed again when its
     /// handshake cannot start), and an unused bootstrap transport being
-    /// dropped — so the clamp the TUN threads apply keeps agreeing with the
-    /// `effective_ipv6_mtu` this node reports in `show_status`.
+    /// dropped — and just before the TUN threads start, so the clamp the
+    /// adapter applies keeps agreeing with the `effective_ipv6_mtu` this
+    /// node reports in `show_status`. The receive loop's tick publishes too,
+    /// which covers a change none of these sites sees.
     ///
     /// Moves in **both** directions, deliberately. A narrow interface
     /// appearing has to tighten the ceiling or the clamp is wrong for
@@ -1875,10 +1871,8 @@ impl Node {
     /// Existing flows are not re-clamped — MSS is negotiated per connection
     /// at SYN time, so a change applies to connections opened after it.
     pub(crate) fn refresh_tun_mss_ceiling(&self) {
-        use std::sync::atomic::Ordering;
-
         let ceiling = crate::ipv6tun::icmp::mss_ceiling(self.transport_mtu());
-        let previous = self.tun_mss_ceiling.swap(ceiling, Ordering::Relaxed);
+        let previous = self.node_mtu.swap_logged(ceiling);
         if previous != ceiling {
             tracing::info!(
                 previous_max_mss = previous,
@@ -1887,6 +1881,7 @@ impl Node {
                 "Node egress MTU changed; TCP MSS ceiling updated for new connections"
             );
         }
+        self.publish_mtu();
     }
 
     /// How many bytes the effective IPv6 MTU falls short of the IPv6
@@ -3610,6 +3605,19 @@ impl Node {
             .and_then(|map| map.get(fips_addr).copied())
     }
 
+    /// The per-peer limits the IPv6 adapter would hold for this node's map,
+    /// built from the map directly, for tests of the clamp that do not
+    /// attach an adapter.
+    #[cfg(test)]
+    pub(crate) fn test_replica(&self) -> crate::ipv6tun::core::PathMtuReplica {
+        let map = self.path_mtu_lookup.read().unwrap();
+        let limits = map
+            .iter()
+            .map(|(addr, e)| (*addr, crate::node::path_mtu::payload_limit(e.mtu)))
+            .collect();
+        std::sync::Arc::new(std::sync::RwLock::new(limits))
+    }
+
     /// Write a path_mtu_lookup entry directly (for tests that pre-seed the map).
     ///
     /// Writes a held entry, which is what a locally derived seed or a
@@ -3619,7 +3627,7 @@ impl Node {
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_insert(&self, fips_addr: crate::Ipv6Address, mtu: u16) {
         if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
+            map.insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
         }
     }
 
@@ -3633,7 +3641,7 @@ impl Node {
         at_ms: u64,
     ) {
         if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert(
+            map.insert_unkeyed(
                 fips_addr,
                 crate::node::path_mtu::PathMtuEntry::learned(mtu, at_ms),
             );
@@ -3724,7 +3732,8 @@ impl Node {
             && let Some(transport_id) = peer.transport_id()
             && let Some(transport_addr) = peer.current_addr().cloned()
         {
-            self.seed_path_mtu_for_link_peer(addr, transport_id, &transport_addr);
+            let key = crate::ipv6tun::link::PeerKey::new(peer.pubkey());
+            self.seed_path_mtu_for_link_peer(addr, key, transport_id, &transport_addr);
         }
     }
 

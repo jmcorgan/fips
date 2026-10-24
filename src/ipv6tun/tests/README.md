@@ -15,6 +15,19 @@ can reach the source file's private items.
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
   and one known residual case pinned as a test.
+- `core.rs` tests `../core.rs`: that the payload limits the node publishes
+  give the same TCP MSS ceiling as the transport MTU they come from, for
+  every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
+  packet fits either way, and the limit reports 33); the state before any
+  attach; and how each message from the node changes the shared state.
+- `link.rs` tests `../link.rs`: a peer key names the address its node
+  address has, and every message field is of a type allowed to cross the
+  link. The second is a scan of the source of `../link.rs` itself that skips
+  comments, attributes, and string and char literals (raw strings included),
+  then reads every struct and enum whatever its visibility, with named, tuple
+  and unit fields; forged definitions of each shape, of one placed after a
+  literal holding a lone quote, and of one placed after an attribute whose
+  literal holds an unbalanced bracket, show the scan refuses a node address.
 - `tun.rs` tests `../tun.rs` as module `name_tests`: TUN startup never
   deletes, downs or takes over an existing interface named `tun.name`. A
   link of any kind but TUN is refused and left untouched, a TUN another
@@ -28,14 +41,35 @@ can reach the source file's private items.
   decision (`existing_link_verdict`) and, in root network-namespace tests,
   `TunDevice::create` and teardown themselves.
 
+- `bsdnet.rs` tests `../bsdnet.rs` (macOS and FreeBSD only) as module `tests`:
+  the routing message layout and socket-address padding, the kernel's error
+  codes surfacing for calls it refuses (an unknown sysctl name or interface,
+  a route add the kernel rejects), and, as root, a route added twice through
+  one interface being accepted, one present through another interface being
+  refused with the other interface named, a TUN device created twice in turn
+  coming up with its address, MTU and `fd00::/8` route both times and going
+  down at shutdown with its other flags kept, and a configured device set up
+  a second time accepting its own address and route.
+- `winnet.rs` tests `../winnet.rs` (Windows only) as module `tests`: IP
+  Helper's Win32 codes surfacing for an interface that does not exist, a
+  stop with no `FIPS` adapter present succeeding, and, as Administrator, a route and an address added twice on the loopback
+  interface being accepted, the loopback's IPv6 MTU being changed through its
+  interface row, and a Wintun adapter created twice in turn coming up with
+  its address, MTU and `fd00::/8` route (this one needs `wintun.dll` on the
+  DLL search path).
+
 ## Rules
 
 - Older tests in `src/ipv6tun/` stay in their source files' inline `mod tests`
   blocks; new tests go here. A file that already has an inline `tests` module
   declares its file here under a different module name.
-- The network-namespace tests need root. They are `#[ignore]`d, so the normal
+- The network-namespace tests, and the macOS and FreeBSD tests that change
+  routes or create a device, need root. They are `#[ignore]`d, so the normal
   test run skips them; build with `cargo test --lib --no-run` and run the test
-  binary under `sudo` with `--ignored`. They share the namespace harness
+  binary under `sudo` with `--ignored`. The FreeBSD package workflow and the
+  macOS unit-test job run the `bsdnet` tests that way, with
+  `--include-ignored`, and the Windows unit-test job, whose runner is
+  elevated, the `winnet` ones. They share the namespace harness
   (`ForgedSourceNetns`) with the inline tests in `../dns.rs`, which exposes it
   as `pub(super)`. The generic parts, running a setup command
   (`testutil::run_ok`) and running code inside a named namespace

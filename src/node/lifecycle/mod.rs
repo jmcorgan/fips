@@ -2154,6 +2154,10 @@ impl Node {
             // messages can be sent before we start accepting packets.
             if !peer_connect_done && matches!(child, Child::Tun | Child::Dns) {
                 self.initiate_peer_connections().await;
+                // Attach the IPv6 adapter here, after the peers connect and
+                // before its device or DNS responder starts, so what the
+                // node knows is in the adapter before its first packet.
+                self.attach_host();
                 peer_connect_done = true;
             }
 
@@ -2303,17 +2307,15 @@ impl Node {
                     let config = &self.context.config;
                     match self.supervisor.ipv6tun.open_tun(&config.tun, address).await {
                         Some(device) => {
-                            // Seed the shared MSS ceiling from whatever is bound
-                            // right now. Both TUN threads read it live from here
-                            // on, so a transport binding or unbinding later moves
-                            // the clamp instead of leaving it at this instant's
-                            // value — see `crate::ipv6tun::tun::MssCeiling`.
+                            // Publish the node-wide limit for whatever is bound
+                            // right now. Starting the threads applies it first,
+                            // and each later push moves the adapter's ceiling, so
+                            // a transport binding or unbinding moves the clamp
+                            // instead of leaving it at this instant's value; see
+                            // `crate::ipv6tun::tun::MssCeiling`.
                             self.refresh_tun_mss_ceiling();
                             self.warn_shortfall();
                             let threads = TunThreads {
-                                ceiling: self.tun_mss_ceiling.clone(),
-                                effective: self.effective_ipv6_mtu(),
-                                path_mtu: self.path_mtu_lookup.clone(),
                                 channel: self.config().node.buffers.tun_channel,
                                 exit_tx: self.child_exit_tx.clone(),
                             };
@@ -2376,7 +2378,11 @@ impl Node {
         }
         if !peer_connect_done {
             self.initiate_peer_connections().await;
+            self.attach_host();
         }
+        // Whatever the adapter has not taken by now (no TUN threads came up)
+        // is applied by its own task from here on.
+        self.supervisor.ipv6tun.run_link();
 
         // Publish the FSM-resolved start-completion state
         // instead of the old unconditional `Running`.
@@ -2543,6 +2549,7 @@ impl Node {
             if !packet_taken && matches!(child, Child::Tun) {
                 self.supervisor.packet_tx.take();
                 self.packet_rx.take();
+                self.detach_host().await;
                 packet_taken = true;
             }
 
@@ -2609,6 +2616,7 @@ impl Node {
         if !packet_taken {
             self.supervisor.packet_tx.take();
             self.packet_rx.take();
+            self.detach_host().await;
         }
 
         // The medium-change detector is a bare task with no teardown protocol
@@ -2696,9 +2704,10 @@ impl Node {
         }
         if saw_edge {
             // A bind or unbind changes which transports are bound, and so the
-            // node's egress MTU floor. During bring-up this runs before the
-            // TUN threads exist, which is exactly when it must: they read the
-            // ceiling this leaves behind.
+            // node's egress MTU floor. During bring-up a transport's edges
+            // are drained before the adapter attaches, and the attach hands
+            // the adapter the limit this leaves published; an edge after the
+            // attach is pushed to it.
             self.refresh_tun_mss_ceiling();
         }
         published

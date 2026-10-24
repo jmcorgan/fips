@@ -2518,6 +2518,16 @@ async fn test_transport_mtu_min_with_single_operational() {
 // path_mtu_lookup, causing the SYN-time TCP MSS clamp to fall back to the
 // global ceiling.
 
+/// A peer's node address and the key it derives from, for tests that seed
+/// the path MTU map, which checks that the two agree.
+fn seed_peer() -> (NodeAddr, crate::ipv6tun::link::PeerKey) {
+    let identity = crate::Identity::generate();
+    (
+        *identity.node_addr(),
+        crate::ipv6tun::link::PeerKey::new(identity.pubkey()),
+    )
+}
+
 #[tokio::test]
 async fn test_seed_path_mtu_inserts_when_empty() {
     let mut node = make_node();
@@ -2528,11 +2538,11 @@ async fn test_seed_path_mtu_inserts_when_empty() {
     let udp = make_udp_transport_with_mtu(1, 1452).await;
     node.transports.insert(TransportId::new(1), udp);
 
-    let peer_addr = make_node_addr(0xAA);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.2:2121");
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
     let stored = node
         .path_mtu_lookup
@@ -2568,11 +2578,11 @@ async fn test_seeded_narrow_link_mtu_reaches_the_clamp_as_a_tight_ceiling() {
     let udp = make_udp_transport_with_mtu(1, 240).await;
     node.transports.insert(TransportId::new(1), udp);
 
-    let peer_addr = make_node_addr(0xEE);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.6:2121");
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
     assert_eq!(
         node.path_mtu_lookup
@@ -2588,7 +2598,7 @@ async fn test_seeded_narrow_link_mtu_reaches_the_clamp_as_a_tight_ceiling() {
     // every full-size segment would be refused by the transport with no
     // feedback to the TCP stack.
     assert_eq!(
-        crate::ipv6tun::tun::per_flow_max_mss(&node.path_mtu_lookup, fips_addr.as_bytes(), 1360),
+        crate::ipv6tun::tun::per_flow_max_mss(&node.test_replica(), fips_addr.as_bytes(), 1360),
         103,
         "the clamp must honour the seeded link MTU, not fall back to 1143"
     );
@@ -2608,7 +2618,7 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     let udp = make_udp_transport_with_mtu(1, 1452).await;
     node.transports.insert(TransportId::new(1), udp);
 
-    let peer_addr = make_node_addr(0xBB);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.3:2121");
 
@@ -2617,9 +2627,9 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     node.path_mtu_lookup
         .write()
         .unwrap()
-        .insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1280));
+        .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1280));
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
     let stored = node
         .path_mtu_lookup
@@ -2648,7 +2658,7 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
     let udp = make_udp_transport_with_mtu(1, 1280).await;
     node.transports.insert(TransportId::new(1), udp);
 
-    let peer_addr = make_node_addr(0xCC);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.4:2121");
 
@@ -2656,9 +2666,9 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
     node.path_mtu_lookup
         .write()
         .unwrap()
-        .insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1452));
+        .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1452));
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
     let stored = node
         .path_mtu_lookup
@@ -2680,12 +2690,12 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
 #[tokio::test]
 async fn test_seed_path_mtu_noop_for_unknown_transport() {
     let node = make_node();
-    let peer_addr = make_node_addr(0xDD);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.5:2121");
 
     // No transport registered — call must be a no-op, not panic.
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(99), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(99), &transport_addr);
 
     let map = node.path_mtu_lookup.read().unwrap();
     assert!(
@@ -2713,12 +2723,12 @@ async fn test_seed_path_mtu_reseeds_when_peer_moves_to_wider_transport() {
     node.transports.insert(TransportId::new(1), narrow);
     node.transports.insert(TransportId::new(2), wide);
 
-    let peer_addr = make_node_addr(0xE1);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let narrow_addr = TransportAddr::from_string("10.0.0.6:2121");
     let wide_addr = TransportAddr::from_string("10.0.0.7:2121");
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &narrow_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &narrow_addr);
     assert_eq!(
         node.path_mtu_lookup
             .read()
@@ -2730,7 +2740,7 @@ async fn test_seed_path_mtu_reseeds_when_peer_moves_to_wider_transport() {
     );
 
     // The peer moves to the wider transport.
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(2), &wide_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(2), &wide_addr);
     assert_eq!(
         node.path_mtu_lookup
             .read()
@@ -2761,19 +2771,19 @@ async fn test_seed_path_mtu_discards_learned_value_from_abandoned_link() {
     node.transports.insert(TransportId::new(1), narrow);
     node.transports.insert(TransportId::new(2), wide);
 
-    let peer_addr = make_node_addr(0xE2);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let narrow_addr = TransportAddr::from_string("10.0.0.8:2121");
     let wide_addr = TransportAddr::from_string("10.0.0.9:2121");
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &narrow_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &narrow_addr);
     // Reactive MtuExceeded tightens further, still on the narrow link.
     node.path_mtu_lookup
         .write()
         .unwrap()
-        .insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(900));
+        .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(900));
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(2), &wide_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(2), &wide_addr);
     assert_eq!(
         node.path_mtu_lookup
             .read()
@@ -2802,19 +2812,19 @@ async fn test_seed_path_mtu_keeps_tighter_value_when_reseeding_same_transport() 
     let udp = make_udp_transport_with_mtu(1, 1452).await;
     node.transports.insert(TransportId::new(1), udp);
 
-    let peer_addr = make_node_addr(0xE3);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.10:2121");
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     // Reactive learning tightens the same link.
     node.path_mtu_lookup
         .write()
         .unwrap()
-        .insert(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1200));
+        .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1200));
 
     // Re-promotion on the same transport.
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     assert_eq!(
         node.path_mtu_lookup
             .read()
@@ -2846,11 +2856,11 @@ async fn test_releasing_a_path_drops_the_seeding_transport_record_with_the_value
     let udp = make_udp_transport_with_mtu(1, 1452).await;
     node.transports.insert(TransportId::new(1), udp);
 
-    let peer_addr = make_node_addr(0xE4);
+    let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.11:2121");
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     assert_eq!(
         node.path_mtu_seeded_by
             .read()
@@ -2902,6 +2912,7 @@ async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
 
     let identity = make_peer_identity();
     let peer_addr = *identity.node_addr();
+    let peer_key = crate::ipv6tun::link::PeerKey::new(identity.pubkey());
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.12:2121");
 
@@ -2909,7 +2920,7 @@ async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
     peer.set_current_addr(TransportId::new(1), transport_addr.clone());
     node.peers.insert(peer_addr, peer);
 
-    node.seed_path_mtu_for_link_peer(&peer_addr, TransportId::new(1), &transport_addr);
+    node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     node.path_mtu_lookup_release(&peer_addr);
 
     assert_eq!(

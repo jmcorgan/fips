@@ -409,6 +409,25 @@ with v0.5.x or earlier peers.
 
 ### Changed
 
+- On Windows the TUN adapter's address, IPv6 MTU and `fd00::/8` route are set
+  through the IP Helper API instead of `netsh`, and a failure of any of them now
+  fails TUN setup, so the node continues without a TUN as on the other
+  platforms instead of reporting an active TUN that lacks its address, route or
+  MTU. An address or route already present is recognised by its error code,
+  whatever the system's language. Setup waits up to five seconds for a new
+  adapter to appear in the IPv6 stack instead of a fixed half second, and a
+  failed route removal at stop is logged instead of ignored.
+
+- On macOS and FreeBSD the TUN interface is configured by direct kernel calls
+  (interface ioctls, `sysctlbyname` and the routing socket) instead of by
+  running `ifconfig`, `route` and `sysctl`, so whether a step failed is decided
+  by the kernel's error code, and a failure names the step and carries the
+  system's message. A `fd00::/8` route already present through the TUN
+  interface itself is accepted on both platforms (macOS used to fail TUN setup
+  on it); one already present through a different interface now fails TUN
+  setup on both (FreeBSD used to accept it). The MTU is no longer set a second
+  time after the `tun` crate has set it.
+
 - The debug lines for handshake msg1 and msg2 handling, link promotion and
   cross-connection resolution at msg2 now say where a message came from and
   which handshake it belongs to. They carry the transport and address the

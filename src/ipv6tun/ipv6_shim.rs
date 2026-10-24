@@ -25,6 +25,11 @@ const IPV6_SHIM_RESIDUAL_SIZE: usize = 6;
 /// IPv6 header size.
 const IPV6_HEADER_SIZE: usize = 40;
 
+/// How many bytes shorter a packet is once compressed: the 40-byte IPv6
+/// header becomes the format byte and the residual fields. An IPv6 packet of
+/// `n` bytes travels as a payload of `n - HEADER_SAVING`.
+pub(crate) const HEADER_SAVING: u16 = (IPV6_HEADER_SIZE - 1 - IPV6_SHIM_RESIDUAL_SIZE) as u16;
+
 /// Compress an IPv6 packet for the shim.
 ///
 /// Strips source/destination addresses (32 bytes) and payload length (2 bytes).

@@ -12,8 +12,6 @@ use crate::identity::NodeAddr;
 use crate::native::link::{self, NativeMessage, Outcome, Served};
 use crate::native::registry::FlowKey;
 use crate::node::Node;
-use crate::proto::framing::FIPS_OVERHEAD;
-use crate::proto::fsp::wire::FSP_PORT_HEADER_SIZE;
 use secp256k1::XOnlyPublicKey;
 use tracing::debug;
 
@@ -98,9 +96,7 @@ impl Node {
     /// is 40 bytes more than the same application data gets through the IPv6
     /// shim, which spends them on a header the application never sees.
     pub(in crate::node) fn native_max_payload(&self) -> u16 {
-        self.transport_mtu()
-            .saturating_sub(FIPS_OVERHEAD)
-            .saturating_sub(FSP_PORT_HEADER_SIZE as u16)
+        crate::node::path_mtu::payload_limit(self.transport_mtu())
     }
 
     /// Send one datagram a native API client wrote to its descriptor.

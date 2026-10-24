@@ -608,16 +608,20 @@ impl Node {
         let gone: std::collections::HashSet<crate::Ipv6Address> = expired.iter().copied().collect();
         let seeds: Vec<(
             crate::NodeAddr,
+            crate::ipv6tun::link::PeerKey,
             crate::transport::TransportId,
             crate::transport::TransportAddr,
         )> = self
             .peers
             .iter()
             .filter(|(addr, _)| gone.contains(&crate::Ipv6Address::from_node_addr(addr)))
-            .filter_map(|(addr, p)| Some((*addr, p.transport_id()?, p.current_addr()?.clone())))
+            .filter_map(|(addr, p)| {
+                let key = crate::ipv6tun::link::PeerKey::new(p.pubkey());
+                Some((*addr, key, p.transport_id()?, p.current_addr()?.clone()))
+            })
             .collect();
-        for (addr, tid, taddr) in seeds {
-            self.seed_path_mtu_for_link_peer(&addr, tid, &taddr);
+        for (addr, key, tid, taddr) in seeds {
+            self.seed_path_mtu_for_link_peer(&addr, key, tid, &taddr);
         }
 
         debug!(

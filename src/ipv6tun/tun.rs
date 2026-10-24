@@ -6,9 +6,10 @@
 //!
 //! Platform-specific implementations:
 //! - Linux: Uses the `tun` crate with `rtnetlink` for interface configuration
-//! - macOS/FreeBSD: Uses the `tun` crate with `ifconfig`/`route` for interface
-//!   configuration
-//! - Windows: Uses the `wintun` crate for TUN device support
+//! - macOS/FreeBSD: Uses the `tun` crate, with interface ioctls and the
+//!   routing socket for interface configuration
+//! - Windows: Uses the `wintun` crate for TUN device support, with IP Helper
+//!   for interface configuration
 
 #[cfg(windows)]
 use crate::Ipv6Address;
@@ -34,35 +35,35 @@ use tracing::{error, warn};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 use tun::Layer;
 
-use crate::node::path_mtu::PathMtuLookup;
+use super::core::PathMtuReplica;
 
-/// The node-global TCP MSS ceiling, shared live with the TUN reader and
-/// writer threads.
+/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
+/// this large, so an MSS derived from it fits anywhere.
 ///
-/// Shared rather than copied because the value it is derived from moves at
-/// runtime. `Node::transport_mtu()` is the minimum across *bound* transports,
-/// and since dynamic interface binding a transport can bind minutes after
-/// start or unbind mid-operation — so a narrow interface appearing must
-/// tighten the clamp, and its departure must release it. Every other consumer
-/// of `transport_mtu()` already reads it live (`show_status`, the snapshot,
-/// the session-layer fragmentation check); these two threads captured a `u16`
-/// at spawn and were the only place left where the daemon could report one
-/// effective MTU and clamp to another.
+/// Three uses, and they must not disagree: the cold-flow fallback in
+/// [`per_flow_max_mss`], and the two seeds of the node-wide limit before any
+/// transport has bound, the adapter's (`MeshState::new`) and the node's record
+/// of what it has published (`NodeMtuFeed::new`). It is also the value
+/// `Node::transport_mtu()` falls back to when nothing is bound.
+pub const IPV6_MIN_MTU: u16 = 1280;
+
+/// The TCP MSS ceiling the IPv6 adapter derives from the node-wide payload
+/// limit, shared live with the TUN reader and writer threads.
 ///
-/// A relaxed load per packet, beside the `PathMtuLookup` read that already
+/// Shared rather than copied because the limit moves at runtime. The node
+/// publishes it from `Node::transport_mtu()`, the minimum across *bound*
+/// transports, and a transport can bind minutes after start or unbind
+/// mid-operation: a narrow interface appearing must tighten the clamp, and
+/// its departure must release it. The adapter stores the ceiling of each
+/// limit the node pushes over the link here (`MeshState` in `core.rs`), so
+/// the threads clamp by the limit last published rather than one captured
+/// at spawn.
+///
+/// A relaxed load per packet, beside the `PathMtuReplica` read that already
 /// happens on the same packet — strictly the cheaper of the two. Ordering is
 /// irrelevant: this is a clamp, and a packet that reads the previous value
 /// during the store is clamped by the ceiling that was correct a microsecond
 /// earlier. The per-flow ceiling has always had that property.
-/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
-/// this large, so an MSS derived from it fits anywhere.
-///
-/// Two callers, and they must not disagree: the cold-flow fallback in
-/// [`per_flow_max_mss`], and the seed for the node's [`MssCeiling`] before any
-/// transport has bound — which is the same value `Node::transport_mtu()` falls
-/// back to when nothing is bound.
-pub const IPV6_MIN_MTU: u16 = 1280;
-
 pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
 
 /// Compute the effective TCP MSS ceiling for a packet given its peer
@@ -88,13 +89,15 @@ pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
 /// per-destination value, which can be larger (when path supports
 /// it) or smaller (when path is observed-tighter than the IPv6 min).
 ///
-/// Path MTU bytes-on-wire to TCP MSS: subtract 77 bytes of FIPS encap
-/// overhead, then 40 bytes IPv6 + 20 bytes TCP headers.
+/// The node reports each learned path as a payload limit; the shim turns it
+/// into an IPv6 MTU, and the 40-byte IPv6 and 20-byte TCP headers come off
+/// that (see [`tcp_mss`](super::core::tcp_mss)).
 pub(crate) fn per_flow_max_mss(
-    lookup: &PathMtuLookup,
+    lookup: &PathMtuReplica,
     addr_bytes: &[u8],
     global_max_mss: u16,
 ) -> u16 {
+    use super::core::tcp_mss;
     use super::icmp::mss_ceiling;
 
     // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
@@ -129,7 +132,7 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
-    let Some(entry) = map.get(&fips_addr).copied() else {
+    let Some(payload_limit) = map.get(&fips_addr).copied() else {
         trace!(
             fips_addr = %fips_addr,
             global_max_mss,
@@ -139,8 +142,7 @@ pub(crate) fn per_flow_max_mss(
         );
         return empty_lookup_ceiling;
     };
-    let path_mtu = entry.mtu;
-    let path_max_mss = mss_ceiling(path_mtu);
+    let path_max_mss = tcp_mss(payload_limit);
     // The actionable floor deliberately does not apply here. Every value a
     // remote party supplies is refused before it can reach this map, at the
     // path MTU state machine, the reactive `MtuExceeded` write and the
@@ -154,7 +156,7 @@ pub(crate) fn per_flow_max_mss(
     // flow would stall with no feedback.
     //
     // What no provenance rescues is the arithmetic degenerating. At a stored
-    // MTU of 137 or less not one payload byte fits alongside the IPv6 and TCP
+    // MTU of 137 or less (a payload limit of 27 or less) not one payload byte fits alongside the IPv6 and TCP
     // headers, and `clamp_tcp_mss` refuses a ceiling of zero, which would
     // leave the SYN carrying the kernel-natural MSS instead. Fall back to the
     // conservative ceiling there; any positive result is by construction the
@@ -167,7 +169,7 @@ pub(crate) fn per_flow_max_mss(
     if path_max_mss == 0 {
         trace!(
             fips_addr = %fips_addr,
-            path_mtu,
+            payload_limit,
             empty_lookup_ceiling,
             "per_flow_max_mss: stored path_mtu leaves no room for a TCP payload byte, using conservative ceiling"
         );
@@ -176,7 +178,7 @@ pub(crate) fn per_flow_max_mss(
     let result = std::cmp::min(global_max_mss, path_max_mss);
     trace!(
         fips_addr = %fips_addr,
-        path_mtu,
+        payload_limit,
         path_max_mss,
         global_max_mss,
         result,
@@ -431,16 +433,17 @@ impl TunDevice {
     /// can happen independently on separate threads. Returns the writer and
     /// a channel sender for submitting packets to be written.
     ///
-    /// `max_mss` is the global TCP MSS ceiling derived from the local
-    /// `transport_mtu()` floor, shared live so a transport that binds or
+    /// `max_mss` is the adapter's TCP MSS ceiling, derived from the
+    /// node-wide payload limit and shared live so a transport that binds or
     /// unbinds after start moves it (see [`MssCeiling`]). `path_mtu_lookup`
-    /// is a read-only handle to the per-destination path MTU map populated by
-    /// discovery; the writer reads both on each inbound SYN to compute a
-    /// per-flow ceiling that honors learned narrow paths through the mesh.
+    /// is the adapter's copy of the per-peer payload limits, filled from the
+    /// node's messages on the link; the writer reads both on each inbound
+    /// SYN to compute a per-flow ceiling that honors learned narrow paths
+    /// through the mesh.
     pub fn create_writer(
         &self,
         max_mss: MssCeiling,
-        path_mtu_lookup: PathMtuLookup,
+        path_mtu_lookup: PathMtuReplica,
     ) -> Result<(TunWriter, TunTx), TunError> {
         let fd = self.device.as_raw_fd();
 
@@ -516,7 +519,7 @@ pub struct TunWriter {
     rx: mpsc::Receiver<Vec<u8>>,
     name: String,
     max_mss: MssCeiling,
-    path_mtu_lookup: PathMtuLookup,
+    path_mtu_lookup: PathMtuReplica,
 }
 
 #[cfg(unix)]
@@ -628,7 +631,7 @@ pub fn run_tun_reader(
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
     max_mss: MssCeiling,
-    path_mtu_lookup: PathMtuLookup,
+    path_mtu_lookup: PathMtuReplica,
 ) {
     let (name, mut buf) = tun_reader_setup(device.name(), mtu, &max_mss);
 
@@ -691,7 +694,7 @@ pub fn run_tun_reader(
     tun_tx: TunTx,
     outbound_tx: TunOutboundTx,
     max_mss: MssCeiling,
-    path_mtu_lookup: PathMtuLookup,
+    path_mtu_lookup: PathMtuReplica,
     shutdown_fd: std::os::unix::io::RawFd,
 ) {
     let _shutdown_fd = ShutdownFd(shutdown_fd);
@@ -808,7 +811,7 @@ fn handle_tun_packet(
     our_addr: Ipv6Address,
     tun_tx: &TunTx,
     outbound_tx: &TunOutboundTx,
-    path_mtu_lookup: &PathMtuLookup,
+    path_mtu_lookup: &PathMtuReplica,
 ) -> bool {
     use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
     use super::tcp_mss::{clamp_tcp_mss, recalculate_l4_checksum};
@@ -938,8 +941,15 @@ mod windows_tun {
     use crate::TunConfig;
     use std::sync::Arc;
 
-    /// The Windows adapter name visible in network settings and used in netsh commands.
+    /// The Windows adapter name visible in network settings.
     pub(crate) const ADAPTER_NAME: &str = "FIPS";
+
+    /// The mesh address space routed into the adapter: `fd00::/8`.
+    const MESH_PREFIX: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8);
+
+    /// How long a new adapter may take to appear in the IPv6 stack before
+    /// setup gives up.
+    const IPV6_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// Wintun ring buffer capacity in bytes. Must be a power of 2 between
     /// 0x20000 (128 KiB) and 0x4000000 (64 MiB). 2 MiB balances memory
@@ -957,6 +967,8 @@ mod windows_tun {
     pub struct TunDevice {
         session: Arc<wintun::Session>,
         _adapter: Arc<wintun::Adapter>,
+        /// The adapter's LUID, the key of its IP Helper rows.
+        luid: u64,
         name: String,
         mtu: u16,
         address: Ipv6Address,
@@ -967,7 +979,7 @@ mod windows_tun {
         ///
         /// Loads the wintun DLL, creates (or reopens) a named adapter, starts
         /// a session with a 2 MiB ring buffer, and configures the interface
-        /// via netsh. Requires Administrator privileges.
+        /// through IP Helper. Requires Administrator privileges.
         pub async fn create(config: &TunConfig, address: Ipv6Address) -> Result<Self, TunError> {
             let name = config.name();
             let mtu = config.mtu();
@@ -1006,14 +1018,14 @@ mod windows_tun {
 
             let session = Arc::new(session);
 
-            // Configure the IPv6 address and route via netsh.
-            // Use the adapter name (ADAPTER_NAME) not the tunnel type name.
-            let ipv6_addr = address.to_ipv6();
-            configure_windows_interface(ADAPTER_NAME, ipv6_addr, mtu).await?;
+            // SAFETY: every bit pattern of the LUID union is a valid u64.
+            let luid = unsafe { adapter.get_luid().Value };
+            configure_windows_interface(luid, address.to_ipv6(), mtu).await?;
 
             Ok(Self {
                 session,
                 _adapter: adapter,
+                luid,
                 name: name.to_string(),
                 mtu,
                 address,
@@ -1056,18 +1068,7 @@ mod windows_tun {
         /// The wintun adapter and session are cleaned up when dropped.
         pub async fn shutdown(&self) -> Result<(), TunError> {
             debug!(name = %self.name, "Shutting down TUN device");
-            let _ = tokio::process::Command::new("netsh")
-                .args([
-                    "interface",
-                    "ipv6",
-                    "delete",
-                    "route",
-                    "fd00::/8",
-                    &format!("interface={}", ADAPTER_NAME),
-                ])
-                .output()
-                .await;
-            Ok(())
+            drop_route(self.luid)
         }
 
         /// Create a TunWriter for this device.
@@ -1076,14 +1077,15 @@ mod windows_tun {
         /// packets independently. Returns the writer and a channel sender for
         /// submitting packets to be written.
         ///
-        /// `max_mss` is the global TCP MSS ceiling, shared live so a transport
-        /// that binds or unbinds after start moves it (see [`MssCeiling`]).
-        /// `path_mtu_lookup` is a read-only handle to per-destination path MTU
-        /// learned via discovery.
+        /// `max_mss` is the adapter's TCP MSS ceiling, shared live so a
+        /// transport that binds or unbinds after start moves it (see
+        /// [`MssCeiling`]). `path_mtu_lookup` is the adapter's copy of the
+        /// per-peer payload limits, filled from the node's messages on the
+        /// link.
         pub fn create_writer(
             &self,
             max_mss: MssCeiling,
-            path_mtu_lookup: PathMtuLookup,
+            path_mtu_lookup: PathMtuReplica,
         ) -> Result<(TunWriter, TunTx), TunError> {
             let (tx, rx) = mpsc::channel();
             Ok((
@@ -1121,7 +1123,7 @@ mod windows_tun {
         rx: mpsc::Receiver<Vec<u8>>,
         name: String,
         max_mss: MssCeiling,
-        path_mtu_lookup: PathMtuLookup,
+        path_mtu_lookup: PathMtuReplica,
     }
 
     impl TunWriter {
@@ -1197,7 +1199,7 @@ mod windows_tun {
         tun_tx: TunTx,
         outbound_tx: TunOutboundTx,
         max_mss: MssCeiling,
-        path_mtu_lookup: PathMtuLookup,
+        path_mtu_lookup: PathMtuReplica,
     ) {
         let (name, mut buf) = super::tun_reader_setup(device.name(), mtu, &max_mss);
 
@@ -1230,118 +1232,83 @@ mod windows_tun {
 
     /// Shutdown and delete a TUN interface by name (Windows).
     ///
-    /// Removes the fd00::/8 route via netsh. The wintun adapter itself
-    /// is cleaned up when the `Adapter` handle is dropped.
+    /// Removes the fd00::/8 route from the adapter named [`ADAPTER_NAME`].
+    /// The wintun adapter itself is cleaned up when the `Adapter` handle is
+    /// dropped. An adapter that is already gone is not an error.
     pub async fn shutdown_tun_interface(name: &str) -> Result<(), TunError> {
         debug!("Shutting down TUN interface {}", name);
-        let _ = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "delete",
-                "route",
-                "fd00::/8",
-                &format!("interface={}", ADAPTER_NAME),
-            ])
-            .output()
-            .await;
-        let _ = name; // name is the tunnel type, not the adapter name
+        // `name` is the tunnel type; the adapter is found by its alias. The
+        // lookup's one documented failure is an invalid parameter, which
+        // for this fixed alias means no interface carries it.
+        match super::super::winnet::alias_luid(ADAPTER_NAME) {
+            Ok(luid) => drop_route(luid)?,
+            Err(e) => debug!("no adapter named {ADAPTER_NAME} ({e}); no route to remove"),
+        }
         debug!("TUN interface {} stopped", name);
         Ok(())
     }
 
-    /// Configure the Windows network interface with IPv6 address, MTU, and route.
+    /// Remove the fd00::/8 route from adapter `luid`; its absence is not an
+    /// error.
+    fn drop_route(luid: u64) -> Result<(), TunError> {
+        let (dst, len) = MESH_PREFIX;
+        super::super::winnet::delete_route(luid, dst, len)
+            .map(|_| ())
+            .map_err(|e| TunError::Configure(format!("failed to delete route {dst}/{len}: {e}")))
+    }
+
+    /// Configure the Windows network interface with IPv6 address, MTU, and
+    /// route, through IP Helper.
     ///
-    /// Uses `netsh` commands to configure the wintun adapter. A brief delay
-    /// is inserted before configuration to allow Windows to fully register
-    /// the adapter in its network stack.
-    ///
-    /// `adapter_name` must be the Windows adapter name (e.g. "FIPS"), not the
-    /// wintun tunnel type name.
+    /// Waits, for up to [`IPV6_WAIT`], for the new adapter to appear in the
+    /// IPv6 stack. The address or route already present is not an error;
+    /// any other failure is, with the Win32 error code in the message, so
+    /// that `open_tun` continues without a TUN as on the other platforms.
     async fn configure_windows_interface(
-        adapter_name: &str,
+        luid: u64,
         addr: Ipv6Addr,
         mtu: u16,
     ) -> Result<(), TunError> {
-        // Brief delay to let Windows fully register the adapter
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        use super::super::winnet::{self, Created};
 
-        // Set IPv6 address
-        let output = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "add",
-                "address",
-                adapter_name,
-                &format!("{}/128", addr),
-            ])
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("netsh add address failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stderr.contains("already") && !stdout.contains("already") {
-                warn!(
-                    "netsh add address failed: stdout={} stderr={}",
-                    stdout.trim(),
-                    stderr.trim()
-                );
+        let start = std::time::Instant::now();
+        loop {
+            match winnet::ipv6_present(luid) {
+                Ok(true) => break,
+                Ok(false) if start.elapsed() < IPV6_WAIT => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Ok(false) => {
+                    return Err(TunError::Configure(format!(
+                        "adapter {ADAPTER_NAME} has no IPv6 interface after {IPV6_WAIT:?}; is IPv6 enabled on it?"
+                    )));
+                }
+                Err(e) => {
+                    return Err(TunError::Configure(format!(
+                        "failed to read the IPv6 interface of {ADAPTER_NAME}: {e}"
+                    )));
+                }
             }
         }
 
-        // Set MTU
-        let output = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "set",
-                "subinterface",
-                adapter_name,
-                &format!("mtu={}", mtu),
-            ])
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("netsh set mtu failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            warn!(
-                "netsh set mtu failed: stdout={} stderr={}",
-                stdout.trim(),
-                stderr.trim()
-            );
+        let fail =
+            |what: String| move |e: std::io::Error| TunError::Configure(format!("{what}: {e}"));
+        if winnet::add_address(luid, addr, 128)
+            .map_err(fail(format!("failed to add {addr}/128 to {ADAPTER_NAME}")))?
+            == Created::Exists
+        {
+            debug!("{addr}/128 already on {ADAPTER_NAME}");
         }
-
-        // Add route for fd00::/8 (mesh IPv6 address space) via this adapter
-        let output = tokio::process::Command::new("netsh")
-            .args([
-                "interface",
-                "ipv6",
-                "add",
-                "route",
-                "fd00::/8",
-                adapter_name,
-            ])
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("netsh add route failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stderr.contains("already") && !stdout.contains("already") {
-                warn!(
-                    "netsh add route failed: stdout={} stderr={}",
-                    stdout.trim(),
-                    stderr.trim()
-                );
-            }
+        winnet::set_mtu(luid, u32::from(mtu)).map_err(fail(format!(
+            "failed to set the IPv6 MTU of {ADAPTER_NAME} to {mtu}"
+        )))?;
+        let (dst, len) = MESH_PREFIX;
+        if winnet::add_route(luid, dst, len).map_err(fail(format!(
+            "failed to add route {dst}/{len} via {ADAPTER_NAME}"
+        )))? == Created::Exists
+        {
+            debug!("route {dst}/{len} already on {ADAPTER_NAME}");
         }
-
         Ok(())
     }
 }
@@ -1634,125 +1601,75 @@ mod platform {
     }
 }
 
+/// Interface configuration on macOS and FreeBSD. Visible to the parent
+/// module so the `bsdnet` root tests can run `configure_interface` a second
+/// time on a configured device.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-mod platform {
+pub(super) mod platform {
     use super::TunError;
+    use crate::ipv6tun::bsdnet;
     use std::net::Ipv6Addr;
-    use tokio::process::Command;
+
+    /// The mesh address space routed into the TUN: `fd00::/8`.
+    const MESH_PREFIX: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8);
 
     /// Check if IPv6 is disabled system-wide.
+    ///
+    /// macOS: `net.inet6.ip6.disabled` is 1 when IPv6 is turned off; a
+    /// kernel without that name, or any failure to read it, counts as
+    /// enabled.
     #[cfg(target_os = "macos")]
     pub fn is_ipv6_disabled() -> bool {
-        // macOS: check via sysctl; if the key doesn't exist, IPv6 is enabled
-        std::process::Command::new("sysctl")
-            .args(["-n", "net.inet6.ip6.disabled"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
-            .unwrap_or(false)
+        matches!(bsdnet::sysctl_int("net.inet6.ip6.disabled"), Ok(1))
     }
 
     /// Check if IPv6 is disabled system-wide.
+    ///
+    /// FreeBSD: `kern.features.inet6` is 1 when the kernel has IPv6 support.
+    /// On a kernel built without INET6 the name is absent (`ENOENT`), so any
+    /// failure to read it, or any other value, means disabled.
     #[cfg(target_os = "freebsd")]
     pub fn is_ipv6_disabled() -> bool {
-        // kern.features.inet6 is 1 when the kernel has IPv6 support. On a
-        // kernel built without INET6 the OID is absent entirely and sysctl
-        // exits nonzero, so a failed lookup means disabled. Only a failure
-        // to run sysctl at all assumes enabled.
-        std::process::Command::new("sysctl")
-            .args(["-n", "kern.features.inet6"])
-            .output()
-            .map(|o| !o.status.success() || String::from_utf8_lossy(&o.stdout).trim() != "1")
-            .unwrap_or(false)
+        !matches!(bsdnet::sysctl_int("kern.features.inet6"), Ok(1))
     }
 
-    /// Shut down a network interface by name.
+    /// Take a network interface down at shutdown, by clearing `IFF_UP`.
     ///
-    /// utun (macOS) and devfs-cloned tun (FreeBSD) devices are
-    /// automatically destroyed by the kernel when the last file
-    /// descriptor closes. Bringing the interface down causes any
-    /// blocking reads to return an error, which unblocks the reader
-    /// thread.
+    /// This does not wake a reader blocked on the device; the shutdown pipe
+    /// does (see `run_tun_reader`).
     pub async fn delete_interface(name: &str) -> Result<(), TunError> {
-        run_cmd("ifconfig", &[name, "down"]).await
+        bsdnet::set_up(name, false)
+            .map_err(|e| TunError::Configure(format!("failed to take {name} down: {e}")))
     }
 
-    /// Configure a network interface with an IPv6 address using ifconfig/route.
-    pub async fn configure_interface(name: &str, addr: Ipv6Addr, mtu: u16) -> Result<(), TunError> {
-        // Add IPv6 address with /128 prefix
-        run_cmd(
-            "ifconfig",
-            &[name, "inet6", &addr.to_string(), "prefixlen", "128"],
-        )
-        .await?;
+    /// Configure the TUN interface: its `/128` address, on FreeBSD IPv6
+    /// enabled on it, the interface up, and the `fd00::/8` route through it.
+    ///
+    /// The MTU was set by the `tun` crate when it created the device.
+    pub async fn configure_interface(
+        name: &str,
+        addr: Ipv6Addr,
+        _mtu: u16,
+    ) -> Result<(), TunError> {
+        bsdnet::add_address(name, addr, 128)
+            .map_err(|e| TunError::Configure(format!("failed to add {addr}/128 to {name}: {e}")))?;
 
         // FreeBSD: a manually-configured interface with no autoconf
         // link-local comes up with ND6_IFF_IFDISABLED set, which silently
         // drops all IPv6.
         #[cfg(target_os = "freebsd")]
-        run_cmd("ifconfig", &[name, "inet6", "-ifdisabled"]).await?;
+        bsdnet::enable_inet6(name)
+            .map_err(|e| TunError::Configure(format!("failed to enable IPv6 on {name}: {e}")))?;
 
-        // Set MTU
-        run_cmd("ifconfig", &[name, "mtu", &mtu.to_string()]).await?;
+        bsdnet::set_up(name, true)
+            .map_err(|e| TunError::Configure(format!("failed to bring {name} up: {e}")))?;
 
-        // Bring interface up
-        run_cmd("ifconfig", &[name, "up"]).await?;
-
-        // Add route for fd00::/8 (mesh IPv6 address space) via this interface
-        #[cfg(target_os = "macos")]
-        run_cmd(
-            "route",
-            &[
-                "add",
-                "-inet6",
-                "-prefixlen",
-                "8",
-                "fd00::",
-                "-interface",
-                name,
-            ],
-        )
-        .await?;
-
-        // FreeBSD: a leftover route from a previous run is not an error.
-        #[cfg(target_os = "freebsd")]
-        {
-            let output = Command::new("route")
-                .args(["-6", "add", "fd00::/8", "-interface", name])
-                .output()
-                .await
-                .map_err(|e| TunError::Configure(format!("route failed: {}", e)))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("File exists") && !stderr.contains("already in table") {
-                    return Err(TunError::Configure(format!(
-                        "route -6 add fd00::/8 failed: {}",
-                        stderr.trim()
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Run a command and return an error if it fails.
-    async fn run_cmd(program: &str, args: &[&str]) -> Result<(), TunError> {
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| TunError::Configure(format!("{} failed: {}", program, e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TunError::Configure(format!(
-                "{} {} failed: {}",
-                program,
-                args.join(" "),
-                stderr.trim()
-            )));
-        }
-        Ok(())
+        let ifindex = bsdnet::interface_index(name)
+            .map_err(|e| TunError::Configure(format!("no index for {name}: {e}")))?;
+        let (dst, len) = MESH_PREFIX;
+        bsdnet::ensure_route(dst, len, ifindex).map_err(|e| {
+            TunError::Configure(format!("failed to add route {dst}/{len} via {name}: {e}"))
+        })
     }
 }
 
@@ -1763,7 +1680,6 @@ mod name_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::path_mtu::PathMtuEntry;
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -1787,8 +1703,13 @@ mod tests {
         Ipv6Address::from_bytes(bytes).unwrap()
     }
 
-    fn empty_lookup() -> PathMtuLookup {
+    fn empty_lookup() -> PathMtuReplica {
         Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    /// The payload limit the node reports for a stored path MTU of `mtu`.
+    fn held(mtu: u16) -> u16 {
+        crate::node::path_mtu::payload_limit(mtu)
     }
 
     #[test]
@@ -1822,10 +1743,7 @@ mod tests {
         // = min(1360, 1143) = 1143.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, PathMtuEntry::held(1280));
+        lookup.write().unwrap().insert(addr, held(1280));
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1143);
     }
 
@@ -1835,10 +1753,7 @@ mod tests {
         // global 1143 (the smaller of the two).
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, PathMtuEntry::held(1452));
+        lookup.write().unwrap().insert(addr, held(1452));
         // global=1143 (UDP-1280-derived); path_max = 1452-77-60 = 1315.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1143), 1143);
     }
@@ -1852,10 +1767,7 @@ mod tests {
         // learned value governs.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, PathMtuEntry::held(1452));
+        lookup.write().unwrap().insert(addr, held(1452));
         // global=1360, path_max = 1452-77-60 = 1315; min(1360, 1315) = 1315.
         // 1315 > 1143, so the conservative ceiling did NOT clamp here.
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1315);
@@ -1871,10 +1783,7 @@ mod tests {
         for stored in [0u16, 1, 100, 137] {
             let lookup = empty_lookup();
             let addr = fips_addr_with_node_byte(0x42);
-            lookup
-                .write()
-                .unwrap()
-                .insert(addr, PathMtuEntry::held(stored));
+            lookup.write().unwrap().insert(addr, held(stored));
             assert_eq!(
                 per_flow_max_mss(&lookup, addr.as_bytes(), 1360),
                 1143,
@@ -1908,10 +1817,7 @@ mod tests {
             .map(|&(stored, _)| {
                 let lookup = empty_lookup();
                 let addr = fips_addr_with_node_byte(0x42);
-                lookup
-                    .write()
-                    .unwrap()
-                    .insert(addr, PathMtuEntry::held(stored));
+                lookup.write().unwrap().insert(addr, held(stored));
                 (stored, per_flow_max_mss(&lookup, addr.as_bytes(), 1360))
             })
             .collect();
@@ -1931,10 +1837,10 @@ mod tests {
         // sub-floor table above.
         let lookup = empty_lookup();
         let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(
-            addr,
-            PathMtuEntry::held(crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU),
-        );
+        lookup
+            .write()
+            .unwrap()
+            .insert(addr, held(crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU));
         assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 119);
     }
 
@@ -1963,8 +1869,8 @@ mod tests {
         let lookup = empty_lookup();
         let a = fips_addr_with_node_byte(0x10);
         let b = fips_addr_with_node_byte(0x20);
-        lookup.write().unwrap().insert(a, PathMtuEntry::held(1280));
-        lookup.write().unwrap().insert(b, PathMtuEntry::held(1452));
+        lookup.write().unwrap().insert(a, held(1280));
+        lookup.write().unwrap().insert(b, held(1452));
         assert_eq!(per_flow_max_mss(&lookup, a.as_bytes(), 1360), 1143);
         assert_eq!(per_flow_max_mss(&lookup, b.as_bytes(), 1360), 1315);
     }

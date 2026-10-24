@@ -358,6 +358,9 @@ pub(crate) struct SessionEntry {
     /// SessionSetup copies of this node's first-handshake attempt sent so
     /// far, for the control socket's resend count.
     setups_sent: u32,
+    /// The key this node opened the session toward, if it opened one. Names
+    /// the peer before a completion has proven its key.
+    opened_key: Option<XOnlyPublicKey>,
 }
 
 impl SessionEntry {
@@ -378,6 +381,7 @@ impl SessionEntry {
             bytes_sent: 0,
             bytes_recv: 0,
             setups_sent: 0,
+            opened_key: None,
         }
     }
 
@@ -393,12 +397,15 @@ impl SessionEntry {
         me: NodeAddr,
         now: SessionInstant,
     ) -> (Self, SessionOutputs) {
+        let opened_key = peer.x_only_public_key().0;
         let peer = peer_key(peer);
         let local = SessionLocal::for_call(local, true);
         let (machine, out) = with_env(&local, |env| {
             SessionRekey::opening_outbound(params, peer, me, now, (), env)
         });
-        (Self::new(remote_addr, machine, now), out)
+        let mut entry = Self::new(remote_addr, machine, now);
+        entry.opened_key = Some(opened_key);
+        (entry, out)
     }
 
     /// A session opened at `now` by a setup whose Noise msg1 `msg1` claims
@@ -442,6 +449,7 @@ impl SessionEntry {
         now: SessionInstant,
         local: &NodeKeys,
     ) -> SessionOutputs {
+        self.opened_key = Some(peer.x_only_public_key().0);
         let input = Input::Open {
             peer: peer_key(peer),
             only: (),
@@ -467,6 +475,12 @@ impl SessionEntry {
             Identity::Proven(key) => XOnlyPublicKey::from_byte_array(key.bytes()).ok(),
             Identity::Claimed(_) => None,
         }
+    }
+
+    /// The peer's static key as far as this node knows it: proven by a
+    /// completion, or else the key this node opened the session toward.
+    pub(crate) fn key(&self) -> Option<XOnlyPublicKey> {
+        self.peer_key().or(self.opened_key)
     }
 
     /// What the control socket reports of who the peer is: `proven` once a

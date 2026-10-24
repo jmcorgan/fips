@@ -5,6 +5,7 @@
 //! bloom filter contains the target. TTL and request_id dedup provide
 //! safety bounds.
 
+use crate::ipv6tun::link::PeerKey;
 use crate::node::reject::DiscoveryReject;
 use crate::node::{Node, diag};
 use crate::peer::ActivePeer;
@@ -451,15 +452,17 @@ impl Node {
                     now_ms,
                     path_mtu,
                 );
-                self.drive_response_actions(actions).await;
+                self.drive_response_actions(actions, PeerKey::new(xonly))
+                    .await;
             }
         }
     }
 
     /// Drive the cross-subsystem effects returned by the discovery core's
     /// accept-side planning. Each arm reproduces the original inline effect
-    /// exactly (same metrics/logs/writes, same order).
-    async fn drive_response_actions(&mut self, actions: Vec<LookupAction>) {
+    /// exactly (same metrics/logs/writes, same order). `target_key` is the
+    /// key the response's proof was verified against.
+    async fn drive_response_actions(&mut self, actions: Vec<LookupAction>, target_key: PeerKey) {
         for action in actions {
             match action {
                 LookupAction::CacheCoords {
@@ -505,8 +508,8 @@ impl Node {
                     if path_mtu < crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU {
                         continue;
                     }
-                    // Mirror path_mtu into the Ipv6Address-keyed read-only lookup
-                    // map used by the TUN reader/writer at TCP MSS clamp time.
+                    // Mirror path_mtu into the Ipv6Address-keyed lookup map, which
+                    // publishes it to the IPv6 adapter's TCP MSS clamp.
                     let fips_addr = crate::Ipv6Address::from_node_addr(&target);
                     match self.path_mtu_lookup.write() {
                         Ok(mut map) => match map.get(&fips_addr).copied() {
@@ -544,6 +547,7 @@ impl Node {
                                 // is the one write that carries a deadline.
                                 map.insert(
                                     fips_addr,
+                                    target_key,
                                     crate::node::path_mtu::PathMtuEntry::learned(path_mtu, now_ms),
                                 );
                                 debug!(
@@ -1085,6 +1089,7 @@ impl Node {
     pub(in crate::node) fn seed_path_mtu_for_link_peer(
         &self,
         peer_addr: &NodeAddr,
+        peer_key: PeerKey,
         transport_id: TransportId,
         addr: &TransportAddr,
     ) {
@@ -1161,6 +1166,7 @@ impl Node {
                 // for itself, and it is released when the link goes.
                 map.insert(
                     fips_addr,
+                    peer_key,
                     crate::node::path_mtu::PathMtuEntry::held(link_mtu),
                 );
                 debug!(

@@ -135,6 +135,16 @@ jobs:
               echo "      are the rest of the answer." >&2
               exit 1
             fi
+            # The TUN interface setup's tests, including the four root-only
+            # ones (a route added twice through one interface, one through
+            # another, a tun device created twice in turn, a configured device
+            # set up again). Those are #[ignore]d, so the pass above skips
+            # them; this VM runs as root. --nocapture prints the kernel's
+            # codes and each round's device. All fifteen must pass.
+            timeout -s KILL 300 cargo test -p fips-mesh --lib -- --include-ignored ipv6tun::bsdnet:: --test-threads=1 --nocapture \
+              2>&1 | tee /tmp/tun-setup-tests.log
+            grep -qE '^test result: ok\. 15 passed;' /tmp/tun-setup-tests.log \
+              || { echo "FAIL: the TUN setup tests did not all pass" >&2; exit 1; }
             bh_was=$(sysctl -n net.inet.tcp.blackhole)
             bh_local_was=$(sysctl -n net.inet.tcp.blackhole_local)
             sysctl net.inet.tcp.blackhole=2 net.inet.tcp.blackhole_local=1
