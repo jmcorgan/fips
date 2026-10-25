@@ -161,7 +161,7 @@ build_rpm() {
     # was handed the .deb as an artifact cannot pull it. Every Debian-family
     # base image carries dpkg-deb, and FIPS_BUILD_IMAGE is one that any runner
     # can pull.
-    if ! docker run --rm \
+    if ! docker run --rm "${CI_LABELS[@]}" \
         -v "$deb_dir":/deb:ro -v "$bin_dir":/bin-out \
         -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
         "$FIPS_BUILD_IMAGE" bash -euo pipefail -c '
@@ -708,7 +708,7 @@ make_next_package() {
     mkdir -p "$next_dir" "$bin_dir"
 
     if [ ! -x "$bin_dir/fips" ]; then
-        if ! docker run --rm \
+        if ! docker run --rm "${CI_LABELS[@]}" \
             -v "$(dirname "$RPM_PATH")":/rpm:ro -v "$bin_dir":/bin-out \
             -v "$REPO_ROOT/packaging/rpm/dnf-bounded.sh":/dnf-bounded.sh:ro \
             -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \

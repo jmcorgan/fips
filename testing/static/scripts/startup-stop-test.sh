@@ -165,6 +165,8 @@ start_container() {
     docker rm -f "$name" >/dev/null 2>&1
     CONTAINERS+=("$name")
     docker create --name "$name" \
+        --label com.corganlabs.fips-ci=1 \
+        --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}" \
         --cap-add NET_ADMIN --device /dev/net/tun:/dev/net/tun \
         --sysctl net.ipv6.conf.all.disable_ipv6=0 \
         -e RUST_LOG=info -e FIPS_TEST_MODE="$mode" \

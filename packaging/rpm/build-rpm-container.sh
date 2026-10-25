@@ -129,7 +129,7 @@ if [ "$NO_BUILD" -eq 0 ]; then
     # dpkg-deb lives in the build image, not necessarily on a host that wants
     # an RPM -- a Fedora workstation has no dpkg at all.
     BUILD_IMAGE=$("$REPO_ROOT/packaging/debian/build-deb-container.sh" --print-image-tag)
-    docker run --rm \
+    docker run --rm "${CI_LABELS[@]}" \
         -v "$DEB_DIR":/deb:ro \
         -v "$BIN_DIR":/bin-out \
         -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
@@ -205,7 +205,7 @@ DNF_BOUND=${DNF_BOUND:-720}
 
 rpm_args=(--no-build --bin-dir /bins --version "$VERSION" --output-dir /out --name-file /name/rpm)
 
-docker run --rm \
+docker run --rm "${CI_LABELS[@]}" \
     -v "$REPO_ROOT":/src:ro \
     -v "$BIN_DIR":/bins:ro \
     -v "$DEST_ABS":/out \
@@ -253,7 +253,7 @@ RPM="$DEST_ABS/$RPM_NAME"
 # from the binaries, which is the table dnf enforces at install time, so this
 # reads what a user's package manager will read. It runs in the rpm image
 # because the host may have no rpm.
-docker run --rm \
+docker run --rm "${CI_LABELS[@]}" \
     -v "$REPO_ROOT":/src:ro \
     -v "$DEST_ABS":/out:ro \
     -w /src \

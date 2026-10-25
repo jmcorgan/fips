@@ -831,9 +831,20 @@ run_build() {
     # startup_epoch/started_at/is_leaf_only/node_profile/max_*) — a shadow field
     # would silently reopen dual-store divergence between the struct and the
     # context. Checks the struct *declaration*, so it is wrap-insensitive.
+    # Captured before matching: under pipefail, grep -q exiting at its match
+    # killed awk with SIGPIPE before its last write, so the guard never fired.
+    # An empty capture means the struct was not found and the guard would
+    # check nothing, so that fails too.
     info "node-context single-store guard"
-    if awk '/^pub struct Node \{/,/^\}/' src/node/mod.rs \
-        | grep -qE '^[[:space:]]+(config|identity|startup_epoch|started_at|is_leaf_only|node_profile|max_connections|max_peers|max_links):'; then
+    local node_decl
+    node_decl=$(awk '/^pub struct Node \{/,/^\}/' src/node/mod.rs) || node_decl=""
+    if [[ -z "$node_decl" ]]; then
+        fail "no 'pub struct Node' declaration found in src/node/mod.rs, so the single-store guard checked nothing"
+        record "node-context-guard" 1
+        return 1
+    fi
+    if grep -qE '^[[:space:]]+(config|identity|startup_epoch|started_at|is_leaf_only|node_profile|max_connections|max_peers|max_links):' \
+        <<<"$node_decl"; then
         fail "Node struct re-declares a bundled immutable field; it must live solely in NodeContext"
         record "node-context-guard" 1
         return 1
@@ -1147,13 +1158,19 @@ run_gateway() {
         && bash testing/static/scripts/gateway-test.sh inject-config \
         && { info "[gateway] Starting containers"; \
              docker compose -f "$compose" -f "$ext" --profile gateway up -d; }; then
+        # Phase 1's mesh evidence and the containers' whole logs land here.
+        # Kept on a failure, since compose down below discards the logs.
+        local evidence
+        evidence=$(mktemp -d "/tmp/ci-gateway-evidence${FIPS_CI_NAME_SUFFIX:-}.XXXXXX")
         info "[gateway] Running gateway test"
-        if bash testing/static/scripts/gateway-test.sh; then
+        if FIPS_GW_EVIDENCE_DIR="$evidence" bash testing/static/scripts/gateway-test.sh; then
             rc=0
+            rm -rf "$evidence"
         else
             rc=1
             info "[gateway] Collecting failure logs"
-            docker compose -f "$compose" -f "$ext" --profile gateway logs --no-color 2>&1 | tail -100
+            FIPS_GW_EVIDENCE_DIR="$evidence" bash testing/static/scripts/gateway-test.sh collect-logs 2>&1
+            info "[gateway] Evidence kept in $evidence"
         fi
     else
         rc=1
@@ -2081,13 +2098,14 @@ run_mount_tmpdir() {
     record "mount-tmpdir" $rc
 }
 
-# Every docker resource a suite gives the generic CI label must carry the run
-# label as well, because the teardown reaps by the run label and a resource
-# with only the generic one outlives a killed run and holds off the builder's
-# orphan sweep. Static, about a second. Mirrored in ci.yml's ci-parity job.
+# Every container, network and volume a suite creates must carry the run
+# label, because the teardown reaps by the run label: a resource with only the
+# generic one outlives a killed run and holds off the builder's orphan sweep,
+# and one with no label is reaped by nothing. Static, about a second. Mirrored
+# in ci.yml's ci-parity job.
 run_ci_labels() {
     local rc=0
-    info "[ci-labels] Checking that the generic CI label always comes with the run label"
+    info "[ci-labels] Checking that every CI container, network and volume carries the run label"
     python3 "$SCRIPT_DIR/check-ci-labels.py" || rc=$?
     record "ci-labels" $rc
 }
@@ -2124,6 +2142,20 @@ run_trailing_log() {
     info "[trailing-log] Checking for functions whose status is a log call's"
     python3 "$SCRIPT_DIR/check-trailing-log.py" || rc=$?
     record "trailing-log" $rc
+}
+
+# The chaos simulator's seeded draws must not depend on Python's string hash
+# seed, or a scenario seed fixes nothing and a red run cannot be replayed. Runs
+# the simulator's own managers under several PYTHONHASHSEED values and compares
+# their draws. Static, a few seconds, and needs nothing built. Mirrored in
+# ci.yml's ci-parity job by hand. Not named chaos-*, which this script and the
+# load annotation read as a scenario suite.
+run_chaos_schedule() {
+    local rc=0
+    info "[sim-schedule] Checking the chaos draws do not depend on the hash seed"
+    python3 "$SCRIPT_DIR/check-chaos-schedule.py" || rc=$?
+    record "sim-schedule" $rc
+    return 0
 }
 
 # Unit tests for the convergence gate every static suite waits on. Hermetic —
@@ -2265,6 +2297,7 @@ run_guards() {
     run_ci_parity
     run_log_strings
     run_trailing_log
+    run_chaos_schedule
     run_image_scoping
     run_action_pins
     run_comment_refs

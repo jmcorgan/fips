@@ -50,7 +50,7 @@ class LinkManager:
         self.rng = rng
         self.netem_mgr = netem_mgr  # Optional: for coordinated tc manipulation
         self.link_states: dict[tuple[str, str], LinkState] = {
-            edge: LinkState(edge=edge) for edge in topology.edges
+            edge: LinkState(edge=edge) for edge in sorted(topology.edges)
         }
 
     @property
