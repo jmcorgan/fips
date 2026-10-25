@@ -106,7 +106,7 @@ if [[ $rc -ne 0 ]]; then
     exit $rc
 fi
 
-docker run --rm --network none \
+docker run --rm --network none "${CI_LABELS[@]}" \
     -v "$PROJECT_ROOT:/src:ro" \
     -v "$APK_DIR:/apk:ro" \
     -e REPO=/src \
@@ -137,7 +137,7 @@ for spec in "${FW_IMAGES[@]}"; do
         fw_env+=(-e FW_CASES)
     fi
     echo "==> firewall scenarios in $image"
-    docker run --rm --network none --cap-add NET_ADMIN \
+    docker run --rm --network none --cap-add NET_ADMIN "${CI_LABELS[@]}" \
         --tmpfs /fw-small:size=128k \
         -v "$PROJECT_ROOT:/src:ro" \
         -v "$APK_DIR:/apk:ro" \
@@ -156,7 +156,7 @@ done
 for spec in "${FW_IMAGES[@]}"; do
     image="${spec%%|*}"
     echo "==> init script scenarios in $image"
-    docker run --rm --network none \
+    docker run --rm --network none "${CI_LABELS[@]}" \
         -v "$PROJECT_ROOT:/src:ro" \
         -v "$APK_DIR:/apk:ro" \
         -e INIT_GATEWAY -e PRERM -e INIT_CASES \

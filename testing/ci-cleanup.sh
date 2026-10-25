@@ -272,16 +272,22 @@ veth_pattern() {
 
 # ip(8) in a privileged --net=host container, matching how the simulation
 # creates these interfaces (see chaos/sim/veth.py).
+#
+# Neither helper carries the CI labels: the builder skips its orphan sweep
+# while any generic-labelled container is up, so a labelled helper would let
+# one run's teardown hold off that sweep. The `# ci-labels:` comment exempts
+# each from testing/check-ci-labels.py, and sits on the command's last line
+# because a comment after a backslash would end the command there.
 veth_ip() {
     timeout "$TMO" docker run --rm --privileged --net=host \
-        --entrypoint ip "$VETH_IMAGE" "$@" 2>/dev/null
+        --entrypoint ip "$VETH_IMAGE" "$@" 2>/dev/null  # ci-labels: the reaper's ip(8) helper
 }
 
 # The same, taking `ip -batch` commands on stdin so any number of deletes costs
 # one container. -force keeps ip going past an interface that vanished under us.
 veth_ip_batch() {
     timeout "$TMO" docker run --rm -i --privileged --net=host \
-        --entrypoint ip "$VETH_IMAGE" -force -batch - >/dev/null 2>&1 || true
+        --entrypoint ip "$VETH_IMAGE" -force -batch - >/dev/null 2>&1 || true  # ci-labels: the reaper's ip(8) helper
 }
 
 reap_veths() {

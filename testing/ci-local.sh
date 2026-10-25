@@ -1715,13 +1715,14 @@ run_mount_tmpdir() {
     record "mount-tmpdir" $rc
 }
 
-# Every docker resource a suite gives the generic CI label must carry the run
-# label as well, because the teardown reaps by the run label and a resource
-# with only the generic one outlives a killed run and holds off the builder's
-# orphan sweep. Static, about a second. Mirrored in ci.yml's ci-parity job.
+# Every container, network and volume a suite creates must carry the run
+# label, because the teardown reaps by the run label: a resource with only the
+# generic one outlives a killed run and holds off the builder's orphan sweep,
+# and one with no label is reaped by nothing. Static, about a second. Mirrored
+# in ci.yml's ci-parity job.
 run_ci_labels() {
     local rc=0
-    info "[ci-labels] Checking that the generic CI label always comes with the run label"
+    info "[ci-labels] Checking that every CI container, network and volume carries the run label"
     python3 "$SCRIPT_DIR/check-ci-labels.py" || rc=$?
     record "ci-labels" $rc
 }

@@ -114,7 +114,7 @@ jobs:
         run: python3 testing/check-portable-atomics.py
       - name: Check no bind-mount source comes from a bare mktemp
         run: python3 testing/check-mount-tmpdir.py
-      - name: Check every CI-labelled docker resource carries the run label
+      - name: Check every CI container, network and volume carries the run label
         run: python3 testing/check-ci-labels.py
       # The OpenWrt Package workflow runs this too, but only on trunk pushes,
       # tags and pull requests; here a branch push sees a finding first.

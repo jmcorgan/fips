@@ -334,7 +334,7 @@ else
     HOST_HEAD=""
 fi
 
-docker run --rm \
+docker run --rm "${CI_LABELS[@]}" \
     -v "$REPO_ROOT":/src:ro \
     "${GIT_MOUNTS[@]}" \
     -v "$DEST_ABS":/out \
@@ -377,7 +377,7 @@ REJECT=$DEB
 # library that cargo-deb's "$auto" read; a host of another distribution could
 # produce a difference of its own.
 "$REPO_ROOT/testing/check-glibc-floor.sh" "$DEB" >&2
-docker run --rm \
+docker run --rm "${CI_LABELS[@]}" \
     -v "$REPO_ROOT":/src:ro \
     -v "$DEST_ABS":/out:ro \
     -w /src \
