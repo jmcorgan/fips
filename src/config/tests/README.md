@@ -17,10 +17,15 @@ that file and can reach its private items.
 - `buffers.rs`: tests for the internal buffer sizes in `Config::validate`
   (`mod.rs`): the floor of 1 on `node.buffers.host_channel`, and its default
   for a file that does not name it.
+- `grants.rs`: tests for `node.native_api.grants`: the default writes no
+  key, an entry reads from the documented shape, the IPv6 adapter's built-in
+  grant in `NativeApiConfig::effective_grants` (`node.rs`) keeps port 256
+  unless an entry takes it and keeps its feed and learn request either way,
+  and the rules `Config::validate` refuses an entry by.
 
-`mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`
-and `mod buffers`, not as `mod tests`, because `mod.rs` still carries an
-inline `mod tests` block of that name. That block, and the inline blocks in
-the other files here, predate the rule that unit tests live in this
-directory; moving them is a separate change. Once `mod.rs`'s block has
-moved, its tests and these can share the usual `mod tests;` declaration.
+`mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`,
+`mod buffers` and `mod grants`, not as `mod tests`, because `mod.rs` still
+carries an inline `mod tests` block of that name. That block, and the inline
+blocks in the other files here, predate the rule that unit tests live in this
+directory; moving them is a separate change. Once `mod.rs`'s block has moved,
+its tests and these can share the usual `mod tests;` declaration.

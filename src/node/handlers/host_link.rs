@@ -20,11 +20,12 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use secp256k1::PublicKey;
 
 use crate::NodeAddr;
+use crate::config::{ConfigError, Grant, Principal};
 use crate::ipv6tun::link::{self, Attach, Datagram, FromMesh, PeerKey, Refusal};
 use crate::ipv6tun::mtu::mss_ceiling;
 use crate::ipv6tun::tun::IPV6_MIN_MTU;
-use crate::node::Node;
 use crate::node::path_mtu::payload_limit;
+use crate::node::{Node, NodeError};
 
 /// What the node has published of its node-wide limit, and the ceiling it
 /// last logged at a transport change.
@@ -57,6 +58,25 @@ impl NodeMtuFeed {
     }
 }
 
+/// Whether the adapter's grant among `grants` covers the port `request`
+/// asks for. The port is all a grant can withhold from the adapter: its
+/// identity feed and learn request are kept whoever holds port 256.
+fn granted(request: &Attach, grants: &[Grant]) -> Result<(), NodeError> {
+    let Some(port) = request.port else {
+        return Ok(());
+    };
+    let held = grants
+        .iter()
+        .any(|g| g.principal == Principal::Adapter && g.ports.contains(&port));
+    if held {
+        return Ok(());
+    }
+    Err(NodeError::Config(ConfigError::Validation(format!(
+        "the IPv6 adapter needs port {port} for the TUN, but node.native_api.grants \
+         gives it to another principal"
+    ))))
+}
+
 impl Node {
     /// Attach the IPv6 adapter: take its request, answer it, and hand it its
     /// end of the link with the answer already queued.
@@ -68,10 +88,26 @@ impl Node {
         self.attach_with(request);
     }
 
+    /// Refuse the adapter's attach if it would serve a port the grants in
+    /// force do not give it: an app-owned TUN on a node whose configuration
+    /// gives port 256 to a user, which validation cannot see because the
+    /// embedder installs the TUN after the configuration is loaded.
+    /// `start()` calls this before [`Node::attach_host`], so a refused
+    /// adapter is never attached.
+    pub(in crate::node) fn check_attach(&self) -> Result<(), NodeError> {
+        let request = self.supervisor.ipv6tun.attach_request();
+        granted(&request, &self.config().node.native_api.effective_grants())
+    }
+
     /// Answer the attach `request`.
     fn attach_with(&mut self, request: Attach) {
         let Attach { port, feeds } = request;
-        // Port 256 is the adapter's by construction; nothing else can ask.
+        // `start()` checked the request against the grants before calling
+        // the attach.
+        debug_assert!(
+            granted(&request, &self.config().node.native_api.effective_grants()).is_ok(),
+            "the adapter attached to a port the grants do not give it"
+        );
         debug_assert!(port.is_none_or(|p| p == link::IPV6_PORT));
         let buffers = &self.config().node.buffers;
         let (mesh_link, host_link, datagrams, learned) =

@@ -221,6 +221,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   showed a client filling it toward that cap. These count outbound datagrams,
   unlike `show_native_flows`' per-flow queued count, which covers inbound
   ones.
+- `node.native_api.grants` names who may use ports 256 to 1023, the feed of
+  routable keys and the learn request: each entry is one `uid` or `gid` with
+  its `ports`, `keys` and `learn`. The IPv6 adapter's grant of port 256 is
+  built in, so no list drops it. Entries are checked at startup on every
+  platform: one principal per entry, something granted, ports from 256 to
+  1023, one grantee per port, and no user grant of port 256 while
+  `tun.enabled` is true. An app-owned TUN on a node that grants port 256 to a
+  user fails `start()` with a configuration error. The native socket reads no
+  caller credentials yet, so it still refuses ports 0 to 1023 to every client
+  and an entry grants nothing over it.
 
 #### Packaging
 

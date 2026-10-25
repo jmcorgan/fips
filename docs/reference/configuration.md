@@ -654,6 +654,7 @@ way to hand a file descriptor to another process at all, while macOS has
 | `node.native_api.backlog` | usize | `16` | Flows announced on one listener and not yet taken by its task. Refused below 1 at startup: a listener with no backlog admits no flow, so every arrival would be dropped |
 | `node.native_api.max_flows` | usize | `256` | Flows this node holds at once |
 | `node.native_api.debug_commands` | bool | `false` | Answer the `inject`, `stats` and `arrive` debug commands. Not a supported interface |
+| `node.native_api.grants` | list | `[]` | Who may use ports 256 to 1023, the identity feed (`keys`) and the learn request (`learn`); see [Grants](#grants) below |
 
 > **Security note:** the socket is mode `0770`, owned by group `fips`, and
 > that is the whole of the authorization model. **Any user in the `fips` group
@@ -688,6 +689,39 @@ reference](cli-fipsctl.md) and
 the crate and speaks the API through the `fips::native::client` module, which
 hides the line protocol; see
 [../how-to/use-the-native-datagram-api.md](../how-to/use-the-native-datagram-api.md).
+
+#### Grants
+
+`node.native_api.grants` names who may use what a client is otherwise
+refused: ports 256 through 1023, the feed of keys the node can route to, and
+the request to register a key the client resolved. Each entry names exactly
+one principal, a user id or a group id, and what it may use:
+
+```yaml
+node:
+  native_api:
+    grants:
+      - uid: 990          # or gid: 990, exactly one of the two
+        ports: [257]      # each 256 to 1023; bind and dial on the same number
+        keys: false       # the identity feed
+        learn: false      # the learn request
+```
+
+The IPv6 adapter's grant is built in and is not written in the list, so no
+list drops it: it holds port 256, the identity feed and the learn request. A
+grant applies whether or not `enabled` is set, since `enabled` switches the
+unprivileged surface only. The daemon refuses at startup an entry that names
+both a uid and a gid or neither, one that grants nothing, a port outside 256
+to 1023, a port in two places, and, while `tun.enabled` is true, port 256,
+which the adapter then holds. With the TUN disabled an entry may take port
+256; the adapter keeps its feed and learn request, which its DNS responder
+still uses. An embedder that installs an app-owned TUN on such a node fails
+`start()`, naming the conflict.
+
+No socket client is matched against an entry yet: the socket reads no caller
+credentials, and it still refuses ports 0 through 1023 to every client. Until
+it reads them, entries are checked at startup and grant nothing over the
+socket.
 
 ## TUN Interface (`tun.*`)
 
@@ -1483,6 +1517,9 @@ node:
   #   backlog: 16                    # flows announced on one listener, awaiting its task; at least 1
   #   max_flows: 256                 # flows this node holds at once
   #   debug_commands: false          # inject/stats/arrive; test harness only
+  #   grants:                        # ports 256-1023, keys, learn; see Grants
+  #     - uid: 990                   # or gid; exactly one
+  #       ports: [257]
   buffers:
     packet_channel: 1024
     tun_channel: 1024

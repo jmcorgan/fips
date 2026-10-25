@@ -268,6 +268,58 @@ async fn the_queue_toward_an_embedder_that_stops_reading_is_bounded() {
     );
 }
 
+/// With the TUN disabled in the configuration, a user may be granted port
+/// 256. An embedder that then installs an app-owned TUN would have the
+/// adapter serve that port too, so the node refuses to start, naming the
+/// conflict, and never attaches the adapter.
+#[tokio::test]
+async fn an_app_owned_tun_on_a_node_that_grants_port_256_to_a_user_fails_start_unattached() {
+    let mut config = app_tun_config();
+    config.tun.enabled = false;
+    config.node.native_api.grants = vec![crate::config::GrantConfig {
+        uid: Some(0),
+        ports: vec![256],
+        ..Default::default()
+    }];
+    config
+        .validate()
+        .expect("precondition: the configuration loads");
+    let mut node = Node::new(config).unwrap();
+    let (_outbound, _inbound) = node.enable_app_owned_tun();
+
+    let err = node
+        .start()
+        .await
+        .expect_err("the adapter cannot have port 256");
+    assert!(
+        matches!(&err, NodeError::Config(_)) && err.to_string().contains("port 256"),
+        "got: {err}"
+    );
+    assert!(
+        node.supervisor.host_link.is_none(),
+        "the adapter was attached"
+    );
+    let _ = node.stop().await;
+}
+
+/// With no grants configured, an app-owned TUN's adapter is attached
+/// serving port 256 at start, as it always was.
+#[tokio::test]
+async fn with_no_grants_an_app_owned_tun_is_attached_serving_port_256() {
+    let mut node = Node::new(app_tun_config()).unwrap();
+    let (_outbound, _inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    assert!(
+        node.supervisor.host_link.is_some(),
+        "the adapter is attached"
+    );
+    assert_eq!(
+        node.supervisor.ipv6tun.attach_request().port,
+        Some(crate::ipv6tun::link::IPV6_PORT)
+    );
+    node.stop().await.unwrap();
+}
+
 /// Throughput of the app-owned TUN between two in-process nodes over
 /// loopback UDP: packets of `FIPS_TPUT_SIZE` bytes (default 1200) pushed as
 /// fast as the outbound channel takes them for `FIPS_TPUT_SECS` seconds
