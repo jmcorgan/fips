@@ -22,6 +22,11 @@ can reach the source file's private items.
   attach; how each message from the node changes the shared state; and the
   key map: known keys in, forgotten keys out, a key the DNS responder learned
   after the node decided to forget it kept, and an attach starting it empty.
+- `mtu.rs` tests `../mtu.rs`: each function (`effective_ipv6_mtu`,
+  `mss_ceiling`, `ipv6_mtu`, `tcp_mss`) against a literal copy of its earlier
+  definition at every `u16` input, the FSP payload limit against the
+  adapter's earlier seed expression at every input, and the known answers
+  at the inputs the call sites pass, including the default UDP MTU.
 - `outbound.rs` tests `../outbound.rs` as module `host_tests`: the host half
   turns a packet to a key the adapter holds into a datagram carrying the
   compressed packet, answers a packet to a prefix no key names with

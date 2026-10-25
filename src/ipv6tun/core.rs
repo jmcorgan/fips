@@ -15,9 +15,9 @@ use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 
-use super::icmp::effective_ipv6_mtu;
 use super::ipv6_shim::HEADER_SAVING;
 use super::link::{FromMesh, Learned, MeshLink, PeerKey};
+use super::mtu::{effective_ipv6_mtu, ipv6_mtu, tcp_mss};
 use super::tun::{IPV6_MIN_MTU, MssCeiling};
 use crate::Ipv6Address;
 use fips_core::identity::NodePrefix;
@@ -34,20 +34,6 @@ struct Known {
     /// The number of the last report of this key the DNS responder made,
     /// or 0 if it made none.
     learned: u64,
-}
-
-/// The largest IPv6 packet a payload limit admits: the shim compresses a
-/// 40-byte IPv6 header to [`HEADER_SAVING`] bytes fewer.
-pub(crate) fn ipv6_mtu(payload_limit: u16) -> u16 {
-    payload_limit.saturating_add(HEADER_SAVING)
-}
-
-/// The largest TCP segment a payload limit admits: its IPv6 MTU less the
-/// 40-byte IPv6 and 20-byte TCP headers. Zero when not one payload byte fits.
-pub(crate) fn tcp_mss(payload_limit: u16) -> u16 {
-    ipv6_mtu(payload_limit)
-        .saturating_sub(40)
-        .saturating_sub(20)
 }
 
 /// What applying a message leaves for the caller to act on.
