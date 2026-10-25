@@ -243,8 +243,11 @@ wait_for_socket() {
 wait_for_running() {
     local name="$1" timeout="${2:-20}" waited=0
     while [[ $waited -lt $timeout ]]; do
+        # The logs are captured before matching: under pipefail, grep -q
+        # exiting at its match can kill the writer with SIGPIPE and turn the
+        # match into a miss.
         if [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]] \
-            && docker logs "$name" 2>&1 | grep -q "Node started"; then
+            && grep -q "Node started" <<<"$(docker logs "$name" 2>&1)"; then
             return 0
         fi
         sleep 1
@@ -954,8 +957,9 @@ YAML
 wait_for_link() {
     local timeout="${1:-45}" waited=0
     while [[ $waited -lt $timeout ]]; do
-        if docker logs "$NODE_A" 2>&1 | grep -q "Parent switched" \
-            || docker logs "$NODE_B" 2>&1 | grep -q "Parent switched"; then
+        # Logs captured before matching, as in wait_for_running.
+        if grep -q "Parent switched" <<<"$(docker logs "$NODE_A" 2>&1)" \
+            || grep -q "Parent switched" <<<"$(docker logs "$NODE_B" 2>&1)"; then
             return 0
         fi
         sleep 1

@@ -3,10 +3,10 @@
 use super::*;
 use crate::node::session::{session_after, session_at};
 use crate::node::tests::spanning_tree::{
-    TestNode, cleanup_nodes, drain_all_packets, generate_random_edges, initiate_handshake,
-    lock_large_network_test, make_test_node_with_config, populate_all_coord_caches,
-    process_available_packets, run_tree_test, run_tree_test_with_configs, run_tree_test_with_mtus,
-    verify_tree_convergence,
+    TestNode, cleanup_nodes, delay_loopback_delivery, drain_all_packets, generate_random_edges,
+    initiate_handshake, lock_large_network_test, make_test_node_with_config,
+    populate_all_coord_caches, process_available_packets, run_tree_test,
+    run_tree_test_with_configs, run_tree_test_with_mtus, verify_tree_convergence,
 };
 use crate::proto::fsp::{SessionAck, SessionMessageType, SessionMsg3};
 use crate::proto::link::SessionDatagram;
@@ -6076,12 +6076,31 @@ async fn make_routable_pair() -> Vec<TestNode> {
     nodes
 }
 
+/// How long the session tests' setup waits for both sides to be established.
+///
+/// Sized for a loaded host, the same figure the bootstrap tests give peering.
+/// Measured on the wall clock, because one caller pauses tokio time and a
+/// paused clock would run out a tokio bound at once.
+const SESSION_SETUP_BOUND: Duration = Duration::from_secs(10);
+
 /// Establish an FSP session from nodes[0] to nodes[1] and assert both sides
 /// reached Established.
 async fn establish_pair_session(nodes: &mut [TestNode]) {
+    establish_pair_session_within(nodes, SESSION_SETUP_BOUND).await;
+}
+
+/// Establish an FSP session from nodes[0] to nodes[1], waiting up to `bound`
+/// of wall time, and assert both sides reached Established.
+///
+/// The three 20 ms drain passes come first, unconditionally: on loopback they
+/// carry the three-message handshake one hop per pass, so a setup that
+/// completes in them returns exactly as it always has. Only a setup still
+/// short of Established after them keeps draining, until the bound.
+async fn establish_pair_session_within(nodes: &mut [TestNode], bound: Duration) {
     let node0_addr = *nodes[0].node.node_addr();
     let node1_addr = *nodes[1].node.node_addr();
     let node1_pubkey = nodes[1].node.identity().pubkey_full();
+    let deadline = std::time::Instant::now() + bound;
 
     nodes[0]
         .node
@@ -6094,22 +6113,81 @@ async fn establish_pair_session(nodes: &mut [TestNode]) {
         process_available_packets(nodes).await;
     }
 
+    let established = |nodes: &[TestNode]| {
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| e.is_established())
+            && nodes[1]
+                .node
+                .get_session(&node0_addr)
+                .is_some_and(|e| e.is_established())
+    };
+    while !established(nodes) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(nodes).await;
+    }
+
+    assert!(
+        established(nodes),
+        "the pair's session must be established before the test body: after {:?} \
+         initiator {}, responder {}",
+        bound,
+        setup_state(&nodes[0].node, &node1_addr),
+        setup_state(&nodes[1].node, &node0_addr),
+    );
+}
+
+/// Name the state of `node`'s session entry for `peer`, for a setup failure.
+fn setup_state(node: &Node, peer: &NodeAddr) -> &'static str {
+    match node.get_session(peer) {
+        None => "absent",
+        Some(e) if e.is_established() => "established",
+        Some(e) if e.is_initiating() => "initiating",
+        Some(e) if e.is_awaiting_msg3() => "awaiting msg3",
+        Some(_) => "no state",
+    }
+}
+
+#[tokio::test]
+async fn a_session_setup_whose_packets_arrive_late_is_still_established_before_the_test_body() {
+    let mut nodes = make_routable_pair().await;
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+
+    // Each of the handshake's three hops now takes 100 ms, longer than the
+    // whole of a fixed 60 ms setup window.
+    for node in &nodes {
+        delay_loopback_delivery(node, Some(Duration::from_millis(100)));
+    }
+    establish_pair_session(&mut nodes).await;
+
     assert!(
         nodes[0]
             .node
             .get_session(&node1_addr)
-            .expect("initiator session present")
-            .is_established(),
-        "initiator session must be established before the test body"
+            .is_some_and(|e| e.is_established()),
+        "the initiator must be established once the setup returns"
     );
     assert!(
         nodes[1]
             .node
             .get_session(&node0_addr)
-            .expect("responder session present")
-            .is_established(),
-        "responder session must be established before the test body"
+            .is_some_and(|e| e.is_established()),
+        "the responder must be established once the setup returns"
     );
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "must be established before the test body")]
+async fn a_session_setup_that_never_completes_fails_at_the_bound() {
+    let mut nodes = make_routable_pair().await;
+
+    // The responder never hears the setup, so the wait has to give up at its
+    // bound rather than hide a handshake that cannot finish.
+    delay_loopback_delivery(&nodes[1], None);
+    establish_pair_session_within(&mut nodes, Duration::from_millis(300)).await;
 }
 
 /// Forge a SessionSetup carrying an unrelated ephemeral but claiming

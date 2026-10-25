@@ -123,7 +123,7 @@ class NetemManager:
         # Per-edge bandwidth: (node_a, node_b) -> rate in mbit
         self._edge_rates: dict[tuple[str, str], int] = {}
         if bandwidth and bandwidth.enabled:
-            for a, b in topology.edges:
+            for a, b in sorted(topology.edges):
                 rate = rng.choice(bandwidth.tiers_mbps)
                 self._edge_rates[(a, b)] = rate
                 self._edge_rates[(b, a)] = rate
@@ -131,7 +131,7 @@ class NetemManager:
         self._ingress_config = ingress
         self._ingress_rates: dict[tuple[str, str], int] = {}
         if ingress and ingress.enabled:
-            for a, b in topology.edges:
+            for a, b in sorted(topology.edges):
                 rate = rng.choice(ingress.tiers_kbps)
                 self._ingress_rates[(a, b)] = rate
                 self._ingress_rates[(b, a)] = rate
@@ -428,7 +428,7 @@ class NetemManager:
         # Only consider edges where both endpoints are up, and never the
         # explicitly excluded ones (links an assertion depends on).
         live_edges = [
-            (a, b) for a, b in self.topology.edges
+            (a, b) for a, b in sorted(self.topology.edges)
             if a not in self.down_nodes and b not in self.down_nodes
             and "-".join(sorted([a, b])) not in self._mutation_exclude
         ]

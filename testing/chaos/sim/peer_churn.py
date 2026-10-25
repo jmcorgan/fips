@@ -94,7 +94,7 @@ class PeerChurnManager:
         # Phase 1: Disconnect a random active link between up nodes
         candidates = [
             (a, b)
-            for a, b in self.active_edges
+            for a, b in sorted(self.active_edges)
             if a not in self.down_nodes and b not in self.down_nodes
         ]
         if candidates:

@@ -55,7 +55,10 @@ check() {
     bash "$GATE" "$@" 2>&1) || rc=$?
   if { [ "$expect" = zero ] && [ "$rc" -eq 0 ]; } ||
      { [ "$expect" = nonzero ] && [ "$rc" -ne 0 ]; }; then
-    if printf '%s\n' "$LAST_OUT" | grep -qE -- "$pattern"; then
+    # Matched on a here-string, not a pipe from printf: under pipefail,
+    # grep -q exiting at its match can kill the writer with SIGPIPE and turn
+    # the match into a miss once the output is over 4 KB (two cases are).
+    if grep -qE -- "$pattern" <<<"$LAST_OUT"; then
       echo "PASS $name (exit $rc)"
       return 0
     fi

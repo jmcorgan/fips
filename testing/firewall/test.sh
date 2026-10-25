@@ -79,8 +79,12 @@ wait_for_fips0() {
     local container="$1"
     local timeout="${2:-30}"
     for _ in $(seq 1 "$timeout"); do
-        if docker exec "$container" ip -6 addr show fips0 2>/dev/null \
-            | grep -qE 'inet6 fd[0-9a-f]+:'; then
+        # Captured before matching: under pipefail, grep -q exiting at its
+        # match can kill the writer with SIGPIPE and turn the match into a
+        # miss. Captured inside the condition so that set -e does not end
+        # the script while fips0 is not up yet.
+        if grep -qE 'inet6 fd[0-9a-f]+:' \
+            <<<"$(docker exec "$container" ip -6 addr show fips0 2>/dev/null)"; then
             return 0
         fi
         sleep 1

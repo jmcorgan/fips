@@ -231,10 +231,13 @@ check_gateway_default_listener() {
     local journal="" _i
     for _i in $(seq 1 5); do
         journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null) || journal=""
-        printf '%s\n' "$journal" | grep -q "fips-gateway running" && break
+        # Matched on a here-string, not a pipe from printf: under pipefail,
+        # grep -q exiting at its match can kill the writer with SIGPIPE and
+        # turn the match into a miss once the journal is over 4 KB.
+        grep -q "fips-gateway running" <<<"$journal" && break
         sleep 1
     done
-    if ! printf '%s\n' "$journal" | grep -q "fips-gateway running"; then
+    if ! grep -q "fips-gateway running" <<<"$journal"; then
         fail "the installed fips-gateway did not reach 'fips-gateway running', so its default listener was not observed"
         echo "  --- fips-gateway journal ---"
         printf '%s\n' "$journal" | tail -15
@@ -574,7 +577,9 @@ DOCKERFILE
         cleanup_container "$name"
         return
     fi
-    if echo "$install_output" | grep -qE "^E:|errors? were encountered"; then
+    # Matched on a here-string, as in check_gateway_default_listener: a pipe
+    # from echo can lose the match to SIGPIPE once the transcript is long.
+    if grep -qE "^E:|errors? were encountered" <<<"$install_output"; then
         fail "apt install reported errors"
         echo "$install_output" | tail -20
         cleanup_container "$name"
@@ -791,8 +796,11 @@ DOCKERFILE
 
     start_unit "$name" fips-gateway.service "$GATEWAY_START_TIMEOUT" >/dev/null 2>&1 || true
     sleep 3
-    if docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null \
-            | grep -q "DNS upstream is reachable"; then
+    # Captured before matching: under pipefail, grep -q exiting at its match
+    # can kill the writer with SIGPIPE and turn the match into a miss.
+    local gateway_journal
+    gateway_journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null)
+    if grep -q "DNS upstream is reachable" <<<"$gateway_journal"; then
         pass "fips-gateway reaches DNS upstream at [::1]:5354 via .deb install"
     else
         fail "fips-gateway DNS upstream check failed against installed daemon"

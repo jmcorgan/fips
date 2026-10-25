@@ -591,17 +591,17 @@ async fn resolve_query(
 mod mesh_tests;
 
 #[cfg(test)]
-mod tests {
+pub(in crate::gateway) mod tests {
     use super::*;
 
     use crate::gateway::pool::ConntrackSnapshot;
     use simple_dns::{Name, Question, RCODE, ResourceRecord};
     use tokio::sync::mpsc;
 
-    pub(super) const TEST_TTL: u32 = 60;
+    pub(in crate::gateway) const TEST_TTL: u32 = 60;
 
     /// Build a client-facing AAAA query.
-    pub(super) fn build_query(id: u16, qname: &str) -> Vec<u8> {
+    pub(in crate::gateway) fn build_query(id: u16, qname: &str) -> Vec<u8> {
         build_query_of_type(id, qname, QTYPE::TYPE(TYPE::AAAA))
     }
 
@@ -625,7 +625,7 @@ mod tests {
     }
 
     /// Build an upstream NOERROR AAAA answer.
-    pub(super) fn build_answer(id: u16, qname: &str, addr: &str) -> Vec<u8> {
+    pub(in crate::gateway) fn build_answer(id: u16, qname: &str, addr: &str) -> Vec<u8> {
         let mut packet = Packet::new_reply(id);
         packet.set_flags(PacketFlag::RESPONSE | PacketFlag::RECURSION_AVAILABLE);
         let name = Name::new_unchecked(qname);
@@ -663,14 +663,14 @@ mod tests {
         })
     }
 
-    pub(super) fn test_pool() -> std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>> {
+    pub(in crate::gateway) fn test_pool() -> std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>> {
         std::sync::Arc::new(tokio::sync::Mutex::new(
             VirtualIpPool::new("fd01::/112", TEST_TTL as u64, 30).unwrap(),
         ))
     }
 
     /// Assert the response is an AAAA answer whose address came from the pool.
-    pub(super) fn assert_pool_answer(response: &[u8]) -> Ipv6Addr {
+    pub(in crate::gateway) fn assert_pool_answer(response: &[u8]) -> Ipv6Addr {
         let packet = Packet::parse(response).unwrap();
         assert_eq!(packet.rcode(), RCODE::NoError);
         let addr = extract_aaaa(&packet).expect("expected an AAAA answer");

@@ -29,7 +29,9 @@
 # sweep, which skips while any generic-labelled container is up, then stops
 # for every later run as well. ci-local.sh exports FIPS_CI_RUN_ID; a hand run
 # gets "manual". testing/check-ci-labels.py fails a docker command, or an
-# array of its arguments, that carries the generic label without the run label.
+# array of its arguments, that carries the generic label without the run label,
+# and a container, network or volume created under testing/ or packaging/
+# without the run label at all.
 #
 # Not for an image every run shares under one fixed tag: a concurrent run's
 # teardown would remove that tag from under this run. Label only what is

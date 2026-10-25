@@ -26,6 +26,10 @@ class SimNode:
 @dataclass
 class SimTopology:
     nodes: dict[str, SimNode] = field(default_factory=dict)
+    # A set's iteration order follows Python's per-process string hash seed,
+    # so anything that draws from a seeded stream while walking these edges
+    # must walk sorted(edges), or the same scenario seed draws differently on
+    # every run. testing/check-chaos-schedule.py fails when one does not.
     edges: set[tuple[str, str]] = field(default_factory=set)
     # Per-edge transport type; edges not in this dict default to "udp"
     edge_transport: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -167,7 +171,7 @@ class SimTopology:
 
         # Build static-config adjacency for BFS
         static_adj: dict[str, list[str]] = {nid: [] for nid in self.nodes}
-        for a, b in static_edges:
+        for a, b in sorted(static_edges):
             static_adj[a].append(b)
             static_adj[b].append(a)
 
@@ -187,7 +191,7 @@ class SimTopology:
                     outbound[node].append(peer)
 
         # Non-tree static-config edges: lower ID → higher ID
-        for a, b in static_edges:
+        for a, b in sorted(static_edges):
             if (a, b) not in tree_edges and (b, a) not in tree_edges:
                 outbound[a].append(b)  # a < b by _make_edge convention
 
