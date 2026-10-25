@@ -176,3 +176,77 @@ async fn an_app_owned_tun_carries_a_packet_to_the_peer_app_and_answers_refusals_
     node_a.stop().await.unwrap();
     node_b.stop().await.unwrap();
 }
+
+/// Throughput of the app-owned TUN between two in-process nodes over
+/// loopback UDP: packets of `FIPS_TPUT_SIZE` bytes (default 1200) pushed as
+/// fast as the outbound channel takes them for `FIPS_TPUT_SECS` seconds
+/// (default 3), counted at the peer's app. Prints one `TPUT` line.
+#[tokio::test]
+#[ignore = "a throughput measurement, run by hand"]
+async fn app_owned_tun_throughput_between_two_nodes() {
+    let secs: u64 = std::env::var("FIPS_TPUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let size: usize = std::env::var("FIPS_TPUT_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1200);
+    let mut node_b = Node::new(app_tun_config()).unwrap();
+    let (_b_outbound, b_inbound) = node_b.enable_app_owned_tun();
+    node_b.start().await.unwrap();
+    let mut config_a = app_tun_config();
+    config_a.peers.push(crate::config::PeerConfig::new(
+        node_b.npub(),
+        "udp",
+        udp_addr(&node_b).to_string(),
+    ));
+    let mut node_a = Node::new(config_a).unwrap();
+    let (a_outbound, _a_inbound) = node_a.enable_app_owned_tun();
+    node_a.start().await.unwrap();
+    let addr_a = node_a.identity().address().to_ipv6();
+    let addr_b = node_b.identity().address().to_ipv6();
+    let size = size.min(node_a.effective_ipv6_mtu() as usize);
+
+    let embedder = async {
+        let packet = ipv6_packet(addr_a, addr_b, size);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(tokio::time::Instant::now() < deadline, "no session");
+            a_outbound.send(packet.clone()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if std::iter::from_fn(|| b_inbound.try_recv().ok()).count() > 0 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while b_inbound.try_recv().is_ok() {}
+        let start = tokio::time::Instant::now();
+        let end = start + Duration::from_secs(secs);
+        let mut received = 0usize;
+        let mut sent = 0usize;
+        while tokio::time::Instant::now() < end {
+            if a_outbound.try_send(packet.clone()).is_ok() {
+                sent += 1;
+            } else {
+                tokio::task::yield_now().await;
+            }
+            while let Ok(p) = b_inbound.try_recv() {
+                received += p.len();
+            }
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "TPUT size={size} secs={elapsed:.2} sent={sent} recv_pkts={} mbps={:.1}",
+            received / size,
+            received as f64 * 8.0 / elapsed / 1e6
+        );
+    };
+    tokio::select! {
+        result = node_a.run_rx_loop() => panic!("node A's rx loop exited: {result:?}"),
+        result = node_b.run_rx_loop() => panic!("node B's rx loop exited: {result:?}"),
+        () = embedder => {}
+    }
+    node_a.stop().await.unwrap();
+    node_b.stop().await.unwrap();
+}

@@ -7,6 +7,7 @@
 use super::icmp_rate_limit::IcmpRateLimiter;
 use super::tun::TunTx;
 use std::net::Ipv6Addr;
+use std::sync::Mutex;
 use tracing::debug;
 
 /// ICMPv6 message types.
@@ -362,8 +363,9 @@ pub(crate) struct IcmpContext<'a> {
     tun_tx: Option<&'a TunTx>,
     /// This node's address, the source of Destination Unreachable replies.
     our_addr: Ipv6Addr,
-    /// Per-source limiter, applied to Packet Too Big only.
-    limiter: &'a mut IcmpRateLimiter,
+    /// Per-source limiter, applied to Packet Too Big only. Shared between
+    /// the threads that answer the host.
+    limiter: &'a Mutex<IcmpRateLimiter>,
 }
 
 impl<'a> IcmpContext<'a> {
@@ -371,13 +373,18 @@ impl<'a> IcmpContext<'a> {
     pub(crate) fn new(
         tun_tx: Option<&'a TunTx>,
         our_addr: Ipv6Addr,
-        limiter: &'a mut IcmpRateLimiter,
+        limiter: &'a Mutex<IcmpRateLimiter>,
     ) -> Self {
         Self {
             tun_tx,
             our_addr,
             limiter,
         }
+    }
+
+    /// This node's address.
+    pub(crate) fn our_addr(&self) -> Ipv6Addr {
+        self.our_addr
     }
 
     /// Send ICMPv6 Destination Unreachable back through TUN.
@@ -396,14 +403,6 @@ impl<'a> IcmpContext<'a> {
         }
     }
 
-    /// Answer packets that were queued for a destination found to have no
-    /// route, with one Destination Unreachable each.
-    pub(crate) fn no_route<P: AsRef<[u8]>>(&self, packets: impl IntoIterator<Item = P>) {
-        for packet in packets {
-            self.dest_unreachable(packet.as_ref());
-        }
-    }
-
     /// Send ICMPv6 Packet Too Big back through TUN.
     ///
     /// Rate-limited per source address to prevent ICMP floods from
@@ -416,8 +415,14 @@ impl<'a> IcmpContext<'a> {
         // SAFETY: slice is exactly 16 bytes; length validated above (>= 40)
         let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
 
-        // Rate limit ICMP PTB messages per source
-        if !self.limiter.should_send(src_addr) {
+        // Rate limit ICMP PTB messages per source. A poisoned lock means a
+        // thread panicked mid-check; the limiter's state is still usable.
+        let allowed = self
+            .limiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .should_send(src_addr);
+        if !allowed {
             debug!(
                 src = %src_addr,
                 "Rate limiting ICMP Packet Too Big"

@@ -66,6 +66,7 @@ environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_block
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_blocked_writer_exits_when_its_stream_is_dropped_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 helper        fips-mesh  transport::ble::io_macos::corebluetooth::tests::sink_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 long-running  fips-mesh  node::tests::discovery::test_discovery_100_nodes  src/node/tests/discovery.rs
+benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_two_nodes  src/node/tests/app_tun.rs
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs

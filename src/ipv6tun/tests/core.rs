@@ -88,3 +88,46 @@ fn applying_the_node_messages_updates_the_shared_state() {
     assert!(paths.read().unwrap().is_empty());
     assert_eq!(state.apply(FromMesh::Synced), Applied::Synced);
 }
+
+#[test]
+fn the_key_map_takes_known_keys_and_drops_forgotten_ones_by_prefix() {
+    let state = MeshState::new();
+    let peer = PeerKey::any();
+    let prefix = prefix_of(&peer);
+    assert_eq!(state.key(&prefix), None);
+    state.apply(FromMesh::KnownKey { peer });
+    assert_eq!(state.key(&prefix), Some(peer));
+    state.apply(FromMesh::ForgotKey { peer, learned: 0 });
+    assert_eq!(state.key(&prefix), None);
+}
+
+#[test]
+fn a_key_learned_after_the_node_decided_to_forget_it_is_kept() {
+    let state = MeshState::new();
+    let peer = PeerKey::any();
+    state.apply(FromMesh::KnownKey { peer });
+    let report = state.learn(peer);
+    assert_eq!(report.seq, 1);
+    state.apply(FromMesh::ForgotKey {
+        peer,
+        learned: report.seq - 1,
+    });
+    assert_eq!(state.key(&prefix_of(&peer)), Some(peer), "kept");
+    state.apply(FromMesh::ForgotKey {
+        peer,
+        learned: report.seq,
+    });
+    assert_eq!(state.key(&prefix_of(&peer)), None, "the node had seen it");
+}
+
+#[test]
+fn an_attach_drops_every_key_before_its_replay() {
+    let state = MeshState::new();
+    let old = PeerKey::any();
+    state.apply(FromMesh::KnownKey { peer: old });
+    state.apply(FromMesh::Attached {
+        node: PeerKey::any(),
+        payload_limit: 1170,
+    });
+    assert_eq!(state.key(&prefix_of(&old)), None);
+}

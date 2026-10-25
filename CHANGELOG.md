@@ -1530,6 +1530,14 @@ with v0.5.x or earlier peers.
   out the default route. Startup replaces a rule left by an earlier
   version.
 
+- The first packet to a `.fips` name the node's DNS responder has just
+  resolved is no longer answered with ICMPv6 Destination Unreachable when the
+  node is busy. The responder hands the resolved key to the node before it
+  answers, but the node registered it only after any host packets already
+  waiting, so the host's first packet could miss it and a TCP connect could
+  fail at once. Every waiting resolution is now registered before each host
+  packet is handled.
+
 #### Documentation
 
 - Reference and design documents that disagreed with the code are

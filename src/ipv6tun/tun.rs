@@ -190,10 +190,23 @@ pub(crate) fn per_flow_max_mss(
 /// Channel sender for packets to be written to TUN.
 pub type TunTx = mpsc::Sender<Vec<u8>>;
 
-/// Channel sender for outbound packets from TUN reader to Node.
+/// Channel sender of the packets an embedder that owns the TUN hands the
+/// node.
 pub type TunOutboundTx = tokio::sync::mpsc::Sender<Vec<u8>>;
-/// Channel receiver for outbound packets (consumed by Node's RX loop).
+/// Channel receiver of those packets (consumed by Node's RX loop).
 pub type TunOutboundRx = tokio::sync::mpsc::Receiver<Vec<u8>>;
+
+/// What the TUN reader needs to run the host half for each packet itself:
+/// the adapter's state, the Packet Too Big limiter it shares, and the
+/// link's channel of datagrams to the node.
+pub(crate) struct HostPath {
+    /// The adapter's state: the node-wide IPv6 MTU and the key map.
+    pub(crate) state: super::core::MeshState,
+    /// The Packet Too Big limiter.
+    pub(crate) limiter: Arc<std::sync::Mutex<super::icmp_rate_limit::IcmpRateLimiter>>,
+    /// Datagrams to the node.
+    pub(crate) datagrams: tokio::sync::mpsc::Sender<super::link::Datagram>,
+}
 
 /// Errors that can occur with TUN operations.
 #[derive(Debug, Error)]
@@ -624,12 +637,12 @@ impl TunWriter {
 /// error occurs.
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 #[cfg(unix)]
-pub fn run_tun_reader(
+pub(crate) fn run_tun_reader(
     mut device: TunDevice,
     mtu: u16,
     our_addr: Ipv6Address,
     tun_tx: TunTx,
-    outbound_tx: TunOutboundTx,
+    host: HostPath,
     max_mss: MssCeiling,
     path_mtu_lookup: PathMtuReplica,
 ) {
@@ -644,7 +657,7 @@ pub fn run_tun_reader(
                     &name,
                     our_addr,
                     &tun_tx,
-                    &outbound_tx,
+                    &host,
                     &path_mtu_lookup,
                 ) {
                     break;
@@ -687,12 +700,12 @@ impl Drop for ShutdownFd {
 /// parked in a blocking TUN read on either of them.
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[allow(clippy::too_many_arguments)]
-pub fn run_tun_reader(
+pub(crate) fn run_tun_reader(
     mut device: TunDevice,
     mtu: u16,
     our_addr: Ipv6Address,
     tun_tx: TunTx,
-    outbound_tx: TunOutboundTx,
+    host: HostPath,
     max_mss: MssCeiling,
     path_mtu_lookup: PathMtuReplica,
     shutdown_fd: std::os::unix::io::RawFd,
@@ -753,7 +766,7 @@ pub fn run_tun_reader(
                         &name,
                         our_addr,
                         &tun_tx,
-                        &outbound_tx,
+                        &host,
                         &path_mtu_lookup,
                     ) {
                         return; // _shutdown_fd closes on drop
@@ -810,7 +823,7 @@ fn handle_tun_packet(
     name: &str,
     our_addr: Ipv6Address,
     tun_tx: &TunTx,
-    outbound_tx: &TunOutboundTx,
+    host: &HostPath,
     path_mtu_lookup: &PathMtuReplica,
 ) -> bool {
     use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
@@ -855,7 +868,11 @@ fn handle_tun_packet(
         if clamp_tcp_mss(packet, effective_max_mss) {
             trace!(name = %name, max_mss = effective_max_mss, "Clamped TCP MSS in SYN packet");
         }
-        if outbound_tx.blocking_send(packet.to_vec()).is_err() {
+        let mut icmp =
+            super::icmp::IcmpContext::new(Some(tun_tx), our_addr.to_ipv6(), &host.limiter);
+        if let Some(datagram) = super::outbound::outbound(packet, &host.state, &mut icmp)
+            && host.datagrams.blocking_send(datagram).is_err()
+        {
             return false; // Channel closed, shutdown
         }
     } else {
@@ -1192,12 +1209,12 @@ mod windows_tun {
     ///
     /// This is designed to run in a dedicated thread since wintun reads are blocking.
     /// The loop exits when the session is closed or an unrecoverable error occurs.
-    pub fn run_tun_reader(
+    pub(crate) fn run_tun_reader(
         mut device: TunDevice,
         mtu: u16,
         our_addr: Ipv6Address,
         tun_tx: TunTx,
-        outbound_tx: TunOutboundTx,
+        host: super::HostPath,
         max_mss: MssCeiling,
         path_mtu_lookup: PathMtuReplica,
     ) {
@@ -1212,7 +1229,7 @@ mod windows_tun {
                         &name,
                         our_addr,
                         &tun_tx,
-                        &outbound_tx,
+                        &host,
                         &path_mtu_lookup,
                     ) {
                         break;
@@ -1315,7 +1332,9 @@ mod windows_tun {
 
 // Re-export Windows TUN types at module level
 #[cfg(windows)]
-pub use windows_tun::{TunDevice, TunWriter, run_tun_reader, shutdown_tun_interface};
+pub(crate) use windows_tun::run_tun_reader;
+#[cfg(windows)]
+pub use windows_tun::{TunDevice, TunWriter, shutdown_tun_interface};
 
 // Android uses an app-owned TUN (the embedder owns the fd, e.g. an Android
 // VpnService); FIPS never creates or configures a system TUN here. These no-op
@@ -1897,11 +1916,37 @@ mod tests {
         pkt
     }
 
+    /// A host path whose map knows `peer`, and the node's end of its
+    /// datagram channel.
+    fn host_path(
+        peer: Option<crate::ipv6tun::link::PeerKey>,
+    ) -> (
+        HostPath,
+        tokio::sync::mpsc::Receiver<crate::ipv6tun::link::Datagram>,
+    ) {
+        let state = crate::ipv6tun::core::MeshState::new();
+        if let Some(peer) = peer {
+            state.apply(crate::ipv6tun::link::FromMesh::KnownKey { peer });
+        }
+        let (datagrams, rx) = tokio::sync::mpsc::channel(4);
+        let limiter = Arc::new(std::sync::Mutex::new(
+            crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter::new(),
+        ));
+        (
+            HostPath {
+                state,
+                limiter,
+                datagrams,
+            },
+            rx,
+        )
+    }
+
     #[test]
     fn self_addressed_packet_is_hairpinned_to_tun() {
         let our_addr = fips_addr_with_node_byte(0x55);
         let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
-        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let (outbound_tx, mut outbound_rx) = host_path(None);
         let lookup = empty_lookup();
         let mut pkt = ipv6_packet_to(&our_addr);
 
@@ -1930,9 +1975,10 @@ mod tests {
     #[test]
     fn other_fips_packet_goes_to_mesh() {
         let our_addr = fips_addr_with_node_byte(0x55);
-        let peer = fips_addr_with_node_byte(0x66);
+        let key = crate::ipv6tun::link::PeerKey::any();
+        let peer = key.address();
         let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
-        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let (outbound_tx, mut outbound_rx) = host_path(Some(key));
         let lookup = empty_lookup();
         let mut pkt = ipv6_packet_to(&peer);
 

@@ -9,9 +9,19 @@
 //!
 //! A remote end is named by its x-only public key, never by a node address
 //! or an `fd00::/8` prefix; the adapter derives addresses itself.
+//!
+//! Three channels carry the messages. Down, one unbounded channel of
+//! [`FromMesh`] in the order the node sends them. Up, two bounded ones: the
+//! adapter's datagrams, and the keys its DNS responder learned, kept apart
+//! so that a burst of datagrams never holds a registration back. The node
+//! answers a datagram it refuses with a [`Refusal`], handed to the adapter
+//! in line where the refusal is decided.
 
 use secp256k1::XOnlyPublicKey;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc::{
+    Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
+};
 
 use crate::{Ipv6Address, NodeAddr};
 
@@ -19,25 +29,42 @@ use crate::{Ipv6Address, NodeAddr};
 pub(crate) const IPV6_PORT: u16 = 256;
 
 /// A peer named by the 32 bytes of its x-only public key.
+///
+/// The bytes are held serialized, so hashing and comparing a peer key, as
+/// the node does for every datagram, never calls into secp256k1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PeerKey(XOnlyPublicKey);
+pub(crate) struct PeerKey([u8; 32]);
 
 impl PeerKey {
     /// The key of the peer whose x-only public key is `key`.
     pub(crate) fn new(key: XOnlyPublicKey) -> Self {
-        Self(key)
+        Self(key.serialize())
     }
 
     /// Some peer's key, for a test that needs one but not a particular one.
     #[cfg(test)]
     pub(crate) fn any() -> Self {
-        Self(crate::Identity::generate().pubkey())
+        Self::new(crate::Identity::generate().pubkey())
+    }
+
+    /// The peer's x-only public key.
+    pub(crate) fn key(&self) -> XOnlyPublicKey {
+        XOnlyPublicKey::from_slice(&self.0).expect("a peer key is built only from a valid key")
+    }
+
+    /// The node address the peer's key hashes to: the first 16 bytes of the
+    /// SHA-256 of the key's bytes, as `NodeAddr::from_pubkey` derives it.
+    pub(crate) fn node_addr(&self) -> NodeAddr {
+        let hash = Sha256::digest(self.0);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        NodeAddr::from_bytes(bytes)
     }
 
     /// The peer's IPv6 address: the `fd00::/8` form of the node address its
     /// key hashes to.
     pub(crate) fn address(&self) -> Ipv6Address {
-        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&self.0))
+        Ipv6Address::from_node_addr(&self.node_addr())
     }
 }
 
@@ -47,6 +74,10 @@ pub(crate) struct Feeds {
     /// The per-peer path MTU feed: one [`FromMesh::PathMtu`] per entry at
     /// attach, then one per change.
     pub(crate) path_mtu: bool,
+    /// The identity feed: one [`FromMesh::KnownKey`] per key the node can
+    /// route to at attach, then one per key it learns and a
+    /// [`FromMesh::ForgotKey`] once it can no longer route to one.
+    pub(crate) identity: bool,
 }
 
 /// The adapter's request to attach to the node.
@@ -83,12 +114,86 @@ pub(crate) enum FromMesh {
         /// The limit in bytes, or `None` when the node released it.
         payload_limit: Option<u16>,
     },
+    /// The node can route to this peer by its key.
+    KnownKey {
+        /// The peer.
+        peer: PeerKey,
+    },
+    /// The node can no longer route to this peer.
+    ForgotKey {
+        /// The peer.
+        peer: PeerKey,
+        /// The number of the last [`Learned`] the node had handled when it
+        /// decided this. A key the adapter has learned again since then is
+        /// kept.
+        learned: u64,
+    },
 }
 
-/// The adapter's end of the link: the receiver of everything the node sends.
+/// A datagram from the host for the node to send to `peer` on the IPv6
+/// port: the IPv6 packet with its header compressed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Datagram {
+    /// The destination.
+    pub(crate) peer: PeerKey,
+    /// The compressed packet.
+    pub(crate) payload: Vec<u8>,
+}
+
+/// A key the adapter's DNS responder handed to the host, for the node to
+/// register before the host's first packet to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Learned {
+    /// The peer the name resolved to.
+    pub(crate) peer: PeerKey,
+    /// This report's number, counting from 1, so that a later
+    /// [`FromMesh::ForgotKey`] can say which reports it has seen.
+    pub(crate) seq: u64,
+}
+
+/// A datagram, or datagrams held for one destination, that the node will
+/// not send, handed back so the adapter can answer the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// Larger than the node carries to `peer`.
+    TooBig {
+        /// The destination.
+        peer: PeerKey,
+        /// The largest payload, in bytes, the node carries to it.
+        payload_limit: u16,
+        /// The refused payload.
+        payload: Vec<u8>,
+    },
+    /// A session to `peer` would exceed the session table.
+    TableFull {
+        /// The destination.
+        peer: PeerKey,
+        /// The refused payload.
+        payload: Vec<u8>,
+    },
+    /// Nothing is working to reach `peer`.
+    NoRoute {
+        /// The destination.
+        peer: PeerKey,
+        /// The refused payloads, in the order the host sent them.
+        payloads: Vec<Vec<u8>>,
+    },
+}
+
+/// The node's receiver of the adapter's datagrams.
+pub(crate) type DatagramRx = Receiver<Datagram>;
+/// The node's receiver of the keys the adapter learned.
+pub(crate) type LearnedRx = Receiver<Learned>;
+
+/// The adapter's end of the link: the receiver of everything the node
+/// sends, and the senders of what the adapter sends it.
 pub(crate) struct MeshLink {
     /// Messages from the node, in order.
     pub(crate) from_mesh: UnboundedReceiver<FromMesh>,
+    /// The adapter's datagrams, to the node.
+    pub(crate) datagrams: Sender<Datagram>,
+    /// The keys the adapter learned, to the node.
+    pub(crate) learned: Sender<Learned>,
 }
 
 /// The node's end of the link: the sender of everything the adapter receives.
@@ -109,11 +214,26 @@ impl HostLink {
     }
 }
 
-/// A connected pair of link ends. Only the node's attach step calls this,
-/// so holding a [`MeshLink`] is what an attach was granted.
-pub(crate) fn pair() -> (MeshLink, HostLink) {
+/// A connected pair of link ends, with the node's two receivers. Only the
+/// node's attach step calls this, so holding a [`MeshLink`] is what an
+/// attach was granted. `datagrams` and `learned` bound the two channels up.
+pub(crate) fn pair(
+    datagrams: usize,
+    learned: usize,
+) -> (MeshLink, HostLink, DatagramRx, LearnedRx) {
     let (to_host, from_mesh) = unbounded_channel();
-    (MeshLink { from_mesh }, HostLink { to_host })
+    let (datagram_tx, datagram_rx) = channel(datagrams);
+    let (learned_tx, learned_rx) = channel(learned);
+    (
+        MeshLink {
+            from_mesh,
+            datagrams: datagram_tx,
+            learned: learned_tx,
+        },
+        HostLink { to_host },
+        datagram_rx,
+        learned_rx,
+    )
 }
 
 #[cfg(test)]

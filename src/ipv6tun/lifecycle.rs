@@ -7,6 +7,7 @@
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use tokio::sync::mpsc::Sender;
@@ -14,12 +15,13 @@ use tracing::{debug, info, warn};
 
 use super::config::{DnsConfig, TunConfig};
 use super::core::{Applied, MeshState, PathMtuReplica, run_link};
-use super::dns::{DnsIdentityRx, MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
+use super::dns::{MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::link::{Attach, Feeds, FromMesh, IPV6_PORT, MeshLink};
+use super::link::{Attach, Datagram, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal};
+use super::outbound::{answer, outbound};
 use super::tun::{
-    MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
+    HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
     shutdown_tun_interface,
 };
 use crate::Ipv6Address;
@@ -60,10 +62,19 @@ pub(crate) struct Handles {
     /// Whether the node has attached us since it last detached us. Neither
     /// the device nor its threads may start before the attach.
     attached: bool,
+    /// Where the adapter's datagrams go: the node's end, from the attach.
+    datagrams: Option<Sender<Datagram>>,
+    /// Where the DNS responder reports the keys it learned: the node's end,
+    /// from the attach.
+    learned: Option<Sender<Learned>>,
+    /// Whether the attach asked for the identity feed, so that our key map
+    /// is kept: only then does the node tell us what to forget.
+    keys_fed: bool,
     /// TUN device state, as reported by `Node::tun_state`.
     tun_state: TunState,
-    /// Per-source limiter of the Packet Too Big replies sent to the host.
-    icmp_limiter: IcmpRateLimiter,
+    /// Per-source limiter of the Packet Too Big replies sent to the host,
+    /// shared with the TUN reader thread.
+    icmp_limiter: Arc<Mutex<IcmpRateLimiter>>,
 
     /// Kernel name of the TUN device this node created, used to delete or
     /// down it at teardown. Set only while a system TUN is up; an app-owned
@@ -71,7 +82,7 @@ pub(crate) struct Handles {
     pub(crate) tun_name: Option<String>,
     /// TUN packet sender channel.
     pub(crate) tun_tx: Option<TunTx>,
-    /// Receiver for outbound packets from the TUN reader.
+    /// Receiver of the packets an embedder that owns the TUN sends.
     pub(crate) tun_outbound_rx: Option<TunOutboundRx>,
     /// TUN reader thread handle.
     pub(crate) tun_reader_handle: Option<JoinHandle<()>>,
@@ -83,8 +94,6 @@ pub(crate) struct Handles {
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     pub(crate) tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
 
-    /// Receiver for resolved identities from the DNS responder.
-    pub(crate) dns_identity_rx: Option<DnsIdentityRx>,
     /// DNS responder task handle.
     pub(crate) dns_task: Option<tokio::task::JoinHandle<()>>,
     /// Address the DNS responder actually bound, read back from the socket
@@ -99,8 +108,6 @@ pub(crate) struct Handles {
 
 /// What the TUN threads take from the node when they start.
 pub(crate) struct TunThreads {
-    /// Capacity of the host-to-mesh channel (`node.buffers.tun_channel`).
-    pub(crate) channel: usize,
     /// Sender each TUN thread reports `Child::Tun` on when it exits.
     pub(crate) exit_tx: Option<Sender<Child>>,
 }
@@ -116,8 +123,11 @@ impl Handles {
             } else {
                 TunState::Disabled
             },
-            icmp_limiter: IcmpRateLimiter::new(),
+            icmp_limiter: Arc::new(Mutex::new(IcmpRateLimiter::new())),
             mesh: MeshState::new(),
+            datagrams: None,
+            learned: None,
+            keys_fed: false,
             link: None,
             link_task: None,
             attached: false,
@@ -128,7 +138,6 @@ impl Handles {
             tun_writer_handle: None,
             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             tun_shutdown_fd: None,
-            dns_identity_rx: None,
             dns_task: None,
             dns_local_addr: None,
             dns_aliases: None,
@@ -142,24 +151,43 @@ impl Handles {
 
     /// Borrow the host-facing ICMPv6 sender: the TUN channel, our address
     /// and the Packet Too Big rate limiter.
-    pub(crate) fn icmp(&mut self) -> IcmpContext<'_> {
-        IcmpContext::new(self.tun_tx.as_ref(), self.our_addr, &mut self.icmp_limiter)
+    pub(crate) fn icmp(&self) -> IcmpContext<'_> {
+        IcmpContext::new(self.tun_tx.as_ref(), self.our_addr, &self.icmp_limiter)
     }
 
-    /// What to ask the node for when it attaches us: port 256 and the path
-    /// MTU feed while the TUN is enabled, and nothing otherwise.
+    /// Run the host half for one packet an embedder that owns the TUN sent:
+    /// answer it here, or return the datagram for the node.
+    pub(crate) fn outbound(&mut self, packet: &[u8]) -> Option<Datagram> {
+        self.catch_up();
+        outbound(packet, &self.mesh, &mut self.icmp())
+    }
+
+    /// Answer the host for a datagram the node refused.
+    pub(crate) fn answer(&self, refusal: Refusal) {
+        answer(refusal, &mut self.icmp());
+    }
+
+    /// What to ask the node for when it attaches us: port 256, the path MTU
+    /// feed and the identity feed while the TUN is enabled, and nothing
+    /// otherwise.
     pub(crate) fn attach_request(&self) -> Attach {
         let tun = self.tun_state != TunState::Disabled;
         Attach {
             port: tun.then_some(IPV6_PORT),
-            feeds: Feeds { path_mtu: tun },
+            feeds: Feeds {
+                path_mtu: tun,
+                identity: tun,
+            },
         }
     }
 
     /// Take our end of the link from the node's attach, applying everything
     /// up to the end of its replay now, before any device opens.
-    pub(crate) fn attached(&mut self, link: MeshLink) {
+    pub(crate) fn attached(&mut self, link: MeshLink, feeds: Feeds) {
         self.attached = true;
+        self.keys_fed = feeds.identity;
+        self.datagrams = Some(link.datagrams.clone());
+        self.learned = Some(link.learned.clone());
         self.link = Some(link);
         while let Some(message) = self.next_queued() {
             match self.mesh.apply(message) {
@@ -202,6 +230,8 @@ impl Handles {
     /// that out.
     pub(crate) async fn detached(&mut self) {
         self.attached = false;
+        self.datagrams = None;
+        self.learned = None;
         self.link = None;
         if let Some(task) = self.link_task.take()
             && let Err(e) = task.await
@@ -223,6 +253,35 @@ impl Handles {
     #[cfg(test)]
     pub(crate) fn mesh(&self) -> &MeshState {
         &self.mesh
+    }
+
+    /// Whether the node has attached us since it last detached us.
+    #[cfg(test)]
+    pub(crate) fn is_attached(&self) -> bool {
+        self.attached
+    }
+
+    /// Apply every message the node has queued so far, for tests.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) {
+        self.catch_up();
+    }
+
+    /// What the DNS responder learns keys through, once attached, for tests.
+    #[cfg(test)]
+    pub(crate) fn learner(&self) -> Option<Learner> {
+        Some(Learner {
+            state: self.mesh.clone(),
+            learned: self.learned.clone()?,
+            keep: self.keys_fed,
+        })
+    }
+
+    /// Where a system TUN reader sends its datagrams, once attached, for
+    /// tests that stand in for the reader thread.
+    #[cfg(test)]
+    pub(crate) fn datagram_sender(&self) -> Option<Sender<Datagram>> {
+        self.datagrams.clone()
     }
 
     /// The state once every queued message is applied, as the TUN threads
@@ -316,10 +375,7 @@ impl Handles {
         threads: TunThreads,
     ) -> Result<(), TunError> {
         debug_assert!(self.attached, "the TUN threads started before the attach");
-        let TunThreads {
-            channel: tun_channel_size,
-            exit_tx,
-        } = threads;
+        let TunThreads { exit_tx } = threads;
         // Everything the node has said so far, including the limit it
         // published just before calling this, is in place before either
         // thread reads it.
@@ -367,8 +423,19 @@ impl Handles {
         // Clone tun_tx for the reader
         let reader_tun_tx = tun_tx.clone();
 
-        // Create outbound channel for TUN reader → Node
-        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
+        // The reader runs the host half itself and sends its datagrams to
+        // the node on the link, whose channel the node bounded at
+        // `node.buffers.tun_channel` when it attached us.
+        let Some(datagrams) = self.datagrams.clone() else {
+            return Err(TunError::Configure(
+                "the TUN threads started before the attach".into(),
+            ));
+        };
+        let host = HostPath {
+            state: self.mesh.clone(),
+            limiter: self.icmp_limiter.clone(),
+            datagrams,
+        };
 
         // Spawn reader thread. Like the writer, it
         // self-reports `Child::Tun` on exit or panic (sync
@@ -386,7 +453,7 @@ impl Handles {
                         mtu,
                         our_addr,
                         reader_tun_tx,
-                        outbound_tx,
+                        host,
                         max_mss,
                         path_mtu_lookup,
                         shutdown_read_fd,
@@ -405,7 +472,7 @@ impl Handles {
                         mtu,
                         our_addr,
                         reader_tun_tx,
-                        outbound_tx,
+                        host,
                         max_mss,
                         path_mtu_lookup,
                     )
@@ -416,7 +483,6 @@ impl Handles {
 
         self.tun_name = Some(name);
         self.tun_tx = Some(tun_tx);
-        self.tun_outbound_rx = Some(outbound_rx);
         self.tun_reader_handle = Some(reader_handle);
         self.tun_writer_handle = Some(writer_handle);
         #[cfg(any(target_os = "macos", target_os = "freebsd"))]
@@ -475,17 +541,21 @@ impl Handles {
     /// whether it came up. A failure is logged and is not fatal to the node.
     ///
     /// `peers` seeds the responder's own hosts map, which it reloads from
-    /// the hosts file on its own; `channel` is the capacity of the identity
-    /// channel back to the node (`node.buffers.dns_channel`). Reads the TUN
-    /// device name for the mesh-interface filter, so the TUN child, when
-    /// enabled, starts first.
+    /// the hosts file on its own. The keys it hands out go into our own map
+    /// and to the node on the link, whose channel the node bounded at
+    /// `node.buffers.dns_channel` when it attached us. Reads the TUN device
+    /// name for the mesh-interface filter, so the TUN child, when enabled,
+    /// starts first.
     pub(crate) fn start_dns(
         &mut self,
         config: &DnsConfig,
         peers: &[PeerConfig],
-        channel: usize,
         exit_tx: Option<Sender<Child>>,
     ) -> bool {
+        let Some(learned) = self.learned.clone() else {
+            warn!("DNS responder not started: the node has not attached the IPv6 adapter");
+            return false;
+        };
         // Initialize DNS responder (independent of TUN).
         //
         // Default bind_addr is "::1" (IPv6 loopback). The shipped
@@ -522,7 +592,11 @@ impl Handles {
                         // and this is the address an embedder that
                         // proxies queries to us has to dial.
                         let local_addr = socket.local_addr().unwrap_or(bind);
-                        let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(channel);
+                        let keys = Learner {
+                            state: self.mesh.clone(),
+                            learned,
+                            keep: self.keys_fed,
+                        };
                         let dns_ttl = config.ttl();
                         let base_hosts = HostMap::from_peer_configs(peers);
                         let hosts_path = PathBuf::from(DEFAULT_HOSTS_PATH);
@@ -563,17 +637,9 @@ impl Handles {
                         // `Running`.
                         let handle = tokio::spawn(report_exit(
                             Child::Dns,
-                            run_responder(
-                                socket,
-                                identity_tx,
-                                dns_ttl,
-                                reloader,
-                                Some(aliases_rx),
-                                mesh,
-                            ),
+                            run_responder(socket, keys, dns_ttl, reloader, Some(aliases_rx), mesh),
                             exit_tx,
                         ));
-                        self.dns_identity_rx = Some(identity_rx);
                         self.dns_task = Some(handle);
                         self.dns_aliases = Some(aliases_tx);
                         self.dns_local_addr = Some(local_addr);
@@ -612,5 +678,31 @@ impl Handles {
         // the listener, so an embedder polling `dns_local_addr()`
         // never dials a socket that is already gone.
         self.dns_local_addr.take();
+    }
+}
+
+/// Where the DNS responder puts a key it hands to the host: into the
+/// adapter's own map, so the host's first packet to it is forwarded, and to
+/// the node, which registers it.
+pub(crate) struct Learner {
+    /// The adapter's state, holding its map.
+    pub(crate) state: MeshState,
+    /// The node's end of the link.
+    pub(crate) learned: Sender<Learned>,
+    /// Whether to record keys in the map: only while the node feeds it,
+    /// since only then does the node say what to forget.
+    pub(crate) keep: bool,
+}
+
+impl Learner {
+    /// Record `peer` in our map, if we keep one, and report it to the node,
+    /// waiting for room on the link.
+    pub(crate) async fn learn(&self, peer: super::link::PeerKey) {
+        let report = if self.keep {
+            self.state.learn(peer)
+        } else {
+            self.state.report(peer)
+        };
+        let _ = self.learned.send(report).await;
     }
 }

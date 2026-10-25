@@ -970,8 +970,8 @@ impl Node {
                     "Discovery lookup timed out, destination unreachable"
                 );
             }
-            if let Some(packets) = queued {
-                self.host_icmp().no_route(&packets);
+            if let Some(held) = queued {
+                self.answer_held(held);
             }
         }
 

@@ -2425,9 +2425,11 @@ async fn with_the_held_table_full_a_destination_with_an_initiating_session_gets_
     for i in 0..cap as u32 {
         let mut bytes = [0xEEu8; 16];
         bytes[..4].copy_from_slice(&i.to_be_bytes());
-        nodes[0]
-            .node
-            .queue_pending_tun_packet_for_test(NodeAddr::from_bytes(bytes), vec![0x60; 40]);
+        nodes[0].node.test_hold(
+            NodeAddr::from_bytes(bytes),
+            crate::ipv6tun::link::PeerKey::any(),
+            vec![0x60; 40],
+        );
     }
     assert_eq!(nodes[0].node.pending_tun_destinations(), cap);
 
@@ -2581,9 +2583,11 @@ fn test_purge_idle_sessions_cleans_pending_packets() {
     node.sessions.insert(remote_addr, entry);
 
     // Insert some pending packets for this destination
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(vec![1, 2, 3]);
-    node.pending_tun_packets.insert(remote_addr, queue);
+    node.test_hold(
+        remote_addr,
+        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        vec![1, 2, 3],
+    );
     assert!(node.pending_tun_packets.contains_key(&remote_addr));
 
     // Purge after idle timeout
