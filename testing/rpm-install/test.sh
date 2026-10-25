@@ -671,8 +671,11 @@ test_no_resolver() {
             fail "saved backend is '$backend' (expected 'none')"
         fi
 
-        if cexec "$name" journalctl -u fips-dns.service --no-pager 2>&1 \
-            | grep -q "No supported DNS resolver detected"; then
+        # Captured before matching: under pipefail, grep -q exiting at its
+        # match can kill the writer with SIGPIPE and turn the match into a miss.
+        local journal
+        journal=$(cexec "$name" journalctl -u fips-dns.service --no-pager 2>&1)
+        if grep -q "No supported DNS resolver detected" <<<"$journal"; then
             pass "journal carries the no-resolver warning"
         else
             fail "no-resolver warning missing from the journal"
@@ -771,8 +774,10 @@ test_upgrade() {
     # straight back finishes in seconds too. What makes the transaction safe
     # is the --no-block in the scriptlet that runs on upgrade -- the installed
     # package's %postun -- so assert that directly.
-    if cexec "$name" rpm -q --scripts fips-mesh 2>/dev/null \
-        | grep -q 'systemctl --no-block try-restart'; then
+    # Captured before matching, as the journal check above is.
+    local scripts
+    scripts=$(cexec "$name" rpm -q --scripts fips-mesh 2>/dev/null)
+    if grep -q 'systemctl --no-block try-restart' <<<"$scripts"; then
         pass "installed %postun queues the restart (--no-block)"
     else
         fail "installed %postun does not queue the restart with --no-block"
