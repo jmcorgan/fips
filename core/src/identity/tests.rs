@@ -855,3 +855,56 @@ fn a_peer_keys_debug_output_is_its_first_four_bytes_in_hex() {
     let key = PeerKey::from_xonly(&generator_key());
     assert_eq!(format!("{key:?}"), "PeerKey(79be667e)");
 }
+
+#[test]
+fn the_generator_keys_node_prefix_matches_the_value_computed_outside_the_crate() {
+    let addr = NodeAddr::from_pubkey(&generator_key());
+    let want: [u8; 15] = hex::decode("132f39a98c31baaddba6525f5d43f2")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(addr.prefix().as_bytes(), &want);
+    assert_eq!(
+        Ipv6Address::from_node_addr(&addr).prefix().as_bytes(),
+        &want
+    );
+    assert_eq!(addr.prefix(), NodePrefix::from_bytes(want));
+}
+
+#[test]
+fn an_ipv6_address_names_the_prefix_of_the_node_address_it_was_derived_from() {
+    let identity = Identity::generate();
+    assert_eq!(identity.address().prefix(), identity.node_addr().prefix());
+    assert_eq!(
+        identity.node_addr().prefix().as_bytes()[..],
+        identity.node_addr().as_bytes()[0..15]
+    );
+}
+
+#[test]
+fn a_prefix_from_octets_takes_bytes_one_to_fifteen_and_ignores_byte_zero() {
+    let mut octets = [0u8; 16];
+    for (i, b) in octets.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    octets[0] = 0xfe;
+    let prefix = NodePrefix::from_octets(&octets);
+    let want: [u8; 15] = core::array::from_fn(|i| (i + 1) as u8);
+    assert_eq!(prefix.as_bytes(), &want);
+    octets[0] = 0xfd;
+    assert_eq!(NodePrefix::from_octets(&octets), prefix);
+}
+
+#[test]
+fn a_node_address_from_a_prefix_is_the_prefix_followed_by_a_zero_byte() {
+    let g = NodeAddr::from_pubkey(&generator_key()).prefix();
+    assert_eq!(
+        NodeAddr::from_prefix(g).to_string(),
+        "132f39a98c31baaddba6525f5d43f200"
+    );
+    let ones = NodePrefix::from_bytes([0xff; 15]);
+    assert_eq!(
+        NodeAddr::from_prefix(ones).to_string(),
+        "ffffffffffffffffffffffffffffff00"
+    );
+}

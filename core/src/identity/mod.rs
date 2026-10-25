@@ -11,6 +11,7 @@ mod key;
 mod local;
 mod node_addr;
 mod peer;
+mod prefix;
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -30,6 +31,7 @@ pub use local::ErasingKeypair;
 pub use local::Identity;
 pub use node_addr::NodeAddr;
 pub use peer::PeerIdentity;
+pub use prefix::NodePrefix;
 
 /// Shared secp256k1 context reused across all identity operations.
 ///
