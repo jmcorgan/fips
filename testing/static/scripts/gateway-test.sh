@@ -5,12 +5,18 @@
 #   gw-client (non-FIPS) → gw-gateway (fips + fips-gateway) → gw-server (fips + http)
 #
 # Usage:
-#   ./scripts/gateway-test.sh [inject-config | selftest]
+#   ./scripts/gateway-test.sh [inject-config | selftest | collect-logs [dir]]
 #
 # Subcommands:
 #   inject-config  — post-process generated configs to add the gateway section
 #   selftest       — check the output readers against canned input
+#   collect-logs   — save each container's whole log and state to <dir>/final
+#                    (default: the evidence directory) and print part of each
 #   (no args)      — run the test (containers must be running)
+#
+# Evidence (container logs and state, and the mesh's peer and link state when
+# Phase 1 does not converge) goes under FIPS_GW_EVIDENCE_DIR, or, when that is
+# unset, a new directory under ${TMPDIR:-/tmp} whose path is printed.
 set -e
 
 trap 'echo ""; echo "Test interrupted"; exit 130' INT
@@ -974,12 +980,84 @@ print(json.dumps(a))
     return 1
 }
 
+# ── Evidence ─────────────────────────────────────────────────────────────
+
+GW_EVIDENCE_DIR="${FIPS_GW_EVIDENCE_DIR:-}"
+
+# Make sure GW_EVIDENCE_DIR names a directory, creating one under TMPDIR when
+# FIPS_GW_EVIDENCE_DIR is unset. Call it directly, not inside $( ), so the
+# directory it creates is the one every later caller uses.
+gw_evidence_init() {
+    if [ -z "$GW_EVIDENCE_DIR" ]; then
+        GW_EVIDENCE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fips-gateway-evidence${FIPS_CI_NAME_SUFFIX:-}.XXXXXX") \
+            || return 1
+        echo "  evidence directory: $GW_EVIDENCE_DIR"
+    fi
+    mkdir -p "$GW_EVIDENCE_DIR" || return 1
+    return 0
+}
+
+# Save each gateway container's whole log (with docker's timestamps) and its
+# state to <dir>, then print the first and last lines of each log. Every
+# container keeps its log across the suite's stop and start of the gateway, so
+# the files hold start-up as well as the end. Never fails: it runs while
+# something else already has.
+gw_container_logs() {
+    local dir="$1" c lines
+    mkdir -p "$dir" || { echo "  cannot create $dir" >&2; return 0; }
+    for c in "$GATEWAY" "$SERVER" "$SERVER2" "$CLIENT" "$CLIENT2"; do
+        docker logs --timestamps "$c" > "$dir/$c.log" 2>&1 || true
+        docker inspect -f 'status={{.State.Status}} created={{.Created}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} restarts={{.RestartCount}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' \
+            "$c" > "$dir/$c.state" 2>&1 || true
+    done
+    echo "  container logs saved to $dir:"
+    for c in "$GATEWAY" "$SERVER" "$SERVER2" "$CLIENT" "$CLIENT2"; do
+        lines=$(grep -c '' "$dir/$c.log" 2>/dev/null || true)
+        echo "    $c: ${lines:-0} line(s), $dir/$c.log ($(cat "$dir/$c.state" 2>/dev/null || true))"
+    done
+    for c in "$GATEWAY" "$SERVER" "$SERVER2" "$CLIENT" "$CLIENT2"; do
+        echo "  --- $c: first 60 lines ---"
+        head -n 60 "$dir/$c.log" 2>/dev/null || true
+        echo "  --- $c: last 40 lines ---"
+        tail -n 40 "$dir/$c.log" 2>/dev/null || true
+    done
+    return 0
+}
+
+# Save and print each FIPS node's peers, links and status as fipsctl reports
+# them, then its container log, to <dir>. For a mesh that did not form. Never
+# fails, for the same reason as gw_container_logs.
+gw_mesh_evidence() {
+    local dir="$1" c what
+    mkdir -p "$dir" || { echo "  cannot create $dir" >&2; return 0; }
+    echo "  mesh evidence, saved to $dir:"
+    for c in "$GATEWAY" "$SERVER" "$SERVER2"; do
+        for what in peers links status; do
+            timeout 15 docker exec "$c" fipsctl show "$what" > "$dir/$c.$what.json" 2>&1 || true
+            echo "  --- $c: fipsctl show $what ---"
+            cat "$dir/$c.$what.json" 2>/dev/null || true
+        done
+    done
+    gw_container_logs "$dir"
+    return 0
+}
+
 if [ "${1:-}" = "selftest" ]; then
     if gw_selftest; then exit 0; else exit 1; fi
 fi
 
 if [ "${1:-}" = "inject-config" ]; then
     inject_gateway_config || exit 1
+    exit 0
+fi
+
+if [ "${1:-}" = "collect-logs" ]; then
+    if [ -n "${2:-}" ]; then
+        GW_EVIDENCE_DIR="$2"
+    fi
+    gw_evidence_init || exit 1
+    gw_container_logs "$GW_EVIDENCE_DIR/final"
+    echo "  collect-logs: wrote $GW_EVIDENCE_DIR/final"
     exit 0
 fi
 
@@ -1110,9 +1188,16 @@ echo ""
 
 # Phase 1: Wait for mesh convergence (gateway ↔ server, gateway ↔ server-2)
 echo "Phase 1: Mesh convergence"
-wait_for_peers "$GATEWAY" 2 30 || true
-wait_for_peers "$SERVER" 1 30 || true
-wait_for_peers "$SERVER2" 1 30 || true
+P1_RC=0
+wait_for_peers "$GATEWAY" 2 30 || P1_RC=1
+wait_for_peers "$SERVER" 1 30 || P1_RC=1
+wait_for_peers "$SERVER2" 1 30 || P1_RC=1
+check "Mesh convergence: $GATEWAY 2 peers, $SERVER and $SERVER2 1 each, within 30s" "$P1_RC"
+# The suite carries on, so the checks that do not need the mesh still report;
+# the state at this moment is what says why it did not form.
+if [ "$P1_RC" -ne 0 ] && gw_evidence_init; then
+    gw_mesh_evidence "$GW_EVIDENCE_DIR/phase1"
+fi
 
 # Phase 1b: LAN interface
 #

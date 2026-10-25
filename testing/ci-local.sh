@@ -971,13 +971,19 @@ run_gateway() {
         && bash testing/static/scripts/gateway-test.sh inject-config \
         && { info "[gateway] Starting containers"; \
              docker compose -f "$compose" -f "$ext" --profile gateway up -d; }; then
+        # Phase 1's mesh evidence and the containers' whole logs land here.
+        # Kept on a failure, since compose down below discards the logs.
+        local evidence
+        evidence=$(mktemp -d "/tmp/ci-gateway-evidence${FIPS_CI_NAME_SUFFIX:-}.XXXXXX")
         info "[gateway] Running gateway test"
-        if bash testing/static/scripts/gateway-test.sh; then
+        if FIPS_GW_EVIDENCE_DIR="$evidence" bash testing/static/scripts/gateway-test.sh; then
             rc=0
+            rm -rf "$evidence"
         else
             rc=1
             info "[gateway] Collecting failure logs"
-            docker compose -f "$compose" -f "$ext" --profile gateway logs --no-color 2>&1 | tail -100
+            FIPS_GW_EVIDENCE_DIR="$evidence" bash testing/static/scripts/gateway-test.sh collect-logs 2>&1
+            info "[gateway] Evidence kept in $evidence"
         fi
     else
         rc=1

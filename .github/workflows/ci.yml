@@ -993,13 +993,26 @@ jobs:
 
       - name: Run gateway test
         if: matrix.type == 'gateway'
+        env:
+          FIPS_GW_EVIDENCE_DIR: ${{ runner.temp }}/gateway-evidence
         run: bash testing/static/scripts/gateway-test.sh
 
+      # Each container's whole log, from its start: part of each in the job
+      # log, all of it (with Phase 1's mesh state, if the mesh did not form)
+      # in the uploaded artifact.
       - name: Collect logs on failure (gateway)
         if: matrix.type == 'gateway' && failure()
-        run: |
-          docker compose -f testing/static/docker-compose.yml \
-            --profile gateway logs --no-color | tail -300
+        env:
+          FIPS_GW_EVIDENCE_DIR: ${{ runner.temp }}/gateway-evidence
+        run: bash testing/static/scripts/gateway-test.sh collect-logs
+
+      - name: Upload logs on failure (gateway)
+        if: matrix.type == 'gateway' && failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gateway-logs-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-evidence/
+          retention-days: 7
 
       - name: Stop containers (gateway)
         if: matrix.type == 'gateway' && always()
