@@ -136,3 +136,91 @@ fn an_attach_drops_every_key_before_its_replay() {
     });
     assert_eq!(state.key(&old.addr().prefix()), None);
 }
+
+/// The address the companion of the key map holds for `peer`, if any.
+fn companion(state: &MeshState, peer: &PeerKey) -> Option<crate::Ipv6Address> {
+    state.addresses.read().unwrap().get(peer).copied()
+}
+
+#[test]
+fn the_address_companion_follows_known_and_forgotten_keys() {
+    let state = MeshState::new();
+    let peer = any_key();
+    state.apply(FromMesh::KnownKey { peer });
+    assert_eq!(companion(&state, &peer), Some(peer.address()));
+    assert_eq!(state.address(&peer), peer.address());
+    state.apply(FromMesh::ForgotKey { peer, learned: 0 });
+    assert_eq!(companion(&state, &peer), None);
+}
+
+#[test]
+fn the_address_companion_keeps_a_key_learned_after_the_node_decided_to_forget_it() {
+    let state = MeshState::new();
+    let peer = any_key();
+    state.apply(FromMesh::KnownKey { peer });
+    let report = state.learn(peer);
+    state.apply(FromMesh::ForgotKey {
+        peer,
+        learned: report.seq - 1,
+    });
+    assert_eq!(companion(&state, &peer), Some(peer.address()), "kept");
+    state.apply(FromMesh::ForgotKey {
+        peer,
+        learned: report.seq,
+    });
+    assert_eq!(companion(&state, &peer), None, "the node had seen it");
+}
+
+#[test]
+fn a_key_the_dns_responder_learned_is_in_the_address_companion() {
+    let state = MeshState::new();
+    let peer = any_key();
+    state.learn(peer);
+    assert_eq!(companion(&state, &peer), Some(peer.address()));
+}
+
+#[test]
+fn an_attach_clears_the_address_companion() {
+    let state = MeshState::new();
+    let old = any_key();
+    state.apply(FromMesh::KnownKey { peer: old });
+    state.apply(FromMesh::Attached {
+        node: any_key(),
+        payload_limit: 1170,
+    });
+    assert_eq!(companion(&state, &old), None);
+}
+
+#[test]
+fn a_prefix_that_changes_hands_drops_the_old_keys_address() {
+    // Two keys whose addresses share a prefix cannot be generated, so the
+    // old holder is placed under the new key's prefix by hand, with its
+    // address, as a KnownKey for it would have left them.
+    let state = MeshState::new();
+    let old = any_key();
+    let new = any_key();
+    state.keys.write().unwrap().insert(
+        new.addr().prefix(),
+        Known {
+            peer: old,
+            learned: 0,
+        },
+    );
+    state.addresses.write().unwrap().insert(old, old.address());
+    state.apply(FromMesh::KnownKey { peer: new });
+    assert_eq!(state.key(&new.addr().prefix()), Some(new));
+    assert_eq!(
+        companion(&state, &old),
+        None,
+        "the old holder's address goes"
+    );
+    assert_eq!(companion(&state, &new), Some(new.address()));
+}
+
+#[test]
+fn the_address_of_a_key_the_adapter_does_not_hold_is_hashed_from_the_key() {
+    let state = MeshState::new();
+    let stranger = any_key();
+    assert_eq!(companion(&state, &stranger), None);
+    assert_eq!(state.address(&stranger), stranger.address());
+}

@@ -6,6 +6,10 @@
 //! the node's path MTU map is driven through its real handler, and after
 //! each one the adapter's copy must equal the map.
 
+use super::spanning_tree::{
+    TestNode, cleanup_nodes, populate_all_coord_caches, process_available_packets, run_tree_test,
+    verify_tree_convergence,
+};
 use super::*;
 use crate::LookupResponse;
 use crate::ipv6tun::icmp::{effective_ipv6_mtu, mss_ceiling};
@@ -1205,4 +1209,244 @@ async fn the_tick_tells_the_adapter_to_forget_an_evicted_key_no_session_holds() 
     }
     assert!(state.keys().contains(&kept_key));
     node.stop().await.unwrap();
+}
+
+/// Process packets on every node until two rounds in a row find none.
+async fn settle_all(nodes: &mut [TestNode]) {
+    let mut idle = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if process_available_packets(nodes).await == 0 {
+            idle += 1;
+            if idle >= 2 {
+                break;
+            }
+        } else {
+            idle = 0;
+        }
+    }
+}
+
+/// A chain of `n` nodes in a line with the first node's session to the
+/// last established through the others.
+async fn chain_with_session(n: usize) -> Vec<TestNode> {
+    let edges: Vec<(usize, usize)> = (1..n).map(|i| (i - 1, i)).collect();
+    let mut nodes = run_tree_test(n, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    let last = *nodes[n - 1].node.node_addr();
+    let last_key = nodes[n - 1].node.identity().pubkey_full();
+    nodes[0]
+        .node
+        .initiate_session(last, last_key)
+        .await
+        .unwrap();
+    settle_all(&mut nodes).await;
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&last)
+            .is_some_and(|s| s.is_established()),
+        "precondition: the first node's session to the last is established"
+    );
+    nodes
+}
+
+/// A chain A—B—C with A's session to C established through B, and B
+/// marking everything it forwards Congestion Experienced, as a transport
+/// that drops does.
+async fn congested_chain() -> Vec<TestNode> {
+    let mut nodes = chain_with_session(3).await;
+    nodes[1].node.transport_drops.insert(
+        crate::transport::TransportId::new(1),
+        crate::node::TransportDropState {
+            prev_drops: 100,
+            dropping: true,
+        },
+    );
+    nodes
+}
+
+/// An ECT(0) IPv6 packet from `src` to `dst` with a 16-byte payload.
+fn ect_packet(src: &crate::Ipv6Address, dst: &crate::Ipv6Address) -> Vec<u8> {
+    let mut packet = vec![0u8; 56];
+    packet[0] = 0x60;
+    packet[1] = 0x20;
+    packet[5] = 16;
+    packet[6] = 59;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(src.as_bytes());
+    packet[24..40].copy_from_slice(dst.as_bytes());
+    packet
+}
+
+/// Send `packet`, compressed, from `nodes[from]` to `nodes[to]` on the IPv6
+/// port.
+async fn send_ipv6(nodes: &mut [TestNode], from: usize, to: usize, packet: &[u8]) {
+    let dest = *nodes[to].node.node_addr();
+    nodes[from]
+        .node
+        .send_session_data(
+            &dest,
+            256,
+            256,
+            &crate::ipv6tun::ipv6_shim::compress_ipv6(packet).unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_datagram_marked_congestion_experienced_reaches_the_host_marked_and_is_counted() {
+    let mut nodes = congested_chain().await;
+    let a_addr = *nodes[0].node.node_addr();
+    let c_addr = *nodes[2].node.node_addr();
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[2].node.install_tun(tun_tx);
+    let before = nodes[2].node.metrics().congestion.ce_received.get();
+
+    let sent = ect_packet(
+        &crate::Ipv6Address::from_node_addr(&a_addr),
+        &crate::Ipv6Address::from_node_addr(&c_addr),
+    );
+    send_ipv6(&mut nodes, 0, 2, &sent).await;
+    settle_all(&mut nodes).await;
+
+    let delivered: Vec<Vec<u8>> = tun_rx.try_iter().collect();
+    assert_eq!(delivered.len(), 1, "the packet reaches C's host");
+    assert_eq!(delivered[0][1] & 0x30, 0x30, "and arrives marked CE");
+    assert_eq!(&delivered[0][2..], &sent[2..], "with nothing else changed");
+    assert_eq!(
+        nodes[2].node.metrics().congestion.ce_received.get(),
+        before + 1
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_datagram_marked_congestion_experienced_that_holds_no_packet_is_counted_and_not_delivered()
+ {
+    let mut nodes = congested_chain().await;
+    let c_addr = *nodes[2].node.node_addr();
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[2].node.install_tun(tun_tx);
+    let before = nodes[2].node.metrics().congestion.ce_received.get();
+
+    nodes[0]
+        .node
+        .send_session_data(&c_addr, 256, 256, &[0x60, 1, 2])
+        .await
+        .unwrap();
+    settle_all(&mut nodes).await;
+
+    assert_eq!(tun_rx.try_iter().count(), 0, "nothing reaches C's host");
+    assert_eq!(
+        nodes[2].node.metrics().congestion.ce_received.get(),
+        before + 1,
+        "the marked datagram is counted as it arrives"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn ipv6_traffic_to_a_node_with_no_tun_touches_no_native_counter_or_flow() {
+    let mut nodes = congested_chain().await;
+    let a_addr = *nodes[0].node.node_addr();
+    let c_addr = *nodes[2].node.node_addr();
+    let native = format!("{:?}", nodes[2].node.metrics().native.snapshot());
+    let before = nodes[2].node.metrics().congestion.ce_received.get();
+
+    let sent = ect_packet(
+        &crate::Ipv6Address::from_node_addr(&a_addr),
+        &crate::Ipv6Address::from_node_addr(&c_addr),
+    );
+    send_ipv6(&mut nodes, 0, 2, &sent).await;
+    settle_all(&mut nodes).await;
+
+    assert_eq!(
+        format!("{:?}", nodes[2].node.metrics().native.snapshot()),
+        native,
+        "no native counter moves"
+    );
+    assert_eq!(nodes[2].node.native_registry_for_test().flow_count(), 0);
+    assert_eq!(nodes[2].node.native_registry_for_test().port_count(), 0);
+    assert_eq!(
+        nodes[2].node.metrics().congestion.ce_received.get(),
+        before + 1,
+        "a marked datagram is counted with no TUN, as it always was"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_delivery_and_then_a_refusal_reach_the_host_in_the_order_the_node_made_them() {
+    // Node 1's host is handed node 0's datagram while the receive path
+    // handles it, then has its own oversized packet to node 0 refused. Both
+    // are written toward the host where they are decided, so the host reads
+    // them in that order with nothing run in between.
+    let mut nodes = chain_with_session(2).await;
+    let node0 = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let node1 = crate::Ipv6Address::from_node_addr(nodes[1].node.node_addr());
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[1].node.install_tun(tun_tx);
+    // Attach now, with the identity feed, so the refused packet below names
+    // a key the adapter holds and reaches the node.
+    nodes[1]
+        .node
+        .handle_tun_outbound(ect_packet(&node1, &node0))
+        .await;
+    settle_all(&mut nodes).await;
+    let _ = tun_rx.try_iter().count();
+    let _ = std::iter::from_fn(|| nodes[0].packet_rx.try_recv().ok()).count();
+
+    let sent = ect_packet(&node0, &node1);
+    send_ipv6(&mut nodes, 0, 1, &sent).await;
+    let frames: Vec<_> = std::iter::from_fn(|| nodes[1].packet_rx.try_recv().ok()).collect();
+    assert!(!frames.is_empty(), "node 0's datagram is waiting at node 1");
+    for frame in frames {
+        nodes[1].node.handle_encrypted_frame(frame).await;
+    }
+    let mtu = nodes[1].node.effective_ipv6_mtu() as usize;
+    let mut oversized = vec![0u8; mtu + 1];
+    oversized[..40].copy_from_slice(&ect_packet(&node1, &node0)[..40]);
+    oversized[4..6].copy_from_slice(&((mtu + 1 - 40) as u16).to_be_bytes());
+    nodes[1].node.handle_tun_outbound(oversized).await;
+    // Anything the node had left to run later gets its chance here.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let at_host: Vec<Vec<u8>> = tun_rx.try_iter().collect();
+    assert_eq!(
+        at_host.len(),
+        2,
+        "a delivery and an answer, got {at_host:?}"
+    );
+    assert_eq!(at_host[0], sent, "the delivery first");
+    assert_eq!(
+        (at_host[1][6], at_host[1][40]),
+        (58, 2),
+        "then the Packet Too Big answer"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_delivery_toward_a_host_that_has_gone_logs_the_closed_queue() {
+    let mut nodes = chain_with_session(2).await;
+    let node0 = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let node1 = crate::Ipv6Address::from_node_addr(nodes[1].node.node_addr());
+    let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+    nodes[1].node.install_tun(tun_tx);
+    drop(tun_rx);
+
+    let (capture, _guard) = crate::testutil::capture_logs_scoped();
+    send_ipv6(&mut nodes, 0, 1, &ect_packet(&node0, &node1)).await;
+    settle_all(&mut nodes).await;
+    assert!(
+        capture
+            .line("Failed to deliver decompressed IPv6 packet to TUN")
+            .is_some(),
+        "got: {:?}",
+        capture.lines()
+    );
+    cleanup_nodes(&mut nodes).await;
 }

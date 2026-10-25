@@ -5,9 +5,10 @@
 //! them into IPv6 terms with the shim arithmetic in `mtu.rs` and keeps the
 //! results where its TUN threads read them per packet. It also keeps the keys
 //! the node can route to, by the address prefix a host packet names them
-//! with, together with the keys its own DNS responder handed out. Nothing here
-//! reads node state; it changes only when a [`FromMesh`] message is applied
-//! or the DNS responder learns a key.
+//! with, together with the keys its own DNS responder handed out, and the
+//! address of each such key, which names the source of what that peer
+//! delivers. Nothing here reads node state; it changes only when a
+//! [`FromMesh`] message is applied or the DNS responder learns a key.
 
 use portable_atomic::AtomicU64;
 use std::collections::HashMap;
@@ -60,6 +61,9 @@ pub(crate) struct MeshState {
     paths: PathMtuReplica,
     /// The keys destinations are named by, by prefix.
     keys: Arc<RwLock<HashMap<NodePrefix, Known>>>,
+    /// The address of each key in `keys`, so a delivery from a peer the
+    /// adapter knows names its source without hashing the key again.
+    addresses: Arc<RwLock<HashMap<PeerKey, Ipv6Address>>>,
     /// The number of the last key the DNS responder learned.
     learned: Arc<AtomicU64>,
 }
@@ -76,6 +80,7 @@ impl MeshState {
             ceiling: Arc::new(AtomicU16::new(tcp_mss(seed))),
             paths: Arc::new(RwLock::new(HashMap::new())),
             keys: Arc::new(RwLock::new(HashMap::new())),
+            addresses: Arc::new(RwLock::new(HashMap::new())),
             learned: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -94,6 +99,9 @@ impl MeshState {
                 }
                 if let Ok(mut keys) = self.keys.write() {
                     keys.clear();
+                }
+                if let Ok(mut addresses) = self.addresses.write() {
+                    addresses.clear();
                 }
                 self.set_limit(payload_limit);
                 return Applied::Attached(node.address().to_ipv6());
@@ -122,7 +130,8 @@ impl MeshState {
                         .get(&peer.addr().prefix())
                         .filter(|known| known.peer == peer)
                         .map_or(0, |known| known.learned);
-                    keys.insert(peer.addr().prefix(), Known { peer, learned });
+                    let old = keys.insert(peer.addr().prefix(), Known { peer, learned });
+                    self.addressed(peer, old.map(|known| known.peer));
                 }
             }
             FromMesh::ForgotKey { peer, learned } => {
@@ -135,6 +144,9 @@ impl MeshState {
                         .is_some_and(|known| known.peer == peer && known.learned <= learned)
                     {
                         keys.remove(&prefix);
+                        if let Ok(mut addresses) = self.addresses.write() {
+                            addresses.remove(&peer);
+                        }
                     }
                 }
             }
@@ -148,9 +160,31 @@ impl MeshState {
     pub(crate) fn learn(&self, peer: PeerKey) -> Learned {
         let seq = self.learned.fetch_add(1, Ordering::Relaxed) + 1;
         if let Ok(mut keys) = self.keys.write() {
-            keys.insert(peer.addr().prefix(), Known { peer, learned: seq });
+            let old = keys.insert(peer.addr().prefix(), Known { peer, learned: seq });
+            self.addressed(peer, old.map(|known| known.peer));
         }
         Learned { peer, seq }
+    }
+
+    /// Record `peer`'s address, now that it names the prefix `replaced`
+    /// held, and drop the address of `replaced` if that was another key.
+    fn addressed(&self, peer: PeerKey, replaced: Option<PeerKey>) {
+        if let Ok(mut addresses) = self.addresses.write() {
+            if let Some(old) = replaced.filter(|old| *old != peer) {
+                addresses.remove(&old);
+            }
+            addresses.entry(peer).or_insert_with(|| peer.address());
+        }
+    }
+
+    /// The address of `peer`: from the map for a key the adapter holds,
+    /// hashed from the key otherwise.
+    pub(crate) fn address(&self, peer: &PeerKey) -> Ipv6Address {
+        self.addresses
+            .read()
+            .ok()
+            .and_then(|addresses| addresses.get(peer).copied())
+            .unwrap_or_else(|| peer.address())
     }
 
     /// Number a report of `peer` for the node without recording it, for an

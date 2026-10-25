@@ -1,9 +1,43 @@
 //! Host-side half of delivering what a peer sent to the IPv6 port.
 //!
-//! A datagram that arrived marked Congestion Experienced is delivered with
-//! its IPv6 packet marked CE, so the host's transport sees the congestion
-//! the mesh signalled. [`mark_ce`] is that marking; it reads only the packet
-//! it is given.
+//! The node hands the adapter each such datagram as a [`Deliver`]: the
+//! sender's key, the packet with its header compressed, and whether it
+//! arrived marked Congestion Experienced. The adapter rebuilds the packet
+//! with the sender's address as its source and ours as its destination,
+//! marks it CE when the datagram was, so the host's transport sees the
+//! congestion the mesh signalled, and queues it for the host.
+//!
+//! [`unpack`] and [`mark_ce`] are the synchronous decisions; they read only
+//! what they are given.
+
+use std::sync::mpsc::SendError;
+
+use super::ipv6_shim::decompress_ipv6;
+use super::link::Deliver;
+
+/// What became of a datagram handed to the adapter, for the node to log.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Queued for the host, or dropped and counted on a full queue.
+    Delivered,
+    /// The payload is not a compressed IPv6 packet.
+    Malformed,
+    /// No TUN is up to hand it to.
+    NoDevice,
+    /// The TUN writer or the embedder has gone.
+    Closed(SendError<Vec<u8>>),
+}
+
+/// The IPv6 packet `deliver` carries, from `source` to `dest`, marked CE
+/// when the datagram arrived marked, or `None` if its payload is not a
+/// compressed IPv6 packet.
+pub(crate) fn unpack(deliver: &Deliver, source: [u8; 16], dest: [u8; 16]) -> Option<Vec<u8>> {
+    let mut packet = decompress_ipv6(&deliver.payload, source, dest)?;
+    if deliver.ce {
+        mark_ce(&mut packet);
+    }
+    Some(packet)
+}
 
 /// Mark ECN-CE in an IPv6 packet's Traffic Class field.
 ///

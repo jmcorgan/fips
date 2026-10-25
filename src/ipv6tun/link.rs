@@ -15,7 +15,9 @@
 //! adapter's datagrams, and the keys its DNS responder learned, kept apart
 //! so that a burst of datagrams never holds a registration back. The node
 //! answers a datagram it refuses with a [`Refusal`], handed to the adapter
-//! in line where the refusal is decided.
+//! in line where the refusal is decided, and hands it each datagram a peer
+//! sent to the IPv6 port as a [`Deliver`], in line where it is received, so
+//! the host sees deliveries and answers in the order the node made them.
 
 use tokio::sync::mpsc::{
     Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
@@ -105,6 +107,18 @@ pub(crate) struct Datagram {
     pub(crate) peer: PeerKey,
     /// The compressed packet.
     pub(crate) payload: Vec<u8>,
+}
+
+/// A datagram a peer sent to the IPv6 port, for the adapter to hand the
+/// host: the IPv6 packet with its header compressed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Deliver {
+    /// The sender.
+    pub(crate) peer: PeerKey,
+    /// The compressed packet.
+    pub(crate) payload: Vec<u8>,
+    /// Whether the datagram arrived marked Congestion Experienced.
+    pub(crate) ce: bool,
 }
 
 /// A key the adapter's DNS responder handed to the host, for the node to

@@ -15,16 +15,16 @@ between crossing handshakes. The machine resends this node's first setup
 on its ladder, ends its attempt at the handshake timeout and each
 candidate 40 s after its setup, and asks for its own teardown when it
 holds neither; it retains the initiator's first msg3 and resends it until
-any frame from the peer authenticates (the responder prompts at once
-under the new keys), and starts a repair rekey if its last copy goes
-unheard. Who the peer is stays the claimed address until a completion
-bonds its key (`identity`, `peer_key`), and the shell caches, uses and
-reports a peer key only from there: the control socket shows an unproved
-session with no `npub` and `identity: "unproven"` (`identity_status`). The
-one exception is the key this node opened the session toward
-(`opened_key`, read through `key()`): before a completion the shell uses it
-only to name the destination of its own path MTU entries, whose address
-that key derives.
+any frame from the peer authenticates (the responder prompts at once under
+the new keys), and starts a repair rekey if its last copy goes unheard.
+Who the peer is stays the claimed address until a completion bonds its key
+(`identity`, `peer_key`, and `proven` for the key's bytes), and the shell
+caches, uses and reports a peer key only from there: the control socket
+shows an unproved session with no `npub` and `identity: "unproven"`
+(`identity_status`). The one exception is the key this node opened the
+session toward (`opened_key`, read through `key()`): before a completion
+the shell uses it only to name the destination of its own path MTU
+entries, whose address that key derives.
 
 Once established, the machine owns the current, pending and previous key
 epochs, seals every frame, runs every inbound frame through its rows

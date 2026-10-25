@@ -677,6 +677,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dropped()` reads the count. Code that names the type as an `mpsc::Sender`
   must name `TunTx` instead. `TunDevice::create_writer` takes the queue's
   capacity as a third argument.
+- A datagram to the IPv6 port that arrives marked Congestion Experienced is
+  counted in `congestion.ce_received` as it arrives, before the IPv6 adapter
+  rebuilds its packet, so one whose payload is not a compressed IPv6 packet
+  is now counted too; before, only a datagram whose packet was rebuilt was
+  counted.
 
 #### Packaging
 

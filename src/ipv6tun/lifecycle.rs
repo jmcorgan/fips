@@ -18,7 +18,10 @@ use super::core::{Applied, MeshState, PathMtuReplica, run_link};
 use super::dns::{MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::link::{Attach, Datagram, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal};
+use super::inbound::{Delivery, unpack};
+use super::link::{
+    Attach, Datagram, Deliver, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal,
+};
 use super::outbound::{answer, outbound};
 use super::tun::{
     HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
@@ -163,6 +166,23 @@ impl Handles {
     pub(crate) fn outbound(&mut self, packet: &[u8]) -> Option<Datagram> {
         self.catch_up();
         outbound(packet, &self.mesh, &mut self.icmp())
+    }
+
+    /// Hand the host a datagram a peer sent to the IPv6 port: rebuild the
+    /// packet from the sender to us, mark it CE if the datagram was, and
+    /// queue it, dropping it if the host has left no room.
+    pub(crate) fn deliver(&self, deliver: Deliver) -> Delivery {
+        let source = *self.mesh.address(&deliver.peer).as_bytes();
+        let Some(packet) = unpack(&deliver, source, self.our_addr.octets()) else {
+            return Delivery::Malformed;
+        };
+        match &self.tun_tx {
+            Some(tun_tx) => match tun_tx.send(packet) {
+                Ok(()) => Delivery::Delivered,
+                Err(e) => Delivery::Closed(e),
+            },
+            None => Delivery::NoDevice,
+        }
     }
 
     /// Answer the host for a datagram the node refused.

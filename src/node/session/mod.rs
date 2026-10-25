@@ -464,6 +464,16 @@ impl SessionEntry {
         self.machine.view().identity
     }
 
+    /// The peer's static key as its 32 bytes, once a completion has
+    /// authenticated it: what [`SessionEntry::peer_key`] parses, without the
+    /// parse, for a caller that names the peer by its bytes.
+    pub(crate) fn proven(&self) -> Option<PeerKey> {
+        match self.identity() {
+            Identity::Proven(key) => Some(key),
+            Identity::Claimed(_) => None,
+        }
+    }
+
     /// The peer's static key, once a completion has authenticated it.
     pub(crate) fn peer_key(&self) -> Option<XOnlyPublicKey> {
         match self.identity() {

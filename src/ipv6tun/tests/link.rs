@@ -498,3 +498,20 @@ fn the_scan_reads_the_outbound_messages_and_their_fields() {
         );
     }
 }
+
+#[test]
+fn the_scan_reads_the_delivery_message_and_its_fields() {
+    let (items, fields) = message_fields(include_str!("../link.rs"));
+    assert!(
+        items.iter().any(|i| i == "Deliver"),
+        "the scan must find Deliver, found {items:?}"
+    );
+    for ty in ["PeerKey", "Vec<u8>", "bool"] {
+        assert!(
+            fields
+                .iter()
+                .any(|(o, t)| o.starts_with("Deliver") && t == ty),
+            "the scan must read Deliver's {ty} field, found {fields:?}"
+        );
+    }
+}

@@ -7,8 +7,8 @@
 
 use crate::NodeAddr;
 use crate::cache::Funding;
-use crate::ipv6tun::inbound::mark_ce;
-use crate::ipv6tun::link::{PeerKey, Refusal};
+use crate::ipv6tun::inbound::Delivery;
+use crate::ipv6tun::link::{Deliver, PeerKey, Refusal};
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{RejectReason, SessionReject};
@@ -713,39 +713,44 @@ impl Node {
 
                 match dst_port {
                     FSP_PORT_IPV6_SHIM => {
-                        use crate::Ipv6Address;
-                        let src_ipv6 = Ipv6Address::from_node_addr(src_addr).to_ipv6().octets();
-                        let dst_ipv6 = Ipv6Address::from_node_addr(self.node_addr())
-                            .to_ipv6()
-                            .octets();
-
-                        match crate::ipv6tun::ipv6_shim::decompress_ipv6(
-                            service_payload,
-                            src_ipv6,
-                            dst_ipv6,
-                        ) {
-                            Some(mut packet) => {
-                                if ce_flag {
-                                    mark_ce(&mut packet);
-                                    self.metrics().congestion.ce_received.inc();
-                                }
-                                if let Some(tun_tx) = &self.supervisor.ipv6tun.tun_tx {
-                                    if let Err(e) = tun_tx.send(packet) {
-                                        debug!(error = %e, "Failed to deliver decompressed IPv6 packet to TUN");
-                                    }
-                                } else {
+                        // Counted as it arrives, before the adapter rebuilds
+                        // the packet, so one whose payload is not a packet
+                        // counts too.
+                        if ce_flag {
+                            self.metrics().congestion.ce_received.inc();
+                        }
+                        // The sender's key, which the handler above has proven:
+                        // it accepts nothing but an Established session. Like
+                        // the native dispatch below, only the delivery is
+                        // skipped without one; this message's bookkeeping after
+                        // the dispatch is still owed.
+                        if let Some(peer) =
+                            self.sessions.get(src_addr).and_then(SessionEntry::proven)
+                        {
+                            let len = service_payload.len();
+                            let delivery = self.supervisor.ipv6tun.deliver(Deliver {
+                                peer,
+                                payload: service_payload.to_vec(),
+                                ce: ce_flag,
+                            });
+                            match delivery {
+                                Delivery::Delivered => {}
+                                Delivery::NoDevice => {
                                     trace!(
                                         src = %self.peer_display_name(src_addr),
                                         "IPv6 shim packet decompressed (no TUN interface)"
                                     );
                                 }
-                            }
-                            None => {
-                                debug!(
-                                    src = %self.peer_display_name(src_addr),
-                                    len = service_payload.len(),
-                                    "IPv6 shim decompression failed"
-                                );
+                                Delivery::Closed(e) => {
+                                    debug!(error = %e, "Failed to deliver decompressed IPv6 packet to TUN");
+                                }
+                                Delivery::Malformed => {
+                                    debug!(
+                                        src = %self.peer_display_name(src_addr),
+                                        len,
+                                        "IPv6 shim decompression failed"
+                                    );
+                                }
                             }
                         }
                     }

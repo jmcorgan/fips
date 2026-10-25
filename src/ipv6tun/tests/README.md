@@ -21,7 +21,10 @@ can reach the source file's private items.
   packet fits either way, and the limit reports 33); the state before any
   attach; how each message from the node changes the shared state; and the
   key map: known keys in, forgotten keys out, a key the DNS responder learned
-  after the node decided to forget it kept, and an attach starting it empty.
+  after the node decided to forget it kept, and an attach starting it empty;
+  and the address companion of the key map following it through the same
+  changes and a prefix that changes hands, with the address of a key the
+  adapter does not hold hashed from the key.
 - `mtu.rs` tests `../mtu.rs`: each function (`effective_ipv6_mtu`,
   `mss_ceiling`, `ipv6_mtu`, `tcp_mss`) against a literal copy of its earlier
   definition at every `u16` input, the FSP payload limit against the
@@ -40,7 +43,9 @@ can reach the source file's private items.
   only an embedder that owns the TUN can send) is quoted as rebuilt.
 - `inbound.rs` tests `../inbound.rs`: the CE marking sets the ECN bits of an
   ECN-capable packet, leaves a Not-ECT packet unmarked, and leaves a packet
-  too short to hold a Traffic Class unchanged.
+  too short to hold a Traffic Class unchanged; a delivered packet is rebuilt
+  from the sender to us and marked CE only when its datagram arrived marked;
+  and a payload that is not a compressed packet is not delivered.
 - `link.rs` tests `../link.rs`: a peer key names the address its node
   address has and holds its key and nothing else, the link's peer key is the
   identity module's `PeerKey` (fips-core, `identity/key.rs`) rather than a
@@ -51,7 +56,9 @@ can reach the source file's private items.
   its visibility, with named, tuple and unit fields; forged definitions of
   each shape, of one placed after a literal holding a lone quote, and of one
   placed after an attribute whose literal holds an unbalanced bracket, show
-  the scan refuses a node address.
+  the scan refuses a node address, and the scan is shown to read the
+  messages it checks, with their fields, the delivery to the host among
+  them.
 - `queue.rs` tests `../queue.rs`: a full queue toward the host drops and
   counts what it cannot hold without waiting, a queue with room again takes
   packets and its clones share one count, a queue whose reader has gone is
