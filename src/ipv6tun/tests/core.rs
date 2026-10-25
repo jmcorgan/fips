@@ -1,5 +1,6 @@
 use super::*;
-use crate::ipv6tun::icmp::mss_ceiling;
+use crate::ipv6tun::icmp::{effective_ipv6_mtu, mss_ceiling};
+use crate::ipv6tun::ipv6_shim::HEADER_SAVING;
 use crate::ipv6tun::link::any_key;
 use crate::node::path_mtu::payload_limit;
 

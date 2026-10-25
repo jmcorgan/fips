@@ -765,7 +765,7 @@ fn the_path_refusal_matches_the_tun_paths_packet_too_big_for_every_path_mtu_and_
                 let old = (old_path < old_node && len > old_path).then_some(old_path as u32);
                 let new =
                     super::super::handlers::host_link::path_refusal(len - 33, path_mtu, limit)
-                        .map(|l| u32::from(crate::ipv6tun::core::ipv6_mtu(l)));
+                        .map(|l| u32::from(crate::ipv6tun::mtu::ipv6_mtu(l)));
                 assert_eq!(new, old, "t {t}, path MTU {path_mtu}, length {len}");
             }
         }

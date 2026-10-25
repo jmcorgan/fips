@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use secp256k1::PublicKey;
 
 use crate::NodeAddr;
-use crate::ipv6tun::icmp::mss_ceiling;
 use crate::ipv6tun::link::{self, Attach, Datagram, FromMesh, PeerKey, Refusal};
+use crate::ipv6tun::mtu::mss_ceiling;
 use crate::ipv6tun::tun::IPV6_MIN_MTU;
 use crate::node::Node;
 use crate::node::path_mtu::payload_limit;

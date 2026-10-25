@@ -1109,7 +1109,7 @@ impl Node {
         // admits no TCP payload byte at all, since there the SYN-time clamp
         // has nothing usable to derive and drops the peer onto the
         // conservative fallback ceiling for as long as the link stands.
-        if crate::ipv6tun::icmp::mss_ceiling(link_mtu) == 0 {
+        if crate::ipv6tun::mtu::mss_ceiling(link_mtu) == 0 {
             warn!(
                 peer = %self.peer_display_name(peer_addr),
                 link_mtu = link_mtu,

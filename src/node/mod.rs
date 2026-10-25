@@ -1834,11 +1834,11 @@ impl Node {
 
     /// Calculate the effective IPv6 MTU that can be sent over FIPS.
     ///
-    /// Delegates to `ipv6tun::icmp::effective_ipv6_mtu()` with this node's
+    /// Delegates to `ipv6tun::mtu::effective_ipv6_mtu()` with this node's
     /// transport MTU. Returns the maximum IPv6 packet size (including
     /// IPv6 header) that can be transmitted through the FIPS mesh.
     pub fn effective_ipv6_mtu(&self) -> u16 {
-        crate::ipv6tun::icmp::effective_ipv6_mtu(self.transport_mtu())
+        crate::ipv6tun::mtu::effective_ipv6_mtu(self.transport_mtu())
     }
 
     /// The TCP MSS ceiling last logged at a transport change. The adapter
@@ -1873,7 +1873,7 @@ impl Node {
     /// Existing flows are not re-clamped — MSS is negotiated per connection
     /// at SYN time, so a change applies to connections opened after it.
     pub(crate) fn refresh_tun_mss_ceiling(&self) {
-        let ceiling = crate::ipv6tun::icmp::mss_ceiling(self.transport_mtu());
+        let ceiling = crate::ipv6tun::mtu::mss_ceiling(self.transport_mtu());
         let previous = self.node_mtu.swap_logged(ceiling);
         if previous != ceiling {
             tracing::info!(
@@ -1915,7 +1915,7 @@ impl Node {
                 effective_ipv6_mtu = self.effective_ipv6_mtu(),
                 short_by = short,
                 "Transport MTU too small for the IPv6 minimum: IPv6 packets above the effective MTU and up to 1280 bytes will be dropped for every protocol except TCP; set each transport's mtu to at least {}",
-                crate::ipv6tun::tun::IPV6_MIN_MTU + crate::ipv6tun::icmp::FIPS_IPV6_OVERHEAD
+                crate::ipv6tun::tun::IPV6_MIN_MTU + crate::ipv6tun::mtu::FIPS_IPV6_OVERHEAD
             );
         }
     }

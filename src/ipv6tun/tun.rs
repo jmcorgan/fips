@@ -91,14 +91,13 @@ pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
 ///
 /// The node reports each learned path as a payload limit; the shim turns it
 /// into an IPv6 MTU, and the 40-byte IPv6 and 20-byte TCP headers come off
-/// that (see [`tcp_mss`](super::core::tcp_mss)).
+/// that (see [`tcp_mss`](super::mtu::tcp_mss)).
 pub(crate) fn per_flow_max_mss(
     lookup: &PathMtuReplica,
     addr_bytes: &[u8],
     global_max_mss: u16,
 ) -> u16 {
-    use super::core::tcp_mss;
-    use super::icmp::mss_ceiling;
+    use super::mtu::{mss_ceiling, tcp_mss};
 
     // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
     // payload (1203) → TCP segment after IPv6+TCP headers (1143).

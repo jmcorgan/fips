@@ -12,10 +12,11 @@
 //! The decisions are the synchronous functions [`admit`], [`outbound`] and
 //! [`answer`]; they read only the adapter's own state.
 
-use super::core::{MeshState, ipv6_mtu};
+use super::core::MeshState;
 use super::icmp::IcmpContext;
 use super::ipv6_shim::{compress_ipv6, decompress_ipv6};
 use super::link::{Datagram, PeerKey, Refusal};
+use super::mtu::ipv6_mtu;
 use fips_core::identity::NodePrefix;
 
 /// The verdict on a packet read from the TUN, before the mesh is asked.

@@ -2,10 +2,10 @@
 //!
 //! The node publishes payload limits: the largest FSP payload it sends to any
 //! peer, and per peer where it has learned a narrower path. The adapter turns
-//! them into IPv6 terms with its own shim arithmetic and keeps the results
-//! where its TUN threads read them per packet. It also keeps the keys the
-//! node can route to, by the address prefix a host packet names them with,
-//! together with the keys its own DNS responder handed out. Nothing here
+//! them into IPv6 terms with the shim arithmetic in `mtu.rs` and keeps the
+//! results where its TUN threads read them per packet. It also keeps the keys
+//! the node can route to, by the address prefix a host packet names them
+//! with, together with the keys its own DNS responder handed out. Nothing here
 //! reads node state; it changes only when a [`FromMesh`] message is applied
 //! or the DNS responder learns a key.
 
@@ -15,11 +15,11 @@ use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 
-use super::icmp::effective_ipv6_mtu;
-use super::ipv6_shim::HEADER_SAVING;
 use super::link::{FromMesh, Learned, MeshLink, PeerKey};
+use super::mtu::{ipv6_mtu, tcp_mss};
 use super::tun::{IPV6_MIN_MTU, MssCeiling};
 use crate::Ipv6Address;
+use crate::proto::framing::payload_limit;
 use fips_core::identity::NodePrefix;
 
 /// Per-peer payload limits keyed by the peer's IPv6 address, as the TUN
@@ -34,20 +34,6 @@ struct Known {
     /// The number of the last report of this key the DNS responder made,
     /// or 0 if it made none.
     learned: u64,
-}
-
-/// The largest IPv6 packet a payload limit admits: the shim compresses a
-/// 40-byte IPv6 header to [`HEADER_SAVING`] bytes fewer.
-pub(crate) fn ipv6_mtu(payload_limit: u16) -> u16 {
-    payload_limit.saturating_add(HEADER_SAVING)
-}
-
-/// The largest TCP segment a payload limit admits: its IPv6 MTU less the
-/// 40-byte IPv6 and 20-byte TCP headers. Zero when not one payload byte fits.
-pub(crate) fn tcp_mss(payload_limit: u16) -> u16 {
-    ipv6_mtu(payload_limit)
-        .saturating_sub(40)
-        .saturating_sub(20)
 }
 
 /// What applying a message leaves for the caller to act on.
@@ -79,11 +65,12 @@ pub(crate) struct MeshState {
 }
 
 impl MeshState {
-    /// State before any attach: no per-peer limits, and the limit of the
-    /// IPv6 minimum MTU, which is where the clamp starts before any
-    /// transport has bound.
+    /// State before any attach: no per-peer limits, and the payload limit of
+    /// the IPv6 minimum MTU, which is where the clamp starts before any
+    /// transport has bound and where the node's record of what it has
+    /// published starts too.
     pub(crate) fn new() -> Self {
-        let seed = effective_ipv6_mtu(IPV6_MIN_MTU).saturating_sub(HEADER_SAVING);
+        let seed = payload_limit(IPV6_MIN_MTU);
         Self {
             node_limit: Arc::new(AtomicU16::new(seed)),
             ceiling: Arc::new(AtomicU16::new(tcp_mss(seed))),

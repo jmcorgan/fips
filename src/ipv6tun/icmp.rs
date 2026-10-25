@@ -63,42 +63,8 @@ const ICMPV6_HEADER_LEN: usize = 8;
 /// Maximum original packet bytes to include in ICMPv6 error.
 const MAX_ORIGINAL_PACKET: usize = MIN_IPV6_MTU - IPV6_HEADER_LEN - ICMPV6_HEADER_LEN;
 
-/// FIPS encapsulation overhead for compressed IPv6 shim traffic (port 256).
-///
-/// With port multiplexing (4 bytes) and IPv6 header compression (format byte +
-/// 6 residual bytes, stripping 34 bytes of addresses/version/payload length),
-/// the net overhead for IPv6 packets is 77 bytes.
-///
-/// ```text
-/// Wire size = FIPS_OVERHEAD(106) + port_header(4) + format(1) + residual(6) + upper_payload
-///           = 117 + (ipv6_len - 40)
-///           = ipv6_len + 77
-/// ```
-pub const FIPS_IPV6_OVERHEAD: u16 = 77;
-
-/// Calculate the effective IPv6 MTU for FIPS-encapsulated traffic.
-///
-/// Given a transport MTU (e.g., UDP payload size), returns the maximum
-/// IPv6 packet size (including IPv6 header) that can be transmitted
-/// through the FIPS mesh after IPv6 header compression.
-pub fn effective_ipv6_mtu(transport_mtu: u16) -> u16 {
-    transport_mtu.saturating_sub(FIPS_IPV6_OVERHEAD)
-}
-
-/// Largest TCP segment size a FIPS-encapsulated path of `transport_mtu`
-/// bytes on the wire admits: the effective inner IPv6 MTU less the 40-byte
-/// IPv6 header and the 20-byte TCP header.
-///
-/// Zero means the path has no room for even one payload byte, so no TCP
-/// segment fits and no clamp derived from it carries information. That is
-/// the one condition the SYN-time clamp treats as unusable regardless of
-/// where the MTU came from, and it is why the seed site warns; both read it
-/// from here so they cannot disagree about where the cliff is.
-pub fn mss_ceiling(transport_mtu: u16) -> u16 {
-    effective_ipv6_mtu(transport_mtu)
-        .saturating_sub(40)
-        .saturating_sub(20)
-}
+// The IPv6 MTU arithmetic lives in `mtu.rs`; these keep their public path.
+pub use super::mtu::{FIPS_IPV6_OVERHEAD, effective_ipv6_mtu, mss_ceiling};
 
 /// Check if we should send an ICMPv6 error for this packet.
 ///

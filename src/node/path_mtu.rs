@@ -7,18 +7,10 @@
 
 use crate::Ipv6Address;
 use crate::ipv6tun::link::{FromMesh, HostLink, PeerKey};
-use crate::proto::framing::FIPS_OVERHEAD;
-use crate::proto::fsp::wire::FSP_PORT_HEADER_SIZE;
+pub(crate) use crate::proto::framing::payload_limit;
 use std::collections::HashMap;
 use std::collections::hash_map::Iter;
 use std::sync::{Arc, RwLock};
-
-/// The largest FSP payload a path MTU of `mtu` bytes admits once FMP and FSP
-/// framing and the port header are paid, saturating at zero.
-pub(crate) fn payload_limit(mtu: u16) -> u16 {
-    mtu.saturating_sub(FIPS_OVERHEAD)
-        .saturating_sub(FSP_PORT_HEADER_SIZE as u16)
-}
 
 /// One `path_mtu_lookup` entry: the MTU the TCP MSS clamp reads, plus how
 /// the entry is released.
