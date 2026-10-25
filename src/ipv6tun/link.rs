@@ -17,55 +17,22 @@
 //! answers a datagram it refuses with a [`Refusal`], handed to the adapter
 //! in line where the refusal is decided.
 
-use secp256k1::XOnlyPublicKey;
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{
     Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
 };
 
-use crate::{Ipv6Address, NodeAddr};
+/// A peer named by the 32 bytes of its x-only public key: the identity
+/// module's key type, which hashes and compares as bytes, as the node does
+/// for every datagram, without a call into secp256k1.
+pub(crate) use fips_core::identity::PeerKey;
 
 /// The FSP port the IPv6 adapter's traffic uses.
 pub(crate) const IPV6_PORT: u16 = 256;
 
-/// A peer named by the 32 bytes of its x-only public key.
-///
-/// The bytes are held serialized, so hashing and comparing a peer key, as
-/// the node does for every datagram, never calls into secp256k1.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PeerKey([u8; 32]);
-
-impl PeerKey {
-    /// The key of the peer whose x-only public key is `key`.
-    pub(crate) fn new(key: XOnlyPublicKey) -> Self {
-        Self(key.serialize())
-    }
-
-    /// Some peer's key, for a test that needs one but not a particular one.
-    #[cfg(test)]
-    pub(crate) fn any() -> Self {
-        Self::new(crate::Identity::generate().pubkey())
-    }
-
-    /// The peer's x-only public key.
-    pub(crate) fn key(&self) -> XOnlyPublicKey {
-        XOnlyPublicKey::from_slice(&self.0).expect("a peer key is built only from a valid key")
-    }
-
-    /// The node address the peer's key hashes to: the first 16 bytes of the
-    /// SHA-256 of the key's bytes, as `NodeAddr::from_pubkey` derives it.
-    pub(crate) fn node_addr(&self) -> NodeAddr {
-        let hash = Sha256::digest(self.0);
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&hash[..16]);
-        NodeAddr::from_bytes(bytes)
-    }
-
-    /// The peer's IPv6 address: the `fd00::/8` form of the node address its
-    /// key hashes to.
-    pub(crate) fn address(&self) -> Ipv6Address {
-        Ipv6Address::from_node_addr(&self.node_addr())
-    }
+/// Some peer's key, for a test that needs one but not a particular one.
+#[cfg(test)]
+pub(crate) fn any_key() -> PeerKey {
+    PeerKey::from_xonly(&crate::Identity::generate().pubkey())
 }
 
 /// Which state feeds an attach asks the node to replay and keep pushing.

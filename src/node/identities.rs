@@ -19,9 +19,7 @@ use secp256k1::{PublicKey, XOnlyPublicKey};
 
 use crate::NodeAddr;
 use crate::ipv6tun::link::{FromMesh, HostLink, PeerKey};
-
-/// Bytes 1 to 15 of a node's IPv6 address.
-pub(crate) type Prefix = [u8; 15];
+use fips_core::identity::NodePrefix;
 
 /// One cached identity: the node address, its key, and when it was last used,
 /// in milliseconds.
@@ -44,7 +42,7 @@ struct Feed {
 #[derive(Default)]
 pub(crate) struct IdentityCache {
     /// The entries, by prefix.
-    entries: HashMap<Prefix, Entry>,
+    entries: HashMap<NodePrefix, Entry>,
     /// The feed, while the adapter is attached and asked for it.
     feed: Option<Feed>,
     /// The number of the last key the adapter's DNS responder reported that
@@ -60,12 +58,12 @@ impl IdentityCache {
 
     /// Store `entry` under `prefix`, returning the entry it replaces, and
     /// tell the adapter of its key if it has not been told already.
-    pub(crate) fn insert(&mut self, prefix: Prefix, entry: Entry) -> Option<Entry> {
-        let key = PeerKey::new(entry.1.x_only_public_key().0);
+    pub(crate) fn insert(&mut self, prefix: NodePrefix, entry: Entry) -> Option<Entry> {
+        let key = PeerKey::from_xonly(&entry.1.x_only_public_key().0);
         let addr = entry.0;
         let old = self.entries.insert(prefix, entry);
         if let Some(old) = &old {
-            let old_key = PeerKey::new(old.1.x_only_public_key().0);
+            let old_key = PeerKey::from_xonly(&old.1.x_only_public_key().0);
             if old_key != key {
                 self.removed(old_key);
             }
@@ -81,9 +79,9 @@ impl IdentityCache {
 
     /// Remove the entry under `prefix`, returning it. The adapter keeps the
     /// key until a sweep finds it neither cached again nor held by a session.
-    pub(crate) fn remove(&mut self, prefix: &Prefix) -> Option<Entry> {
+    pub(crate) fn remove(&mut self, prefix: &NodePrefix) -> Option<Entry> {
         let old = self.entries.remove(prefix)?;
-        self.removed(PeerKey::new(old.1.x_only_public_key().0));
+        self.removed(PeerKey::from_xonly(&old.1.x_only_public_key().0));
         Some(old)
     }
 
@@ -98,14 +96,14 @@ impl IdentityCache {
     }
 
     /// The entry under `prefix`, stamped as used at `now`.
-    pub(crate) fn touch(&mut self, prefix: &Prefix, now: u64) -> Option<(NodeAddr, PublicKey)> {
+    pub(crate) fn touch(&mut self, prefix: &NodePrefix, now: u64) -> Option<(NodeAddr, PublicKey)> {
         let entry = self.entries.get_mut(prefix)?;
         entry.2 = now;
         Some((entry.0, entry.1))
     }
 
     /// Whether an entry is stored under `prefix`.
-    pub(crate) fn contains_key(&self, prefix: &Prefix) -> bool {
+    pub(crate) fn contains_key(&self, prefix: &NodePrefix) -> bool {
         self.entries.contains_key(prefix)
     }
 
@@ -121,7 +119,7 @@ impl IdentityCache {
     }
 
     /// Every entry with its prefix.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Prefix, &Entry)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&NodePrefix, &Entry)> {
         self.entries.iter()
     }
 
@@ -143,11 +141,11 @@ impl IdentityCache {
         let mut told: HashMap<PeerKey, NodeAddr> = self
             .entries
             .values()
-            .map(|entry| (PeerKey::new(entry.1.x_only_public_key().0), entry.0))
+            .map(|entry| (PeerKey::from_xonly(&entry.1.x_only_public_key().0), entry.0))
             .collect();
         let mut removed = HashSet::new();
         for (key, addr) in held {
-            let key = PeerKey::new(key);
+            let key = PeerKey::from_xonly(&key);
             if let std::collections::hash_map::Entry::Vacant(slot) = told.entry(key) {
                 slot.insert(addr);
                 removed.insert(key);
@@ -183,11 +181,10 @@ impl IdentityCache {
         let entries = &self.entries;
         // Cached again: an entry for the key's prefix holds the key.
         let cached = |key: &PeerKey, addr: &NodeAddr| {
-            let mut prefix = [0u8; 15];
-            prefix.copy_from_slice(&addr.as_bytes()[0..15]);
+            let prefix = addr.prefix();
             entries
                 .get(&prefix)
-                .is_some_and(|entry| PeerKey::new(entry.1.x_only_public_key().0) == *key)
+                .is_some_and(|entry| PeerKey::from_xonly(&entry.1.x_only_public_key().0) == *key)
         };
         let told = &feed.told;
         feed.removed

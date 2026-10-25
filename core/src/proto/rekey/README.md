@@ -84,8 +84,11 @@ handshakes) between two machines on each.
   `Drain`, `Ids` (an epoch's indices), `Slot`, `Role`, `RecvHome`,
   `Purpose`, and the trial open of one epoch's key.
 - `proof.rs`: the values that carry authority and the only code that
-  makes them: `PeerKey`, `Bond` and `Bonded`, `Authentic` with `Fresh`
-  and `Replayable`, the reply, msg3 and frame proofs, and `Evidence`.
+  makes them: `Bond` and `Bonded`, `Authentic` with `Fresh` and
+  `Replayable`, the reply, msg3 and frame proofs, and `Evidence`. It
+  re-exports `PeerKey`, the peer's static key, from the identity module
+  (`crate::identity`), which defines it beside the node address it
+  derives, so `proto::rekey::PeerKey` keeps naming it.
 - `candidates.rs`: the bounded candidate list, its per-carrier quota and
   the first-handshake eviction rule.
 - `resolve.rs`: `resolve`, the one tie-break both ends evaluate alike.

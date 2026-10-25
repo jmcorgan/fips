@@ -3734,7 +3734,7 @@ impl Node {
             && let Some(transport_id) = peer.transport_id()
             && let Some(transport_addr) = peer.current_addr().cloned()
         {
-            let key = crate::ipv6tun::link::PeerKey::new(peer.pubkey());
+            let key = crate::ipv6tun::link::PeerKey::from_xonly(&peer.pubkey());
             self.seed_path_mtu_for_link_peer(addr, key, transport_id, &transport_addr);
         }
     }
@@ -3753,8 +3753,7 @@ impl Node {
 
     /// Register a node in the identity cache for Ipv6Address → NodeAddr lookup.
     pub(crate) fn register_identity(&mut self, node_addr: NodeAddr, pubkey: secp256k1::PublicKey) {
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&node_addr.as_bytes()[0..15]);
+        let prefix = node_addr.prefix();
         self.identity_cache
             .insert(prefix, (node_addr, pubkey, Self::now_ms()));
         // LRU eviction, never of the entry just registered: stamps are in
@@ -3781,13 +3780,13 @@ impl Node {
     /// entry is registered again so the next lookup hits the store.
     pub(crate) fn lookup_by_fips_prefix(
         &mut self,
-        prefix: &[u8; 15],
+        prefix: &fips_core::identity::NodePrefix,
     ) -> Option<(NodeAddr, secp256k1::PublicKey)> {
         if let Some(found) = self.identity_cache.touch(prefix, Self::now_ms()) {
             return Some(found);
         }
         let (addr, pubkey) = self.sessions.iter().find_map(|(addr, entry)| {
-            if addr.as_bytes()[0..15] != prefix[..] {
+            if addr.prefix() != *prefix {
                 return None;
             }
             entry
@@ -3800,8 +3799,7 @@ impl Node {
 
     /// Check if a node's identity is in the cache (without LRU touch).
     pub(crate) fn has_cached_identity(&self, addr: &NodeAddr) -> bool {
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&addr.as_bytes()[0..15]);
+        let prefix = addr.prefix();
         self.identity_cache.contains_key(&prefix)
     }
 
@@ -3857,8 +3855,7 @@ impl Node {
     /// otherwise, under the key cached for `dest` or held by its session.
     #[cfg(test)]
     pub(crate) fn queue_pending_tun_packet_for_test(&mut self, dest: NodeAddr, packet: Vec<u8>) {
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&dest.as_bytes()[0..15]);
+        let prefix = dest.prefix();
         let key = self
             .identity_cache
             .iter()
@@ -3866,7 +3863,11 @@ impl Node {
             .map(|(_, entry)| entry.1.x_only_public_key().0)
             .or_else(|| self.sessions.get(&dest).and_then(|s| s.key()))
             .expect("the destination's key is cached or held by its session; use test_hold");
-        self.test_hold(dest, crate::ipv6tun::link::PeerKey::new(key), packet);
+        self.test_hold(
+            dest,
+            crate::ipv6tun::link::PeerKey::from_xonly(&key),
+            packet,
+        );
     }
 
     /// Queue `packet` for `dest` under `peer`, as

@@ -796,3 +796,115 @@ fn auth_challenge_generate_draws_from_the_entropy_source() {
     let challenge = super::AuthChallenge::<FixedEntropy<7>>::generate();
     assert_eq!(challenge.as_bytes(), &[7; 32]);
 }
+
+/// The x-only key of the secp256k1 generator point, whose derived
+/// identifiers below were computed independently of this crate.
+fn generator_key() -> secp256k1::XOnlyPublicKey {
+    let bytes: [u8; 32] =
+        hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    secp256k1::XOnlyPublicKey::from_byte_array(&bytes).unwrap()
+}
+
+#[test]
+fn the_generator_keys_node_address_and_ipv6_address_match_values_computed_outside_the_crate() {
+    let g = generator_key();
+    let key = PeerKey::from_xonly(&g);
+    assert_eq!(key.addr().to_string(), "132f39a98c31baaddba6525f5d43f295");
+    assert_eq!(
+        NodeAddr::from_pubkey(&g).to_string(),
+        "132f39a98c31baaddba6525f5d43f295"
+    );
+    assert_eq!(
+        key.address().to_string(),
+        "fd13:2f39:a98c:31ba:addb:a652:5f5d:43f2"
+    );
+    assert_eq!(
+        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&g)).to_string(),
+        "fd13:2f39:a98c:31ba:addb:a652:5f5d:43f2"
+    );
+}
+
+#[test]
+fn a_peer_key_round_trips_through_its_xonly_key_and_holds_its_serialized_bytes() {
+    let k = Identity::generate().pubkey();
+    let key = PeerKey::from_xonly(&k);
+    assert_eq!(key.to_xonly(), Ok(k));
+    assert_eq!(*key.bytes(), k.serialize());
+    assert_eq!(PeerKey::new(k.serialize()), key);
+}
+
+#[test]
+fn a_peer_key_of_bytes_off_the_curve_refuses_conversion_but_still_derives_addresses() {
+    for bytes in [[0u8; 32], [0xffu8; 32]] {
+        let key = PeerKey::new(bytes);
+        assert!(key.to_xonly().is_err(), "{key:?} must not convert");
+        assert_eq!(key.address(), Ipv6Address::from_node_addr(&key.addr()));
+    }
+}
+
+#[test]
+fn a_peer_key_is_its_32_bytes_and_nothing_more() {
+    assert_eq!(core::mem::size_of::<PeerKey>(), 32);
+}
+
+#[test]
+fn a_peer_keys_debug_output_is_its_first_four_bytes_in_hex() {
+    let key = PeerKey::from_xonly(&generator_key());
+    assert_eq!(format!("{key:?}"), "PeerKey(79be667e)");
+}
+
+#[test]
+fn the_generator_keys_node_prefix_matches_the_value_computed_outside_the_crate() {
+    let addr = NodeAddr::from_pubkey(&generator_key());
+    let want: [u8; 15] = hex::decode("132f39a98c31baaddba6525f5d43f2")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(addr.prefix().as_bytes(), &want);
+    assert_eq!(
+        Ipv6Address::from_node_addr(&addr).prefix().as_bytes(),
+        &want
+    );
+    assert_eq!(addr.prefix(), NodePrefix::from_bytes(want));
+}
+
+#[test]
+fn an_ipv6_address_names_the_prefix_of_the_node_address_it_was_derived_from() {
+    let identity = Identity::generate();
+    assert_eq!(identity.address().prefix(), identity.node_addr().prefix());
+    assert_eq!(
+        identity.node_addr().prefix().as_bytes()[..],
+        identity.node_addr().as_bytes()[0..15]
+    );
+}
+
+#[test]
+fn a_prefix_from_octets_takes_bytes_one_to_fifteen_and_ignores_byte_zero() {
+    let mut octets = [0u8; 16];
+    for (i, b) in octets.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    octets[0] = 0xfe;
+    let prefix = NodePrefix::from_octets(&octets);
+    let want: [u8; 15] = core::array::from_fn(|i| (i + 1) as u8);
+    assert_eq!(prefix.as_bytes(), &want);
+    octets[0] = 0xfd;
+    assert_eq!(NodePrefix::from_octets(&octets), prefix);
+}
+
+#[test]
+fn a_node_address_from_a_prefix_is_the_prefix_followed_by_a_zero_byte() {
+    let g = NodeAddr::from_pubkey(&generator_key()).prefix();
+    assert_eq!(
+        NodeAddr::from_prefix(g).to_string(),
+        "132f39a98c31baaddba6525f5d43f200"
+    );
+    let ones = NodePrefix::from_bytes([0xff; 15]);
+    assert_eq!(
+        NodeAddr::from_prefix(ones).to_string(),
+        "ffffffffffffffffffffffffffffff00"
+    );
+}

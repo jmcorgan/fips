@@ -1,12 +1,14 @@
 use super::*;
+use crate::{Ipv6Address, NodeAddr};
 
 #[test]
 fn a_peer_key_names_the_address_its_node_address_has() {
-    let key = PeerKey::any();
-    assert_eq!(key.node_addr(), NodeAddr::from_pubkey(&key.key()));
+    let key = any_key();
+    let xonly = key.to_xonly().expect("a generated key parses");
+    assert_eq!(key.addr(), NodeAddr::from_pubkey(&xonly));
     assert_eq!(
         key.address(),
-        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&key.key()))
+        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&xonly))
     );
 }
 
@@ -17,6 +19,17 @@ fn a_peer_key_is_its_key_and_nothing_else() {
     assert_eq!(std::mem::size_of::<PeerKey>(), 32);
 }
 
+#[test]
+fn the_link_names_peers_by_the_identity_modules_key() {
+    // The link's peer key is the identity module's type, not one of its own,
+    // so the size check above measures the type the messages carry.
+    fn same(key: fips_core::identity::PeerKey) -> PeerKey {
+        key
+    }
+    let key = any_key();
+    assert_eq!(same(key), key);
+}
+
 /// Field types a message may carry: integers, flags, strings, bytes, the
 /// peer key, and the message types this file defines.
 const ALLOWED: &[&str] = &[
@@ -24,10 +37,12 @@ const ALLOWED: &[&str] = &[
     "Attach", "FromMesh",
 ];
 
-/// The items in the link's source that are not messages: the two link ends,
-/// and the peer key, whose key bytes are the one field the link allows
-/// (`a_peer_key_is_its_key_and_nothing_else` keeps it the only one).
-const NOT_MESSAGES: &[&str] = &["MeshLink", "HostLink", "PeerKey"];
+/// The items in the link's source that are not messages: the two link ends.
+/// The peer key, whose key bytes are the one field the link allows, is the
+/// identity module's type and is not defined there
+/// (`a_peer_key_is_its_key_and_nothing_else` and
+/// `the_link_names_peers_by_the_identity_modules_key` keep it to its bytes).
+const NOT_MESSAGES: &[&str] = &["MeshLink", "HostLink"];
 
 /// Whether `ty` is an allowed field type, or an `Option` or `Vec` of one.
 fn allowed(ty: &str) -> bool {
@@ -346,9 +361,7 @@ fn refused(source: &str) -> Vec<(String, String)> {
 #[test]
 fn messages_carry_only_owned_data_of_the_allowed_types() {
     let (items, fields) = message_fields(include_str!("../link.rs"));
-    for item in [
-        "Feeds", "Attach", "FromMesh", "MeshLink", "HostLink", "PeerKey",
-    ] {
+    for item in ["Feeds", "Attach", "FromMesh", "MeshLink", "HostLink"] {
         assert!(
             items.iter().any(|i| i == item),
             "the scan must find {item}, found {items:?}"

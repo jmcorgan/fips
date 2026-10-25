@@ -9,7 +9,7 @@
 use super::*;
 use crate::LookupResponse;
 use crate::ipv6tun::icmp::{effective_ipv6_mtu, mss_ceiling};
-use crate::ipv6tun::link::PeerKey;
+use crate::ipv6tun::link::{PeerKey, any_key};
 use crate::node::path_mtu::{PathMtuEntry, payload_limit};
 use crate::node::session::session_at;
 use crate::proto::stp::TreeCoordinate;
@@ -116,7 +116,7 @@ fn mtu_exceeded(dest: &NodeAddr, reporter: &NodeAddr, mtu: u16) -> Vec<u8> {
 #[tokio::test]
 async fn the_attach_replays_every_entry_before_the_adapter_reads_any() {
     let mut node = tun_node();
-    let keys: Vec<PeerKey> = (0..3).map(|_| PeerKey::any()).collect();
+    let keys: Vec<PeerKey> = (0..3).map(|_| any_key()).collect();
     for (i, key) in keys.iter().enumerate() {
         node.path_mtu_lookup.write().unwrap().insert(
             key.address(),
@@ -144,7 +144,7 @@ async fn a_second_attach_drops_what_changed_while_detached() {
     // A stopped node can start again. An entry released between the two
     // attaches must not survive in the adapter's copy.
     let mut node = tun_node();
-    let (kept, gone) = (PeerKey::any(), PeerKey::any());
+    let (kept, gone) = (any_key(), any_key());
     for key in [kept, gone] {
         node.path_mtu_lookup
             .write()
@@ -167,7 +167,7 @@ async fn an_adapter_without_the_tun_asks_for_no_path_feed() {
     let mut config = Config::new();
     config.tun.enabled = false;
     let mut node = make_node_with(config);
-    let key = PeerKey::any();
+    let key = any_key();
     node.path_mtu_lookup
         .write()
         .unwrap()
@@ -184,7 +184,7 @@ async fn the_adapter_copy_follows_a_link_seed_and_both_releases() {
     let identity = make_peer_identity();
     let peer_addr = *identity.node_addr();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
-    let key = PeerKey::new(identity.pubkey());
+    let key = PeerKey::from_xonly(&identity.pubkey());
     let transport_addr = TransportAddr::from_string("10.0.0.12:2121");
     let tid = crate::transport::TransportId::new(1);
 
@@ -219,7 +219,7 @@ async fn the_adapter_copy_follows_the_expiry_pass_and_its_re_seed() {
     let ttl = node.config().node.cache.coord_ttl_secs * 1000;
 
     // A remote-learned entry for a destination with no link: expires.
-    let far = PeerKey::any();
+    let far = any_key();
     node.path_mtu_lookup.write().unwrap().insert(
         far.address(),
         far,
@@ -229,7 +229,7 @@ async fn the_adapter_copy_follows_the_expiry_pass_and_its_re_seed() {
     // the seed comes back.
     let identity = make_peer_identity();
     let peer_addr = *identity.node_addr();
-    let near = PeerKey::new(identity.pubkey());
+    let near = PeerKey::from_xonly(&identity.pubkey());
     let tid = crate::transport::TransportId::new(1);
     let transport_addr = TransportAddr::from_string("10.0.0.13:2121");
     let mut peer = crate::peer::ActivePeer::new(identity, LinkId::new(1), 0);
@@ -383,7 +383,7 @@ async fn a_restart_applies_nothing_the_previous_start_left_queued_on_its_link() 
     // detaches it. Nothing it held may land after the next attach has
     // replaced the adapter's copy.
     let mut node = tun_node();
-    let gone = PeerKey::any();
+    let gone = any_key();
     node.attach_host();
     node.supervisor.ipv6tun.run_link();
     node.path_mtu_lookup
@@ -406,7 +406,7 @@ async fn a_restart_applies_nothing_the_previous_start_left_queued_on_its_link() 
 #[tokio::test]
 async fn an_unkeyed_entry_over_a_keyed_one_releases_it_in_the_adapter_copy() {
     let mut node = attached_node();
-    let key = PeerKey::any();
+    let key = any_key();
     node.path_mtu_lookup
         .write()
         .unwrap()
@@ -420,7 +420,7 @@ async fn an_unkeyed_entry_over_a_keyed_one_releases_it_in_the_adapter_copy() {
 #[should_panic(expected = "another peer's key")]
 fn a_path_mtu_entry_under_another_peers_key_is_refused() {
     let node = tun_node();
-    let (addr, other) = (PeerKey::any().address(), PeerKey::any());
+    let (addr, other) = (any_key().address(), any_key());
     node.path_mtu_lookup
         .write()
         .unwrap()
@@ -509,7 +509,7 @@ fn adapter_keys(node: &mut Node) -> std::collections::BTreeSet<[u8; 32]> {
         .mesh()
         .keys()
         .iter()
-        .map(|k| k.key().serialize())
+        .map(|k| *k.bytes())
         .collect()
 }
 
@@ -610,7 +610,7 @@ async fn a_key_the_dns_responder_handed_out_survives_a_forget_decided_before_its
     assert!(!node.has_cached_identity(peer.node_addr()));
 
     let learner = node.supervisor.ipv6tun.learner().expect("attached");
-    learner.learn(PeerKey::new(peer.pubkey())).await;
+    learner.learn(PeerKey::from_xonly(&peer.pubkey())).await;
     node.sweep_identities();
     assert!(
         adapter_keys(&mut node).contains(&peer.pubkey().serialize()),
@@ -622,6 +622,49 @@ async fn a_key_the_dns_responder_handed_out_survives_a_forget_decided_before_its
     let report = learned.try_recv().expect("the report waits on the link");
     node.register_learned(report);
     assert!(node.has_cached_identity(peer.node_addr()));
+}
+
+#[tokio::test]
+async fn a_learned_report_whose_key_does_not_parse_is_counted_handled_and_registers_nothing() {
+    // The responder reports only keys it parsed, but a peer key holds any 32
+    // bytes. A report of bytes off the curve names no node: the node must
+    // not panic or register anything, and must still count the report as
+    // handled, which the next forget's number shows. The first report is
+    // left unhandled, so only the second can make that number cover it.
+    let mut node = make_node_with(identity_config(1));
+    let _rx = super::discovery::install_tun_channel(&mut node);
+    node.attach_host();
+    let peer = Identity::generate();
+    node.register_identity(*peer.node_addr(), peer.pubkey_full());
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let other = Identity::generate();
+    node.register_identity(*other.node_addr(), other.pubkey_full());
+    assert!(!node.has_cached_identity(peer.node_addr()));
+
+    let learner = node.supervisor.ipv6tun.learner().expect("attached");
+    learner.learn(PeerKey::from_xonly(&peer.pubkey())).await;
+    learner.learn(PeerKey::new([0xff; 32])).await;
+    let learned = node.supervisor.learned_rx.as_mut().unwrap();
+    let _unhandled = learned
+        .try_recv()
+        .expect("the first report waits on the link");
+    let invalid = learned
+        .try_recv()
+        .expect("the second report waits on the link");
+    assert_eq!(invalid.seq, 2);
+    let cached = node.identity_cache.len();
+    node.register_learned(invalid);
+    assert_eq!(node.identity_cache.len(), cached, "nothing registered");
+    assert!(
+        adapter_keys(&mut node).contains(&peer.pubkey().serialize()),
+        "the adapter holds the key the first report named"
+    );
+
+    node.sweep_identities();
+    assert!(
+        !adapter_keys(&mut node).contains(&peer.pubkey().serialize()),
+        "the forget must carry the second report's number"
+    );
 }
 
 #[tokio::test]
@@ -857,7 +900,7 @@ async fn a_packet_to_a_name_the_responder_just_resolved_is_held_even_when_it_ove
     node.start().await.unwrap();
     let peer = Identity::generate();
     let learner = node.supervisor.ipv6tun.learner().expect("attached");
-    learner.learn(PeerKey::new(peer.pubkey())).await;
+    learner.learn(PeerKey::from_xonly(&peer.pubkey())).await;
     app_outbound
         .send(host_packet(&node, peer.address(), 80))
         .await
@@ -891,7 +934,7 @@ async fn a_datagram_from_the_system_tun_reader_to_a_name_just_resolved_is_held_e
     node.start().await.unwrap();
     let peer = Identity::generate();
     let learner = node.supervisor.ipv6tun.learner().expect("attached");
-    learner.learn(PeerKey::new(peer.pubkey())).await;
+    learner.learn(PeerKey::from_xonly(&peer.pubkey())).await;
     let datagram = node
         .supervisor
         .ipv6tun
@@ -937,8 +980,7 @@ async fn a_send_to_a_cached_key_initiates_with_the_parity_the_cache_holds() {
     node.handle_tun_outbound(host_packet(&node, dest.address(), 80))
         .await;
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&dest.node_addr().as_bytes()[0..15]);
+    let prefix = dest.node_addr().prefix();
     let (_, cached) = node.lookup_by_fips_prefix(&prefix).unwrap();
     assert_eq!(cached, dest.pubkey_full(), "the cached parity is kept");
 }
@@ -1135,8 +1177,8 @@ async fn the_tick_tells_the_adapter_to_forget_an_evicted_key_no_session_holds() 
     let kept = Identity::generate();
     node.register_identity(*kept.node_addr(), kept.pubkey_full());
     let state = node.supervisor.ipv6tun.mesh().clone();
-    let gone_key = PeerKey::new(gone.pubkey());
-    let kept_key = PeerKey::new(kept.pubkey());
+    let gone_key = PeerKey::from_xonly(&gone.pubkey());
+    let kept_key = PeerKey::from_xonly(&kept.pubkey());
 
     // Both keys reach the adapter before the receive loop, and so before
     // any sweep, runs; otherwise the wait below could pass on a key that

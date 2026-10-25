@@ -1574,7 +1574,9 @@ impl Node {
 
         // Session MMP runs only on an established session, so its peer has a
         // proven key.
-        let peer_key = entry.key().map(crate::ipv6tun::link::PeerKey::new);
+        let peer_key = entry
+            .key()
+            .map(|k| crate::ipv6tun::link::PeerKey::from_xonly(&k));
         let Some(mmp) = entry.mmp_mut() else {
             return;
         };
@@ -2208,7 +2210,7 @@ impl Node {
             .sessions
             .get(&msg.dest_addr)
             .and_then(|e| e.key())
-            .map(crate::ipv6tun::link::PeerKey::new);
+            .map(|k| crate::ipv6tun::link::PeerKey::from_xonly(&k));
         match self.path_mtu_lookup.write() {
             Ok(mut map) => {
                 // Read existing, decide, and apply the write under one guard so
@@ -3383,8 +3385,7 @@ impl Node {
     /// can be sent.
     pub(in crate::node) async fn retry_session_after_discovery(&mut self, dest_addr: NodeAddr) {
         // Look up the destination's public key from the identity cache
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
+        let prefix = dest_addr.prefix();
         // The lookup has ended, so where the retry below starts no session
         // and finds no session entry, nothing is working on the held TUN
         // packets: they are answered now rather than left for the tick.

@@ -472,7 +472,7 @@ impl SessionEntry {
     /// The peer's static key, once a completion has authenticated it.
     pub(crate) fn peer_key(&self) -> Option<XOnlyPublicKey> {
         match self.identity() {
-            Identity::Proven(key) => XOnlyPublicKey::from_byte_array(key.bytes()).ok(),
+            Identity::Proven(key) => key.to_xonly().ok(),
             Identity::Claimed(_) => None,
         }
     }

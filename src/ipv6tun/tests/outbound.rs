@@ -1,6 +1,6 @@
 use super::*;
 use crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter;
-use crate::ipv6tun::link::FromMesh;
+use crate::ipv6tun::link::{FromMesh, any_key};
 use std::net::Ipv6Addr;
 use std::sync::Mutex;
 use std::sync::mpsc;
@@ -51,7 +51,7 @@ fn state_with(peer: PeerKey, limit: u16) -> MeshState {
 
 #[test]
 fn a_packet_to_a_known_key_becomes_a_datagram_carrying_the_compressed_packet() {
-    let peer = PeerKey::any();
+    let peer = any_key();
     let state = state_with(peer, 1400);
     let (tun_tx, rx) = mpsc::channel();
     let limiter = limiter();
@@ -67,11 +67,11 @@ fn a_packet_to_a_known_key_becomes_a_datagram_carrying_the_compressed_packet() {
 
 #[test]
 fn a_packet_to_a_prefix_no_key_names_is_answered_unreachable_from_the_raw_packet() {
-    let state = state_with(PeerKey::any(), 1400);
+    let state = state_with(any_key(), 1400);
     let (tun_tx, rx) = mpsc::channel();
     let limiter = limiter();
     let mut icmp = IcmpContext::new(Some(&tun_tx), us(), &limiter);
-    let stranger = PeerKey::any().address().to_ipv6();
+    let stranger = any_key().address().to_ipv6();
     let sent = packet(us(), stranger, 80);
 
     assert_eq!(outbound(&sent, &state, &mut icmp), None);
@@ -87,13 +87,13 @@ fn a_packet_to_a_prefix_no_key_names_is_answered_unreachable_from_the_raw_packet
 
 #[test]
 fn a_packet_over_the_published_limit_to_an_unknown_destination_is_answered_packet_too_big() {
-    let state = state_with(PeerKey::any(), 1000);
+    let state = state_with(any_key(), 1000);
     let (tun_tx, rx) = mpsc::channel();
     let limiter = limiter();
     let mut icmp = IcmpContext::new(Some(&tun_tx), us(), &limiter);
     let mtu = state.ipv6_mtu();
     assert_eq!(mtu, 1000 + 33);
-    let stranger = PeerKey::any().address().to_ipv6();
+    let stranger = any_key().address().to_ipv6();
 
     let over = packet(us(), stranger, usize::from(mtu) + 1);
     assert_eq!(outbound(&over, &state, &mut icmp), None);
@@ -113,7 +113,7 @@ fn a_packet_over_the_published_limit_to_an_unknown_destination_is_answered_packe
 #[test]
 fn a_packet_to_a_known_key_goes_to_the_node_whatever_its_size() {
     // The node holds the live limit; the adapter's copy can trail it.
-    let peer = PeerKey::any();
+    let peer = any_key();
     let state = state_with(peer, 1000);
     let (tun_tx, rx) = mpsc::channel();
     let limiter = limiter();
@@ -143,7 +143,7 @@ fn answered(refusal: Refusal) -> Vec<Vec<u8>> {
 
 #[test]
 fn every_refusal_of_a_packet_sent_from_our_address_is_answered_byte_for_byte_as_before() {
-    let peer = PeerKey::any();
+    let peer = any_key();
     let dst = peer.address().to_ipv6();
     for len in [40, 41, 80, 1200, 1500] {
         let sent = packet(us(), dst, len);
@@ -184,7 +184,7 @@ fn a_refused_packet_from_a_foreign_source_is_answered_as_if_sent_from_our_addres
     // no source address, so a packet the host sent from another address is
     // rebuilt with ours, and the answer goes to us rather than to the
     // foreign source.
-    let peer = PeerKey::any();
+    let peer = any_key();
     let foreign: Ipv6Addr = "fd00::99".parse().unwrap();
     let sent = packet(foreign, peer.address().to_ipv6(), 80);
     let got = answered(Refusal::TableFull {
@@ -202,7 +202,7 @@ fn a_refused_packet_from_a_foreign_source_is_answered_as_if_sent_from_our_addres
 
 #[test]
 fn packet_too_big_from_a_refusal_reports_the_ipv6_mtu_of_its_payload_limit() {
-    let peer = PeerKey::any();
+    let peer = any_key();
     let sent = packet(us(), peer.address().to_ipv6(), 1300);
     let got = answered(Refusal::TooBig {
         peer,
@@ -226,7 +226,7 @@ fn a_refused_packet_to_a_non_fd_destination_or_with_a_wrong_length_field_is_quot
     // field, so the quote names the destination in its fd00::/8 form and
     // carries the computed length, where the TUN path quoted the packet as
     // sent. The forwarded packet already arrives that way.
-    let peer = PeerKey::any();
+    let peer = any_key();
     let mut odd = peer.address().to_ipv6().octets();
     odd[0] = 0xfe;
     let to_odd = packet(us(), Ipv6Addr::from(odd), 80);

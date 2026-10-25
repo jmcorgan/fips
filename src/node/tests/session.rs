@@ -1194,8 +1194,7 @@ fn test_identity_cache_populated_on_promote() {
 
     // Identity cache should contain the peer
     let peer_addr = *peer_identity.node_addr();
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&peer_addr.as_bytes()[0..15]);
+    let prefix = peer_addr.prefix();
     let cached = node.lookup_by_fips_prefix(&prefix);
     assert!(
         cached.is_some(),
@@ -1302,8 +1301,7 @@ async fn session_with_its_route_lost(evict_identity: bool) -> (Vec<TestNode>, No
 
     nodes[0].node.coord_cache.remove(&node2_addr);
     if evict_identity {
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&node2_addr.as_bytes()[0..15]);
+        let prefix = node2_addr.prefix();
         nodes[0].node.identity_cache.remove(&prefix);
         assert!(!nodes[0].node.has_cached_identity(&node2_addr));
     }
@@ -2427,7 +2425,7 @@ async fn with_the_held_table_full_a_destination_with_an_initiating_session_gets_
         bytes[..4].copy_from_slice(&i.to_be_bytes());
         nodes[0].node.test_hold(
             NodeAddr::from_bytes(bytes),
-            crate::ipv6tun::link::PeerKey::any(),
+            crate::ipv6tun::link::any_key(),
             vec![0x60; 40],
         );
     }
@@ -2585,7 +2583,7 @@ fn test_purge_idle_sessions_cleans_pending_packets() {
     // Insert some pending packets for this destination
     node.test_hold(
         remote_addr,
-        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey()),
         vec![1, 2, 3],
     );
     assert!(node.pending_tun_packets.contains_key(&remote_addr));
@@ -2746,13 +2744,11 @@ fn test_identity_cache_lru_eviction() {
     let id3 = Identity::generate();
 
     // Insert first two with explicit timestamps to ensure deterministic ordering
-    let mut prefix1 = [0u8; 15];
-    prefix1.copy_from_slice(&id1.node_addr().as_bytes()[0..15]);
+    let prefix1 = id1.node_addr().prefix();
     node.identity_cache
         .insert(prefix1, (*id1.node_addr(), id1.pubkey_full(), 1000));
 
-    let mut prefix2 = [0u8; 15];
-    prefix2.copy_from_slice(&id2.node_addr().as_bytes()[0..15]);
+    let prefix2 = id2.node_addr().prefix();
     node.identity_cache
         .insert(prefix2, (*id2.node_addr(), id2.pubkey_full(), 2000));
 
@@ -2767,8 +2763,7 @@ fn test_identity_cache_lru_eviction() {
         "Oldest entry should have been evicted"
     );
 
-    let mut prefix3 = [0u8; 15];
-    prefix3.copy_from_slice(&id3.node_addr().as_bytes()[0..15]);
+    let prefix3 = id3.node_addr().prefix();
     assert!(
         node.lookup_by_fips_prefix(&prefix3).is_some(),
         "Newest entry should be present"
@@ -2784,8 +2779,7 @@ fn test_identity_cache_lookup() {
 
     node.register_identity(remote_addr, remote.pubkey_full());
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&remote_addr.as_bytes()[0..15]);
+    let prefix = remote_addr.prefix();
 
     let result = node.lookup_by_fips_prefix(&prefix);
     assert!(result.is_some(), "Registered identity should be available");
@@ -3639,7 +3633,7 @@ async fn node_with_link_seed(
 
     node.seed_path_mtu_for_link_peer(
         &remote_addr,
-        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey()),
         transport_id,
         &transport_addr,
     );
@@ -4420,7 +4414,7 @@ async fn test_idle_session_purge_keeps_link_peer_path_mtu_seed() {
 
     node.seed_path_mtu_for_link_peer(
         &remote_addr,
-        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey()),
         transport_id,
         &transport_addr,
     );
@@ -11034,8 +11028,7 @@ async fn the_identity_store_fallback_ignores_a_session_that_is_not_established()
         "precondition: the session is still in its handshake"
     );
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&node1_addr.as_bytes()[0..15]);
+    let prefix = node1_addr.prefix();
     nodes[0].node.identity_cache.remove(&prefix);
 
     assert_eq!(
@@ -11059,8 +11052,7 @@ fn registering_an_identity_into_a_full_store_never_evicts_the_entry_just_registe
     let mut node = make_node_with(config);
     for i in 0..3u64 {
         let other = Identity::generate();
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&other.node_addr().as_bytes()[0..15]);
+        let prefix = other.node_addr().prefix();
         node.identity_cache.insert(
             prefix,
             (*other.node_addr(), other.pubkey_full(), u64::MAX - i),

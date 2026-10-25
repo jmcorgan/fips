@@ -2163,7 +2163,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     ipv6_pkt[24..40].copy_from_slice(&target_ipv6.octets());
     node.test_hold(
         target_addr,
-        crate::ipv6tun::link::PeerKey::new(target_identity.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&target_identity.pubkey()),
         ipv6_pkt,
     );
 
@@ -2348,8 +2348,7 @@ async fn a_native_send_does_not_replace_a_key_already_cached_for_that_destinatio
     node.handle_native_outbound(key, dest.pubkey(), b"hello".to_vec())
         .await;
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
+    let prefix = dest_addr.prefix();
     let (_, cached) = node
         .lookup_by_fips_prefix(&prefix)
         .expect("the destination's key must still be cached");
@@ -3119,7 +3118,7 @@ async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_pa
     let dest = *unknown.node_addr();
     node.test_hold(
         dest,
-        crate::ipv6tun::link::PeerKey::new(unknown.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&unknown.pubkey()),
         tun_packet_to(&dest),
     );
     node.retry_session_after_discovery(dest).await;

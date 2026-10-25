@@ -763,14 +763,20 @@ impl Node {
 
     /// Register a key the adapter's DNS responder handed to the host, with
     /// the even-parity lift its npub names, and note the report handled.
+    ///
+    /// The responder reports only keys parsed from a resolved npub, so the
+    /// key always converts today. One that did not would name no node: it is
+    /// not registered, and the report is still noted handled so the count
+    /// the adapter's forgets carry keeps moving.
     pub(in crate::node) fn register_learned(&mut self, report: crate::ipv6tun::link::Learned) {
-        let key = report.peer.key();
-        let node_addr = crate::NodeAddr::from_pubkey(&key);
-        debug!(
-            node_addr = %node_addr,
-            "Registering identity from DNS resolution"
-        );
-        self.register_identity(node_addr, key.public_key(secp256k1::Parity::Even));
+        if let Ok(key) = report.peer.to_xonly() {
+            let node_addr = crate::NodeAddr::from_pubkey(&key);
+            debug!(
+                node_addr = %node_addr,
+                "Registering identity from DNS resolution"
+            );
+            self.register_identity(node_addr, key.public_key(secp256k1::Parity::Even));
+        }
         self.identity_cache.handled(report.seq);
     }
 }

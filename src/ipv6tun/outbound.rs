@@ -16,6 +16,7 @@ use super::core::{MeshState, ipv6_mtu};
 use super::icmp::IcmpContext;
 use super::ipv6_shim::{compress_ipv6, decompress_ipv6};
 use super::link::{Datagram, PeerKey, Refusal};
+use fips_core::identity::NodePrefix;
 
 /// The verdict on a packet read from the TUN, before the mesh is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +26,16 @@ pub(crate) enum Admit {
     /// Larger than the mesh carries; answer Packet Too Big with this MTU.
     TooBig(u32),
     /// Forward to the destination with this address prefix.
-    Forward([u8; 15]),
+    Forward(NodePrefix),
+}
+
+/// The node prefix a packet's destination address names, its bytes 1 to 15.
+/// The caller has checked the packet holds a whole IPv6 header; byte 0 of the
+/// address is not read, so a destination outside `fd00::/8` names one too.
+fn destination(packet: &[u8]) -> NodePrefix {
+    let mut octets = [0u8; 16];
+    octets.copy_from_slice(&packet[24..40]);
+    NodePrefix::from_octets(&octets)
 }
 
 /// Check a packet from the TUN against the node-wide IPv6 MTU and extract
@@ -41,11 +51,8 @@ pub(crate) fn admit(packet: &[u8], ipv6_mtu: u16) -> Admit {
         return Admit::TooBig(effective_mtu as u32);
     }
 
-    // Extract destination Ipv6Address prefix (IPv6 dest bytes 1-15)
-    // IPv6 header: bytes 24-39 are dest addr, so prefix = bytes 25-39
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&packet[25..40]);
-    Admit::Forward(prefix)
+    // IPv6 header: bytes 24-39 are the destination address.
+    Admit::Forward(destination(packet))
 }
 
 /// Forward one IPv6 packet from the host: check it, answer it or drop it
@@ -65,9 +72,7 @@ pub(crate) fn outbound(
     if packet.len() < 40 || packet[0] >> 4 != 6 {
         return None;
     }
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&packet[25..40]);
-    if let Some(peer) = state.key(&prefix) {
+    if let Some(peer) = state.key(&destination(packet)) {
         // What compression refuses, anything shorter than an IPv6 header or
         // of another version, has been dropped above.
         let payload = compress_ipv6(packet)?;
@@ -163,7 +168,7 @@ mod tests {
 
     #[test]
     fn admit_extracts_destination_bytes_one_to_fifteen() {
-        let expected: [u8; 15] = dest().octets()[1..16].try_into().unwrap();
+        let expected = NodePrefix::from_bytes(dest().octets()[1..16].try_into().unwrap());
         assert_eq!(admit(&packet(dest(), 60), 1280), Admit::Forward(expected));
     }
 }

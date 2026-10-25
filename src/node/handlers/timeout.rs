@@ -616,7 +616,7 @@ impl Node {
             .iter()
             .filter(|(addr, _)| gone.contains(&crate::Ipv6Address::from_node_addr(addr)))
             .filter_map(|(addr, p)| {
-                let key = crate::ipv6tun::link::PeerKey::new(p.pubkey());
+                let key = crate::ipv6tun::link::PeerKey::from_xonly(&p.pubkey());
                 Some((*addr, key, p.transport_id()?, p.current_addr()?.clone()))
             })
             .collect();

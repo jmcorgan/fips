@@ -3,17 +3,20 @@
 <!-- markdownlint-disable MD013 -->
 
 Identity types for FIPS nodes: the local node's identity, which holds
-its keypair and signs; the 16-byte node address derived from a Nostr
-public key; the node's IPv6 address; a remote peer's identity; the
-authentication challenge and response; and the NIP-19 npub and nsec
-encodings.
+its keypair and signs; a peer's key held as its 32 bytes; the 16-byte
+node address derived from a Nostr public key; the node's IPv6 address
+and the 15-byte node prefix it carries; a remote peer's identity; the authentication challenge and response;
+and the NIP-19 npub and nsec encodings.
 
 The root crate re-exports the types, the encodings and `init_secp`
 under `fips::identity`, next to the deprecated `FipsAddress` alias it
 keeps; it does not re-export `secp` or `sha256`, and re-exports
-`ErasingKeypair` only as `pub(crate)`. `Identity` and `AuthChallenge`
-take the host's entropy source as a type parameter; the root crate fixes
-it with type aliases at the same paths,
+`ErasingKeypair` only as `pub(crate)`. It does not re-export `PeerKey`
+or `NodePrefix` under `fips::identity`; the rekey machine names it as
+`proto::rekey::PeerKey`, and the root crate's IPv6 adapter imports it
+from here for its own link. `Identity` and `AuthChallenge` take the
+host's entropy source as a type parameter; the root crate fixes it with
+type aliases at the same paths,
 `fips::identity::Identity = Identity<OsEntropy>` and likewise
 `AuthChallenge`, where `OsEntropy` is `rand`'s thread-local generator.
 
@@ -27,6 +30,19 @@ from its x-only public key:
 | npub | `String` | NIP-19 bech32 of the public key | what people configure and see |
 | node address | `NodeAddr` | first 16 bytes of SHA-256 of the public key | routing and every protocol table |
 | IPv6 address | `Ipv6Address` | `0xfd` followed by the first 15 bytes of the node address | the TUN interface, so IP applications can reach a node |
+| node prefix | `NodePrefix` | the first 15 bytes of the node address, which are bytes 1 to 15 of the IPv6 address | what a host packet names its destination by: the identity cache's key and the IPv6 adapter's key map |
+
+The derivations start from the key's 32 bytes, which `PeerKey` holds
+where a peer is compared and hashed without a secp256k1 call.
+`PeerKey::addr` is the one place the node address is derived;
+`NodeAddr::from_pubkey` and `PeerKey::address` go through it, and a
+known-answer test in `tests.rs` pins its output for the generator's key.
+`NodeAddr::prefix` and `Ipv6Address::prefix` are the two ways to the
+node prefix, `NodePrefix::from_octets` takes it from any 16 address
+bytes without checking byte 0 (a host may send outside `fd00::/8`), and
+`NodeAddr::from_prefix` turns it back into a node address with a zero
+last byte. The node prefix is not `IPV6_ADDRESS_PREFIX`, the `0xfd`
+byte in front of it.
 
 These derivations are part of the protocol: every node computes them the
 same way, and a change to any of them stops nodes agreeing on who is
@@ -43,9 +59,19 @@ algebraic structure.
   (`0xfd`); `IdentityError` and its `From` impls; the `sha256` helper
   and the private `hex_encode` helper.
 - `address.rs`: `Ipv6Address`, the node's 128-bit IPv6 address with the
-  `0xfd` prefix, and its conversion to `core::net::Ipv6Addr`.
+  `0xfd` prefix, its conversion to `core::net::Ipv6Addr`, and the node
+  prefix it carries.
+- `key.rs`: `PeerKey`, a node's static key held as the 32 bytes of its
+  x-only public key, compared and hashed as bytes. Any 32 bytes make
+  one, so its conversion back to an `XOnlyPublicKey`, `to_xonly`, can
+  fail; `addr` derives the node address from the bytes and `address`
+  the IPv6 address. Its `Debug` shows the first four bytes, and the
+  rekey machine's state digests use that form.
 - `node_addr.rs`: `NodeAddr`, the 16-byte node identifier taken from the
-  SHA-256 of the public key.
+  SHA-256 of the public key, which it derives through `PeerKey::addr`;
+  its `prefix`, and `from_prefix`, the zero-padded reverse.
+- `prefix.rs`: `NodePrefix`, bytes 0 to 14 of a node address, and
+  `from_octets`, which reads bytes 1 to 15 of an IPv6 address.
 - `peer.rs`: `PeerIdentity`, a remote peer known by its public key only.
 - `encoding.rs`: npub and nsec encoding and decoding, and
   `decode_secret`, which accepts an nsec or a hex secret key.
