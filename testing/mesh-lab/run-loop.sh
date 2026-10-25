@@ -594,9 +594,12 @@ parse_nat_lan() {
         peer_adoption_timeout="true"
     fi
 
-    local cross_init_observed="false"
-    if grep -E "Connection initiated.*node-(a|b)" "$REP_DIR"/docker-logs/*.log 2>/dev/null \
-        | awk '{print $1}' | sort -u | head -2 | wc -l | grep -q '2'; then
+    # Captured before counting: under pipefail, head exiting after two lines
+    # can kill sort with SIGPIPE and turn an observation into a miss.
+    local cross_init_observed="false" inits
+    inits=$(grep -E "Connection initiated.*node-(a|b)" "$REP_DIR"/docker-logs/*.log 2>/dev/null \
+        | awk '{print $1}' | sort -u)
+    if [ "$(grep -c . <<<"$inits")" -ge 2 ]; then
         cross_init_observed="true"
     fi
 

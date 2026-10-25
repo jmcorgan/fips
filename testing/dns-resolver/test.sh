@@ -957,10 +957,13 @@ check_gateway_default_bind() {
     for _i in $(seq 1 5); do
         if text=$(read_gateway_log "$name" "$log"); then
             read_ok=1
-            if printf '%s\n' "$text" | grep -q 'Gateway DNS resolver listening.*addr=\[::1\]:5365'; then
+            # Matched on a here-string, not a pipe from printf: under
+            # pipefail, grep -q exiting at its match can kill the writer with
+            # SIGPIPE and turn the match into a miss once the log is over 4 KB.
+            if grep -q 'Gateway DNS resolver listening.*addr=\[::1\]:5365' <<<"$text"; then
                 listening=1
             fi
-            if printf '%s\n' "$text" | grep -qE 'Created nftables table|Failed to create nftables table'; then
+            if grep -qE 'Created nftables table|Failed to create nftables table' <<<"$text"; then
                 nat_step=1
                 break
             fi
@@ -1061,14 +1064,15 @@ EOF'
     else
         pass "fips-gateway on a held DNS port exits $rc"
     fi
-    if printf '%s\n' "$text" | grep -qF "the fips daemon's own DNS responder listens on 5354"; then
+    # Matched on a here-string, as in check_gateway_default_bind.
+    if grep -qF "the fips daemon's own DNS responder listens on 5354" <<<"$text"; then
         pass "the bind error names the daemon as the likely holder of 5354"
     else
         fail "the bind error does not carry the 5354 hint"
     fi
     local line
     for line in "Failed to create virtual IP pool" "Failed to create nftables table" "Created nftables table"; do
-        if printf '%s\n' "$text" | grep -qF "$line"; then
+        if grep -qF "$line" <<<"$text"; then
             fail "fips-gateway reached a step after the DNS bind: '$line'"
         else
             pass "fips-gateway stopped before '$line'"

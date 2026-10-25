@@ -138,7 +138,10 @@ else
         exit 1
     fi
 
-    if ! rustup target list --installed | grep -q "^$RUST_TARGET$"; then
+    # Captured before matching: under pipefail, grep -q exiting at its match
+    # can kill the writer with SIGPIPE and turn the match into a miss.
+    # Captured inside the condition so that set -e does not end the script.
+    if ! grep -q "^$RUST_TARGET$" <<<"$(rustup target list --installed)"; then
         echo "==> Adding Rust target $RUST_TARGET..."
         rustup target add "$RUST_TARGET"
     fi

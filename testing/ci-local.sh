@@ -721,9 +721,20 @@ run_build() {
     # startup_epoch/started_at/is_leaf_only/node_profile/max_*) — a shadow field
     # would silently reopen dual-store divergence between the struct and the
     # context. Checks the struct *declaration*, so it is wrap-insensitive.
+    # Captured before matching: under pipefail, grep -q exiting at its match
+    # killed awk with SIGPIPE before its last write, so the guard never fired.
+    # An empty capture means the struct was not found and the guard would
+    # check nothing, so that fails too.
     info "node-context single-store guard"
-    if awk '/^pub struct Node \{/,/^\}/' src/node/mod.rs \
-        | grep -qE '^[[:space:]]+(config|identity|startup_epoch|started_at|is_leaf_only|node_profile|max_connections|max_peers|max_links):'; then
+    local node_decl
+    node_decl=$(awk '/^pub struct Node \{/,/^\}/' src/node/mod.rs) || node_decl=""
+    if [[ -z "$node_decl" ]]; then
+        fail "no 'pub struct Node' declaration found in src/node/mod.rs, so the single-store guard checked nothing"
+        record "node-context-guard" 1
+        return 1
+    fi
+    if grep -qE '^[[:space:]]+(config|identity|startup_epoch|started_at|is_leaf_only|node_profile|max_connections|max_peers|max_links):' \
+        <<<"$node_decl"; then
         fail "Node struct re-declares a bundled immutable field; it must live solely in NodeContext"
         record "node-context-guard" 1
         return 1

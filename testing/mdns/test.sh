@@ -147,9 +147,12 @@ start_node() {
 
 # wait_for_log <container> <fixed string> <timeout>: 0 once the line appears.
 wait_for_log() {
-    local waited=0
+    local waited=0 logs
     while [[ $waited -lt $3 ]]; do
-        docker logs "$1" 2>&1 | grep -qF "$2" && return 0
+        # Captured before matching: under pipefail, grep -q exiting at its
+        # match can kill the writer with SIGPIPE and turn the match into a miss.
+        logs=$(docker logs "$1" 2>&1)
+        grep -qF "$2" <<<"$logs" && return 0
         sleep 1
         waited=$((waited + 1))
     done
