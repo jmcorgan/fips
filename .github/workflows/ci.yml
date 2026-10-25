@@ -799,6 +799,10 @@ jobs:
     name: Unit tests (musl)
     runs-on: ubuntu-latest
     needs: [build]
+    # Its `cargo test` run has no per-test limit, so this bound is all that
+    # ends a hang. The slowest green run seen took 17 minutes; see the Linux
+    # job's bound.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
