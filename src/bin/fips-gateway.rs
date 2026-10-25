@@ -8,7 +8,7 @@ use clap::Parser;
 #[cfg(target_os = "linux")]
 use fips::Config;
 #[cfg(target_os = "linux")]
-use fips::gateway::{control, dns, nat, net, pool, state};
+use fips::gateway::{control, dns, nat, net, pool, shutdown, state};
 #[cfg(target_os = "linux")]
 use fips::version;
 #[cfg(target_os = "linux")]
@@ -602,7 +602,7 @@ async fn main() {
     // --- Channels ---
 
     // Pool events (new/removed mappings) → NAT + net modules
-    let (event_tx, mut event_rx) = mpsc::channel::<pool::PoolEvent>(64);
+    let (event_tx, mut event_rx) = mpsc::channel::<pool::PoolEvent>(shutdown::EVENT_CAPACITY);
 
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -799,23 +799,24 @@ async fn main() {
 
     info!("fips-gateway shutting down");
 
-    // Close the event channel first. Nothing receives from it any more, and
-    // a resolver or tick blocked sending into a full channel cannot see the
-    // shutdown signal; closing it makes that send fail at once.
-    drop(event_rx);
-
-    // Signal all tasks to stop
-    let _ = shutdown_tx.send(true);
-
-    // Wait for tasks (control task is cancelled by dropping the listener)
-    if let Some(task) = control_task {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(task) = dns_task {
-        let _ = task.await;
-    }
-    let mut save_log = tick_task.await.unwrap_or_default();
+    let stopped = shutdown::stop_tasks(
+        event_rx,
+        &shutdown_tx,
+        control_task,
+        dns_task,
+        tick_task,
+        shutdown::STOP_TIMEOUT,
+    )
+    .await;
+    // An abandoned tick may still be writing the pool state on a blocking
+    // thread, which aborting it does not stop, through the same temporary
+    // file the final write uses. Its last completed write stands instead,
+    // as after a crash.
+    let save_log = match stopped.tick {
+        shutdown::TaskEnd::Finished(save_log) => Some(save_log),
+        shutdown::TaskEnd::Failed(_) => Some(state::SaveLog::default()),
+        shutdown::TaskEnd::Abandoned => None,
+    };
 
     // Log final pool status, and write the exact set of addresses a client
     // may still hold an answer for: nothing is issued any more, so the next
@@ -833,7 +834,12 @@ async fn main() {
         );
         pool_guard.shutdown_state()
     };
-    save_log.report(&save_pool_state(final_state).await);
+    match save_log {
+        Some(mut save_log) => save_log.report(&save_pool_state(final_state).await),
+        None => warn!(
+            "Pool tick did not stop; skipping the final pool state write, the last periodic write stands"
+        ),
+    }
 
     // Clean up network and NAT
     net_setup.cleanup().await;
