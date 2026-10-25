@@ -23,7 +23,7 @@ pub const IPV6_SHIM_FORMAT_COMPRESSED: u8 = 0x00;
 const IPV6_SHIM_RESIDUAL_SIZE: usize = 6;
 
 /// IPv6 header size.
-const IPV6_HEADER_SIZE: usize = 40;
+pub(crate) const IPV6_HEADER_SIZE: usize = 40;
 
 /// How many bytes shorter a packet is once compressed: the 40-byte IPv6
 /// header becomes the format byte and the residual fields. An IPv6 packet of

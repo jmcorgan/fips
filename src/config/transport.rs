@@ -37,7 +37,8 @@ const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:2121";
 /// smaller transport MTU gives an IPv6 MTU below 1280, and a host ignores a
 /// Packet Too Big reporting less than that (RFC 8201), so every non-TCP
 /// packet between the two sizes would be lost.
-const DEFAULT_UDP_MTU: u16 = 1357;
+const DEFAULT_UDP_MTU: u16 =
+    crate::ipv6tun::tun::IPV6_MIN_MTU + crate::ipv6tun::mtu::FIPS_IPV6_OVERHEAD;
 
 /// Default UDP receive buffer size (2 MB).
 const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
