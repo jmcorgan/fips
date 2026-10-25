@@ -24,47 +24,9 @@ use super::lease::EpochTag;
 use super::profile::{Completed, Profile};
 use crate::identity::NodeAddr;
 
-/// A peer's static key, compared on its X coordinate only.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PeerKey([u8; 32]);
-
-impl PeerKey {
-    /// The key whose X coordinate is `x`.
-    pub fn new(x: [u8; 32]) -> Self {
-        Self(x)
-    }
-
-    /// The key of an x-only public key.
-    pub fn from_xonly(key: &secp256k1::XOnlyPublicKey) -> Self {
-        Self(key.serialize())
-    }
-
-    /// The X coordinate.
-    pub fn bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// The node address derived from the key: the first 16 bytes of the
-    /// SHA-256 of its X coordinate, as `NodeAddr::from_pubkey` derives it.
-    pub fn addr(&self) -> NodeAddr {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(self.0);
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&hash[..16]);
-        NodeAddr::from_bytes(bytes)
-    }
-}
-
-impl fmt::Debug for PeerKey {
-    /// The first four bytes, which is enough to tell test keys apart.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "PeerKey({:02x}{:02x}{:02x}{:02x})",
-            self.0[0], self.0[1], self.0[2], self.0[3]
-        )
-    }
-}
+/// A peer's static key, compared on its X coordinate only. Defined in the
+/// identity module beside the node address it derives.
+pub use crate::identity::PeerKey;
 
 /// What a completed handshake must match to become an epoch of this
 /// machine.

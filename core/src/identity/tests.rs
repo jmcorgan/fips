@@ -796,3 +796,62 @@ fn auth_challenge_generate_draws_from_the_entropy_source() {
     let challenge = super::AuthChallenge::<FixedEntropy<7>>::generate();
     assert_eq!(challenge.as_bytes(), &[7; 32]);
 }
+
+/// The x-only key of the secp256k1 generator point, whose derived
+/// identifiers below were computed independently of this crate.
+fn generator_key() -> secp256k1::XOnlyPublicKey {
+    let bytes: [u8; 32] =
+        hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    secp256k1::XOnlyPublicKey::from_byte_array(&bytes).unwrap()
+}
+
+#[test]
+fn the_generator_keys_node_address_and_ipv6_address_match_values_computed_outside_the_crate() {
+    let g = generator_key();
+    let key = PeerKey::from_xonly(&g);
+    assert_eq!(key.addr().to_string(), "132f39a98c31baaddba6525f5d43f295");
+    assert_eq!(
+        NodeAddr::from_pubkey(&g).to_string(),
+        "132f39a98c31baaddba6525f5d43f295"
+    );
+    assert_eq!(
+        key.address().to_string(),
+        "fd13:2f39:a98c:31ba:addb:a652:5f5d:43f2"
+    );
+    assert_eq!(
+        Ipv6Address::from_node_addr(&NodeAddr::from_pubkey(&g)).to_string(),
+        "fd13:2f39:a98c:31ba:addb:a652:5f5d:43f2"
+    );
+}
+
+#[test]
+fn a_peer_key_round_trips_through_its_xonly_key_and_holds_its_serialized_bytes() {
+    let k = Identity::generate().pubkey();
+    let key = PeerKey::from_xonly(&k);
+    assert_eq!(key.to_xonly(), Ok(k));
+    assert_eq!(*key.bytes(), k.serialize());
+    assert_eq!(PeerKey::new(k.serialize()), key);
+}
+
+#[test]
+fn a_peer_key_of_bytes_off_the_curve_refuses_conversion_but_still_derives_addresses() {
+    for bytes in [[0u8; 32], [0xffu8; 32]] {
+        let key = PeerKey::new(bytes);
+        assert!(key.to_xonly().is_err(), "{key:?} must not convert");
+        assert_eq!(key.address(), Ipv6Address::from_node_addr(&key.addr()));
+    }
+}
+
+#[test]
+fn a_peer_key_is_its_32_bytes_and_nothing_more() {
+    assert_eq!(core::mem::size_of::<PeerKey>(), 32);
+}
+
+#[test]
+fn a_peer_keys_debug_output_is_its_first_four_bytes_in_hex() {
+    let key = PeerKey::from_xonly(&generator_key());
+    assert_eq!(format!("{key:?}"), "PeerKey(79be667e)");
+}

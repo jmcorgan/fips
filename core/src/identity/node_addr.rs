@@ -5,9 +5,8 @@ use alloc::string::String;
 use core::fmt;
 
 use secp256k1::XOnlyPublicKey;
-use sha2::{Digest, Sha256};
 
-use super::{IdentityError, hex_encode};
+use super::{IdentityError, PeerKey, hex_encode};
 
 /// 16-byte node identifier derived from truncated SHA-256(pubkey).
 ///
@@ -35,14 +34,10 @@ impl NodeAddr {
 
     /// Derive a NodeAddr from an x-only public key (npub).
     ///
-    /// Computes SHA-256(pubkey) and takes the first 16 bytes.
+    /// Computes SHA-256(pubkey) and takes the first 16 bytes, through
+    /// [`PeerKey::addr`], where the derivation is written.
     pub fn from_pubkey(pubkey: &XOnlyPublicKey) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(pubkey.serialize());
-        let hash = hasher.finalize();
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&hash[..16]);
-        Self(bytes)
+        PeerKey::from_xonly(pubkey).addr()
     }
 
     /// Return the raw bytes.

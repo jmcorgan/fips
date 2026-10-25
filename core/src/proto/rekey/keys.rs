@@ -189,7 +189,7 @@ pub(crate) fn peer_key<E: crate::entropy::EntropySource>(
 /// its DH uses the X coordinate alone, so even parity is what the deployed
 /// initiator uses for a key it knows only as an npub.
 pub(crate) fn pinned(peer: &PeerKey) -> Result<secp256k1::PublicKey, HsError> {
-    let x = secp256k1::XOnlyPublicKey::from_slice(peer.bytes()).map_err(|_| HsError)?;
+    let x = peer.to_xonly().map_err(|_| HsError)?;
     Ok(secp256k1::PublicKey::from_x_only_public_key(
         x,
         secp256k1::Parity::Even,

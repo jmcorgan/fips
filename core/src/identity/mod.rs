@@ -7,6 +7,7 @@
 mod address;
 mod auth;
 mod encoding;
+mod key;
 mod local;
 mod node_addr;
 mod peer;
@@ -23,6 +24,7 @@ use thiserror::Error;
 pub use address::Ipv6Address;
 pub use auth::{AuthChallenge, AuthResponse};
 pub use encoding::{decode_npub, decode_nsec, decode_secret, encode_npub, encode_nsec};
+pub use key::PeerKey;
 #[doc(hidden)]
 pub use local::ErasingKeypair;
 pub use local::Identity;
