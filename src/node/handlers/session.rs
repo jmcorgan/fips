@@ -7,6 +7,7 @@
 
 use crate::NodeAddr;
 use crate::cache::Funding;
+use crate::ipv6tun::inbound::mark_ce;
 use crate::ipv6tun::link::{PeerKey, Refusal};
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
@@ -29,7 +30,6 @@ use crate::proto::fsp::wire::{
 };
 use crate::proto::fsp::{
     FspAction, FspInnerFlags, SessionAck, SessionMessageType, SessionMsg3, SessionSetup,
-    mark_ipv6_ecn_ce,
 };
 #[cfg(unix)]
 use crate::proto::link::LinkMessageType;
@@ -726,7 +726,7 @@ impl Node {
                         ) {
                             Some(mut packet) => {
                                 if ce_flag {
-                                    mark_ipv6_ecn_ce(&mut packet);
+                                    mark_ce(&mut packet);
                                     self.metrics().congestion.ce_received.inc();
                                 }
                                 if let Some(tun_tx) = &self.supervisor.ipv6tun.tun_tx {

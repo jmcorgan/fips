@@ -35,7 +35,7 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
-pub use core::{Fsp, FspAction, mark_ipv6_ecn_ce, push_bounded_pending, should_apply_path_mtu};
+pub use core::{Fsp, FspAction, push_bounded_pending, should_apply_path_mtu};
 pub use wire::{
     FspInnerFlags, SessionAck, SessionFlags, SessionMessageType, SessionMsg3, SessionSetup,
 };

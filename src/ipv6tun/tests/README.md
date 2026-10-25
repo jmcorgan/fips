@@ -38,6 +38,9 @@ can reach the source file's private items.
   a packet from a foreign source is answered as if sent from ours, and one
   to a destination outside `fd00::/8` or with a wrong length field (which
   only an embedder that owns the TUN can send) is quoted as rebuilt.
+- `inbound.rs` tests `../inbound.rs`: the CE marking sets the ECN bits of an
+  ECN-capable packet, leaves a Not-ECT packet unmarked, and leaves a packet
+  too short to hold a Traffic Class unchanged.
 - `link.rs` tests `../link.rs`: a peer key names the address its node
   address has and holds its key and nothing else, the link's peer key is the
   identity module's `PeerKey` (fips-core, `identity/key.rs`) rather than a
