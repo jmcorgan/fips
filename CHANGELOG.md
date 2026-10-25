@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first start after a package upgrade no longer fails and leaves the gateway
   down until procd restarts it.
 
+#### Gateway
+
+- When `fips-gateway` stops, it waits at most one second for its DNS
+  resolver and its periodic task to finish, then ends them and goes on to
+  remove its routes and NAT state. Before, it waited for them without a
+  limit, and a resolver waiting on a silent upstream server held the stop
+  for up to five seconds. If the periodic task has to be ended, the gateway
+  skips its final state save and keeps the state from the last periodic
+  save.
+
 #### Sessions and rekey
 
 - After a path MTU decrease, a destination's later report of the value it
