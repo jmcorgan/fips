@@ -119,8 +119,15 @@ cleanup() {
 # containers live in the Docker VM, so running ip(8) on the macOS host could
 # never reach them, while on Linux the shared namespaces make it identical to
 # running ip(8) directly.
+#
+# Labelled, unlike ci-cleanup.sh's ip(8) helpers: this one runs only inside a
+# live run of this suite, so holding off the builder's broad sweep while it is
+# up is right, and the run label lets the run's teardown reap one a killed run
+# leaves behind.
 ip_host() {
     docker run --rm --privileged --network host --pid host \
+        --label com.corganlabs.fips-ci=1 \
+        --label "com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID:-manual}" \
         --entrypoint /bin/sh "$IMAGE" -c "$1"
 }
 
