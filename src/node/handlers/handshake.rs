@@ -2380,7 +2380,7 @@ impl Node {
         let is_outbound = carrier_is_outbound;
 
         // The key both promotion paths seed the path MTU map under.
-        let peer_key = crate::ipv6tun::link::PeerKey::new(verified_identity.pubkey());
+        let peer_key = crate::ipv6tun::link::PeerKey::from_xonly(&verified_identity.pubkey());
 
         // Check for cross-connection
         if let Some(existing_peer) = self.peers.get(&peer_node_addr) {

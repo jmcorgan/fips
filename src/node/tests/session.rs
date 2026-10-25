@@ -3661,7 +3661,7 @@ async fn with_the_held_table_full_a_destination_with_an_initiating_session_gets_
         bytes[..4].copy_from_slice(&i.to_be_bytes());
         nodes[0].node.test_hold(
             NodeAddr::from_bytes(bytes),
-            crate::ipv6tun::link::PeerKey::any(),
+            crate::ipv6tun::link::any_key(),
             vec![0x60; 40],
         );
     }
@@ -3818,7 +3818,7 @@ fn test_purge_idle_sessions_cleans_pending_packets() {
     // Insert some pending packets for this destination
     node.test_hold(
         remote_addr,
-        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey()),
         vec![1, 2, 3],
     );
     assert!(node.pending_tun_packets.contains_key(&remote_addr));
@@ -4872,7 +4872,7 @@ async fn node_with_link_seed(
 
     node.seed_path_mtu_for_link_peer(
         &remote_addr,
-        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey()),
         transport_id,
         &transport_addr,
     );
@@ -5653,7 +5653,7 @@ async fn test_idle_session_purge_keeps_link_peer_path_mtu_seed() {
 
     node.seed_path_mtu_for_link_peer(
         &remote_addr,
-        crate::ipv6tun::link::PeerKey::new(remote.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey()),
         transport_id,
         &transport_addr,
     );

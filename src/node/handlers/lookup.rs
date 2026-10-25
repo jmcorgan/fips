@@ -408,7 +408,7 @@ impl Node {
                     now_ms,
                     path_mtu,
                 );
-                self.drive_response_actions(actions, PeerKey::new(xonly))
+                self.drive_response_actions(actions, PeerKey::from_xonly(&xonly))
                     .await;
             }
         }

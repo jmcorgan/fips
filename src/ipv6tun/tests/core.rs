@@ -1,6 +1,6 @@
 use super::*;
 use crate::ipv6tun::icmp::mss_ceiling;
-use crate::ipv6tun::link::PeerKey;
+use crate::ipv6tun::link::any_key;
 use crate::node::path_mtu::payload_limit;
 
 #[test]
@@ -54,8 +54,8 @@ fn applying_the_node_messages_updates_the_shared_state() {
     let state = MeshState::new();
     let ceiling = state.ceiling();
     let paths = state.paths();
-    let us = PeerKey::any();
-    let peer = PeerKey::any();
+    let us = any_key();
+    let peer = any_key();
 
     assert_eq!(
         state.apply(FromMesh::Attached {
@@ -92,7 +92,7 @@ fn applying_the_node_messages_updates_the_shared_state() {
 #[test]
 fn the_key_map_takes_known_keys_and_drops_forgotten_ones_by_prefix() {
     let state = MeshState::new();
-    let peer = PeerKey::any();
+    let peer = any_key();
     let prefix = prefix_of(&peer);
     assert_eq!(state.key(&prefix), None);
     state.apply(FromMesh::KnownKey { peer });
@@ -104,7 +104,7 @@ fn the_key_map_takes_known_keys_and_drops_forgotten_ones_by_prefix() {
 #[test]
 fn a_key_learned_after_the_node_decided_to_forget_it_is_kept() {
     let state = MeshState::new();
-    let peer = PeerKey::any();
+    let peer = any_key();
     state.apply(FromMesh::KnownKey { peer });
     let report = state.learn(peer);
     assert_eq!(report.seq, 1);
@@ -123,10 +123,10 @@ fn a_key_learned_after_the_node_decided_to_forget_it_is_kept() {
 #[test]
 fn an_attach_drops_every_key_before_its_replay() {
     let state = MeshState::new();
-    let old = PeerKey::any();
+    let old = any_key();
     state.apply(FromMesh::KnownKey { peer: old });
     state.apply(FromMesh::Attached {
-        node: PeerKey::any(),
+        node: any_key(),
         payload_limit: 1170,
     });
     assert_eq!(state.key(&prefix_of(&old)), None);

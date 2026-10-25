@@ -2520,7 +2520,7 @@ fn seed_peer() -> (NodeAddr, crate::ipv6tun::link::PeerKey) {
     let identity = crate::Identity::generate();
     (
         *identity.node_addr(),
-        crate::ipv6tun::link::PeerKey::new(identity.pubkey()),
+        crate::ipv6tun::link::PeerKey::from_xonly(&identity.pubkey()),
     )
 }
 
@@ -2908,7 +2908,7 @@ async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
 
     let identity = make_peer_identity();
     let peer_addr = *identity.node_addr();
-    let peer_key = crate::ipv6tun::link::PeerKey::new(identity.pubkey());
+    let peer_key = crate::ipv6tun::link::PeerKey::from_xonly(&identity.pubkey());
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.12:2121");
 
@@ -4618,7 +4618,12 @@ async fn dns_responder_serves_a_proxying_embedder() {
     .expect("channel is open");
 
     assert_eq!(
-        crate::NodeAddr::from_pubkey(&identity.peer.key()),
+        crate::NodeAddr::from_pubkey(
+            &identity
+                .peer
+                .to_xonly()
+                .expect("the responder reports a parsed key")
+        ),
         *peer.node_addr()
     );
     node.register_learned(identity);

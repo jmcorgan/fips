@@ -34,8 +34,10 @@ can reach the source file's private items.
   to a destination outside `fd00::/8` or with a wrong length field (which
   only an embedder that owns the TUN can send) is quoted as rebuilt.
 - `link.rs` tests `../link.rs`: a peer key names the address its node
-  address has and holds its key and nothing else, and every message field is
-  of a type allowed to cross the link. The last is a scan of the source of
+  address has and holds its key and nothing else, the link's peer key is the
+  identity module's `PeerKey` (fips-core, `identity/key.rs`) rather than a
+  type of its own, and every message field is of a type allowed to cross the
+  link. The last is a scan of the source of
   `../link.rs` itself that skips comments, attributes, and string and char
   literals (raw strings included), then reads every struct and enum whatever
   its visibility, with named, tuple and unit fields; forged definitions of

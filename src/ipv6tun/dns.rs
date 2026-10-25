@@ -50,7 +50,7 @@ impl IdentitySink for DnsIdentityTx {
 impl IdentitySink for super::lifecycle::Learner {
     async fn resolved(&self, identity: DnsResolvedIdentity) {
         let key = identity.pubkey.x_only_public_key().0;
-        self.learn(super::link::PeerKey::new(key)).await;
+        self.learn(super::link::PeerKey::from_xonly(&key)).await;
     }
 }
 

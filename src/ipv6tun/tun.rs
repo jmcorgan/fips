@@ -1975,7 +1975,7 @@ mod tests {
     #[test]
     fn other_fips_packet_goes_to_mesh() {
         let our_addr = fips_addr_with_node_byte(0x55);
-        let key = crate::ipv6tun::link::PeerKey::any();
+        let key = crate::ipv6tun::link::any_key();
         let peer = key.address();
         let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
         let (outbound_tx, mut outbound_rx) = host_path(Some(key));

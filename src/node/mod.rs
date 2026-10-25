@@ -3666,7 +3666,7 @@ impl Node {
             && let Some(transport_id) = peer.transport_id()
             && let Some(transport_addr) = peer.current_addr().cloned()
         {
-            let key = crate::ipv6tun::link::PeerKey::new(peer.pubkey());
+            let key = crate::ipv6tun::link::PeerKey::from_xonly(&peer.pubkey());
             self.seed_path_mtu_for_link_peer(addr, key, transport_id, &transport_addr);
         }
     }
@@ -3798,7 +3798,11 @@ impl Node {
             .map(|(_, entry)| entry.1.x_only_public_key().0)
             .or_else(|| self.sessions.get(&dest).and_then(|s| s.key()))
             .expect("the destination's key is cached or held by its session; use test_hold");
-        self.test_hold(dest, crate::ipv6tun::link::PeerKey::new(key), packet);
+        self.test_hold(
+            dest,
+            crate::ipv6tun::link::PeerKey::from_xonly(&key),
+            packet,
+        );
     }
 
     /// Queue `packet` for `dest` under `peer`, as

@@ -77,7 +77,7 @@ impl Node {
         let (mesh_link, host_link, datagrams, learned) =
             link::pair(buffers.tun_channel, buffers.dns_channel);
         host_link.send(FromMesh::Attached {
-            node: PeerKey::new(self.identity().pubkey()),
+            node: PeerKey::from_xonly(&self.identity().pubkey()),
             payload_limit: self.node_mtu.published.load(Ordering::Relaxed),
         });
         if feeds.path_mtu
@@ -216,7 +216,7 @@ impl Node {
         let addr = self
             .identity_cache
             .address(peer)
-            .unwrap_or_else(|| peer.node_addr());
+            .unwrap_or_else(|| peer.addr());
         let mut prefix = [0u8; 15];
         prefix.copy_from_slice(&addr.as_bytes()[0..15]);
         self.lookup_by_fips_prefix(&prefix)
@@ -230,14 +230,14 @@ impl Node {
             sessions
                 .get(addr)
                 .and_then(|entry| entry.key())
-                .map(PeerKey::new)
+                .map(|k| PeerKey::from_xonly(&k))
                 == Some(*key)
         });
         #[cfg(debug_assertions)]
         for (addr, entry) in &self.sessions {
             if let Some(key) = entry.key() {
                 debug_assert!(
-                    self.identity_cache.told(&PeerKey::new(key)),
+                    self.identity_cache.told(&PeerKey::from_xonly(&key)),
                     "the session to {addr} holds a key the adapter was never told of"
                 );
             }
