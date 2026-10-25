@@ -59,13 +59,12 @@ fn extract_aaaa(packet: &Packet) -> Option<Ipv6Addr> {
 /// Derive NodeAddr from a FIPS mesh address (fd00::/8).
 /// Returns None unless the address carries the FIPS prefix.
 fn node_addr_from_mesh(mesh_addr: Ipv6Addr) -> Option<NodeAddr> {
-    // Ipv6Address = [0xfd, node_addr[0..15]], so node_addr[0..15] = bytes[1..16].
-    let bytes = *crate::identity::Ipv6Address::from_bytes(mesh_addr.octets())
+    // Ipv6Address = [0xfd, node prefix], and the prefix is the node address's
+    // first 15 bytes; its last byte is not in the address, so it is zero.
+    let prefix = crate::identity::Ipv6Address::from_bytes(mesh_addr.octets())
         .ok()?
-        .as_bytes();
-    let mut node_bytes = [0u8; 16];
-    node_bytes[..15].copy_from_slice(&bytes[1..16]);
-    Some(NodeAddr::from_bytes(node_bytes))
+        .prefix();
+    Some(NodeAddr::from_prefix(prefix))
 }
 
 /// Check that an upstream datagram answers the query we actually sent.

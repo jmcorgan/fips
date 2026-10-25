@@ -980,8 +980,7 @@ async fn a_send_to_a_cached_key_initiates_with_the_parity_the_cache_holds() {
     node.handle_tun_outbound(host_packet(&node, dest.address(), 80))
         .await;
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&dest.node_addr().as_bytes()[0..15]);
+    let prefix = dest.node_addr().prefix();
     let (_, cached) = node.lookup_by_fips_prefix(&prefix).unwrap();
     assert_eq!(cached, dest.pubkey_full(), "the cached parity is kept");
 }

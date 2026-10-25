@@ -3369,8 +3369,7 @@ impl Node {
     /// can be sent.
     pub(in crate::node) async fn retry_session_after_discovery(&mut self, dest_addr: NodeAddr) {
         // Look up the destination's public key from the identity cache
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
+        let prefix = dest_addr.prefix();
         // The lookup has ended, so where the retry below starts no session
         // and finds no session entry, nothing is working on the held TUN
         // packets: they are answered now rather than left for the tick.

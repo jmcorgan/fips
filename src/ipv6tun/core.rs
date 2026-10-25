@@ -20,20 +20,11 @@ use super::ipv6_shim::HEADER_SAVING;
 use super::link::{FromMesh, Learned, MeshLink, PeerKey};
 use super::tun::{IPV6_MIN_MTU, MssCeiling};
 use crate::Ipv6Address;
+use fips_core::identity::NodePrefix;
 
 /// Per-peer payload limits keyed by the peer's IPv6 address, as the TUN
 /// threads look them up from a packet's address bytes.
 pub(crate) type PathMtuReplica = Arc<RwLock<HashMap<Ipv6Address, u16>>>;
-
-/// Bytes 1 to 15 of a destination's address, which name its node.
-pub(crate) type Prefix = [u8; 15];
-
-/// The prefix of the address `peer`'s key hashes to.
-pub(crate) fn prefix_of(peer: &PeerKey) -> Prefix {
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&peer.address().as_bytes()[1..16]);
-    prefix
-}
 
 /// A key the adapter can name a destination by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +73,7 @@ pub(crate) struct MeshState {
     /// Per-peer payload limits.
     paths: PathMtuReplica,
     /// The keys destinations are named by, by prefix.
-    keys: Arc<RwLock<HashMap<Prefix, Known>>>,
+    keys: Arc<RwLock<HashMap<NodePrefix, Known>>>,
     /// The number of the last key the DNS responder learned.
     learned: Arc<AtomicU64>,
 }
@@ -141,15 +132,15 @@ impl MeshState {
                 // adapter is then going down.
                 if let Ok(mut keys) = self.keys.write() {
                     let learned = keys
-                        .get(&prefix_of(&peer))
+                        .get(&peer.addr().prefix())
                         .filter(|known| known.peer == peer)
                         .map_or(0, |known| known.learned);
-                    keys.insert(prefix_of(&peer), Known { peer, learned });
+                    keys.insert(peer.addr().prefix(), Known { peer, learned });
                 }
             }
             FromMesh::ForgotKey { peer, learned } => {
                 if let Ok(mut keys) = self.keys.write() {
-                    let prefix = prefix_of(&peer);
+                    let prefix = peer.addr().prefix();
                     // A key the DNS responder handed out after the node
                     // decided this is the host's to use, and stays.
                     if keys
@@ -170,7 +161,7 @@ impl MeshState {
     pub(crate) fn learn(&self, peer: PeerKey) -> Learned {
         let seq = self.learned.fetch_add(1, Ordering::Relaxed) + 1;
         if let Ok(mut keys) = self.keys.write() {
-            keys.insert(prefix_of(&peer), Known { peer, learned: seq });
+            keys.insert(peer.addr().prefix(), Known { peer, learned: seq });
         }
         Learned { peer, seq }
     }
@@ -183,7 +174,7 @@ impl MeshState {
     }
 
     /// The key a destination with address prefix `prefix` is named by.
-    pub(crate) fn key(&self, prefix: &Prefix) -> Option<PeerKey> {
+    pub(crate) fn key(&self, prefix: &NodePrefix) -> Option<PeerKey> {
         self.keys.read().ok()?.get(prefix).map(|known| known.peer)
     }
 

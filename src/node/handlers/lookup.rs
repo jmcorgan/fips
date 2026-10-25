@@ -340,8 +340,7 @@ impl Node {
                 let path_mtu = response.path_mtu;
 
                 // Look up the target's public key from identity_cache
-                let mut prefix = [0u8; 15];
-                prefix.copy_from_slice(&target.as_bytes()[0..15]);
+                let prefix = target.prefix();
                 let target_pubkey = match self.lookup_by_fips_prefix(&prefix) {
                     Some((_addr, pubkey)) => pubkey,
                     None => {

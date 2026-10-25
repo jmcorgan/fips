@@ -2226,8 +2226,7 @@ async fn a_native_send_does_not_replace_a_key_already_cached_for_that_destinatio
     node.handle_native_outbound(key, dest.pubkey(), b"hello".to_vec())
         .await;
 
-    let mut prefix = [0u8; 15];
-    prefix.copy_from_slice(&dest_addr.as_bytes()[0..15]);
+    let prefix = dest_addr.prefix();
     let (_, cached) = node
         .lookup_by_fips_prefix(&prefix)
         .expect("the destination's key must still be cached");

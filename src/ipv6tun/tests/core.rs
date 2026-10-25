@@ -93,7 +93,7 @@ fn applying_the_node_messages_updates_the_shared_state() {
 fn the_key_map_takes_known_keys_and_drops_forgotten_ones_by_prefix() {
     let state = MeshState::new();
     let peer = any_key();
-    let prefix = prefix_of(&peer);
+    let prefix = peer.addr().prefix();
     assert_eq!(state.key(&prefix), None);
     state.apply(FromMesh::KnownKey { peer });
     assert_eq!(state.key(&prefix), Some(peer));
@@ -112,12 +112,16 @@ fn a_key_learned_after_the_node_decided_to_forget_it_is_kept() {
         peer,
         learned: report.seq - 1,
     });
-    assert_eq!(state.key(&prefix_of(&peer)), Some(peer), "kept");
+    assert_eq!(state.key(&peer.addr().prefix()), Some(peer), "kept");
     state.apply(FromMesh::ForgotKey {
         peer,
         learned: report.seq,
     });
-    assert_eq!(state.key(&prefix_of(&peer)), None, "the node had seen it");
+    assert_eq!(
+        state.key(&peer.addr().prefix()),
+        None,
+        "the node had seen it"
+    );
 }
 
 #[test]
@@ -129,5 +133,5 @@ fn an_attach_drops_every_key_before_its_replay() {
         node: any_key(),
         payload_limit: 1170,
     });
-    assert_eq!(state.key(&prefix_of(&old)), None);
+    assert_eq!(state.key(&old.addr().prefix()), None);
 }

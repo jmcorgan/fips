@@ -217,8 +217,7 @@ impl Node {
             .identity_cache
             .address(peer)
             .unwrap_or_else(|| peer.addr());
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&addr.as_bytes()[0..15]);
+        let prefix = addr.prefix();
         self.lookup_by_fips_prefix(&prefix)
     }
 

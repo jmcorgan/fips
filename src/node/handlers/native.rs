@@ -189,8 +189,7 @@ impl Node {
     /// own parity. The presence check refreshes that entry, so it is not the
     /// oldest one when the answer arrives.
     fn cache_flow_key(&mut self, peer: &NodeAddr, pubkey: secp256k1::PublicKey) {
-        let mut prefix = [0u8; 15];
-        prefix.copy_from_slice(&peer.as_bytes()[0..15]);
+        let prefix = peer.prefix();
         if self.lookup_by_fips_prefix(&prefix).is_none() {
             self.register_identity(*peer, pubkey);
         }
