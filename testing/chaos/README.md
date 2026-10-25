@@ -186,7 +186,7 @@ Annotated example based on `churn-mixed.yaml`:
 ```yaml
 scenario:
   name: "churn-mixed"
-  seed: 42                          # deterministic RNG seed
+  seed: 42                          # fixes topology and tiers; runtime events still vary with timing
   duration_secs: 600                # total simulation time
 
 topology:

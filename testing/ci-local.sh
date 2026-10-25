@@ -1760,6 +1760,20 @@ run_trailing_log() {
     record "trailing-log" $rc
 }
 
+# The chaos simulator's seeded draws must not depend on Python's string hash
+# seed, or a scenario seed fixes nothing and a red run cannot be replayed. Runs
+# the simulator's own managers under several PYTHONHASHSEED values and compares
+# their draws. Static, a few seconds, and needs nothing built. Mirrored in
+# ci.yml's ci-parity job by hand. Not named chaos-*, which this script and the
+# load annotation read as a scenario suite.
+run_chaos_schedule() {
+    local rc=0
+    info "[sim-schedule] Checking the chaos draws do not depend on the hash seed"
+    python3 "$SCRIPT_DIR/check-chaos-schedule.py" || rc=$?
+    record "sim-schedule" $rc
+    return 0
+}
+
 # Unit tests for the convergence gate every static suite waits on. Hermetic —
 # synthetic ping functions against the same SECONDS clock, no containers — but
 # it drives real timeouts, so it costs about 45 seconds rather than the "few
@@ -1886,6 +1900,7 @@ run_guards() {
     run_ci_parity
     run_log_strings
     run_trailing_log
+    run_chaos_schedule
     run_image_scoping
     run_action_pins
     run_comment_refs

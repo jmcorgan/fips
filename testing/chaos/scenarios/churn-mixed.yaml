@@ -79,9 +79,16 @@ bandwidth:
 #
 # Calibrated 2026-07-26 against fourteen runs that recorded a baseline
 # verdict, read from their assertions.txt files, all with this file's
-# seed 42. The seed fixes the random draws but not the schedule: events
-# are drawn as the run goes, so host timing can change which node is
-# stopped and when.
+# seed 42. Until 2026-10-25 the simulator walked its edge set unsorted
+# before drawing, so the draws followed Python's per-process string hash
+# seed: those runs, and every CI run up to then, drew a different flap,
+# bandwidth-tier and mutation schedule under the same seed 42. The seed
+# now fixes the topology, the bandwidth and ingress tiers, the initial
+# netem and which node dials which. It still does not fix the runtime
+# schedule: events are drawn as the run goes, from mesh state at the
+# tick, and where managers share one random stream, host timing decides
+# how their draws interleave, so it can change which node is stopped or
+# which link flaps, and when.
 #
 #   distinct roots   1 2 3 4 5   -> 2 3 5 3 1 runs
 #   nodes parented   9 8 7 6 5   -> the exact complement, in all 14
