@@ -2157,6 +2157,7 @@ impl Node {
                 // Attach the IPv6 adapter here, after the peers connect and
                 // before its device or DNS responder starts, so what the
                 // node knows is in the adapter before its first packet.
+                self.check_attach()?;
                 self.attach_host();
                 peer_connect_done = true;
             }
@@ -2317,6 +2318,7 @@ impl Node {
                             self.warn_shortfall();
                             let threads = TunThreads {
                                 exit_tx: self.child_exit_tx.clone(),
+                                capacity: self.config().node.buffers.host_channel,
                             };
                             self.supervisor.ipv6tun.spawn_tun(device, threads)?;
                             #[cfg(target_os = "linux")]
@@ -2376,6 +2378,7 @@ impl Node {
         }
         if !peer_connect_done {
             self.initiate_peer_connections().await;
+            self.check_attach()?;
             self.attach_host();
         }
         // Whatever the adapter has not taken by now (no TUN threads came up)

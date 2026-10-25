@@ -332,6 +332,16 @@ with v0.5.x or earlier peers.
   showed a client filling it toward that cap. These count outbound datagrams,
   unlike `show_native_flows`' per-flow queued count, which covers inbound
   ones.
+- `node.native_api.grants` names who may use ports 256 to 1023, the feed of
+  routable keys and the learn request: each entry is one `uid` or `gid` with
+  its `ports`, `keys` and `learn`. The IPv6 adapter's grant of port 256 is
+  built in, so no list drops it. Entries are checked at startup on every
+  platform: one principal per entry, something granted, ports from 256 to
+  1023, one grantee per port, and no user grant of port 256 while
+  `tun.enabled` is true. An app-owned TUN on a node that grants port 256 to a
+  user fails `start()` with a configuration error. The native socket reads no
+  caller credentials yet, so it still refuses ports 0 to 1023 to every client
+  and an entry grants nothing over it.
 
 #### Packaging
 
@@ -794,6 +804,20 @@ with v0.5.x or earlier peers.
   `node.heartbeat_interval_secs` is still dialled on the new address, so
   failover is unchanged. `fipsctl connect` to a live peer succeeds with
   `refreshed: false` and a new `detail: "peer live, not dialled"` field.
+
+- `fips::ipv6tun::tun::TunTx`, which `Node::tun_tx()` returns, is now a
+  struct rather than an alias of `std::sync::mpsc::Sender<Vec<u8>>`, because
+  the queue toward the host is now bounded. `send` and `clone` keep their
+  signatures, and `send` still fails only when the reader has gone; a packet
+  that finds the queue full is dropped and counted, and `send` returns `Ok`.
+  `dropped()` reads the count. Code that names the type as an `mpsc::Sender`
+  must name `TunTx` instead. `TunDevice::create_writer` takes the queue's
+  capacity as a third argument.
+- A datagram to the IPv6 port that arrives marked Congestion Experienced is
+  counted in `congestion.ce_received` as it arrives, before the IPv6 adapter
+  rebuilds its packet, so one whose payload is not a compressed IPv6 packet
+  is now counted too; before, only a datagram whose packet was rebuilt was
+  counted.
 
 #### Packaging
 
@@ -1533,6 +1557,16 @@ with v0.5.x or earlier peers.
   no longer reach UDP peers; keep `transports.udp.mtu` at 1,071 or above.
 
 #### TUN
+
+- The queue of packets toward the host is bounded, so an embedder that stops
+  reading its app-owned TUN's inbound channel no longer lets packets pile up
+  in node memory without limit; the same holds for the system TUN's writer
+  thread. The queue holds `node.buffers.host_channel` packets, a new setting
+  that defaults to 4096 and must be at least 1. No producer waits for room: a
+  packet that finds the queue full is dropped and counted in
+  `Node::tun_tx().dropped()`, and the node logs "Host not reading; dropping
+  packets toward it" at warn, target `fips::ipv6tun::queue`, at the first drop
+  and at each doubling of the count.
 
 - On Linux, the `fd00::/8` IPv6 policy rule is removed when the node stops,
   and is added with `suppress_prefixlength 0`, so a rule left by a crash no

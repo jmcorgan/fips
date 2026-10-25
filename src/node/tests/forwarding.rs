@@ -1076,8 +1076,8 @@ async fn test_forwarding_with_cache_warming_enables_routing() {
 // ECN Tests
 // ============================================================================
 
+use crate::ipv6tun::inbound::mark_ce as mark_ipv6_ecn_ce;
 use crate::node::TransportDropState;
-use crate::proto::fsp::mark_ipv6_ecn_ce;
 use crate::transport::TransportId;
 
 /// Build a minimal IPv6 header (40 bytes) with specified ECN bits.

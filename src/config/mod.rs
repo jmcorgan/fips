@@ -27,6 +27,7 @@ mod peer;
 mod transport;
 
 use crate::ipv6tun::config::{DnsConfig, TunConfig};
+use crate::ipv6tun::link::IPV6_PORT;
 use crate::node::REKEY_JITTER_SECS;
 use crate::nostr::FRESHNESS_SKEW_TOLERANCE_MS;
 use crate::{Identity, IdentityError};
@@ -45,10 +46,10 @@ use zeroize::{Zeroize, Zeroizing};
 pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig, PortForward, Proto};
 pub use loadlog::LoadLog;
 pub use node::{
-    BloomConfig, BuffersConfig, CacheConfig, ControlConfig, LimitsConfig, LookupConfig, MmpConfig,
-    NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig, NostrRendezvousPolicy,
-    RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig,
-    TreeConfig,
+    BloomConfig, BuffersConfig, CacheConfig, ControlConfig, Grant, GrantConfig, LimitsConfig,
+    LookupConfig, MmpConfig, NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig,
+    NostrRendezvousPolicy, Principal, RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig,
+    SessionConfig, SessionMmpConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
@@ -2173,6 +2174,18 @@ impl Config {
             }
         }
 
+        // A queue of no packets is a rendezvous channel: a packet toward the
+        // host would be kept only if the reader happened to be waiting for it
+        // at that moment, so nearly every one would be dropped.
+        if self.node.buffers.host_channel < 1 {
+            return Err(ConfigError::Validation(
+                "node.buffers.host_channel is 0 but must be at least 1: a queue toward \
+                 the host that holds nothing drops every packet its reader is not \
+                 already waiting for"
+                    .to_string(),
+            ));
+        }
+
         let native = &self.node.native_api;
         // Both floors refuse a node that would start, answer every setup call
         // and then drop every datagram a peer sent. A zero `backlog` makes the
@@ -2203,6 +2216,7 @@ impl Config {
                 NativeApiConfig::MAX_PENDING_PER_FLOW
             )));
         }
+        check_grants(&native.grants, self.tun.enabled)?;
 
         // Reject loopback UDP bind combined with non-loopback peer addresses.
         // Linux pins the source IP to a loopback-bound socket, so packets
@@ -2439,6 +2453,60 @@ mod udp_interface_tests;
 #[cfg(test)]
 #[path = "tests/rekey_switch.rs"]
 mod rekey_switch;
+
+/// Refuse a `node.native_api.grants` list that names no single principal
+/// for an entry, grants nothing in one, grants a port outside 256 to 1023,
+/// grants a port twice, or, while the TUN is enabled, grants port 256,
+/// which the IPv6 adapter then holds.
+///
+/// Checked on every platform: the adapter's grant is in the crate and does
+/// not use the native socket.
+fn check_grants(grants: &[GrantConfig], tun_enabled: bool) -> Result<(), ConfigError> {
+    let refuse = |msg: String| Err(ConfigError::Validation(msg));
+    let mut owners: BTreeMap<u16, usize> = BTreeMap::new();
+    for (i, grant) in grants.iter().enumerate() {
+        let name = format!("node.native_api.grants[{i}]");
+        if grant.principal().is_none() {
+            return refuse(format!(
+                "{name} must name exactly one of `uid` and `gid`: a grant is for one principal"
+            ));
+        }
+        if grant.ports.is_empty() && !grant.keys && !grant.learn {
+            return refuse(format!(
+                "{name} grants nothing: it names no port and neither `keys` nor `learn`"
+            ));
+        }
+        for &port in &grant.ports {
+            if !(256..=1023).contains(&port) {
+                return refuse(format!(
+                    "{name} grants port {port}, but a grant covers only ports 256 to 1023: \
+                     ports below 256 are refused to everyone, and ports from 1024 need no grant"
+                ));
+            }
+            if let Some(first) = owners.insert(port, i) {
+                return refuse(format!(
+                    "{name} grants port {port}, which node.native_api.grants[{first}] already \
+                     grants: a port has one grantee"
+                ));
+            }
+            if tun_enabled && port == IPV6_PORT {
+                return refuse(format!(
+                    "{name} grants port {IPV6_PORT}, which the IPv6 adapter holds while \
+                     `tun.enabled` is true"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "tests/buffers.rs"]
+mod buffers;
+
+#[cfg(test)]
+#[path = "tests/grants.rs"]
+mod grants;
 
 #[cfg(test)]
 mod tests {

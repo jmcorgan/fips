@@ -12,10 +12,12 @@ profile; outside `rekey/` this module has no cryptography.
 
 - `mod.rs`: declares the files and re-exports their public items.
 - `core.rs`: `Fsp`, the stateless anchor, and `FspAction`: the
-  coordinate and path-MTU reactions, and the MTU clamp, bounded queue and
-  ECN transforms. The first handshake, with its resends and the decision
-  between crossing handshakes, and every rekey, with its handshake
-  messages, cutovers and drains, are the rekey machine's.
+  coordinate and path-MTU reactions, and the MTU clamp and bounded queue
+  transforms. Marking a delivered IPv6 packet Congestion Experienced is the
+  IPv6 adapter's, in the root crate's `ipv6tun::inbound`. The first
+  handshake, with its resends and the decision between crossing
+  handshakes, and every rekey, with its handshake messages, cutovers and
+  drains, are the rekey machine's.
 - `quorum.rs`: `LinkQuorum`, the distinct-link count that must report a
   broken path before verified coordinates are demoted.
 - `rekey/`: the session's profile of the shared rekey machine

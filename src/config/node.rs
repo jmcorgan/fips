@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::IdentityConfig;
+use crate::ipv6tun::link::IPV6_PORT;
 use crate::proto::mmp::{DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MmpMode};
 
 // ============================================================================
@@ -1106,6 +1107,80 @@ pub struct NativeApiConfig {
     /// test harness turns on and nothing else does.
     #[serde(default = "NativeApiConfig::default_debug_commands")]
     pub debug_commands: bool,
+
+    /// Who may use ports 256 to 1023, the identity feed and the learn
+    /// request (`node.native_api.grants`).
+    ///
+    /// Applies whether or not `enabled` is set: `enabled` switches the
+    /// unprivileged surface, and a grant is not part of it. The IPv6
+    /// adapter's grant of port 256 is built in and is not written here, so
+    /// no list drops it; see [`NativeApiConfig::effective_grants`]. No
+    /// socket client is matched against an entry yet, because the socket
+    /// reads no caller credentials: until it does, entries are checked at
+    /// load and grant nothing over the socket.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<GrantConfig>,
+}
+
+/// One entry of `node.native_api.grants`: a principal, a user id or a
+/// group id, and what it may use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantConfig {
+    /// The user the grant is for (`uid`). Exactly one of `uid` and `gid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// The group the grant is for (`gid`). Exactly one of `uid` and `gid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    /// The ports the principal may bind and dial, each from 256 to 1023
+    /// (`ports`). A port has one grantee.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+    /// The identity feed: the keys the node can route to (`keys`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keys: bool,
+    /// The learn request: registering a key the principal resolved
+    /// (`learn`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub learn: bool,
+}
+
+impl GrantConfig {
+    /// The principal the entry names, or `None` when it names both a uid
+    /// and a gid or neither, which validation refuses.
+    pub fn principal(&self) -> Option<Principal> {
+        match (self.uid, self.gid) {
+            (Some(uid), None) => Some(Principal::Uid(uid)),
+            (None, Some(gid)) => Some(Principal::Gid(gid)),
+            _ => None,
+        }
+    }
+}
+
+/// Who a grant in force is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Principal {
+    /// The IPv6 adapter. In the crate it is whatever holds the node's link
+    /// to the adapter, which no configuration names.
+    Adapter,
+    /// A user id.
+    Uid(u32),
+    /// A group id.
+    Gid(u32),
+}
+
+/// A grant in force: a configured entry, or the IPv6 adapter's built-in
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    /// Who it is for.
+    pub principal: Principal,
+    /// The ports it may bind and dial.
+    pub ports: Vec<u16>,
+    /// Whether it may take the identity feed.
+    pub keys: bool,
+    /// Whether it may make the learn request.
+    pub learn: bool,
 }
 
 impl Default for NativeApiConfig {
@@ -1117,6 +1192,7 @@ impl Default for NativeApiConfig {
             backlog: Self::default_backlog(),
             max_flows: Self::default_max_flows(),
             debug_commands: Self::default_debug_commands(),
+            grants: Vec::new(),
         }
     }
 }
@@ -1131,6 +1207,37 @@ impl NativeApiConfig {
     /// checked at config load so a value that would wedge a listener's task is
     /// refused at startup rather than at the first arrival.
     pub const MAX_PENDING_PER_FLOW: usize = 64;
+
+    /// The grants in force: the configured entries, then the IPv6 adapter's
+    /// built-in grant of port 256, the identity feed and the learn request.
+    ///
+    /// An entry that names port 256 takes the port from the adapter, which
+    /// keeps the feed and the request: its DNS responder runs with the TUN
+    /// disabled and still learns keys. Validation refuses such an entry
+    /// while `tun.enabled` is set. An entry whose principal is not exactly
+    /// one of `uid` and `gid` is left out.
+    pub fn effective_grants(&self) -> Vec<Grant> {
+        let taken = self.grants.iter().any(|g| g.ports.contains(&IPV6_PORT));
+        let mut grants: Vec<Grant> = self
+            .grants
+            .iter()
+            .filter_map(|g| {
+                Some(Grant {
+                    principal: g.principal()?,
+                    ports: g.ports.clone(),
+                    keys: g.keys,
+                    learn: g.learn,
+                })
+            })
+            .collect();
+        grants.push(Grant {
+            principal: Principal::Adapter,
+            ports: if taken { Vec::new() } else { vec![IPV6_PORT] },
+            keys: true,
+            learn: true,
+        });
+        grants
+    }
 
     fn default_enabled() -> bool {
         false
@@ -1188,6 +1295,12 @@ pub struct BuffersConfig {
     /// DNS→Node identity channel capacity (`node.buffers.dns_channel`).
     #[serde(default = "BuffersConfig::default_dns_channel")]
     pub dns_channel: usize,
+    /// Packets the queue toward the host holds before it drops
+    /// (`node.buffers.host_channel`): what peers delivered, ICMPv6 answers
+    /// and hairpinned packets, waiting for the TUN writer thread or for the
+    /// embedder that owns the TUN. At least 1.
+    #[serde(default = "BuffersConfig::host_default")]
+    pub host_channel: usize,
 }
 
 impl Default for BuffersConfig {
@@ -1196,6 +1309,7 @@ impl Default for BuffersConfig {
             packet_channel: 1024,
             tun_channel: 1024,
             dns_channel: 64,
+            host_channel: 4096,
         }
     }
 }
@@ -1209,6 +1323,11 @@ impl BuffersConfig {
     }
     fn default_dns_channel() -> usize {
         64
+    }
+    /// The default of `host_channel`: deep enough that a reader which is
+    /// keeping up rides out a burst from the receive loop.
+    fn host_default() -> usize {
+        4096
     }
 }
 

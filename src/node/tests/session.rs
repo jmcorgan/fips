@@ -9911,7 +9911,7 @@ async fn outbound_traffic_behind_a_forged_half_open_session_sends_its_own_setup_
     drain_to_quiescence(&mut nodes).await;
 
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[0].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    nodes[0].node.install_tun(tun_tx);
 
     let src_fips = crate::Ipv6Address::from_node_addr(&victim_addr);
     let dst_fips = crate::Ipv6Address::from_node_addr(&owner_addr);
@@ -10581,7 +10581,7 @@ async fn a_late_msg3_after_this_node_initiated_leaves_one_established_epoch() {
     // The responder has traffic for the initiator and initiates itself
     // beside its candidate at once.
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[initiator].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    nodes[initiator].node.install_tun(tun_tx);
     let packet = build_ipv6_packet(
         &crate::Ipv6Address::from_node_addr(&responder_addr),
         &crate::Ipv6Address::from_node_addr(&initiator_addr),
@@ -11054,7 +11054,7 @@ async fn a_host_reply_to_an_established_session_peer_is_sent_after_the_identity_
 
     let (_app_outbound, node0_tun) = nodes[0].node.enable_app_owned_tun();
     let (tun_tx, node1_tun) = std::sync::mpsc::channel();
-    nodes[1].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    nodes[1].node.install_tun(tun_tx);
 
     let src = crate::Ipv6Address::from_node_addr(&node1_addr);
     let dst = crate::Ipv6Address::from_node_addr(&node0_addr);
@@ -11065,6 +11065,92 @@ async fn a_host_reply_to_an_established_session_peer_is_sent_after_the_identity_
         process_available_packets(&mut nodes).await;
     }
 
+    let at_node1: Vec<Vec<u8>> = std::iter::from_fn(|| node1_tun.try_recv().ok()).collect();
+    assert!(
+        !at_node1.iter().any(|p| is_icmpv6_dest_unreachable(p)),
+        "node 1 must not answer its own host's reply with Destination Unreachable"
+    );
+    let at_node0: Vec<Vec<u8>> = std::iter::from_fn(|| node0_tun.try_recv().ok()).collect();
+    assert_eq!(
+        at_node0,
+        vec![reply],
+        "the reply must reach node 0 on the established session"
+    );
+    assert!(
+        nodes[1].node.has_cached_identity(&node0_addr),
+        "the session's authenticated key restores node 0's entry in the store"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_peer_evicted_from_the_identity_store_whose_session_keeps_delivering_is_delivered_and_answered()
+ {
+    // The inbound half of the eviction case above. The adapter is attached
+    // with the identity feed before the eviction, and the tick's sweep runs
+    // after it, so a session's key forgotten by the sweep would leave the
+    // host's reply with no key to name its destination by.
+    let mut cfg1 = crate::config::Config::new();
+    cfg1.node.cache.identity_size = 3;
+    cfg1.tun.enabled = true;
+    cfg1.dns.enabled = false;
+    let configs = vec![crate::config::Config::new(), cfg1];
+    let mut nodes = run_tree_test_with_configs(configs, &[(0, 1)]).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    establish_pair_session(&mut nodes).await;
+
+    let node0_addr = *nodes[0].node.node_addr();
+    let node1_addr = *nodes[1].node.node_addr();
+    let (_app_outbound, node0_tun) = nodes[0].node.enable_app_owned_tun();
+    let (tun_tx, node1_tun) = std::sync::mpsc::channel();
+    nodes[1].node.install_tun(tun_tx);
+    nodes[1].node.attach_host();
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for _ in 0..4 {
+        let other = Identity::generate();
+        nodes[1]
+            .node
+            .register_identity(*other.node_addr(), other.pubkey_full());
+    }
+    assert!(
+        !nodes[1].node.has_cached_identity(&node0_addr),
+        "precondition: node 0's key has been evicted from node 1's store"
+    );
+    nodes[1].node.sweep_identities();
+
+    let src = crate::Ipv6Address::from_node_addr(&node0_addr);
+    let dst = crate::Ipv6Address::from_node_addr(&node1_addr);
+    let sent = build_ipv6_packet(&src, &dst, b"request");
+    nodes[0]
+        .node
+        .send_session_data(
+            &node1_addr,
+            256,
+            256,
+            &crate::ipv6tun::ipv6_shim::compress_ipv6(&sent).unwrap(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    let at_node1: Vec<Vec<u8>> = std::iter::from_fn(|| node1_tun.try_recv().ok()).collect();
+    assert_eq!(
+        at_node1,
+        vec![sent],
+        "node 0's datagram reaches node 1's host from node 0's address"
+    );
+
+    let reply = build_ipv6_packet(&dst, &src, b"reply");
+    nodes[1].node.handle_tun_outbound(reply.clone()).await;
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        process_available_packets(&mut nodes).await;
+    }
     let at_node1: Vec<Vec<u8>> = std::iter::from_fn(|| node1_tun.try_recv().ok()).collect();
     assert!(
         !at_node1.iter().any(|p| is_icmpv6_dest_unreachable(p)),
@@ -11210,9 +11296,9 @@ async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>)
     let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
     let c_bytes = c_fips.to_ipv6().octets();
     let (a_tx, a_rx) = std::sync::mpsc::channel();
-    nodes[0].node.supervisor.ipv6tun.tun_tx = Some(a_tx);
+    nodes[0].node.install_tun(a_tx);
     let (c_tx, c_rx) = std::sync::mpsc::channel();
-    nodes[2].node.supervisor.ipv6tun.tun_tx = Some(c_tx);
+    nodes[2].node.install_tun(c_tx);
     let global = crate::ipv6tun::icmp::mss_ceiling(nodes[0].node.transport_mtu());
     let clamp = |nodes: &[TestNode]| {
         crate::ipv6tun::tun::per_flow_max_mss(&nodes[0].node.test_replica(), &c_bytes, global)

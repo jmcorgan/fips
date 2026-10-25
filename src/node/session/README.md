@@ -19,13 +19,13 @@ holds neither; it retains the initiator's first msg3 and resends it until
 any frame from the peer authenticates (the responder prompts at once
 under the new keys), and starts a repair rekey if its last copy goes
 unheard. Who the peer is stays the claimed address until a completion
-bonds its key (`identity`, `peer_key`), and the shell caches, uses and
-reports a peer key only from there: the control socket shows an unproved
-session with no `npub` and `identity: "unproven"` (`identity_status`). The
-one exception is the key this node opened the session toward
-(`opened_key`, read through `key()`): before a completion the shell uses it
-only to name the destination of its own path MTU entries, whose address
-that key derives.
+bonds its key (`identity`, `peer_key`, and `proven` for the key's bytes),
+and the shell caches, uses and reports a peer key only from there: the
+control socket shows an unproved session with no `npub` and
+`identity: "unproven"` (`identity_status`). The one exception is the key
+this node opened the session toward (`opened_key`, read through `key()`):
+before a completion the shell uses it only to name the destination of its
+own path MTU entries, whose address that key derives.
 Each call into the machine gets the profile's per-call keys
 (`SessionLocal`), marked as the session's first handshake while the
 machine holds no epoch, so the first handshake's ack and msg3 carry the
