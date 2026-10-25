@@ -5,7 +5,26 @@
 # testing/check-node-test-groups.py fails when the two differ.
 nextest-version = { required = "0.9.143" }
 
+# A test that never returns is ended after 300 s and fails as a TIMEOUT that
+# names it, instead of holding the run until the job's timeout-minutes ends it
+# with no name. The known-slow tests at the end of this file get 480 s. Of the
+# rest, the slowest took 23 s on core-vm (12 and 3 CPUs, under side load), so
+# 300 s leaves room for a runner many times slower.
+#
+# Under [profile.ci] a timed-out test is retried like a failed one, so a hang
+# costs three limits, 15 minutes or 24 for a known-slow test, which stays inside
+# each unit-test job's timeout-minutes in .github/workflows/ci.yml.
+#
+# The limit is spelled out in both profiles rather than inherited from
+# [profile.default], as the test groups below are. Only nextest applies it:
+# `cargo test` has no per-test limit, so the internal builder (which has no
+# nextest) and the workflow's `cargo test` steps are held only by their run or
+# job bounds.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [profile.ci]
+slow-timeout = { period = "60s", terminate-after = 5 }
 junit = { path = "junit.xml" }
 # Synthetic node tests build 250-edge meshes with one-shot UDP
 # handshakes; on shared CI runners the localhost stack still drops the
@@ -55,8 +74,8 @@ retries = 2
 # branch lacks matches nothing there. testing/check-node-test-groups.py
 # recomputes the membership from the source (ci-parity job and local CI's
 # guards) and fails when a socket module or a lock holder is missing, so add a
-# module here when it starts opening a socket. Filters stay in the one shape
-# it parses: anchored, package-scoped, one alternation.
+# module here when it starts opening a socket. The test-group filters stay in
+# the one shape it parses: anchored, package-scoped, one alternation.
 [test-groups]
 node-large = { max-threads = 1 }
 node-synthetic = { max-threads = 1 }
@@ -76,3 +95,22 @@ test-group = 'node-large'
 [[profile.ci.overrides]]
 filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
+
+# The known-slow tests get 480 s instead of 300: the six 100-node tests (the
+# node-large group; test_discovery_100_nodes is ignored by default and takes
+# about two minutes), the routing map bound, and the rekey interleaving
+# explorer in fips-core. The slowest of them took 57 s on core-vm. Add a test
+# here when it needs more than 300 s on a slow runner.
+#
+# Unlike the group filters, this one is not package-scoped. fips-core exists
+# only on master and next, and package() naming a package the workspace lacks
+# is a hard error, while a test() name a branch lacks matches nothing. One
+# filter therefore serves every branch. testing/check-node-test-groups.py reads
+# only overrides that set a test-group, so it does not check this one.
+[[profile.default.overrides]]
+filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
+[[profile.ci.overrides]]
+filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
+slow-timeout = { period = "60s", terminate-after = 8 }

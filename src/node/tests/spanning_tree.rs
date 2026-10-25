@@ -76,6 +76,41 @@ pub(super) fn add_loopback_alias(existing: &TransportAddr) -> TransportAddr {
     alias
 }
 
+/// Hold back every packet sent to `node` from now on by `delay`, or discard
+/// them all when `delay` is `None`.
+///
+/// Stands in for a slow receive path (a real socket on a stalled host) on a
+/// loopback node: the loopback transport looks its destination up in the
+/// registry on every send, so pointing `node.addr` at a forwarder delays
+/// every later send to it. Each packet is delayed on its own task, so a
+/// hop costs `delay` however many packets are in flight. It sleeps on tokio
+/// time, so it must not be used in a test that pauses time. The registry
+/// keeps the forwarder's sender alive, so the forwarder ends only when the
+/// test's runtime is dropped.
+pub(super) fn delay_loopback_delivery(node: &TestNode, delay: Option<Duration>) {
+    let inner = LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .get(&node.addr)
+        .expect("node's loopback address must be registered")
+        .clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
+    tokio::spawn(async move {
+        while let Some(packet) = rx.recv().await {
+            let Some(delay) = delay else { continue };
+            let inner = inner.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = inner.send(packet);
+            });
+        }
+    });
+    LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(node.addr.clone(), tx);
+}
+
 /// Build a node that stands for `old` after a restart: the same identity
 /// and loopback address, a fresh startup epoch and no peers.
 ///

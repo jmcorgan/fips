@@ -370,7 +370,8 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     needs: [build]
-    # Nothing else bounds a test that never returns, so without this a hang
+    # nextest ends a test that never returns (.config/nextest.toml), but the
+    # `cargo test` steps have no per-test limit, so without this a hang there
     # holds the runner to GitHub's six-hour default. The slowest green run seen
     # took 54 minutes on a slow runner with a warm cache, 50 of them in steps
     # this job still runs, so the bound leaves room for a run that slow and
