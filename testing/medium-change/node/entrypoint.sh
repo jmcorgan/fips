@@ -18,9 +18,12 @@ ROUTER_OCTET="${ROUTER_OCTET:-254}"
 DEFAULT_VIA="${DEFAULT_VIA:-primary}"
 
 iface_for_subnet() {
-    local prefix="$1"
-    ip -4 -oneline addr show \
-        | awk -v p="${prefix}." '$4 ~ "^"p {print $2; exit}'
+    local prefix="$1" addrs
+    # Captured before matching: under pipefail, awk exiting at its match can
+    # kill ip with SIGPIPE, and an assignment from this function then ends
+    # the script. ip's own failure still returns its status.
+    addrs=$(ip -4 -oneline addr show) || return
+    awk -v p="${prefix}." '$4 ~ "^"p {print $2; exit}' <<<"$addrs"
 }
 
 wait_for_subnet() {

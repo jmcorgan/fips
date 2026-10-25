@@ -123,8 +123,11 @@ ln "${STAGING_DIR}/usr/local/bin/fips" "${STAGING_DIR}/usr/local/bin/fips-ble-ag
 # in its Info.plist. build.rs embeds one in the fips binary through a linker
 # argument, which nothing else would notice going missing: check the stripped
 # binary that ships still carries it.
-if ! launchctl plist __TEXT,__info_plist "${STAGING_DIR}/usr/local/bin/fips" 2>/dev/null \
-        | grep -q NSBluetoothAlwaysUsageDescription; then
+# Captured before matching: under pipefail, grep -q exiting at its match
+# can kill the writer with SIGPIPE and turn the match into a miss.
+# Captured inside the condition so that set -e does not end the script.
+if ! grep -q NSBluetoothAlwaysUsageDescription \
+        <<<"$(launchctl plist __TEXT,__info_plist "${STAGING_DIR}/usr/local/bin/fips" 2>/dev/null)"; then
     echo "fips binary has no NSBluetoothAlwaysUsageDescription in __TEXT,__info_plist;" \
          "BLE would crash it. Check the -sectcreate link argument in build.rs." >&2
     exit 1
