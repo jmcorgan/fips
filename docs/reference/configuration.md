@@ -625,6 +625,7 @@ tuning under high load or on memory-constrained devices.
 | `node.buffers.packet_channel` | usize | `1024` | Transport to Node packet channel capacity |
 | `node.buffers.tun_channel` | usize | `1024` | TUN to Node outbound channel capacity |
 | `node.buffers.dns_channel` | usize | `64` | DNS to Node identity channel capacity |
+| `node.buffers.host_channel` | usize | `4096` | Packets the queue toward the host holds (deliveries from peers, ICMPv6 answers, hairpinned packets), for the TUN writer thread or an embedder's app-owned TUN; a packet that finds it full is dropped and counted. At least 1 |
 
 ### Native Datagram API (`node.native_api.*`)
 
@@ -1486,6 +1487,7 @@ node:
     packet_channel: 1024
     tun_channel: 1024
     dns_channel: 64
+    host_channel: 4096               # packets queued toward the host; at least 1
 
 tun:
   enabled: false

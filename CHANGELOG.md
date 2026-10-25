@@ -659,6 +659,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failover is unchanged. `fipsctl connect` to a live peer succeeds with
   `refreshed: false` and a new `detail: "peer live, not dialled"` field.
 
+- `fips::ipv6tun::tun::TunTx`, which `Node::tun_tx()` returns, is now a
+  struct rather than an alias of `std::sync::mpsc::Sender<Vec<u8>>`, because
+  the queue toward the host is now bounded. `send` and `clone` keep their
+  signatures, and `send` still fails only when the reader has gone; a packet
+  that finds the queue full is dropped and counted, and `send` returns `Ok`.
+  `dropped()` reads the count. Code that names the type as an `mpsc::Sender`
+  must name `TunTx` instead. `TunDevice::create_writer` takes the queue's
+  capacity as a third argument.
+
 #### Packaging
 
 - The glibc floor is 2.34, one step below the 2.35 Ubuntu 22.04 sets. Both
@@ -1294,6 +1303,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer reach UDP peers; keep `transports.udp.mtu` at 1,071 or above.
 
 #### TUN
+
+- The queue of packets toward the host is bounded, so an embedder that stops
+  reading its app-owned TUN's inbound channel no longer lets packets pile up
+  in node memory without limit; the same holds for the system TUN's writer
+  thread. The queue holds `node.buffers.host_channel` packets, a new setting
+  that defaults to 4096 and must be at least 1. No producer waits for room: a
+  packet that finds the queue full is dropped and counted in
+  `Node::tun_tx().dropped()`, and the node logs "Host not reading; dropping
+  packets toward it" at warn, target `fips::ipv6tun::queue`, at the first drop
+  and at each doubling of the count.
 
 - On Linux, the `fd00::/8` IPv6 policy rule is removed when the node stops,
   and is added with `suppress_prefixlength 0`, so a rule left by a crash no

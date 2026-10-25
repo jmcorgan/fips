@@ -2158,6 +2158,18 @@ impl Config {
             }
         }
 
+        // A queue of no packets is a rendezvous channel: a packet toward the
+        // host would be kept only if the reader happened to be waiting for it
+        // at that moment, so nearly every one would be dropped.
+        if self.node.buffers.host_channel < 1 {
+            return Err(ConfigError::Validation(
+                "node.buffers.host_channel is 0 but must be at least 1: a queue toward \
+                 the host that holds nothing drops every packet its reader is not \
+                 already waiting for"
+                    .to_string(),
+            ));
+        }
+
         let native = &self.node.native_api;
         // Both floors refuse a node that would start, answer every setup call
         // and then drop every datagram a peer sent. A zero `backlog` makes the
@@ -2424,6 +2436,10 @@ mod udp_interface_tests;
 #[cfg(test)]
 #[path = "tests/rekey_switch.rs"]
 mod rekey_switch;
+
+#[cfg(test)]
+#[path = "tests/buffers.rs"]
+mod buffers;
 
 #[cfg(test)]
 mod tests {

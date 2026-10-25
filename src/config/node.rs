@@ -1184,6 +1184,12 @@ pub struct BuffersConfig {
     /// DNS→Node identity channel capacity (`node.buffers.dns_channel`).
     #[serde(default = "BuffersConfig::default_dns_channel")]
     pub dns_channel: usize,
+    /// Packets the queue toward the host holds before it drops
+    /// (`node.buffers.host_channel`): what peers delivered, ICMPv6 answers
+    /// and hairpinned packets, waiting for the TUN writer thread or for the
+    /// embedder that owns the TUN. At least 1.
+    #[serde(default = "BuffersConfig::host_default")]
+    pub host_channel: usize,
 }
 
 impl Default for BuffersConfig {
@@ -1192,6 +1198,7 @@ impl Default for BuffersConfig {
             packet_channel: 1024,
             tun_channel: 1024,
             dns_channel: 64,
+            host_channel: 4096,
         }
     }
 }
@@ -1205,6 +1212,11 @@ impl BuffersConfig {
     }
     fn default_dns_channel() -> usize {
         64
+    }
+    /// The default of `host_channel`: deep enough that a reader which is
+    /// keeping up rides out a burst from the receive loop.
+    fn host_default() -> usize {
+        4096
     }
 }
 

@@ -35,22 +35,46 @@ pub(crate) fn make_node_addr(val: u8) -> NodeAddr {
 /// event. Closing it would mean installing the default before any test runs,
 /// which libtest has no hook for.
 #[derive(Clone, Default)]
-pub(crate) struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+pub(crate) struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<Captured>>>);
+
+/// One captured event: its target, and its line as [`LogCapture::lines`]
+/// gives it.
+struct Captured {
+    /// The event's target, by default the module that emitted it.
+    target: &'static str,
+    /// The level, then each field as ` name=value`.
+    line: String,
+}
 
 impl LogCapture {
     /// Every captured line, each prefixed with its level.
     pub(crate) fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap().clone()
-    }
-
-    /// Only the captured lines emitted at WARN.
-    pub(crate) fn warnings(&self) -> Vec<String> {
         self.0
             .lock()
             .unwrap()
             .iter()
+            .map(|event| event.line.clone())
+            .collect()
+    }
+
+    /// Only the captured lines emitted at WARN.
+    pub(crate) fn warnings(&self) -> Vec<String> {
+        self.lines()
+            .into_iter()
             .filter(|line| line.starts_with("WARN"))
-            .cloned()
+            .collect()
+    }
+
+    /// The target of every captured line whose message is exactly
+    /// `message`, in order. An operator filters on the target, so where a
+    /// line is logged from is part of its contract too.
+    pub(crate) fn targets(&self, message: &str) -> Vec<&'static str> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| has_message(&event.line, message))
+            .map(|event| event.target)
             .collect()
     }
 
@@ -119,7 +143,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
 
         let mut fields = Fields(event.metadata().level().to_string());
         event.record(&mut fields);
-        self.0.lock().unwrap().push(fields.0);
+        self.0.lock().unwrap().push(Captured {
+            target: event.metadata().target(),
+            line: fields.0,
+        });
     }
 }
 

@@ -17,6 +17,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod link;
 pub(crate) mod mtu;
 pub(crate) mod outbound;
+pub(crate) mod queue;
 pub mod tcp_mss;
 pub mod tun;
 #[cfg(windows)]

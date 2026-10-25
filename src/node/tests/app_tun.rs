@@ -177,10 +177,103 @@ async fn an_app_owned_tun_carries_a_packet_to_the_peer_app_and_answers_refusals_
     node_b.stop().await.unwrap();
 }
 
+/// The node's queue toward an app-owned TUN whose embedder has stopped
+/// reading holds no more than `node.buffers.host_channel` packets, however
+/// many more its peers send, and counts every packet it drops.
+#[tokio::test]
+async fn the_queue_toward_an_embedder_that_stops_reading_is_bounded() {
+    const BOUND: usize = 16;
+    const SENT: usize = 200;
+
+    let mut config_b = app_tun_config();
+    config_b.node.buffers.host_channel = BOUND;
+    let mut node_b = Node::new(config_b).unwrap();
+    let (_b_outbound, b_inbound) = node_b.enable_app_owned_tun();
+    node_b.start().await.unwrap();
+
+    let mut config_a = app_tun_config();
+    config_a.peers.push(crate::config::PeerConfig::new(
+        node_b.npub(),
+        "udp",
+        udp_addr(&node_b).to_string(),
+    ));
+    let mut node_a = Node::new(config_a).unwrap();
+    let (a_outbound, _a_inbound) = node_a.enable_app_owned_tun();
+    node_a.start().await.unwrap();
+
+    let addr_a = node_a.identity().address().to_ipv6();
+    let addr_b = node_b.identity().address().to_ipv6();
+
+    // Packets B's embedder read before it stopped.
+    let mut read = 0u64;
+    let embedder = async {
+        // Bring the session up: offer a packet until B's app receives it.
+        let packet = ipv6_packet(addr_a, addr_b, 120);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        'up: loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "precondition: the session never came up"
+            );
+            a_outbound.send(packet.clone()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            while let Ok(p) = b_inbound.try_recv() {
+                read += 1;
+                if p == packet {
+                    break 'up;
+                }
+            }
+        }
+        // B's embedder now stops reading while A keeps sending.
+        for _ in 0..SENT {
+            a_outbound.send(packet.clone()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+
+    tokio::select! {
+        result = node_a.run_rx_loop() => panic!("node A's rx loop exited: {result:?}"),
+        result = node_b.run_rx_loop() => panic!("node B's rx loop exited: {result:?}"),
+        () = embedder => {}
+    }
+
+    let queued = b_inbound.try_iter().count();
+    let dropped = node_b.tun_tx().map_or(0, |tx| tx.dropped());
+    // Every data packet B's session took from A went to the queue: read,
+    // still queued, or dropped.
+    let received = node_b
+        .get_session(node_a.node_addr())
+        .map_or(0, |entry| entry.traffic_counters().1);
+    node_a.stop().await.unwrap();
+    node_b.stop().await.unwrap();
+    assert!(
+        queued > 0,
+        "precondition: packets reached B while its embedder was not reading"
+    );
+    assert!(
+        queued <= BOUND,
+        "{queued} packets queued after {SENT} were sent toward an embedder that stopped reading, \
+         past the bound of {BOUND}"
+    );
+    assert!(
+        dropped > 0,
+        "{queued} queued and none dropped after {SENT} were sent past a bound of {BOUND}"
+    );
+    assert_eq!(
+        read + queued as u64 + dropped,
+        received,
+        "the packets B took from the session ({received}) are not those read ({read}), \
+         queued ({queued}) and dropped ({dropped})"
+    );
+}
+
 /// Throughput of the app-owned TUN between two in-process nodes over
 /// loopback UDP: packets of `FIPS_TPUT_SIZE` bytes (default 1200) pushed as
 /// fast as the outbound channel takes them for `FIPS_TPUT_SECS` seconds
-/// (default 3), counted at the peer's app. Prints one `TPUT` line.
+/// (default 3), counted at the peer's app. `FIPS_TPUT_HOSTQ` sets the peer's
+/// `node.buffers.host_channel`. Prints one `TPUT` line, ending with how many
+/// packets the peer's queue toward its app dropped.
 #[tokio::test]
 #[ignore = "a throughput measurement, run by hand"]
 async fn app_owned_tun_throughput_between_two_nodes() {
@@ -192,7 +285,14 @@ async fn app_owned_tun_throughput_between_two_nodes() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1200);
-    let mut node_b = Node::new(app_tun_config()).unwrap();
+    let mut config_b = app_tun_config();
+    if let Some(n) = std::env::var("FIPS_TPUT_HOSTQ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        config_b.node.buffers.host_channel = n;
+    }
+    let mut node_b = Node::new(config_b).unwrap();
     let (_b_outbound, b_inbound) = node_b.enable_app_owned_tun();
     node_b.start().await.unwrap();
     let mut config_a = app_tun_config();
@@ -208,6 +308,7 @@ async fn app_owned_tun_throughput_between_two_nodes() {
     let addr_b = node_b.identity().address().to_ipv6();
     let size = size.min(node_a.effective_ipv6_mtu() as usize);
 
+    let b_tx = node_b.tun_tx().cloned();
     let embedder = async {
         let packet = ipv6_packet(addr_a, addr_b, size);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -237,9 +338,10 @@ async fn app_owned_tun_throughput_between_two_nodes() {
         }
         let elapsed = start.elapsed().as_secs_f64();
         println!(
-            "TPUT size={size} secs={elapsed:.2} sent={sent} recv_pkts={} mbps={:.1}",
+            "TPUT size={size} secs={elapsed:.2} sent={sent} recv_pkts={} mbps={:.1} hostq_dropped={}",
             received / size,
-            received as f64 * 8.0 / elapsed / 1e6
+            received as f64 * 8.0 / elapsed / 1e6,
+            b_tx.as_ref().map_or(0, |tx| tx.dropped())
         );
     };
     tokio::select! {

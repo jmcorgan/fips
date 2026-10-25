@@ -49,6 +49,13 @@ can reach the source file's private items.
   each shape, of one placed after a literal holding a lone quote, and of one
   placed after an attribute whose literal holds an unbalanced bracket, show
   the scan refuses a node address.
+- `queue.rs` tests `../queue.rs`: a full queue toward the host drops and
+  counts what it cannot hold without waiting, a queue with room again takes
+  packets and its clones share one count, a queue whose reader has gone is
+  an error that counts nothing, and a full queue warns at the first drop and
+  at each doubling, with the count, under the target
+  `fips::ipv6tun::queue`. A sender formats for debugging with its drop
+  count.
 - `tun.rs` tests `../tun.rs` as module `name_tests`: TUN startup never
   deletes, downs or takes over an existing interface named `tun.name`. A
   link of any kind but TUN is refused and left untouched, a TUN another

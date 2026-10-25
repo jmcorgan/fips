@@ -110,6 +110,9 @@ pub(crate) struct Handles {
 pub(crate) struct TunThreads {
     /// Sender each TUN thread reports `Child::Tun` on when it exits.
     pub(crate) exit_tx: Option<Sender<Child>>,
+    /// How many packets toward the host the writer's queue holds
+    /// (`node.buffers.host_channel`).
+    pub(crate) capacity: usize,
 }
 
 impl Handles {
@@ -375,7 +378,7 @@ impl Handles {
         threads: TunThreads,
     ) -> Result<(), TunError> {
         debug_assert!(self.attached, "the TUN threads started before the attach");
-        let TunThreads { exit_tx } = threads;
+        let TunThreads { exit_tx, capacity } = threads;
         // Everything the node has said so far, including the limit it
         // published just before calling this, is in place before either
         // thread reads it.
@@ -408,7 +411,8 @@ impl Handles {
         // Create writer (dups the fd for independent write access).
         // Pass the per-peer payload limits so the inbound SYN clamp can
         // honor a narrower path the node has learned.
-        let (writer, tun_tx) = device.create_writer(max_mss.clone(), path_mtu_lookup.clone())?;
+        let (writer, tun_tx) =
+            device.create_writer(max_mss.clone(), path_mtu_lookup.clone(), capacity)?;
 
         // Spawn writer thread. On exit, including a panic,
         // it self-reports `Child::Tun` (sync context →

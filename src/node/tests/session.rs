@@ -10299,7 +10299,7 @@ async fn outbound_traffic_behind_a_forged_half_open_session_sends_its_own_setup_
     drain_to_quiescence(&mut nodes).await;
 
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[0].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    nodes[0].node.install_tun(tun_tx);
 
     let src_fips = crate::Ipv6Address::from_node_addr(&victim_addr);
     let dst_fips = crate::Ipv6Address::from_node_addr(&owner_addr);
@@ -10799,7 +10799,7 @@ async fn a_late_msg3_after_this_node_initiated_leaves_one_established_epoch() {
     // The responder has traffic for the initiator and initiates itself
     // beside its candidate at once.
     let (tun_tx, tun_rx) = std::sync::mpsc::channel();
-    nodes[initiator].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    nodes[initiator].node.install_tun(tun_tx);
     let packet = build_ipv6_packet(
         &crate::Ipv6Address::from_node_addr(&responder_addr),
         &crate::Ipv6Address::from_node_addr(&initiator_addr),
@@ -11272,7 +11272,7 @@ async fn a_host_reply_to_an_established_session_peer_is_sent_after_the_identity_
 
     let (_app_outbound, node0_tun) = nodes[0].node.enable_app_owned_tun();
     let (tun_tx, node1_tun) = std::sync::mpsc::channel();
-    nodes[1].node.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    nodes[1].node.install_tun(tun_tx);
 
     let src = crate::Ipv6Address::from_node_addr(&node1_addr);
     let dst = crate::Ipv6Address::from_node_addr(&node0_addr);
@@ -11428,9 +11428,9 @@ async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>)
     let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
     let c_bytes = c_fips.to_ipv6().octets();
     let (a_tx, a_rx) = std::sync::mpsc::channel();
-    nodes[0].node.supervisor.ipv6tun.tun_tx = Some(a_tx);
+    nodes[0].node.install_tun(a_tx);
     let (c_tx, c_rx) = std::sync::mpsc::channel();
-    nodes[2].node.supervisor.ipv6tun.tun_tx = Some(c_tx);
+    nodes[2].node.install_tun(c_tx);
     let global = crate::ipv6tun::icmp::mss_ceiling(nodes[0].node.transport_mtu());
     let clamp = |nodes: &[TestNode]| {
         crate::ipv6tun::tun::per_flow_max_mss(&nodes[0].node.test_replica(), &c_bytes, global)

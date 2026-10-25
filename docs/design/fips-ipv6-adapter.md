@@ -271,7 +271,7 @@ Kernel IPv6 Stack (routing: fd00::/8 → fips0)
        ▼
 TUN Device (fips0)
     ├── Reader Thread (blocking I/O → packet processing)
-    └── Writer Thread (mpsc queue → TUN writes)
+    └── Writer Thread (bounded queue → TUN writes)
 ```
 
 ### Reader Thread
@@ -291,7 +291,7 @@ The TUN reader receives raw IPv6 packets from applications and processes them:
 
 ### Writer Thread
 
-A single writer thread services an mpsc queue of outbound packets:
+A single writer thread services a bounded queue of outbound packets:
 
 - Inbound mesh traffic on port 256 (IPv6 header reconstructed from session
   context + residual fields, then delivered as complete IPv6 packets)
@@ -303,6 +303,16 @@ The writer clamps TCP MSS on every SYN-flagged segment it writes, whatever
 its source. The queue-based design eliminates contention on TUN writes and cleanly
 separates concerns. New packet sources can be added by cloning the sender
 handle.
+
+The queue holds at most `node.buffers.host_channel` packets (default 4096).
+No producer waits for room: a packet that finds the queue full is dropped
+and counted, as a router's full output queue drops, so a writer that has
+fallen behind never holds the receive loop back and never lets the queue
+grow without limit. The count is shared by every clone of the sender and is
+read with `TunTx::dropped`; the node logs "Host not reading; dropping packets
+toward it" at warn (target `fips::ipv6tun::queue`) at the first drop and at
+each doubling of the count, so a stall shows without a line per packet. Only
+a queue whose reader has gone is an error to the producer.
 
 ### Self-Addressed Packets
 
@@ -347,7 +357,11 @@ before `start()` (and before the node is moved into a background task), mirrorin
   and routed exactly as the Reader Thread's output would be.
 - **mesh → app** — inbound mesh traffic on port 256 is reconstructed and written
   to the node's `tun_tx` (the same sink the Writer Thread reads); the embedder
-  pulls from `app_inbound_rx` and writes to its fd.
+  pulls from `app_inbound_rx` and writes to its fd. The queue is bounded at
+  `node.buffers.host_channel` packets as the Writer Thread's is, so an embedder
+  that falls that far behind loses packets: each is counted in
+  `Node::tun_tx().dropped()`, and the node logs the warning the Writer Thread
+  section names.
 
 With the channels installed, `start()` skips system-TUN creation (it gates on
 `tun_tx` being unset), so FIPS does no `CAP_NET_ADMIN` operations.

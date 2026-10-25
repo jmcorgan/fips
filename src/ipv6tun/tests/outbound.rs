@@ -1,6 +1,7 @@
 use super::*;
 use crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter;
 use crate::ipv6tun::link::{FromMesh, any_key};
+use crate::ipv6tun::tun::TunTx;
 use std::net::Ipv6Addr;
 use std::sync::Mutex;
 use std::sync::mpsc;
@@ -53,7 +54,7 @@ fn state_with(peer: PeerKey, limit: u16) -> MeshState {
 fn a_packet_to_a_known_key_becomes_a_datagram_carrying_the_compressed_packet() {
     let peer = any_key();
     let state = state_with(peer, 1400);
-    let (tun_tx, rx) = mpsc::channel();
+    let (tun_tx, rx) = TunTx::bounded(64);
     let limiter = limiter();
     let mut icmp = IcmpContext::new(Some(&tun_tx), us(), &limiter);
     let sent = packet(us(), peer.address().to_ipv6(), 300);
@@ -68,7 +69,7 @@ fn a_packet_to_a_known_key_becomes_a_datagram_carrying_the_compressed_packet() {
 #[test]
 fn a_packet_to_a_prefix_no_key_names_is_answered_unreachable_from_the_raw_packet() {
     let state = state_with(any_key(), 1400);
-    let (tun_tx, rx) = mpsc::channel();
+    let (tun_tx, rx) = TunTx::bounded(64);
     let limiter = limiter();
     let mut icmp = IcmpContext::new(Some(&tun_tx), us(), &limiter);
     let stranger = any_key().address().to_ipv6();
@@ -88,7 +89,7 @@ fn a_packet_to_a_prefix_no_key_names_is_answered_unreachable_from_the_raw_packet
 #[test]
 fn a_packet_over_the_published_limit_to_an_unknown_destination_is_answered_packet_too_big() {
     let state = state_with(any_key(), 1000);
-    let (tun_tx, rx) = mpsc::channel();
+    let (tun_tx, rx) = TunTx::bounded(64);
     let limiter = limiter();
     let mut icmp = IcmpContext::new(Some(&tun_tx), us(), &limiter);
     let mtu = state.ipv6_mtu();
@@ -115,7 +116,7 @@ fn a_packet_to_a_known_key_goes_to_the_node_whatever_its_size() {
     // The node holds the live limit; the adapter's copy can trail it.
     let peer = any_key();
     let state = state_with(peer, 1000);
-    let (tun_tx, rx) = mpsc::channel();
+    let (tun_tx, rx) = TunTx::bounded(64);
     let limiter = limiter();
     let mut icmp = IcmpContext::new(Some(&tun_tx), us(), &limiter);
     let over = packet(
@@ -132,7 +133,7 @@ fn a_packet_to_a_known_key_goes_to_the_node_whatever_its_size() {
 /// packet the host sent, against what the adapter writes from the refused
 /// payload.
 fn answered(refusal: Refusal) -> Vec<Vec<u8>> {
-    let (tun_tx, rx) = mpsc::channel();
+    let (tun_tx, rx) = TunTx::bounded(64);
     let limiter = limiter();
     answer(
         refusal,
@@ -151,7 +152,7 @@ fn every_refusal_of_a_packet_sent_from_our_address_is_answered_byte_for_byte_as_
 
         // Today: `too_big(packet, mtu)` and `dest_unreachable(packet)` on
         // the packet itself.
-        let (tun_tx, rx) = mpsc::channel();
+        let (tun_tx, rx) = TunTx::bounded(64);
         let limiter = limiter();
         let mut today = IcmpContext::new(Some(&tun_tx), us(), &limiter);
         today.too_big(&sent, 1033);
@@ -241,7 +242,7 @@ fn a_refused_packet_to_a_non_fd_destination_or_with_a_wrong_length_field_is_quot
             peer,
             payload: compress_ipv6(sent).unwrap(),
         });
-        let (tun_tx, rx) = mpsc::channel();
+        let (tun_tx, rx) = TunTx::bounded(64);
         let limiter = limiter();
         IcmpContext::new(Some(&tun_tx), us(), &limiter).dest_unreachable(sent);
         let today = drain(&rx);

@@ -4062,8 +4062,8 @@ impl Node {
     /// Install a TUN packet sender, standing in for the TUN writer, so a
     /// test can read what the node delivers toward the host.
     #[cfg(test)]
-    pub(crate) fn install_tun(&mut self, tun_tx: TunTx) {
-        self.supervisor.ipv6tun.tun_tx = Some(tun_tx);
+    pub(crate) fn install_tun(&mut self, tun_tx: impl Into<TunTx>) {
+        self.supervisor.ipv6tun.tun_tx = Some(tun_tx.into());
     }
 
     /// Set up an **app-owned TUN**: rather than FIPS creating a system TUN
@@ -4089,12 +4089,18 @@ impl Node {
     /// same channel. The embedder should push only `fd00::/8`-destined IPv6
     /// packets, expect ICMPv6 errors on `app_inbound_rx`, and clamp TCP MSS on
     /// SYN-flagged segments in both directions.
+    ///
+    /// `app_inbound_rx` holds at most `node.buffers.host_channel` packets. The
+    /// node never waits for the app: a packet that finds the queue full is
+    /// dropped and counted in [`Self::tun_tx`]'s [`TunTx::dropped`], and the
+    /// node logs a warning at the first drop and at each doubling.
     pub fn enable_app_owned_tun(&mut self) -> (TunOutboundTx, std::sync::mpsc::Receiver<Vec<u8>>) {
         let tun_channel_size = self.config().node.buffers.tun_channel;
         // app → mesh: the app pushes; `run_rx_loop` drains `tun_outbound_rx`.
         let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
-        // mesh → app: the node writes inbound packets to `tun_tx`; the app pulls.
-        let (tun_tx, tun_rx) = std::sync::mpsc::channel();
+        // mesh → app: the node writes inbound packets to `tun_tx`, dropping
+        // what the app has left no room for; the app pulls.
+        let (tun_tx, tun_rx) = TunTx::bounded(self.config().node.buffers.host_channel);
         self.supervisor.ipv6tun.install_app_tun(tun_tx, outbound_rx);
         (outbound_tx, tun_rx)
     }

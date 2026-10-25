@@ -186,8 +186,7 @@ pub(crate) fn per_flow_max_mss(
     result
 }
 
-/// Channel sender for packets to be written to TUN.
-pub type TunTx = mpsc::Sender<Vec<u8>>;
+pub use super::queue::TunTx;
 
 /// Channel sender of the packets an embedder that owns the TUN hands the
 /// node.
@@ -456,6 +455,7 @@ impl TunDevice {
         &self,
         max_mss: MssCeiling,
         path_mtu_lookup: PathMtuReplica,
+        capacity: usize,
     ) -> Result<(TunWriter, TunTx), TunError> {
         let fd = self.device.as_raw_fd();
 
@@ -469,7 +469,7 @@ impl TunDevice {
         }
 
         let write_file = unsafe { File::from_raw_fd(write_fd) };
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = TunTx::bounded(capacity);
 
         Ok((
             TunWriter {
@@ -1102,8 +1102,9 @@ mod windows_tun {
             &self,
             max_mss: MssCeiling,
             path_mtu_lookup: PathMtuReplica,
+            capacity: usize,
         ) -> Result<(TunWriter, TunTx), TunError> {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = TunTx::bounded(capacity);
             Ok((
                 TunWriter {
                     session: self.session.clone(),
@@ -1944,7 +1945,7 @@ mod tests {
     #[test]
     fn self_addressed_packet_is_hairpinned_to_tun() {
         let our_addr = fips_addr_with_node_byte(0x55);
-        let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
+        let (tun_tx, tun_rx) = TunTx::bounded(64);
         let (outbound_tx, mut outbound_rx) = host_path(None);
         let lookup = empty_lookup();
         let mut pkt = ipv6_packet_to(&our_addr);
@@ -1976,7 +1977,7 @@ mod tests {
         let our_addr = fips_addr_with_node_byte(0x55);
         let key = crate::ipv6tun::link::any_key();
         let peer = key.address();
-        let (tun_tx, tun_rx) = mpsc::channel::<Vec<u8>>();
+        let (tun_tx, tun_rx) = TunTx::bounded(64);
         let (outbound_tx, mut outbound_rx) = host_path(Some(key));
         let lookup = empty_lookup();
         let mut pkt = ipv6_packet_to(&peer);

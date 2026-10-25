@@ -14,10 +14,13 @@ that file and can reach its private items.
   under `LoadLog::hold` (`loadlog.rs`), as the daemon's does, so the test
   also checks that the warning is held during the load and arrives when the
   held log is replayed.
+- `buffers.rs`: tests for the internal buffer sizes in `Config::validate`
+  (`mod.rs`): the floor of 1 on `node.buffers.host_channel`, and its default
+  for a file that does not name it.
 
-`mod.rs` declares these as `mod udp_interface_tests` and `mod rekey_switch`,
-not as `mod tests`, because `mod.rs` still carries an inline `mod tests`
-block of that name. That block, and the inline blocks in the other files
-here, predate the rule that unit tests live in this directory; moving them is a
-separate change. Once `mod.rs`'s block has moved, its tests and these can
-share the usual `mod tests;` declaration.
+`mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`
+and `mod buffers`, not as `mod tests`, because `mod.rs` still carries an
+inline `mod tests` block of that name. That block, and the inline blocks in
+the other files here, predate the rule that unit tests live in this
+directory; moving them is a separate change. Once `mod.rs`'s block has
+moved, its tests and these can share the usual `mod tests;` declaration.
