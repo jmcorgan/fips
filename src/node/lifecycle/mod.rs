@@ -15,7 +15,6 @@ use super::peering::reconcile::{
 use super::peering::retry::MAX_RETRY_CONNECTIONS_PER_TICK;
 
 use crate::config::{ConnectPolicy, PeerAddress, PeerConfig};
-use crate::ipv6tun::lifecycle::TunThreads;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::nostr::{BootstrapEvent, NostrRendezvous};
@@ -29,7 +28,7 @@ use crate::{NodeAddr, PeerIdentity};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 const OPEN_DISCOVERY_RETRY_LIFETIME_MULTIPLIER: u64 = 2;
 /// Parallel dial attempts to one peer over its candidate paths. Applies to
@@ -46,48 +45,6 @@ fn socket_addr_families_compatible(local: SocketAddr, remote: SocketAddr) -> boo
         (local, remote),
         (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_))
     )
-}
-
-/// Run a supervised child's async body, then report the child's exit on `tx`,
-/// whether the body returned or panicked.
-///
-/// A panic would otherwise unwind past the report and leave the node healthy
-/// with the child gone. Aborting the task still reports nothing: the abort
-/// drops this whole future, so a deliberate stop does not read as a death.
-pub(crate) async fn report_exit(
-    child: Child,
-    body: impl std::future::Future<Output = ()>,
-    tx: Option<tokio::sync::mpsc::Sender<Child>>,
-) {
-    use futures::FutureExt;
-
-    if std::panic::AssertUnwindSafe(body)
-        .catch_unwind()
-        .await
-        .is_err()
-    {
-        // The panic hook has already printed the payload.
-        error!(child = ?child, "Supervised child panicked; reporting its exit");
-    }
-    if let Some(tx) = tx {
-        let _ = tx.send(child).await;
-    }
-}
-
-/// Run a supervised child's thread body, then report the child's exit on `tx`,
-/// whether the body returned or panicked.
-pub(crate) fn report_thread(
-    child: Child,
-    body: impl FnOnce(),
-    tx: Option<&tokio::sync::mpsc::Sender<Child>>,
-) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
-        // The panic hook has already printed the payload.
-        error!(child = ?child, "Supervised child panicked; reporting its exit");
-    }
-    if let Some(tx) = tx {
-        let _ = tx.blocking_send(child);
-    }
 }
 
 /// What [`Node::try_active_peer_alternative_addresses`] did for a held peer.
@@ -1787,15 +1744,18 @@ impl Node {
         self.supervisor.packet_tx = Some(packet_tx.clone());
         self.packet_rx = Some(packet_rx);
 
-        // Runtime child-liveness channel. Created before any
-        // child is spawned so each directly-observable child (TUN threads, the
-        // DNS task, and the mDNS/Nostr liveness monitor) can clone the sender
-        // and self-report its `Child` on exit. The sender stored on `self` is
-        // the keep-alive; the rx_loop takes only the receiver, so the channel
+        // Runtime child-liveness channel. Created before any child is
+        // spawned so the mDNS/Nostr liveness monitor can clone the sender and
+        // self-report its `Child` on exit. The sender stored on `self` is the
+        // keep-alive; the rx_loop takes only the receiver, so the channel
         // never closes spuriously while the node runs.
         let (child_exit_tx, child_exit_rx) = tokio::sync::mpsc::channel(16);
         self.child_exit_tx = Some(child_exit_tx);
         self.child_exit_rx = Some(child_exit_rx);
+        // The IPv6 adapter's TUN threads and DNS task report on a channel of
+        // the adapter's own, opened for this start in the same way; the
+        // receive loop maps each exit to its child.
+        self.supervisor.exit_rx = Some(self.supervisor.ipv6tun.exits());
 
         // Interface-presence channel. Created before `create_transports` so
         // every interface-bound transport gets the sender at construction and
@@ -1825,8 +1785,8 @@ impl Node {
         // No Tun child when the TUN is app-owned (the embedder pre-set
         // `tun_tx` via `enable_app_owned_tun`) — FIPS does no system-TUN ops;
         // the channels installed before `start` carry both directions.
-        let tun = self.config().tun.enabled && self.supervisor.ipv6tun.tun_tx.is_none();
-        let app_tun = self.supervisor.ipv6tun.tun_tx.is_some();
+        let app_tun = self.supervisor.ipv6tun.app_tun();
+        let tun = self.config().tun.enabled && !app_tun;
         let dns = self.config().dns.enabled;
 
         // Worker-pool booleans + counts. Unix only — the workers issue
@@ -2060,9 +2020,7 @@ impl Node {
                 Child::Tun => {
                     // Initialize TUN interface after transports and peers are
                     // ready.
-                    let address = *self.identity().address();
-                    let config = &self.context.config;
-                    match self.supervisor.ipv6tun.open_tun(&config.tun, address).await {
+                    match self.supervisor.ipv6tun.open_tun().await {
                         Some(device) => {
                             // Publish the node-wide limit for whatever is bound
                             // right now. Starting the threads applies it first,
@@ -2072,23 +2030,14 @@ impl Node {
                             // `crate::ipv6tun::tun::MssCeiling`.
                             self.refresh_tun_mss_ceiling();
                             self.warn_shortfall();
-                            let threads = TunThreads {
-                                exit_tx: self.child_exit_tx.clone(),
-                                capacity: self.config().node.buffers.host_channel,
-                            };
-                            self.supervisor.ipv6tun.spawn_tun(device, threads)?;
+                            self.supervisor.ipv6tun.spawn_tun(device)?;
                             Event::SubstrateUp { child }
                         }
                         None => Event::SubstrateFailed { child },
                     }
                 }
                 Child::Dns => {
-                    let config = &self.context.config;
-                    let up = self.supervisor.ipv6tun.start_dns(
-                        &config.dns,
-                        config.peers(),
-                        self.child_exit_tx.clone(),
-                    );
+                    let up = self.supervisor.ipv6tun.start_dns();
                     if up {
                         Event::SubstrateUp { child }
                     } else {
@@ -2381,32 +2330,6 @@ impl Node {
             task.abort();
         }
         self.supervisor.netmon_rx.take();
-    }
-
-    /// Retract anything a child published about itself, after it exited on its
-    /// own at runtime (as opposed to being torn down by [`Self::stop`]).
-    ///
-    /// The FSM's `ChildExited` handling only republishes node health; it does
-    /// not touch per-child handles. That is fine for state nobody outside the
-    /// node reads, but not for an address an embedder dials: a stale
-    /// [`Node::dns_local_addr`] would have the app proxying `.fips` queries
-    /// into a socket that is gone, and the only symptom would be resolution
-    /// quietly timing out.
-    ///
-    /// Deliberately narrow — it clears published facts, not handles.
-    /// `dns_task` is left alone because [`Self::reconstruct_supervised_up`]
-    /// reads it to rebuild the teardown set, and aborting an already-finished
-    /// handle there is harmless.
-    ///
-    /// For `Dns` the event comes only from a panic. `run_responder`, the loop
-    /// the node spawns and `run_dns_responder` wraps, is an unconditional
-    /// loop whose every failure arm continues, so it has no ordinary exit;
-    /// [`report_exit`] catches a panic in it and reports `Child::Dns`, which
-    /// is what reaches this.
-    pub(in crate::node) fn retract_child_publications(&mut self, child: Child) {
-        if matches!(child, Child::Dns) {
-            self.supervisor.ipv6tun.retract_dns();
-        }
     }
 
     /// Tell the supervisor FSM that `child` exited on its own at runtime, and

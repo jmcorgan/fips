@@ -116,12 +116,25 @@ impl HostMap {
     /// Peers with a valid `alias` field are inserted. Invalid hostnames
     /// or npubs are logged as warnings and skipped.
     pub fn from_peer_configs(peers: &[PeerConfig]) -> Self {
+        Self::from_aliases(
+            peers
+                .iter()
+                .filter_map(|peer| Some((peer.alias.as_deref()?, peer.npub.as_str()))),
+        )
+    }
+
+    /// Build a host map from `(alias, npub)` pairs, in order, skipping and
+    /// warning about each invalid one.
+    pub(crate) fn from_aliases<'a>(aliases: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         let mut map = Self::new();
-        for peer in peers {
-            if let Some(alias) = &peer.alias
-                && let Err(e) = map.insert(alias, &peer.npub)
-            {
-                warn!(alias = %alias, npub = %peer.npub, error = %e, "Skipping invalid peer alias for host map");
+        for (alias, npub) in aliases {
+            if let Err(e) = map.insert(alias, npub) {
+                warn!(
+                    alias = %alias,
+                    npub = %npub,
+                    error = %e,
+                    "Skipping invalid peer alias for host map"
+                );
             }
         }
         if !map.is_empty() {

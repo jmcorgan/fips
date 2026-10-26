@@ -136,6 +136,59 @@ impl TunConfig {
     }
 }
 
+/// A peer alias the `.fips` DNS responder answers for: name and npub, as
+/// configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Alias {
+    /// The alias, as the peer list gives it.
+    pub(crate) name: String,
+    /// The npub the alias names, as the peer list gives it.
+    pub(crate) npub: String,
+}
+
+/// What the IPv6 adapter runs by, handed to it when the node builds it: its
+/// two configuration sections, the node settings it reads, and the peer
+/// aliases. All of it is owned data, so no node type crosses.
+#[derive(Debug, Clone)]
+pub(crate) struct Settings {
+    /// The TUN section (`tun.*`).
+    pub(crate) tun: TunConfig,
+    /// The DNS responder section (`dns.*`).
+    pub(crate) dns: DnsConfig,
+    /// How many packets an embedder that owns the TUN can queue toward the
+    /// mesh (`node.buffers.tun_channel`).
+    pub(crate) tun_channel: usize,
+    /// How many packets toward the host the TUN writer's queue, or an
+    /// embedder's, holds (`node.buffers.host_channel`).
+    pub(crate) host_channel: usize,
+    /// The node's control socket path (`node.control.socket_path`), beside
+    /// which the adapter's status socket is bound.
+    pub(crate) control: String,
+    /// The peer aliases the DNS responder answers for, until the node
+    /// replaces them.
+    pub(crate) aliases: Vec<Alias>,
+}
+
+#[cfg(test)]
+impl Settings {
+    /// Default sections, both queues 64 packets, no aliases, and the TUN
+    /// enabled when `tun`, for tests that build the adapter's handles by
+    /// themselves.
+    pub(crate) fn with_tun(tun: bool) -> Self {
+        Self {
+            tun: TunConfig {
+                enabled: tun,
+                ..Default::default()
+            },
+            dns: DnsConfig::default(),
+            tun_channel: 64,
+            host_channel: 64,
+            control: String::new(),
+            aliases: Vec::new(),
+        }
+    }
+}
+
 /// The `dns.ttl` setting read through its accessor.
 #[cfg(test)]
 mod ttl_tests {

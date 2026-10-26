@@ -82,13 +82,22 @@ can reach the source file's private items.
   loaded `inet fips` table that polices another interface than the TUN is
   reported as no firewall, every listener unfiltered, and one that polices
   the TUN classifies each listener by its rules. It also covers the
-  adapter's status: after each TUN and DNS start, stop and retract the
+  adapter's status: after each TUN and DNS start, stop and exit the
   published status equals what the node's facades read from the handles,
   the drop count is read from the current queue when asked, the status
   socket answers `show_status` with its four keys and an unknown command as
   unknown, the panel reads the configured TUN name while no TUN is up, a
   named TUN is rendered by its name, and on Windows the listener binds on
   loopback.
+- `lifecycle.rs` tests `../lifecycle.rs`: each child exit is reported once,
+  after a panic or a return, and not after an abort; the DNS responder's task
+  reports on the exit channel the start opened, the one `exits` returned;
+  the panic line logs under the target
+  `fips::ipv6tun::lifecycle` with the child it names; and what each exit
+  takes back when the node hands it over: a TUN thread's nothing, the DNS
+  responder's its published address, with its task left for the teardown;
+  and the TUN device takes the address the node's attach gave, not the seed
+  the handles were built with.
 - `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
   `target_tests`: the warning about a firewall that polices another
   interface than the TUN keeps the `fips::control::firewall_state` target it

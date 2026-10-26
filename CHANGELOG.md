@@ -662,12 +662,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fips::node::handlers::session`, so a `fips::node=debug` filter no longer
   shows them. All logging from TUN and DNS start and stop (for example "TUN
   device active", "Shutting down TUN interface" and "DNS responder started",
-  with their failure warnings) logs as `fips::ipv6tun::lifecycle` rather than
-  `fips::node::lifecycle`, so a filter on `fips::node::lifecycle` or
-  `fips::node` no longer selects it. An existing `RUST_LOG` filter naming an
-  old target still parses and simply stops matching, so the symptom is missing
-  log lines rather than an error. Update `RUST_LOG` filters, journal-watch
-  recipes and any log-scraping alert accordingly.
+  with their failure warnings), and the error logged when a TUN thread or the
+  DNS responder panics ("Supervised child panicked; reporting its exit"), logs
+  as `fips::ipv6tun::lifecycle` rather than `fips::node::lifecycle`, so a
+  filter on `fips::node::lifecycle` or `fips::node` no longer selects it. An
+  existing `RUST_LOG` filter naming an old target still parses and simply
+  stops matching, so the symptom is missing log lines rather than an error.
+  Update `RUST_LOG` filters, journal-watch recipes and any log-scraping alert
+  accordingly.
 
 - Runtime peer updates (`update_peers`) and `fipsctl connect` no longer dial a
   new address for a peer whose link is live, matching discovery. Such a dial

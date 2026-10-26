@@ -1450,3 +1450,37 @@ async fn a_delivery_toward_a_host_that_has_gone_logs_the_closed_queue() {
     );
     cleanup_nodes(&mut nodes).await;
 }
+
+/// The adapter is handed the node's TUN and DNS sections, both queue sizes
+/// it reads, the control socket path and the aliases of the peers that have
+/// one, as configured.
+#[test]
+fn the_adapter_settings_are_the_node_configuration_it_reads() {
+    let a = Identity::generate();
+    let peer = |id: &Identity, alias: Option<&str>| crate::config::PeerConfig {
+        npub: id.npub(),
+        alias: alias.map(String::from),
+        ..Default::default()
+    };
+    let mut config = Config::new();
+    config.tun.name = Some("mesh9".to_string());
+    config.dns.port = Some(5399);
+    config.node.buffers.host_channel = 77;
+    config.node.buffers.tun_channel = 11;
+    config.node.control.socket_path = "/run/x/node.sock".to_string();
+    config.peers = vec![peer(&a, Some("alpha")), peer(&Identity::generate(), None)];
+
+    let settings = crate::node::adapter_settings(&config);
+    assert_eq!(settings.tun.name(), "mesh9");
+    assert_eq!(settings.dns.port(), 5399);
+    assert_eq!(settings.host_channel, 77);
+    assert_eq!(settings.tun_channel, 11);
+    assert_eq!(settings.control, "/run/x/node.sock");
+    assert_eq!(
+        settings.aliases,
+        vec![crate::ipv6tun::config::Alias {
+            name: "alpha".to_string(),
+            npub: a.npub(),
+        }]
+    );
+}

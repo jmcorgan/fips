@@ -5,10 +5,9 @@
 //! status socket answers.
 
 use super::*;
-use crate::ipv6tun::config::DnsConfig;
-use crate::ipv6tun::lifecycle::Handles;
+use crate::ipv6tun::config::{DnsConfig, Settings};
+use crate::ipv6tun::lifecycle::{Exit, Handles};
 use crate::ipv6tun::link::{DatagramRx, Feeds, HostLink, LearnedRx, pair};
-use crate::ipv6tun::queue::TunTx;
 use serde_json::json;
 
 /// `nft -j list table inet fips` output for the shipped
@@ -109,7 +108,7 @@ fn listening_sockets_report_filtered_rows_when_the_table_polices_the_tun() {
 /// Handles for a node with the TUN enabled, attached over a fresh link so
 /// that the DNS responder can start, with the node's ends of the link.
 fn attached() -> (Handles, HostLink, DatagramRx, LearnedRx) {
-    let mut handles = Handles::new(fixture_fips0_addr(), true);
+    let mut handles = Handles::new(fixture_fips0_addr(), dns_settings());
     let (mesh, host, datagrams, learned) = pair(8, 8);
     let feeds = Feeds {
         path_mtu: true,
@@ -119,28 +118,17 @@ fn attached() -> (Handles, HostLink, DatagramRx, LearnedRx) {
     (handles, host, datagrams, learned)
 }
 
-/// A DNS responder on the IPv6 loopback at a port the kernel picks.
-fn loopback_dns() -> DnsConfig {
-    DnsConfig {
-        bind_addr: Some("::1".to_string()),
-        port: Some(0),
-        ..Default::default()
+/// Settings with the TUN enabled and a DNS responder on the IPv6 loopback
+/// at a port the kernel picks.
+fn dns_settings() -> Settings {
+    Settings {
+        dns: DnsConfig {
+            bind_addr: Some("::1".to_string()),
+            port: Some(0),
+            ..Default::default()
+        },
+        ..Settings::with_tun(true)
     }
-}
-
-/// Install an embedder's TUN channels on `handles`, returning the ends the
-/// embedder keeps.
-fn install_app_tun(
-    handles: &mut Handles,
-    capacity: usize,
-) -> (
-    std::sync::mpsc::Receiver<Vec<u8>>,
-    tokio::sync::mpsc::Sender<Vec<u8>>,
-) {
-    let (tun_tx, host_rx) = TunTx::bounded(capacity);
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(capacity);
-    handles.install_app_tun(tun_tx, outbound_rx);
-    (host_rx, outbound_tx)
 }
 
 /// Assert that the published status shows what the node's facades read
@@ -152,31 +140,37 @@ fn assert_published(handles: &Handles, step: &str) {
         handles.tun_state(),
         "tun_state after {step}"
     );
-    assert_eq!(read.tun_name, handles.tun_name, "tun_name after {step}");
     assert_eq!(
-        read.dns_local_addr, handles.dns_local_addr,
+        read.tun_name.as_deref(),
+        handles.tun_name(),
+        "tun_name after {step}"
+    );
+    assert_eq!(
+        read.dns_local_addr,
+        handles.dns_local_addr(),
         "dns_local_addr after {step}"
     );
 }
 
 #[tokio::test]
 async fn the_published_status_follows_each_tun_and_dns_change() {
-    // A DNS responder that the node retracts after it exited on its own.
+    // A DNS responder whose address the adapter takes back after it exited
+    // on its own.
     let (mut handles, _host, _datagrams, _learned) = attached();
     assert_published(&handles, "the start");
-    let _tun = install_app_tun(&mut handles, 4);
+    let _tun = handles.install_app_tun();
     assert_eq!(handles.status().read().tun_state, TunState::Active);
     assert_published(&handles, "install_app_tun");
-    assert!(handles.start_dns(&loopback_dns(), &[], None));
+    assert!(handles.start_dns());
     assert!(handles.status().read().dns_local_addr.is_some());
     assert_published(&handles, "start_dns");
-    handles.retract_dns();
-    assert_published(&handles, "retract_dns");
+    handles.exited(Exit::Dns);
+    assert_published(&handles, "the DNS exit");
     handles.stop_dns();
 
-    // A DNS responder stopped with no retract first.
+    // A DNS responder stopped with no exit first.
     let (mut handles, _host, _datagrams, _learned) = attached();
-    assert!(handles.start_dns(&loopback_dns(), &[], None));
+    assert!(handles.start_dns());
     assert!(handles.status().read().dns_local_addr.is_some());
     assert_published(&handles, "start_dns");
     handles.stop_dns();
@@ -185,11 +179,15 @@ async fn the_published_status_follows_each_tun_and_dns_change() {
 
 #[test]
 fn the_status_reads_the_drop_count_of_the_current_queue_live() {
-    let mut handles = Handles::new(fixture_fips0_addr(), true);
-    let _tun = install_app_tun(&mut handles, 1);
+    let settings = Settings {
+        host_channel: 1,
+        ..Settings::with_tun(true)
+    };
+    let mut handles = Handles::new(fixture_fips0_addr(), settings);
+    let _tun = handles.install_app_tun();
     let source = handles.status();
     assert_eq!(source.read().host_drops, 0);
-    let tun_tx = handles.tun_tx.as_ref().unwrap();
+    let tun_tx = handles.tun_tx().unwrap();
     tun_tx.send(vec![0x60]).unwrap();
     tun_tx.send(vec![0x60]).unwrap();
     assert_eq!(
@@ -201,7 +199,7 @@ fn the_status_reads_the_drop_count_of_the_current_queue_live() {
 
 /// A responder over unattached handles with the TUN disabled.
 fn disabled_responder() -> Responder {
-    let handles = Handles::new(fixture_fips0_addr(), false);
+    let handles = Handles::new(fixture_fips0_addr(), Settings::with_tun(false));
     Responder {
         source: handles.status(),
         fips0: fixture_fips0_addr(),

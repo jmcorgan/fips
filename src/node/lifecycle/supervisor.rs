@@ -133,6 +133,16 @@ pub(crate) enum Child {
     Dns,
 }
 
+impl From<crate::ipv6tun::lifecycle::Exit> for Child {
+    /// The child an exit the IPv6 adapter reports belongs to.
+    fn from(exit: crate::ipv6tun::lifecycle::Exit) -> Self {
+        match exit {
+            crate::ipv6tun::lifecycle::Exit::Tun => Child::Tun,
+            crate::ipv6tun::lifecycle::Exit::Dns => Child::Dns,
+        }
+    }
+}
+
 /// An input to the supervisor. Results of executing [`Action`]s are fed back as
 /// `SubstrateUp` / `SubstrateFailed` / `ChildStopped`.
 ///
@@ -829,6 +839,10 @@ pub(crate) struct Supervisor {
     /// attach until the receive loop takes it, or teardown drops it.
     pub(in crate::node) learned_rx: Option<crate::ipv6tun::link::LearnedRx>,
 
+    /// The receiver of the adapter's children's exits: `Some` from the start
+    /// that opened it until the receive loop takes it.
+    pub(in crate::node) exit_rx: Option<crate::ipv6tun::lifecycle::ExitRx>,
+
     /// Sender for each UDP listen socket the transport spawn binds — its raw
     /// fd and the instance name it was configured under — armed by
     /// [`Node::enable_app_owned_udp_fd`](crate::Node::enable_app_owned_udp_fd)
@@ -908,6 +922,7 @@ impl Supervisor {
             host_link: None,
             datagram_rx: None,
             learned_rx: None,
+            exit_rx: None,
             #[cfg(unix)]
             udp_fd_tx: None,
             nostr_rendezvous: crate::nostr::RendezvousDriver::default(),

@@ -612,12 +612,13 @@ pub struct Node {
     packet_rx: Option<PacketRx>,
 
     // === Child Exit Channel ===
-    /// Sender half of the runtime child-liveness channel. Cloned into each
-    /// directly-observable child (the TUN reader/writer threads, the DNS task,
-    /// and the mDNS/Nostr liveness monitor) so a child self-reports its
-    /// [`Child`](crate::node::lifecycle::supervisor::Child) when it exits. Held
-    /// on `self` for the rx_loop's lifetime as the keep-alive sender so the
-    /// receiver never observes a spuriously-closed channel.
+    /// Sender half of the runtime child-liveness channel. Cloned into the
+    /// mDNS/Nostr liveness monitor so it self-reports its
+    /// [`Child`](crate::node::lifecycle::supervisor::Child) when it exits; the
+    /// IPv6 adapter's TUN threads and DNS task report on the adapter's own exit
+    /// channel instead. Held on `self` for the rx_loop's lifetime as the
+    /// keep-alive sender so the receiver never observes a spuriously-closed
+    /// channel.
     child_exit_tx: Option<tokio::sync::mpsc::Sender<crate::node::lifecycle::supervisor::Child>>,
     /// Receiver half of the runtime child-liveness channel, `take()`-en by the
     /// rx_loop select arm that feeds `Event::ChildExited` to the supervisor FSM.
@@ -990,6 +991,34 @@ fn build_setup_rate_limiter(config: &Config) -> SessionSetupRateLimiter {
     )
 }
 
+/// The peer aliases the IPv6 adapter's DNS responder answers for: each peer
+/// in `peers` that has an alias, as configured and in order.
+fn adapter_aliases(peers: &[crate::config::PeerConfig]) -> Vec<crate::ipv6tun::config::Alias> {
+    peers
+        .iter()
+        .filter_map(|peer| {
+            Some(crate::ipv6tun::config::Alias {
+                name: peer.alias.clone()?,
+                npub: peer.npub.clone(),
+            })
+        })
+        .collect()
+}
+
+/// What the IPv6 adapter runs by, from the node's configuration `config`:
+/// its TUN and DNS sections, the two queue sizes it reads, the control
+/// socket path and the peer aliases.
+pub(crate) fn adapter_settings(config: &Config) -> crate::ipv6tun::config::Settings {
+    crate::ipv6tun::config::Settings {
+        tun: config.tun.clone(),
+        dns: config.dns.clone(),
+        tun_channel: config.node.buffers.tun_channel,
+        host_channel: config.node.buffers.host_channel,
+        control: config.node.control.socket_path.clone(),
+        aliases: adapter_aliases(config.peers()),
+    }
+}
+
 impl Node {
     /// Create a new node from configuration.
     pub fn new(config: Config) -> Result<Self, NodeError> {
@@ -1066,7 +1095,7 @@ impl Node {
             supervisor: lifecycle::supervisor::Supervisor::new(
                 crate::ipv6tun::lifecycle::Handles::new(
                     identity.address().to_ipv6(),
-                    config.tun.enabled,
+                    adapter_settings(&config),
                 ),
             ),
             tree_state,
@@ -1246,7 +1275,7 @@ impl Node {
             supervisor: lifecycle::supervisor::Supervisor::new(
                 crate::ipv6tun::lifecycle::Handles::new(
                     identity.address().to_ipv6(),
-                    config.tun.enabled,
+                    adapter_settings(&config),
                 ),
             ),
             tree_state,
@@ -1759,8 +1788,10 @@ impl Node {
         let base = HostMap::from_peer_configs(self.config().peers());
         tracing::debug!(entries = base.len(), "Rebuilding peer alias maps");
         self.host_map.set_base(base.clone());
-        self.peer_acl.rebase(base.clone()).await;
-        self.supervisor.ipv6tun.publish_aliases(base);
+        self.peer_acl.rebase(base).await;
+        self.supervisor
+            .ipv6tun
+            .replace_aliases(adapter_aliases(self.config().peers()));
     }
 
     /// Return a human-readable display name for a NodeAddr.
@@ -2985,7 +3016,7 @@ impl Node {
 
     /// Get the TUN interface name, if active.
     pub fn tun_name(&self) -> Option<&str> {
-        self.supervisor.ipv6tun.tun_name.as_deref()
+        self.supervisor.ipv6tun.tun_name()
     }
 
     /// The IPv6 adapter's status as its status socket would answer it now.
@@ -4059,14 +4090,14 @@ impl Node {
     ///
     /// Returns None if TUN is not active or the node hasn't been started.
     pub fn tun_tx(&self) -> Option<&TunTx> {
-        self.supervisor.ipv6tun.tun_tx.as_ref()
+        self.supervisor.ipv6tun.tun_tx()
     }
 
     /// Install a TUN packet sender, standing in for the TUN writer, so a
     /// test can read what the node delivers toward the host.
     #[cfg(test)]
     pub(crate) fn install_tun(&mut self, tun_tx: impl Into<TunTx>) {
-        self.supervisor.ipv6tun.tun_tx = Some(tun_tx.into());
+        self.supervisor.ipv6tun.install_sender(tun_tx.into());
     }
 
     /// Set up an **app-owned TUN**: rather than FIPS creating a system TUN
@@ -4098,14 +4129,7 @@ impl Node {
     /// dropped and counted in [`Self::tun_tx`]'s [`TunTx::dropped`], and the
     /// node logs a warning at the first drop and at each doubling.
     pub fn enable_app_owned_tun(&mut self) -> (TunOutboundTx, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let tun_channel_size = self.config().node.buffers.tun_channel;
-        // app → mesh: the app pushes; `run_rx_loop` drains `tun_outbound_rx`.
-        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
-        // mesh → app: the node writes inbound packets to `tun_tx`, dropping
-        // what the app has left no room for; the app pulls.
-        let (tun_tx, tun_rx) = TunTx::bounded(self.config().node.buffers.host_channel);
-        self.supervisor.ipv6tun.install_app_tun(tun_tx, outbound_rx);
-        (outbound_tx, tun_rx)
+        self.supervisor.ipv6tun.install_app_tun()
     }
 
     /// Set up an **app-owned UDP socket option**: FIPS keeps the socket, and
@@ -4276,7 +4300,7 @@ impl Node {
     /// Reading live node state from a backgrounded loop is a general gap, not
     /// one this accessor tries to close.
     pub fn dns_local_addr(&self) -> Option<std::net::SocketAddr> {
-        self.supervisor.ipv6tun.dns_local_addr
+        self.supervisor.ipv6tun.dns_local_addr()
     }
 
     /// A handle that wakes the medium-change detector (`node.netmon.*`) now

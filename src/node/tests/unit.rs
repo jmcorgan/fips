@@ -4640,13 +4640,13 @@ async fn dns_responder_serves_a_proxying_embedder() {
     );
 }
 
-/// `retract_child_publications(Dns)` clears the published address.
+/// The adapter's handling of a DNS exit clears the published address.
 ///
-/// Scoped to the helper deliberately, and named for that rather than for the
-/// scenario: no responder dies here, and deleting the `run_rx_loop` call site
-/// leaves this green. The rx-loop wiring is pinned separately, by
-/// `a_dns_exit_on_the_child_channel_degrades_the_node_and_retracts_its_address`.
-/// The producer side reports `Child::Dns` only when the responder panics, since
+/// Scoped to the adapter's call deliberately, and named for that rather than
+/// for the scenario: no responder dies here, and deleting the `run_rx_loop`
+/// call site leaves this green. The rx-loop wiring is pinned separately, by
+/// `a_dns_exit_on_the_adapter_channel_degrades_the_node_and_retracts_its_address`.
+/// The producer side reports `Exit::Dns` only when the responder panics, since
 /// `run_dns_responder` has no ordinary exit.
 ///
 /// What it does pin is the behavior the wiring depends on: the FSM's
@@ -4655,7 +4655,7 @@ async fn dns_responder_serves_a_proxying_embedder() {
 /// on, and a proxying embedder would see `.fips` queries silently time out
 /// rather than any error it could act on.
 #[tokio::test]
-async fn retract_child_publications_clears_the_dns_address() {
+async fn an_adapter_dns_exit_clears_the_dns_address() {
     let mut config = crate::Config::new();
     config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
@@ -4670,7 +4670,9 @@ async fn retract_child_publications_clears_the_dns_address() {
     assert!(node.dns_local_addr().is_some(), "responder came up");
 
     // What `run_rx_loop` does when the DNS task self-reports its exit.
-    node.retract_child_publications(crate::node::lifecycle::supervisor::Child::Dns);
+    node.supervisor
+        .ipv6tun
+        .exited(crate::ipv6tun::lifecycle::Exit::Dns);
 
     assert!(
         node.dns_local_addr().is_none(),
@@ -4678,116 +4680,6 @@ async fn retract_child_publications_clears_the_dns_address() {
     );
 
     node.stop().await.unwrap();
-}
-
-/// A supervised task that panics is still reported to the supervisor.
-///
-/// Without the report the panic ends the task silently: the `JoinError` sits
-/// on a handle nobody reads until `stop()`, and the node stays `Running` with
-/// the child gone.
-#[tokio::test]
-async fn report_exit_reports_a_body_that_panics() {
-    use crate::node::lifecycle::report_exit;
-    use crate::node::lifecycle::supervisor::Child;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    let handle = tokio::spawn(report_exit(
-        Child::Dns,
-        async { panic!("the supervised body died") },
-        Some(tx),
-    ));
-    let joined = handle.await;
-
-    assert_eq!(
-        rx.recv().await,
-        Some(Child::Dns),
-        "a panicking child must still report its exit",
-    );
-    assert!(
-        joined.is_ok(),
-        "the panic must be contained by the reporter"
-    );
-}
-
-/// A supervised task whose body returns is reported, so a future ordinary
-/// exit from the DNS responder needs no further wiring.
-#[tokio::test]
-async fn report_exit_reports_a_body_that_returns() {
-    use crate::node::lifecycle::report_exit;
-    use crate::node::lifecycle::supervisor::Child;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(report_exit(Child::Dns, async {}, Some(tx)))
-        .await
-        .unwrap();
-
-    assert_eq!(rx.recv().await, Some(Child::Dns));
-}
-
-/// A deliberate teardown aborts a running child, and that must not read as a
-/// death: the abort drops the whole reporting future before any send.
-#[tokio::test]
-async fn report_exit_stays_silent_when_the_task_is_aborted() {
-    use crate::node::lifecycle::report_exit;
-    use crate::node::lifecycle::supervisor::Child;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(report_exit(
-        Child::Dns,
-        async move {
-            let _ = started_tx.send(());
-            std::future::pending::<()>().await;
-        },
-        Some(tx),
-    ));
-    // The body is running, as a live responder is when `stop()` aborts it.
-    started_rx.await.unwrap();
-    handle.abort();
-
-    assert!(handle.await.unwrap_err().is_cancelled());
-    assert_eq!(rx.recv().await, None, "an aborted child must not report");
-}
-
-/// A supervised thread that panics is still reported to the supervisor.
-#[test]
-fn report_thread_reports_a_body_that_panics() {
-    use crate::node::lifecycle::report_thread;
-    use crate::node::lifecycle::supervisor::Child;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    let joined = std::thread::spawn(move || {
-        report_thread(
-            Child::Tun,
-            || panic!("the supervised thread died"),
-            Some(&tx),
-        )
-    })
-    .join();
-
-    assert_eq!(
-        rx.try_recv(),
-        Ok(Child::Tun),
-        "a panicking thread must still report its exit",
-    );
-    assert!(
-        joined.is_ok(),
-        "the panic must be contained by the reporter"
-    );
-}
-
-/// A supervised thread whose body returns is reported.
-#[test]
-fn report_thread_reports_a_body_that_returns() {
-    use crate::node::lifecycle::report_thread;
-    use crate::node::lifecycle::supervisor::Child;
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    std::thread::spawn(move || report_thread(Child::Tun, || {}, Some(&tx)))
-        .join()
-        .unwrap();
-
-    assert_eq!(rx.try_recv(), Ok(Child::Tun));
 }
 
 /// A node with a UDP transport and a DNS responder on an ephemeral port, and
@@ -4805,23 +4697,24 @@ fn dns_config() -> crate::Config {
     config
 }
 
-/// A DNS exit reaching the child channel degrades the node and retracts the
+/// A DNS exit on the adapter's exit channel degrades the node and retracts the
 /// responder's published address, through the real rx loop.
 ///
 /// The exit is queued before the loop starts and the loop is driven in place
 /// under a bound, so the node's state is readable afterwards. The shutdown
 /// future never fires, which keeps the loop out of the drain path.
 #[tokio::test]
-async fn a_dns_exit_on_the_child_channel_degrades_the_node_and_retracts_its_address() {
+async fn a_dns_exit_on_the_adapter_channel_degrades_the_node_and_retracts_its_address() {
     let mut node = make_node_with(dns_config());
     node.start().await.unwrap();
     assert_eq!(node.state(), NodeState::Running);
     assert!(node.dns_local_addr().is_some(), "responder came up");
 
-    node.child_exit_tx
-        .clone()
+    node.supervisor
+        .ipv6tun
+        .exit_sender()
         .unwrap()
-        .send(crate::node::lifecycle::supervisor::Child::Dns)
+        .send(crate::ipv6tun::lifecycle::Exit::Dns)
         .await
         .unwrap();
     let drive = tokio::time::timeout(
@@ -4841,6 +4734,103 @@ async fn a_dns_exit_on_the_child_channel_degrades_the_node_and_retracts_its_addr
     );
 
     node.stop().await.unwrap();
+}
+
+/// The node opens the adapter's exit channel before its DNS responder starts,
+/// so the responder's task holds a sender on the channel the node's receive
+/// loop reads.
+///
+/// The loop test above sends on the adapter's sender itself, so it stays
+/// green if the node opened the channel only after its children started: the
+/// responder would then report on no channel, or on a dead one, and a panic in
+/// it would leave the node `Running` with its address still published.
+#[tokio::test]
+async fn the_node_opens_the_adapter_exit_channel_before_its_dns_responder_starts() {
+    let mut node = make_node_with(dns_config());
+    node.start().await.unwrap();
+    assert!(node.dns_local_addr().is_some(), "responder came up");
+
+    let sender = node.supervisor.ipv6tun.exit_sender().unwrap();
+    assert_eq!(
+        sender.strong_count(),
+        3,
+        "the handles' sender, this clone and the responder task's",
+    );
+    drop(sender);
+
+    node.stop().await.unwrap();
+}
+
+/// A restarted node opens a fresh exit channel for the adapter, its DNS
+/// responder reports on it, and a DNS exit on it reaches the new receive loop:
+/// the node degrades and the responder's address is retracted.
+///
+/// The first run's loop takes that start's receiver and drops it, as a real
+/// stop does, so a node that kept the first start's channel would leave the
+/// restarted responder reporting on a channel nobody reads.
+#[tokio::test]
+async fn an_adapter_exit_after_a_restart_reaches_the_new_receive_loop() {
+    let mut node = make_node_with(dns_config());
+    node.start().await.unwrap();
+    let first = node.supervisor.ipv6tun.exit_sender().unwrap();
+    let drive = tokio::time::timeout(
+        Duration::from_millis(100),
+        node.run_rx_loop_with_shutdown(std::future::pending()),
+    )
+    .await;
+    assert!(
+        drive.is_err(),
+        "the first loop must still be running: {drive:?}"
+    );
+    node.stop().await.unwrap();
+
+    node.start().await.unwrap();
+    assert_eq!(node.state(), NodeState::Running);
+    assert!(node.dns_local_addr().is_some(), "responder came up again");
+    let sender = node.supervisor.ipv6tun.exit_sender().unwrap();
+    assert!(
+        !sender.same_channel(&first),
+        "a restart must open a fresh exit channel",
+    );
+    assert_eq!(
+        sender.strong_count(),
+        3,
+        "the handles' sender, this clone and the restarted responder task's",
+    );
+    drop(first);
+
+    sender
+        .send(crate::ipv6tun::lifecycle::Exit::Dns)
+        .await
+        .unwrap();
+    drop(sender);
+    let drive = tokio::time::timeout(
+        Duration::from_millis(500),
+        node.run_rx_loop_with_shutdown(std::future::pending()),
+    )
+    .await;
+    assert!(
+        drive.is_err(),
+        "the second loop must still be running: {drive:?}"
+    );
+
+    assert_eq!(node.state(), NodeState::Degraded);
+    assert!(
+        node.dns_local_addr().is_none(),
+        "a dead responder must not keep publishing an address to dial",
+    );
+
+    node.stop().await.unwrap();
+}
+
+/// Each exit the IPv6 adapter reports is handled as the child it names, so
+/// a TUN thread's exit degrades the TUN and a DNS exit the responder.
+#[test]
+fn an_adapter_exit_is_handled_as_the_child_it_names() {
+    use crate::ipv6tun::lifecycle::Exit;
+    use crate::node::lifecycle::supervisor::Child;
+    assert_eq!(Child::from(Exit::Tun), Child::Tun);
+    assert_eq!(Child::from(Exit::Dns), Child::Dns);
 }
 
 /// The healthy side of the wiring test: the same drive with no exit queued
@@ -5362,7 +5352,7 @@ fn mesh_filter_resolves_the_live_tun_device_rather_than_the_configured_name() {
 
     assert_eq!(node.supervisor.ipv6tun.mesh_ifindex(), None);
 
-    node.supervisor.ipv6tun.tun_name = Some(loopback.to_string());
+    node.supervisor.ipv6tun.name_tun(loopback);
     assert_eq!(node.supervisor.ipv6tun.mesh_ifindex(), Some(expected));
 }
 
