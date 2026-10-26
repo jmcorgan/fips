@@ -84,6 +84,11 @@ impl TunTx {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+
+    /// The shared drop count, for the adapter's status to read when asked.
+    pub(crate) fn counter(&self) -> Arc<AtomicU64> {
+        self.dropped.clone()
+    }
 }
 
 impl fmt::Debug for TunTx {

@@ -23,6 +23,7 @@ use super::link::{
     Attach, Datagram, Deliver, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal,
 };
 use super::outbound::{answer, outbound};
+use super::status::{Responder, Shown, StatusSource, serve};
 use super::tun::{
     HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
     shutdown_tun_interface,
@@ -107,6 +108,10 @@ pub(crate) struct Handles {
     /// Sends a new peer-alias base to the running DNS responder; `Some` only
     /// while it runs. Written through [`Handles::publish_aliases`].
     dns_aliases: Option<tokio::sync::watch::Sender<HostMap>>,
+    /// What the TUN and DNS starts and stops leave, published for the
+    /// status socket each time one of them changes it. These handles are
+    /// its only writer.
+    shown: tokio::sync::watch::Sender<Shown>,
 }
 
 /// What the TUN threads take from the node when they start.
@@ -122,13 +127,20 @@ impl Handles {
     /// Empty handles for a node whose address is `our_addr`, with the TUN
     /// configured when `tun_enabled` and disabled otherwise.
     pub(crate) fn new(our_addr: Ipv6Addr, tun_enabled: bool) -> Self {
+        let tun_state = if tun_enabled {
+            TunState::Configured
+        } else {
+            TunState::Disabled
+        };
+        let (shown, _) = tokio::sync::watch::channel(Shown {
+            tun_state,
+            tun_name: None,
+            dns_local_addr: None,
+            drops: None,
+        });
         Self {
             our_addr,
-            tun_state: if tun_enabled {
-                TunState::Configured
-            } else {
-                TunState::Disabled
-            },
+            tun_state,
             icmp_limiter: Arc::new(Mutex::new(IcmpRateLimiter::new())),
             mesh: MeshState::new(),
             datagrams: None,
@@ -147,12 +159,46 @@ impl Handles {
             dns_task: None,
             dns_local_addr: None,
             dns_aliases: None,
+            shown,
         }
     }
 
     /// The TUN device state.
     pub(crate) fn tun_state(&self) -> TunState {
         self.tun_state
+    }
+
+    /// Publish what the TUN and DNS starts and stops have left, for the
+    /// status socket. Every method that changes one of them calls this
+    /// last.
+    fn publish(&self) {
+        self.shown.send_replace(Shown {
+            tun_state: self.tun_state,
+            tun_name: self.tun_name.clone(),
+            dns_local_addr: self.dns_local_addr,
+            drops: self.tun_tx.as_ref().map(TunTx::counter),
+        });
+    }
+
+    /// Where the status socket reads our status from.
+    pub(crate) fn status(&self) -> StatusSource {
+        StatusSource {
+            shown: self.shown.subscribe(),
+            mesh: self.mesh.clone(),
+        }
+    }
+
+    /// Answer on our status socket beside the control socket at `control`,
+    /// from a task of its own, until the runtime ends. `configured` is the
+    /// configured TUN name, which the listening panel uses while no TUN is
+    /// up.
+    pub(crate) fn serve_status(&self, control: &str, configured: &str) {
+        let responder = Responder {
+            source: self.status(),
+            fips0: self.our_addr,
+            configured: configured.to_string(),
+        };
+        tokio::spawn(serve(control.to_string(), responder));
     }
 
     /// Borrow the host-facing ICMPv6 sender: the TUN channel, our address
@@ -320,6 +366,7 @@ impl Handles {
         self.tun_tx = Some(tun_tx);
         self.tun_outbound_rx = Some(outbound_rx);
         self.tun_state = TunState::Active;
+        self.publish();
     }
 
     /// Create the TUN device, logging it, or log the failure, mark the TUN
@@ -343,6 +390,7 @@ impl Handles {
             Err(e) => {
                 warn!(error = %e, "Failed to initialize TUN, continuing without it");
                 self.tun_state = TunState::Failed;
+                self.publish();
                 None
             }
         }
@@ -505,6 +553,10 @@ impl Handles {
             );
         });
 
+        // Warn if the loaded firewall polices some other interface than
+        // the TUN just brought up.
+        #[cfg(target_os = "linux")]
+        super::firewall_state::spawn_scope_check(&name);
         self.tun_name = Some(name);
         self.tun_tx = Some(tun_tx);
         self.tun_reader_handle = Some(reader_handle);
@@ -514,6 +566,7 @@ impl Handles {
             self.tun_shutdown_fd = Some(shutdown_write_fd);
         }
         self.tun_state = TunState::Active;
+        self.publish();
         self.run_link();
         Ok(())
     }
@@ -559,6 +612,7 @@ impl Handles {
             let _ = handle.join();
         }
         self.tun_state = TunState::Disabled;
+        self.publish();
     }
 
     /// Start the `.fips` DNS responder and keep its handles, returning
@@ -667,6 +721,7 @@ impl Handles {
                         self.dns_task = Some(handle);
                         self.dns_aliases = Some(aliases_tx);
                         self.dns_local_addr = Some(local_addr);
+                        self.publish();
                         true
                     }
                     Err(e) => {
@@ -702,6 +757,14 @@ impl Handles {
         // the listener, so an embedder polling `dns_local_addr()`
         // never dials a socket that is already gone.
         self.dns_local_addr.take();
+        self.publish();
+    }
+
+    /// Retract the DNS responder's published address after it exited on
+    /// its own, leaving its task handle for the teardown to find.
+    pub(crate) fn retract_dns(&mut self) {
+        self.dns_local_addr.take();
+        self.publish();
     }
 }
 

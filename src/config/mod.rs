@@ -539,6 +539,70 @@ pub fn default_gateway_path() -> PathBuf {
     }
 }
 
+/// Where the IPv6 adapter's status socket is, given the node's control
+/// socket.
+///
+/// On Unix it is a sibling of the control socket, named from its file name
+/// with `-ipv6tun` inserted before the extension: `/run/fips/control.sock`
+/// gives `/run/fips/control-ipv6tun.sock`, `node.ctl` gives
+/// `node-ipv6tun.ctl` and `node` gives `node-ipv6tun`. Keeping the
+/// extension means two control sockets in one directory never give one
+/// adapter socket, even when they differ only in extension. On Windows,
+/// where the control socket's "path" is a TCP port, it is that port plus 2
+/// (`21210` gives `21212`); a port that does not parse is read as the
+/// default `21210`, as the control socket reads it, and port `0` (an
+/// ephemeral bind) stays `0`.
+///
+/// The daemon binds here. `None` when no path follows: a control path with
+/// no file name, or a port too high to offset.
+pub fn ipv6tun_socket(control: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        let mut name = control.file_stem()?.to_os_string();
+        name.push("-ipv6tun");
+        if let Some(extension) = control.extension() {
+            name.push(".");
+            name.push(extension);
+        }
+        Some(control.with_file_name(name))
+    }
+    #[cfg(windows)]
+    {
+        // Not 1: the gateway's placeholder port, 21211, sits one above the
+        // default control port.
+        const OFFSET: u16 = 2;
+        let port = control.to_string_lossy().parse::<u16>().unwrap_or(21210);
+        if port == 0 {
+            return Some(PathBuf::from("0"));
+        }
+        let port = port.checked_add(OFFSET)?;
+        Some(PathBuf::from(port.to_string()))
+    }
+}
+
+/// Where a client finds the IPv6 adapter's status socket for the control
+/// socket it was given, following symlinks to the control socket first.
+///
+/// A client given a symlink to the control socket (`fipsctl -s`) reaches the
+/// adapter beside the real socket, not a sibling of the link that does not
+/// exist. A path that cannot be resolved (no such file yet, or no
+/// permission) is used as given. On Windows this is [`ipv6tun_socket`].
+pub fn ipv6tun_client(control: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        let real = std::fs::canonicalize(control);
+        ipv6tun_socket(real.as_deref().unwrap_or(control))
+    }
+    #[cfg(windows)]
+    {
+        ipv6tun_socket(control)
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/sockets.rs"]
+mod sockets;
+
 /// Read a bare bech32 nsec from a key file.
 ///
 /// The file contents are the private key, and trimming copies it into a

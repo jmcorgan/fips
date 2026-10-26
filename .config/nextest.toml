@@ -85,7 +85,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|tcp|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
@@ -93,7 +93,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|tcp|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|tcp|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 # The known-slow tests get 480 s instead of 300: the six 100-node tests (the

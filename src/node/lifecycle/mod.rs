@@ -2077,10 +2077,6 @@ impl Node {
                                 capacity: self.config().node.buffers.host_channel,
                             };
                             self.supervisor.ipv6tun.spawn_tun(device, threads)?;
-                            #[cfg(target_os = "linux")]
-                            if let Some(tun) = self.tun_name() {
-                                crate::control::firewall_state::spawn_scope_check(tun);
-                            }
                             Event::SubstrateUp { child }
                         }
                         None => Event::SubstrateFailed { child },
@@ -2409,7 +2405,7 @@ impl Node {
     /// is what reaches this.
     pub(in crate::node) fn retract_child_publications(&mut self, child: Child) {
         if matches!(child, Child::Dns) {
-            self.supervisor.ipv6tun.dns_local_addr.take();
+            self.supervisor.ipv6tun.retract_dns();
         }
     }
 

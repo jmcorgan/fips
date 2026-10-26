@@ -708,13 +708,48 @@ fn main() {
         return;
     }
 
-    match send_request(&socket_path, &request) {
+    let command = match &cli.command {
+        Commands::Show { what } => what.command_name(),
+        _ => "",
+    };
+    match query(&socket_path, command, &request) {
         Ok(value) => print_response(&value),
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
     }
+}
+
+/// Send `request` for `command` to the node's control socket and, when the
+/// node's reply leaves out a key the IPv6 adapter answers, ask the adapter's
+/// socket beside it too and merge its answer in with
+/// [`fips::control::compose`].
+///
+/// An error from the node is returned as it came, without asking the
+/// adapter. An adapter that does not answer leaves its keys at the fallback.
+fn query(socket_path: &Path, command: &str, request: &str) -> Result<serde_json::Value, String> {
+    let mut value = send_request(socket_path, request)?;
+    if !is_ok(&value) {
+        return Ok(value);
+    }
+    let Some(data) = value.get_mut("data") else {
+        return Ok(value);
+    };
+    if !fips::control::composes(command, data) {
+        return Ok(value);
+    }
+    let adapter = fips::config::ipv6tun_client(socket_path)
+        .and_then(|path| send_request(&path, request).ok())
+        .filter(is_ok)
+        .and_then(|reply| reply.get("data").cloned());
+    fips::control::compose(command, data, adapter.as_ref());
+    Ok(value)
+}
+
+/// Whether a control socket reply reports success.
+fn is_ok(reply: &serde_json::Value) -> bool {
+    reply.get("status").and_then(|v| v.as_str()) == Some("ok")
 }
 
 /// Render the response as a Unicode block sparkline plot.
@@ -1677,6 +1712,10 @@ fn probe_close(report: &serde_json::Value) {
         println!("{note}");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/fipsctl.rs"]
+mod query_tests;
 
 #[cfg(test)]
 mod tests {

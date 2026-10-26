@@ -9,13 +9,20 @@
 //! - Windows: Uses a TCP socket on localhost (see commit 3)
 
 pub mod commands;
-pub mod firewall_state;
-pub mod listening;
+mod compose;
 pub mod probe;
 pub mod protocol;
 pub mod queries;
 pub mod read_handle;
 pub mod snapshot;
+
+/// The listening-sockets panel's two halves live in the IPv6 adapter; these
+/// paths are kept for code written against them.
+pub use crate::ipv6tun::{firewall_state, listening};
+
+/// How `fipsctl` and `fipstop` merge the IPv6 adapter's status into the
+/// node's.
+pub use compose::{compose, composes};
 
 use crate::config::ControlConfig;
 use protocol::{Request, Response};
@@ -33,17 +40,21 @@ const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// A message sent from the accept loop to the main event loop.
 pub type ControlMessage = (Request, oneshot::Sender<Response>);
 
-/// Handle a single client connection over any AsyncRead + AsyncWrite stream.
+/// Serve one client connection over any AsyncRead + AsyncWrite stream: read
+/// one request line, answer it with `dispatch`, write one response line and
+/// close.
 ///
-/// Shared between Unix and Windows implementations to avoid duplicating
-/// the request/response protocol logic.
-async fn handle_connection_generic<S>(
+/// Shared by every control-style socket, so each one reads, limits, times out
+/// and writes the same way. Returns `Ok(false)` when the response could not be
+/// written in time, which each caller logs in its own words.
+pub(crate) async fn serve<S, D, F>(
     stream: S,
-    control_tx: mpsc::Sender<ControlMessage>,
-    read_handle: ControlReadHandle,
-) -> Result<(), Box<dyn std::error::Error>>
+    dispatch: D,
+) -> Result<bool, Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    D: FnOnce(Request) -> F,
+    F: std::future::Future<Output = Response>,
 {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut buf_reader = BufReader::new(reader);
@@ -74,33 +85,10 @@ where
 
     let response = match read_result {
         Ok(Ok(())) if line.is_empty() => Response::error("empty request"),
-        Ok(Ok(())) => {
-            // Parse the request
-            match serde_json::from_str::<Request>(line.trim()) {
-                Ok(request) => {
-                    // First try to serve the request entirely off-loop from the
-                    // read handle. It returns None for any command with no snapshot
-                    // branch, and those fall through to the rx_loop path below.
-                    match snapshot_dispatch(&request, &read_handle) {
-                        Some(resp) => resp,
-                        None => {
-                            // Send to main loop and wait for response
-                            let (resp_tx, resp_rx) = oneshot::channel();
-                            if control_tx.send((request, resp_tx)).await.is_err() {
-                                Response::error("node shutting down")
-                            } else {
-                                match tokio::time::timeout(IO_TIMEOUT, resp_rx).await {
-                                    Ok(Ok(resp)) => resp,
-                                    Ok(Err(_)) => Response::error("response channel closed"),
-                                    Err(_) => Response::error("query timeout"),
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => Response::error(format!("invalid request: {}", e)),
-            }
-        }
+        Ok(Ok(())) => match serde_json::from_str::<Request>(line.trim()) {
+            Ok(request) => dispatch(request).await,
+            Err(e) => Response::error(format!("invalid request: {}", e)),
+        },
         Ok(Err(e)) => Response::error(format!("read error: {}", e)),
         Err(_) => Response::error("read timeout"),
     };
@@ -115,10 +103,47 @@ where
     })
     .await;
 
-    if let Err(_) | Ok(Err(_)) = write_result {
+    Ok(matches!(write_result, Ok(Ok(()))))
+}
+
+/// Answer one request to the node's control socket: off the receive loop
+/// from the read handle when it can, otherwise on the loop.
+async fn answer(
+    request: Request,
+    control_tx: mpsc::Sender<ControlMessage>,
+    read_handle: ControlReadHandle,
+) -> Response {
+    // First try to serve the request entirely off-loop from the read handle.
+    // It returns None for any command with no snapshot branch, and those fall
+    // through to the rx_loop path below.
+    if let Some(resp) = snapshot_dispatch(&request, &read_handle) {
+        return resp;
+    }
+    // Send to main loop and wait for response
+    let (resp_tx, resp_rx) = oneshot::channel();
+    if control_tx.send((request, resp_tx)).await.is_err() {
+        return Response::error("node shutting down");
+    }
+    match tokio::time::timeout(IO_TIMEOUT, resp_rx).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(_)) => Response::error("response channel closed"),
+        Err(_) => Response::error("query timeout"),
+    }
+}
+
+/// Serve one client of the node's control socket, logging a response that
+/// could not be written.
+async fn handle_connection<S>(
+    stream: S,
+    control_tx: mpsc::Sender<ControlMessage>,
+    read_handle: ControlReadHandle,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if !serve(stream, |request| answer(request, control_tx, read_handle)).await? {
         debug!("Control socket write failed or timed out");
     }
-
     Ok(())
 }
 
@@ -182,7 +207,7 @@ mod unix_impl {
                 let tx = control_tx.clone();
                 let handle = read_handle.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection_generic(stream, tx, handle).await {
+                    if let Err(e) = handle_connection(stream, tx, handle).await {
                         debug!(error = %e, "Control connection error");
                     }
                 });
@@ -271,7 +296,7 @@ mod windows_impl {
         /// Run the accept loop, forwarding requests to the main event loop via mpsc.
         ///
         /// Each accepted connection is handled in a spawned task using the
-        /// shared `handle_connection_generic` protocol handler.
+        /// shared `serve` connection loop.
         pub(crate) async fn accept_loop(
             self,
             control_tx: mpsc::Sender<ControlMessage>,
@@ -295,7 +320,7 @@ mod windows_impl {
                 let tx = control_tx.clone();
                 let handle = read_handle.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection_generic(stream, tx, handle).await {
+                    if let Err(e) = handle_connection(stream, tx, handle).await {
                         debug!(error = %e, "Control connection error");
                     }
                 });
@@ -309,6 +334,10 @@ mod windows_impl {
 pub use unix_impl::ControlSocket;
 #[cfg(windows)]
 pub use windows_impl::ControlSocket;
+
+#[cfg(test)]
+#[path = "tests/serve.rs"]
+mod serve_tests;
 
 #[cfg(test)]
 mod tests {

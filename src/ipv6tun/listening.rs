@@ -9,7 +9,7 @@
 //!
 //! Linux-only. Non-Linux callers receive an empty vector.
 //!
-//! See [`crate::control::firewall_state`] for the per-port nftables
+//! See [`super::firewall_state`] for the per-port nftables
 //! filter classification that pairs with this enumeration.
 //!
 //! See `docs/design/fips-security.md` for the operator-side narrative

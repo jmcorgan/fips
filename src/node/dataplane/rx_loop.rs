@@ -144,6 +144,11 @@ impl Node {
 
         if self.config().node.control.enabled {
             let config = self.config().node.control.clone();
+            // The IPv6 adapter answers for itself on its own socket beside
+            // this one, bound under the same switch.
+            self.supervisor
+                .ipv6tun
+                .serve_status(&config.socket_path, self.config().tun.name());
             let tx = control_tx.clone();
             let read_handle = self.control_read_handle();
             tokio::spawn(async move {

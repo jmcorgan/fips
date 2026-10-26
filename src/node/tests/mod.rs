@@ -55,6 +55,8 @@ mod session;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;
+#[cfg(unix)]
+mod status;
 mod stored_msg2;
 mod survivors;
 mod tcp;

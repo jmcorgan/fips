@@ -136,11 +136,9 @@ impl ControlReadHandle {
 /// Returns `Some(response)` when the command can be rendered from the bundled
 /// snapshot cells, or `None` when it must take the mpsc → rx_loop path.
 ///
-/// The queries served here read any of the cells the handle bundles —
-/// `context`, `metrics`, `stats`, `routing`, `entities`, `native` — plus
-/// host-OS facts gathered in [`super::listening`] and
-/// [`super::firewall_state`], so they render in the control task without
-/// touching `Node`. Taking a parameter is not what decides it:
+/// The queries served here read any of the cells the handle bundles
+/// (`context`, `metrics`, `stats`, `routing`, `entities`, `native`), so they
+/// render in the control task without touching `Node`. Taking a parameter is not what decides it:
 /// `show_stats_history` is parameterized and is served here. What falls back is
 /// a query needing live `Node` state the snapshot does not carry, and every
 /// mutation.
@@ -179,9 +177,6 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
         }),
         #[cfg(feature = "profiling")]
         "profile_tick_status" => Some(Response::ok(crate::instr::capture::status())),
-        "show_listening_sockets" => Some(Response::ok(
-            queries::show_listening_sockets_from_handle(handle),
-        )),
         "show_stats_list" => Some(Response::ok(queries::show_stats_list())),
         "show_metrics" => Some(Response::ok(queries::show_metrics_from_handle(handle))),
         // Peer-ACL status, served from the tick-published `StatsSnapshot`.

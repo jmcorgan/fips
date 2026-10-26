@@ -22,10 +22,17 @@ that file and can reach its private items.
   grant in `NativeApiConfig::effective_grants` (`node.rs`) keeps port 256
   unless an entry takes it and keeps its feed and learn request either way,
   and the rules `Config::validate` refuses an entry by.
+- `sockets.rs`: tests for `ipv6tun_socket` and `ipv6tun_client` (`mod.rs`),
+  which place the IPv6 adapter's status socket beside the control socket: on
+  Unix a sibling with `-ipv6tun` before the extension, distinct for any two
+  control sockets in one directory, none for a path with no file name, and
+  for a client a symlink to the control socket followed first while a path
+  that does not exist is used as given; on Windows the control port plus 2.
 
 `mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`,
-`mod buffers` and `mod grants`, not as `mod tests`, because `mod.rs` still
-carries an inline `mod tests` block of that name. That block, and the inline
-blocks in the other files here, predate the rule that unit tests live in this
-directory; moving them is a separate change. Once `mod.rs`'s block has moved,
-its tests and these can share the usual `mod tests;` declaration.
+`mod buffers`, `mod grants` and `mod sockets`, not as `mod tests`, because
+`mod.rs` still carries an inline `mod tests` block of that name. That block,
+and the inline blocks in the other files here, predate the rule that unit
+tests live in this directory; moving them is a separate change. Once
+`mod.rs`'s block has moved, its tests and these can share the usual
+`mod tests;` declaration.

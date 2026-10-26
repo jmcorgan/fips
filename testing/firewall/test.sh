@@ -153,16 +153,19 @@ activate_firewall() {
     fi
 }
 
-# Print the `firewall_active` field of the daemon's show_listening_sockets
-# reply ("true" or "false"), or the empty string when the control socket
-# did not answer. Empty is distinct from both answers, so a caller expecting
-# either value cannot be satisfied by an unreachable daemon.
+# Print the `firewall_active` field of the IPv6 adapter's
+# show_listening_sockets reply ("true" or "false"), or the empty string when
+# the adapter's status socket did not answer. That socket sits beside the
+# control socket, with -ipv6tun before its extension. Empty is distinct from
+# both answers, so a caller expecting either value cannot be satisfied by an
+# unreachable daemon.
 read_firewall_active() {
     local container="$1"
     docker exec "$container" python3 -c '
 import glob, json, socket, sys
-paths = ["/run/fips/control.sock", "/var/run/fips/control.sock"] \
-    + glob.glob("/run/user/*/fips/control.sock") + ["/tmp/fips-control.sock"]
+paths = ["/run/fips/control-ipv6tun.sock", "/var/run/fips/control-ipv6tun.sock"] \
+    + glob.glob("/run/user/*/fips/control-ipv6tun.sock") \
+    + ["/tmp/fips-control-ipv6tun.sock"]
 for path in paths:
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -386,7 +389,9 @@ log "Case (e): fips.nft scoped to an interface that is not the TUN"
 # This proves the query path answers before its "false" is trusted below.
 FW_ACTIVE="$(read_firewall_active "$CONTAINER_B")"
 if [ "$FW_ACTIVE" != "true" ]; then
-    fail "(e) control: with the real fips.nft loaded, show_listening_sockets firewall_active should be true (got '${FW_ACTIVE}'; empty means the control socket did not answer)"
+    fail "(e) control: with the real fips.nft loaded, the IPv6 adapter's" \
+        "show_listening_sockets reply should report firewall_active true" \
+        "(got '${FW_ACTIVE}'; empty means the adapter's socket did not answer)"
 fi
 
 OTHER_IF="notfips0"
@@ -413,7 +418,9 @@ pass "(e) table scoped to ${OTHER_IF} does not police fips0: TCP/${UNALLOWED_POR
 
 FW_ACTIVE="$(read_firewall_active "$CONTAINER_B")"
 if [ "$FW_ACTIVE" != "false" ]; then
-    fail "(e) table scoped to ${OTHER_IF} while the TUN is fips0: show_listening_sockets should report firewall_active false (got '${FW_ACTIVE}')"
+    fail "(e) table scoped to ${OTHER_IF} while the TUN is fips0: the IPv6 adapter's" \
+        "show_listening_sockets reply should report firewall_active false" \
+        "(got '${FW_ACTIVE}')"
 fi
 pass "(e) listener report shows the firewall as not policing the TUN"
 

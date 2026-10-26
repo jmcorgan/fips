@@ -114,7 +114,7 @@ table below lists every command currently registered.
 
 | Command | Params | `data` shape (top-level keys) |
 | ------- | ------ | ----------------------------- |
-| `show_status` | — | `version`, `npub`, `node_addr`, `ipv6_addr`, `state`, `is_leaf_only`, `is_root` (bool — this node is the spanning-tree root), `root` (hex node-addr of the current tree root), `persistent` (bool — identity is persisted, i.e. `persistent` set or an `nsec` configured), `peer_count`, `session_count`, `link_count`, `transport_count`, `connection_count`, `transport_peer_counts` (object mapping transport-type name to its connected-peer count; configured transports appear with `0`), `tun_state`, `tun_name`, `effective_ipv6_mtu`, `control_socket`, `pid`, `exe_path`, `uptime_secs`, `estimated_mesh_size`, `forwarding`, `sparklines`. |
+| `show_status` | none | `version`, `npub`, `node_addr`, `ipv6_addr`, `state`, `is_leaf_only`, `is_root` (bool: this node is the spanning-tree root), `root` (hex node-addr of the current tree root), `persistent` (bool: identity is persisted, i.e. `persistent` set or an `nsec` configured), `peer_count`, `session_count`, `link_count`, `transport_count`, `connection_count`, `transport_peer_counts` (object mapping transport-type name to its connected-peer count; configured transports appear with `0`), `control_socket`, `pid`, `exe_path`, `uptime_secs`, `estimated_mesh_size`, `forwarding`, `sparklines`. The TUN keys `tun_state`, `tun_name` and `effective_ipv6_mtu` are answered by the IPv6 adapter's status socket; see [IPv6 adapter command catalog](#ipv6-adapter-command-catalog). |
 | `show_acl` | — | `allow_file`, `deny_file`, `enforcement_active`, `effective_mode`, `default_decision`, `allow_all`, `deny_all`, `allow_file_entries`, `deny_file_entries`, `allow_entries`, `deny_entries`. |
 | `show_peers` | — | `peers[]` — per-peer object: `node_addr`, `npub`, `display_name`, `ipv6_addr`, `connectivity`, `link_id`, `direction`, `transport_addr`, `transport_type`, `is_parent`, `is_child`, `tree_depth`, `effective_depth` (`tree_depth + link_cost` — the metric `evaluate_parent` ranks on; `null` when the peer has no coords, or is unmeasured while another peer has an SRTT sample, per the cold-start gate), `stats`, `noise`, `current_k_bit`, `mmp`, plus optional `nostr_traversal`, `rekey_in_progress`, `rekey_draining`. |
 | `show_links` | — | `links[]` — `link_id`, `transport_id`, `remote_addr`, `direction`, `state`, `created_at_ms`, `stats`. |
@@ -128,7 +128,6 @@ table below lists every command currently registered.
 | `show_routing` | — | `coord_cache_entries`, `identity_cache_entries`, `pending_lookups[]`, `pending_tun_destinations`, `pending_tun_packets`, `pending_native_destinations` and `pending_native_datagrams` (outbound native API datagrams held for a destination whose session is not yet up: the destinations with any held, and the datagrams held across them; not counted in `show_native_flows`' `queued`), `recent_requests`, `retries[]`, `forwarding`, `discovery` (request/response sub-counters; includes `req_deduplicated` — requests suppressed as recent duplicates — and `req_dedup_cache_full` — requests admitted because the dedup cache was full), `error_signals`, `congestion`. |
 | `show_identity_cache` | — | `entries[]`, `count`, `max_entries`. Each entry: `node_addr`, `npub`, `display_name`, `ipv6_addr`, `last_seen_ms`, `age_ms`. |
 | `show_native_flows` | — | `flows[]`, `listeners[]`, `stats` (the `native` counter family). Each flow: `flow_id`, `peer` (the peer's npub, which is its address; always present, because the flow carries the key its client named or its session authenticated), `peer_addr` (the 16-byte node address in hex — a truncated hash of the same key, kept because it is what `show_sessions` and `show_routing` key on), `local_port`, `remote_port`, `state` (`established` / `pending_accept`), `queued` (datagrams the node is holding for the flow), `age_ms` (time since the flow reached its current state: opened for a flow this node opened, accepted for one taken off a listener, announced for one still pending — accepting a pending flow restarts the clock). Each listener: `local_port`, `backlog`. |
-| `show_listening_sockets` | — | `fips0_addr`, `firewall_active` (bool — `inet fips` table loaded), `sockets[]`. Each entry: `proto` (`tcp` / `udp`), `local_addr` (`::` or the node's fd00::/8 address), `port`, `pid` (nullable), `process` (nullable), `wildcard_bind` (bool — `local_addr == ::`), `filter` (`accept` / `drop` / `unknown` / `no_firewall`). Linux-only; returns an empty `sockets[]` on other platforms. |
 | `show_stats_list` | — | `metrics[]` (each with `name`, `unit`, `scope`), `fast_ring_seconds`, `slow_ring_minutes`, `peer_retention_seconds`. |
 | `show_metrics` | — | Flat snapshot of every counter family: `forwarding`, `discovery` (a deprecated alias of `lookup`), `lookup`, `tree`, `bloom`, `congestion`, `errors`, `native` and `dataplane` from the metrics registry, read live, and `handshake` and `session`, which the main loop keeps and publishes each tick, so they are as of the last tick. Each value is that family's counter snapshot object. Counter-only — gauges/histograms that need the live node are excluded. Served off the main loop. Silent-rejection sites classify their reason as a typed `RejectReason` and increment the matching per-family counter exposed here — see [Rejection reasons](#rejection-reasons). |
 | `show_stats_history` | `metric` (req), `peer` (req for per-peer metrics), `window` (`<N>s` / `<N>m` / `<N>h`, default `10m`), `granularity` (`1s` / `1m`, default `1s`) | A single `Series`: `metric`, `unit`, `granularity_seconds`, `values[]`. |
@@ -246,11 +245,84 @@ set. Dispatch lives in `src/gateway/control.rs`.
 Until the first snapshot has been published (very early in startup),
 both commands return `gateway not yet initialized`.
 
+## IPv6 Adapter Status Socket
+
+The IPv6 adapter, which runs the TUN and the `.fips` DNS responder,
+answers for its own status on a socket of its own beside the daemon's
+control socket. It speaks the same protocol as the control socket: one
+request line, one response line, the same 4096-byte request limit,
+5-second timeouts and error messages.
+
+### Where it is
+
+The socket has no configuration key: its path is derived from the
+control socket's. On Unix it is a sibling of the control socket, named
+from the control socket's file name with `-ipv6tun` inserted before the
+extension. For the default control socket paths:
+
+| Control socket | IPv6 adapter status socket |
+| -------------- | -------------------------- |
+| `/run/fips/control.sock` | `/run/fips/control-ipv6tun.sock` |
+| `/var/run/fips/control.sock` | `/var/run/fips/control-ipv6tun.sock` |
+| `$XDG_RUNTIME_DIR/fips/control.sock` | `$XDG_RUNTIME_DIR/fips/control-ipv6tun.sock` |
+| `/tmp/fips-control.sock` | `/tmp/fips-control-ipv6tun.sock` |
+
+A control socket at `node.ctl` gives `node-ipv6tun.ctl`, and one with no
+extension, `node`, gives `node-ipv6tun`. Because the extension is kept,
+two daemons whose control sockets differ never derive the same adapter
+socket. On Windows the socket is a TCP listener on `127.0.0.1` at the
+control port plus 2, `21212` by default; `21211`, one above the default
+control port, is the gateway's placeholder.
+
+As at the control socket's path, the daemon removes whatever it finds at
+the adapter's path that does not accept a connection before it binds, so
+no other file should be kept there.
+
+The daemon binds the socket only while `node.control.enabled` is true,
+when it binds the control socket, with the same mode (`0770`) and group
+(`fips`), and logs `IPv6 adapter status socket listening`. The
+adapter's path is 8 bytes longer than the control socket's, so a control
+socket path within 8 bytes of the Unix socket path limit (107 bytes on
+Linux) binds while the adapter's cannot: the daemon logs a warning and
+runs without the adapter's socket, and `fipsctl` and `fipstop` then show
+`disabled`, `-` and `0` for the TUN keys. A client given a symlink to the
+control socket follows it to the real socket before deriving the
+adapter's path (`fips::config::ipv6tun_client`), so it reaches the
+adapter beside the real socket.
+
+On Windows any local user can connect to `21212`, as to the control
+port. Two daemons on one Windows host need control ports that are not 2
+apart, or one daemon's adapter port is the other's control port.
+
+### IPv6 adapter command catalog
+
+| Command | Params | `data` shape |
+| ------- | ------ | ------------ |
+| `show_status` | none | `tun_state` (`disabled`, `configured`, `active` or `failed`), `tun_name` (the TUN device's name, or `-` while none is up and for a TUN the embedder owns), `effective_ipv6_mtu` (the node-wide IPv6 MTU, from the limit the node last published to the adapter), `host_drops` (packets toward the host dropped because the host stopped reading, since the current TUN or embedder channel came up). |
+| `show_listening_sockets` | none | `fips0_addr`, `firewall_active` (bool: the `inet fips` table is loaded), `sockets[]`. Each entry: `proto` (`tcp` / `udp`), `local_addr` (`::` or the node's fd00::/8 address), `port`, `pid` (nullable), `process` (nullable), `wildcard_bind` (bool: `local_addr == ::`), `filter` (`accept` / `drop` / `unknown` / `no_firewall`). Linux-only; returns an empty `sockets[]` on other platforms. |
+
+Any other command is answered `unknown command: <name>`. The daemon's
+control socket answers neither: its `show_status` leaves out the TUN keys,
+and it answers `show_listening_sockets` as an unknown command. `fipsctl`
+and `fipstop` ask both sockets and merge the adapter's TUN keys into the
+daemon's `show_status`; with no adapter answering they show `disabled`,
+`-` and `0`. Other keys of the adapter's reply, such as `host_drops`, are
+not merged.
+
+Where a transport's MTU is below 110 bytes, too small for any IPv6
+packet, the adapter's `effective_ipv6_mtu` reads 33. The daemon's control
+socket used to report the transport MTU less 77 there (0 to 32), and
+`fipsctl` and `fipstop` now show 33.
+
 ## Driving the Socket Directly
 
 ```sh
 # Linux / macOS
 echo '{"command":"show_status"}' | sudo nc -U /run/fips/control.sock
+
+# The IPv6 adapter's TUN keys and the listening panel, from its own socket
+echo '{"command":"show_status"}' | sudo nc -U /run/fips/control-ipv6tun.sock
+echo '{"command":"show_listening_sockets"}' | sudo nc -U /run/fips/control-ipv6tun.sock
 
 # Windows (PowerShell with a TCP-capable tool of your choice)
 ```

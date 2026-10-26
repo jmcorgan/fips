@@ -124,6 +124,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destroy-and-recreate, that an `optional` interface never moves node health,
   and that absence is logged once on the edge rather than once per retry.
 
+- The IPv6 adapter answers for its own status on a socket beside the control
+  socket, named from the control socket's file name with `-ipv6tun` before
+  its extension (`control-ipv6tun.sock` beside `control.sock`; on Windows the
+  control port plus 2, 21212 by default), bound only while
+  `node.control.enabled` is true. It answers `show_status` with `tun_state`,
+  `tun_name`, `effective_ipv6_mtu` and `host_drops` (packets toward the host
+  dropped because the host stopped reading) and `show_listening_sockets`. The
+  daemon logs one more line at start, `IPv6 adapter status socket listening`.
+
 #### Node lifecycle
 
 - Transport-medium change detection, controlled by the new `node.netmon.*`
@@ -682,6 +691,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilds its packet, so one whose payload is not a compressed IPv6 packet
   is now counted too; before, only a datagram whose packet was rebuilt was
   counted.
+- `fipsctl` and `fipstop` also read the IPv6 adapter's status socket beside
+  the control socket they are given, for `show_status`'s TUN fields when the
+  daemon does not give them and for the listening panel; their output is
+  unchanged, and against a daemon that has no adapter socket they show what
+  the daemon gives.
+- **Breaking for programs that read the control socket directly**: the
+  daemon's control socket no longer answers `tun_state`, `tun_name` and
+  `effective_ipv6_mtu` in `show_status`, nor the `show_listening_sockets`
+  command; the IPv6 adapter's status socket answers them (see Added).
+  `fipsctl` and `fipstop` output is unchanged. A program that reads the
+  control socket directly must ask the adapter's socket for them. Against
+  this daemon, a `fipsctl` from before this release omits `tun_state`,
+  `tun_name` and `effective_ipv6_mtu` from `show status`, and an older
+  `fipstop` shows them as `-` and hides the listening panel.
+  `fips::control::queries::show_status` returns the node's keys only. Where
+  a transport's MTU is below 110 bytes, too small for any IPv6 packet,
+  `effective_ipv6_mtu` now reads 33 rather than the transport MTU less 77.
 
 #### Packaging
 

@@ -2255,9 +2255,6 @@ impl Node {
             history: std::sync::Arc::new(self.stats_history.clone()),
             estimated_mesh_size: self.estimated_mesh_size,
             state: self.supervisor.state,
-            tun_state: self.supervisor.ipv6tun.tun_state(),
-            tun_name: self.supervisor.ipv6tun.tun_name.clone(),
-            effective_ipv6_mtu: self.effective_ipv6_mtu(),
             connection_count: self.connection_count(),
             peer_count: self.peers.len(),
             link_count: self.links.len(),
@@ -2989,6 +2986,12 @@ impl Node {
     /// Get the TUN interface name, if active.
     pub fn tun_name(&self) -> Option<&str> {
         self.supervisor.ipv6tun.tun_name.as_deref()
+    }
+
+    /// The IPv6 adapter's status as its status socket would answer it now.
+    #[cfg(test)]
+    pub(crate) fn ipv6tun_status(&self) -> crate::ipv6tun::status::Ipv6TunStatus {
+        self.supervisor.ipv6tun.status().read()
     }
 
     // === Resource Limits ===

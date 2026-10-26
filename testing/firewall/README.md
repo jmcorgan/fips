@@ -24,11 +24,13 @@ actively DROP'd by the fips chain (not silently unrouted).
   a table scoped to an interface that is not the TUN polices nothing on
   it. The suite loads the production file with its interface name
   rewritten to `notfips0`, asserts that node-a then reaches the case-(a)
-  port and that node-b's `show_listening_sockets` control reply reports
-  `firewall_active: false`, then reloads the real file and asserts the
-  port is dropped again and the reply reads `true`. The reply is read
-  once with the real file loaded before the rewrite, so a control socket
-  that does not answer fails the case instead of passing it.
+  port and that the `show_listening_sockets` reply of node-b's IPv6
+  adapter status socket (`control-ipv6tun.sock`, beside the control
+  socket) reports `firewall_active: false`, then reloads the real file
+  and asserts the port is dropped again and the reply reads `true`. The
+  reply is read once with the real file loaded before the rewrite, so an
+  adapter socket that does not answer fails the case instead of passing
+  it.
 
 ## Files
 

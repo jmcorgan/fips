@@ -78,6 +78,22 @@ can reach the source file's private items.
   routing table's ULA traffic out the default route. It covers the pure kind
   decision (`existing_link_verdict`) and, in root network-namespace tests,
   `TunDevice::create` and teardown themselves.
+- `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
+  loaded `inet fips` table that polices another interface than the TUN is
+  reported as no firewall, every listener unfiltered, and one that polices
+  the TUN classifies each listener by its rules. It also covers the
+  adapter's status: after each TUN and DNS start, stop and retract the
+  published status equals what the node's facades read from the handles,
+  the drop count is read from the current queue when asked, the status
+  socket answers `show_status` with its four keys and an unknown command as
+  unknown, the panel reads the configured TUN name while no TUN is up, a
+  named TUN is rendered by its name, and on Windows the listener binds on
+  loopback.
+- `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
+  `target_tests`: the warning about a firewall that polices another
+  interface than the TUN keeps the `fips::control::firewall_state` target it
+  had before the module moved here, and a table that polices the TUN draws
+  no warning.
 
 - `bsdnet.rs` tests `../bsdnet.rs` (macOS and FreeBSD only) as module `tests`:
   the routing message layout and socket-address padding, the kernel's error
@@ -90,11 +106,12 @@ can reach the source file's private items.
   a second time accepting its own address and route.
 - `winnet.rs` tests `../winnet.rs` (Windows only) as module `tests`: IP
   Helper's Win32 codes surfacing for an interface that does not exist, a
-  stop with no `FIPS` adapter present succeeding, and, as Administrator, a route and an address added twice on the loopback
-  interface being accepted, the loopback's IPv6 MTU being changed through its
-  interface row, and a Wintun adapter created twice in turn coming up with
-  its address, MTU and `fd00::/8` route (this one needs `wintun.dll` on the
-  DLL search path).
+  stop with no `FIPS` adapter present succeeding, and, as Administrator, a
+  route and an address added twice on the loopback interface being
+  accepted, the loopback's IPv6 MTU being changed through its interface
+  row, and a Wintun adapter created twice in turn coming up with its
+  address, MTU and `fd00::/8` route (this one needs `wintun.dll` on the DLL
+  search path).
 
 ## Rules
 

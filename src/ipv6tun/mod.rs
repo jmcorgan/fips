@@ -10,15 +10,18 @@ mod bsdnet;
 pub mod config;
 pub(crate) mod core;
 pub mod dns;
+pub mod firewall_state;
 pub mod icmp;
 pub mod icmp_rate_limit;
 pub(crate) mod inbound;
 pub mod ipv6_shim;
 pub(crate) mod lifecycle;
 pub(crate) mod link;
+pub mod listening;
 pub(crate) mod mtu;
 pub(crate) mod outbound;
 pub(crate) mod queue;
+pub(crate) mod status;
 pub mod tcp_mss;
 pub mod tun;
 #[cfg(windows)]

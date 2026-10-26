@@ -3,13 +3,16 @@ mod client;
 mod event;
 mod ui;
 
+#[cfg(test)]
+mod tests;
+
 use app::{App, ConnectionState, SelectedTreeItem, Tab};
 use clap::Parser;
 use client::ControlClient;
 use event::{Event, EventHandler};
 use fips::version;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// FIPS mesh monitoring TUI
@@ -42,6 +45,54 @@ fn default_gateway_socket_path() -> PathBuf {
     fips::config::default_gateway_path()
 }
 
+/// How many fetches skip the IPv6 adapter's socket after it could not be
+/// reached.
+const QUIET: u32 = 10;
+
+/// The IPv6 adapter's status socket beside the control socket, and how many
+/// more fetches skip it after it last could not be reached.
+struct Adapter {
+    client: ControlClient,
+    quiet: u32,
+}
+
+impl Adapter {
+    /// Whether this fetch may ask the adapter; called once per fetch, so a
+    /// skipped adapter is asked again after `QUIET` fetches.
+    fn ready(&mut self) -> bool {
+        if self.quiet == 0 {
+            return true;
+        }
+        self.quiet -= 1;
+        false
+    }
+
+    /// Ask the adapter `command`; `None` when it does not answer. An adapter
+    /// that cannot be reached is skipped for the next `QUIET` fetches; one
+    /// that was reached and did not answer is asked again on the next.
+    fn ask(&mut self, rt: &tokio::runtime::Runtime, command: &str) -> Option<serde_json::Value> {
+        if self.quiet > 0 {
+            return None;
+        }
+        match rt.block_on(self.client.probe(command)) {
+            Some(reply) => reply.ok(),
+            None => {
+                self.quiet = QUIET;
+                None
+            }
+        }
+    }
+}
+
+/// The client of the IPv6 adapter's status socket beside the control socket
+/// at `socket` (the `-s` path or the default).
+fn adapter(socket: &Path) -> Option<Adapter> {
+    fips::config::ipv6tun_client(socket).map(|path| Adapter {
+        client: ControlClient::new(&path),
+        quiet: 0,
+    })
+}
+
 fn restore_terminal() {
     ratatui::restore();
 }
@@ -49,12 +100,21 @@ fn restore_terminal() {
 fn fetch_data(
     rt: &tokio::runtime::Runtime,
     client: &ControlClient,
+    adapter: Option<&mut Adapter>,
     gateway_client: &ControlClient,
     app: &mut App,
 ) {
+    let mut adapter = adapter.and_then(|a| a.ready().then_some(a));
+
     // Always fetch status for the status bar
     match rt.block_on(client.query("show_status")) {
-        Ok(data) => {
+        Ok(mut data) => {
+            // The IPv6 adapter answers the TUN keys on its own socket when
+            // the node leaves them out.
+            if fips::control::composes("show_status", &data) {
+                let answer = adapter.as_mut().and_then(|a| a.ask(rt, "show_status"));
+                fips::control::compose("show_status", &mut data, answer.as_ref());
+            }
             app.data.insert(Tab::Node, data);
             app.connection_state = ConnectionState::Connected;
         }
@@ -65,15 +125,15 @@ fn fetch_data(
         }
     }
 
-    // Listening-on-fips0 panel — fetched only while the Node tab is
-    // active (it's the only place the data is rendered). Errors are
-    // non-fatal: an old daemon without the query just leaves the
-    // payload at None and the panel hides.
+    // Listening-on-fips0 panel, fetched only while the Node tab is
+    // active (it's the only place the data is rendered). The IPv6
+    // adapter's socket answers it, and the node's does when the adapter
+    // does not (an older daemon). Errors are non-fatal: with neither
+    // answering the payload stays at None and the panel hides.
     if app.active_tab == Tab::Node {
-        match rt.block_on(client.query("show_listening_sockets")) {
-            Ok(data) => app.listening_sockets = Some(data),
-            Err(_) => app.listening_sockets = None,
-        }
+        app.listening_sockets = adapter
+            .and_then(|a| a.ask(rt, "show_listening_sockets"))
+            .or_else(|| rt.block_on(client.query("show_listening_sockets")).ok());
     }
 
     // Gateway tab uses a separate socket
@@ -278,6 +338,7 @@ fn main() {
         .expect("failed to create tokio runtime");
 
     let client = ControlClient::new(&socket_path);
+    let mut adapter = adapter(&socket_path);
     let gateway_client = ControlClient::new(&gateway_socket_path);
     let mut terminal = ratatui::try_init().unwrap_or_else(|e| {
         eprintln!("fipstop: failed to initialize terminal: {e}");
@@ -293,7 +354,7 @@ fn main() {
     let mut events = EventHandler::new(refresh);
 
     // Initial fetch
-    fetch_data(&rt, &client, &gateway_client, &mut app);
+    fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
 
     // Main loop
     loop {
@@ -322,7 +383,13 @@ fn main() {
                                 {
                                     app.last_error = Some((std::time::Instant::now(), e));
                                 }
-                                fetch_data(&rt, &client, &gateway_client, &mut app);
+                                fetch_data(
+                                    &rt,
+                                    &client,
+                                    adapter.as_mut(),
+                                    &gateway_client,
+                                    &mut app,
+                                );
                             }
                         }
                         (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) | (KeyCode::Esc, _) => {
@@ -369,12 +436,12 @@ fn main() {
                     (KeyCode::Tab, KeyModifiers::NONE) => {
                         app.close_detail();
                         app.active_tab = app.active_tab.next();
-                        fetch_data(&rt, &client, &gateway_client, &mut app);
+                        fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                     }
                     (KeyCode::BackTab, _) => {
                         app.close_detail();
                         app.active_tab = app.active_tab.prev();
-                        fetch_data(&rt, &client, &gateway_client, &mut app);
+                        fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                     }
                     (KeyCode::Down, _) => {
                         if app.active_tab == Tab::Graphs {
@@ -441,7 +508,7 @@ fn main() {
                     (KeyCode::Char(' '), _) | (KeyCode::Right, _) => {
                         if app.active_tab == Tab::Graphs && app.detail_view.is_none() {
                             app.graphs_next_window();
-                            fetch_data(&rt, &client, &gateway_client, &mut app);
+                            fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                         } else if app.active_tab == Tab::Transports
                             && app.detail_view.is_none()
                             && let SelectedTreeItem::Transport(tid) = app.selected_tree_item
@@ -458,22 +525,22 @@ fn main() {
                         // the by-peer detail (which then closes, since the
                         // detail only applies to the by-peer mode).
                         app.graphs_next_mode();
-                        fetch_data(&rt, &client, &gateway_client, &mut app);
+                        fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                     }
                     (KeyCode::Char('n'), KeyModifiers::NONE) if app.active_tab == Tab::Graphs => {
                         // `n` switches the statistic, for both the by-peer list
                         // and the open by-peer detail (which re-renders).
                         app.graphs_next_selector();
-                        fetch_data(&rt, &client, &gateway_client, &mut app);
+                        fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                     }
                     (KeyCode::Char('N'), KeyModifiers::SHIFT) if app.active_tab == Tab::Graphs => {
                         app.graphs_prev_selector();
-                        fetch_data(&rt, &client, &gateway_client, &mut app);
+                        fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                     }
                     (KeyCode::Left, _) => {
                         if app.active_tab == Tab::Graphs && app.detail_view.is_none() {
                             app.graphs_prev_window();
-                            fetch_data(&rt, &client, &gateway_client, &mut app);
+                            fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                         } else if app.active_tab == Tab::Transports
                             && app.detail_view.is_none()
                             && let SelectedTreeItem::Transport(tid) = app.selected_tree_item
@@ -511,7 +578,7 @@ fn main() {
                         app.close_detail();
                         app.active_tab = Tab::Graphs;
                         app.graphs_scroll = 0;
-                        fetch_data(&rt, &client, &gateway_client, &mut app);
+                        fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
                     }
                     (KeyCode::Char('s'), KeyModifiers::NONE) => {
                         // `s` cycles the active sort column on the MMP and
@@ -529,7 +596,7 @@ fn main() {
                 // Redraw happens at top of loop
             }
             Ok(Event::Tick) => {
-                fetch_data(&rt, &client, &gateway_client, &mut app);
+                fetch_data(&rt, &client, adapter.as_mut(), &gateway_client, &mut app);
             }
             Err(_) => {
                 app.should_quit = true;

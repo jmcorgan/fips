@@ -281,6 +281,7 @@ mutation; rate-limited msg1s never reach the ACL.
 | `/etc/fips/peers.allow` | root:root | `0644` | Optional peer allowlist. |
 | `/etc/fips/peers.deny` | root:root | `0644` | Optional peer denylist. |
 | `/run/fips/control.sock` | root:fips | `0770` | Control socket (members of `fips` group can use `fipsctl`). |
+| `/run/fips/control-ipv6tun.sock` | root:fips | `0770` | IPv6 adapter status socket, beside the control socket while the control socket is enabled (TUN state and name, IPv6 MTU, packets dropped toward the host, listening sockets). |
 | `/run/fips/api.sock` | root:fips | `0770` | Native datagram API socket, when `node.native_api.enabled` is set (experimental; absent otherwise). |
 | `/run/fips/` | root:fips | `0750` | Socket parent directory. |
 
@@ -288,6 +289,10 @@ The `/etc/fips/` paths are the Linux ones. macOS and FreeBSD use
 `/usr/local/etc/fips/`; the Windows service keeps the key, config,
 hosts and ACL files in `C:\ProgramData\fips\`, which
 `install-service.ps1` restricts to SYSTEM and Administrators.
+
+On Windows the IPv6 adapter's status socket is a TCP port on
+`127.0.0.1`, the control port plus 2 (`21212` by default), and any local
+user can connect to it, as to the control port.
 
 Adding a user to the `fips` group grants `fipsctl` access without
 requiring root. The daemon `chown`s the control socket and its parent
