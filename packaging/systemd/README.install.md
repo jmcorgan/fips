@@ -116,15 +116,14 @@ peers:
 ### 5. DNS Resolver
 
 FIPS includes a DNS responder for `.fips` domain names that listens on
-`fips0` and on `[::1]:5354`. The `fips-dns.service` helper detects the
-host's DNS routing system and configures it to forward `.fips` queries
-to the responder. Backends tried in order:
+`[::1]:5354` by default (`dns.bind_addr`). The `fips-dns.service` helper
+detects the host's DNS routing system and configures it to forward
+`.fips` queries to the responder. Backends tried in order:
 
 1. systemd `dns-delegate` drop-in (systemd >= 258, declarative)
 2. `systemd-resolved` global drop-in via `/etc/systemd/resolved.conf.d/`
-3. `systemd-resolved` per-link `resolvectl` (legacy fallback)
-4. `dnsmasq` (standalone, drops a config in `/etc/dnsmasq.d/`)
-5. NetworkManager with the `dnsmasq` plugin
+3. `dnsmasq` (standalone, drops a config in `/etc/dnsmasq.d/`)
+4. NetworkManager with the `dnsmasq` plugin
 
 If none of the supported backends is detected, `fips-dns-setup` logs a
 warning with manual instructions and exits cleanly. The daemon itself

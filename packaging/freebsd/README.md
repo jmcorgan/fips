@@ -121,6 +121,8 @@ cat /var/run/fips/dns-backend         # which backend fips_dns configured
 ```
 
 The TUN interface gets a kernel-assigned name (`tun0`, `tun1`, ...),
-like `utun` on macOS, and is destroyed automatically when the daemon
-exits. `ifconfig <name>` prints `Opened by PID <n>` for the process
-holding a tun device.
+like `utun` on macOS. `ifconfig <name>` prints `Opened by PID <n>` for
+the process holding a tun device. The daemon takes the interface down
+when it exits but does not destroy it, and the next start opens a
+leftover `tunN` again. On pfSense the interface was observed to stay
+listed after exit, down, without an address and with nobody holding it.

@@ -1676,11 +1676,13 @@ mod platform {
 
     /// Shut down a network interface by name.
     ///
-    /// utun (macOS) and devfs-cloned tun (FreeBSD) devices are
-    /// automatically destroyed by the kernel when the last file
-    /// descriptor closes. Bringing the interface down causes any
-    /// blocking reads to return an error, which unblocks the reader
-    /// thread.
+    /// A macOS utun is destroyed by the kernel when its last file
+    /// descriptor closes. A FreeBSD tun is only taken down here; the
+    /// daemon never destroys it, and the next start reopens a leftover
+    /// one. On pfSense it was observed to stay listed, down and without
+    /// an address, after exit.
+    /// Bringing the interface down does not wake a reader blocked on the
+    /// device; the shutdown pipe does.
     pub async fn delete_interface(name: &str) -> Result<(), TunError> {
         run_cmd("ifconfig", &[name, "down"]).await
     }

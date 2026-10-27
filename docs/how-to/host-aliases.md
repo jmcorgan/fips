@@ -78,8 +78,9 @@ Format rules:
 
 - One hostname and one npub per line, separated by
   whitespace.
-- Hostnames are lowercase letters, digits, and hyphens; max
-  63 characters.
+- Hostnames are letters, digits, and hyphens; max 63
+  characters. Case does not matter: names are stored and
+  matched in lowercase.
 - Comments start with `#` and continue to end of line; blank
   lines are ignored.
 - On duplicate hostnames, the last entry wins.

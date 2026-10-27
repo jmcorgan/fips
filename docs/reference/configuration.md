@@ -556,8 +556,11 @@ with the node for routing.
 | `dns.port` | u16 | `5354` | Listen port |
 | `dns.ttl` | u32 | `300` | AAAA record TTL in seconds. Values above 2147483647 are treated as 2147483647. |
 
-The `dns.ttl` value should not exceed `node.cache.coord_ttl_secs` to avoid
-stale address mappings.
+The answer for an `<npub>.fips` name is derived from the npub, so it
+cannot go stale. The answer for a host alias can: after the alias is
+pointed at another npub in `/etc/fips/hosts`, a client may keep the old
+address for up to `dns.ttl` seconds. `dns.ttl` is not tied to
+`node.cache.coord_ttl_secs`.
 
 ### Host Mapping
 

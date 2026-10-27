@@ -2547,8 +2547,10 @@ impl Node {
                         self.supervisor.tun_tx.take();
 
                         // Delete the interface (on Linux, causes reader to get
-                        // EFAULT; on macOS/FreeBSD this downs it — the kernel
-                        // destroys the device once the reader closes the fd).
+                        // EFAULT). On macOS and FreeBSD this only downs it: a
+                        // macOS utun goes away when the reader closes the fd,
+                        // but the daemon does not destroy a FreeBSD tun, and
+                        // the next start reopens a leftover one.
                         if let Err(e) = shutdown_tun_interface(&name).await {
                             warn!(name = %name, error = %e, "Failed to shutdown TUN interface");
                         }
