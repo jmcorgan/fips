@@ -404,3 +404,42 @@ async fn app_owned_tun_throughput_between_two_nodes() {
     node_a.stop().await.unwrap();
     node_b.stop().await.unwrap();
 }
+
+/// An embedder's TUN takes both queue sizes from the node's configuration:
+/// its packets toward the mesh queue up to `node.buffers.tun_channel`, and
+/// those toward it up to `node.buffers.host_channel`, past which the node
+/// drops and counts them.
+#[tokio::test]
+async fn an_app_owned_tun_takes_its_queue_sizes_from_the_node_configuration() {
+    let mut config = app_tun_config();
+    config.node.buffers.tun_channel = 7;
+    config.node.buffers.host_channel = 5;
+    let mut node = Node::new(config).unwrap();
+    let (outbound, inbound) = node.enable_app_owned_tun();
+    assert_eq!(outbound.max_capacity(), 7);
+
+    let tun_tx = node.tun_tx().expect("the embedder's queue is installed");
+    for _ in 0..6 {
+        tun_tx.send(vec![0x60]).unwrap();
+    }
+    assert_eq!(inbound.try_iter().count(), 5);
+    assert_eq!(tun_tx.dropped(), 1);
+}
+
+/// An embedder's TUN on a node whose configuration enables the TUN starts
+/// no TUN device of the node's own and leaves no TUN child for the stop to
+/// tear down: the node runs, the TUN is active with no device name, and
+/// the embedder's queue outlives the stop.
+#[tokio::test]
+async fn an_app_owned_tun_with_the_tun_enabled_starts_and_stops_no_tun_child() {
+    let mut node = Node::new(app_tun_config()).unwrap();
+    let (_outbound, _inbound) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    assert_eq!(node.state(), crate::node::NodeState::Running);
+    assert_eq!(node.tun_state(), crate::ipv6tun::tun::TunState::Active);
+    assert_eq!(node.tun_name(), None);
+    assert!(!node.supervisor.ipv6tun.tun_up(), "no TUN child is up");
+    node.stop().await.unwrap();
+    assert_eq!(node.tun_state(), crate::ipv6tun::tun::TunState::Active);
+    assert!(node.tun_tx().is_some(), "the embedder's queue stays");
+}

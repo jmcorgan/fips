@@ -8,7 +8,7 @@ use crate::proto::fmp::{ConnAction, ConnSnapshot, LifecycleView};
 use crate::transport::LinkId;
 use fips_core::time::Instant;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 impl LifecycleView for Node {
     fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
@@ -565,39 +565,17 @@ impl Node {
                 .is_some_and(|at| now_ms.saturating_sub(at) >= ttl_ms)
         };
 
-        // Read-scan first: an ordinary tick expires nothing, and the TUN
-        // reader and writer take this lock on every packet.
-        let expired: Vec<crate::Ipv6Address> = match self.path_mtu_lookup.read() {
-            Ok(map) => map
-                .iter()
-                .filter(|(_, e)| stale(e))
-                .map(|(a, _)| *a)
-                .collect(),
-            Err(e) => {
-                warn!(error = %e, "path_mtu_lookup read lock poisoned; expiry pass skipped");
-                return;
-            }
-        };
+        let expired: Vec<crate::Ipv6Address> = self
+            .path_mtu_lookup
+            .iter()
+            .filter(|(_, e)| stale(e))
+            .map(|(a, _)| *a)
+            .collect();
         if expired.is_empty() {
             return;
         }
-
-        match self.path_mtu_lookup.write() {
-            Ok(mut map) => {
-                for addr in &expired {
-                    // Re-test under the write lock. The read guard was dropped
-                    // before this one was taken, so a fresh value may have
-                    // landed in between; without this the pass would delete a
-                    // value that was just learned.
-                    if map.get(addr).is_some_and(stale) {
-                        map.remove(addr);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "path_mtu_lookup write lock poisoned; entries not expired");
-                return;
-            }
+        for addr in &expired {
+            self.path_mtu_lookup.remove(addr);
         }
 
         // Restore what local configuration knows, the same way

@@ -41,15 +41,21 @@ impl IcmpRateLimiter {
         }
     }
 
-    /// Check if we should send an ICMP PTB to this source address.
+    /// Check if we should send an ICMP PTB to this source address now.
     ///
-    /// Returns true if enough time has passed since the last ICMP to this source,
-    /// or if this is the first ICMP to this source.
-    ///
-    /// If true is returned, the internal state is updated to record this send.
+    /// Reads the clock and judges by it, as [`Self::check`] does with the
+    /// time it is given.
     pub fn should_send(&mut self, src_addr: Ipv6Addr) -> bool {
-        let now = Instant::now();
+        self.check(src_addr, Instant::now())
+    }
 
+    /// Check if we should send an ICMP PTB to this source address at `now`.
+    ///
+    /// Returns true if at least the minimum interval has passed since the
+    /// last ICMP to this source, or if this is the first ICMP to it. If true
+    /// is returned, `now` is recorded as this source's last send, and entries
+    /// older than the maximum age at `now` are dropped.
+    pub(crate) fn check(&mut self, src_addr: Ipv6Addr, now: Instant) -> bool {
         // Check if we've sent to this source recently
         if let Some(&last) = self.last_sent.get(&src_addr)
             && now.duration_since(last) < self.min_interval
@@ -94,7 +100,6 @@ impl Default for IcmpRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_first_send_allowed() {
@@ -133,21 +138,6 @@ mod tests {
     }
 
     #[test]
-    fn test_send_allowed_after_interval() {
-        let mut limiter = IcmpRateLimiter::with_interval(Duration::from_millis(50));
-        let addr: Ipv6Addr = "fd00::1".parse().unwrap();
-
-        // First send
-        assert!(limiter.should_send(addr));
-
-        // Wait for interval to pass
-        thread::sleep(Duration::from_millis(60));
-
-        // Second send should now be allowed
-        assert!(limiter.should_send(addr));
-    }
-
-    #[test]
     fn test_cleanup_removes_old_entries() {
         let mut limiter = IcmpRateLimiter::new();
         let addr1: Ipv6Addr = "fd00::1".parse().unwrap();
@@ -179,3 +169,7 @@ mod tests {
         assert_eq!(limiter.len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/icmp_rate_limit.rs"]
+mod clock_tests;

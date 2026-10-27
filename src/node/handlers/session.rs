@@ -7,7 +7,7 @@
 
 use crate::NodeAddr;
 use crate::cache::Funding;
-use crate::ipv6tun::inbound::Delivery;
+use crate::ipv6tun::lifecycle::Delivery;
 use crate::ipv6tun::link::{Deliver, PeerKey, Refusal};
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
@@ -1627,57 +1627,44 @@ impl Node {
         // time value until a reactive MtuExceeded happens to fire. Keep the
         // tighter of existing-or-new — never loosen the clamp.
         let fips_addr = crate::Ipv6Address::from_node_addr(src_addr);
-        match self.path_mtu_lookup.write() {
-            Ok(mut map) => {
-                // Read existing, decide, and apply the write under one guard so
-                // the keep-tighter update stays atomic.
-                let prior = map.get(&fips_addr).copied();
-                let actions =
-                    self.fsp
-                        .plan_path_mtu_tighten(fips_addr, prior.map(|e| e.mtu), new_mtu);
-                if actions.is_empty() {
-                    debug!(
-                        dest = %peer_name,
-                        fips_addr = %fips_addr,
-                        new_mtu,
-                        existing = prior.map(|e| e.mtu).unwrap_or(new_mtu),
-                        "PathMtuNotification: keeping tighter existing path_mtu_lookup value"
-                    );
-                }
-                for action in actions {
-                    if let FspAction::TightenPathMtuLookup { fips_addr, mtu } = action {
-                        // Held, not expiring. This value arrives inside a
-                        // session, and a session's teardown or a PathBroken
-                        // naming it already releases the entry. A deadline here
-                        // would instead recreate the gap this mirror exists to
-                        // close: a peer repeating an identical value on a stable
-                        // path takes the unchanged early-return above and never
-                        // rewrites the entry, so an expiring one would vanish
-                        // and stay gone.
-                        let held = crate::node::path_mtu::PathMtuEntry::held(mtu);
-                        debug_assert!(peer_key.is_some(), "a session path MTU with no peer key");
-                        match peer_key {
-                            Some(key) => map.insert(fips_addr, key, held),
-                            None => map.insert_unkeyed(fips_addr, held),
-                        };
-                        debug!(
-                            dest = %peer_name,
-                            fips_addr = %fips_addr,
-                            new_mtu,
-                            prior = ?prior,
-                            map_len = map.len(),
-                            "PathMtuNotification: tightened path_mtu_lookup"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
+        // Read existing, decide, and apply the write in one step on the
+        // receive loop, so the keep-tighter update stays atomic.
+        let prior = self.path_mtu_lookup.get(&fips_addr).copied();
+        let actions = self
+            .fsp
+            .plan_path_mtu_tighten(fips_addr, prior.map(|e| e.mtu), new_mtu);
+        if actions.is_empty() {
+            debug!(
+                dest = %peer_name,
+                fips_addr = %fips_addr,
+                new_mtu,
+                existing = prior.map(|e| e.mtu).unwrap_or(new_mtu),
+                "PathMtuNotification: keeping tighter existing path_mtu_lookup value"
+            );
+        }
+        for action in actions {
+            if let FspAction::TightenPathMtuLookup { fips_addr, mtu } = action {
+                // Held, not expiring. This value arrives inside a
+                // session, and a session's teardown or a PathBroken
+                // naming it already releases the entry. A deadline here
+                // would instead recreate the gap this mirror exists to
+                // close: a peer repeating an identical value on a stable
+                // path takes the unchanged early-return above and never
+                // rewrites the entry, so an expiring one would vanish
+                // and stay gone.
+                let held = crate::node::path_mtu::PathMtuEntry::held(mtu);
+                debug_assert!(peer_key.is_some(), "a session path MTU with no peer key");
+                match peer_key {
+                    Some(key) => self.path_mtu_lookup.insert(fips_addr, key, held),
+                    None => self.path_mtu_lookup.insert_unkeyed(fips_addr, held),
+                };
+                debug!(
                     dest = %peer_name,
                     fips_addr = %fips_addr,
                     new_mtu,
-                    error = %e,
-                    "path_mtu_lookup write lock poisoned; PathMtuNotification not reflected"
+                    prior = ?prior,
+                    map_len = self.path_mtu_lookup.len(),
+                    "PathMtuNotification: tightened path_mtu_lookup"
                 );
             }
         }
@@ -2216,55 +2203,42 @@ impl Node {
             .get(&msg.dest_addr)
             .and_then(|e| e.key())
             .map(|k| crate::ipv6tun::link::PeerKey::from_xonly(&k));
-        match self.path_mtu_lookup.write() {
-            Ok(mut map) => {
-                // Read existing, decide, and apply the write under one guard so
-                // the keep-tighter update stays atomic.
-                let prior = map.get(&fips_addr).copied();
-                let actions =
-                    self.fsp
-                        .plan_path_mtu_tighten(fips_addr, prior.map(|e| e.mtu), msg.mtu);
-                if actions.is_empty() {
-                    debug!(
-                        dest = %peer_name,
-                        fips_addr = %fips_addr,
-                        bottleneck_mtu = msg.mtu,
-                        existing = prior.map(|e| e.mtu).unwrap_or(msg.mtu),
-                        "Reactive MtuExceeded: keeping tighter existing path_mtu_lookup value"
-                    );
-                }
-                for action in actions {
-                    if let FspAction::TightenPathMtuLookup { fips_addr, mtu } = action {
-                        // Held, not expiring. The admission gate above requires
-                        // a session for the named destination, and that
-                        // session's teardown releases this entry. Nothing
-                        // re-sends the signal once traffic is sized to fit, so a
-                        // deadline would drop a genuine persistent bottleneck
-                        // and start the next flow at the conservative ceiling.
-                        let held = crate::node::path_mtu::PathMtuEntry::held(mtu);
-                        debug_assert!(peer_key.is_some(), "a session path MTU with no peer key");
-                        match peer_key {
-                            Some(key) => map.insert(fips_addr, key, held),
-                            None => map.insert_unkeyed(fips_addr, held),
-                        };
-                        debug!(
-                            dest = %peer_name,
-                            fips_addr = %fips_addr,
-                            bottleneck_mtu = msg.mtu,
-                            prior = ?prior,
-                            map_len = map.len(),
-                            "Reactive MtuExceeded: tightened path_mtu_lookup"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
+        // Read existing, decide, and apply the write in one step on the
+        // receive loop, so the keep-tighter update stays atomic.
+        let prior = self.path_mtu_lookup.get(&fips_addr).copied();
+        let actions = self
+            .fsp
+            .plan_path_mtu_tighten(fips_addr, prior.map(|e| e.mtu), msg.mtu);
+        if actions.is_empty() {
+            debug!(
+                dest = %peer_name,
+                fips_addr = %fips_addr,
+                bottleneck_mtu = msg.mtu,
+                existing = prior.map(|e| e.mtu).unwrap_or(msg.mtu),
+                "Reactive MtuExceeded: keeping tighter existing path_mtu_lookup value"
+            );
+        }
+        for action in actions {
+            if let FspAction::TightenPathMtuLookup { fips_addr, mtu } = action {
+                // Held, not expiring. The admission gate above requires
+                // a session for the named destination, and that
+                // session's teardown releases this entry. Nothing
+                // re-sends the signal once traffic is sized to fit, so a
+                // deadline would drop a genuine persistent bottleneck
+                // and start the next flow at the conservative ceiling.
+                let held = crate::node::path_mtu::PathMtuEntry::held(mtu);
+                debug_assert!(peer_key.is_some(), "a session path MTU with no peer key");
+                match peer_key {
+                    Some(key) => self.path_mtu_lookup.insert(fips_addr, key, held),
+                    None => self.path_mtu_lookup.insert_unkeyed(fips_addr, held),
+                };
+                debug!(
                     dest = %peer_name,
                     fips_addr = %fips_addr,
                     bottleneck_mtu = msg.mtu,
-                    error = %e,
-                    "path_mtu_lookup write lock poisoned; reactive MtuExceeded not reflected"
+                    prior = ?prior,
+                    map_len = self.path_mtu_lookup.len(),
+                    "Reactive MtuExceeded: tightened path_mtu_lookup"
                 );
             }
         }

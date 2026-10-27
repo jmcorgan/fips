@@ -8,8 +8,8 @@
 //! - the `stats_history` read-side rings (the "dual-ring": the live mutable
 //!   ring stays on the tick; this is the cloned read copy), and
 //! - the cheap scalar gauges `show_status` needs (`estimated_mesh_size`,
-//!   node `state`, `tun_state`, `tun_name`, `effective_ipv6_mtu`, and the
-//!   peer / session / link / connection / transport counts), plus
+//!   node `state`, and the peer / session / link / connection / transport
+//!   counts), plus
 //!   `peer_aliases` (copied from the node's display-name map on each tick;
 //!   it changes when `update_peers` replaces the peer list), and
 //! - the handshake and session reject counters, which `NodeStats` keeps on
@@ -25,7 +25,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::identity::NodeAddr;
-use crate::ipv6tun::tun::TunState;
 use crate::node::NodeState;
 use crate::node::acl::PeerAclStatus;
 use crate::node::stats::{HandshakeStatsSnapshot, SessionStatsSnapshot};
@@ -42,12 +41,6 @@ pub(crate) struct StatsSnapshot {
     pub estimated_mesh_size: Option<u64>,
     /// Node operational state.
     pub state: NodeState,
-    /// TUN device state.
-    pub tun_state: TunState,
-    /// TUN interface name, if active.
-    pub tun_name: Option<String>,
-    /// Effective IPv6 MTU over the mesh.
-    pub effective_ipv6_mtu: u16,
     /// Number of pending connections (handshake in progress).
     pub connection_count: usize,
     /// Number of authenticated peers.
@@ -114,9 +107,6 @@ impl StatsSnapshot {
             history: Arc::new(StatsHistory::new()),
             estimated_mesh_size: None,
             state: NodeState::Created,
-            tun_state: TunState::Disabled,
-            tun_name: None,
-            effective_ipv6_mtu: 0,
             connection_count: 0,
             peer_count: 0,
             link_count: 0,

@@ -79,16 +79,17 @@ fipsctl show peers | jq '.peers[] | {display_name, mmp: .mmp}'
 
 ### Trace logging
 
-Module-scoped trace logging on the TUN reader and the MMP handler
-shows the per-packet decisions. The `tracing` macros default the
-target to the emitting module path, so the filter targets are the
-fully-qualified module paths under the `fips` crate.
+Module-scoped trace logging on the TUN reader, its TCP MSS clamp
+and the MMP handler shows the per-packet decisions. The `tracing`
+macros default the target to the emitting module path, so the
+filter targets are the fully-qualified module paths under the
+`fips` crate.
 
 ```sh
 sudo systemctl edit fips
 # Add:
 # [Service]
-# Environment=RUST_LOG=info,fips::ipv6tun::tun=trace,fips::node::handlers::mmp=debug
+# Environment=RUST_LOG=info,fips::ipv6tun::tun=trace,fips::ipv6tun::mss=trace,fips::node::handlers::mmp=debug
 sudo systemctl restart fips
 sudo journalctl -u fips -f
 ```

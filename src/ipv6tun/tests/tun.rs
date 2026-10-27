@@ -9,6 +9,10 @@
 //! the Linux outcomes. macOS and FreeBSD are not run at all; there the
 //! kernel names the device, and after the fix no code touches an interface
 //! by `tun.name` before create. The module is Linux only.
+//!
+//! Tests of the reader's packet handler, its MSS clamp and which closed
+//! channel ends it, also live here, because only `tun.rs`'s child modules
+//! reach the handler. They need no root, so the Linux lib suite runs them.
 
 use super::*;
 
@@ -518,4 +522,132 @@ fn startup_replaces_an_older_rule_rather_than_adding_beside_it() {
         rules.len() == 1 && rules[0].contains("suppress_prefixlength 0"),
         "one fd00::/8 rule, of the new shape: {rules:?}"
     );
+}
+
+/// A host path whose map knows `peer`, with its replica and the node's end of
+/// its datagram channel.
+fn reader_host(
+    peer: crate::ipv6tun::link::PeerKey,
+) -> (
+    HostPath,
+    PathMtuReplica,
+    tokio::sync::mpsc::Receiver<crate::ipv6tun::link::Datagram>,
+) {
+    let state = crate::ipv6tun::core::MeshState::new();
+    state.apply(crate::ipv6tun::link::FromMesh::KnownKey { peer });
+    let (datagrams, rx) = tokio::sync::mpsc::channel(4);
+    let limiter = Arc::new(std::sync::Mutex::new(
+        crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter::new(),
+    ));
+    let host = HostPath {
+        state,
+        limiter,
+        datagrams,
+    };
+    (host, PathMtuReplica::default(), rx)
+}
+
+/// The reader clamps a SYN from the host by the stored path to its
+/// destination, in the packet itself, before handing it to the mesh.
+#[test]
+fn the_reader_clamps_a_syn_by_the_path_to_its_destination() {
+    let key = crate::ipv6tun::link::any_key();
+    let peer = key.address();
+    let ours = *crate::Identity::generate().address();
+    let (host, paths, _datagrams) = reader_host(key);
+    paths
+        .write()
+        .unwrap()
+        .insert(peer, crate::node::path_mtu::payload_limit(1000));
+    let (tun_tx, _tun_rx) = TunTx::bounded(4);
+
+    // A SYN from us to the peer: a 40-byte IPv6 header carrying TCP, then a
+    // 24-byte TCP header with data offset 6 and one MSS option of 1440.
+    let mut packet = vec![0u8; 64];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&24u16.to_be_bytes());
+    packet[6] = 6;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(ours.as_bytes());
+    packet[24..40].copy_from_slice(peer.as_bytes());
+    packet[52] = 6 << 4;
+    packet[53] = 0x02;
+    packet[60..64].copy_from_slice(&[2, 4, 0x05, 0xa0]);
+
+    assert!(handle_tun_packet(
+        &mut packet,
+        1360,
+        "test0",
+        ours,
+        &tun_tx,
+        &host,
+        &paths
+    ));
+    assert_eq!(u16::from_be_bytes([packet[62], packet[63]]), 863);
+}
+
+/// A packet of `len` bytes from `src` to `dst` that carries nothing (next
+/// header 59), so no clamp applies to it.
+fn bare(src: &crate::Ipv6Address, dst: &[u8; 16], len: usize) -> Vec<u8> {
+    let mut packet = vec![0u8; len];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&((len - 40) as u16).to_be_bytes());
+    packet[6] = 59;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(src.as_bytes());
+    packet[24..40].copy_from_slice(dst);
+    packet
+}
+
+/// Whether the reader goes on after `packet`, with the queue toward the host
+/// closed and a host path that knows `known`.
+fn continues(
+    packet: &mut [u8],
+    ours: crate::Ipv6Address,
+    known: crate::ipv6tun::link::PeerKey,
+) -> bool {
+    let (host, paths, _datagrams) = reader_host(known);
+    let (tun_tx, tun_rx) = TunTx::bounded(4);
+    drop(tun_rx);
+    handle_tun_packet(packet, 1360, "test0", ours, &tun_tx, &host, &paths)
+}
+
+/// A closed queue toward the host ends the reader when it was to hairpin a
+/// packet or answer one addressed outside the mesh, and not when it was to
+/// answer a mesh destination with Destination Unreachable or Packet Too Big.
+#[test]
+fn a_closed_host_queue_ends_the_reader_only_on_a_hairpin_or_an_off_mesh_answer() {
+    let ours = *crate::Identity::generate().address();
+    let known = crate::ipv6tun::link::any_key();
+    let stranger = *crate::ipv6tun::link::any_key().address().as_bytes();
+    let off_mesh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let mut cases = [
+        ("hairpin", bare(&ours, ours.as_bytes(), 60), false),
+        ("off the mesh", bare(&ours, &off_mesh.octets(), 60), false),
+        ("unreachable", bare(&ours, &stranger, 60), true),
+        ("too big", bare(&ours, &stranger, 1400), true),
+    ];
+    for (what, packet, goes_on) in &mut cases {
+        assert_eq!(continues(packet, ours, known), *goes_on, "{what}");
+    }
+}
+
+/// A closed datagram channel to the node ends the reader.
+#[test]
+fn a_closed_datagram_channel_ends_the_reader() {
+    let ours = *crate::Identity::generate().address();
+    let known = crate::ipv6tun::link::any_key();
+    let (host, paths, datagrams) = reader_host(known);
+    drop(datagrams);
+    let (tun_tx, _tun_rx) = TunTx::bounded(4);
+    let mut packet = bare(&ours, known.address().as_bytes(), 60);
+    assert!(!handle_tun_packet(
+        &mut packet,
+        1360,
+        "test0",
+        ours,
+        &tun_tx,
+        &host,
+        &paths
+    ));
 }

@@ -2,7 +2,6 @@
   "data": {
     "connection_count": 0,
     "control_socket": "<redacted>",
-    "effective_ipv6_mtu": 1203,
     "estimated_mesh_size": null,
     "exe_path": "<redacted>",
     "forwarding": {
@@ -60,8 +59,6 @@
     "state": "created",
     "transport_count": 0,
     "transport_peer_counts": {},
-    "tun_name": "<redacted>",
-    "tun_state": "disabled",
     "uptime_secs": "<redacted>",
     "version": "<redacted>"
   },

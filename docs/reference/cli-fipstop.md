@@ -25,7 +25,7 @@ a confirmation prompt — see [Keybindings](#keybindings)). For
 
 | Flag | Argument | Default | Description |
 | ---- | -------- | ------- | ----------- |
-| `-s`, `--socket` | `PATH` | (auto) | Daemon control-socket path / port. Same default as `fipsctl`. |
+| `-s`, `--socket` | `PATH` | (auto) | Daemon control-socket path / port. Same default as `fipsctl`. `fipstop` also reads the IPv6 adapter's status socket beside the one given (see [Files](#files)). |
 | `--gateway-socket` | `PATH` | (auto) | `fips-gateway` control-socket path / port. Default: `/run/fips/gateway.sock` (Unix), TCP port `21211` (Windows). |
 | `-r`, `--refresh` | `SECONDS` | `2` | Poll interval. |
 | `-V` | — | — | Print the short version, `<version> (rev <git-hash>)`. The `rev` part is omitted when the build could not read a git revision, as in a package built from a git worktree. |
@@ -39,7 +39,7 @@ query on its first activation and on every refresh tick while active.
 
 | Tab | Query | Shows |
 | --- | ----- | ----- |
-| **Node** | `show_status` (+ `show_listening_sockets`) | Identity, version, uptime, peer/link/session counts, sparklines for mesh size, tree depth, peer count, bytes, loss. The Traffic block on this tab is split: TUN counters on the left, the **Listening on fips0** panel on the right (see below). |
+| **Node** | `show_status` on the control socket and on the IPv6 adapter's status socket, merged (+ `show_listening_sockets` on the adapter's) | Identity, version, uptime, peer/link/session counts, sparklines for mesh size, tree depth, peer count, bytes, loss. The Traffic block on this tab is split: TUN counters on the left, the **Listening on fips0** panel on the right (see below). |
 | **Peers** | `show_peers` (+ `show_links`, `show_transports` cross-refs) | Authenticated peers in a table. Selecting a row and pressing Enter opens a detail view. |
 | **Transports** | `show_transports` (+ `show_links`, `show_peers` cross-refs) | Tree of transport instances with per-link children when expanded. An interface-bound transport also carries an interface block; see [Interface block](#interface-block-transports-tab). |
 | **Sessions** | `show_sessions` | End-to-end FSP sessions. |
@@ -210,6 +210,18 @@ Same control-socket resolution rules as
 pattern with `gateway.sock` in place of `control.sock`, falling back
 to `/tmp/fips-gateway.sock` if neither system path nor
 `XDG_RUNTIME_DIR` is available.
+
+`fipstop` also reads the IPv6 adapter's status socket beside the
+control socket, given with `-s` or by default, named by the rule in
+[control-socket.md](control-socket.md#where-it-is) (`control-ipv6tun.sock`
+beside `control.sock`; on Windows the control port plus 2). A symlink
+given with `-s` is followed to the real control socket first. The
+Listening on fips0 panel is read from the adapter's socket, or from the
+control socket when the adapter does not answer; an adapter socket that
+cannot be reached is skipped for the next ten refreshes. The Node tab takes
+`tun_state`, `tun_name` and `effective_ipv6_mtu` from the adapter only
+when the daemon's `show_status` leaves them out; with no adapter
+answering they show `disabled`, `-` and `0`.
 
 ## See also
 

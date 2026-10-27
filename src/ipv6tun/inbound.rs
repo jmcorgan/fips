@@ -10,23 +10,8 @@
 //! [`unpack`] and [`mark_ce`] are the synchronous decisions; they read only
 //! what they are given.
 
-use std::sync::mpsc::SendError;
-
 use super::ipv6_shim::decompress_ipv6;
 use super::link::Deliver;
-
-/// What became of a datagram handed to the adapter, for the node to log.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Delivery {
-    /// Queued for the host, or dropped and counted on a full queue.
-    Delivered,
-    /// The payload is not a compressed IPv6 packet.
-    Malformed,
-    /// No TUN is up to hand it to.
-    NoDevice,
-    /// The TUN writer or the embedder has gone.
-    Closed(SendError<Vec<u8>>),
-}
 
 /// The IPv6 packet `deliver` carries, from `source` to `dest`, marked CE
 /// when the datagram arrived marked, or `None` if its payload is not a

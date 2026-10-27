@@ -3296,6 +3296,9 @@ async fn test_handle_mtu_exceeded_keeps_tighter_existing_path_mtu_lookup() {
     // loosen — keep the existing value.
     tn.node.path_mtu_lookup_insert(dest_fips, 1280);
 
+    // A frame larger than the report, so the report is corroborated and
+    // reaches the lookup write this test is about.
+    note_sent_wire_len(&mut tn.node, &dest, 1600);
     let inner = build_mtu_exceeded_inner(&dest, &reporter, 1500);
     tn.node.handle_mtu_exceeded(&reporter, &inner).await;
 
@@ -11301,7 +11304,7 @@ async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>)
     nodes[2].node.install_tun(c_tx);
     let global = crate::ipv6tun::icmp::mss_ceiling(nodes[0].node.transport_mtu());
     let clamp = |nodes: &[TestNode]| {
-        crate::ipv6tun::tun::per_flow_max_mss(&nodes[0].node.test_replica(), &c_bytes, global)
+        crate::ipv6tun::mss::per_flow_max_mss(&nodes[0].node.test_replica(), &c_bytes, global)
     };
 
     let before = clamp(nodes);

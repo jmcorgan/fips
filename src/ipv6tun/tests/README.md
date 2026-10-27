@@ -1,9 +1,36 @@
 # `src/ipv6tun/tests/`
 
 Unit tests for files in `src/ipv6tun/` that keep their tests outside the source
-file. Each file here is a child module of the source file it tests, declared
-from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod <name>;`, so it
-can reach the source file's private items.
+file. Most files here are a child module of the source file they test,
+declared from that file as
+`#[cfg(test)] #[path = "tests/<file>.rs"] mod <name>;`, so they can reach the
+source file's private items. Two are not:
+
+- `mod.rs` is the module for the adapter's directory tests, those of the
+  adapter as a whole rather than of one file, declared from `../mod.rs` as
+  `#[cfg(test)] mod tests;`. It declares `scan.rs`. It checks that the
+  adapter's decision modules (`config.rs`, `core.rs`, `icmp.rs`,
+  `icmp_rate_limit.rs`, `inbound.rs`, `ipv6_shim.rs`, `mss.rs`, `mtu.rs`,
+  `outbound.rs`, `tcp_mss.rs`) read no clock and reach no async runtime,
+  channel, thread, OS or socket: a scan of each one's source, without its
+  comments, literals and test-only items, finds no async code, runtime,
+  channel or link channel end, thread, clock read (called or passed as a
+  function), OS call, socket, or path through one of the adapter's driver
+  modules, renamed or not. The limiter's public `should_send` is the one
+  clock read allowed. Every module `../mod.rs` declares must be listed as a
+  decision module or a driver, and only one; lines planted in a copy of
+  `outbound.rs` show the scan finds each kind of item, and ignores one in a
+  comment, a literal or a test-only item while still finding one a feature
+  build compiles. It is a check of names, not types: an item reached under
+  another name passes, as does I/O through `std::io` or a name lookup through
+  `ToSocketAddrs`, which are not on its lists. The DNS responder's query
+  decisions are not scanned, because they share `dns.rs` with its sockets,
+  which makes it a driver.
+- `scan.rs` is its helper module (`tests::scan`) for the tests that read the
+  adapter's own source as text: where an identifier, a string or char literal
+  (raw strings included), or a bracketed group ends. It tests no file.
+
+The others:
 
 - `dns.rs` tests `../dns.rs` as module `reply_tests`: where the DNS
   responder sends a reply to a mesh source address (`fd00::/8`) when no strict
@@ -14,7 +41,18 @@ can reach the source file's private items.
   destination address the receive path reports, and, in root
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
-  and one known residual case pinned as a test.
+  and one known residual case pinned as a test. It also pins the receive
+  loop's order (`run_responder`, on the IPv6 loopback with no mesh side): a
+  resolved identity is handed to the node before the reply is sent, so no
+  reply arrives while the identity sink holds it; and the hosts file is
+  re-read only for a query that passes the screen, not for a datagram the
+  screen drops or a query it refuses. The loop takes two synchronous steps
+  for each datagram, tested without a socket: the first
+  (`Answering::receive`) names a query from the mesh, which the loop drops,
+  or returns what the screen made of the datagram with the path a reply
+  takes, without reading the host map; the second (`answer`) answers a query
+  that passed, with the host map, and returns the reply and any identity it
+  resolved.
 - `core.rs` tests `../core.rs`: that the payload limits the node publishes
   give the same TCP MSS ceiling as the transport MTU they come from, for
   every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
@@ -30,17 +68,56 @@ can reach the source file's private items.
   definition at every `u16` input, the FSP payload limit against the
   adapter's earlier seed expression at every input, and the known answers
   at the inputs the call sites pass, including the default UDP MTU.
-- `outbound.rs` tests `../outbound.rs` as module `host_tests`: the host half
-  turns a packet to a key the adapter holds into a datagram carrying the
-  compressed packet, answers a packet to a prefix no key names with
-  Destination Unreachable and one over the published limit with Packet Too
-  Big, both built from the packet itself; and every refusal the node hands
-  back is answered byte for byte as the packet the host sent would have been
-  when the host sent it from our address. A compressed payload keeps neither
-  the source address, the destination's first byte nor the length field, so
-  a packet from a foreign source is answered as if sent from ours, and one
-  to a destination outside `fd00::/8` or with a wrong length field (which
-  only an embedder that owns the TUN can send) is quoted as rebuilt.
+- `mss.rs` tests `../mss.rs`: the per-destination TCP MSS ceiling
+  (`per_flow_max_mss`) falls back to the IPv6-minimum ceiling, capped by the
+  node-wide one, for an address with no stored path, one outside `fd00::/8`
+  and a slice of the wrong length; it takes the smaller of the node-wide
+  ceiling and the stored path's, for each destination on its own; it falls
+  back again where a stored MTU leaves no room for a payload byte, while a
+  locally seeded MTU below the actionable floor, and one at that floor, clamp
+  by their own arithmetic; and its fallback trace logs under the target
+  `fips::ipv6tun::mss`. The shared clamp the TUN writers and reader call
+  (`clamp`) clamps a SYN by the stored path to its source for a packet toward
+  the host and to its destination for one from it, leaves a packet too short
+  to hold its source unclamped, and does not clamp a segment that is not a
+  SYN.
+- `icmp.rs` tests `../icmp.rs` as module `answer_tests`: the functions that
+  build the answers the adapter owes the host and return them rather than
+  send them. Destination Unreachable (`unreachable`) is built from our address
+  for a packet owed an ICMPv6 error and not for one from a multicast source.
+  Packet Too Big (`too_big`) is judged by the per-source limiter at the time
+  given: an answer with no TUN queue up still counts against its source, so
+  one to the same source within the interval is held back, and one at the end
+  of the interval is built. The older tests of the builders stay in the
+  file's inline `tests` module.
+- `icmp_rate_limit.rs` tests `../icmp_rate_limit.rs` as module `clock_tests`:
+  the Packet Too Big limiter judged at exact times through the check that
+  takes the time (`check`), rather than by sleeping. A source is held back
+  for the whole interval after a send and allowed again once it has passed,
+  to the millisecond, with the default interval and a custom one; an attempt
+  held back does not restart the interval; and an entry is dropped by the
+  first allowed check at its maximum age and kept by one just short of it.
+  The older tests of the wrapper that reads the clock (`should_send`) stay in
+  the file's inline `tests` module.
+- `outbound.rs` tests `../outbound.rs` as module `host_tests`, on the
+  values the host half's decisions return rather than on what a channel
+  received: the host half turns a packet to a key the adapter holds into a
+  datagram carrying the compressed packet, answers a packet to a prefix no
+  key names with Destination Unreachable and one over the published limit
+  with Packet Too Big, both built from the packet itself; and every refusal
+  the node hands back is answered byte for byte as the packet the host sent
+  would have been when the host sent it from our address. A compressed
+  payload keeps neither the source address, the destination's first byte
+  nor the length field, so a packet from a foreign source is answered as if
+  sent from ours, and one to a destination outside `fd00::/8` or with a
+  wrong length field (which only an embedder that owns the TUN can send) is
+  quoted as rebuilt. The system TUN reader's decision (`from_tun`) answers a
+  destination outside `fd00::/8` itself, hairpins a packet to us with its
+  checksum finished, and clamps a SYN to the stored path before the checks
+  every packet from the host gets, which a packet an embedder sends gets
+  alone; a packet that is not IPv6 gets nothing on either path, even when
+  its bytes read as our address or a held key's; and a refusal of several
+  payloads is owed one answer each, in order.
 - `inbound.rs` tests `../inbound.rs`: the CE marking sets the ECN bits of an
   ECN-capable packet, leaves a Not-ECT packet unmarked, and leaves a packet
   too short to hold a Traffic Class unchanged; a delivered packet is rebuilt
@@ -58,7 +135,7 @@ can reach the source file's private items.
   placed after an attribute whose literal holds an unbalanced bracket, show
   the scan refuses a node address, and the scan is shown to read the
   messages it checks, with their fields, the delivery to the host among
-  them.
+  them. The scanner's handling of literals and brackets is in `scan.rs`.
 - `queue.rs` tests `../queue.rs`: a full queue toward the host drops and
   counts what it cannot hold without waiting, a queue with room again takes
   packets and its clones share one count, a queue whose reader has gone is
@@ -77,7 +154,42 @@ can reach the source file's private items.
   beside it, and a rule left by an exit without stop does not send another
   routing table's ULA traffic out the default route. It covers the pure kind
   decision (`existing_link_verdict`) and, in root network-namespace tests,
-  `TunDevice::create` and teardown themselves.
+  `TunDevice::create` and teardown themselves. The tests of the reader's
+  packet handler need no root: the reader clamps a SYN by the stored path to
+  its destination before handing it to the mesh; a closed queue toward the
+  host ends the reader when it was to hairpin a packet or answer one addressed
+  outside the mesh, and not when it was to answer a mesh destination with
+  Destination Unreachable or Packet Too Big; and a closed datagram channel to
+  the node ends it.
+- `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
+  loaded `inet fips` table that polices another interface than the TUN is
+  reported as no firewall, every listener unfiltered, and one that polices
+  the TUN classifies each listener by its rules. It also covers the
+  adapter's status: after each TUN and DNS start, stop and exit the
+  published status equals what the node's facades read from the handles,
+  the drop count is read from the current queue when asked, the status
+  socket answers `show_status` with its four keys and an unknown command as
+  unknown, the panel reads the configured TUN name while no TUN is up, a
+  named TUN is rendered by its name, and on Windows the listener binds on
+  loopback.
+- `lifecycle.rs` tests `../lifecycle.rs`: each child exit is reported once,
+  after a panic or a return, and not after an abort; the DNS responder's task
+  reports on the exit channel the start opened, the one `exits` returned;
+  the panic line logs under the target
+  `fips::ipv6tun::lifecycle` with the child it names; and what each exit
+  takes back when the node hands it over: a TUN thread's nothing, the DNS
+  responder's its published address, with its task left for the teardown;
+  and the TUN device takes the address the node's attach gave, not the seed
+  the handles were built with. It also covers how the handles answer the host
+  on the app-owned path and for a refusal: the Packet Too Big limiter counts a
+  refusal's source while no TUN queue is up, so a second refusal from it once
+  a queue is up is held back, and two oversize packets from one source in a
+  row are answered with one Packet Too Big.
+- `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
+  `target_tests`: the warning about a firewall that polices another
+  interface than the TUN keeps the `fips::control::firewall_state` target it
+  had before the module moved here, and a table that polices the TUN draws
+  no warning.
 
 - `bsdnet.rs` tests `../bsdnet.rs` (macOS and FreeBSD only) as module `tests`:
   the routing message layout and socket-address padding, the kernel's error
@@ -90,11 +202,12 @@ can reach the source file's private items.
   a second time accepting its own address and route.
 - `winnet.rs` tests `../winnet.rs` (Windows only) as module `tests`: IP
   Helper's Win32 codes surfacing for an interface that does not exist, a
-  stop with no `FIPS` adapter present succeeding, and, as Administrator, a route and an address added twice on the loopback
-  interface being accepted, the loopback's IPv6 MTU being changed through its
-  interface row, and a Wintun adapter created twice in turn coming up with
-  its address, MTU and `fd00::/8` route (this one needs `wintun.dll` on the
-  DLL search path).
+  stop with no `FIPS` adapter present succeeding, and, as Administrator, a
+  route and an address added twice on the loopback interface being
+  accepted, the loopback's IPv6 MTU being changed through its interface
+  row, and a Wintun adapter created twice in turn coming up with its
+  address, MTU and `fd00::/8` route (this one needs `wintun.dll` on the DLL
+  search path).
 
 ## Rules
 

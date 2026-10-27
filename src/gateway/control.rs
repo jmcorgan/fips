@@ -9,7 +9,6 @@ use crate::control::protocol::{Request, Response};
 use crate::gateway::pool::{MappingInfo, MappingState, PoolStatus};
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -24,12 +23,6 @@ use tracing::{debug, info, warn};
 /// `XDG_RUNTIME_DIR` / `/tmp` for non-root dev runs that don't have
 /// `/run/fips` writable.
 pub const GATEWAY_SOCKET_PATH: &str = "/run/fips/gateway.sock";
-
-/// Maximum request size in bytes (4 KB).
-const MAX_REQUEST_SIZE: usize = 4096;
-
-/// I/O timeout for client connections.
-const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Snapshot of gateway state published by the main loop.
 #[derive(Clone)]
@@ -93,62 +86,17 @@ impl GatewayControlSocket {
         }
     }
 
-    /// Handle a single client connection.
+    /// Handle a single client connection with the shared control-socket
+    /// loop, answering from the latest snapshot.
     async fn handle_connection(
         stream: tokio::net::UnixStream,
         snapshot_rx: watch::Receiver<Option<GatewaySnapshot>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (reader, mut writer) = stream.into_split();
-        let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
-
-        // Read one line with timeout and size limit
-        let read_result = tokio::time::timeout(IO_TIMEOUT, async {
-            let mut total = 0usize;
-            loop {
-                let n = buf_reader.read_line(&mut line).await?;
-                if n == 0 {
-                    break;
-                }
-                total += n;
-                if total > MAX_REQUEST_SIZE {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "request too large",
-                    ));
-                }
-                if line.ends_with('\n') {
-                    break;
-                }
-            }
-            Ok(())
-        })
-        .await;
-
-        let response = match read_result {
-            Ok(Ok(())) if line.is_empty() => Response::error("empty request"),
-            Ok(Ok(())) => match serde_json::from_str::<Request>(line.trim()) {
-                Ok(request) => dispatch_command(&request.command, &snapshot_rx),
-                Err(e) => Response::error(format!("invalid request: {e}")),
-            },
-            Ok(Err(e)) => Response::error(format!("read error: {e}")),
-            Err(_) => Response::error("read timeout"),
-        };
-
-        // Write response with timeout
-        let json = serde_json::to_string(&response)?;
-        let write_result = tokio::time::timeout(IO_TIMEOUT, async {
-            writer.write_all(json.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.shutdown().await?;
-            Ok::<_, std::io::Error>(())
-        })
-        .await;
-
-        if let Err(_) | Ok(Err(_)) = write_result {
+        let answer =
+            |request: Request| async move { dispatch_command(&request.command, &snapshot_rx) };
+        if !crate::control::serve(stream, answer).await? {
             debug!("Gateway control socket write failed or timed out");
         }
-
         Ok(())
     }
 

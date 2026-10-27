@@ -587,7 +587,7 @@ pub struct Node {
     /// `coord_cache.entries[*].path_mtu`). Every change is published to the
     /// IPv6 adapter, whose SYN/SYN-ACK clamp uses the smaller of the
     /// local-egress floor and the learned per-destination path MTU.
-    path_mtu_lookup: crate::node::path_mtu::PathMtuLookup,
+    path_mtu_lookup: crate::node::path_mtu::PathMtuMap,
     /// What this node has published to the IPv6 adapter of its node-wide
     /// payload limit, and the TCP MSS ceiling it last logged.
     ///
@@ -611,7 +611,7 @@ pub struct Node {
     /// describes: `path_mtu_lookup_release` drops both together, and peer
     /// removal is one of its callers, so a peer that never comes back leaves
     /// nothing behind.
-    path_mtu_seeded_by: Arc<std::sync::RwLock<HashMap<crate::Ipv6Address, TransportId>>>,
+    path_mtu_seeded_by: HashMap<crate::Ipv6Address, TransportId>,
     /// The embedder's wake-up for the medium-change detector, handed out by
     /// [`Node::netmon_trigger`] and into the detector at `start()`. Always
     /// allocated so the trigger works whenever it is fetched.
@@ -636,12 +636,13 @@ pub struct Node {
     packet_rx: Option<PacketRx>,
 
     // === Child Exit Channel ===
-    /// Sender half of the runtime child-liveness channel. Cloned into each
-    /// directly-observable child (the TUN reader/writer threads, the DNS task,
-    /// and the mDNS/Nostr liveness monitor) so a child self-reports its
-    /// [`Child`](crate::node::lifecycle::supervisor::Child) when it exits. Held
-    /// on `self` for the rx_loop's lifetime as the keep-alive sender so the
-    /// receiver never observes a spuriously-closed channel.
+    /// Sender half of the runtime child-liveness channel. Cloned into the
+    /// mDNS/Nostr liveness monitor so it self-reports its
+    /// [`Child`](crate::node::lifecycle::supervisor::Child) when it exits; the
+    /// IPv6 adapter's TUN threads and DNS task report on the adapter's own exit
+    /// channel instead. Held on `self` for the rx_loop's lifetime as the
+    /// keep-alive sender so the receiver never observes a spuriously-closed
+    /// channel.
     child_exit_tx: Option<tokio::sync::mpsc::Sender<crate::node::lifecycle::supervisor::Child>>,
     /// Receiver half of the runtime child-liveness channel, `take()`-en by the
     /// rx_loop select arm that feeds `Event::ChildExited` to the supervisor FSM.
@@ -1007,6 +1008,34 @@ fn build_setup_rate_limiter(config: &Config) -> SessionSetupRateLimiter {
     )
 }
 
+/// The peer aliases the IPv6 adapter's DNS responder answers for: each peer
+/// in `peers` that has an alias, as configured and in order.
+fn adapter_aliases(peers: &[crate::config::PeerConfig]) -> Vec<crate::ipv6tun::config::Alias> {
+    peers
+        .iter()
+        .filter_map(|peer| {
+            Some(crate::ipv6tun::config::Alias {
+                name: peer.alias.clone()?,
+                npub: peer.npub.clone(),
+            })
+        })
+        .collect()
+}
+
+/// What the IPv6 adapter runs by, from the node's configuration `config`:
+/// its TUN and DNS sections, the two queue sizes it reads, the control
+/// socket path and the peer aliases.
+pub(crate) fn adapter_settings(config: &Config) -> crate::ipv6tun::config::Settings {
+    crate::ipv6tun::config::Settings {
+        tun: config.tun.clone(),
+        dns: config.dns.clone(),
+        tun_channel: config.node.buffers.tun_channel,
+        host_channel: config.node.buffers.host_channel,
+        control: config.node.control.socket_path.clone(),
+        aliases: adapter_aliases(config.peers()),
+    }
+}
+
 impl Node {
     /// Create a new node from configuration.
     pub fn new(config: Config) -> Result<Self, NodeError> {
@@ -1086,7 +1115,7 @@ impl Node {
             supervisor: lifecycle::supervisor::Supervisor::new(
                 crate::ipv6tun::lifecycle::Handles::new(
                     identity.address().to_ipv6(),
-                    config.tun.enabled,
+                    adapter_settings(&config),
                 ),
             ),
             tree_state,
@@ -1180,12 +1209,12 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::default(),
+            path_mtu_lookup: Default::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
             node_mtu: handlers::host_link::NodeMtuFeed::new(),
-            path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_seeded_by: HashMap::new(),
             netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
@@ -1271,7 +1300,7 @@ impl Node {
             supervisor: lifecycle::supervisor::Supervisor::new(
                 crate::ipv6tun::lifecycle::Handles::new(
                     identity.address().to_ipv6(),
-                    config.tun.enabled,
+                    adapter_settings(&config),
                 ),
             ),
             tree_state,
@@ -1362,12 +1391,12 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::default(),
+            path_mtu_lookup: Default::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
             node_mtu: handlers::host_link::NodeMtuFeed::new(),
-            path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_seeded_by: HashMap::new(),
             netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
@@ -1783,8 +1812,10 @@ impl Node {
         let base = HostMap::from_peer_configs(self.config().peers());
         tracing::debug!(entries = base.len(), "Rebuilding peer alias maps");
         self.host_map.set_base(base.clone());
-        self.peer_acl.rebase(base.clone()).await;
-        self.supervisor.ipv6tun.publish_aliases(base);
+        self.peer_acl.rebase(base).await;
+        self.supervisor
+            .ipv6tun
+            .replace_aliases(adapter_aliases(self.config().peers()));
     }
 
     /// Return a human-readable display name for a NodeAddr.
@@ -2295,9 +2326,6 @@ impl Node {
             history: std::sync::Arc::new(self.stats_history.clone()),
             estimated_mesh_size: self.estimated_mesh_size,
             state: self.supervisor.state,
-            tun_state: self.supervisor.ipv6tun.tun_state(),
-            tun_name: self.supervisor.ipv6tun.tun_name.clone(),
-            effective_ipv6_mtu: self.effective_ipv6_mtu(),
             connection_count: self.connection_count(),
             peer_count: self.peers.len(),
             link_count: self.links.len(),
@@ -3010,7 +3038,13 @@ impl Node {
 
     /// Get the TUN interface name, if active.
     pub fn tun_name(&self) -> Option<&str> {
-        self.supervisor.ipv6tun.tun_name.as_deref()
+        self.supervisor.ipv6tun.tun_name()
+    }
+
+    /// The IPv6 adapter's status as its status socket would answer it now.
+    #[cfg(test)]
+    pub(crate) fn ipv6tun_status(&self) -> crate::ipv6tun::status::Ipv6TunStatus {
+        self.supervisor.ipv6tun.status().read()
     }
 
     // === Resource Limits ===
@@ -3589,10 +3623,7 @@ impl Node {
     /// Read the path MTU stored for a destination Ipv6Address.
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_get(&self, fips_addr: &crate::Ipv6Address) -> Option<u16> {
-        self.path_mtu_lookup
-            .read()
-            .ok()
-            .and_then(|map| map.get(fips_addr).map(|e| e.mtu))
+        self.path_mtu_lookup.get(fips_addr).map(|e| e.mtu)
     }
 
     /// Read the whole path_mtu_lookup entry, including how it is released.
@@ -3601,10 +3632,7 @@ impl Node {
         &self,
         fips_addr: &crate::Ipv6Address,
     ) -> Option<crate::node::path_mtu::PathMtuEntry> {
-        self.path_mtu_lookup
-            .read()
-            .ok()
-            .and_then(|map| map.get(fips_addr).copied())
+        self.path_mtu_lookup.get(fips_addr).copied()
     }
 
     /// The per-peer limits the IPv6 adapter would hold for this node's map,
@@ -3612,8 +3640,8 @@ impl Node {
     /// attach an adapter.
     #[cfg(test)]
     pub(crate) fn test_replica(&self) -> crate::ipv6tun::core::PathMtuReplica {
-        let map = self.path_mtu_lookup.read().unwrap();
-        let limits = map
+        let limits = self
+            .path_mtu_lookup
             .iter()
             .map(|(addr, e)| (*addr, crate::node::path_mtu::payload_limit(e.mtu)))
             .collect();
@@ -3627,27 +3655,24 @@ impl Node {
     /// the mercy of the expiry pass. Use `path_mtu_lookup_learn` for the
     /// discovery-carrier shape.
     #[cfg(test)]
-    pub(crate) fn path_mtu_lookup_insert(&self, fips_addr: crate::Ipv6Address, mtu: u16) {
-        if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
-        }
+    pub(crate) fn path_mtu_lookup_insert(&mut self, fips_addr: crate::Ipv6Address, mtu: u16) {
+        self.path_mtu_lookup
+            .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
     }
 
     /// Write an expiring path_mtu_lookup entry directly, as the discovery
     /// `LookupResponse` carrier does (for tests that drive the expiry pass).
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_learn(
-        &self,
+        &mut self,
         fips_addr: crate::Ipv6Address,
         mtu: u16,
         at_ms: u64,
     ) {
-        if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert_unkeyed(
-                fips_addr,
-                crate::node::path_mtu::PathMtuEntry::learned(mtu, at_ms),
-            );
-        }
+        self.path_mtu_lookup.insert_unkeyed(
+            fips_addr,
+            crate::node::path_mtu::PathMtuEntry::learned(mtu, at_ms),
+        );
     }
 
     /// Drop the remote-learned path MTU for a destination whose path is no
@@ -3691,45 +3716,18 @@ impl Node {
         }
 
         let fips_addr = crate::Ipv6Address::from_node_addr(addr);
-        match self.path_mtu_lookup.write() {
-            Ok(mut map) => {
-                if map.remove(&fips_addr).is_some() {
-                    tracing::debug!(
-                        dest = %self.peer_display_name(addr),
-                        fips_addr = %fips_addr,
-                        "Released path_mtu_lookup entry for an invalidated path"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    fips_addr = %fips_addr,
-                    error = %e,
-                    "path_mtu_lookup write lock poisoned; entry not released"
-                );
-                return;
-            }
+        if self.path_mtu_lookup.remove(&fips_addr).is_some() {
+            tracing::debug!(
+                dest = %self.peer_display_name(addr),
+                fips_addr = %fips_addr,
+                "Released path_mtu_lookup entry for an invalidated path"
+            );
         }
         // The seeding record describes the path just released, so it goes with
-        // it. Taken after the guard above is dropped, so
-        // `seed_path_mtu_for_link_peer` remains the only site holding both
-        // locks at once, and before the reseed below, so a peer whose link is
-        // still up writes its transport straight back in.
-        match self.path_mtu_seeded_by.write() {
-            Ok(mut seeded_by) => {
-                seeded_by.remove(&fips_addr);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    fips_addr = %fips_addr,
-                    error = %e,
-                    "path_mtu_seeded_by write lock poisoned; seeding record not released"
-                );
-            }
-        }
+        // it, before the reseed below, so a peer whose link is still up writes
+        // its transport straight back in.
+        self.path_mtu_seeded_by.remove(&fips_addr);
 
-        // The write guard above must be dropped before the seed runs: it takes
-        // the same lock, and `std::sync::RwLock` is not re-entrant.
         if let Some(peer) = self.peers.get(addr)
             && let Some(transport_id) = peer.transport_id()
             && let Some(transport_addr) = peer.current_addr().cloned()
@@ -4119,14 +4117,14 @@ impl Node {
     ///
     /// Returns None if TUN is not active or the node hasn't been started.
     pub fn tun_tx(&self) -> Option<&TunTx> {
-        self.supervisor.ipv6tun.tun_tx.as_ref()
+        self.supervisor.ipv6tun.tun_tx()
     }
 
     /// Install a TUN packet sender, standing in for the TUN writer, so a
     /// test can read what the node delivers toward the host.
     #[cfg(test)]
     pub(crate) fn install_tun(&mut self, tun_tx: impl Into<TunTx>) {
-        self.supervisor.ipv6tun.tun_tx = Some(tun_tx.into());
+        self.supervisor.ipv6tun.install_sender(tun_tx.into());
     }
 
     /// Set up an **app-owned TUN**: rather than FIPS creating a system TUN
@@ -4158,14 +4156,7 @@ impl Node {
     /// dropped and counted in [`Self::tun_tx`]'s [`TunTx::dropped`], and the
     /// node logs a warning at the first drop and at each doubling.
     pub fn enable_app_owned_tun(&mut self) -> (TunOutboundTx, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let tun_channel_size = self.config().node.buffers.tun_channel;
-        // app → mesh: the app pushes; `run_rx_loop` drains `tun_outbound_rx`.
-        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(tun_channel_size);
-        // mesh → app: the node writes inbound packets to `tun_tx`, dropping
-        // what the app has left no room for; the app pulls.
-        let (tun_tx, tun_rx) = TunTx::bounded(self.config().node.buffers.host_channel);
-        self.supervisor.ipv6tun.install_app_tun(tun_tx, outbound_rx);
-        (outbound_tx, tun_rx)
+        self.supervisor.ipv6tun.install_app_tun()
     }
 
     /// Set up an **app-owned UDP socket option**: FIPS keeps the socket, and
@@ -4336,7 +4327,7 @@ impl Node {
     /// Reading live node state from a backgrounded loop is a general gap, not
     /// one this accessor tries to close.
     pub fn dns_local_addr(&self) -> Option<std::net::SocketAddr> {
-        self.supervisor.ipv6tun.dns_local_addr
+        self.supervisor.ipv6tun.dns_local_addr()
     }
 
     /// A handle that wakes the medium-change detector (`node.netmon.*`) now

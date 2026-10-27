@@ -116,10 +116,8 @@ impl Node {
             node: PeerKey::from_xonly(&self.identity().pubkey()),
             payload_limit: self.node_mtu.published.load(Ordering::Relaxed),
         });
-        if feeds.path_mtu
-            && let Ok(mut map) = self.path_mtu_lookup.write()
-        {
-            map.attach(host_link.clone());
+        if feeds.path_mtu {
+            self.path_mtu_lookup.attach(host_link.clone());
         }
         if feeds.identity {
             // A session that holds its peer's key answers for the cache, so
@@ -145,12 +143,7 @@ impl Node {
         self.supervisor.datagram_rx = None;
         self.supervisor.learned_rx = None;
         self.identity_cache.detach();
-        // The map's sender must go even if a writer panicked holding the
-        // lock, or the adapter's task would never see the link close.
-        self.path_mtu_lookup
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .detach();
+        self.path_mtu_lookup.detach();
         self.supervisor.ipv6tun.detached().await;
     }
 

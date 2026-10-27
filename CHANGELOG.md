@@ -235,6 +235,15 @@ with v0.5.x or earlier peers.
   additionally wired into the Noise XX handshake cluster
   (msg1/msg2/msg3) and the rekey-initiator outbound sites on `next`.
 
+- The IPv6 adapter answers for its own status on a socket beside the control
+  socket, named from the control socket's file name with `-ipv6tun` before
+  its extension (`control-ipv6tun.sock` beside `control.sock`; on Windows the
+  control port plus 2, 21212 by default), bound only while
+  `node.control.enabled` is true. It answers `show_status` with `tun_state`,
+  `tun_name`, `effective_ipv6_mtu` and `host_drops` (packets toward the host
+  dropped because the host stopped reading) and `show_listening_sockets`. The
+  daemon logs one more line at start, `IPv6 adapter status socket listening`.
+
 #### Node lifecycle
 
 - Transport-medium change detection, controlled by the new `node.netmon.*`
@@ -783,6 +792,10 @@ with v0.5.x or earlier peers.
 - Tracing targets of the TUN adapter, DNS responder and ICMPv6 code move from
   `fips::upper::*` to `fips::ipv6tun::*`, because the module they log from is
   now `ipv6tun` (for example `fips::upper::tun` becomes `fips::ipv6tun::tun`).
+  The TCP MSS clamp's per-destination trace lines ("per_flow_max_mss: ...")
+  are the exception: they log as `fips::ipv6tun::mss`, so a filter that named
+  `fips::upper::tun` for them now needs `fips::ipv6tun::mss` as well as
+  `fips::ipv6tun::tun`.
   The hosts-file loader and reloader log as `fips::hosts` rather than
   `fips::upper::hosts`, since the hosts file is now a top-level module. The
   ICMPv6 Packet Too Big debug lines ("Sending ICMP Packet Too Big", "Rate
@@ -790,12 +803,14 @@ with v0.5.x or earlier peers.
   `fips::node::handlers::session`, so a `fips::node=debug` filter no longer
   shows them. All logging from TUN and DNS start and stop (for example "TUN
   device active", "Shutting down TUN interface" and "DNS responder started",
-  with their failure warnings) logs as `fips::ipv6tun::lifecycle` rather than
-  `fips::node::lifecycle`, so a filter on `fips::node::lifecycle` or
-  `fips::node` no longer selects it. An existing `RUST_LOG` filter naming an
-  old target still parses and simply stops matching, so the symptom is missing
-  log lines rather than an error. Update `RUST_LOG` filters, journal-watch
-  recipes and any log-scraping alert accordingly.
+  with their failure warnings), and the error logged when a TUN thread or the
+  DNS responder panics ("Supervised child panicked; reporting its exit"), logs
+  as `fips::ipv6tun::lifecycle` rather than `fips::node::lifecycle`, so a
+  filter on `fips::node::lifecycle` or `fips::node` no longer selects it. An
+  existing `RUST_LOG` filter naming an old target still parses and simply
+  stops matching, so the symptom is missing log lines rather than an error.
+  Update `RUST_LOG` filters, journal-watch recipes and any log-scraping alert
+  accordingly.
 
 - Runtime peer updates (`update_peers`) and `fipsctl connect` no longer dial a
   new address for a peer whose link is live, matching discovery. Such a dial
@@ -818,6 +833,23 @@ with v0.5.x or earlier peers.
   rebuilds its packet, so one whose payload is not a compressed IPv6 packet
   is now counted too; before, only a datagram whose packet was rebuilt was
   counted.
+- `fipsctl` and `fipstop` also read the IPv6 adapter's status socket beside
+  the control socket they are given, for `show_status`'s TUN fields when the
+  daemon does not give them and for the listening panel; their output is
+  unchanged, and against a daemon that has no adapter socket they show what
+  the daemon gives.
+- **Breaking for programs that read the control socket directly**: the
+  daemon's control socket no longer answers `tun_state`, `tun_name` and
+  `effective_ipv6_mtu` in `show_status`, nor the `show_listening_sockets`
+  command; the IPv6 adapter's status socket answers them (see Added).
+  `fipsctl` and `fipstop` output is unchanged. A program that reads the
+  control socket directly must ask the adapter's socket for them. Against
+  this daemon, a `fipsctl` from before this release omits `tun_state`,
+  `tun_name` and `effective_ipv6_mtu` from `show status`, and an older
+  `fipstop` shows them as `-` and hides the listening panel.
+  `fips::control::queries::show_status` returns the node's keys only. Where
+  a transport's MTU is below 110 bytes, too small for any IPv6 packet,
+  `effective_ipv6_mtu` now reads 33 rather than the transport MTU less 77.
 
 #### Packaging
 

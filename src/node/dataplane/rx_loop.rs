@@ -82,8 +82,7 @@ impl Node {
         // Take the receiver of an app-owned TUN's packets, or create a dummy
         // channel that never produces messages (when the embedder owns no
         // TUN). Holding the sender prevents the channel from closing.
-        let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.ipv6tun.tun_outbound_rx.take()
-        {
+        let (mut tun_outbound_rx, _tun_guard) = match self.supervisor.ipv6tun.app_packets() {
             Some(rx) => (rx, None),
             None => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -125,6 +124,16 @@ impl Node {
             }
         };
 
+        // The IPv6 adapter's exit receiver, or a dummy channel: the same
+        // pattern, for the same reason, as the child-liveness receiver above.
+        let (mut exit_rx, _exit_guard) = match self.supervisor.exit_rx.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
+
         // Interface-presence receiver, or a dummy channel — same pattern and
         // same reason as the child-liveness receiver above.
         let (mut presence_rx, _presence_guard) = match self.transport_presence_rx.take() {
@@ -144,6 +153,9 @@ impl Node {
 
         if self.config().node.control.enabled {
             let config = self.config().node.control.clone();
+            // The IPv6 adapter answers for itself on its own socket beside
+            // this one, bound under the same switch.
+            self.supervisor.ipv6tun.serve_status();
             let tx = control_tx.clone();
             let read_handle = self.control_read_handle();
             tokio::spawn(async move {
@@ -350,22 +362,30 @@ impl Node {
                 }
                 // Runtime child-liveness. Placed AFTER `packet_rx` so the hot
                 // inbound path keeps its `biased` priority. A directly-observable
-                // child (TUN threads, DNS/mDNS/Nostr) exited on its own; feed the
+                // child (the mDNS/Nostr monitor) exited on its own; feed the
                 // FSM, which republishes health (Degraded here — a Running node
                 // always has ≥1 transport up). `on_child_exited` only ever emits
                 // `PublishState`; other variants are ignored defensively.
                 maybe_child = child_exit_rx.recv() => {
                     if let Some(child) = maybe_child {
-                        // Drop anything the dead child published for embedders
-                        // (e.g. the DNS responder's bound address) before
-                        // republishing health, so nothing outside the node can
-                        // observe an address the listener no longer answers on.
-                        self.retract_child_publications(child);
                         self.step_child_exited(child);
                         // A transport child exiting leaves the bound set, so
                         // it can be the one that was holding the node's egress
                         // MTU down. `is_bound()` is `is_operational()` plus the
                         // presence refinement, and this moves the first half.
+                        self.refresh_tun_mss_ceiling();
+                    }
+                }
+                // The IPv6 adapter's TUN threads and DNS task, reported on the
+                // adapter's own channel and handled as the child each maps to.
+                maybe_exit = exit_rx.recv() => {
+                    if let Some(exit) = maybe_exit {
+                        // The adapter takes back what the child published (the
+                        // DNS responder's bound address) before health is
+                        // republished, so nothing outside the node can observe
+                        // an address the listener no longer answers on.
+                        self.supervisor.ipv6tun.exited(exit);
+                        self.step_child_exited(exit.into());
                         self.refresh_tun_mss_ceiling();
                     }
                 }

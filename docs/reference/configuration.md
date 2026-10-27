@@ -99,8 +99,8 @@ gateway:     # LAN gateway service (Linux only)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.control.enabled` | bool | `true` | Enable the control socket |
-| `node.control.socket_path` | string | *(auto)* | **Unix:** Socket file path. Resolution is shared by daemon and clients: `/run/fips/control.sock` when `/run/fips` exists; then `/var/run/fips/control.sock` on macOS/FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/control.sock`; finally `/tmp/fips-control.sock`. A privileged macOS daemon selects `/var/run/fips/control.sock` even when the private directory must be created after boot. **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. |
+| `node.control.enabled` | bool | `true` | Enable the control socket. The IPv6 adapter's status socket is bound beside it only while this is `true`. |
+| `node.control.socket_path` | string | *(auto)* | **Unix:** Socket file path. Resolution is shared by daemon and clients: `/run/fips/control.sock` when `/run/fips` exists; then `/var/run/fips/control.sock` on macOS/FreeBSD when its private directory exists; then `$XDG_RUNTIME_DIR/fips/control.sock`; finally `/tmp/fips-control.sock`. A privileged macOS daemon selects `/var/run/fips/control.sock` even when the private directory must be created after boot. **Windows:** TCP port number (default: `21210`); the control socket listens on `127.0.0.1` at this port. The IPv6 adapter's status socket is derived from this value: on Unix a sibling with `-ipv6tun` before the extension (`control-ipv6tun.sock` beside `control.sock`), on Windows this port plus 2 (see [control-socket.md](control-socket.md#ipv6-adapter-status-socket)). |
 
 The control socket provides access to node state and runtime management
 via the `fipsctl` command-line tool. In addition to read-only status

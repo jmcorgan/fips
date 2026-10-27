@@ -106,6 +106,26 @@ impl DnsConfig {
         }
         used
     }
+
+    /// Merge a later configuration file's `dns` section into this one.
+    ///
+    /// The later section always decides `enabled`, even when it leaves the
+    /// key at its default of true, so a later file with no `dns` section
+    /// turns the responder back on. `bind_addr`, `port` and `ttl` are taken
+    /// from the later section when it sets them.
+    pub(crate) fn merge(&mut self, other: DnsConfig) {
+        // The later file always decides `enabled`, even when it left the key at its default.
+        self.enabled = other.enabled;
+        if other.bind_addr.is_some() {
+            self.bind_addr = other.bind_addr;
+        }
+        if other.port.is_some() {
+            self.port = other.port;
+        }
+        if other.ttl.is_some() {
+            self.ttl = other.ttl;
+        }
+    }
 }
 
 /// TUN interface configuration (`tun.*`).
@@ -133,6 +153,74 @@ impl TunConfig {
     /// Get the MTU (default: 1280).
     pub fn mtu(&self) -> u16 {
         self.mtu.unwrap_or(DEFAULT_TUN_MTU)
+    }
+
+    /// Merge a later configuration file's `tun` section into this one: it
+    /// can turn the TUN on but not off, and its `name` and `mtu` are taken
+    /// when it sets them.
+    pub(crate) fn merge(&mut self, other: TunConfig) {
+        if other.enabled {
+            self.enabled = true;
+        }
+        if other.name.is_some() {
+            self.name = other.name;
+        }
+        if other.mtu.is_some() {
+            self.mtu = other.mtu;
+        }
+    }
+}
+
+/// A peer alias the `.fips` DNS responder answers for: name and npub, as
+/// configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Alias {
+    /// The alias, as the peer list gives it.
+    pub(crate) name: String,
+    /// The npub the alias names, as the peer list gives it.
+    pub(crate) npub: String,
+}
+
+/// What the IPv6 adapter runs by, handed to it when the node builds it: its
+/// two configuration sections, the node settings it reads, and the peer
+/// aliases. All of it is owned data, so no node type crosses.
+#[derive(Debug, Clone)]
+pub(crate) struct Settings {
+    /// The TUN section (`tun.*`).
+    pub(crate) tun: TunConfig,
+    /// The DNS responder section (`dns.*`).
+    pub(crate) dns: DnsConfig,
+    /// How many packets an embedder that owns the TUN can queue toward the
+    /// mesh (`node.buffers.tun_channel`).
+    pub(crate) tun_channel: usize,
+    /// How many packets toward the host the TUN writer's queue, or an
+    /// embedder's, holds (`node.buffers.host_channel`).
+    pub(crate) host_channel: usize,
+    /// The node's control socket path (`node.control.socket_path`), beside
+    /// which the adapter's status socket is bound.
+    pub(crate) control: String,
+    /// The peer aliases the DNS responder answers for, until the node
+    /// replaces them.
+    pub(crate) aliases: Vec<Alias>,
+}
+
+#[cfg(test)]
+impl Settings {
+    /// Default sections, both queues 64 packets, no aliases, and the TUN
+    /// enabled when `tun`, for tests that build the adapter's handles by
+    /// themselves.
+    pub(crate) fn with_tun(tun: bool) -> Self {
+        Self {
+            tun: TunConfig {
+                enabled: tun,
+                ..Default::default()
+            },
+            dns: DnsConfig::default(),
+            tun_channel: 64,
+            host_channel: 64,
+            control: String::new(),
+            aliases: Vec::new(),
+        }
     }
 }
 

@@ -3,7 +3,13 @@
 //! The framing cost of a session datagram is the sum of FMP link framing and
 //! FSP session framing, so it belongs to neither layer's wire module alone.
 
+use crate::noise;
 use crate::proto::fsp::wire::FSP_PORT_HEADER_SIZE;
+use crate::proto::{fmp, fsp, link};
+
+/// The SessionDatagram's msg_type byte, which is also the last byte of the
+/// FMP inner header, so the sum counts it once.
+const SHARED_BYTE: usize = 1;
 
 /// FIPS base encapsulation overhead for DataPacket (excluding port payload).
 ///
@@ -34,7 +40,20 @@ use crate::proto::fsp::wire::FSP_PORT_HEADER_SIZE;
 /// Note: the FMP inner header msg_type byte IS the SessionDatagram msg_type
 /// byte (shared, not double-counted). The "35 bytes" is the SessionDatagram
 /// body after msg_type is consumed by the dispatch layer.
-pub const FIPS_OVERHEAD: u16 = 16 + 16 + 5 + 35 + 12 + 6 + 16; // 106 bytes
+pub const FIPS_OVERHEAD: u16 = (fmp::wire::ESTABLISHED_HEADER_SIZE
+    + fmp::wire::INNER_HEADER_SIZE
+    + (link::SESSION_DATAGRAM_HEADER_SIZE - SHARED_BYTE)
+    + fsp::wire::FSP_HEADER_SIZE
+    + fsp::wire::FSP_INNER_HEADER_SIZE
+    + fsp::wire::TAG_SIZE
+    + noise::TAG_SIZE) as u16;
+
+// Every payload limit and IPv6 MTU the node reports is derived from this
+// figure; a framing change that moves it has to be made here on purpose.
+const _: () = assert!(
+    FIPS_OVERHEAD == 106,
+    "the FIPS framing overhead is no longer 106 bytes"
+);
 
 /// The largest FSP payload a path MTU of `mtu` bytes admits once FMP and FSP
 /// framing and the port header are paid, saturating at zero.

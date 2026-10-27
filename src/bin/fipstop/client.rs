@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,9 +27,24 @@ impl ControlClient {
         self.send(&line).await
     }
 
+    /// Ask `command` of a socket that may not be there: `None` when it
+    /// cannot be reached, otherwise the reply as `query` gives it.
+    pub async fn probe(&self, command: &str) -> Option<Result<Value, String>> {
+        let stream = self.connect().await.ok()?;
+        Some(Self::exchange(stream, &format!("{{\"command\":\"{command}\"}}\n")).await)
+    }
+
     async fn send(&self, request: &str) -> Result<Value, String> {
         let stream = self.connect().await?;
+        Self::exchange(stream, request).await
+    }
 
+    /// Write `request` on a connected `stream`, then read and check its
+    /// one-line reply.
+    async fn exchange<S: AsyncRead + AsyncWrite>(
+        stream: S,
+        request: &str,
+    ) -> Result<Value, String> {
         let (reader, mut writer) = tokio::io::split(stream);
 
         timeout(IO_TIMEOUT, writer.write_all(request.as_bytes()))

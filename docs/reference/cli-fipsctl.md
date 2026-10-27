@@ -28,7 +28,7 @@ that defines the socket location, see
 
 | Flag | Argument | Description |
 | ---- | -------- | ----------- |
-| `-s`, `--socket` | `PATH` | Override the control-socket path (Linux/macOS) or TCP port (Windows). |
+| `-s`, `--socket` | `PATH` | Override the control-socket path (Linux/macOS) or TCP port (Windows). `fipsctl` also reads the IPv6 adapter's status socket beside the one given (see [Files](#files)). |
 | `-V` | — | Print the short version, `<version> (rev <git-hash>)`. The `rev` part is omitted when the build could not read a git revision, as in a package built from a git worktree. |
 | `--version` | — | Print the long version: short version plus build target triple. |
 | `-h`, `--help` | — | Print usage and exit. Per-subcommand help via `fipsctl <subcommand> --help`. |
@@ -338,6 +338,7 @@ so; `profile tick status` then reports `stopped_by_cap` until the next
 | ---- | ------- |
 | `/etc/fips/hosts` | Maps hostnames to npubs for the `connect`, `disconnect`, and `--peer` arguments. See [configuration.md](configuration.md). |
 | Control socket (default) | Same resolution as the daemon: `/run/fips/control.sock` if present; then `/var/run/fips/control.sock` on macOS/FreeBSD if present; then `$XDG_RUNTIME_DIR/fips/control.sock`; finally `/tmp/fips-control.sock` (Unix). A privileged macOS daemon bootstraps the private `/var/run/fips` directory. Windows uses TCP `localhost:21210`. |
+| IPv6 adapter status socket | Beside the control socket, given with `-s` or by default, named by the rule in [control-socket.md](control-socket.md#where-it-is): `control-ipv6tun.sock` beside `control.sock`, and on Windows the control port plus 2. A symlink given with `-s` is followed to the real control socket first. `show status` asks it only when the daemon's reply leaves out `tun_state`, `tun_name` or `effective_ipv6_mtu`, and takes those keys from it; with no adapter answering they show `disabled`, `-` and `0`. |
 
 If you get `Permission denied` connecting to the socket on Linux,
 add your user to the `fips` group (`sudo usermod -aG fips $USER`)

@@ -38,7 +38,7 @@
 //! Two node-owned resources are deliberately *not* `Reloadable` because
 //! neither has a "re-read from a backing source" concept:
 //!
-//! - `path_mtu_lookup` is an event-driven cache (`Arc<RwLock<HashMap>>`)
+//! - `path_mtu_lookup` is an event-driven cache (`PathMtuMap`)
 //!   populated from observed path-MTU discovery traffic, not loaded from a
 //!   file. There is nothing to poll. Release is mostly event-driven for the
 //!   same reason: an entry is dropped when the path it describes is declared

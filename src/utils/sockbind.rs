@@ -6,10 +6,11 @@
 //! `fips` group can reach it.
 //!
 //! The policy lives in one place so a change to it reaches every socket rather
-//! than whichever copy an author happened to be looking at. All three sockets
-//! use it: the control socket, the gateway control socket and the native
-//! datagram API socket. The gateway previously kept its own copy, which had
-//! already drifted in that it never set the parent's mode at all.
+//! than whichever copy an author happened to be looking at. All four sockets
+//! use it: the control socket, the IPv6 adapter's status socket beside it,
+//! the gateway control socket and the native datagram API socket. The gateway
+//! previously kept its own copy, which had already drifted in that it never
+//! set the parent's mode at all.
 
 #[cfg(unix)]
 use std::path::{Path, PathBuf};

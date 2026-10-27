@@ -43,7 +43,7 @@
 
 use serde_json::Value;
 
-use crate::control::listening::Proto;
+use super::listening::Proto;
 
 /// Classification of a (proto, port) pair against the inbound chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,16 +347,25 @@ pub fn spawn_scope_check(tun: &str) {
         let Ok(classifier) = tokio::task::spawn_blocking(FilterClassifier::query).await else {
             return;
         };
-        if let Some(scope) = classifier.foreign_scope(&tun) {
-            tracing::warn!(
-                tun = %tun,
-                firewall_iface = %scope,
-                "The inet fips firewall polices {scope}, not the TUN {tun}: \
-                 listeners on {tun} are reachable from the mesh. Set fips_if \
-                 in /etc/fips/fips.nft to the tun.name and reload the firewall"
-            );
-        }
+        warn_scope(&classifier, &tun);
     });
+}
+
+/// Warn when `classifier`'s table polices another interface than `tun`.
+#[cfg(target_os = "linux")]
+fn warn_scope(classifier: &FilterClassifier, tun: &str) {
+    if let Some(scope) = classifier.foreign_scope(tun) {
+        // Kept on the target it had in the control module, so log
+        // filters written for it still match.
+        tracing::warn!(
+            target: "fips::control::firewall_state",
+            tun = %tun,
+            firewall_iface = %scope,
+            "The inet fips firewall polices {scope}, not the TUN {tun}: \
+             listeners on {tun} are reachable from the mesh. Set fips_if \
+             in /etc/fips/fips.nft to the tun.name and reload the firewall"
+        );
+    }
 }
 
 /// Heuristic: does this rule, taken as a whole, reference our port?
@@ -531,6 +540,10 @@ fn parse_proto(s: &str) -> Option<Proto> {
         _ => None,
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/firewall_state.rs"]
+mod target_tests;
 
 #[cfg(test)]
 mod tests {

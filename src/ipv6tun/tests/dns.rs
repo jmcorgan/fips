@@ -1,5 +1,8 @@
 //! Tests of where the DNS responder sends a reply to a mesh source address
-//! when no strict pin to the arrival interface is known to hold.
+//! when no strict pin to the arrival interface is known to hold, and of the
+//! order in which its receive loop reports an identity, sends the reply and
+//! refreshes the host map, and of the two synchronous steps that loop takes
+//! for each datagram.
 
 #[cfg(target_os = "linux")]
 use super::tests::{ForgedSourceNetns, bind_pktinfo, expect_answer, send_unanswered};
@@ -732,4 +735,181 @@ async fn a_forged_mesh_source_still_reaches_a_bare_mesh_interface_when_the_mesh_
         "the residual case changed: with fd99::1 on other0 and fips0 bare, {into_mesh} \
          replies left by fips0"
     );
+}
+
+/// An identity sink that counts each identity and then holds the responder
+/// until the test releases it.
+struct Held {
+    /// How many identities the responder has handed over.
+    seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Released by the test to let the responder go on.
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl IdentitySink for Held {
+    async fn resolved(&self, _identity: DnsResolvedIdentity) {
+        self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.release.notified().await;
+    }
+}
+
+/// A responder on the IPv6 loopback with no mesh side, its address, and a
+/// client socket beside it.
+async fn loopback_responder(
+    identity: impl IdentitySink + Send + 'static,
+    reloader: HostMapReloader,
+) -> (std::net::SocketAddr, tokio::net::UdpSocket) {
+    let socket = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+    let to = socket.local_addr().unwrap();
+    tokio::spawn(run_responder(
+        socket,
+        identity,
+        300,
+        reloader,
+        None,
+        MeshSide::default(),
+    ));
+    (to, tokio::net::UdpSocket::bind("[::1]:0").await.unwrap())
+}
+
+/// The responder hands a resolved identity over before it sends the reply:
+/// while the identity sink holds it, no reply reaches the client, and once
+/// the sink lets go the reply does.
+#[tokio::test]
+async fn the_identity_is_handed_over_before_the_reply_is_sent() {
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let held = Held {
+        seen: seen.clone(),
+        release: release.clone(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let reloader = HostMapReloader::new(HostMap::new(), dir.path().join("hosts"));
+    let (to, client) = loopback_responder(held, reloader).await;
+    let name = format!("{}.fips", crate::Identity::generate().npub());
+    let query = super::tests::build_test_query(&name, simple_dns::TYPE::AAAA);
+    client.send_to(&query, to).await.unwrap();
+
+    let handed = || seen.load(std::sync::atomic::Ordering::SeqCst) == 1;
+    assert!(
+        crate::testutil::wait_until(handed, std::time::Duration::from_secs(5)).await,
+        "the identity reached the sink"
+    );
+    let mut buf = [0u8; 512];
+    let early = std::time::Duration::from_millis(300);
+    assert!(
+        tokio::time::timeout(early, client.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "no reply while the identity is held"
+    );
+    release.notify_one();
+    let late = std::time::Duration::from_secs(5);
+    let (len, _) = tokio::time::timeout(late, client.recv_from(&mut buf))
+        .await
+        .expect("the reply once the identity is taken")
+        .unwrap();
+    assert_eq!(
+        &buf[..2],
+        &query[..2],
+        "the reply to the query, {len} bytes"
+    );
+}
+
+/// A datagram the screen drops, and a query it refuses, cost no host-map
+/// refresh: a hosts file that appears before them is read only for the
+/// query that passes the screen after them.
+#[tokio::test]
+async fn only_a_query_that_passes_the_screen_refreshes_the_host_map() {
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts");
+    let reloader = HostMapReloader::new(HostMap::new(), path.clone());
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let (to, client) = loopback_responder(tx, reloader).await;
+    let name = format!("{}.fips", crate::Identity::generate().npub());
+    std::fs::write(
+        &path,
+        format!("gw {}\n", crate::Identity::generate().npub()),
+    )
+    .unwrap();
+
+    let mut response = super::tests::build_test_query(&name, simple_dns::TYPE::AAAA);
+    response[2] |= 0x80;
+    client.send_to(&response, to).await.unwrap();
+    let mut update = super::tests::build_test_query(&name, simple_dns::TYPE::AAAA);
+    update[2] |= 5 << 3;
+    client.send_to(&update, to).await.unwrap();
+    let mut buf = [0u8; 512];
+    let wait = std::time::Duration::from_secs(5);
+    tokio::time::timeout(wait, client.recv_from(&mut buf))
+        .await
+        .expect("the refused query is answered")
+        .unwrap();
+    assert_eq!(
+        buf[3] & 0x0f,
+        4,
+        "NOTIMP, so the dropped datagram came first"
+    );
+    assert!(
+        logs.lines_with("Reloaded hosts file").is_empty(),
+        "refreshed for a datagram the screen did not pass"
+    );
+
+    let query = super::tests::build_test_query(&name, simple_dns::TYPE::AAAA);
+    client.send_to(&query, to).await.unwrap();
+    tokio::time::timeout(wait, client.recv_from(&mut buf))
+        .await
+        .expect("the query is answered")
+        .unwrap();
+    assert_eq!(logs.lines_with("Reloaded hosts file").len(), 1);
+}
+
+/// The first step on one datagram each: a query from the mesh is dropped
+/// before the screen reads it, and what the screen drops or refuses is not
+/// passed to be answered; a query it passes is, with the path its reply
+/// takes, and the second step answers it with the identity it resolved.
+#[test]
+fn only_a_query_off_the_mesh_and_past_the_screen_is_passed_to_be_answered() {
+    let answering = Answering {
+        mesh: MeshSide {
+            ifindex: Some(3),
+            addr: None,
+        },
+        wildcard: true,
+        strict_pin: true,
+    };
+    let from = std::net::SocketAddr::new(ip("fd11:2233::7"), 4444);
+    let on = |ifindex| Arrival {
+        ifindex: Some(ifindex),
+        dst: None,
+    };
+    let name = format!("{}.fips", crate::Identity::generate().npub());
+    let query = super::tests::build_test_query(&name, simple_dns::TYPE::AAAA);
+
+    assert!(matches!(
+        answering.receive(&query, from, on(3)),
+        Received::Mesh
+    ));
+    let mut response = query.clone();
+    response[2] |= 0x80;
+    assert!(matches!(
+        answering.receive(&response, from, on(2)),
+        Received::Screened(Outcome::Drop(_), _)
+    ));
+    let mut update = query.clone();
+    update[2] |= 5 << 3;
+    assert!(matches!(
+        answering.receive(&update, from, on(2)),
+        Received::Screened(Outcome::Refuse(..), ReplyPath::Pinned(2))
+    ));
+
+    let Received::Screened(Outcome::Answer(passed), ReplyPath::Pinned(2)) =
+        answering.receive(&query, from, on(2))
+    else {
+        panic!("a query off the mesh is passed, its reply pinned");
+    };
+    let (bytes, identity) = answer(&passed, 300, &HostMap::new());
+    assert!(identity.is_some(), "an AAAA for an npub resolves it");
+    assert_eq!(&bytes[..2], &query[..2]);
 }

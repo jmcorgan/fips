@@ -31,7 +31,7 @@ async fn exchange_filters(nodes: &mut [TestNode]) {
 /// Give `node` a clamp entry for `peer` tighter than its link seed, as a
 /// path MTU notification inside a session with `peer` writes. Returns the
 /// seed.
-fn tighten_clamp(node: &Node, peer: &NodeAddr) -> Option<u16> {
+fn tighten_clamp(node: &mut Node, peer: &NodeAddr) -> Option<u16> {
     let fips = crate::Ipv6Address::from_node_addr(peer);
     let seed = node.path_mtu_lookup_get(&fips);
     node.path_mtu_lookup_insert(fips, seed.map_or(1200, |s| s - 100));
@@ -68,7 +68,7 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         );
     }
     stale_session(&mut nodes[0].node, b_addr);
-    let seed = tighten_clamp(&nodes[0].node, &b_addr);
+    let seed = tighten_clamp(&mut nodes[0].node, &b_addr);
     // A announced its tree to B at the link's setup; lift the rate limit
     // so the restart's announce goes at once.
     nodes[0]
@@ -175,7 +175,7 @@ async fn outbound_completion_with_a_changed_epoch_replaces_the_machine() {
         let r_addr = *nodes[r].node.node_addr();
         let old_link = nodes[d].node.get_peer(&r_addr).unwrap().link_id();
         stale_session(&mut nodes[d].node, r_addr);
-        let seed = tighten_clamp(&nodes[d].node, &r_addr);
+        let seed = tighten_clamp(&mut nodes[d].node, &r_addr);
 
         let restarted = restarted_node(&nodes[r], rekey_config(REKEY_AFTER_SECS));
         drop(std::mem::replace(&mut nodes[r], restarted));

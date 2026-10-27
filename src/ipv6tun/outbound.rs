@@ -1,23 +1,81 @@
 //! Host-side half of forwarding an IPv6 packet read from the TUN.
 //!
-//! This side checks the packet against the node-wide IPv6 MTU, answers the
-//! host with ICMPv6 when the mesh cannot take it or the destination names
-//! no key the adapter holds, and hands the rest to the node as a
-//! [`Datagram`]: the destination's key and the packet with its header
+//! This side checks the packet against the node-wide IPv6 MTU, decides the
+//! ICMPv6 the host is owed when the mesh cannot take it or the destination
+//! names no key the adapter holds, and otherwise makes it a [`Datagram`] for
+//! the node: the destination's key and the packet with its header
 //! compressed. What happens to it inside the mesh (session lookup, queueing
-//! while a session is set up, discovery) is the node's business; a
-//! datagram the node refuses comes back as a [`Refusal`], which [`answer`]
-//! turns into the ICMPv6 the host is owed.
+//! while a session is set up, discovery) is the node's business; a datagram
+//! the node refuses comes back as a [`Refusal`], which [`answer`] turns into
+//! the ICMPv6 the host is owed.
 //!
-//! The decisions are the synchronous functions [`admit`], [`outbound`] and
-//! [`answer`]; they read only the adapter's own state.
+//! The decisions are synchronous functions that return what to send rather
+//! than sending it, and read no clock: [`from_tun`] for a packet the system
+//! TUN reader read (the `fd00::/8` filter, the hairpin and the MSS clamp,
+//! then the shared step), [`outbound`] for the shared step, which is all a
+//! packet an embedder that owns the TUN sends gets, and [`answer`] for a
+//! refusal. The TUN reader and the adapter's handles carry the result out,
+//! and only they consult the Packet Too Big limiter, when told to.
 
-use super::core::MeshState;
-use super::icmp::IcmpContext;
+use super::core::{MeshState, PathMtuReplica};
+use super::icmp::unreachable;
 use super::ipv6_shim::{compress_ipv6, decompress_ipv6};
 use super::link::{Datagram, PeerKey, Refusal};
+use super::mss::{Remote, clamp};
 use super::mtu::ipv6_mtu;
+use super::tcp_mss::recalculate_l4_checksum;
+use crate::identity::IPV6_ADDRESS_PREFIX;
 use fips_core::identity::NodePrefix;
+use std::net::Ipv6Addr;
+
+/// What the host half does with one packet from the host, on either path.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Host {
+    /// Nothing is sent: the packet is dropped, or the answer it is owed
+    /// cannot be built.
+    Nothing,
+    /// Hand the node this datagram.
+    Mesh(Datagram),
+    /// Send the host this Destination Unreachable. A closed queue toward the
+    /// host is ignored.
+    Unreachable(Vec<u8>),
+    /// Send the host Packet Too Big for the packet, reporting this MTU, if
+    /// the limiter lets the packet's source have one. A closed queue toward
+    /// the host is ignored.
+    TooBig(u32),
+}
+
+/// What the system TUN reader does with one packet it read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FromTun {
+    /// Nothing is sent: the packet is not IPv6, or the Destination
+    /// Unreachable a destination outside the mesh is owed cannot be built.
+    Nothing,
+    /// The packet is addressed to us: write it back toward the host, its
+    /// checksum now complete. A closed queue toward the host ends the reader.
+    Hairpin,
+    /// The destination is outside `fd00::/8`: send the host this Destination
+    /// Unreachable. A closed queue toward the host ends the reader.
+    OffMesh(Vec<u8>),
+    /// A mesh destination: the shared step's verdict, on the packet as
+    /// clamped. `clamped` is the MSS a SYN was clamped to, if it was.
+    Host {
+        /// The MSS ceiling the clamp applied, if it clamped.
+        clamped: Option<u16>,
+        /// The shared step's verdict.
+        host: Host,
+    },
+}
+
+/// An answer the host is owed for a datagram the node refused.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Owed {
+    /// Send the host this Destination Unreachable.
+    Unreachable(Vec<u8>),
+    /// Send the host Packet Too Big for this rebuilt packet, reporting this
+    /// MTU, if the limiter lets its source have one.
+    TooBig(Vec<u8>, u32),
+}
 
 /// The verdict on a packet read from the TUN, before the mesh is asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,76 +114,119 @@ pub(crate) fn admit(packet: &[u8], ipv6_mtu: u16) -> Admit {
     Admit::Forward(destination(packet))
 }
 
-/// Forward one IPv6 packet from the host: check it, answer it or drop it
-/// here, or return the datagram for the node.
+/// Decide what the system TUN reader does with one packet it read.
+///
+/// A packet that is not IPv6 is dropped. A destination outside `fd00::/8`
+/// is answered Destination Unreachable from `our_addr`. A packet to
+/// `our_addr` itself is hairpinned, after its checksum is completed. Any
+/// other packet has a SYN's MSS clamped to the smaller of `ceiling` and the
+/// stored path to its destination, in place, and then takes the shared
+/// step, so a datagram carries the clamped segment and an answer quotes it.
+pub(crate) fn from_tun(
+    packet: &mut [u8],
+    ceiling: u16,
+    paths: &PathMtuReplica,
+    state: &MeshState,
+    our_addr: Ipv6Addr,
+) -> FromTun {
+    // Must be a valid IPv6 packet
+    if packet.len() < 40 || packet[0] >> 4 != 6 {
+        return FromTun::Nothing;
+    }
+    // Non-FIPS destination (outside fd00::/8): ICMPv6 Destination Unreachable
+    if packet[24] != IPV6_ADDRESS_PREFIX {
+        return unreachable(packet, our_addr).map_or(FromTun::Nothing, FromTun::OffMesh);
+    }
+    // Loopback: a packet to our own mesh address must be delivered
+    // locally, not pushed into the mesh (we have no session/route to
+    // ourselves, so it would just be dropped). The reader hairpins it back
+    // to the TUN writer for inbound delivery.
+    //
+    // Platform note: in practice this branch is reached only on macOS.
+    // macOS point-to-point `utun` interfaces egress self-addressed traffic
+    // down the tunnel into the TUN reader, so the daemon has to loop it back
+    // itself. On Linux the kernel routes traffic to our own bound
+    // addresses via `lo` before it ever reaches the TUN, so this branch
+    // never fires there. The check is kept unconditional anyway, both as a
+    // platform-independent self-delivery invariant and so the path stays
+    // exercised by the Linux-only CI unit tests.
+    if packet[24..40] == our_addr.octets() {
+        // Finish the checksum macOS leaves offloaded on self-traffic, else the
+        // local stack drops every non-SYN segment. See recalculate_l4_checksum.
+        recalculate_l4_checksum(packet);
+        return FromTun::Hairpin;
+    }
+    // Per-destination clamp: if discovery has learned a smaller path MTU
+    // for this destination, tighten the ceiling for this flow.
+    let clamped = clamp(packet, ceiling, paths, Remote::Destination);
+    FromTun::Host {
+        clamped,
+        host: outbound(packet, state, our_addr),
+    }
+}
+
+/// Decide what to do with one IPv6 packet from the host: the shared step
+/// both paths take, and all a packet an embedder that owns the TUN sends
+/// gets.
 ///
 /// A packet that is not IPv6 is dropped. A packet to a destination whose
 /// prefix names a key goes to the node whatever its size: the node judges it
 /// against the limit it carries now, which the adapter's copy can trail. A
 /// packet to any other destination is answered here, with Packet Too Big
 /// when it is over the node-wide IPv6 MTU last published, as the size check
-/// comes first, and with Destination Unreachable otherwise.
-pub(crate) fn outbound(
-    packet: &[u8],
-    state: &MeshState,
-    icmp: &mut IcmpContext<'_>,
-) -> Option<Datagram> {
+/// comes first, and with Destination Unreachable from `our_addr` otherwise.
+pub(crate) fn outbound(packet: &[u8], state: &MeshState, our_addr: Ipv6Addr) -> Host {
     if packet.len() < 40 || packet[0] >> 4 != 6 {
-        return None;
+        return Host::Nothing;
     }
     if let Some(peer) = state.key(&destination(packet)) {
         // What compression refuses, anything shorter than an IPv6 header or
         // of another version, has been dropped above.
-        let payload = compress_ipv6(packet)?;
-        return Some(Datagram { peer, payload });
+        return compress_ipv6(packet).map_or(Host::Nothing, |payload| {
+            Host::Mesh(Datagram { peer, payload })
+        });
     }
     match admit(packet, state.ipv6_mtu()) {
-        Admit::TooBig(mtu) => icmp.too_big(packet, mtu),
-        _ => icmp.dest_unreachable(packet),
+        Admit::TooBig(mtu) => Host::TooBig(mtu),
+        _ => unreachable(packet, our_addr).map_or(Host::Nothing, Host::Unreachable),
     }
-    None
 }
 
-/// Answer the host for a datagram the node refused, rebuilding each packet
-/// from its payload with our address as its source.
+/// The answers the host is owed for a datagram the node refused, in the
+/// order the refused payloads came, each packet rebuilt from its payload
+/// with `our_addr` as its source.
 ///
 /// The rebuilt packet is the one the host sent whenever the host sent it
 /// from our own address, the normal case; compression keeps every other
 /// header field it had.
-pub(crate) fn answer(refusal: Refusal, icmp: &mut IcmpContext<'_>) {
+pub(crate) fn answer(refusal: Refusal, our_addr: Ipv6Addr) -> Vec<Owed> {
     match refusal {
         Refusal::TooBig {
             peer,
             payload_limit,
             payload,
-        } => {
-            if let Some(packet) = rebuild(&payload, &peer, icmp) {
-                icmp.too_big(&packet, u32::from(ipv6_mtu(payload_limit)));
-            }
-        }
-        Refusal::TableFull { peer, payload } => {
-            if let Some(packet) = rebuild(&payload, &peer, icmp) {
-                icmp.dest_unreachable(&packet);
-            }
-        }
-        Refusal::NoRoute { peer, payloads } => {
-            for payload in payloads {
-                if let Some(packet) = rebuild(&payload, &peer, icmp) {
-                    icmp.dest_unreachable(&packet);
-                }
-            }
-        }
+        } => rebuild(&payload, &peer, our_addr)
+            .map(|packet| Owed::TooBig(packet, u32::from(ipv6_mtu(payload_limit))))
+            .into_iter()
+            .collect(),
+        Refusal::TableFull { peer, payload } => rebuild(&payload, &peer, our_addr)
+            .and_then(|packet| unreachable(&packet, our_addr))
+            .map(Owed::Unreachable)
+            .into_iter()
+            .collect(),
+        Refusal::NoRoute { peer, payloads } => payloads
+            .iter()
+            .filter_map(|payload| rebuild(payload, &peer, our_addr))
+            .filter_map(|packet| unreachable(&packet, our_addr))
+            .map(Owed::Unreachable)
+            .collect(),
     }
 }
 
-/// The IPv6 packet `payload` was compressed from, sent from our address to
-/// `peer`'s.
-fn rebuild(payload: &[u8], peer: &PeerKey, icmp: &IcmpContext<'_>) -> Option<Vec<u8>> {
-    decompress_ipv6(
-        payload,
-        icmp.our_addr().octets(),
-        *peer.address().as_bytes(),
-    )
+/// The IPv6 packet `payload` was compressed from, sent from `our_addr` to
+/// `peer`'s address.
+fn rebuild(payload: &[u8], peer: &PeerKey, our_addr: Ipv6Addr) -> Option<Vec<u8>> {
+    decompress_ipv6(payload, our_addr.octets(), *peer.address().as_bytes())
 }
 
 #[cfg(test)]

@@ -1350,9 +1350,9 @@ control-socket snapshot and the session-layer fragmentation check always did.
 The TUN reader and writer did not: they were handed a `u16` at spawn, so a
 narrow interface binding later never tightened the TCP MSS clamp and the node
 reported one effective MTU while clamping to another. The ceiling is now
-shared with those threads — an atomic beside the per-destination
-`path_mtu_lookup` they already read on the same packet — and recomputed on
-every change to the bound set.
+shared with those threads — an atomic beside the adapter's copy of the
+per-destination path MTU map, which they already read on the same packet —
+and recomputed on every change to the bound set.
 
 Both directions, for the same reason `Degraded` is a level rather than a
 latch: a narrow interface arriving must tighten the clamp or traffic

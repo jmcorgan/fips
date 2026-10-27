@@ -395,3 +395,71 @@ async fn update_peers_republishes_aliases_to_the_running_dns_responder() {
 
     node.stop().await.unwrap();
 }
+
+/// A node with a UDP transport, a DNS responder on an ephemeral loopback
+/// port and no control socket, with `peers`.
+fn dns_node(peers: Vec<PeerConfig>) -> Node {
+    let mut config = Config::new();
+    config.node.control.enabled = false;
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = true;
+    config.dns.bind_addr = Some("::1".to_string());
+    config.dns.port = Some(0);
+    config.peers = peers;
+    make_node_with(config)
+}
+
+/// A responder started after `update_peers` answers for the new aliases, as
+/// it did when each start read the node's peer list.
+#[tokio::test]
+async fn a_dns_start_after_update_peers_answers_for_the_new_aliases() {
+    let alpha = format!("alpha-{}", suffix());
+    let [a, b] = std::array::from_fn(|_| Identity::generate());
+    let mut node = dns_node(vec![peer(&a, Some(&alpha))]);
+    node.start().await.unwrap();
+    node.stop().await.unwrap();
+
+    node.update_peers(vec![peer(&b, Some(&alpha))])
+        .await
+        .unwrap();
+    node.start().await.unwrap();
+    let dns = node.dns_local_addr().expect("responder is up");
+    let answer = query_aaaa(dns, &format!("{alpha}.fips")).await;
+    assert_eq!(answer, Some(b.address().to_ipv6()));
+    node.stop().await.unwrap();
+}
+
+/// The message logged for each peer alias the maps skip.
+const SKIPPED: &str = "Skipping invalid peer alias for host map";
+
+/// A responder's start warns about an invalid alias once, as it did when it
+/// built its map from the peer list itself.
+#[tokio::test]
+async fn a_dns_start_warns_once_about_an_invalid_alias() {
+    let a = Identity::generate();
+    let mut node = dns_node(vec![peer(&a, Some("not_an_alias"))]);
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    node.start().await.unwrap();
+    assert!(node.dns_local_addr().is_some(), "responder is up");
+    assert_eq!(logs.lines_with(SKIPPED).len(), 1, "{:?}", logs.lines());
+    node.stop().await.unwrap();
+}
+
+/// Replacing the peer list warns about an invalid alias once, from the
+/// node's own maps; the running responder takes the same list quietly.
+#[tokio::test]
+async fn update_peers_warns_once_about_an_invalid_alias_with_the_responder_running() {
+    let [a, b] = std::array::from_fn(|_| Identity::generate());
+    let mut node = dns_node(vec![peer(&a, None)]);
+    node.start().await.unwrap();
+    assert!(node.dns_local_addr().is_some(), "responder is up");
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    node.update_peers(vec![peer(&b, Some("not_an_alias"))])
+        .await
+        .unwrap();
+    assert_eq!(logs.lines_with(SKIPPED).len(), 1, "{:?}", logs.lines());
+    node.stop().await.unwrap();
+}

@@ -412,10 +412,12 @@ the resolved name is rejected with ICMPv6 Destination Unreachable. Direct
 neighbours mask the omission, since their identity arrives with the Noise
 handshake and never needed resolving.
 
-The address is retracted on `stop()`. A retraction hook for a responder that
-exits on its own at runtime is wired on the consuming side, but is dormant:
-`run_dns_responder` never returns, so nothing produces the `Child::Dns` exit
-event it consumes. Watching a responder that dies mid-run is therefore not
+The address is retracted on `stop()`, and also when the responder ends on its
+own at runtime. `run_dns_responder` never returns, but the responder runs inside
+a wrapper that reports a panic as a DNS exit on the adapter's exit channel. The
+node's receive loop hands that exit to the adapter, which retracts the address
+before the node republishes its health, so an embedder never reads an address
+nobody answers on. Watching a responder that dies mid-run is still not
 something an embedder can do today, and would in any case need a way to read
 live node state from a backgrounded `run_rx_loop` — a general gap rather than a
 DNS-specific one.

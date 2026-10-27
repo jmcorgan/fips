@@ -80,9 +80,6 @@ pub fn show_status(node: &Node) -> Value {
         "link_count": node.link_count(),
         "transport_count": node.transport_count(),
         "connection_count": node.connection_count(),
-        "tun_state": format!("{}", node.tun_state()),
-        "tun_name": node.tun_name().unwrap_or("-"),
-        "effective_ipv6_mtu": node.effective_ipv6_mtu(),
         "control_socket": &node.config().node.control.socket_path,
         "pid": pid,
         "exe_path": exe_path,
@@ -169,9 +166,6 @@ pub(crate) fn show_status_from_handle(handle: &super::read_handle::ControlReadHa
         "link_count": stats.link_count,
         "transport_count": stats.transport_count,
         "connection_count": stats.connection_count,
-        "tun_state": format!("{}", stats.tun_state),
-        "tun_name": stats.tun_name.as_deref().unwrap_or("-"),
-        "effective_ipv6_mtu": stats.effective_ipv6_mtu,
         "control_socket": &ctx.config.node.control.socket_path,
         "pid": pid,
         "exe_path": exe_path,
@@ -2467,83 +2461,17 @@ pub(crate) fn show_stats_history_all_peers_from_handle(
 /// `show_listening_sockets` — IPv6 listeners reachable from fips0,
 /// each annotated with its current `inet fips` filter classification.
 ///
-/// Powers the fipstop "Listening on fips0" panel. See
-/// [`crate::control::listening`] and [`crate::control::firewall_state`]
+/// The fipstop "Listening on fips0" panel. The IPv6 adapter's status
+/// socket answers the command with this reply; the node's control socket
+/// no longer does, and this function stays for library callers. See
+/// [`crate::ipv6tun::listening`] and [`crate::ipv6tun::firewall_state`]
 /// for the per-half implementations.
 pub fn show_listening_sockets(node: &Node) -> Value {
     let tun = node
         .tun_name()
         .unwrap_or_else(|| node.config().tun.name())
         .to_string();
-    render_listening_sockets(node.identity().node_addr(), &tun)
-}
-
-/// Off-loop variant of [`show_listening_sockets`]: renders from the
-/// [`ControlReadHandle`](super::read_handle::ControlReadHandle) in the control
-/// task. Reads only the node identity (from `NodeContext`), the TUN name (from
-/// the published stats snapshot, falling back to the configured name), plus
-/// host-OS facts (`/proc` socket enumeration, nftables firewall
-/// classification) — no `Node` state — so it never round-trips the rx_loop.
-pub(crate) fn show_listening_sockets_from_handle(
-    handle: &super::read_handle::ControlReadHandle,
-) -> Value {
-    let tun = handle
-        .stats()
-        .tun_name
-        .clone()
-        .unwrap_or_else(|| handle.context().config.tun.name().to_string());
-    render_listening_sockets(handle.context().identity.node_addr(), &tun)
-}
-
-/// Shell for the listening-sockets panel. Given the node's `NodeAddr` and
-/// TUN name it derives the fips0 address, enumerates listening sockets,
-/// queries the loaded firewall, and hands all three to [`render`].
-fn render_listening_sockets(node_addr: &NodeAddr, tun: &str) -> Value {
-    let fips0 = crate::Ipv6Address::from_node_addr(node_addr).to_ipv6();
-    let sockets = super::listening::enumerate(fips0);
-    let classifier = super::firewall_state::FilterClassifier::query();
-    render(&classifier, tun, fips0, &sockets)
-}
-
-/// Pure renderer for the listening-sockets panel: classifies each socket
-/// against the loaded firewall baseline and builds the JSON reply.
-///
-/// A loaded table that does not police `tun` (scoped to another interface,
-/// or scoped in a way the classifier cannot read) protects nothing on the
-/// TUN, so the reply reports it exactly as if no table were loaded.
-pub(super) fn render(
-    classifier: &super::firewall_state::FilterClassifier,
-    tun: &str,
-    fips0: std::net::Ipv6Addr,
-    sockets: &[super::listening::ListeningSocket],
-) -> Value {
-    let unpoliced = super::firewall_state::FilterClassifier::no_firewall();
-    let classifier = if classifier.polices(tun) {
-        classifier
-    } else {
-        &unpoliced
-    };
-    let rows: Vec<Value> = sockets
-        .iter()
-        .map(|s| {
-            let filter = classifier.classify(s.proto, s.port);
-            json!({
-                "proto": s.proto.as_str(),
-                "local_addr": s.local_addr.to_string(),
-                "port": s.port,
-                "pid": s.pid,
-                "process": s.process,
-                "filter": filter.as_str(),
-                "wildcard_bind": s.wildcard_bind,
-            })
-        })
-        .collect();
-
-    json!({
-        "fips0_addr": fips0.to_string(),
-        "firewall_active": classifier.is_active(),
-        "sockets": rows,
-    })
+    crate::ipv6tun::status::listening(node.identity().address().to_ipv6(), &tun)
 }
 
 /// `show_metrics` — Counter-family snapshot served off the rx_loop.
@@ -2585,6 +2513,10 @@ pub(crate) fn show_metrics_from_handle(handle: &super::read_handle::ControlReadH
 // [`crate::control::commands::dispatch`]. The on-loop `show_*` functions above
 // are retained as the byte-identity oracle the snapshot tests compare each
 // off-loop renderer against.
+
+#[cfg(test)]
+#[path = "tests/queries.rs"]
+mod status_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2686,7 +2618,7 @@ mod tests {
     /// `show_acl` would reflect the host's live ACL state (e.g. a populated
     /// `peers.deny` flips `effective_mode` from `default_open` to
     /// `denylist`), making the snapshot machine-dependent.
-    fn build_test_node() -> Node {
+    pub(super) fn build_test_node() -> Node {
         let identity =
             Identity::from_secret_bytes(&TEST_SEED).expect("test seed is a valid secret key");
         let config = Config::new();
@@ -2726,7 +2658,7 @@ mod tests {
     /// Wrap a handler value in the on-the-wire `Response` envelope so
     /// the snapshot reflects exactly what a control-socket client
     /// receives. Pretty-printed and sorted-keyed for readable diffs.
-    fn render(value: Value) -> String {
+    pub(super) fn render(value: Value) -> String {
         let mut wrapped = json!({ "status": "ok", "data": value });
         normalize_value(&mut wrapped);
         let sorted = sort_object_keys(&wrapped);
@@ -2772,7 +2704,7 @@ mod tests {
     /// Compare `actual` against the on-disk fixture for `name`. If the
     /// fixture does not exist, write it (first-run convention) and
     /// pass. Any subsequent mismatch fails with an inline diff hint.
-    fn assert_snapshot(name: &str, actual: &str) {
+    pub(super) fn assert_snapshot(name: &str, actual: &str) {
         let path = snapshot_dir().join(format!("{name}.json"));
         if !path.exists() {
             std::fs::create_dir_all(path.parent().unwrap())
@@ -3021,7 +2953,6 @@ mod tests {
         let read_queries: &[(&str, Option<Value>)] = &[
             ("show_status", None),
             ("show_acl", None),
-            ("show_listening_sockets", None),
             ("show_metrics", None),
             ("show_stats_list", None),
             (
@@ -3296,7 +3227,6 @@ mod tests {
             params,
         };
         let off_loop = [
-            ("show_listening_sockets", None),
             ("show_stats_list", None),
             ("show_metrics", None),
             ("show_status", None),
@@ -3415,7 +3345,6 @@ mod tests {
         assert_eq!(snap.transport_count, node.transport_count());
         assert_eq!(snap.connection_count, node.connection_count());
         assert_eq!(snap.estimated_mesh_size, node.estimated_mesh_size());
-        assert_eq!(snap.effective_ipv6_mtu, node.effective_ipv6_mtu());
         // The ACL status projection matches the node's live ACL status.
         assert_eq!(snap.acl_status, node.peer_acl_status());
 
@@ -3901,101 +3830,5 @@ mod tests {
                 && std::sync::Arc::ptr_eq(&next[1], &again[1]),
             "an unchanged republish must reuse every row Arc"
         );
-    }
-
-    /// `nft -j list table inet fips` output for the shipped
-    /// `packaging/common/fips.nft` (drop-in include removed), captured
-    /// from nft 1.0.9 with the table loaded in a scratch network
-    /// namespace. Its inbound chain opens with `iifname != "fips0" return`.
-    fn stock_fips_nft_json() -> Value {
-        json!({"nftables": [
-            {"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}},
-            {"table": {"family": "inet", "name": "fips", "handle": 1}},
-            {"chain": {"family": "inet", "table": "fips", "name": "inbound", "handle": 1,
-                "type": "filter", "hook": "input", "prio": 0, "policy": "accept"}},
-            {"rule": {"family": "inet", "table": "fips", "chain": "inbound", "handle": 2, "expr": [
-                {"match": {"op": "!=", "left": {"meta": {"key": "iifname"}}, "right": "fips0"}},
-                {"return": null}
-            ]}},
-            {"rule": {"family": "inet", "table": "fips", "chain": "inbound", "handle": 3, "expr": [
-                {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["established", "related"]}},
-                {"accept": null}
-            ]}},
-            {"rule": {"family": "inet", "table": "fips", "chain": "inbound", "handle": 4, "expr": [
-                {"match": {"op": "==", "left": {"payload": {"protocol": "icmpv6", "field": "type"}}, "right": "echo-request"}},
-                {"accept": null}
-            ]}},
-            {"rule": {"family": "inet", "table": "fips", "chain": "inbound", "handle": 5, "expr": [
-                {"counter": {"packets": 0, "bytes": 0}},
-                {"drop": null}
-            ]}}
-        ]})
-    }
-
-    /// Two wildcard listeners with no drop-in allow rule: one TCP, one UDP.
-    fn two_wildcard_listeners() -> Vec<crate::control::listening::ListeningSocket> {
-        use crate::control::listening::{ListeningSocket, Proto};
-        vec![
-            ListeningSocket {
-                proto: Proto::Tcp,
-                local_addr: std::net::Ipv6Addr::UNSPECIFIED,
-                port: 22,
-                pid: Some(100),
-                process: Some("sshd".into()),
-                wildcard_bind: true,
-            },
-            ListeningSocket {
-                proto: Proto::Udp,
-                local_addr: std::net::Ipv6Addr::UNSPECIFIED,
-                port: 5353,
-                pid: Some(200),
-                process: Some("avahi-daemon".into()),
-                wildcard_bind: true,
-            },
-        ]
-    }
-
-    fn fixture_fips0_addr() -> std::net::Ipv6Addr {
-        "fd97::1".parse().unwrap()
-    }
-
-    #[test]
-    fn listening_sockets_report_no_firewall_when_the_table_polices_another_interface() {
-        let classifier =
-            crate::control::firewall_state::FilterClassifier::from_nft_json(&stock_fips_nft_json());
-        let sockets = two_wildcard_listeners();
-        let out = super::render(&classifier, "mesh0", fixture_fips0_addr(), &sockets);
-
-        let rows = out["sockets"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "both fixture listeners must be rendered");
-        assert_eq!(
-            out["firewall_active"],
-            json!(false),
-            "a table scoped to fips0 does not police TUN mesh0, so the report \
-             must not claim an active firewall; got {out}"
-        );
-        for row in rows {
-            assert_eq!(
-                row["filter"],
-                json!("no_firewall"),
-                "a listener reachable on unpoliced mesh0 must be reported as \
-                 unfiltered; got {row}"
-            );
-        }
-    }
-
-    #[test]
-    fn listening_sockets_report_filtered_rows_when_the_table_polices_the_tun() {
-        let classifier =
-            crate::control::firewall_state::FilterClassifier::from_nft_json(&stock_fips_nft_json());
-        let sockets = two_wildcard_listeners();
-        let out = super::render(&classifier, "fips0", fixture_fips0_addr(), &sockets);
-
-        let rows = out["sockets"].as_array().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(out["firewall_active"], json!(true));
-        for row in rows {
-            assert_eq!(row["filter"], json!("drop"), "row {row}");
-        }
     }
 }

@@ -51,6 +51,8 @@ mod session;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;
+#[cfg(unix)]
+mod status;
 mod survivors;
 mod tcp;
 mod traffic_diag;

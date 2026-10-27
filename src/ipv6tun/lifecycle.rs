@@ -4,34 +4,37 @@
 //! what order. The bodies that bring the TUN device and the `.fips` DNS
 //! responder up and take them down live here, together with the handles
 //! they leave behind for the node to drive and, later, to tear down.
+//!
+//! A child that ends on its own is reported on the exit channel these
+//! handles open for each start, as an [`Exit`] the node's supervisor maps to
+//! its own child. The node hands each exit back to [`Handles::exited`] first,
+//! so the handles take back what the child published.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::mpsc::SendError;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use tokio::sync::mpsc::Sender;
-use tracing::{debug, info, warn};
+use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::{debug, error, info, warn};
 
-use super::config::{DnsConfig, TunConfig};
-use super::core::{Applied, MeshState, PathMtuReplica, run_link};
+use super::config::{Alias, Settings};
+use super::core::{Applied, MeshState, PathMtuReplica};
 use super::dns::{MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
-use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::inbound::{Delivery, unpack};
+use super::inbound::unpack;
 use super::link::{
     Attach, Datagram, Deliver, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal,
 };
-use super::outbound::{answer, outbound};
+use super::outbound::{Host, Owed, answer, outbound};
+use super::status::{Responder, Shown, StatusSource, serve};
 use super::tun::{
-    HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunState, TunTx, run_tun_reader,
-    shutdown_tun_interface,
+    HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunOutboundTx, TunState, TunTx,
+    answer_oversize, run_tun_reader, shutdown_tun_interface,
 };
-use crate::Ipv6Address;
-use crate::config::PeerConfig;
 use crate::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader};
-use crate::node::lifecycle::supervisor::Child;
-use crate::node::lifecycle::{report_exit, report_thread};
+use crate::{IdentityError, Ipv6Address};
 
 /// What the DNS mesh filter judges by when the mesh interface's index is
 /// unknown, as the start-up warning names it.
@@ -40,13 +43,74 @@ const DNS_MESH_FALLBACK: &str = "the destination address";
 #[cfg(not(unix))]
 const DNS_MESH_FALLBACK: &str = "the mesh source address";
 
+/// Which of the adapter's children ended on its own while the node ran.
+///
+/// The node's supervisor maps each to its own child and runs it through its
+/// child-exit path. A stop's own exits are sent too; the node drops them (its
+/// receive loop has returned) or its supervisor ignores them (it is no
+/// longer running).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Exit {
+    /// A TUN reader or writer thread.
+    Tun,
+    /// The `.fips` DNS responder task.
+    Dns,
+}
+
+/// Where the node's supervisor reads the adapter's exits.
+pub(crate) type ExitRx = Receiver<Exit>;
+
+/// How many exits the channel holds before a reporter waits, as many as the
+/// node's own child-exit channel: the two TUN threads and the DNS task
+/// report at most once each per start.
+const EXITS: usize = 16;
+
+/// Run a child's async body, then report its exit on `tx`, whether the body
+/// returned or panicked.
+///
+/// A panic would otherwise unwind past the report and leave the node healthy
+/// with the child gone. Aborting the task still reports nothing: the abort
+/// drops this whole future, so a deliberate stop does not read as a death.
+async fn report_exit(
+    exit: Exit,
+    body: impl std::future::Future<Output = ()>,
+    tx: Option<Sender<Exit>>,
+) {
+    use futures::FutureExt;
+
+    if std::panic::AssertUnwindSafe(body)
+        .catch_unwind()
+        .await
+        .is_err()
+    {
+        // The panic hook has already printed the payload.
+        error!(child = ?exit, "Supervised child panicked; reporting its exit");
+    }
+    if let Some(tx) = tx {
+        let _ = tx.send(exit).await;
+    }
+}
+
+/// Run a child's thread body, then report its exit on `tx`, whether the body
+/// returned or panicked.
+fn report_thread(exit: Exit, body: impl FnOnce(), tx: Option<&Sender<Exit>>) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        // The panic hook has already printed the payload.
+        error!(child = ?exit, "Supervised child panicked; reporting its exit");
+    }
+    if let Some(tx) = tx {
+        let _ = tx.blocking_send(exit);
+    }
+}
+
 /// State and runtime handles of the TUN and DNS children, held by the
 /// node's supervisor.
 ///
-/// Our address, the TUN state and the ICMPv6 limiter are set when the node
-/// is built. Every other field is empty until its child starts. The TUN
-/// channels are the exception: an embedder that owns the TUN installs them
-/// before start through `Node::enable_app_owned_tun`, without a device name.
+/// Our address, the settings, the TUN state and the ICMPv6 limiter are set
+/// when the node is built. Every other field is empty until its child
+/// starts. The TUN channels are the exception: an embedder that owns the TUN
+/// installs them before start through `Node::enable_app_owned_tun`, without
+/// a device name.
 pub(crate) struct Handles {
     /// This node's IPv6 address, the source of the Destination Unreachable
     /// replies sent to the host. Set when the node is built and again from
@@ -82,53 +146,66 @@ pub(crate) struct Handles {
     /// Kernel name of the TUN device this node created, used to delete or
     /// down it at teardown. Set only while a system TUN is up; an app-owned
     /// TUN leaves it unset.
-    pub(crate) tun_name: Option<String>,
+    tun_name: Option<String>,
     /// TUN packet sender channel.
-    pub(crate) tun_tx: Option<TunTx>,
+    tun_tx: Option<TunTx>,
     /// Receiver of the packets an embedder that owns the TUN sends.
-    pub(crate) tun_outbound_rx: Option<TunOutboundRx>,
+    tun_outbound_rx: Option<TunOutboundRx>,
     /// TUN reader thread handle.
-    pub(crate) tun_reader_handle: Option<JoinHandle<()>>,
+    tun_reader_handle: Option<JoinHandle<()>>,
     /// TUN writer thread handle.
-    pub(crate) tun_writer_handle: Option<JoinHandle<()>>,
+    tun_writer_handle: Option<JoinHandle<()>>,
     /// Shutdown pipe: writing to this fd unblocks the TUN reader thread on
     /// macOS and FreeBSD. On Linux, deleting the interface via netlink
     /// serves the same purpose.
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-    pub(crate) tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
+    tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
 
     /// DNS responder task handle.
-    pub(crate) dns_task: Option<tokio::task::JoinHandle<()>>,
+    dns_task: Option<tokio::task::JoinHandle<()>>,
     /// Address the DNS responder actually bound, read back from the socket
     /// after `bind` so a port-0 config resolves to the assigned port. `Some`
     /// only while the responder is up; published to embedders through
     /// [`Node::dns_local_addr`](crate::Node::dns_local_addr).
-    pub(crate) dns_local_addr: Option<SocketAddr>,
+    dns_local_addr: Option<SocketAddr>,
     /// Sends a new peer-alias base to the running DNS responder; `Some` only
-    /// while it runs. Written through [`Handles::publish_aliases`].
+    /// while it runs. Written through [`Handles::replace_aliases`].
     dns_aliases: Option<tokio::sync::watch::Sender<HostMap>>,
-}
-
-/// What the TUN threads take from the node when they start.
-pub(crate) struct TunThreads {
-    /// Sender each TUN thread reports `Child::Tun` on when it exits.
-    pub(crate) exit_tx: Option<Sender<Child>>,
-    /// How many packets toward the host the writer's queue holds
-    /// (`node.buffers.host_channel`).
-    pub(crate) capacity: usize,
+    /// What the TUN and DNS starts and stops leave, published for the
+    /// status socket each time one of them changes it. These handles are
+    /// its only writer.
+    shown: tokio::sync::watch::Sender<Shown>,
+    /// Where the TUN threads and the DNS task report their exits, for this
+    /// start; `None` before the first start.
+    exit_tx: Option<Sender<Exit>>,
+    /// What the adapter runs by, as the node handed it over; the aliases
+    /// follow each replacement.
+    settings: Settings,
 }
 
 impl Handles {
-    /// Empty handles for a node whose address is `our_addr`, with the TUN
-    /// configured when `tun_enabled` and disabled otherwise.
-    pub(crate) fn new(our_addr: Ipv6Addr, tun_enabled: bool) -> Self {
+    /// Empty handles for a node whose address is `our_addr`, running by
+    /// `settings`: the TUN configured when its section enables it and
+    /// disabled otherwise.
+    ///
+    /// `our_addr` is the address replies to the host carry until the node
+    /// attaches us; the attach sets it from the node's key, and the TUN
+    /// device takes the attached one.
+    pub(crate) fn new(our_addr: Ipv6Addr, settings: Settings) -> Self {
+        let tun_state = if settings.tun.enabled {
+            TunState::Configured
+        } else {
+            TunState::Disabled
+        };
+        let (shown, _) = tokio::sync::watch::channel(Shown {
+            tun_state,
+            tun_name: None,
+            dns_local_addr: None,
+            drops: None,
+        });
         Self {
             our_addr,
-            tun_state: if tun_enabled {
-                TunState::Configured
-            } else {
-                TunState::Disabled
-            },
+            tun_state,
             icmp_limiter: Arc::new(Mutex::new(IcmpRateLimiter::new())),
             mesh: MeshState::new(),
             datagrams: None,
@@ -147,7 +224,29 @@ impl Handles {
             dns_task: None,
             dns_local_addr: None,
             dns_aliases: None,
+            shown,
+            exit_tx: None,
+            settings,
         }
+    }
+
+    /// Open the channel the TUN threads and the DNS task report their exits
+    /// on for this start, returning its receiver. The handles keep the
+    /// sender, so the channel stays open while the node runs.
+    ///
+    /// Call it before [`Self::spawn_tun`] and [`Self::start_dns`]: each child
+    /// they start clones the sender held when it starts.
+    pub(crate) fn exits(&mut self) -> ExitRx {
+        let (tx, rx) = tokio::sync::mpsc::channel(EXITS);
+        self.exit_tx = Some(tx);
+        rx
+    }
+
+    /// A sender on this start's exit channel, for tests that stand in for a
+    /// child that ended.
+    #[cfg(test)]
+    pub(crate) fn exit_sender(&self) -> Option<Sender<Exit>> {
+        self.exit_tx.clone()
     }
 
     /// The TUN device state.
@@ -155,17 +254,102 @@ impl Handles {
         self.tun_state
     }
 
-    /// Borrow the host-facing ICMPv6 sender: the TUN channel, our address
-    /// and the Packet Too Big rate limiter.
-    pub(crate) fn icmp(&self) -> IcmpContext<'_> {
-        IcmpContext::new(self.tun_tx.as_ref(), self.our_addr, &self.icmp_limiter)
+    /// The kernel name of the TUN device this node created, while it is up.
+    pub(crate) fn tun_name(&self) -> Option<&str> {
+        self.tun_name.as_deref()
+    }
+
+    /// Where packets toward the host go: the TUN writer's queue, or an
+    /// embedder's while it owns the TUN.
+    pub(crate) fn tun_tx(&self) -> Option<&TunTx> {
+        self.tun_tx.as_ref()
+    }
+
+    /// Whether the TUN's sender is installed. Before a start only an
+    /// embedder's TUN installs it, which is what the start gate asks; while
+    /// a system TUN runs it is also true.
+    pub(crate) fn app_tun(&self) -> bool {
+        self.tun_tx.is_some()
+    }
+
+    /// Take the receiver of the packets an embedder that owns the TUN
+    /// sends, for the node's receive loop to drain.
+    pub(crate) fn app_packets(&mut self) -> Option<TunOutboundRx> {
+        self.tun_outbound_rx.take()
+    }
+
+    /// The address the DNS responder bound, while it is up.
+    pub(crate) fn dns_local_addr(&self) -> Option<SocketAddr> {
+        self.dns_local_addr
+    }
+
+    /// Stand a sender in for the TUN writer, so a test can read what the
+    /// node delivers toward the host.
+    #[cfg(test)]
+    pub(crate) fn install_sender(&mut self, tun_tx: TunTx) {
+        self.tun_tx = Some(tun_tx);
+    }
+
+    /// Record `name` as the TUN device this node created, for tests of
+    /// what reads the name, which run on unix only.
+    #[cfg(all(test, unix))]
+    pub(crate) fn name_tun(&mut self, name: &str) {
+        self.tun_name = Some(name.to_string());
+    }
+
+    /// Publish what the TUN and DNS starts and stops have left, for the
+    /// status socket. Every method that changes one of them calls this
+    /// last.
+    fn publish(&self) {
+        self.shown.send_replace(Shown {
+            tun_state: self.tun_state,
+            tun_name: self.tun_name.clone(),
+            dns_local_addr: self.dns_local_addr,
+            drops: self.tun_tx.as_ref().map(TunTx::counter),
+        });
+    }
+
+    /// Where the status socket reads our status from.
+    pub(crate) fn status(&self) -> StatusSource {
+        StatusSource {
+            shown: self.shown.subscribe(),
+            mesh: self.mesh.clone(),
+        }
+    }
+
+    /// Answer on our status socket beside the node's control socket, from
+    /// a task of its own, until the runtime ends. The listening panel uses
+    /// the configured TUN name while no TUN is up.
+    pub(crate) fn serve_status(&self) {
+        let responder = Responder {
+            source: self.status(),
+            fips0: self.our_addr,
+            configured: self.settings.tun.name().to_string(),
+        };
+        tokio::spawn(serve(self.settings.control.clone(), responder));
     }
 
     /// Run the host half for one packet an embedder that owns the TUN sent:
     /// answer it here, or return the datagram for the node.
     pub(crate) fn outbound(&mut self, packet: &[u8]) -> Option<Datagram> {
         self.catch_up();
-        outbound(packet, &self.mesh, &mut self.icmp())
+        match outbound(packet, &self.mesh, self.our_addr) {
+            Host::Mesh(datagram) => return Some(datagram),
+            Host::Unreachable(response) => self.reply(response),
+            Host::TooBig(mtu) => {
+                answer_oversize(packet, mtu, &self.icmp_limiter, self.tun_tx.as_ref())
+            }
+            Host::Nothing => {}
+        }
+        None
+    }
+
+    /// Queue an ICMPv6 answer toward the host, if a TUN queue is up,
+    /// ignoring a closed one.
+    fn reply(&self, response: Vec<u8>) {
+        if let Some(tun_tx) = &self.tun_tx {
+            let _ = tun_tx.send(response);
+        }
     }
 
     /// Hand the host a datagram a peer sent to the IPv6 port: rebuild the
@@ -187,7 +371,14 @@ impl Handles {
 
     /// Answer the host for a datagram the node refused.
     pub(crate) fn answer(&self, refusal: Refusal) {
-        answer(refusal, &mut self.icmp());
+        for owed in answer(refusal, self.our_addr) {
+            match owed {
+                Owed::Unreachable(response) => self.reply(response),
+                Owed::TooBig(packet, mtu) => {
+                    answer_oversize(&packet, mtu, &self.icmp_limiter, self.tun_tx.as_ref())
+                }
+            }
+        }
     }
 
     /// What to ask the node for when it attaches us: port 256, the path MTU
@@ -314,25 +505,37 @@ impl Handles {
         self.clamp_inputs()
     }
 
-    /// Install the channels of a TUN the embedder owns, which makes the TUN
-    /// active without a device.
-    pub(crate) fn install_app_tun(&mut self, tun_tx: TunTx, outbound_rx: TunOutboundRx) {
+    /// Set up the channels of a TUN the embedder owns, which makes the TUN
+    /// active without a device, and return the embedder's ends: the sender
+    /// of its packets toward the mesh and the receiver of the packets
+    /// toward it, sized by the settings' two queues.
+    pub(crate) fn install_app_tun(
+        &mut self,
+    ) -> (TunOutboundTx, std::sync::mpsc::Receiver<Vec<u8>>) {
+        // app → mesh: the app pushes; `run_rx_loop` drains `tun_outbound_rx`.
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(self.settings.tun_channel);
+        // mesh → app: the node writes inbound packets to `tun_tx`, dropping
+        // what the app has left no room for; the app pulls.
+        let (tun_tx, tun_rx) = TunTx::bounded(self.settings.host_channel);
         self.tun_tx = Some(tun_tx);
         self.tun_outbound_rx = Some(outbound_rx);
         self.tun_state = TunState::Active;
+        self.publish();
+        (outbound_tx, tun_rx)
     }
 
     /// Create the TUN device, logging it, or log the failure, mark the TUN
     /// failed and return `None`.
     ///
     /// A failure here is not fatal to the node: it continues without a TUN.
-    pub(crate) async fn open_tun(
-        &mut self,
-        config: &TunConfig,
-        address: Ipv6Address,
-    ) -> Option<TunDevice> {
+    /// The device takes the address the node's attach gave us.
+    pub(crate) async fn open_tun(&mut self) -> Option<TunDevice> {
         debug_assert!(self.attached, "the TUN device opened before the attach");
-        match TunDevice::create(config, address).await {
+        let created = match self.tun_address() {
+            Ok(address) => TunDevice::create(&self.settings.tun, address).await,
+            Err(e) => Err(TunError::Configure(e.to_string())),
+        };
+        match created {
             Ok(device) => {
                 info!("TUN device active:");
                 info!("     name: {}", device.name());
@@ -343,9 +546,17 @@ impl Handles {
             Err(e) => {
                 warn!(error = %e, "Failed to initialize TUN, continuing without it");
                 self.tun_state = TunState::Failed;
+                self.publish();
                 None
             }
         }
+    }
+
+    /// The TUN device's address: ours, as the node's attach set it. Every
+    /// key's address is in `fd00::/8`, so this fails only on handles built
+    /// with some other seed and never attached.
+    pub(crate) fn tun_address(&self) -> Result<Ipv6Address, IdentityError> {
+        Ipv6Address::from_bytes(self.our_addr.octets())
     }
 
     /// Whether the TUN child is up.
@@ -392,13 +603,10 @@ impl Handles {
     /// An error here (the macOS/FreeBSD shutdown pipe, or duplicating the
     /// device fd for the writer) is fatal to the node's start, unlike a
     /// failure to create the device.
-    pub(crate) fn spawn_tun(
-        &mut self,
-        device: TunDevice,
-        threads: TunThreads,
-    ) -> Result<(), TunError> {
+    pub(crate) fn spawn_tun(&mut self, device: TunDevice) -> Result<(), TunError> {
         debug_assert!(self.attached, "the TUN threads started before the attach");
-        let TunThreads { exit_tx, capacity } = threads;
+        let capacity = self.settings.host_channel;
+        let exit_tx = self.exit_tx.clone();
         // Everything the node has said so far, including the limit it
         // published just before calling this, is in place before either
         // thread reads it.
@@ -435,13 +643,13 @@ impl Handles {
             device.create_writer(max_mss.clone(), path_mtu_lookup.clone(), capacity)?;
 
         // Spawn writer thread. On exit, including a panic,
-        // it self-reports `Child::Tun` (sync context →
+        // it self-reports `Exit::Tun` (sync context →
         // `blocking_send`); TUN is one compound child, so
         // both threads reporting is fine (the FSM de-dups
         // via `up.remove`).
         let writer_child_tx = exit_tx.clone();
         let writer_handle = thread::spawn(move || {
-            report_thread(Child::Tun, move || writer.run(), writer_child_tx.as_ref());
+            report_thread(Exit::Tun, move || writer.run(), writer_child_tx.as_ref());
         });
 
         // Clone tun_tx for the reader
@@ -462,7 +670,7 @@ impl Handles {
         };
 
         // Spawn reader thread. Like the writer, it
-        // self-reports `Child::Tun` on exit or panic (sync
+        // self-reports `Exit::Tun` on exit or panic (sync
         // context → `blocking_send`). Exactly one cfg
         // variant compiles, so the exit sender is moved
         // into that closure.
@@ -470,7 +678,7 @@ impl Handles {
         #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         let reader_handle = thread::spawn(move || {
             report_thread(
-                Child::Tun,
+                Exit::Tun,
                 move || {
                     run_tun_reader(
                         device,
@@ -489,7 +697,7 @@ impl Handles {
         #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         let reader_handle = thread::spawn(move || {
             report_thread(
-                Child::Tun,
+                Exit::Tun,
                 move || {
                     run_tun_reader(
                         device,
@@ -505,6 +713,10 @@ impl Handles {
             );
         });
 
+        // Warn if the loaded firewall polices some other interface than
+        // the TUN just brought up.
+        #[cfg(target_os = "linux")]
+        super::firewall_state::spawn_scope_check(&name);
         self.tun_name = Some(name);
         self.tun_tx = Some(tun_tx);
         self.tun_reader_handle = Some(reader_handle);
@@ -514,6 +726,7 @@ impl Handles {
             self.tun_shutdown_fd = Some(shutdown_write_fd);
         }
         self.tun_state = TunState::Active;
+        self.publish();
         self.run_link();
         Ok(())
     }
@@ -559,23 +772,19 @@ impl Handles {
             let _ = handle.join();
         }
         self.tun_state = TunState::Disabled;
+        self.publish();
     }
 
     /// Start the `.fips` DNS responder and keep its handles, returning
     /// whether it came up. A failure is logged and is not fatal to the node.
     ///
-    /// `peers` seeds the responder's own hosts map, which it reloads from
-    /// the hosts file on its own. The keys it hands out go into our own map
-    /// and to the node on the link, whose channel the node bounded at
-    /// `node.buffers.dns_channel` when it attached us. Reads the TUN device
-    /// name for the mesh-interface filter, so the TUN child, when enabled,
-    /// starts first.
-    pub(crate) fn start_dns(
-        &mut self,
-        config: &DnsConfig,
-        peers: &[PeerConfig],
-        exit_tx: Option<Sender<Child>>,
-    ) -> bool {
+    /// The settings' peer aliases seed the responder's own hosts map, which
+    /// it reloads from the hosts file on its own. The keys it hands out go
+    /// into our own map and to the node on the link, whose channel the node
+    /// bounded at `node.buffers.dns_channel` when it attached us. Reads the
+    /// TUN device name for the mesh-interface filter, so the TUN child, when
+    /// enabled, starts first.
+    pub(crate) fn start_dns(&mut self) -> bool {
         let Some(learned) = self.learned.clone() else {
             warn!("DNS responder not started: the node has not attached the IPv6 adapter");
             return false;
@@ -604,6 +813,7 @@ impl Handles {
         // `IPV6_V6ONLY=0` is set explicitly so IPv4 clients on
         // 127.0.0.1 still reach us regardless of kernel sysctl
         // defaults — but only when bind is on a wildcard / IPv6 path.
+        let config = &self.settings.dns;
         let addr_str = config.bind_addr();
         match addr_str.parse::<IpAddr>() {
             Ok(ip) => {
@@ -622,7 +832,12 @@ impl Handles {
                             keep: self.keys_fed,
                         };
                         let dns_ttl = config.ttl();
-                        let base_hosts = HostMap::from_peer_configs(peers);
+                        let base_hosts = HostMap::from_aliases(
+                            self.settings
+                                .aliases
+                                .iter()
+                                .map(|alias| (alias.name.as_str(), alias.npub.as_str())),
+                        );
                         let hosts_path = PathBuf::from(DEFAULT_HOSTS_PATH);
                         let (aliases_tx, aliases_rx) =
                             tokio::sync::watch::channel(base_hosts.clone());
@@ -660,13 +875,14 @@ impl Handles {
                         // one fired, the FSM ignores it outside
                         // `Running`.
                         let handle = tokio::spawn(report_exit(
-                            Child::Dns,
+                            Exit::Dns,
                             run_responder(socket, keys, dns_ttl, reloader, Some(aliases_rx), mesh),
-                            exit_tx,
+                            self.exit_tx.clone(),
                         ));
                         self.dns_task = Some(handle);
                         self.dns_aliases = Some(aliases_tx);
                         self.dns_local_addr = Some(local_addr);
+                        self.publish();
                         true
                     }
                     Err(e) => {
@@ -682,12 +898,25 @@ impl Handles {
         }
     }
 
-    /// Give the running DNS responder a new peer-alias base, which it applies
-    /// before answering its next query. Does nothing while it is not running.
-    pub(crate) fn publish_aliases(&self, base: HostMap) {
+    /// Replace the peer aliases the running DNS responder answers for; it
+    /// applies them before answering its next query. Does nothing while it
+    /// is not running.
+    ///
+    /// Builds the responder's map without logging the aliases it skips: the
+    /// node has just built its own maps from the same peer list and warned
+    /// about each one there, so warning again would log it twice.
+    ///
+    /// The aliases are kept whether or not the responder runs, so a later
+    /// start answers for the latest list.
+    pub(crate) fn replace_aliases(&mut self, aliases: Vec<Alias>) {
         if let Some(tx) = &self.dns_aliases {
+            let mut base = HostMap::new();
+            for alias in &aliases {
+                let _ = base.insert(&alias.name, &alias.npub);
+            }
             tx.send_replace(base);
         }
+        self.settings.aliases = aliases;
     }
 
     /// Stop the DNS responder and retract its published address.
@@ -702,7 +931,46 @@ impl Handles {
         // the listener, so an embedder polling `dns_local_addr()`
         // never dials a socket that is already gone.
         self.dns_local_addr.take();
+        self.publish();
     }
+
+    /// Take back what a child that ended on its own published, before the
+    /// node's supervisor hears of the exit.
+    ///
+    /// A DNS responder's address goes, so an embedder polling
+    /// `dns_local_addr()` never dials a socket nobody answers on. Its task
+    /// handle stays for the teardown to find, which is how the node still
+    /// counts the child as up.
+    ///
+    /// A TUN thread's exit takes nothing back: the teardown finds the TUN by
+    /// its device name, so the name stays for it.
+    pub(crate) fn exited(&mut self, exit: Exit) {
+        if exit == Exit::Dns {
+            self.dns_local_addr.take();
+            self.publish();
+        }
+    }
+}
+
+/// Apply the node's messages until the link closes, which is how the node
+/// ends it.
+async fn run_link(mut link: MeshLink, state: MeshState) {
+    while let Some(message) = link.from_mesh.recv().await {
+        state.apply(message);
+    }
+}
+
+/// What became of a datagram handed to the adapter, for the node to log.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Queued for the host, or dropped and counted on a full queue.
+    Delivered,
+    /// The payload is not a compressed IPv6 packet.
+    Malformed,
+    /// No TUN is up to hand it to.
+    NoDevice,
+    /// The TUN writer or the embedder has gone.
+    Closed(SendError<Vec<u8>>),
 }
 
 /// Where the DNS responder puts a key it hands to the host: into the
@@ -730,3 +998,7 @@ impl Learner {
         let _ = self.learned.send(report).await;
     }
 }
+
+#[cfg(test)]
+#[path = "tests/lifecycle.rs"]
+mod tests;

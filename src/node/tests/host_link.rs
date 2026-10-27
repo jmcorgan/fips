@@ -43,8 +43,6 @@ fn replica(node: &mut Node) -> HashMap<crate::Ipv6Address, u16> {
 /// The node's own map in the terms the adapter holds it.
 fn published(node: &Node) -> HashMap<crate::Ipv6Address, u16> {
     node.path_mtu_lookup
-        .read()
-        .unwrap()
         .iter()
         .map(|(addr, e)| (*addr, payload_limit(e.mtu)))
         .collect()
@@ -122,11 +120,8 @@ async fn the_attach_replays_every_entry_before_the_adapter_reads_any() {
     let mut node = tun_node();
     let keys: Vec<PeerKey> = (0..3).map(|_| any_key()).collect();
     for (i, key) in keys.iter().enumerate() {
-        node.path_mtu_lookup.write().unwrap().insert(
-            key.address(),
-            *key,
-            PathMtuEntry::held(1200 + i as u16),
-        );
+        node.path_mtu_lookup
+            .insert(key.address(), *key, PathMtuEntry::held(1200 + i as u16));
     }
     node.attach_host();
     // Nothing applied after the attach returned: the replay is in place
@@ -151,16 +146,11 @@ async fn a_second_attach_drops_what_changed_while_detached() {
     let (kept, gone) = (any_key(), any_key());
     for key in [kept, gone] {
         node.path_mtu_lookup
-            .write()
-            .unwrap()
             .insert(key.address(), key, PathMtuEntry::held(1300));
     }
     node.attach_host();
     node.detach_host().await;
-    node.path_mtu_lookup
-        .write()
-        .unwrap()
-        .remove(&gone.address());
+    node.path_mtu_lookup.remove(&gone.address());
     node.attach_host();
     assert_replica(&mut node, &gone.address(), false, "a second attach");
     assert!(replica(&mut node).contains_key(&kept.address()));
@@ -173,8 +163,6 @@ async fn an_adapter_without_the_tun_asks_for_no_path_feed() {
     let mut node = make_node_with(config);
     let key = any_key();
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert(key.address(), key, PathMtuEntry::held(1300));
     node.attach_host();
     assert!(replica(&mut node).is_empty());
@@ -224,11 +212,8 @@ async fn the_adapter_copy_follows_the_expiry_pass_and_its_re_seed() {
 
     // A remote-learned entry for a destination with no link: expires.
     let far = any_key();
-    node.path_mtu_lookup.write().unwrap().insert(
-        far.address(),
-        far,
-        PathMtuEntry::learned(1300, now),
-    );
+    node.path_mtu_lookup
+        .insert(far.address(), far, PathMtuEntry::learned(1300, now));
     // A remote-learned entry on top of a linked peer's seed: expires, and
     // the seed comes back.
     let identity = make_peer_identity();
@@ -239,11 +224,8 @@ async fn the_adapter_copy_follows_the_expiry_pass_and_its_re_seed() {
     let mut peer = crate::peer::ActivePeer::new(identity, LinkId::new(1), 0);
     peer.set_current_addr(tid, transport_addr);
     node.peers.insert(peer_addr, peer);
-    node.path_mtu_lookup.write().unwrap().insert(
-        near.address(),
-        near,
-        PathMtuEntry::learned(1280, now),
-    );
+    node.path_mtu_lookup
+        .insert(near.address(), near, PathMtuEntry::learned(1280, now));
     assert_replica(
         &mut node,
         &far.address(),
@@ -391,14 +373,9 @@ async fn a_restart_applies_nothing_the_previous_start_left_queued_on_its_link() 
     node.attach_host();
     node.supervisor.ipv6tun.run_link();
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert(gone.address(), gone, PathMtuEntry::held(1300));
     node.detach_host().await;
-    node.path_mtu_lookup
-        .write()
-        .unwrap()
-        .remove(&gone.address());
+    node.path_mtu_lookup.remove(&gone.address());
     node.attach_host();
     // Give a task left over from the first start every chance to run.
     for _ in 0..4 {
@@ -412,8 +389,6 @@ async fn an_unkeyed_entry_over_a_keyed_one_releases_it_in_the_adapter_copy() {
     let mut node = attached_node();
     let key = any_key();
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert(key.address(), key, PathMtuEntry::held(1300));
     node.path_mtu_lookup_insert(key.address(), 1200);
     assert!(!replica(&mut node).contains_key(&key.address()));
@@ -423,11 +398,9 @@ async fn an_unkeyed_entry_over_a_keyed_one_releases_it_in_the_adapter_copy() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "another peer's key")]
 fn a_path_mtu_entry_under_another_peers_key_is_refused() {
-    let node = tun_node();
+    let mut node = tun_node();
     let (addr, other) = (any_key().address(), any_key());
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert(addr, other, PathMtuEntry::held(1300));
 }
 
@@ -1449,4 +1422,38 @@ async fn a_delivery_toward_a_host_that_has_gone_logs_the_closed_queue() {
         capture.lines()
     );
     cleanup_nodes(&mut nodes).await;
+}
+
+/// The adapter is handed the node's TUN and DNS sections, both queue sizes
+/// it reads, the control socket path and the aliases of the peers that have
+/// one, as configured.
+#[test]
+fn the_adapter_settings_are_the_node_configuration_it_reads() {
+    let a = Identity::generate();
+    let peer = |id: &Identity, alias: Option<&str>| crate::config::PeerConfig {
+        npub: id.npub(),
+        alias: alias.map(String::from),
+        ..Default::default()
+    };
+    let mut config = Config::new();
+    config.tun.name = Some("mesh9".to_string());
+    config.dns.port = Some(5399);
+    config.node.buffers.host_channel = 77;
+    config.node.buffers.tun_channel = 11;
+    config.node.control.socket_path = "/run/x/node.sock".to_string();
+    config.peers = vec![peer(&a, Some("alpha")), peer(&Identity::generate(), None)];
+
+    let settings = crate::node::adapter_settings(&config);
+    assert_eq!(settings.tun.name(), "mesh9");
+    assert_eq!(settings.dns.port(), 5399);
+    assert_eq!(settings.host_channel, 77);
+    assert_eq!(settings.tun_channel, 11);
+    assert_eq!(settings.control, "/run/x/node.sock");
+    assert_eq!(
+        settings.aliases,
+        vec![crate::ipv6tun::config::Alias {
+            name: "alpha".to_string(),
+            npub: a.npub(),
+        }]
+    );
 }
