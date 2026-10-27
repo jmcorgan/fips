@@ -129,28 +129,71 @@ pub fn handle_dns_packet(
     ttl: u32,
     hosts: &HostMap,
 ) -> Option<(Vec<u8>, Option<DnsResolvedIdentity>)> {
-    match respond(query_bytes, src_port, ttl, || hosts) {
+    match screened(query_bytes, src_port) {
         Outcome::Drop(_) => None,
         Outcome::Refuse(_, bytes) => Some((bytes, None)),
-        Outcome::Answer(answer) => Some(answer),
+        Outcome::Answer(query) => Some(answer(&query, ttl, hosts)),
     }
 }
 
-/// Screen a datagram and, if it is a query, answer it.
+/// Screen a datagram: drop it, refuse it with the screen's reply, or pass it
+/// as a query to answer.
 ///
 /// The one dispatch both the receive loop and [`handle_dns_packet`] run.
-/// `hosts` is called only for a datagram the screen passes as a query, so a
-/// dropped or refused datagram costs no host-map refresh.
-fn respond<'h>(
-    datagram: &[u8],
-    src_port: u16,
-    ttl: u32,
-    hosts: impl FnOnce() -> &'h HostMap,
-) -> Outcome<(Vec<u8>, Option<DnsResolvedIdentity>)> {
+/// Neither reads the host map here; each reads it for an
+/// [`Outcome::Answer`] only, so a dropped or refused datagram costs no
+/// host-map refresh.
+fn screened(datagram: &[u8], src_port: u16) -> Outcome<Query<'_>> {
     match dnsmsg::screen(datagram, src_port) {
         Screen::Drop(reason) => Outcome::Drop(reason),
         Screen::Reply(rcode, bytes) => Outcome::Refuse(rcode, bytes),
-        Screen::Query(query) => Outcome::Answer(answer(&query, ttl, hosts())),
+        Screen::Query(query) => Outcome::Answer(query),
+    }
+}
+
+/// How the responder judges a datagram's arrival and its reply's path,
+/// fixed for its run.
+#[derive(Debug, Clone, Copy)]
+struct Answering {
+    /// The mesh side, whose queries are dropped unanswered.
+    mesh: MeshSide,
+    /// Whether the socket is bound to the wildcard address.
+    wildcard: bool,
+    /// Whether the target holds a reply strictly to the interface it names
+    /// (Linux).
+    strict_pin: bool,
+}
+
+/// What a received datagram is owed, decided before the host map is read.
+enum Received<'a> {
+    /// A query from the mesh: dropped unanswered, before the screen reads it.
+    Mesh,
+    /// What the screen made of it, and how a reply to it is sent. Only an
+    /// [`Outcome::Answer`] asks for the host map, to [`answer`] it with.
+    Screened(Outcome<Query<'a>>, ReplyPath),
+}
+
+impl Answering {
+    /// The first of the two steps for a datagram from `src` that arrived as
+    /// `arrival`. The second, for a query that passed, is [`answer`] with the
+    /// host map brought up to date.
+    fn receive<'a>(
+        &self,
+        datagram: &'a [u8],
+        src: std::net::SocketAddr,
+        arrival: Arrival,
+    ) -> Received<'a> {
+        if mesh_query(arrival, src, self.mesh) {
+            return Received::Mesh;
+        }
+        let path = reply_path(
+            src,
+            arrival.ifindex,
+            self.mesh.ifindex,
+            self.wildcard,
+            self.strict_pin,
+        );
+        Received::Screened(screened(datagram, src.port()), path)
     }
 }
 
@@ -503,7 +546,11 @@ pub(crate) async fn run_responder(
     mesh: MeshSide,
 ) {
     let mut buf = vec![0u8; dnsmsg::MAX_DATAGRAM];
-    let wildcard = wildcard_bind(socket.local_addr());
+    let answering = Answering {
+        mesh,
+        wildcard: wildcard_bind(socket.local_addr()),
+        strict_pin: cfg!(target_os = "linux"),
+    };
 
     loop {
         let (len, src, arrival) = match recv_with_pktinfo(&socket, &mut buf).await {
@@ -513,26 +560,19 @@ pub(crate) async fn run_responder(
                 continue;
             }
         };
-        let arrival_ifindex = arrival.ifindex;
 
-        if mesh_query(arrival, src, mesh) {
-            trace!(
-                src = %src,
-                ifindex = ?arrival_ifindex,
-                dst = ?arrival.dst,
-                "DNS query from the mesh, dropping"
-            );
-            continue;
-        }
-
-        let query_bytes = &buf[..len];
-
-        // For a query, apply any new peer-alias base, then check for hosts
-        // file changes (cheap stat call).
-        let outcome = respond(query_bytes, src.port(), ttl, || {
-            refresh_hosts(&mut reloader, aliases.as_mut());
-            reloader.hosts()
-        });
+        let (outcome, path) = match answering.receive(&buf[..len], src, arrival) {
+            Received::Mesh => {
+                trace!(
+                    src = %src,
+                    ifindex = ?arrival.ifindex,
+                    dst = ?arrival.dst,
+                    "DNS query from the mesh, dropping"
+                );
+                continue;
+            }
+            Received::Screened(outcome, path) => (outcome, path),
+        };
         let (response_bytes, identity) = match outcome {
             Outcome::Drop(reason) => {
                 debug!(src = %src, len, reason = reason.as_str(), "DNS datagram dropped");
@@ -542,7 +582,12 @@ pub(crate) async fn run_responder(
                 debug!(src = %src, len, rcode = %rcode, "DNS query refused");
                 (bytes, None)
             }
-            Outcome::Answer(answer) => answer,
+            Outcome::Answer(query) => {
+                // For a query only, apply any new peer-alias base, then
+                // check for hosts file changes (cheap stat call).
+                refresh_hosts(&mut reloader, aliases.as_mut());
+                answer(&query, ttl, reloader.hosts())
+            }
         };
 
         if let Some(id) = identity {
@@ -553,8 +598,6 @@ pub(crate) async fn run_responder(
             identity_tx.resolved(id).await;
         }
 
-        let strict_pin = cfg!(target_os = "linux");
-        let path = reply_path(src, arrival_ifindex, mesh.ifindex, wildcard, strict_pin);
         if let Err(e) = send_reply(&socket, &response_bytes, src, path, mesh.addr).await {
             debug!(error = %e, "DNS send error");
         }

@@ -14,7 +14,18 @@ can reach the source file's private items.
   destination address the receive path reports, and, in root
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
-  and one known residual case pinned as a test.
+  and one known residual case pinned as a test. It also pins the receive
+  loop's order (`run_responder`, on the IPv6 loopback with no mesh side): a
+  resolved identity is handed to the node before the reply is sent, so no
+  reply arrives while the identity sink holds it; and the hosts file is
+  re-read only for a query that passes the screen, not for a datagram the
+  screen drops or a query it refuses. The loop takes two synchronous steps
+  for each datagram, tested without a socket: the first
+  (`Answering::receive`) names a query from the mesh, which the loop drops,
+  or returns what the screen made of the datagram with the path a reply
+  takes, without reading the host map; the second (`answer`) answers a query
+  that passed, with the host map, and returns the reply and any identity it
+  resolved.
 - `core.rs` tests `../core.rs`: that the payload limits the node publishes
   give the same TCP MSS ceiling as the transport MTU they come from, for
   every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
