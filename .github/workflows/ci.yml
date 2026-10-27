@@ -418,6 +418,31 @@ jobs:
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 
+      # The start-up warning for transports too small for a 1280-byte IPv6
+      # packet, on the path where the node opens its own TUN. Creating the TUN
+      # needs root, so the test is `#[ignore]`d and the run above skips it.
+      # Built as the runner user and only executed under sudo, so that cargo
+      # does not run as root with root's CARGO_HOME. The grep fails the step
+      # unless the test ran and passed: a filter that matches nothing passes.
+      - name: Run the system TUN warning test as root
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib --no-run
+          BIN=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact")
+                     | select(.executable != null)
+                     | select(.target.kind[0] == "lib")
+                     | select(.target.name == "fips")
+                     | .executable' \
+            | tail -1)
+          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+            echo "could not locate the lib test binary" >&2
+            exit 1
+          fi
+          sudo "$BIN" --ignored node::tests::tun_warning:: --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/tun-warning-test.log"
+          grep -qE '^test result: ok\. 1 passed;' "$RUNNER_TEMP/tun-warning-test.log"
+
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
       # summary, so a flake is seen without failing an unrelated run. The

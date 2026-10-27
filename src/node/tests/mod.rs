@@ -43,6 +43,8 @@ mod spanning_tree;
 mod stored_msg2;
 mod tcp;
 mod tree_send_failure;
+#[cfg(target_os = "linux")]
+mod tun_warning;
 mod udp_dns;
 mod unit;
 mod update_peers;
