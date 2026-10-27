@@ -214,9 +214,9 @@ fi
 #
 # Queued, not waited on. `systemctl try-restart` without --no-block returns
 # when the jobs finish, and this scriptlet runs inside the rpm transaction,
-# holding dnf's lock: fips-dns.service is Type=oneshot and fips-dns-setup waits
-# up to 30 s for fips0, so a daemon that comes back slowly -- or not at all --
-# would hold the whole upgrade there. The restart is a request; whether it
+# holding dnf's lock: fips-dns.service is Type=oneshot and ordered after
+# fips.service, so a daemon that comes back slowly -- or not at all -- would
+# hold the whole upgrade there. The restart is a request; whether it
 # succeeds is the daemon's business and the journal's, not the package
 # manager's.
 #
