@@ -81,7 +81,8 @@ Drivers:
   setup by direct kernel or IP Helper calls, deciding what is benign by error
   code.
 
-`tests/` holds the adapter's tests; `tests/README.md` describes each file.
+`tests/` holds the adapter's tests; `src/ipv6tun/tests/README.md` describes
+each file.
 
 ## Relation to the rest of the tree
 
