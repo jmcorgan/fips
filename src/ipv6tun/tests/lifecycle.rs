@@ -1,12 +1,15 @@
 //! Tests of the adapter's start and stop: how its children's exits are
 //! reported to the node, and on which channel, what the adapter takes back
-//! when the node hands it an exit, and the address its TUN device takes.
+//! when the node hands it an exit, and the address its TUN device takes; and
+//! how the handles answer the host on the app-owned path and for a refusal.
 
 use super::{Exit, Handles, report_exit, report_thread};
 use crate::ipv6tun::config::{DnsConfig, Settings};
+use crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter;
 use crate::ipv6tun::link::{
     DatagramRx, Feeds, FromMesh, HostLink, LearnedRx, PeerKey, any_key, pair,
 };
+use std::time::Duration;
 
 /// The panic line both reporters log.
 const PANICKED: &str = "Supervised child panicked; reporting its exit";
@@ -226,4 +229,70 @@ async fn a_tun_exit_takes_nothing_back_and_a_dns_exit_takes_back_the_dns_address
     assert_eq!(handles.status().read().dns_local_addr, None);
     assert!(handles.dns_up(), "the task stays for the teardown to find");
     handles.stop_dns();
+}
+
+/// A packet of `len` bytes from `src` to `dst` that carries nothing.
+fn bare(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, len: usize) -> Vec<u8> {
+    let mut packet = vec![0u8; len];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&((len - 40) as u16).to_be_bytes());
+    packet[6] = 59;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(&src.octets());
+    packet[24..40].copy_from_slice(&dst.octets());
+    packet
+}
+
+/// The Packet Too Big limiter counts a refusal's source even while no TUN
+/// queue is up to take the answer, so a second refusal from the same source
+/// once a queue is up, inside the interval, is not answered; handles that
+/// answered none before do answer it.
+#[test]
+fn packet_too_big_with_no_tun_queue_up_still_counts_against_its_source() {
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let peer = any_key();
+    let sent = bare(us, peer.address().to_ipv6(), 1300);
+    let refusal = || crate::ipv6tun::link::Refusal::TooBig {
+        peer,
+        payload_limit: 1000,
+        payload: crate::ipv6tun::ipv6_shim::compress_ipv6(&sent).unwrap(),
+    };
+
+    // An hour's interval, so a runner stalled between the two refusals
+    // cannot let the second one through.
+    let mut counted = Handles::new(us, Settings::with_tun(true));
+    *counted.icmp_limiter.lock().unwrap() =
+        IcmpRateLimiter::with_interval(Duration::from_secs(3600));
+    counted.answer(refusal());
+    let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
+    counted.install_sender(tun_tx);
+    counted.answer(refusal());
+    assert!(rx.try_recv().is_err(), "held back by the first refusal");
+
+    let mut fresh = Handles::new(us, Settings::with_tun(true));
+    let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
+    fresh.install_sender(tun_tx);
+    fresh.answer(refusal());
+    assert_eq!(rx.try_iter().count(), 1, "answered with nothing before it");
+}
+
+/// A packet an embedder that owns the TUN sends over the node-wide MTU, to a
+/// destination no key names, is answered with Packet Too Big once; a second
+/// from the same source straight after is held back.
+#[test]
+fn repeated_packet_too_big_on_the_app_owned_path_is_answered_once() {
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let mut handles = Handles::new(us, Settings::with_tun(true));
+    // An hour's interval, so a runner stalled between the two packets cannot
+    // let the second one through.
+    *handles.icmp_limiter.lock().unwrap() =
+        IcmpRateLimiter::with_interval(Duration::from_secs(3600));
+    let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
+    handles.install_sender(tun_tx);
+    let over = bare(us, any_key().address().to_ipv6(), 1400);
+    assert!(handles.outbound(&over).is_none());
+    assert!(handles.outbound(&over).is_none());
+    let answers: Vec<Vec<u8>> = rx.try_iter().collect();
+    assert_eq!(answers.len(), 1, "one Packet Too Big");
+    assert_eq!(answers[0][40], 2, "ICMPv6 type 2");
 }

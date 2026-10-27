@@ -43,17 +43,43 @@ can reach the source file's private items.
   the host and to its destination for one from it, leaves a packet too short
   to hold its source unclamped, and does not clamp a segment that is not a
   SYN.
-- `outbound.rs` tests `../outbound.rs` as module `host_tests`: the host half
-  turns a packet to a key the adapter holds into a datagram carrying the
-  compressed packet, answers a packet to a prefix no key names with
-  Destination Unreachable and one over the published limit with Packet Too
-  Big, both built from the packet itself; and every refusal the node hands
-  back is answered byte for byte as the packet the host sent would have been
-  when the host sent it from our address. A compressed payload keeps neither
-  the source address, the destination's first byte nor the length field, so
-  a packet from a foreign source is answered as if sent from ours, and one
-  to a destination outside `fd00::/8` or with a wrong length field (which
-  only an embedder that owns the TUN can send) is quoted as rebuilt.
+- `icmp.rs` tests `../icmp.rs` as module `answer_tests`: the functions that
+  build the answers the adapter owes the host and return them rather than
+  send them. Destination Unreachable (`unreachable`) is built from our address
+  for a packet owed an ICMPv6 error and not for one from a multicast source.
+  Packet Too Big (`too_big`) is judged by the per-source limiter at the time
+  given: an answer with no TUN queue up still counts against its source, so
+  one to the same source within the interval is held back, and one at the end
+  of the interval is built. The older tests of the builders stay in the
+  file's inline `tests` module.
+- `icmp_rate_limit.rs` tests `../icmp_rate_limit.rs` as module `clock_tests`:
+  the Packet Too Big limiter judged at exact times through the check that
+  takes the time (`check`), rather than by sleeping. A source is held back
+  for the whole interval after a send and allowed again once it has passed,
+  to the millisecond, with the default interval and a custom one; an attempt
+  held back does not restart the interval; and an entry is dropped by the
+  first allowed check at its maximum age and kept by one just short of it.
+  The older tests of the wrapper that reads the clock (`should_send`) stay in
+  the file's inline `tests` module.
+- `outbound.rs` tests `../outbound.rs` as module `host_tests`, on the
+  values the host half's decisions return rather than on what a channel
+  received: the host half turns a packet to a key the adapter holds into a
+  datagram carrying the compressed packet, answers a packet to a prefix no
+  key names with Destination Unreachable and one over the published limit
+  with Packet Too Big, both built from the packet itself; and every refusal
+  the node hands back is answered byte for byte as the packet the host sent
+  would have been when the host sent it from our address. A compressed
+  payload keeps neither the source address, the destination's first byte
+  nor the length field, so a packet from a foreign source is answered as if
+  sent from ours, and one to a destination outside `fd00::/8` or with a
+  wrong length field (which only an embedder that owns the TUN can send) is
+  quoted as rebuilt. The system TUN reader's decision (`from_tun`) answers a
+  destination outside `fd00::/8` itself, hairpins a packet to us with its
+  checksum finished, and clamps a SYN to the stored path before the checks
+  every packet from the host gets, which a packet an embedder sends gets
+  alone; a packet that is not IPv6 gets nothing on either path, even when
+  its bytes read as our address or a held key's; and a refusal of several
+  payloads is owed one answer each, in order.
 - `inbound.rs` tests `../inbound.rs`: the CE marking sets the ECN bits of an
   ECN-capable packet, leaves a Not-ECT packet unmarked, and leaves a packet
   too short to hold a Traffic Class unchanged; a delivered packet is rebuilt
@@ -90,9 +116,13 @@ can reach the source file's private items.
   beside it, and a rule left by an exit without stop does not send another
   routing table's ULA traffic out the default route. It covers the pure kind
   decision (`existing_link_verdict`) and, in root network-namespace tests,
-  `TunDevice::create` and teardown themselves. One test needs no root: the
-  reader clamps a SYN by the stored path to its destination before handing it
-  to the mesh.
+  `TunDevice::create` and teardown themselves. The tests of the reader's
+  packet handler need no root: the reader clamps a SYN by the stored path to
+  its destination before handing it to the mesh; a closed queue toward the
+  host ends the reader when it was to hairpin a packet or answer one addressed
+  outside the mesh, and not when it was to answer a mesh destination with
+  Destination Unreachable or Packet Too Big; and a closed datagram channel to
+  the node ends it.
 - `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
   loaded `inet fips` table that polices another interface than the TUN is
   reported as no firewall, every listener unfiltered, and one that polices
@@ -112,7 +142,11 @@ can reach the source file's private items.
   takes back when the node hands it over: a TUN thread's nothing, the DNS
   responder's its published address, with its task left for the teardown;
   and the TUN device takes the address the node's attach gave, not the seed
-  the handles were built with.
+  the handles were built with. It also covers how the handles answer the host
+  on the app-owned path and for a refusal: the Packet Too Big limiter counts a
+  refusal's source while no TUN queue is up, so a second refusal from it once
+  a queue is up is held back, and two oversize packets from one source in a
+  row are answered with one Packet Too Big.
 - `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
   `target_tests`: the warning about a firewall that polices another
   interface than the TUN keeps the `fips::control::firewall_state` target it

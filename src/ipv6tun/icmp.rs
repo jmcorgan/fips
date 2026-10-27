@@ -2,15 +2,16 @@
 //!
 //! Builds Destination Unreachable, for a packet the mesh cannot carry to
 //! its destination, and Packet Too Big, for one larger than the path
-//! admits, and sends them toward the host through the TUN writer
-//! (`IcmpContext`). Packet Too Big is rate limited per source address.
+//! admits, with Packet Too Big rate limited per source address at the time
+//! the caller gives. The TUN reader and the adapter's handles send what
+//! these return toward the host.
 //! The IPv6 MTU arithmetic lives in `mtu.rs`; its public names are
 //! re-exported here so their paths stay.
 
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::tun::TunTx;
 use std::net::Ipv6Addr;
-use std::sync::Mutex;
+use std::time::Instant;
+
 use tracing::debug;
 
 /// ICMPv6 message types.
@@ -320,102 +321,64 @@ pub fn build_packet_too_big(
     Some(response)
 }
 
-/// Sends ICMPv6 errors back to the host through the TUN writer.
+/// Destination Unreachable (no route) for `packet`, from `our_addr`, or
+/// `None` when `packet` is not owed an ICMPv6 error (see
+/// [`should_send_icmp_error`]).
 ///
-/// Holds what both replies need: the channel to the TUN writer, this
-/// node's address, and the per-source Packet Too Big limiter. It borrows
-/// all three for the duration of one use, so it never keeps the TUN
-/// channel open past the adapter's teardown. With no TUN channel the
-/// replies are built and dropped.
-pub(crate) struct IcmpContext<'a> {
-    /// Channel to the TUN writer, `None` when no TUN is up.
-    tun_tx: Option<&'a TunTx>,
-    /// This node's address, the source of Destination Unreachable replies.
-    our_addr: Ipv6Addr,
-    /// Per-source limiter, applied to Packet Too Big only. Shared between
-    /// the threads that answer the host.
-    limiter: &'a Mutex<IcmpRateLimiter>,
+/// Not rate limited: only Packet Too Big goes through the limiter.
+pub(crate) fn unreachable(packet: &[u8], our_addr: Ipv6Addr) -> Option<Vec<u8>> {
+    if !should_send_icmp_error(packet) {
+        return None;
+    }
+    build_dest_unreachable(packet, DestUnreachableCode::NoRoute, our_addr)
 }
 
-impl<'a> IcmpContext<'a> {
-    /// Borrow the TUN channel and limiter, with our address as `our_addr`.
-    pub(crate) fn new(
-        tun_tx: Option<&'a TunTx>,
-        our_addr: Ipv6Addr,
-        limiter: &'a Mutex<IcmpRateLimiter>,
-    ) -> Self {
-        Self {
-            tun_tx,
-            our_addr,
-            limiter,
-        }
+/// Packet Too Big for `packet`, reporting `mtu`, if `limiter` lets the
+/// packet's source have one at `now`.
+///
+/// Rate-limited per source address to prevent ICMP floods from
+/// misconfigured applications sending repeated oversized packets. The
+/// limiter is consulted whether or not a TUN queue is up to take the reply
+/// (`sink`), so a source is counted the same either way; with no queue
+/// nothing is returned and nothing is logged as sent.
+pub(crate) fn too_big(
+    packet: &[u8],
+    mtu: u32,
+    limiter: &mut IcmpRateLimiter,
+    now: Instant,
+    sink: bool,
+) -> Option<Vec<u8>> {
+    // Extract source address for rate limiting
+    if packet.len() < 40 {
+        return None;
+    }
+    let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).unwrap());
+
+    if !limiter.check(src_addr, now) {
+        debug!(
+            src = %src_addr,
+            "Rate limiting ICMP Packet Too Big"
+        );
+        return None;
     }
 
-    /// This node's address.
-    pub(crate) fn our_addr(&self) -> Ipv6Addr {
-        self.our_addr
+    // Use the original packet's *destination* as the ICMP source so the
+    // kernel sees the PTB coming from a remote router, not from itself.
+    // Linux ignores PTBs whose source matches a local address, which
+    // causes a PMTUD blackhole when both src and ICMP-src are local.
+    let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).unwrap());
+    let response = build_packet_too_big(packet, mtu, dest_addr)?;
+    if !sink {
+        return None;
     }
-
-    /// Send ICMPv6 Destination Unreachable back through TUN.
-    ///
-    /// Not rate limited: only Packet Too Big goes through the limiter.
-    pub(crate) fn dest_unreachable(&self, original_packet: &[u8]) {
-        if !should_send_icmp_error(original_packet) {
-            return;
-        }
-
-        if let Some(response) =
-            build_dest_unreachable(original_packet, DestUnreachableCode::NoRoute, self.our_addr)
-            && let Some(tun_tx) = self.tun_tx
-        {
-            let _ = tun_tx.send(response);
-        }
-    }
-
-    /// Send ICMPv6 Packet Too Big back through TUN.
-    ///
-    /// Rate-limited per source address to prevent ICMP floods from
-    /// misconfigured applications sending repeated oversized packets.
-    pub(crate) fn too_big(&mut self, original_packet: &[u8], mtu: u32) {
-        // Extract source address for rate limiting
-        if original_packet.len() < 40 {
-            return;
-        }
-        let src_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[8..24]).unwrap());
-
-        // Rate limit ICMP PTB messages per source. A poisoned lock means a
-        // thread panicked mid-check; the limiter's state is still usable.
-        let allowed = self
-            .limiter
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .should_send(src_addr);
-        if !allowed {
-            debug!(
-                src = %src_addr,
-                "Rate limiting ICMP Packet Too Big"
-            );
-            return;
-        }
-
-        // Use the original packet's *destination* as the ICMP source so the
-        // kernel sees the PTB coming from a remote router, not from itself.
-        // Linux ignores PTBs whose source matches a local address, which
-        // causes a PMTUD blackhole when both src and ICMP-src are local.
-        let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[24..40]).unwrap());
-        if let Some(response) = build_packet_too_big(original_packet, mtu, dest_addr)
-            && let Some(tun_tx) = self.tun_tx
-        {
-            debug!(
-                original_src = %src_addr,
-                original_dst = %dest_addr,
-                packet_size = original_packet.len(),
-                reported_mtu = mtu,
-                "Sending ICMP Packet Too Big"
-            );
-            let _ = tun_tx.send(response);
-        }
-    }
+    debug!(
+        original_src = %src_addr,
+        original_dst = %dest_addr,
+        packet_size = packet.len(),
+        reported_mtu = mtu,
+        "Sending ICMP Packet Too Big"
+    );
+    Some(response)
 }
 
 /// Calculate ICMPv6 checksum per RFC 4443.
@@ -757,8 +720,8 @@ mod tests {
         let remote_addr: Ipv6Addr = "fddf::2".parse().unwrap();
         let original = make_ipv6_packet(local_addr, remote_addr, 6, &[0u8; 1200]); // TCP
 
-        // Pass remote_addr as our_addr — this is what IcmpContext::too_big
-        // does after the fix (original packet's dst = remote peer).
+        // Pass remote_addr as our_addr, as too_big does: the original
+        // packet's destination is the remote peer.
         let response = build_packet_too_big(&original, 1203, remote_addr);
         assert!(response.is_some());
         let response = response.unwrap();
@@ -797,3 +760,7 @@ mod tests {
         assert_eq!(stored_checksum, recomputed, "ICMPv6 checksum must be valid");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/icmp.rs"]
+mod answer_tests;

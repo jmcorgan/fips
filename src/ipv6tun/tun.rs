@@ -36,7 +36,13 @@ use tracing::{error, warn};
 use tun::Layer;
 
 use super::core::PathMtuReplica;
+use super::icmp::too_big;
+use super::icmp_rate_limit::IcmpRateLimiter;
 use super::mss::{Remote, clamp};
+use super::outbound::{FromTun, Host, from_tun};
+use crate::time::HostClock;
+use fips_core::time::Clock;
+use std::sync::{Mutex, PoisonError};
 
 pub use super::mss::{IPV6_MIN_MTU, MssCeiling};
 pub use super::queue::TunTx;
@@ -54,7 +60,7 @@ pub(crate) struct HostPath {
     /// The adapter's state: the node-wide IPv6 MTU and the key map.
     pub(crate) state: super::core::MeshState,
     /// The Packet Too Big limiter.
-    pub(crate) limiter: Arc<std::sync::Mutex<super::icmp_rate_limit::IcmpRateLimiter>>,
+    pub(crate) limiter: Arc<Mutex<IcmpRateLimiter>>,
     /// Datagrams to the node.
     pub(crate) datagrams: tokio::sync::mpsc::Sender<super::link::Datagram>,
 }
@@ -663,6 +669,11 @@ fn tun_reader_setup(device_name: &str, mtu: u16, max_mss: &MssCeiling) -> (Strin
 }
 
 /// Process a single TUN packet. Returns `false` if the reader should exit.
+///
+/// Logs the packet, takes the host half's decision for it, and carries it
+/// out: a closed datagram channel ends the reader, and so does a closed
+/// queue toward the host when the packet was to be hairpinned or answered
+/// as off the mesh; the answers to a mesh destination ignore a closed queue.
 fn handle_tun_packet(
     packet: &mut [u8],
     max_mss: u16,
@@ -672,67 +683,74 @@ fn handle_tun_packet(
     host: &HostPath,
     path_mtu_lookup: &PathMtuReplica,
 ) -> bool {
-    use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
-    use super::tcp_mss::recalculate_l4_checksum;
-
     log_ipv6_packet(packet);
 
-    // Must be a valid IPv6 packet
-    if packet.len() < 40 || packet[0] >> 4 != 6 {
-        return true;
-    }
-
-    // Check if destination is a mesh IPv6 address (fd00::/8 prefix)
-    if packet[24] == crate::identity::IPV6_ADDRESS_PREFIX {
-        // Loopback: a packet to our own mesh address must be delivered
-        // locally, not pushed into the mesh (we have no session/route to
-        // ourselves, so it would just be dropped). Hairpin it back to the TUN
-        // writer for inbound delivery.
-        //
-        // Platform note: in practice this branch is reached only on macOS.
-        // macOS point-to-point `utun` interfaces egress self-addressed traffic
-        // down the tunnel into this reader, so the daemon has to loop it back
-        // itself. On Linux the kernel routes traffic to our own bound
-        // addresses via `lo` before it ever reaches the TUN, so this branch
-        // never fires there. The check is kept unconditional anyway, both as a
-        // platform-independent self-delivery invariant and so the path stays
-        // exercised by the Linux-only CI unit tests.
-        if packet[24..40] == *our_addr.as_bytes() {
+    match from_tun(
+        packet,
+        max_mss,
+        path_mtu_lookup,
+        &host.state,
+        our_addr.to_ipv6(),
+    ) {
+        FromTun::Nothing => true,
+        FromTun::Hairpin => {
             trace!(name = %name, "Hairpinning self-addressed packet back to TUN (loopback)");
-            // Finish the checksum macOS leaves offloaded on self-traffic, else the
-            // local stack drops every non-SYN segment. See recalculate_l4_checksum.
-            recalculate_l4_checksum(packet);
-            if tun_tx.send(packet.to_vec()).is_err() {
-                return false; // Channel closed, shutdown
-            }
-            return true;
+            // Channel closed, shutdown
+            tun_tx.send(packet.to_vec()).is_ok()
         }
-
-        // Per-destination clamp: if discovery has learned a smaller path
-        // MTU for this destination, tighten the ceiling for this flow.
-        if let Some(mss) = clamp(packet, max_mss, path_mtu_lookup, Remote::Destination) {
-            trace!(name = %name, max_mss = mss, "Clamped TCP MSS in SYN packet");
-        }
-        let mut icmp =
-            super::icmp::IcmpContext::new(Some(tun_tx), our_addr.to_ipv6(), &host.limiter);
-        if let Some(datagram) = super::outbound::outbound(packet, &host.state, &mut icmp)
-            && host.datagrams.blocking_send(datagram).is_err()
-        {
-            return false; // Channel closed, shutdown
-        }
-    } else {
-        // Non-FIPS destination: send ICMPv6 Destination Unreachable
-        if should_send_icmp_error(packet)
-            && let Some(response) =
-                build_dest_unreachable(packet, DestUnreachableCode::NoRoute, our_addr.to_ipv6())
-        {
+        FromTun::OffMesh(response) => {
             trace!(name = %name, len = response.len(), "Sending ICMPv6 Destination Unreachable (non-FIPS destination)");
-            if tun_tx.send(response).is_err() {
-                return false;
+            tun_tx.send(response).is_ok()
+        }
+        FromTun::Host {
+            clamped,
+            host: verdict,
+        } => {
+            if let Some(mss) = clamped {
+                trace!(name = %name, max_mss = mss, "Clamped TCP MSS in SYN packet");
+            }
+            match verdict {
+                Host::Nothing => true,
+                // Channel closed, shutdown
+                Host::Mesh(datagram) => host.datagrams.blocking_send(datagram).is_ok(),
+                Host::Unreachable(response) => {
+                    let _ = tun_tx.send(response);
+                    true
+                }
+                Host::TooBig(mtu) => {
+                    answer_oversize(packet, mtu, &host.limiter, Some(tun_tx));
+                    true
+                }
             }
         }
     }
-    true
+}
+
+/// Answer `packet` with Packet Too Big reporting `mtu`, if the limiter lets
+/// its source have one now, and queue the answer toward the host when a
+/// queue is up. The limiter is locked, and the clock read, only here, on
+/// the packets owed one; a closed queue is ignored.
+pub(crate) fn answer_oversize(
+    packet: &[u8],
+    mtu: u32,
+    limiter: &Mutex<IcmpRateLimiter>,
+    tun_tx: Option<&TunTx>,
+) {
+    let now = std::time::Instant::from(HostClock.now());
+    // A poisoned lock means a thread panicked mid-check; the limiter's
+    // state is still usable.
+    let response = too_big(
+        packet,
+        mtu,
+        &mut limiter.lock().unwrap_or_else(PoisonError::into_inner),
+        now,
+        tun_tx.is_some(),
+    );
+    if let Some(response) = response
+        && let Some(tun_tx) = tun_tx
+    {
+        let _ = tun_tx.send(response);
+    }
 }
 
 #[cfg(unix)]

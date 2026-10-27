@@ -21,17 +21,16 @@ use tracing::{debug, error, info, warn};
 use super::config::{Alias, Settings};
 use super::core::{Applied, MeshState, PathMtuReplica, run_link};
 use super::dns::{MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
-use super::icmp::IcmpContext;
 use super::icmp_rate_limit::IcmpRateLimiter;
 use super::inbound::{Delivery, unpack};
 use super::link::{
     Attach, Datagram, Deliver, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal,
 };
-use super::outbound::{answer, outbound};
+use super::outbound::{Host, Owed, answer, outbound};
 use super::status::{Responder, Shown, StatusSource, serve};
 use super::tun::{
     HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunOutboundTx, TunState, TunTx,
-    run_tun_reader, shutdown_tun_interface,
+    answer_oversize, run_tun_reader, shutdown_tun_interface,
 };
 use crate::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader};
 use crate::{IdentityError, Ipv6Address};
@@ -329,17 +328,27 @@ impl Handles {
         tokio::spawn(serve(self.settings.control.clone(), responder));
     }
 
-    /// Borrow the host-facing ICMPv6 sender: the TUN channel, our address
-    /// and the Packet Too Big rate limiter.
-    pub(crate) fn icmp(&self) -> IcmpContext<'_> {
-        IcmpContext::new(self.tun_tx.as_ref(), self.our_addr, &self.icmp_limiter)
-    }
-
     /// Run the host half for one packet an embedder that owns the TUN sent:
     /// answer it here, or return the datagram for the node.
     pub(crate) fn outbound(&mut self, packet: &[u8]) -> Option<Datagram> {
         self.catch_up();
-        outbound(packet, &self.mesh, &mut self.icmp())
+        match outbound(packet, &self.mesh, self.our_addr) {
+            Host::Mesh(datagram) => return Some(datagram),
+            Host::Unreachable(response) => self.reply(response),
+            Host::TooBig(mtu) => {
+                answer_oversize(packet, mtu, &self.icmp_limiter, self.tun_tx.as_ref())
+            }
+            Host::Nothing => {}
+        }
+        None
+    }
+
+    /// Queue an ICMPv6 answer toward the host, if a TUN queue is up,
+    /// ignoring a closed one.
+    fn reply(&self, response: Vec<u8>) {
+        if let Some(tun_tx) = &self.tun_tx {
+            let _ = tun_tx.send(response);
+        }
     }
 
     /// Hand the host a datagram a peer sent to the IPv6 port: rebuild the
@@ -361,7 +370,14 @@ impl Handles {
 
     /// Answer the host for a datagram the node refused.
     pub(crate) fn answer(&self, refusal: Refusal) {
-        answer(refusal, &mut self.icmp());
+        for owed in answer(refusal, self.our_addr) {
+            match owed {
+                Owed::Unreachable(response) => self.reply(response),
+                Owed::TooBig(packet, mtu) => {
+                    answer_oversize(&packet, mtu, &self.icmp_limiter, self.tun_tx.as_ref())
+                }
+            }
+        }
     }
 
     /// What to ask the node for when it attaches us: port 256, the path MTU
