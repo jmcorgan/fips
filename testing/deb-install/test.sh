@@ -53,8 +53,8 @@ DAEMON_TIMEOUT=15
 # Bounds on a single `systemctl start`, which is not a wait loop and needs its
 # own limit. See start_unit() for why an unbounded one can never return.
 UNIT_START_TIMEOUT=30
-# fips-gateway.service's ExecStartPre waits up to 30s for fips0 to appear, by
-# design, so its start legitimately takes longer than any other.
+# fips-gateway.service has needed longer than other units since its start
+# waited for fips0; kept, as a bound that a healthy start never reaches.
 GATEWAY_START_TIMEOUT=60
 # The gateway-enable block restarts fips.service inside the container. Above
 # systemd's default TimeoutStopSec of 90s, so a wedged stop trips this rather
@@ -171,9 +171,10 @@ wait_for_systemd() {
 # Start a unit and wait for its start job, under a bound.
 #
 # Blocking is the right default and the call returning is what synchronises the
-# checks after it: `fips-gateway.service` in particular has an ExecStartPre that
-# waits up to 30s for fips0, so a caller that does not wait races it. What the
-# old code lacked was the bound, not the wait.
+# checks after it on the unit's state. What the old code lacked was the bound,
+# not the wait. `fips-gateway.service` returns as soon as its process runs; the
+# gateway then waits for the TUN and probes the daemon itself, so a check on
+# what the gateway did polls its journal.
 start_unit() {
     local name="$1" unit="$2" limit="${3:-$UNIT_START_TIMEOUT}"
     timeout "$limit" docker exec "$name" systemctl start "$unit" 2>&1
@@ -905,11 +906,17 @@ DOCKERFILE
     fi
 
     start_unit "$name" fips-gateway.service "$GATEWAY_START_TIMEOUT" >/dev/null 2>&1 || true
-    sleep 3
+    # The start returns once the gateway process runs; it then waits for the
+    # TUN and probes the daemon's resolver, which can take up to about 40 s
+    # after a daemon restart, so the journal is polled rather than read once.
     # Captured before matching: under pipefail, grep -q exiting at its match
     # can kill the writer with SIGPIPE and turn the match into a miss.
-    local gateway_journal
-    gateway_journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null)
+    local gateway_journal="" _i
+    for _i in $(seq 1 45); do
+        gateway_journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null) || gateway_journal=""
+        grep -q "DNS upstream is reachable" <<<"$gateway_journal" && break
+        sleep 1
+    done
     if grep -q "DNS upstream is reachable" <<<"$gateway_journal"; then
         pass "fips-gateway reaches DNS upstream at [::1]:5354 via .deb install"
     else

@@ -47,8 +47,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 IMAGE="fips-tarball-test:debian12"
 BOOT_TIMEOUT=60
-# Bounds one install.sh run. It starts at most three units, and the gateway's
-# ExecStartPre returns at once because fips0 exists before the first start.
+# Bounds one install.sh run. It starts at most three units, whose programs here
+# are stubs, so none of them waits for anything before it is started.
 INSTALL_TIMEOUT=120
 UNIT_START_TIMEOUT=60
 TARBALL_DIR=/opt/fips-tarball
@@ -126,8 +126,9 @@ stage_tarball() {
 
 # Start the scenario's systemd container. Not privileged: see
 # testing/lib/systemd-container.sh for the flags and why. The TUN device is
-# passed so the scenario can create the fips0 that fips-gateway.service's
-# ExecStartPre waits for.
+# passed so the scenario can create a fips0. fips-gateway.service no longer
+# needs it, since the gateway here is a stub that does not look for the TUN; it
+# is kept because it is harmless and matches a host the daemon has started on.
 start_container() {
     local name="$1"
     cleanup_container "$name"

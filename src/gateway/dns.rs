@@ -15,7 +15,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tracing::{debug, info, trace, warn};
 
-use super::net::MESH_INTERFACE;
 use super::pool::{PoolEvent, VirtualIpPool};
 use crate::NodeAddr;
 use crate::config::GatewayDnsConfig;
@@ -293,6 +292,7 @@ pub async fn run_dns_resolver(
     pool: std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
     event_tx: tokio::sync::mpsc::Sender<PoolEvent>,
     shutdown: watch::Receiver<bool>,
+    mesh_if: String,
 ) -> Result<(), std::io::Error> {
     let socket = bind_listener(listen_addr)
         .await
@@ -303,7 +303,7 @@ pub async fn run_dns_resolver(
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
-    serve(socket, upstream, ttl, pool, event_tx, shutdown).await
+    serve(socket, upstream, ttl, pool, event_tx, shutdown, mesh_if).await
 }
 
 /// Serve DNS queries on a bound listener until shutdown.
@@ -312,8 +312,8 @@ pub async fn run_dns_resolver(
 /// virtual IPs, and returns them to clients. Returns `Ok` on shutdown and
 /// `Err` when receiving from the listener fails.
 ///
-/// A query that arrived on the mesh interface ([`MESH_INTERFACE`]) is
-/// dropped unanswered: the resolver serves the LAN and the gateway host, and
+/// A query that arrived on the mesh interface, the daemon's TUN named
+/// `mesh_if`, is dropped unanswered: the resolver serves the LAN and the gateway host, and
 /// a listener on the wildcard address would otherwise let any mesh node fill
 /// the virtual-IP pool and probe host-map aliases. An IPv6 listener must come
 /// from [`bind_listener`], which asks for the arrival interface; without it no
@@ -325,17 +325,9 @@ pub async fn serve(
     pool: std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
     event_tx: tokio::sync::mpsc::Sender<PoolEvent>,
     shutdown: watch::Receiver<bool>,
+    mesh_if: String,
 ) -> Result<(), std::io::Error> {
-    serve_excluding(
-        socket,
-        upstream,
-        ttl,
-        pool,
-        event_tx,
-        shutdown,
-        MESH_INTERFACE,
-    )
-    .await
+    serve_excluding(socket, upstream, ttl, pool, event_tx, shutdown, &mesh_if).await
 }
 
 /// Whether a query is dropped as arriving from the mesh: it arrived on the
@@ -1770,7 +1762,16 @@ mod screening_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         tokio::spawn(async move {
             let _keep = event_rx;
-            serve(socket, no_upstream(), TTL, pool(), event_tx, shutdown_rx).await
+            serve(
+                socket,
+                no_upstream(),
+                TTL,
+                pool(),
+                event_tx,
+                shutdown_rx,
+                "fips0".to_string(),
+            )
+            .await
         });
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         (addr, client, shutdown_tx)

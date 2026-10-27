@@ -298,8 +298,16 @@ impl NetnsGateway {
                     let upstream_task = tokio::spawn(answer_every_query(upstream_socket, counted));
                     let socket = bind_listener(&listen).await.unwrap();
                     ready_tx.send(()).unwrap();
-                    let _ =
-                        serve(socket, upstream, TEST_TTL, test_pool(), event_tx, shutdown).await;
+                    let _ = serve(
+                        socket,
+                        upstream,
+                        TEST_TTL,
+                        test_pool(),
+                        event_tx,
+                        shutdown,
+                        "fips0".to_string(),
+                    )
+                    .await;
                     upstream_task.abort();
                 });
             })

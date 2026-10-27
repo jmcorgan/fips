@@ -147,6 +147,7 @@ async fn stopping_with_the_resolver_blocked_on_a_full_event_channel_returns_and_
         Arc::clone(&pool),
         event_tx.clone(),
         shutdown.clone(),
+        "fips0".to_string(),
     ));
     let tick = idle_tick(shutdown);
 
@@ -282,6 +283,7 @@ async fn stopping_with_the_resolver_waiting_on_a_silent_upstream_abandons_it_at_
         test_pool(),
         event_tx,
         shutdown.clone(),
+        "fips0".to_string(),
     ));
     let tick = idle_tick(shutdown);
 

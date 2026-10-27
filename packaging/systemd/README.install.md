@@ -175,8 +175,10 @@ then:
 sudo systemctl enable --now fips-gateway.service
 ```
 
-The unit `Requires=fips.service`, waits up to 30 seconds for `fips0`
-to come up, and runs `fips-gateway --config /etc/fips/fips.yaml`.
+The unit `Requires=fips.service` and runs
+`fips-gateway --config /etc/fips/fips.yaml`. The gateway waits up to
+30 seconds for the daemon's TUN, the interface `tun.name` names
+(`fips0` by default), to come up.
 Inbound port-forward rules can be added in the same `gateway:`
 block.
 

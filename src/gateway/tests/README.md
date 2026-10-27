@@ -7,7 +7,8 @@ declared from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod
 
 - `dns.rs` tests `../dns.rs` as module `mesh_tests`: the gateway DNS
   listener does not answer, forward or map a query that arrived on the mesh
-  interface (`fips0`). It covers the drop rule (`mesh_arrival`), that
+  interface, the daemon's TUN, whose name `serve` is given (`fips0` in these
+  tests). It covers the drop rule (`mesh_arrival`), that
   `bind_listener` turns on arrival-interface reporting, `serve_excluding`
   with loopback standing in for the mesh, and, in root network-namespace
   tests, the listener on a wildcard bind with a veth named `fips0`, including
@@ -24,6 +25,16 @@ declared from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod
   passes on the daemon's own answer, ignores a datagram from another source
   or one that does not answer its question, and waits out its time on a
   closed upstream port. These run without root, on loopback.
+- `nat.rs` tests `../nat.rs` as module `tun_tests`: every rule that matches
+  the TUN by interface name uses the name the manager is given, the daemon's
+  `tun.name`, so with a TUN named `fipsx` no rule names `fips0` and as many
+  rules name `fipsx` as name `fips0` under the default name. Runs without
+  root; it builds the rules and opens no netlink socket.
+- `net.rs` tests `../net.rs` as module `proxy_tests`: how the gateway reads
+  the proxy NDP sysctls for its start-up warning (`proxy_on`). Proxy NDP
+  counts as on when either `all/proxy_ndp` or the LAN interface's own
+  `proxy_ndp` is set, off when both read zero, and unknown when neither can
+  be read. Runs without root, on a sysctl tree in a temporary directory.
 - `shutdown.rs` tests `../shutdown.rs` as module `tests`: stopping the
   gateway's tasks returns, so the cleanup after it is reached, with the real
   resolver or a stand-in with the tick's shape parked in `send` on a full

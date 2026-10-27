@@ -185,7 +185,8 @@ Behind that single command, the init script
    suppress AAAA queries entirely — they assume the LAN has no
    real IPv6 and don't bother. The init script adds an address from
    an unassigned, unrouted part of IANA's `2001::/23` block to
-   convince them otherwise.
+   convince them otherwise. A LAN that already has an IPv6 address
+   you set keeps it, and gets no address from the gateway.
 4. **Adds an RA route for the virtual pool.** A UCI `route6` entry
    under `dhcp` tells `odhcpd` to advertise the pool CIDR via Router
    Advertisement (RFC 4191), so LAN clients learn how to reach pool
