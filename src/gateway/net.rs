@@ -1,15 +1,11 @@
 //! Network setup for the gateway.
 //!
 //! Manages proxy NDP entries and routes for the virtual IP range.
-//! Checks IP forwarding prerequisites.
+//! Checks the IPv6 forwarding and proxy NDP prerequisites.
 
 use super::nat::{RetryLog, RetryReport};
 use std::net::Ipv6Addr;
 use tracing::{debug, error, info, warn};
-
-/// The name of the FIPS daemon's TUN interface, which the gateway checks at
-/// start and whose DNS queries it refuses.
-pub const MESH_INTERFACE: &str = "fips0";
 
 /// Check if IPv6 forwarding is enabled.
 ///
@@ -31,6 +27,43 @@ pub fn check_ipv6_forwarding() {
             error!(error = %e, "Could not check IPv6 forwarding state");
             std::process::exit(1);
         }
+    }
+}
+
+/// Whether proxy NDP is on for `lan_interface`, read from the sysctl tree
+/// under `conf` (normally `/proc/sys/net/ipv6/conf`). The kernel answers a
+/// Neighbor Solicitation from a proxy entry when either `all/proxy_ndp` or the
+/// interface's own `proxy_ndp` is set. `None` when neither file can be read.
+fn proxy_on(conf: &std::path::Path, lan_interface: &str) -> Option<bool> {
+    let read = |dir: &str| {
+        std::fs::read_to_string(conf.join(dir).join("proxy_ndp"))
+            .ok()
+            .map(|v| v.trim() != "0")
+    };
+    match (read("all"), read(lan_interface)) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (None, None) => None,
+        _ => Some(false),
+    }
+}
+
+/// Warn when proxy NDP is off for `lan_interface`.
+///
+/// The gateway answers LAN hosts' Neighbor Solicitations for pool addresses
+/// with proxy NDP entries, which the kernel ignores unless proxy NDP is on.
+/// A LAN that reaches the pool through a route to the gateway (for example
+/// one the gateway's router advertisements carry) does not need it, so this
+/// warns rather than stopping the gateway.
+pub fn check_proxy(lan_interface: &str) {
+    let conf = std::path::Path::new("/proc/sys/net/ipv6/conf");
+    match proxy_on(conf, lan_interface) {
+        Some(true) => debug!(interface = %lan_interface, "Proxy NDP is enabled"),
+        Some(false) => warn!(
+            interface = %lan_interface,
+            "Proxy NDP is disabled, so LAN hosts that resolve pool addresses on-link get no \
+             answer. Enable with: sysctl -w net.ipv6.conf.all.proxy_ndp=1"
+        ),
+        None => warn!(interface = %lan_interface, "Could not check the proxy NDP state"),
     }
 }
 
@@ -237,6 +270,10 @@ fn failure_text(addr: Ipv6Addr, result: &Result<(), std::io::Error>) -> Option<S
         .err()
         .map(|e| e.to_string().replace(&addr.to_string(), "<addr>"))
 }
+
+#[cfg(test)]
+#[path = "tests/net.rs"]
+mod proxy_tests;
 
 #[cfg(test)]
 mod tests {

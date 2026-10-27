@@ -62,6 +62,8 @@ mod survivors;
 mod tcp;
 mod traffic_diag;
 mod tree_send_failure;
+#[cfg(target_os = "linux")]
+mod tun_warning;
 mod udp_dns;
 mod unit;
 mod update_peers;

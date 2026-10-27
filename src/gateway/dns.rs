@@ -15,7 +15,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tracing::{debug, info, trace, warn};
 
-use super::net::MESH_INTERFACE;
 use super::pool::{PoolEvent, VirtualIpPool};
 use crate::NodeAddr;
 use crate::config::GatewayDnsConfig;
@@ -209,6 +208,79 @@ pub async fn bind_listener(listen: &str) -> Result<UdpSocket, ListenError> {
     Ok(socket)
 }
 
+/// The transaction ID of the startup probe's query.
+const PROBE_ID: u16 = 0x1234;
+
+/// The name the startup probe asks for, as an answer's question carries it.
+const PROBE_NAME: &str = "test.fips";
+
+/// The startup probe's query: `test.fips` AAAA, ID [`PROBE_ID`], recursion
+/// desired.
+const PROBE_QUERY: [u8; 27] = [
+    0x12, 0x34, // ID
+    0x01, 0x00, // Flags: standard query, RD=1
+    0x00, 0x01, // QDCOUNT = 1
+    0x00, 0x00, // ANCOUNT = 0
+    0x00, 0x00, // NSCOUNT = 0
+    0x00, 0x00, // ARCOUNT = 0
+    // QNAME: "test.fips"
+    0x04, b't', b'e', b's', b't', 0x04, b'f', b'i', b'p', b's', 0x00, 0x00,
+    0x1C, // QTYPE = AAAA (28)
+    0x00, 0x01, // QCLASS = IN (1)
+];
+
+/// Ask the daemon's resolver at `upstream` the startup probe's question once,
+/// from `socket`, and wait up to `wait` for the answer.
+///
+/// The socket is connected to `upstream`, so the kernel drops datagrams from
+/// any other source, and only a response to the probe's own question counts;
+/// any other datagram is discarded and the wait goes on. A closed upstream
+/// port, which loopback reports at once, also waits out `wait`: at start-up
+/// it is the daemon's responder still binding, and the caller's retries are
+/// sized for that. On failure, returns why: a send or receive error, or no
+/// answer within `wait`.
+pub async fn probe_upstream(
+    socket: &UdpSocket,
+    upstream: SocketAddr,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    socket
+        .connect(upstream)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+    socket
+        .send(&PROBE_QUERY)
+        .await
+        .map_err(|e| format!("send failed: {e}"))?;
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut buf = vec![0u8; dnsmsg::MAX_DATAGRAM];
+    let mut refused = false;
+    loop {
+        let len = match tokio::time::timeout_at(deadline, socket.recv(&mut buf)).await {
+            Ok(Ok(len)) => len,
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                refused = true;
+                continue;
+            }
+            Ok(Err(e)) => return Err(format!("recv failed: {e}")),
+            Err(_) if refused => {
+                return Err(format!(
+                    "upstream port closed (connection refused), waited {}s",
+                    wait.as_secs()
+                ));
+            }
+            Err(_) => return Err(format!("no response within {}s", wait.as_secs())),
+        };
+        let answered = Packet::parse(&buf[..len]).is_ok_and(|p| {
+            upstream_response_matches(&p, PROBE_ID, PROBE_NAME, QCLASS::CLASS(CLASS::IN))
+        });
+        if answered {
+            return Ok(());
+        }
+        debug!(upstream = %upstream, len, "Discarding a datagram that does not answer the probe");
+    }
+}
+
 /// Run the gateway DNS resolver.
 ///
 /// Binds `listen_addr`, then serves as [`serve`] does. The gateway binary
@@ -220,6 +292,7 @@ pub async fn run_dns_resolver(
     pool: std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
     event_tx: tokio::sync::mpsc::Sender<PoolEvent>,
     shutdown: watch::Receiver<bool>,
+    mesh_if: String,
 ) -> Result<(), std::io::Error> {
     let socket = bind_listener(listen_addr)
         .await
@@ -230,7 +303,7 @@ pub async fn run_dns_resolver(
         .parse()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
-    serve(socket, upstream, ttl, pool, event_tx, shutdown).await
+    serve(socket, upstream, ttl, pool, event_tx, shutdown, mesh_if).await
 }
 
 /// Serve DNS queries on a bound listener until shutdown.
@@ -239,8 +312,8 @@ pub async fn run_dns_resolver(
 /// virtual IPs, and returns them to clients. Returns `Ok` on shutdown and
 /// `Err` when receiving from the listener fails.
 ///
-/// A query that arrived on the mesh interface ([`MESH_INTERFACE`]) is
-/// dropped unanswered: the resolver serves the LAN and the gateway host, and
+/// A query that arrived on the mesh interface, the daemon's TUN named
+/// `mesh_if`, is dropped unanswered: the resolver serves the LAN and the gateway host, and
 /// a listener on the wildcard address would otherwise let any mesh node fill
 /// the virtual-IP pool and probe host-map aliases. An IPv6 listener must come
 /// from [`bind_listener`], which asks for the arrival interface; without it no
@@ -252,17 +325,9 @@ pub async fn serve(
     pool: std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
     event_tx: tokio::sync::mpsc::Sender<PoolEvent>,
     shutdown: watch::Receiver<bool>,
+    mesh_if: String,
 ) -> Result<(), std::io::Error> {
-    serve_excluding(
-        socket,
-        upstream,
-        ttl,
-        pool,
-        event_tx,
-        shutdown,
-        MESH_INTERFACE,
-    )
-    .await
+    serve_excluding(socket, upstream, ttl, pool, event_tx, shutdown, &mesh_if).await
 }
 
 /// Whether a query is dropped as arriving from the mesh: it arrived on the
@@ -297,6 +362,7 @@ async fn serve_excluding(
     let mut buf = vec![0u8; dnsmsg::MAX_DATAGRAM];
     // An unreadable local address counts as IPv6, the form that drops more.
     let ipv6_socket = socket.local_addr().map_or(true, |a| a.is_ipv6());
+    let wildcard = crate::ipv6tun::dns::wildcard_bind(socket.local_addr());
 
     loop {
         tokio::select! {
@@ -334,7 +400,25 @@ async fn serve_excluding(
                     Outcome::Answer(bytes) => bytes,
                 };
 
-                if let Err(e) = socket.send_to(&response, client_addr).await {
+                // A reply to a mesh source (fd00::/8) must not be drawn into
+                // the mesh by the TUN's route, or a LAN query with a forged
+                // mesh source is answered into the mesh. On a wildcard bind it
+                // is pinned to the arrival interface; on a specific bind it is
+                // sent only when the routing table takes it back out of that
+                // interface. The mesh index is not passed, since with it a
+                // specific bind would withhold every LAN client holding a ULA
+                // address, which OpenWrt LANs commonly do.
+                let path = crate::ipv6tun::dns::reply_path(
+                    client_addr,
+                    arrival.ifindex,
+                    None,
+                    wildcard,
+                    true,
+                );
+                if let Err(e) =
+                    crate::ipv6tun::dns::send_reply(&socket, &response, client_addr, path, None)
+                        .await
+                {
                     debug!(error = %e, "Failed to send DNS response");
                 }
             }
@@ -1678,7 +1762,16 @@ mod screening_tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         tokio::spawn(async move {
             let _keep = event_rx;
-            serve(socket, no_upstream(), TTL, pool(), event_tx, shutdown_rx).await
+            serve(
+                socket,
+                no_upstream(),
+                TTL,
+                pool(),
+                event_tx,
+                shutdown_rx,
+                "fips0".to_string(),
+            )
+            .await
         });
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         (addr, client, shutdown_tx)

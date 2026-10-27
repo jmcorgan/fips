@@ -87,9 +87,10 @@ wait_for_systemd() {
 # Start a unit and wait for its start job, under a bound.
 #
 # Blocking is the right default and the call returning is what synchronises the
-# checks after it: `fips-gateway.service` in particular has an ExecStartPre that
-# waits up to 30s for fips0, so a caller that does not wait races it. What the
-# old code lacked was the bound, not the wait.
+# checks after it on the unit's state. What the old code lacked was the bound,
+# not the wait. `fips-gateway.service` returns as soon as its process runs; the
+# gateway then waits for the TUN and probes the daemon itself, so a check on
+# what the gateway did polls its journal.
 start_unit() {
     local name="$1" unit="$2" limit="${3:-$UNIT_START_TIMEOUT}"
     timeout "$limit" docker exec "$name" systemctl start "$unit" 2>&1

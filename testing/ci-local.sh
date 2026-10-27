@@ -2186,18 +2186,6 @@ run_package_versions() {
     record "package-versions" $rc
 }
 
-# fips-dns-setup's tun_name, which reads the TUN name from the daemon config,
-# against fixtures. Hermetic: the commands that could touch the host are stubbed,
-# about a second, and needs nothing built. Mirrored in ci.yml's ci-parity job by
-# hand.
-run_tun_name() {
-    local rc=0
-    info "[tun-name] Checking fips-dns-setup reads the TUN name from the config"
-    bash "$SCRIPT_DIR/dns-resolver/tun-name-test.sh" || rc=$?
-    record "tun-name" $rc
-    return 0
-}
-
 # The GitHub unit-test jobs run check-nextest-flaky.sh after nextest to
 # surface tests that passed only on retry. Nothing local runs nextest under the
 # retrying ci profile, so the checker itself never runs here; its fixture tests
@@ -2296,7 +2284,6 @@ run_guards() {
     run_wait_converge
     run_relay_verdict_test
     run_package_versions
-    run_tun_name
     run_nextest_flaky
     run_node_test_groups
     run_glibc_floor

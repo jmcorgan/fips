@@ -1,9 +1,15 @@
 //! Tests that the gateway DNS listener does not answer queries arriving on
-//! the mesh interface.
+//! the mesh interface, that it does not send a reply to a LAN query with a
+//! forged mesh source into the mesh, and that the gateway's startup probe of
+//! the daemon's resolver passes only on the daemon's answer to its own
+//! question.
 //!
 //! A listener on the wildcard address (`listen: "[::]:53"`) is reachable from
 //! the mesh through `fips0`, so without a filter any mesh node with a session
 //! to the gateway could fill the virtual-IP pool and probe host-map aliases.
+//! A reply sent by the routing table to an `fd00::/8` address follows the
+//! TUN's mesh route, so a LAN host that forges a mesh source would have the
+//! reply sent into the mesh.
 //! The root tests build a gateway namespace whose `fips0` is a veth to a mesh
 //! namespace, beside a LAN veth to a LAN namespace, and run the real listener
 //! and `serve` inside it.
@@ -269,6 +275,11 @@ impl NetnsGateway {
     /// Bind `[::]:PORT` in namespace `ns` and serve on it. Everything the
     /// listener does per datagram runs in that namespace.
     fn spawn(ns: &str) -> Self {
+        Self::spawn_on(ns, format!("[::]:{PORT}"))
+    }
+
+    /// Bind `listen` in namespace `ns` and serve on it, as [`Self::spawn`].
+    fn spawn_on(ns: &str, listen: String) -> Self {
         let (event_tx, events) = tokio::sync::mpsc::channel(16);
         let (stop, shutdown) = watch::channel(false);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -285,10 +296,18 @@ impl NetnsGateway {
                     let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
                     let upstream = upstream_socket.local_addr().unwrap();
                     let upstream_task = tokio::spawn(answer_every_query(upstream_socket, counted));
-                    let socket = bind_listener(&format!("[::]:{PORT}")).await.unwrap();
+                    let socket = bind_listener(&listen).await.unwrap();
                     ready_tx.send(()).unwrap();
-                    let _ =
-                        serve(socket, upstream, TEST_TTL, test_pool(), event_tx, shutdown).await;
+                    let _ = serve(
+                        socket,
+                        upstream,
+                        TEST_TTL,
+                        test_pool(),
+                        event_tx,
+                        shutdown,
+                        "fips0".to_string(),
+                    )
+                    .await;
                     upstream_task.abort();
                 });
             })
@@ -443,4 +462,258 @@ async fn a_query_arriving_on_a_recreated_fips0_is_still_not_answered() {
     let peer = GatewayNetns::client(&ns.mesh, "[fd99::2]:0");
     let reply = query(&peer, to).await;
     assert_unanswered(reply, &mut gateway, 0, "after the restart");
+}
+
+/// The startup probe against an upstream socket that `answer` drives: it
+/// receives the probe's query, and `answer` gets the socket, the query and its
+/// source. Returns the probe's result and how long it took.
+async fn probe_with<F, Fut>(
+    wait: std::time::Duration,
+    answer: F,
+) -> (Result<(), String>, std::time::Duration)
+where
+    F: FnOnce(UdpSocket, Vec<u8>, SocketAddr) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let upstream_socket = UdpSocket::bind("[::1]:0").await.unwrap();
+    let upstream = upstream_socket.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; dnsmsg::MAX_DATAGRAM];
+        let (len, src) = upstream_socket.recv_from(&mut buf).await.unwrap();
+        answer(upstream_socket, buf[..len].to_vec(), src).await;
+    });
+    let probe = UdpSocket::bind("[::]:0").await.unwrap();
+    let started = std::time::Instant::now();
+    let result = probe_upstream(&probe, upstream, wait).await;
+    let took = started.elapsed();
+    upstream_task.abort();
+    (result, took)
+}
+
+/// The daemon's answer to the probe, `test.fips` AAAA: an NXDOMAIN that
+/// carries the question.
+fn daemon_answer(query: &[u8]) -> Vec<u8> {
+    let hosts = crate::hosts::HostMap::new();
+    let (answer, _) = crate::ipv6tun::dns::handle_dns_packet(query, 40000, TEST_TTL, &hosts)
+        .expect("the daemon answers the probe's query");
+    answer
+}
+
+/// The probe passes on the answer the daemon's own resolver gives it.
+#[tokio::test]
+async fn the_startup_probe_accepts_the_daemons_answer_to_its_question() {
+    let (result, _) = probe_with(
+        std::time::Duration::from_secs(2),
+        |socket, query, src| async move {
+            socket.send_to(&daemon_answer(&query), src).await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(
+        result,
+        Ok(()),
+        "the daemon's answer to the probe was not accepted"
+    );
+}
+
+/// A datagram from any address but the upstream's does not pass the probe,
+/// even one that looks exactly like the daemon's answer. The upstream itself
+/// stays silent, as a resolver that is not yet up does.
+#[tokio::test]
+async fn the_startup_probe_ignores_a_datagram_from_another_source() {
+    let (result, _) = probe_with(
+        std::time::Duration::from_secs(1),
+        |_silent, query, src| async move {
+            let stray = UdpSocket::bind("[::1]:0").await.unwrap();
+            stray.send_to(&daemon_answer(&query), src).await.unwrap();
+            std::future::pending::<()>().await;
+        },
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the probe passed on a datagram from a source other than the upstream"
+    );
+}
+
+/// A datagram from the upstream that does not answer the probe's question
+/// does not pass it.
+#[tokio::test]
+async fn the_startup_probe_ignores_an_upstream_datagram_that_does_not_answer_its_question() {
+    let (result, _) = probe_with(
+        std::time::Duration::from_secs(1),
+        |socket, query, src| async move {
+            let mut wrong_id = daemon_answer(&query);
+            wrong_id[0] ^= 0xff;
+            socket.send_to(&wrong_id, src).await.unwrap();
+            socket.send_to(b"not dns", src).await.unwrap();
+            std::future::pending::<()>().await;
+        },
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the probe passed on an upstream datagram that does not answer it"
+    );
+}
+
+/// With nothing listening on the upstream port, an attempt fails, but only
+/// after waiting out its time, as it did before the socket was connected: at
+/// start-up a refused port is the daemon's responder still binding, and the
+/// gateway's retries are sized for that.
+#[tokio::test]
+async fn the_startup_probe_waits_out_its_time_when_the_upstream_port_is_closed() {
+    let closed = UdpSocket::bind("[::1]:0").await.unwrap();
+    let upstream = closed.local_addr().unwrap();
+    drop(closed);
+    let probe = UdpSocket::bind("[::]:0").await.unwrap();
+    let wait = std::time::Duration::from_millis(1500);
+    let started = std::time::Instant::now();
+    let result = probe_upstream(&probe, upstream, wait).await;
+    let took = started.elapsed();
+    assert!(result.is_err(), "the probe passed with nothing listening");
+    assert!(
+        took >= std::time::Duration::from_millis(1400),
+        "the probe gave up after {took:?} on a closed port instead of waiting out {wait:?}, \
+         which shortens the time the daemon has to bind its responder"
+    );
+}
+
+impl GatewayNetns {
+    /// The forged mesh source the LAN host puts on its own link.
+    const FORGED: &'static str = "fd11:2233::7";
+
+    /// Give the LAN an on-link ULA prefix (`fdab::1/64` on the gateway,
+    /// `fdab::2/64` on the LAN host), as OpenWrt LANs commonly have, put the
+    /// forged mesh source on the LAN host's link, and count, in the gateway
+    /// namespace, the UDP packets from the listener's port that leave by
+    /// `fips0`.
+    fn forge_source(&self) {
+        let forged = format!("{}/128", Self::FORGED);
+        let (gw, lan) = (self.gw.as_str(), self.lan.as_str());
+        for args in [
+            vec!["-n", gw, "addr", "add", "fdab::1/64", "dev", "l0", "nodad"],
+            vec!["-n", lan, "addr", "add", "fdab::2/64", "dev", "c0", "nodad"],
+            vec![
+                "-n",
+                lan,
+                "addr",
+                "add",
+                forged.as_str(),
+                "dev",
+                "c0",
+                "nodad",
+            ],
+        ] {
+            crate::testutil::run_ok("ip", &args);
+        }
+        let rule = format!("oifname fips0 udp sport {PORT} counter name refl");
+        for cmd in [
+            "add table inet gwtest".to_string(),
+            "add counter inet gwtest refl".to_string(),
+            "add chain inet gwtest out { type filter hook output priority 0 ; }".to_string(),
+            format!("add rule inet gwtest out {rule}"),
+        ] {
+            let mut args = vec!["netns", "exec", gw, "nft"];
+            args.extend(cmd.split(' '));
+            crate::testutil::run_ok("ip", &args);
+        }
+    }
+
+    /// UDP packets from the listener's port that have left by `fips0`.
+    fn mesh_replies(&self) -> u64 {
+        let out = std::process::Command::new("ip")
+            .args([
+                "netns", "exec", &self.gw, "nft", "list", "counter", "inet", "gwtest", "refl",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.split_whitespace()
+            .skip_while(|w| *w != "packets")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no packet count in nft output: {text}"))
+            .parse()
+            .unwrap()
+    }
+}
+
+/// Send a query from `forged` (a LAN host's socket on the forged mesh source)
+/// to `to`, and assert that no reply leaves the gateway by `fips0`, and that
+/// a query from each of `healthy` is still answered.
+async fn assert_offmesh(
+    ns: &GatewayNetns,
+    forged: &UdpSocket,
+    healthy: &[(&UdpSocket, SocketAddr, &str)],
+    to: SocketAddr,
+    what: &str,
+) {
+    for (client, to, who) in healthy {
+        assert!(
+            query(client, *to).await.is_some(),
+            "{what}: {who} is not answered"
+        );
+    }
+    let _ = query(forged, to).await;
+    let into_mesh = ns.mesh_replies();
+    assert_eq!(
+        into_mesh,
+        0,
+        "{what}: a LAN query from forged mesh source {} was answered into the mesh: \
+         {into_mesh} UDP packet(s) from port {PORT} left by fips0",
+        GatewayNetns::FORGED
+    );
+}
+
+/// A LAN host that forges a mesh source address must not make a wildcard
+/// gateway listener answer into the mesh, while LAN clients with a global and
+/// an on-link ULA address are still answered.
+///
+/// Needs root (network namespaces, nft): build with
+/// `cargo test --lib --no-run` and run the test binary under `sudo` with
+/// `--ignored`.
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh() {
+    let ns = GatewayNetns::new();
+    ns.forge_source();
+    let _gateway = NetnsGateway::spawn(&ns.gw);
+    let to = SocketAddr::from(("2001:db8:1::1".parse::<Ipv6Addr>().unwrap(), PORT));
+    let ula_to = SocketAddr::from(("fdab::1".parse::<Ipv6Addr>().unwrap(), PORT));
+    let genuine = GatewayNetns::client(&ns.lan, "[2001:db8:1::2]:0");
+    let ula = GatewayNetns::client(&ns.lan, "[fdab::2]:0");
+    let forged = GatewayNetns::client(&ns.lan, "[fd11:2233::7]:4444");
+    assert_offmesh(
+        &ns,
+        &forged,
+        &[
+            (&genuine, to, "the LAN client"),
+            (&ula, ula_to, "the on-link ULA client"),
+        ],
+        to,
+        "wildcard listener",
+    )
+    .await;
+}
+
+/// The same on a gateway listener bound to one LAN address, which always
+/// sends from that address, so the kernel does not hold a reply to the
+/// arrival interface. An on-link ULA client is still answered.
+#[tokio::test]
+#[ignore = "needs root: creates network namespaces"]
+async fn a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh_on_a_specific_bind() {
+    let ns = GatewayNetns::new();
+    ns.forge_source();
+    let _gateway = NetnsGateway::spawn_on(&ns.gw, format!("[fdab::1]:{PORT}"));
+    let to = SocketAddr::from(("fdab::1".parse::<Ipv6Addr>().unwrap(), PORT));
+    let ula = GatewayNetns::client(&ns.lan, "[fdab::2]:0");
+    let forged = GatewayNetns::client(&ns.lan, "[fd11:2233::7]:4444");
+    assert_offmesh(
+        &ns,
+        &forged,
+        &[(&ula, to, "the on-link ULA client")],
+        to,
+        "listener bound to fdab::1",
+    )
+    .await;
 }

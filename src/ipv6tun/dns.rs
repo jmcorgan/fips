@@ -326,7 +326,7 @@ pub(crate) fn mesh_query(arrival: Arrival, src: std::net::SocketAddr, mesh: Mesh
 
 /// How a reply to a DNS query is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplyPath {
+pub(crate) enum ReplyPath {
     /// To the query's source by the routing table.
     Routed,
     /// To the query's source, only out of the interface with this index.
@@ -384,7 +384,7 @@ enum ReplyPath {
 ///
 /// The decision is one pure function for every target, so its table is
 /// tested on any host; `strict_pin` says whether the target holds a pin.
-fn reply_path(
+pub(crate) fn reply_path(
     src: std::net::SocketAddr,
     arrival_ifindex: Option<u32>,
     mesh_ifindex: Option<u32>,
@@ -495,7 +495,7 @@ fn check_returning(
 /// Whether a socket with local address `local` is bound to the wildcard
 /// address (`::` or `0.0.0.0`). An unreadable address counts as specific,
 /// the form for which [`reply_path`] withholds more.
-fn wildcard_bind(local: std::io::Result<std::net::SocketAddr>) -> bool {
+pub(crate) fn wildcard_bind(local: std::io::Result<std::net::SocketAddr>) -> bool {
     local.is_ok_and(|addr| addr.ip().is_unspecified())
 }
 
@@ -611,7 +611,7 @@ pub(crate) async fn run_responder(
 /// other target a `Pinned` path is treated as `Returning`. `mesh_addr` is the
 /// node's own mesh address while a TUN is up, which a `Returning` check
 /// uses.
-async fn send_reply(
+pub(crate) async fn send_reply(
     socket: &tokio::net::UdpSocket,
     buf: &[u8],
     dst: std::net::SocketAddr,

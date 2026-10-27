@@ -22,6 +22,8 @@ benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
 environment   fips-mesh  gateway::dns::mesh_tests::a_dns_query_arriving_on_fips0_is_not_answered_and_mints_no_mapping  src/gateway/tests/dns.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh  src/gateway/tests/dns.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh_on_a_specific_bind  src/gateway/tests/dns.rs
 environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_on_a_wildcard_listener_is_still_answered_with_a_pool_address  src/gateway/tests/dns.rs
 environment   fips-mesh  gateway::dns::mesh_tests::a_query_arriving_on_a_recreated_fips0_is_still_not_answered  src/gateway/tests/dns.rs
 environment   fips-mesh  ipv6tun::bsdnet::tests::a_route_added_twice_through_the_same_interface_is_accepted  src/ipv6tun/tests/bsdnet.rs
@@ -64,6 +66,7 @@ environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_o
 environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_when_its_retries_fall_between_slot_releases  src/node/tests/claim_slots.rs
 environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_when_no_claims_are_made  src/node/tests/claim_slots.rs
 environment   fips-mesh  node::tests::claim_slots::a_dropped_peer_is_redialled_on_its_first_retry_while_claims_of_a_connected_peer_continue  src/node/tests/claim_slots.rs
+environment   fips-mesh  node::tests::tun_warning::start_with_a_system_tun_warns_once_when_the_udp_mtu_is_too_small_for_a_1280_byte_ipv6_packet_and_not_at_the_default  src/node/tests/tun_warning.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::the_radio_comes_up_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::dials_a_peer_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware  src/transport/ble/io_macos/corebluetooth.rs

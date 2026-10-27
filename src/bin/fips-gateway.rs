@@ -314,10 +314,51 @@ async fn main() {
 
     // Check IPv6 forwarding
     net::check_ipv6_forwarding();
+    net::check_proxy(&gw_config.lan_interface);
 
-    // Check fips0 interface exists
-    if let Err(e) = net::check_interface_exists(net::MESH_INTERFACE).await {
-        error!(error = %e, "fips0 interface not found — is the FIPS daemon running?");
+    // Wait for the daemon's TUN, named by its tun.name, which the daemon
+    // creates some time after it starts. When the gateway starts with the
+    // daemon (at boot, or both restarted by an upgrade) this keeps it from
+    // exiting and being restarted while the TUN is still missing. A stop
+    // during the wait ends it at once; nothing needs tearing down yet.
+    let tun_name = config.tun.name().to_string();
+    // How long to wait for the TUN, in seconds.
+    const TUN_WAIT: u32 = 30;
+    let tun_wait = async {
+        let mut waited = 0;
+        loop {
+            match net::check_interface_exists(&tun_name).await {
+                Ok(_) => return Ok(()),
+                Err(e) if waited >= TUN_WAIT => return Err(e),
+                Err(_) => {
+                    if waited == 0 {
+                        info!(interface = %tun_name, "Waiting for the FIPS daemon's TUN interface");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    waited += 1;
+                }
+            }
+        }
+    };
+    let tun_found = tokio::select! {
+        biased;
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM during start-up, exiting");
+            std::process::exit(0);
+        }
+        _ = sigint.recv() => {
+            info!("Received SIGINT during start-up, exiting");
+            std::process::exit(0);
+        }
+        found = tun_wait => found,
+    };
+    if let Err(e) = tun_found {
+        error!(
+            error = %e,
+            interface = %tun_name,
+            "The FIPS daemon's TUN interface (tun.name) did not appear within {TUN_WAIT}s; \
+             is the FIPS daemon running?"
+        );
         std::process::exit(1);
     }
 
@@ -352,23 +393,6 @@ async fn main() {
             }
         };
 
-        // Build a minimal DNS query for "test.fips" AAAA
-        // Header: ID=0x1234, flags=0x0100 (standard query, RD=1),
-        //   QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
-        // Question: 4test4fips0 QTYPE=AAAA(28) QCLASS=IN(1)
-        let query: Vec<u8> = vec![
-            0x12, 0x34, // ID
-            0x01, 0x00, // Flags: standard query, RD=1
-            0x00, 0x01, // QDCOUNT = 1
-            0x00, 0x00, // ANCOUNT = 0
-            0x00, 0x00, // NSCOUNT = 0
-            0x00, 0x00, // ARCOUNT = 0
-            // QNAME: "test.fips"
-            0x04, b't', b'e', b's', b't', 0x04, b'f', b'i', b'p', b's', 0x00, 0x00,
-            0x1C, // QTYPE = AAAA (28)
-            0x00, 0x01, // QCLASS = IN (1)
-        ];
-
         let bind_addr = if upstream_addr.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -388,43 +412,29 @@ async fn main() {
         //
         // Bounded retry covers the cold-boot race where this gateway and
         // the fips daemon start at approximately the same time: the
-        // daemon's TUN may be up (the systemd ExecStartPre wait already
-        // gates on that) while its DNS responder is still binding
-        // [::1]:5354. Without this retry, the gateway hard-failed after
-        // a single 3-second probe and relied on Restart=on-failure for
-        // recovery.
+        // daemon's TUN may be up (the wait above gates on that) while its
+        // DNS responder is still binding [::1]:5354, which on loopback
+        // refuses the probe at once; the probe waits out each attempt all
+        // the same, so the retries span the same time. Without this retry,
+        // the gateway hard-failed after a single 3-second probe and relied
+        // on Restart=on-failure for recovery.
         const MAX_PROBE_ATTEMPTS: u32 = 5;
         const PROBE_TIMEOUT_SECS: u64 = 1;
         const PROBE_RETRY_DELAY_SECS: u64 = 1;
 
-        let mut buf = [0u8; 512];
         let mut last_failure: Option<String> = None;
         let probe = async {
             for attempt in 1..=MAX_PROBE_ATTEMPTS {
-                if let Err(e) = sock.send_to(&query, upstream_addr).await {
-                    last_failure = Some(format!("send_to failed: {}", e));
-                } else {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
-                        sock.recv_from(&mut buf),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_)) => {
-                            info!(
-                                upstream = %upstream, attempt = attempt,
-                                "DNS upstream is reachable"
-                            );
-                            return true;
-                        }
-                        Ok(Err(e)) => {
-                            last_failure = Some(format!("recv_from failed: {}", e));
-                        }
-                        Err(_) => {
-                            last_failure =
-                                Some(format!("no response within {}s", PROBE_TIMEOUT_SECS));
-                        }
+                let wait = std::time::Duration::from_secs(PROBE_TIMEOUT_SECS);
+                match dns::probe_upstream(&sock, upstream_addr, wait).await {
+                    Ok(()) => {
+                        info!(
+                            upstream = %upstream, attempt = attempt,
+                            "DNS upstream is reachable"
+                        );
+                        return true;
                     }
+                    Err(failure) => last_failure = Some(failure),
                 }
                 if attempt < MAX_PROBE_ATTEMPTS {
                     info!(
@@ -536,7 +546,11 @@ async fn main() {
     let ip_pool = Arc::new(Mutex::new(ip_pool));
 
     // NAT manager
-    let mut nat_mgr = match nat::NatManager::new(gw_config.lan_interface.clone(), pool_network) {
+    let mut nat_mgr = match nat::NatManager::new(
+        gw_config.lan_interface.clone(),
+        tun_name.clone(),
+        pool_network,
+    ) {
         Ok(n) => n,
         Err(e) => {
             error!(error = %e, "Failed to create nftables table — do you have CAP_NET_ADMIN?");
@@ -618,6 +632,7 @@ async fn main() {
         Arc::clone(&ip_pool),
         event_tx.clone(),
         shutdown_rx.clone(),
+        tun_name.clone(),
     )));
 
     // --- Snapshot channel for control socket ---

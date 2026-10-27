@@ -8,9 +8,11 @@
 # quickly and procd_running reports nothing running, unless a case installs
 # the ubus stub. The gateway is a stub that records its open descriptors and
 # sleeps until it is signalled; /etc/init.d/network, odhcpd and dnsmasq are
-# recorders that log each call to $CALLS. The container cannot create fips0, so
-# ip is a stub that reports fips0 present exactly while $FIPS0 exists and
-# passes every other call to busybox.
+# recorders that log each call to $CALLS. The container cannot create the
+# daemon's TUN, so ip is a stub that reports an interface <name> present to
+# "ip link show <name>" exactly while $LINKS/<name> exists ($FIPS0 for fips0),
+# records every "ip -6 route" call to $CALLS, and passes every call it does
+# not answer to busybox.
 #
 # Seams:
 #   INIT_GATEWAY  the init script under test; default the one built into the
@@ -42,16 +44,18 @@ LOCK=/var/lock/procd_fips-gateway.lock
 CALLS=/tmp/init-calls
 FDS=/tmp/init-gateway-fds
 SUPLOG=/tmp/init-supervise.log
-FIPS0=/tmp/init-fips0
+LINKS=/tmp/init-links
+FIPS0=$LINKS/fips0
 UBUS_REAL=/tmp/init-ubus.real
 DHCP_STOCK=/tmp/init-dhcp.stock
 INSTROOT=/tmp/init-instroot
 PREFIX=2001:2:f1b5::1/64
 OPERATOR=2001:db8:1::1/64
+RA_SAVED=/etc/fips/gateway-ra-default.saved
 
 # The number of cases in the full run, counted by hand from the list at the
 # end of this file. A run that completes fewer exits 2.
-ALL_CASES=13
+ALL_CASES=21
 
 FAILURES=0
 CASES=0
@@ -158,10 +162,13 @@ ip_stub() {
 	rm -f "$p"
 	cat > "$p" <<STUB
 #!/bin/sh
-if [ "\$*" = "link show fips0" ]; then
-	[ -e $FIPS0 ]
+if [ "\$#" -eq 3 ] && [ "\$1" = link ] && [ "\$2" = show ]; then
+	[ -e "$LINKS/\$3" ]
 	exit \$?
 fi
+case "\$*" in
+"-6 route "*) echo "ip \$*" >> $CALLS ;;
+esac
 exec /bin/busybox ip "\$@"
 STUB
 	chmod 0755 "$p"
@@ -169,11 +176,13 @@ STUB
 
 # The image as each case starts from: the init script under test, the stub
 # gateway and the recorders, a gateway-enabled fips.yaml, a LAN interface in
-# the network config, no boot links, the real ubus, and fips0 present.
+# the network config, no boot links, the real ubus, fips0 present, and no
+# saved ra_default.
 reset() {
 	kill_matching "$INIT supervise"
 	kill_matching /usr/bin/fips-gateway
 	rm -f "$CALLS" "$FDS" "$SUPLOG" /var/run/fips-gateway.pid /var/run/fips-gateway-install-hold
+	rm -f "$RA_SAVED"
 	mkdir -p /var/lock /var/run /etc/fips /etc/rc.d
 	cp "$INIT_GATEWAY" "$INIT" || harness_fail "cannot install $INIT_GATEWAY"
 	chmod 0755 "$INIT"
@@ -191,6 +200,8 @@ STUB
 	recorder /etc/init.d/fips
 	recorder /usr/bin/logger
 	ip_stub
+	rm -rf "$LINKS"
+	mkdir -p "$LINKS"
 	touch "$FIPS0"
 	cp "$DHCP_STOCK" /etc/config/dhcp
 	cat > /etc/fips/fips.yaml <<'YAML'
@@ -544,6 +555,177 @@ gateway_starts_after_the_fips0_wait_runs_out() {
 	finish
 }
 
+# A daemon whose tun.name renames its TUN: supervise waits for that name, and
+# a fips0 that exists does not start the gateway.
+gateway_waits_for_a_renamed_tun() {
+	begin gateway_waits_for_a_renamed_tun
+	reset
+	cat >> /etc/fips/fips.yaml <<'YAML'
+tun:
+  enabled: true
+  name: fipsx
+YAML
+	supervise_spawn
+	sleep 3
+	check "W7: the gateway is not started while fipsx is absent, though fips0 exists" test ! -s "$FDS"
+	touch "$LINKS/fipsx"
+	check "W8: the gateway starts within 5 s of fipsx appearing" gateway_within 5
+	supervise_stop
+	finish
+}
+
+# An operator's own LAN address survives the gateway: start does not replace
+# it, and nothing the gateway does deletes it.
+operator_ip6addr_is_kept() {
+	begin operator_ip6addr_is_kept
+	reset
+	uci set network.lan.ip6addr="$OPERATOR"
+	uci commit network
+	enable_start
+	check "O1: start keeps the operator's network.lan.ip6addr" has_operator
+	init stop
+	init disable
+	check "O2: stop and disable keep the operator's network.lan.ip6addr" has_operator
+	finish
+}
+
+# An operator's dhcp.lan.ra_default is put back when the gateway stops, and
+# a value the operator sets after that is the one the next stop puts back.
+operator_ra_default_is_restored_by_stop() {
+	begin operator_ra_default_is_restored_by_stop
+	reset
+	uci set dhcp.lan.ra_default=1
+	uci commit dhcp
+	enable_start
+	check "D1: the running gateway sets ra_default 2" test "$(uci -q get dhcp.lan.ra_default)" = 2
+	init stop
+	check "D2: stop puts the operator's ra_default 1 back" test "$(uci -q get dhcp.lan.ra_default)" = 1
+	uci set dhcp.lan.ra_default=0
+	uci commit dhcp
+	init start
+	init stop
+	check "D4: a later start and stop put back the operator's new ra_default 0" test "$(uci -q get dhcp.lan.ra_default)" = 0
+	finish
+}
+
+# A router that loses power while the gateway runs never runs stop; the next
+# boot's start must not take the gateway's own ra_default 2 for the operator's.
+operator_ra_default_survives_a_power_loss() {
+	begin operator_ra_default_survives_a_power_loss
+	reset
+	uci set dhcp.lan.ra_default=1
+	uci commit dhcp
+	enable_start
+	kill_matching "$INIT supervise"
+	kill_matching /usr/bin/fips-gateway
+	init start
+	init stop
+	check "D3: after a start with no stop, then start and stop, ra_default is 1" test "$(uci -q get dhcp.lan.ra_default)" = 1
+	finish
+}
+
+# A stop with nothing saved changes the operator's ra_default only when it is
+# 2, the value an older package's start left. The prerm stops the gateway on
+# every package upgrade and removal, whether or not it ever ran.
+stop_with_nothing_saved_keeps_ra_default() {
+	begin stop_with_nothing_saved_keeps_ra_default
+	reset
+	uci set dhcp.lan.ra_default=1
+	uci commit dhcp
+	PKG_UPGRADE=1 sh "$PRERM" upgrade >/dev/null 2>&1
+	rm -f /tmp/fips-prerm-upgrade
+	check "D5: an upgrade's stop of a gateway that never ran keeps ra_default 1" test "$(uci -q get dhcp.lan.ra_default)" = 1
+	init stop
+	check "D6: a stop of a gateway that never ran keeps ra_default 1" test "$(uci -q get dhcp.lan.ra_default)" = 1
+	init enable
+	sed -i 's/enabled: true/enabled: false/' /etc/fips/fips.yaml
+	init start
+	init stop
+	check "D7: a stop after a start declined by fips.yaml keeps ra_default 1" test "$(uci -q get dhcp.lan.ra_default)" = 1
+	uci set dhcp.lan.ra_default=2
+	uci commit dhcp
+	init stop
+	check "D8: a stop with nothing saved deletes an older package's ra_default 2" no_ra_default
+	finish
+}
+
+# gateway.lan_interface names the LAN bridge; the pool route and its RA
+# advertisement follow it, on the UCI interface whose device it is.
+pool_route_follows_lan_interface() {
+	begin pool_route_follows_lan_interface
+	reset
+	sed -i 's/lan_interface: br-lan/lan_interface: br-guest/' /etc/fips/fips.yaml
+	cat >> /etc/config/network <<'UCI'
+
+config interface 'guest'
+	option device 'br-guest'
+	option proto 'static'
+UCI
+	mark
+	enable_start
+	check "I1: the kernel pool route is on br-guest" sh -c "grep -q '^ip -6 route replace fd01::/112 dev br-guest' $CALLS"
+	check "I2: the RA route6 is on the guest interface" test "$(uci -q get 'dhcp.@route6[0].interface')" = guest
+	finish
+}
+
+# A LAN on a VLAN device: the whole device name, dot and all, picks the
+# interface, so the pool route, its advertisement, the prefix and ra_default
+# all go to the guest interface and none to lan.
+lan_interface_on_a_vlan_device() {
+	begin lan_interface_on_a_vlan_device
+	reset
+	sed -i 's/lan_interface: br-lan/lan_interface: br-lan.3/' /etc/fips/fips.yaml
+	cat >> /etc/config/network <<'UCI'
+
+config interface 'guest'
+	option device 'br-lan.3'
+	option proto 'static'
+UCI
+	cat >> /etc/config/dhcp <<'UCI'
+
+config dhcp 'guest'
+	option interface 'guest'
+	option ra 'server'
+UCI
+	mark
+	enable_start
+	check "V1: the kernel pool route is on br-lan.3" sh -c "grep -q '^ip -6 route replace fd01::/112 dev br-lan.3' $CALLS"
+	check "V2: the RA route6 is on the guest interface" test "$(uci -q get 'dhcp.@route6[0].interface')" = guest
+	check "V3: the prefix is on network.guest, not network.lan" sh -c "[ \"\$(uci -q get network.guest.ip6addr)\" = $PREFIX ] && [ -z \"\$(uci -q get network.lan.ip6addr)\" ]"
+	check "V4: ra_default 2 is on dhcp.guest, not dhcp.lan" sh -c "[ \"\$(uci -q get dhcp.guest.ra_default)\" = 2 ] && [ -z \"\$(uci -q get dhcp.lan.ra_default)\" ]"
+	finish
+}
+
+# With bridge VLAN filtering, LuCI adds bridge-vlan sections that name the
+# LAN bridge as their device, after the lan interface or before it. Only an
+# interface section is the LAN's, so the prefix still goes to network.lan.
+lan_interface_beside_a_bridge_vlan_section() {
+	begin lan_interface_beside_a_bridge_vlan_section
+	reset
+	cat > /etc/config/network <<'UCI'
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan1'
+
+config bridge-vlan
+	option device 'br-lan'
+	option vlan '1'
+	list ports 'lan1:u*'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.1.1'
+	option netmask '255.255.255.0'
+UCI
+	enable_start
+	check "B1: the prefix is on network.lan" test "$(uci -q get network.lan.ip6addr)" = "$PREFIX"
+	check "B2: the bridge-vlan section is left alone" sh -c "! uci -q show network | grep -q 'bridge-vlan.*ip6addr'"
+	check "B3: the RA route6 is on the lan interface" test "$(uci -q get 'dhcp.@route6[0].interface')" = lan
+	finish
+}
+
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 [ -f "$INIT_GATEWAY" ] || harness_fail "no init script at $INIT_GATEWAY"
@@ -569,7 +751,15 @@ disable_then_stop_deletes_prefix
 restart_of_disabled_gateway_keeps_prefix
 gateway_waits_for_fips0
 stop_during_the_fips0_wait_starts_nothing
-gateway_starts_after_the_fips0_wait_runs_out"
+gateway_starts_after_the_fips0_wait_runs_out
+gateway_waits_for_a_renamed_tun
+operator_ip6addr_is_kept
+operator_ra_default_is_restored_by_stop
+operator_ra_default_survives_a_power_loss
+stop_with_nothing_saved_keeps_ra_default
+pool_route_follows_lan_interface
+lan_interface_on_a_vlan_device
+lan_interface_beside_a_bridge_vlan_section"
 
 if [ -n "$INIT_CASES" ]; then
 	SELECTED="$INIT_CASES"

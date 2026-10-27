@@ -8,8 +8,10 @@ set -e
 # returns, which held apt, and every package operation queued behind it, for
 # ever.
 UNIT_START_LIMIT=60
-# fips-gateway.service waits up to 30s in ExecStartPre for fips0, behind a
-# daemon that has only just been started, so it gets longer.
+# fips-gateway.service gets longer. The gateway waits up to 30s for the
+# daemon's TUN and then probes the daemon's resolver, behind a daemon that has
+# only just been started; systemd reports the unit active once the process
+# runs, so a healthy start never reaches this bound, which is kept as a margin.
 GATEWAY_START_LIMIT=90
 
 # Whether fips-dns.service was enabled when the package was removed, written

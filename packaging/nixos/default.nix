@@ -194,15 +194,6 @@ in
       after = [ "fips.service" ];
       requires = [ "fips.service" ];
 
-      preStart = ''
-        for i in $(seq 1 30); do
-          ${pkgs.iproute2}/bin/ip link show fips0 >/dev/null 2>&1 && exit 0
-          sleep 1
-        done
-        echo "fips0 did not appear within 30s" >&2
-        exit 1
-      '';
-
       serviceConfig = {
         Type = "simple";
         ExecStart = "${cfg.package}/bin/fips-gateway --config ${stateDir}/fips.yaml";

@@ -375,6 +375,14 @@ sysctl net.ipv6.conf.all.proxy_ndp
 If 0, enable it (see
 [deploy-gateway.md](deploy-gateway.md#kernel-sysctls)).
 
+The gateway checks this at start. When `proxy_ndp` is 0 both for all
+interfaces and for its `lan_interface`, it keeps running but logs a
+warning that begins `Proxy NDP is disabled` and gives the `sysctl`
+command that enables it, with the LAN interface in its `interface`
+field. It counts proxy NDP as on when either
+`net.ipv6.conf.all.proxy_ndp` or `net.ipv6.conf.<lan_interface>.proxy_ndp`
+is 1.
+
 ## Inbound-half diagnostics
 
 Symptoms in this section all involve a mesh peer trying to reach a

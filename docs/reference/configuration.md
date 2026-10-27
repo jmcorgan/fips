@@ -744,8 +744,11 @@ with the node for routing.
 | `dns.port` | u16 | `5354` | Listen port |
 | `dns.ttl` | u32 | `300` | AAAA record TTL in seconds. Values above 2147483647 are treated as 2147483647. |
 
-The `dns.ttl` value should not exceed `node.cache.coord_ttl_secs` to avoid
-stale address mappings.
+The answer for an `<npub>.fips` name is derived from the npub, so it
+cannot go stale. The answer for a host alias can: after the alias is
+pointed at another npub in `/etc/fips/hosts`, a client may keep the old
+address for up to `dns.ttl` seconds. `dns.ttl` is not tied to
+`node.cache.coord_ttl_secs`.
 
 ### Host Mapping
 
@@ -905,7 +908,7 @@ overhead.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:8443"`). If omitted, outbound-only mode. |
-| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. |
+| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. Received frames are accepted up to 65535 bytes whatever the local value, so peers with different values interoperate. |
 | `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
 | `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
 | `transports.tcp.keepalive_secs` | u64 | `30` | TCP keepalive interval in seconds (0 = disabled) |

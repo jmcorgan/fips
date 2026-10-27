@@ -1254,10 +1254,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Linux packages
 
-- `fips-dns-setup` reads the TUN name from `tun.name` instead of waiting for
-  `fips0`, so on a host whose TUN has another name it no longer times out,
-  and upgrading such a host no longer leaves the package half-configured
-  with apt exiting 100.
+- `fips-dns-setup` no longer waits for `fips0`, so on a host whose TUN has
+  another name it no longer times out, and upgrading such a host no longer
+  leaves the package half-configured with apt exiting 100. Its per-link
+  `resolvectl` backend is removed: it could be reached only if
+  systemd-resolved started during the script's run, and then pointed
+  resolved at an address the daemon does not listen on.
 - An upgrade or reinstall no longer re-enables a `fips-dns.service` the
   operator disabled. `fips-dns` is enabled on first install, and on an
   install after a remove only if it was enabled when it was removed.
@@ -1278,9 +1280,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a release, as `.ipk` packages already were. Every upload had been
   refused for its content type, without failing the release run. A failed
   upload now raises a warning in the run.
-- `fips-gateway` waits up to 30 seconds for `fips0` before it starts, so its
-  first start after a package upgrade no longer fails and leaves the gateway
-  down until procd restarts it.
+- `fips-gateway` waits up to 30 seconds for the daemon's TUN before it
+  starts, so its first start after a package upgrade no longer fails and
+  leaves the gateway down until procd restarts it.
+- Starting `fips-gateway` no longer replaces an IPv6 address set on the LAN
+  (`network.lan.ip6addr`); the gateway's prefix is added only to a LAN with
+  none. Stopping it puts back the LAN's `ra_default` as it was, instead of
+  deleting it. The pool route and its router advertisement follow
+  `gateway.lan_interface`, including a VLAN device such as `br-lan.3`,
+  instead of always using `br-lan` and `lan`.
 
 #### Gateway
 
@@ -1291,6 +1299,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for up to five seconds. If the periodic task has to be ended, the gateway
   skips its final state save and keeps the state from the last periodic
   save.
+- `fips-gateway` uses the daemon's `tun.name` for its TUN instead of `fips0`.
+  With any other name it exited at start saying `fips0` was missing; it now
+  finds the TUN, matches its NAT and firewall rules against it, and refuses
+  DNS queries arriving on it. The gateway now waits up to 30 seconds for the
+  TUN itself, so the packaged systemd units and the NixOS module no longer
+  wait for `fips0` before starting it, and the OpenWrt init script waits for
+  the configured name.
+- `fips-gateway` warns at start when `proxy_ndp` is off for all interfaces
+  and for its LAN interface. LAN hosts that reach pool addresses on-link
+  need it, and without it they got no answer and no message said why.
+- The gateway's start-up check that the daemon's resolver answers accepts
+  only an answer to its own query from the configured upstream. A stray
+  datagram reaching it while the resolver was down let the gateway start
+  instead of exiting to be restarted.
+- On a non-loopback `gateway.dns.listen`, the gateway no longer sends the
+  reply to a LAN query with a forged mesh (`fd00::/8`) source into the mesh.
+  LAN clients with ULA addresses are still answered.
 
 #### Sessions and rekey
 
@@ -1335,11 +1360,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Transports
 
-- On Linux, a TCP link no longer resets on the first full-size frame where
-  the local MSS is below the configured `mtu`, as over WireGuard, Tailscale
-  or an MSS-clamping middlebox. Received frames are bounded by the configured
-  `mtu`, the bound senders use. Two peers configured with different `mtu`
-  values can still reset their link on frames between the two.
+- A TCP link no longer resets on frames it should carry. On Linux, a frame
+  above the local MSS but within the configured `mtu` used to reset it, as
+  over WireGuard, Tailscale or an MSS-clamping middlebox. Between two peers
+  configured with different `transports.tcp.mtu` values, every frame between
+  the two values from the larger end used to reset it. A TCP receiver now
+  accepts frames up to 65535 bytes whatever its own `mtu`, so a peer that
+  upgrades receives frames up to its peer's value. The largest frame a peer
+  can make the receiver allocate for rises from the local `mtu` (1400 bytes
+  by default) to 64 KiB.
 - On Linux, macOS and FreeBSD, a frame to a UDP next hop larger than the UDP
   MTU is refused on the encrypt-worker send path as on the inline one. A
   transit node forwarding onto a smaller UDP link now signals `MtuExceeded`
@@ -1385,6 +1414,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `outbound_only` is set, the debug `inject` command can write into any
   flow on the node, and Tor `control_port` mode runs no inbound onion
   service.
+- The Nostr relay examples no longer advise `FIPS_UDP_MTU=1280`, which loses
+  IPv6 packets of 1204 to 1280 bytes; they name 1357. Also corrected: the
+  address in `fips-dns-setup`'s header, the `dns.ttl` advice, the hostname
+  case rule for host aliases, and the FreeBSD README, which said the TUN
+  interface is destroyed when the daemon exits (the daemon takes it down,
+  and the next start reuses it).
 
 ### Security
 

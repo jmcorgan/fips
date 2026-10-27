@@ -64,7 +64,9 @@ section first, then jump to whichever half (or both) you need.
 The gateway runs alongside a `fips` daemon on the same host:
 
 - The daemon must be running with the TUN adapter enabled (the
-  `fips0` interface must exist).
+  interface `tun.name` names, `fips0` by default, must exist). The
+  gateway takes the name from `tun.name` in the configuration it
+  loads, so point the two at the same file.
 - The daemon's DNS resolver must be enabled (`dns.enabled: true`,
   default) and reachable from `fips-gateway`. By default that means
   `[::1]:5354` (IPv6 loopback). The gateway's default
@@ -170,9 +172,9 @@ sudo journalctl -u fips-gateway -e
 
 The startup log will report `Gateway config loaded`,
 `DNS upstream is reachable`, `Created nftables table 'fips_gateway'`,
-and finally `fips-gateway running`. The unit's `ExecStartPre` waits up
-to 30 s for `fips0` to appear, which covers the cold-boot race where
-the daemon is still bringing up its TUN.
+and finally `fips-gateway running`. The gateway itself waits up to
+30 s for the TUN named by `tun.name` to appear, which covers the
+cold-boot race where the daemon is still bringing up its TUN.
 
 ## Configure the outbound half
 

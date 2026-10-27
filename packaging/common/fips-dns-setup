@@ -2,33 +2,26 @@
 # fips-dns-setup — Configure DNS routing for the .fips domain.
 #
 # Detects the system's DNS resolver and configures it to forward .fips
-# queries to the FIPS DNS responder on 127.0.0.1:5354 (or [::1]:5354
-# for the global drop-in backend).
+# queries to the FIPS DNS responder on [::1]:5354, the daemon's default
+# bind. Every backend targets that address.
 #
 # Backends (tried in order):
 #   1. systemd dns-delegate (systemd >= 258, declarative drop-in)
 #   2. systemd-resolved global drop-in via /etc/systemd/resolved.conf.d/
-#      (preferred for systemd-resolved hosts — DNS=[::1]:5354 routes
-#      via standard loopback with no interface scoping, sidestepping
-#      the IPV6_PKTINFO ifindex behaviour that causes self-destined
-#      traffic to fips0's address to be silently dropped by the
-#      mesh-interface filter)
-#   3. systemd-resolved via per-link resolvectl (legacy fallback —
-#      historically failed silently due to the issue described above;
-#      kept for hosts where the global drop-in is unsuitable)
-#   4. dnsmasq (standalone)
-#   5. NetworkManager with dnsmasq plugin
-#   6. Warning with manual instructions
+#      (DNS=[::1]:5354 routes via standard loopback with no interface
+#      scoping, sidestepping the IPV6_PKTINFO ifindex behaviour that
+#      causes self-destined traffic to fips0's address to be silently
+#      dropped by the mesh-interface filter)
+#   3. dnsmasq (standalone)
+#   4. NetworkManager with dnsmasq plugin
+#   5. Warning with manual instructions
 #
-# Only the resolvectl backend uses the TUN interface. Its name is the daemon's
-# tun.name, read from the daemon's config (FIPS_CONFIG), and fips0 when the
-# config does not set one, as in the daemon.
+# No backend uses the TUN interface, so the script does not wait for it.
+# fips-dns-teardown still reverts the per-link resolvectl configuration an
+# older version of this script could write.
 
 FIPS_DNS_PORT="5354"
 FIPS_DNS_LOOPBACK_V6="::1"
-FIPS_CONFIG="${FIPS_CONFIG:-/etc/fips/fips.yaml}"
-FIPS_DEFAULT_INTERFACE="fips0"
-FIPS_INTERFACE="$FIPS_DEFAULT_INTERFACE"
 
 DNS_DELEGATE_DIR="/etc/systemd/dns-delegate.d"
 DNS_DELEGATE_FILE="${DNS_DELEGATE_DIR}/fips.dns-delegate"
@@ -43,74 +36,10 @@ STATE_FILE="${STATE_DIR}/dns-backend"
 
 log() { echo "fips-dns: $*"; }
 
-# Record the backend on the state file's first line, and for a backend that
-# configured an interface, that interface on the second.
+# Record the backend in the state file for fips-dns-teardown.
 save_backend() {
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$@" > "$STATE_FILE"
-}
-
-# Print the TUN interface name the daemon uses: `name:` directly under the
-# top-level `tun:` block of FIPS_CONFIG, unquoted and without a trailing
-# comment, or fips0 when the file, the block or the key is absent. This reads
-# the block layout the shipped config uses; it is not a YAML parser, and a
-# layout it does not read (flow style, anchors) gives fips0.
-tun_name() {
-    local name=""
-    if [ -r "$FIPS_CONFIG" ]; then
-        name=$(awk -v sq="'" '
-            function value(v,   q, end) {
-                sub(/^[ \t]+/, "", v)
-                q = substr(v, 1, 1)
-                if (q == "\"" || q == sq) {
-                    end = index(substr(v, 2), q)
-                    return end ? substr(v, 2, end - 1) : ""
-                }
-                sub(/[ \t]+#.*$/, "", v)
-                sub(/[ \t\r]+$/, "", v)
-                return v
-            }
-            /^[ \t]*(#.*)?\r?$/ { next }
-            /^[^ \t]/ { in_tun = ($0 ~ /^tun:[ \t]*(#.*)?\r?$/); indent = -1; next }
-            in_tun {
-                match($0, /^[ \t]*/)
-                if (indent < 0) indent = RLENGTH
-                if (RLENGTH == indent && $0 ~ /^[ \t]*name:/) {
-                    v = $0
-                    sub(/^[ \t]*name:/, "", v)
-                    print value(v)
-                    exit
-                }
-            }
-        ' "$FIPS_CONFIG" 2>/dev/null) || name=""
-    fi
-    echo "${name:-$FIPS_DEFAULT_INTERFACE}"
-}
-
-# Wait for the TUN interface (up to 30s).
-wait_for_interface() {
-    for i in $(seq 1 30); do
-        ip link show "$FIPS_INTERFACE" >/dev/null 2>&1 && return 0
-        sleep 1
-    done
-    log "ERROR: $FIPS_INTERFACE interface not found after 30s"
-    return 1
-}
-
-# Wait for the TUN interface to have a global IPv6 address assigned (up to 30s).
-# Returns the address on stdout, or empty string if timeout.
-wait_for_fips_addr() {
-    for i in $(seq 1 30); do
-        local addr
-        addr=$(ip -6 -o addr show dev "$FIPS_INTERFACE" scope global 2>/dev/null \
-               | awk '{print $4}' | cut -d/ -f1 | head -1)
-        if [ -n "$addr" ]; then
-            echo "$addr"
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
 }
 
 # Get systemd version number.
@@ -182,38 +111,7 @@ EOF
     return 0
 }
 
-# Backend 3: resolvectl (legacy fallback)
-#
-# systemd-resolved applies interface-scoped routing to per-link DNS servers.
-# On Ubuntu 22 (systemd 249), configuring `resolvectl dns fips0 127.0.0.1:5354`
-# causes resolved to route the DNS query through fips0 and fail (127.0.0.1 is
-# not reachable via a TUN with only fd00::/8 routes). Using fips0's own global
-# IPv6 address (locally delivered by the kernel) sidesteps that — but on hosts
-# where the daemon binds wildcard `::`, IPV6_PKTINFO reports `ipi6_ifindex ==
-# fips0` for those packets and the daemon's mesh-interface filter drops every
-# query silently. The global-drop-in backend above avoids both issues; this
-# resolvectl path is retained only as a fallback for environments where the
-# global drop-in is unsuitable.
-try_resolvectl() {
-    command -v resolvectl >/dev/null 2>&1 || return 1
-    is_active systemd-resolved.service || return 1
-    wait_for_interface || return 1
-
-    local fips_addr
-    fips_addr=$(wait_for_fips_addr)
-    if [ -z "$fips_addr" ]; then
-        log "ERROR: $FIPS_INTERFACE has no global IPv6 address after 30s"
-        return 1
-    fi
-
-    log "Configuring via resolvectl (DNS=[${fips_addr}]:${FIPS_DNS_PORT})"
-    resolvectl dns "$FIPS_INTERFACE" "[${fips_addr}]:${FIPS_DNS_PORT}"
-    resolvectl domain "$FIPS_INTERFACE" "~fips"
-    save_backend "resolvectl" "$FIPS_INTERFACE"
-    return 0
-}
-
-# Backend 4: standalone dnsmasq
+# Backend 3: standalone dnsmasq
 #
 # dnsmasq's `server=/<domain>/<addr>#<port>` syntax accepts an IPv6
 # literal directly (no brackets). Targets ::1#5354 to match the
@@ -236,7 +134,7 @@ EOF
     return 0
 }
 
-# Backend 5: NetworkManager with dnsmasq plugin
+# Backend 4: NetworkManager with dnsmasq plugin
 try_nm_dnsmasq() {
     is_active NetworkManager.service || return 1
 
@@ -260,11 +158,8 @@ EOF
 # --- Main ---
 
 main() {
-    FIPS_INTERFACE=$(tun_name)
-
     try_dns_delegate && exit 0
     try_global_drop_in && exit 0
-    try_resolvectl && exit 0
     try_dnsmasq && exit 0
     try_nm_dnsmasq && exit 0
 
@@ -279,8 +174,7 @@ main() {
     exit 0
 }
 
-# Sourced (by testing/dns-resolver/tun-name-test.sh), only the functions are
-# defined.
+# Sourced, only the functions are defined.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     set -e
     main

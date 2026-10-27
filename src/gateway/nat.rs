@@ -40,11 +40,6 @@ const MESH_SOURCE_SET: &str = "fips_mesh_sources";
 /// the same transaction that creates it.
 const MESH_SOURCE_SET_ID: u32 = 1;
 
-/// The mesh TUN interface, as the kernel compares interface names: the name
-/// and its terminating NUL. Every interface match on the TUN is built from
-/// this one constant.
-const TUN_IFACE: &[u8] = b"fips0\0";
-
 /// The loopback interface, as the kernel compares interface names.
 const LOOPBACK_IFACE: &[u8] = b"lo\0";
 
@@ -271,6 +266,9 @@ pub struct NatManager {
     /// LAN interface name. Only traffic arriving on it is translated onto
     /// the mesh, and it gates the port-forward LAN-side masquerade.
     lan_interface: String,
+    /// The daemon's TUN interface name (its `tun.name`). Every interface
+    /// match on the TUN is built from it.
+    tun_interface: String,
     /// The virtual IP range, as its network address and prefix length.
     pool: (Ipv6Addr, u8),
     /// Active mappings keyed by virtual IP.
@@ -292,12 +290,17 @@ impl NatManager {
     ///
     /// Everything `new` does except sending the first rebuild, so a test can
     /// exercise the batch builder with no socket and no privileges.
-    fn with_state(lan_interface: String, pool: (Ipv6Addr, u8)) -> Self {
-        Self::with_state_in(TABLE_NAME, lan_interface, pool)
+    fn with_state(lan_interface: String, tun_interface: String, pool: (Ipv6Addr, u8)) -> Self {
+        Self::with_state_in(TABLE_NAME, lan_interface, tun_interface, pool)
     }
 
     /// `with_state` with the table, and every object in it, under `table_name`.
-    fn with_state_in(table_name: &str, lan_interface: String, pool: (Ipv6Addr, u8)) -> Self {
+    fn with_state_in(
+        table_name: &str,
+        lan_interface: String,
+        tun_interface: String,
+        pool: (Ipv6Addr, u8),
+    ) -> Self {
         let table = Table::new(ProtocolFamily::Inet).with_name(table_name);
         let pre_chain = Chain::new(&table)
             .with_name(PREROUTING_CHAIN)
@@ -333,6 +336,7 @@ impl NatManager {
             raw_chain,
             in_chain,
             lan_interface,
+            tun_interface,
             pool,
             mappings: HashMap::new(),
             port_forwards: Vec::new(),
@@ -355,10 +359,15 @@ impl NatManager {
     /// pool. The input chain rejects traffic to a pool address that no
     /// mapping translated, from the LAN or from the gateway host itself.
     ///
-    /// `lan_interface` is the gateway's LAN-facing interface name. `pool` is
-    /// the virtual IP range as its network address and prefix length.
-    pub fn new(lan_interface: String, pool: (Ipv6Addr, u8)) -> Result<Self, NatError> {
-        let mgr = Self::with_state(lan_interface, pool);
+    /// `lan_interface` is the gateway's LAN-facing interface name and
+    /// `tun_interface` the daemon's TUN interface name. `pool` is the virtual
+    /// IP range as its network address and prefix length.
+    pub fn new(
+        lan_interface: String,
+        tun_interface: String,
+        pool: (Ipv6Addr, u8),
+    ) -> Result<Self, NatError> {
+        let mgr = Self::with_state(lan_interface, tun_interface, pool);
         mgr.rebuild()?;
 
         info!("Created nftables table '{TABLE_NAME}'");
@@ -595,7 +604,7 @@ impl NatManager {
                     .with_expr(Meta::new(MetaType::NfProto))
                     .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                     .with_expr(Meta::new(MetaType::IifName))
-                    .with_expr(Cmp::new(CmpOp::Neq, TUN_IFACE.to_vec()))
+                    .with_expr(Cmp::new(CmpOp::Neq, self.tun_bytes()))
                     .with_expr(Meta::new(MetaType::IifName))
                     .with_expr(Cmp::new(CmpOp::Neq, LOOPBACK_IFACE.to_vec()))
                     .with_expr(
@@ -704,7 +713,7 @@ impl NatManager {
                     .with_expr(Meta::new(MetaType::NfProto))
                     .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                     .with_expr(Meta::new(MetaType::OifName))
-                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.tun_bytes()))
                     .with_expr(Meta::new(MetaType::IifName))
                     .with_expr(Cmp::new(CmpOp::Neq, self.lan_iface_bytes()))
                     .with_expr(Conntrack::new(ConntrackKey::State))
@@ -723,7 +732,7 @@ impl NatManager {
                     .with_expr(Meta::new(MetaType::IifName))
                     .with_expr(Cmp::new(CmpOp::Eq, self.lan_iface_bytes()))
                     .with_expr(Meta::new(MetaType::OifName))
-                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.tun_bytes()))
                     .with_expr(Masquerade::default());
                 Ok(Some(rule))
             }
@@ -741,7 +750,7 @@ impl NatManager {
                     .with_expr(Meta::new(MetaType::NfProto))
                     .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                     .with_expr(Meta::new(MetaType::OifName))
-                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.tun_bytes()))
                     .with_expr(
                         HighLevelPayload::Network(NetworkHeaderField::IPv6(IPv6HeaderField::Daddr))
                             .build(),
@@ -805,7 +814,7 @@ impl NatManager {
 
                 let rule = Rule::new(&self.pre_chain)?
                     .with_expr(Meta::new(MetaType::IifName))
-                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.tun_bytes()))
                     .with_expr(Meta::new(MetaType::NfProto))
                     .with_expr(Cmp::new(CmpOp::Eq, [libc::NFPROTO_IPV6 as u8]))
                     .with_expr(Meta::new(MetaType::L4Proto))
@@ -830,7 +839,7 @@ impl NatManager {
                 let lan_iface = self.lan_iface_bytes();
                 let rule = Rule::new(&self.post_chain)?
                     .with_expr(Meta::new(MetaType::IifName))
-                    .with_expr(Cmp::new(CmpOp::Eq, TUN_IFACE.to_vec()))
+                    .with_expr(Cmp::new(CmpOp::Eq, self.tun_bytes()))
                     .with_expr(Meta::new(MetaType::OifName))
                     .with_expr(Cmp::new(CmpOp::Eq, lan_iface))
                     .with_expr(Meta::new(MetaType::NfProto))
@@ -908,6 +917,13 @@ impl NatManager {
     /// The LAN interface name as the kernel compares it, with its NUL.
     fn lan_iface_bytes(&self) -> Vec<u8> {
         let mut bytes = self.lan_interface.clone().into_bytes();
+        bytes.push(0);
+        bytes
+    }
+
+    /// The TUN interface name as the kernel compares it, with its NUL.
+    fn tun_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.tun_interface.clone().into_bytes();
         bytes.push(0);
         bytes
     }
@@ -1817,6 +1833,10 @@ fn send_batch(bytes: &[u8]) -> Result<(), NatError> {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/nat.rs"]
+mod tun_tests;
+
 // Coverage gap. These tests run unprivileged and open no netlink socket, so
 // three failure paths in `open_socket` and `send_batch` go unexercised here.
 // The receive timeout firing and a reply longer than the buffer (seen through
@@ -1845,6 +1865,10 @@ mod tests {
         Ipv6Addr::new(0xfd02, 0, 0, 0, 0, 0, 0, last)
     }
 
+    /// The TUN interface the test managers are built with, as the kernel
+    /// compares interface names.
+    const TUN_IFACE: &[u8] = b"fips0\0";
+
     /// The pool the test managers are built with.
     const TEST_POOL: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, 0), 112);
 
@@ -1855,7 +1879,12 @@ mod tests {
 
     /// `manager_with_mappings` with every object under `table_name`.
     fn manager_with_mappings_in(table_name: &str, count: u16) -> NatManager {
-        let mut mgr = NatManager::with_state_in(table_name, "br-lan".to_string(), TEST_POOL);
+        let mut mgr = NatManager::with_state_in(
+            table_name,
+            "br-lan".to_string(),
+            "fips0".to_string(),
+            TEST_POOL,
+        );
         for i in 1..=count {
             mgr.mappings.insert(
                 vip(i),
@@ -1992,7 +2021,7 @@ mod tests {
         let pool = crate::gateway::pool::VirtualIpPool::with_limits("fd01::1/112", 60, 60, 1, 1, 1)
             .expect("the pool accepts the CIDR");
         for network in [pool.network(), ("fd01::1".parse().unwrap(), 112)] {
-            let mgr = NatManager::with_state("br-lan".to_string(), network);
+            let mgr = NatManager::with_state("br-lan".to_string(), "fips0".to_string(), network);
             let rule = mgr
                 .rule_for(NatOp::NonLanPoolDrop)
                 .unwrap()
