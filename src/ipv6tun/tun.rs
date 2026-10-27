@@ -36,156 +36,9 @@ use tracing::{error, warn};
 use tun::Layer;
 
 use super::core::PathMtuReplica;
+use super::mss::{Remote, clamp};
 
-/// The IPv6 minimum link MTU (RFC 8200): every compliant path accepts a packet
-/// this large, so an MSS derived from it fits anywhere.
-///
-/// Three uses, and they must not disagree: the cold-flow fallback in
-/// [`per_flow_max_mss`], and the two seeds of the node-wide limit before any
-/// transport has bound, the adapter's (`MeshState::new`) and the node's record
-/// of what it has published (`NodeMtuFeed::new`). It is also the value
-/// `Node::transport_mtu()` falls back to when nothing is bound.
-pub const IPV6_MIN_MTU: u16 = 1280;
-
-/// The TCP MSS ceiling the IPv6 adapter derives from the node-wide payload
-/// limit, shared live with the TUN reader and writer threads.
-///
-/// Shared rather than copied because the limit moves at runtime. The node
-/// publishes it from `Node::transport_mtu()`, the minimum across *bound*
-/// transports, and a transport can bind minutes after start or unbind
-/// mid-operation: a narrow interface appearing must tighten the clamp, and
-/// its departure must release it. The adapter stores the ceiling of each
-/// limit the node pushes over the link here (`MeshState` in `core.rs`), so
-/// the threads clamp by the limit last published rather than one captured
-/// at spawn.
-///
-/// A relaxed load per packet, beside the `PathMtuReplica` read that already
-/// happens on the same packet — strictly the cheaper of the two. Ordering is
-/// irrelevant: this is a clamp, and a packet that reads the previous value
-/// during the store is clamped by the ceiling that was correct a microsecond
-/// earlier. The per-flow ceiling has always had that property.
-pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
-
-/// Compute the effective TCP MSS ceiling for a packet given its peer
-/// address bytes (a 16-byte IPv6 destination on outbound, source on
-/// inbound). Returns `min(global_max_mss, learned_path_max_mss)` when
-/// the per-destination path MTU is known via discovery; otherwise
-/// returns `min(global_max_mss, ipv6_minimum_safe_max_mss)`, the
-/// conservative IPv6-minimum-derived ceiling.
-///
-/// The conservative empty-lookup fallback exists because there is a
-/// race window between TCP-SYN-out and discovery-completes-with-path-
-/// MTU on cold flows. Without the floor, the first SYN exits at the
-/// kernel-natural MSS (TUN MTU minus IPv6/TCP headers), which can
-/// exceed what some downstream forwarder hop is willing to carry.
-/// The drop is silent (no PTB feedback through the userspace TUN to
-/// the kernel TCP stack), so TCP retransmits at the same too-large
-/// MSS and the application's first connection wedges before discovery
-/// completes for a corrected second SYN to fire.
-///
-/// RFC 8200 mandates every IPv6 path accepts at least 1280-byte
-/// packets, so a SYN clamped to the IPv6-minimum-derived MSS fits
-/// any compliant path. Subsequent flows pick up the actual learned
-/// per-destination value, which can be larger (when path supports
-/// it) or smaller (when path is observed-tighter than the IPv6 min).
-///
-/// The node reports each learned path as a payload limit; the shim turns it
-/// into an IPv6 MTU, and the 40-byte IPv6 and 20-byte TCP headers come off
-/// that (see [`tcp_mss`](super::mtu::tcp_mss)).
-pub(crate) fn per_flow_max_mss(
-    lookup: &PathMtuReplica,
-    addr_bytes: &[u8],
-    global_max_mss: u16,
-) -> u16 {
-    use super::mtu::{mss_ceiling, tcp_mss};
-
-    // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
-    // payload (1203) → TCP segment after IPv6+TCP headers (1143).
-    // Used as the conservative ceiling for empty-lookup destinations.
-    let conservative_max_mss = mss_ceiling(IPV6_MIN_MTU);
-    let empty_lookup_ceiling = std::cmp::min(global_max_mss, conservative_max_mss);
-
-    if addr_bytes.len() != 16 {
-        trace!(
-            len = addr_bytes.len(),
-            global_max_mss,
-            empty_lookup_ceiling,
-            "per_flow_max_mss: addr_bytes wrong length, fall back to conservative ceiling"
-        );
-        return empty_lookup_ceiling;
-    }
-    let Ok(fips_addr) = Ipv6Address::from_slice(addr_bytes) else {
-        trace!(
-            global_max_mss,
-            empty_lookup_ceiling,
-            "per_flow_max_mss: Ipv6Address::from_slice rejected (non-fd::/8 prefix), fall back to conservative ceiling"
-        );
-        return empty_lookup_ceiling;
-    };
-    let Ok(map) = lookup.read() else {
-        trace!(
-            fips_addr = %fips_addr,
-            global_max_mss,
-            empty_lookup_ceiling,
-            "per_flow_max_mss: lookup read lock poisoned, fall back to conservative ceiling"
-        );
-        return empty_lookup_ceiling;
-    };
-    let Some(payload_limit) = map.get(&fips_addr).copied() else {
-        trace!(
-            fips_addr = %fips_addr,
-            global_max_mss,
-            empty_lookup_ceiling,
-            map_len = map.len(),
-            "per_flow_max_mss: no path_mtu_lookup entry for destination, fall back to conservative ceiling"
-        );
-        return empty_lookup_ceiling;
-    };
-    let path_max_mss = tcp_mss(payload_limit);
-    // The actionable floor deliberately does not apply here. Every value a
-    // remote party supplies is refused before it can reach this map, at the
-    // path MTU state machine, the reactive `MtuExceeded` write and the
-    // discovery response, so a small stored value is one the node derived
-    // from its own outgoing link: a configured transport MTU, or the MTU a
-    // BLE connection negotiated, which on that transport is routinely well
-    // under the floor. Such a value is exact rather than suspect, and the
-    // tight clamp it yields is the reason it is stored: discarding it would
-    // advertise the conservative ceiling on a link that cannot carry it, and
-    // a direct link has no forwarder to answer with `MtuExceeded`, so the
-    // flow would stall with no feedback.
-    //
-    // What no provenance rescues is the arithmetic degenerating. At a stored
-    // MTU of 137 or less (a payload limit of 27 or less) not one payload byte fits alongside the IPv6 and TCP
-    // headers, and `clamp_tcp_mss` refuses a ceiling of zero, which would
-    // leave the SYN carrying the kernel-natural MSS instead. Fall back to the
-    // conservative ceiling there; any positive result is by construction the
-    // largest segment the stored MTU admits.
-    //
-    // `trace!`, not `warn!`, because this runs on every packet rather than
-    // only on SYNs: one degenerate stored value would otherwise emit a WARN
-    // per packet indefinitely and bury every other warning on the node. The
-    // link promotion path warns once instead.
-    if path_max_mss == 0 {
-        trace!(
-            fips_addr = %fips_addr,
-            payload_limit,
-            empty_lookup_ceiling,
-            "per_flow_max_mss: stored path_mtu leaves no room for a TCP payload byte, using conservative ceiling"
-        );
-        return empty_lookup_ceiling;
-    }
-    let result = std::cmp::min(global_max_mss, path_max_mss);
-    trace!(
-        fips_addr = %fips_addr,
-        payload_limit,
-        path_max_mss,
-        global_max_mss,
-        result,
-        "per_flow_max_mss: per-destination clamp applied"
-    );
-    result
-}
-
+pub use super::mss::{IPV6_MIN_MTU, MssCeiling};
 pub use super::queue::TunTx;
 
 /// Channel sender of the packets an embedder that owns the TUN hands the
@@ -542,8 +395,6 @@ impl TunWriter {
     /// to the TUN device. Returns when the channel is closed (all senders dropped).
     #[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(unused_mut))]
     pub fn run(mut self) {
-        use super::tcp_mss::clamp_tcp_mss;
-
         debug!(
             name = %self.name,
             max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed),
@@ -554,19 +405,15 @@ impl TunWriter {
             // Read per packet, not once: a transport binding or unbinding
             // moves the node's egress floor at runtime. See `MssCeiling`.
             let global_max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed);
-            // Per-destination clamp: peer IPv6 source address (bytes 8..24)
-            // identifies the flow's remote end. If discovery has learned a
-            // smaller path MTU for that peer, tighten the ceiling.
-            let effective_max_mss = if packet.len() >= 24 {
-                per_flow_max_mss(&self.path_mtu_lookup, &packet[8..24], global_max_mss)
-            } else {
-                global_max_mss
-            };
-            // Clamp TCP MSS on inbound SYN-flagged packets
-            if clamp_tcp_mss(&mut packet, effective_max_mss) {
+            if let Some(mss) = clamp(
+                &mut packet,
+                global_max_mss,
+                &self.path_mtu_lookup,
+                Remote::Source,
+            ) {
                 trace!(
                     name = %self.name,
-                    max_mss = effective_max_mss,
+                    max_mss = mss,
                     "Clamped TCP MSS in inbound SYN packet"
                 );
             }
@@ -826,7 +673,7 @@ fn handle_tun_packet(
     path_mtu_lookup: &PathMtuReplica,
 ) -> bool {
     use super::icmp::{DestUnreachableCode, build_dest_unreachable, should_send_icmp_error};
-    use super::tcp_mss::{clamp_tcp_mss, recalculate_l4_checksum};
+    use super::tcp_mss::recalculate_l4_checksum;
 
     log_ipv6_packet(packet);
 
@@ -863,9 +710,8 @@ fn handle_tun_packet(
 
         // Per-destination clamp: if discovery has learned a smaller path
         // MTU for this destination, tighten the ceiling for this flow.
-        let effective_max_mss = per_flow_max_mss(path_mtu_lookup, &packet[24..40], max_mss);
-        if clamp_tcp_mss(packet, effective_max_mss) {
-            trace!(name = %name, max_mss = effective_max_mss, "Clamped TCP MSS in SYN packet");
+        if let Some(mss) = clamp(packet, max_mss, path_mtu_lookup, Remote::Destination) {
+            trace!(name = %name, max_mss = mss, "Clamped TCP MSS in SYN packet");
         }
         let mut icmp =
             super::icmp::IcmpContext::new(Some(tun_tx), our_addr.to_ipv6(), &host.limiter);
@@ -1149,8 +995,7 @@ mod windows_tun {
         /// Blocks forever, reading packets from the channel and writing them
         /// to the wintun session. Returns when the channel is closed.
         pub fn run(self) {
-            use super::per_flow_max_mss;
-            use crate::ipv6tun::tcp_mss::clamp_tcp_mss;
+            use super::{Remote, clamp};
 
             debug!(
                 name = %self.name,
@@ -1162,17 +1007,15 @@ mod windows_tun {
                 // Read per packet, not once: a transport binding or unbinding
                 // moves the node's egress floor. See `MssCeiling`.
                 let global_max_mss = self.max_mss.load(std::sync::atomic::Ordering::Relaxed);
-                // Per-destination clamp (peer source IPv6 = bytes 8..24)
-                let effective_max_mss = if packet.len() >= 24 {
-                    per_flow_max_mss(&self.path_mtu_lookup, &packet[8..24], global_max_mss)
-                } else {
-                    global_max_mss
-                };
-                // Clamp TCP MSS on inbound SYN-flagged packets
-                if clamp_tcp_mss(&mut packet, effective_max_mss) {
+                if let Some(mss) = clamp(
+                    &mut packet,
+                    global_max_mss,
+                    &self.path_mtu_lookup,
+                    Remote::Source,
+                ) {
                     trace!(
                         name = %self.name,
-                        max_mss = effective_max_mss,
+                        max_mss = mss,
                         "Clamped TCP MSS in inbound SYN packet"
                     );
                 }
@@ -1711,10 +1554,6 @@ mod tests {
     // Note: TUN device creation tests require elevated privileges
     // and are better suited for integration tests.
 
-    // ========================================================================
-    // per_flow_max_mss — per-destination MSS clamp regression coverage
-    // ========================================================================
-
     fn fips_addr_with_node_byte(b: u8) -> Ipv6Address {
         let mut bytes = [0u8; 16];
         bytes[0] = crate::identity::IPV6_ADDRESS_PREFIX;
@@ -1724,174 +1563,6 @@ mod tests {
 
     fn empty_lookup() -> PathMtuReplica {
         Arc::new(RwLock::new(HashMap::new()))
-    }
-
-    /// The payload limit the node reports for a stored path MTU of `mtu`.
-    fn held(mtu: u16) -> u16 {
-        crate::node::path_mtu::payload_limit(mtu)
-    }
-
-    #[test]
-    fn per_flow_empty_lookup_returns_conservative_ceiling() {
-        // Cold-flow first-SYN race-window guard: when no per-destination
-        // path_mtu has been learned yet, fall back to the IPv6-minimum-
-        // derived ceiling (1280 - 77 - 60 = 1143) rather than the local
-        // global ceiling. This ensures the first SYN to an unknown
-        // destination clamps small enough to traverse any RFC-8200-
-        // compliant IPv6 path.
-        let lookup = empty_lookup();
-        let addr = fips_addr_with_node_byte(0x42);
-        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1143);
-    }
-
-    #[test]
-    fn per_flow_empty_lookup_returns_global_when_global_smaller() {
-        // When the local global ceiling is already <= the conservative
-        // 1143 ceiling (e.g. a daemon configured with UDP-1280 only),
-        // the empty-lookup fallback stays at the global rather than
-        // expanding upward.
-        let lookup = empty_lookup();
-        let addr = fips_addr_with_node_byte(0x42);
-        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1100), 1100);
-    }
-
-    #[test]
-    fn per_flow_clamps_to_path_mtu_when_smaller() {
-        // Discovery learned path_mtu=1280 for this destination; global
-        // ceiling is 1360. Per-flow clamp should be min(1360, 1280-77-60)
-        // = min(1360, 1143) = 1143.
-        let lookup = empty_lookup();
-        let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(addr, held(1280));
-        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1143);
-    }
-
-    #[test]
-    fn per_flow_keeps_global_when_path_mtu_larger() {
-        // Discovery learned path_mtu=1452 (> global). Per-flow stays at
-        // global 1143 (the smaller of the two).
-        let lookup = empty_lookup();
-        let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(addr, held(1452));
-        // global=1143 (UDP-1280-derived); path_max = 1452-77-60 = 1315.
-        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1143), 1143);
-    }
-
-    #[test]
-    fn per_flow_learned_value_overrides_conservative_ceiling() {
-        // When discovery has learned a per-destination value LARGER than
-        // the conservative 1143 ceiling, the learned value (capped by
-        // the global ceiling) wins. The conservative ceiling is only the
-        // empty-lookup fallback; once an entry exists, the actual
-        // learned value governs.
-        let lookup = empty_lookup();
-        let addr = fips_addr_with_node_byte(0x42);
-        lookup.write().unwrap().insert(addr, held(1452));
-        // global=1360, path_max = 1452-77-60 = 1315; min(1360, 1315) = 1315.
-        // 1315 > 1143, so the conservative ceiling did NOT clamp here.
-        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 1315);
-    }
-
-    #[test]
-    fn per_flow_stored_mtu_admitting_no_payload_byte_falls_back_to_conservative_ceiling() {
-        // A stored MTU of 137 or less leaves nothing after the 77 bytes of
-        // FIPS encapsulation and the 40 + 20 bytes of IPv6 and TCP header, so
-        // the MSS arithmetic saturates to zero. Returning that zero would be
-        // worse than the fallback: `clamp_tcp_mss` refuses a ceiling of zero,
-        // so the SYN would go out at the kernel-natural MSS, unclamped.
-        for stored in [0u16, 1, 100, 137] {
-            let lookup = empty_lookup();
-            let addr = fips_addr_with_node_byte(0x42);
-            lookup.write().unwrap().insert(addr, held(stored));
-            assert_eq!(
-                per_flow_max_mss(&lookup, addr.as_bytes(), 1360),
-                1143,
-                "stored path_mtu {stored} admits no payload byte and must be ignored"
-            );
-        }
-    }
-
-    #[test]
-    fn per_flow_honors_a_locally_seeded_sub_floor_mtu_instead_of_loosening_to_the_ceiling() {
-        // Only `seed_path_mtu_for_link_peer` can put a sub-floor value in this
-        // map: every remote-supplied path MTU is refused at ingress, at the
-        // path MTU state machine, the reactive `MtuExceeded` write and the
-        // discovery response. A seeded value is therefore the node's own link
-        // measurement, and BLE negotiates one per connection that lands in
-        // this band routinely.
-        //
-        // Applying the remote-value floor here discarded it and advertised
-        // 1143 instead, which a link this narrow cannot carry: every full-size
-        // segment is refused by the transport, a direct link has no forwarder
-        // to answer with `MtuExceeded`, and the flow stalls with no feedback.
-        // The tight clamp is the whole reason the seed exists.
-        //
-        // 138 is the first MTU admitting a payload byte; 240 is a plausible
-        // negotiated BLE value; 255 is one below the remote-value floor. The
-        // whole table is evaluated before asserting, so a regression names
-        // every band it broke rather than only the first.
-        let want = [(138u16, 1u16), (240, 103), (255, 118)];
-        let got: Vec<(u16, u16)> = want
-            .iter()
-            .map(|&(stored, _)| {
-                let lookup = empty_lookup();
-                let addr = fips_addr_with_node_byte(0x42);
-                lookup.write().unwrap().insert(addr, held(stored));
-                (stored, per_flow_max_mss(&lookup, addr.as_bytes(), 1360))
-            })
-            .collect();
-        assert_eq!(
-            got,
-            want.to_vec(),
-            "each locally seeded path_mtu must clamp tight, not fall back to 1143"
-        );
-    }
-
-    #[test]
-    fn per_flow_stored_mtu_at_the_actionable_floor_is_still_honored() {
-        // The smallest value the node will accept from a remote party still
-        // clamps to its own arithmetic and nothing coarser: 256 - 77 - 40 - 20
-        // = 119. Reintroducing the remote-value floor as a clamp-time guard
-        // would leave this case passing, so it is pinned separately from the
-        // sub-floor table above.
-        let lookup = empty_lookup();
-        let addr = fips_addr_with_node_byte(0x42);
-        lookup
-            .write()
-            .unwrap()
-            .insert(addr, held(crate::proto::mmp::MIN_ACTIONABLE_PATH_MTU));
-        assert_eq!(per_flow_max_mss(&lookup, addr.as_bytes(), 1360), 119);
-    }
-
-    #[test]
-    fn per_flow_returns_conservative_ceiling_for_non_fips_addr() {
-        // Non-fips IPv6 (e.g. fe80::/10 link-local) takes the empty-
-        // lookup path. With global=1360, fall back to 1143.
-        let lookup = empty_lookup();
-        let mut bytes = [0u8; 16];
-        bytes[0] = 0xfe;
-        bytes[1] = 0x80;
-        assert_eq!(per_flow_max_mss(&lookup, &bytes, 1360), 1143);
-    }
-
-    #[test]
-    fn per_flow_returns_conservative_ceiling_on_short_addr_slice() {
-        let lookup = empty_lookup();
-        let bytes = [0u8; 8];
-        assert_eq!(per_flow_max_mss(&lookup, &bytes, 1360), 1143);
-    }
-
-    #[test]
-    fn per_flow_independent_per_destination() {
-        // Two different destinations with different path MTUs. Each
-        // lookup honors its own value; cross-talk would be a regression.
-        let lookup = empty_lookup();
-        let a = fips_addr_with_node_byte(0x10);
-        let b = fips_addr_with_node_byte(0x20);
-        lookup.write().unwrap().insert(a, held(1280));
-        lookup.write().unwrap().insert(b, held(1452));
-        assert_eq!(per_flow_max_mss(&lookup, a.as_bytes(), 1360), 1143);
-        assert_eq!(per_flow_max_mss(&lookup, b.as_bytes(), 1360), 1315);
     }
 
     // ========================================================================

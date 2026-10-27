@@ -26,8 +26,9 @@ rest) at its own crate root.
 - `link.rs`: the link-layer message type catalog (`LinkMessageType`)
   and the session datagram that carries end-to-end traffic.
 - `framing.rs`: the encapsulation overhead of a session datagram, which
-  spans the FMP and FSP layers, and the largest FSP payload a path MTU
-  admits once that overhead and the port header are paid.
+  spans the FMP and FSP layers and is summed from their wire sizes, and
+  the largest FSP payload a path MTU admits once that overhead and the
+  port header are paid.
 - `math.rs`: `powi`, an integer power that gives the same bits on every
   platform, for the protocol arithmetic `core` has no float method for.
 - `rate_limit.rs`: a per-address minimum-interval limiter and an

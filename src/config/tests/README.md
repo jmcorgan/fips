@@ -28,11 +28,16 @@ that file and can reach its private items.
   control sockets in one directory, none for a path with no file name, and
   for a client a symlink to the control socket followed first while a path
   that does not exist is used as given; on Windows the control port plus 2.
+- `merge.rs`: tests for how `Config::merge` (`mod.rs`) layers a later
+  file's `tun` and `dns` sections, which `TunConfig::merge` and
+  `DnsConfig::merge` (`src/ipv6tun/config.rs`) hold: a later file can turn
+  the TUN on but not off, always decides `dns.enabled` even at its default,
+  and replaces each optional field only when it sets one.
 
 `mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`,
-`mod buffers`, `mod grants` and `mod sockets`, not as `mod tests`, because
-`mod.rs` still carries an inline `mod tests` block of that name. That block,
-and the inline blocks in the other files here, predate the rule that unit
-tests live in this directory; moving them is a separate change. Once
-`mod.rs`'s block has moved, its tests and these can share the usual
-`mod tests;` declaration.
+`mod buffers`, `mod grants`, `mod sockets` and `mod merge`, not as
+`mod tests`, because `mod.rs` still carries an inline `mod tests` block of
+that name. That block, and the inline blocks in the other files here,
+predate the rule that unit tests live in this directory; moving them is a
+separate change. Once `mod.rs`'s block has moved, its tests and these can
+share the usual `mod tests;` declaration.

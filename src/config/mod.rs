@@ -1943,27 +1943,9 @@ impl Config {
         if other.node.leaf_only {
             self.node.leaf_only = true;
         }
-        // Merge tun section
-        if other.tun.enabled {
-            self.tun.enabled = true;
-        }
-        if other.tun.name.is_some() {
-            self.tun.name = other.tun.name;
-        }
-        if other.tun.mtu.is_some() {
-            self.tun.mtu = other.tun.mtu;
-        }
-        // Merge dns section — higher-priority config always wins for enabled
-        self.dns.enabled = other.dns.enabled;
-        if other.dns.bind_addr.is_some() {
-            self.dns.bind_addr = other.dns.bind_addr;
-        }
-        if other.dns.port.is_some() {
-            self.dns.port = other.dns.port;
-        }
-        if other.dns.ttl.is_some() {
-            self.dns.ttl = other.dns.ttl;
-        }
+        // Merge the IPv6 adapter's tun and dns sections
+        self.tun.merge(other.tun);
+        self.dns.merge(other.dns);
         // Merge transports section
         self.transports.merge(other.transports);
         // Merge peers (replace if non-empty)
@@ -2556,6 +2538,10 @@ mod buffers;
 #[cfg(test)]
 #[path = "tests/grants.rs"]
 mod grants;
+
+#[cfg(test)]
+#[path = "tests/merge.rs"]
+mod merge;
 
 #[cfg(test)]
 mod tests {

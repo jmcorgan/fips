@@ -30,6 +30,19 @@ can reach the source file's private items.
   definition at every `u16` input, the FSP payload limit against the
   adapter's earlier seed expression at every input, and the known answers
   at the inputs the call sites pass, including the default UDP MTU.
+- `mss.rs` tests `../mss.rs`: the per-destination TCP MSS ceiling
+  (`per_flow_max_mss`) falls back to the IPv6-minimum ceiling, capped by the
+  node-wide one, for an address with no stored path, one outside `fd00::/8`
+  and a slice of the wrong length; it takes the smaller of the node-wide
+  ceiling and the stored path's, for each destination on its own; it falls
+  back again where a stored MTU leaves no room for a payload byte, while a
+  locally seeded MTU below the actionable floor, and one at that floor, clamp
+  by their own arithmetic; and its fallback trace logs under the target
+  `fips::ipv6tun::mss`. The shared clamp the TUN writers and reader call
+  (`clamp`) clamps a SYN by the stored path to its source for a packet toward
+  the host and to its destination for one from it, leaves a packet too short
+  to hold its source unclamped, and does not clamp a segment that is not a
+  SYN.
 - `outbound.rs` tests `../outbound.rs` as module `host_tests`: the host half
   turns a packet to a key the adapter holds into a datagram carrying the
   compressed packet, answers a packet to a prefix no key names with
@@ -77,7 +90,9 @@ can reach the source file's private items.
   beside it, and a rule left by an exit without stop does not send another
   routing table's ULA traffic out the default route. It covers the pure kind
   decision (`existing_link_verdict`) and, in root network-namespace tests,
-  `TunDevice::create` and teardown themselves.
+  `TunDevice::create` and teardown themselves. One test needs no root: the
+  reader clamps a SYN by the stored path to its destination before handing it
+  to the mesh.
 - `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
   loaded `inet fips` table that polices another interface than the TUN is
   reported as no firewall, every listener unfiltered, and one that polices

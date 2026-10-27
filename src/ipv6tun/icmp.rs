@@ -1,8 +1,11 @@
-//! ICMPv6 message handling for FIPS.
+//! ICMPv6 error messages the IPv6 adapter sends back to the host (RFC 4443).
 //!
-//! Implements ICMPv6 error message generation per RFC 4443.
-//! Currently supports Destination Unreachable (Type 1) for
-//! packets that cannot be routed.
+//! Builds Destination Unreachable, for a packet the mesh cannot carry to
+//! its destination, and Packet Too Big, for one larger than the path
+//! admits, and sends them toward the host through the TUN writer
+//! (`IcmpContext`). Packet Too Big is rate limited per source address.
+//! The IPv6 MTU arithmetic lives in `mtu.rs`; its public names are
+//! re-exported here so their paths stay.
 
 use super::icmp_rate_limit::IcmpRateLimiter;
 use super::tun::TunTx;

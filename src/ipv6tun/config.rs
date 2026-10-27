@@ -106,6 +106,26 @@ impl DnsConfig {
         }
         used
     }
+
+    /// Merge a later configuration file's `dns` section into this one.
+    ///
+    /// The later section always decides `enabled`, even when it leaves the
+    /// key at its default of true, so a later file with no `dns` section
+    /// turns the responder back on. `bind_addr`, `port` and `ttl` are taken
+    /// from the later section when it sets them.
+    pub(crate) fn merge(&mut self, other: DnsConfig) {
+        // The later file always decides `enabled`, even when it left the key at its default.
+        self.enabled = other.enabled;
+        if other.bind_addr.is_some() {
+            self.bind_addr = other.bind_addr;
+        }
+        if other.port.is_some() {
+            self.port = other.port;
+        }
+        if other.ttl.is_some() {
+            self.ttl = other.ttl;
+        }
+    }
 }
 
 /// TUN interface configuration (`tun.*`).
@@ -133,6 +153,21 @@ impl TunConfig {
     /// Get the MTU (default: 1280).
     pub fn mtu(&self) -> u16 {
         self.mtu.unwrap_or(DEFAULT_TUN_MTU)
+    }
+
+    /// Merge a later configuration file's `tun` section into this one: it
+    /// can turn the TUN on but not off, and its `name` and `mtu` are taken
+    /// when it sets them.
+    pub(crate) fn merge(&mut self, other: TunConfig) {
+        if other.enabled {
+            self.enabled = true;
+        }
+        if other.name.is_some() {
+            self.name = other.name;
+        }
+        if other.mtu.is_some() {
+            self.mtu = other.mtu;
+        }
     }
 }
 

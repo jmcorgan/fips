@@ -2540,12 +2540,7 @@ async fn test_seed_path_mtu_inserts_when_empty() {
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
-    let stored = node
-        .path_mtu_lookup
-        .read()
-        .unwrap()
-        .get(&fips_addr)
-        .map(|e| e.mtu);
+    let stored = node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu);
     assert_eq!(
         stored,
         Some(1452),
@@ -2581,11 +2576,7 @@ async fn test_seeded_narrow_link_mtu_reaches_the_clamp_as_a_tight_ceiling() {
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
     assert_eq!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .map(|e| e.mtu),
+        node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu),
         Some(240),
         "the seed stores a narrow link MTU unchanged"
     );
@@ -2594,7 +2585,7 @@ async fn test_seeded_narrow_link_mtu_reaches_the_clamp_as_a_tight_ceiling() {
     // every full-size segment would be refused by the transport with no
     // feedback to the TCP stack.
     assert_eq!(
-        crate::ipv6tun::tun::per_flow_max_mss(&node.test_replica(), fips_addr.as_bytes(), 1360),
+        crate::ipv6tun::mss::per_flow_max_mss(&node.test_replica(), fips_addr.as_bytes(), 1360),
         103,
         "the clamp must honour the seeded link MTU, not fall back to 1143"
     );
@@ -2621,18 +2612,11 @@ async fn test_seed_path_mtu_keeps_tighter_existing_value() {
     // Pre-populate with a tighter value, e.g. learned from discovery's
     // reverse-path bottleneck.
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1280));
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
-    let stored = node
-        .path_mtu_lookup
-        .read()
-        .unwrap()
-        .get(&fips_addr)
-        .map(|e| e.mtu);
+    let stored = node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu);
     assert_eq!(
         stored,
         Some(1280),
@@ -2660,18 +2644,11 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
 
     // Pre-populate with a looser stale value.
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1452));
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
 
-    let stored = node
-        .path_mtu_lookup
-        .read()
-        .unwrap()
-        .get(&fips_addr)
-        .map(|e| e.mtu);
+    let stored = node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu);
     assert_eq!(
         stored,
         Some(1280),
@@ -2685,7 +2662,7 @@ async fn test_seed_path_mtu_tightens_looser_existing_value() {
 
 #[tokio::test]
 async fn test_seed_path_mtu_noop_for_unknown_transport() {
-    let node = make_node();
+    let mut node = make_node();
     let (peer_addr, peer_key) = seed_peer();
     let fips_addr = crate::Ipv6Address::from_node_addr(&peer_addr);
     let transport_addr = TransportAddr::from_string("10.0.0.5:2121");
@@ -2693,7 +2670,7 @@ async fn test_seed_path_mtu_noop_for_unknown_transport() {
     // No transport registered — call must be a no-op, not panic.
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(99), &transport_addr);
 
-    let map = node.path_mtu_lookup.read().unwrap();
+    let map = &node.path_mtu_lookup;
     assert!(
         map.get(&fips_addr).is_none(),
         "Seed must be a no-op when transport_id is not registered"
@@ -2726,11 +2703,7 @@ async fn test_seed_path_mtu_reseeds_when_peer_moves_to_wider_transport() {
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &narrow_addr);
     assert_eq!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .map(|e| e.mtu),
+        node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu),
         Some(1280),
         "first seed takes the narrow link's MTU"
     );
@@ -2738,11 +2711,7 @@ async fn test_seed_path_mtu_reseeds_when_peer_moves_to_wider_transport() {
     // The peer moves to the wider transport.
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(2), &wide_addr);
     assert_eq!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .map(|e| e.mtu),
+        node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu),
         Some(1452),
         "a seed from a different transport must replace a value describing \
          the link the peer has left"
@@ -2775,17 +2744,11 @@ async fn test_seed_path_mtu_discards_learned_value_from_abandoned_link() {
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &narrow_addr);
     // Reactive MtuExceeded tightens further, still on the narrow link.
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(900));
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(2), &wide_addr);
     assert_eq!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .map(|e| e.mtu),
+        node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu),
         Some(1452),
         "a tighter value measured on the abandoned link must not clamp the new one"
     );
@@ -2815,18 +2778,12 @@ async fn test_seed_path_mtu_keeps_tighter_value_when_reseeding_same_transport() 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     // Reactive learning tightens the same link.
     node.path_mtu_lookup
-        .write()
-        .unwrap()
         .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(1200));
 
     // Re-promotion on the same transport.
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     assert_eq!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .map(|e| e.mtu),
+        node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu),
         Some(1200),
         "re-seeding the same link must not undo reactive learning"
     );
@@ -2858,11 +2815,7 @@ async fn test_releasing_a_path_drops_the_seeding_transport_record_with_the_value
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     assert_eq!(
-        node.path_mtu_seeded_by
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .copied(),
+        node.path_mtu_seeded_by.get(&fips_addr).copied(),
         Some(TransportId::new(1)),
         "the seed records the transport it came from"
     );
@@ -2872,19 +2825,11 @@ async fn test_releasing_a_path_drops_the_seeding_transport_record_with_the_value
     node.path_mtu_lookup_release(&peer_addr);
 
     assert!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .is_none(),
+        node.path_mtu_lookup.get(&fips_addr).is_none(),
         "release drops the stored value"
     );
     assert!(
-        node.path_mtu_seeded_by
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .is_none(),
+        !node.path_mtu_seeded_by.contains_key(&fips_addr),
         "release must drop the seeding record with it, or the map grows for \
          the life of the process"
     );
@@ -2920,20 +2865,12 @@ async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
     node.path_mtu_lookup_release(&peer_addr);
 
     assert_eq!(
-        node.path_mtu_lookup
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .map(|e| e.mtu),
+        node.path_mtu_lookup.get(&fips_addr).map(|e| e.mtu),
         Some(1452),
         "a peer whose link is still up is reseeded from that link"
     );
     assert_eq!(
-        node.path_mtu_seeded_by
-            .read()
-            .unwrap()
-            .get(&fips_addr)
-            .copied(),
+        node.path_mtu_seeded_by.get(&fips_addr).copied(),
         Some(TransportId::new(1)),
         "and the seeding record comes back with it, so a later move is still \
          detectable"

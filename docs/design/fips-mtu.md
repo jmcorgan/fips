@@ -194,10 +194,10 @@ consumers:
   transit routers. Read by the session layer when constructing
   outbound `SessionDatagram` envelopes.
 
-- **TCP-clamp mirror** (`path_mtu_lookup`, a
-  `HashMap<Ipv6Address, u16>` on the Node). Read by the
-  TUN-side TCP MSS clamp (`per_flow_max_mss` in
-  `src/ipv6tun/tun.rs`) at first-SYN time so outbound TCP flows
+- **TCP-clamp mirror** (`path_mtu_lookup`, a `PathMtuMap` on the
+  Node). The node publishes each change to the IPv6 adapter's copy,
+  which the TUN-side TCP MSS clamp (`per_flow_max_mss` in
+  `src/ipv6tun/mss.rs`) reads at first-SYN time so outbound TCP flows
   are clamped to the per-destination MTU rather than a generic
   ceiling. Written from four sites, each keeping the tighter of the
   stored and the new value, except that a link seed from a different

@@ -57,8 +57,8 @@ pub enum FspAction {
     /// but no longer refuses a hint that replaces it.
     DemoteCoords { addr: NodeAddr },
     /// Write `mtu` into the shared `Ipv6Address`-keyed path-MTU lookup, keeping
-    /// the tighter of existing-or-new (the shell applies the write under the
-    /// `path_mtu_lookup` guard).
+    /// the tighter of existing-or-new (the shell reads and writes in one step
+    /// on the node's receive loop).
     TightenPathMtuLookup { fips_addr: Ipv6Address, mtu: u16 },
     /// Trigger discovery toward `dest` (`maybe_initiate_lookup`). The
     /// `CoordsRequired` decision emits it only when the target's identity is
@@ -117,8 +117,8 @@ impl Fsp {
     /// Decide whether a path-MTU update should tighten the shared lookup: emit
     /// `TightenPathMtuLookup` only when there is no `existing` value or
     /// `candidate` is strictly tighter than it (keep-tighter, never loosen).
-    /// The `existing` read and the applied write are performed shell-side
-    /// under one `path_mtu_lookup` write guard, so the decision stays atomic.
+    /// The `existing` read and the applied write are performed shell-side in
+    /// one step on the node's receive loop, so the decision stays atomic.
     pub fn plan_path_mtu_tighten(
         &self,
         fips_addr: Ipv6Address,

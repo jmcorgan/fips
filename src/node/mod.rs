@@ -567,7 +567,7 @@ pub struct Node {
     /// `coord_cache.entries[*].path_mtu`). Every change is published to the
     /// IPv6 adapter, whose SYN/SYN-ACK clamp uses the smaller of the
     /// local-egress floor and the learned per-destination path MTU.
-    path_mtu_lookup: crate::node::path_mtu::PathMtuLookup,
+    path_mtu_lookup: crate::node::path_mtu::PathMtuMap,
     /// What this node has published to the IPv6 adapter of its node-wide
     /// payload limit, and the TCP MSS ceiling it last logged.
     ///
@@ -591,7 +591,7 @@ pub struct Node {
     /// describes: `path_mtu_lookup_release` drops both together, and peer
     /// removal is one of its callers, so a peer that never comes back leaves
     /// nothing behind.
-    path_mtu_seeded_by: Arc<std::sync::RwLock<HashMap<crate::Ipv6Address, TransportId>>>,
+    path_mtu_seeded_by: HashMap<crate::Ipv6Address, TransportId>,
     /// The embedder's wake-up for the medium-change detector, handed out by
     /// [`Node::netmon_trigger`] and into the detector at `start()`. Always
     /// allocated so the trigger works whenever it is fetched.
@@ -1190,12 +1190,12 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::default(),
+            path_mtu_lookup: Default::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
             node_mtu: handlers::host_link::NodeMtuFeed::new(),
-            path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_seeded_by: HashMap::new(),
             netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
@@ -1367,12 +1367,12 @@ impl Node {
             peer_aliases: HashMap::new(),
             peer_acl,
             host_map,
-            path_mtu_lookup: Arc::default(),
+            path_mtu_lookup: Default::default(),
             // Seeded at the IPv6 minimum, which is what `transport_mtu()`
             // itself falls back to when nothing is bound. Refreshed before
             // the TUN threads start and on every change to the bound set.
             node_mtu: handlers::host_link::NodeMtuFeed::new(),
-            path_mtu_seeded_by: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            path_mtu_seeded_by: HashMap::new(),
             netmon_trigger: netmon::NetmonTrigger::new(),
             #[cfg(unix)]
             decrypt_registered_sessions: std::collections::HashSet::new(),
@@ -3555,10 +3555,7 @@ impl Node {
     /// Read the path MTU stored for a destination Ipv6Address.
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_get(&self, fips_addr: &crate::Ipv6Address) -> Option<u16> {
-        self.path_mtu_lookup
-            .read()
-            .ok()
-            .and_then(|map| map.get(fips_addr).map(|e| e.mtu))
+        self.path_mtu_lookup.get(fips_addr).map(|e| e.mtu)
     }
 
     /// Read the whole path_mtu_lookup entry, including how it is released.
@@ -3567,10 +3564,7 @@ impl Node {
         &self,
         fips_addr: &crate::Ipv6Address,
     ) -> Option<crate::node::path_mtu::PathMtuEntry> {
-        self.path_mtu_lookup
-            .read()
-            .ok()
-            .and_then(|map| map.get(fips_addr).copied())
+        self.path_mtu_lookup.get(fips_addr).copied()
     }
 
     /// The per-peer limits the IPv6 adapter would hold for this node's map,
@@ -3578,8 +3572,8 @@ impl Node {
     /// attach an adapter.
     #[cfg(test)]
     pub(crate) fn test_replica(&self) -> crate::ipv6tun::core::PathMtuReplica {
-        let map = self.path_mtu_lookup.read().unwrap();
-        let limits = map
+        let limits = self
+            .path_mtu_lookup
             .iter()
             .map(|(addr, e)| (*addr, crate::node::path_mtu::payload_limit(e.mtu)))
             .collect();
@@ -3593,27 +3587,24 @@ impl Node {
     /// the mercy of the expiry pass. Use `path_mtu_lookup_learn` for the
     /// discovery-carrier shape.
     #[cfg(test)]
-    pub(crate) fn path_mtu_lookup_insert(&self, fips_addr: crate::Ipv6Address, mtu: u16) {
-        if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
-        }
+    pub(crate) fn path_mtu_lookup_insert(&mut self, fips_addr: crate::Ipv6Address, mtu: u16) {
+        self.path_mtu_lookup
+            .insert_unkeyed(fips_addr, crate::node::path_mtu::PathMtuEntry::held(mtu));
     }
 
     /// Write an expiring path_mtu_lookup entry directly, as the discovery
     /// `LookupResponse` carrier does (for tests that drive the expiry pass).
     #[cfg(test)]
     pub(crate) fn path_mtu_lookup_learn(
-        &self,
+        &mut self,
         fips_addr: crate::Ipv6Address,
         mtu: u16,
         at_ms: u64,
     ) {
-        if let Ok(mut map) = self.path_mtu_lookup.write() {
-            map.insert_unkeyed(
-                fips_addr,
-                crate::node::path_mtu::PathMtuEntry::learned(mtu, at_ms),
-            );
-        }
+        self.path_mtu_lookup.insert_unkeyed(
+            fips_addr,
+            crate::node::path_mtu::PathMtuEntry::learned(mtu, at_ms),
+        );
     }
 
     /// Drop the remote-learned path MTU for a destination whose path is no
@@ -3657,45 +3648,18 @@ impl Node {
         }
 
         let fips_addr = crate::Ipv6Address::from_node_addr(addr);
-        match self.path_mtu_lookup.write() {
-            Ok(mut map) => {
-                if map.remove(&fips_addr).is_some() {
-                    tracing::debug!(
-                        dest = %self.peer_display_name(addr),
-                        fips_addr = %fips_addr,
-                        "Released path_mtu_lookup entry for an invalidated path"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    fips_addr = %fips_addr,
-                    error = %e,
-                    "path_mtu_lookup write lock poisoned; entry not released"
-                );
-                return;
-            }
+        if self.path_mtu_lookup.remove(&fips_addr).is_some() {
+            tracing::debug!(
+                dest = %self.peer_display_name(addr),
+                fips_addr = %fips_addr,
+                "Released path_mtu_lookup entry for an invalidated path"
+            );
         }
         // The seeding record describes the path just released, so it goes with
-        // it. Taken after the guard above is dropped, so
-        // `seed_path_mtu_for_link_peer` remains the only site holding both
-        // locks at once, and before the reseed below, so a peer whose link is
-        // still up writes its transport straight back in.
-        match self.path_mtu_seeded_by.write() {
-            Ok(mut seeded_by) => {
-                seeded_by.remove(&fips_addr);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    fips_addr = %fips_addr,
-                    error = %e,
-                    "path_mtu_seeded_by write lock poisoned; seeding record not released"
-                );
-            }
-        }
+        // it, before the reseed below, so a peer whose link is still up writes
+        // its transport straight back in.
+        self.path_mtu_seeded_by.remove(&fips_addr);
 
-        // The write guard above must be dropped before the seed runs: it takes
-        // the same lock, and `std::sync::RwLock` is not re-entrant.
         if let Some(peer) = self.peers.get(addr)
             && let Some(transport_id) = peer.transport_id()
             && let Some(transport_addr) = peer.current_addr().cloned()

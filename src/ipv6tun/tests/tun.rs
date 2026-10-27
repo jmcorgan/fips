@@ -9,6 +9,10 @@
 //! the Linux outcomes. macOS and FreeBSD are not run at all; there the
 //! kernel names the device, and after the fix no code touches an interface
 //! by `tun.name` before create. The module is Linux only.
+//!
+//! One test of the reader's TCP MSS clamp also lives here, because only
+//! `tun.rs`'s child modules reach the reader's packet handler. It needs no
+//! root, so the Linux lib suite runs it.
 
 use super::*;
 
@@ -518,4 +522,66 @@ fn startup_replaces_an_older_rule_rather_than_adding_beside_it() {
         rules.len() == 1 && rules[0].contains("suppress_prefixlength 0"),
         "one fd00::/8 rule, of the new shape: {rules:?}"
     );
+}
+
+/// A host path whose map knows `peer`, with its replica and the node's end of
+/// its datagram channel.
+fn reader_host(
+    peer: crate::ipv6tun::link::PeerKey,
+) -> (
+    HostPath,
+    PathMtuReplica,
+    tokio::sync::mpsc::Receiver<crate::ipv6tun::link::Datagram>,
+) {
+    let state = crate::ipv6tun::core::MeshState::new();
+    state.apply(crate::ipv6tun::link::FromMesh::KnownKey { peer });
+    let (datagrams, rx) = tokio::sync::mpsc::channel(4);
+    let limiter = Arc::new(std::sync::Mutex::new(
+        crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter::new(),
+    ));
+    let host = HostPath {
+        state,
+        limiter,
+        datagrams,
+    };
+    (host, PathMtuReplica::default(), rx)
+}
+
+/// The reader clamps a SYN from the host by the stored path to its
+/// destination, in the packet itself, before handing it to the mesh.
+#[test]
+fn the_reader_clamps_a_syn_by_the_path_to_its_destination() {
+    let key = crate::ipv6tun::link::any_key();
+    let peer = key.address();
+    let ours = *crate::Identity::generate().address();
+    let (host, paths, _datagrams) = reader_host(key);
+    paths
+        .write()
+        .unwrap()
+        .insert(peer, crate::node::path_mtu::payload_limit(1000));
+    let (tun_tx, _tun_rx) = TunTx::bounded(4);
+
+    // A SYN from us to the peer: a 40-byte IPv6 header carrying TCP, then a
+    // 24-byte TCP header with data offset 6 and one MSS option of 1440.
+    let mut packet = vec![0u8; 64];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&24u16.to_be_bytes());
+    packet[6] = 6;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(ours.as_bytes());
+    packet[24..40].copy_from_slice(peer.as_bytes());
+    packet[52] = 6 << 4;
+    packet[53] = 0x02;
+    packet[60..64].copy_from_slice(&[2, 4, 0x05, 0xa0]);
+
+    assert!(handle_tun_packet(
+        &mut packet,
+        1360,
+        "test0",
+        ours,
+        &tun_tx,
+        &host,
+        &paths
+    ));
+    assert_eq!(u16::from_be_bytes([packet[62], packet[63]]), 863);
 }

@@ -466,62 +466,49 @@ impl Node {
                     // Mirror path_mtu into the Ipv6Address-keyed lookup map, which
                     // publishes it to the IPv6 adapter's TCP MSS clamp.
                     let fips_addr = crate::Ipv6Address::from_node_addr(&target);
-                    match self.path_mtu_lookup.write() {
-                        Ok(mut map) => match map.get(&fips_addr).copied() {
-                            Some(existing)
-                                if !should_apply_path_mtu(Some(existing.mtu), path_mtu) =>
-                            {
-                                // Keep the tighter learned value; never loosen
-                                // the clamp. A reactive MtuExceeded or
-                                // PathMtuNotification tighten takes precedence
-                                // over a looser discovery estimate
-                                // (cross-carrier keep-tighter).
-                                //
-                                // This arm deliberately leaves `learned_ms`
-                                // alone. A later answered lookup that reports
-                                // the value already stored takes this arm, so
-                                // the entry still expires at first-write plus
-                                // the TTL rather than being pushed out again
-                                // by every answer of the same value. (A
-                                // replayed response never gets here: the
-                                // pending lookup is gone once the first answer
-                                // is accepted, so the copy is dropped as
-                                // unsolicited.) Refreshing the stamp here would
-                                // read as a tidy-up and would silently restore
-                                // indefinite pinning.
-                                debug!(
-                                    target = %self.peer_display_name(&target),
-                                    fips_addr = %fips_addr,
-                                    path_mtu = path_mtu,
-                                    existing = existing.mtu,
-                                    "LookupResponse: keeping tighter existing path_mtu_lookup value"
-                                );
-                            }
-                            other => {
-                                // The one carrier with no release path, so this
-                                // is the one write that carries a deadline.
-                                map.insert(
-                                    fips_addr,
-                                    target_key,
-                                    crate::node::path_mtu::PathMtuEntry::learned(path_mtu, now_ms),
-                                );
-                                debug!(
-                                    target = %self.peer_display_name(&target),
-                                    fips_addr = %fips_addr,
-                                    path_mtu = path_mtu,
-                                    prior = ?other,
-                                    map_len = map.len(),
-                                    "Wrote path_mtu_lookup from discovery LookupResponse"
-                                );
-                            }
-                        },
-                        Err(e) => {
-                            warn!(
+                    match self.path_mtu_lookup.get(&fips_addr).copied() {
+                        Some(existing) if !should_apply_path_mtu(Some(existing.mtu), path_mtu) => {
+                            // Keep the tighter learned value; never loosen
+                            // the clamp. A reactive MtuExceeded or
+                            // PathMtuNotification tighten takes precedence
+                            // over a looser discovery estimate
+                            // (cross-carrier keep-tighter).
+                            //
+                            // This arm deliberately leaves `learned_ms`
+                            // alone. A later answered lookup that reports
+                            // the value already stored takes this arm, so
+                            // the entry still expires at first-write plus
+                            // the TTL rather than being pushed out again
+                            // by every answer of the same value. (A
+                            // replayed response never gets here: the
+                            // pending lookup is gone once the first answer
+                            // is accepted, so the copy is dropped as
+                            // unsolicited.) Refreshing the stamp here would
+                            // read as a tidy-up and would silently restore
+                            // indefinite pinning.
+                            debug!(
                                 target = %self.peer_display_name(&target),
                                 fips_addr = %fips_addr,
                                 path_mtu = path_mtu,
-                                error = %e,
-                                "path_mtu_lookup write lock poisoned; clamp will not see this update"
+                                existing = existing.mtu,
+                                "LookupResponse: keeping tighter existing path_mtu_lookup value"
+                            );
+                        }
+                        other => {
+                            // The one carrier with no release path, so this
+                            // is the one write that carries a deadline.
+                            self.path_mtu_lookup.insert(
+                                fips_addr,
+                                target_key,
+                                crate::node::path_mtu::PathMtuEntry::learned(path_mtu, now_ms),
+                            );
+                            debug!(
+                                target = %self.peer_display_name(&target),
+                                fips_addr = %fips_addr,
+                                path_mtu = path_mtu,
+                                prior = ?other,
+                                map_len = self.path_mtu_lookup.len(),
+                                "Wrote path_mtu_lookup from discovery LookupResponse"
                             );
                         }
                     }
@@ -1038,7 +1025,7 @@ impl Node {
     /// from discovery or from reactive `MtuExceeded` is assumed to be about
     /// the link now being seeded and is not discarded.
     pub(in crate::node) fn seed_path_mtu_for_link_peer(
-        &self,
+        &mut self,
         peer_addr: &NodeAddr,
         peer_key: PeerKey,
         transport_id: TransportId,
@@ -1070,34 +1057,18 @@ impl Node {
             );
         }
         let fips_addr = crate::Ipv6Address::from_node_addr(peer_addr);
-        let Ok(mut map) = self.path_mtu_lookup.write() else {
-            warn!(
-                peer = %self.peer_display_name(peer_addr),
-                "seed_path_mtu_for_link_peer: path_mtu_lookup write lock poisoned"
-            );
-            return;
-        };
-        // Taken while `path_mtu_lookup` is held. This is the only site that
-        // locks both, so no lock-order inversion is reachable.
-        let Ok(mut seeded_by) = self.path_mtu_seeded_by.write() else {
-            warn!(
-                peer = %self.peer_display_name(peer_addr),
-                "seed_path_mtu_for_link_peer: path_mtu_seeded_by write lock poisoned"
-            );
-            return;
-        };
         // Only a *prior seed from another transport* proves the peer has
         // moved. With no prior seed the existing value came from discovery or
         // reactive learning about the path we are seeding now, so the
         // never-loosen rule still applies to it.
-        let prior_seed = seeded_by.get(&fips_addr).copied();
+        let prior_seed = self.path_mtu_seeded_by.get(&fips_addr).copied();
         let relinked = prior_seed.is_some_and(|prior| prior != transport_id);
         // Recorded whether or not the value changes: the next seed needs to
         // know which link this one described, otherwise a peer whose first
         // seed was declined never registers a link at all and a later move
         // cannot be detected.
-        seeded_by.insert(fips_addr, transport_id);
-        match map.get(&fips_addr).copied() {
+        self.path_mtu_seeded_by.insert(fips_addr, transport_id);
+        match self.path_mtu_lookup.get(&fips_addr).copied() {
             Some(existing) if !relinked && existing.mtu <= link_mtu => {
                 // Keep the tighter learned value; never loosen within a link.
                 // `relinked` is the case upstream's held/release lifecycle does
@@ -1115,7 +1086,7 @@ impl Node {
             other => {
                 // Held, not expiring: this describes a link this node can see
                 // for itself, and it is released when the link goes.
-                map.insert(
+                self.path_mtu_lookup.insert(
                     fips_addr,
                     peer_key,
                     crate::node::path_mtu::PathMtuEntry::held(link_mtu),
@@ -1128,7 +1099,7 @@ impl Node {
                     prior_transport = ?prior_seed,
                     transport_id = %transport_id,
                     relinked = relinked,
-                    map_len = map.len(),
+                    map_len = self.path_mtu_lookup.len(),
                     "seed_path_mtu_for_link_peer: wrote link MTU"
                 );
             }

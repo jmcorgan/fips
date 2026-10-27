@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 
 use super::link::{FromMesh, Learned, MeshLink, PeerKey};
+use super::mss::{IPV6_MIN_MTU, MssCeiling};
 use super::mtu::{ipv6_mtu, tcp_mss};
-use super::tun::{IPV6_MIN_MTU, MssCeiling};
 use crate::Ipv6Address;
 use crate::proto::framing::payload_limit;
 use fips_core::identity::NodePrefix;

@@ -10,7 +10,6 @@ use crate::ipv6tun::link::{FromMesh, HostLink, PeerKey};
 pub(crate) use crate::proto::framing::payload_limit;
 use std::collections::HashMap;
 use std::collections::hash_map::Iter;
-use std::sync::{Arc, RwLock};
 
 /// One `path_mtu_lookup` entry: the MTU the TCP MSS clamp reads, plus how
 /// the entry is released.
@@ -157,6 +156,3 @@ impl PathMtuMap {
         }
     }
 }
-
-/// The node's path MTU map behind the lock its writers take.
-pub(crate) type PathMtuLookup = Arc<RwLock<PathMtuMap>>;
