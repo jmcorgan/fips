@@ -642,7 +642,7 @@ overhead.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:8443"`). If omitted, outbound-only mode. |
-| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. |
+| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. Received frames are accepted up to 65535 bytes whatever the local value, so peers with different values interoperate. |
 | `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
 | `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
 | `transports.tcp.keepalive_secs` | u64 | `30` | TCP keepalive interval in seconds (0 = disabled) |

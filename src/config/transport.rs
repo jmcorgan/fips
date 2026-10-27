@@ -386,7 +386,9 @@ pub struct TcpConfig {
 
     /// Default MTU for TCP connections. Defaults to 1400.
     /// TCP reports this configured value to FMP and checks sends against
-    /// it; it does not report a per-connection MTU.
+    /// it; it does not report a per-connection MTU. Received frames are
+    /// accepted up to 65535 bytes whatever this value, so peers configured
+    /// with different values can exchange frames up to the larger one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 
