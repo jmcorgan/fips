@@ -16,7 +16,7 @@ use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 
-use super::link::{FromMesh, Learned, MeshLink, PeerKey};
+use super::link::{FromMesh, Learned, PeerKey};
 use super::mss::{IPV6_MIN_MTU, MssCeiling};
 use super::mtu::{ipv6_mtu, tcp_mss};
 use crate::Ipv6Address;
@@ -228,14 +228,6 @@ impl MeshState {
     /// The shared per-peer limits, for the TUN threads.
     pub(crate) fn paths(&self) -> PathMtuReplica {
         self.paths.clone()
-    }
-}
-
-/// Apply the node's messages until the link closes, which is how the node
-/// ends it.
-pub(crate) async fn run_link(mut link: MeshLink, state: MeshState) {
-    while let Some(message) = link.from_mesh.recv().await {
-        state.apply(message);
     }
 }
 

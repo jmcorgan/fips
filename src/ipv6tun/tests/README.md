@@ -1,9 +1,36 @@
 # `src/ipv6tun/tests/`
 
 Unit tests for files in `src/ipv6tun/` that keep their tests outside the source
-file. Each file here is a child module of the source file it tests, declared
-from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod <name>;`, so it
-can reach the source file's private items.
+file. Most files here are a child module of the source file they test,
+declared from that file as
+`#[cfg(test)] #[path = "tests/<file>.rs"] mod <name>;`, so they can reach the
+source file's private items. Two are not:
+
+- `mod.rs` is the module for the adapter's directory tests, those of the
+  adapter as a whole rather than of one file, declared from `../mod.rs` as
+  `#[cfg(test)] mod tests;`. It declares `scan.rs`. It checks that the
+  adapter's decision modules (`config.rs`, `core.rs`, `icmp.rs`,
+  `icmp_rate_limit.rs`, `inbound.rs`, `ipv6_shim.rs`, `mss.rs`, `mtu.rs`,
+  `outbound.rs`, `tcp_mss.rs`) read no clock and reach no async runtime,
+  channel, thread, OS or socket: a scan of each one's source, without its
+  comments, literals and test-only items, finds no async code, runtime,
+  channel or link channel end, thread, clock read (called or passed as a
+  function), OS call, socket, or path through one of the adapter's driver
+  modules, renamed or not. The limiter's public `should_send` is the one
+  clock read allowed. Every module `../mod.rs` declares must be listed as a
+  decision module or a driver, and only one; lines planted in a copy of
+  `outbound.rs` show the scan finds each kind of item, and ignores one in a
+  comment, a literal or a test-only item while still finding one a feature
+  build compiles. It is a check of names, not types: an item reached under
+  another name passes, as does I/O through `std::io` or a name lookup through
+  `ToSocketAddrs`, which are not on its lists. The DNS responder's query
+  decisions are not scanned, because they share `dns.rs` with its sockets,
+  which makes it a driver.
+- `scan.rs` is its helper module (`tests::scan`) for the tests that read the
+  adapter's own source as text: where an identifier, a string or char literal
+  (raw strings included), or a bracketed group ends. It tests no file.
+
+The others:
 
 - `dns.rs` tests `../dns.rs` as module `reply_tests`: where the DNS
   responder sends a reply to a mesh source address (`fd00::/8`) when no strict
@@ -108,7 +135,7 @@ can reach the source file's private items.
   placed after an attribute whose literal holds an unbalanced bracket, show
   the scan refuses a node address, and the scan is shown to read the
   messages it checks, with their fields, the delivery to the host among
-  them.
+  them. The scanner's handling of literals and brackets is in `scan.rs`.
 - `queue.rs` tests `../queue.rs`: a full queue toward the host drops and
   counts what it cannot hold without waiting, a queue with room again takes
   packets and its clones share one count, a queue whose reader has gone is

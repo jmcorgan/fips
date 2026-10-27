@@ -12,6 +12,7 @@
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::mpsc::SendError;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -19,10 +20,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info, warn};
 
 use super::config::{Alias, Settings};
-use super::core::{Applied, MeshState, PathMtuReplica, run_link};
+use super::core::{Applied, MeshState, PathMtuReplica};
 use super::dns::{MeshSide, bind_dns_socket, lookup_mesh_ifindex, run_responder};
 use super::icmp_rate_limit::IcmpRateLimiter;
-use super::inbound::{Delivery, unpack};
+use super::inbound::unpack;
 use super::link::{
     Attach, Datagram, Deliver, Feeds, FromMesh, IPV6_PORT, Learned, MeshLink, Refusal,
 };
@@ -949,6 +950,27 @@ impl Handles {
             self.publish();
         }
     }
+}
+
+/// Apply the node's messages until the link closes, which is how the node
+/// ends it.
+async fn run_link(mut link: MeshLink, state: MeshState) {
+    while let Some(message) = link.from_mesh.recv().await {
+        state.apply(message);
+    }
+}
+
+/// What became of a datagram handed to the adapter, for the node to log.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// Queued for the host, or dropped and counted on a full queue.
+    Delivered,
+    /// The payload is not a compressed IPv6 packet.
+    Malformed,
+    /// No TUN is up to hand it to.
+    NoDevice,
+    /// The TUN writer or the embedder has gone.
+    Closed(SendError<Vec<u8>>),
 }
 
 /// Where the DNS responder puts a key it hands to the host: into the

@@ -7,7 +7,7 @@
 
 use crate::NodeAddr;
 use crate::cache::Funding;
-use crate::ipv6tun::inbound::Delivery;
+use crate::ipv6tun::lifecycle::Delivery;
 use crate::ipv6tun::link::{Deliver, PeerKey, Refusal};
 use crate::node::handlers::mmp::format_throughput;
 use crate::node::rate_limit::Msg1Class;
