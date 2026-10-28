@@ -132,12 +132,13 @@ tests or compile-time checks.
 **Decisions and drivers:**
 
 - No decision module names a runtime item: async code or the async runtime,
-  channels or the link's channel ends, threads, clock reads, OS calls,
-  sockets or a driver module. `icmp_rate_limit.rs` may read the clock exactly
+  channels or the link's channel ends, threads, clock reads, OS calls, I/O
+  through `std::io` or `std::fs`, sockets, a lookup through `ToSocketAddrs`,
+  or a driver module. `icmp_rate_limit.rs` may read the clock exactly
   once, in `should_send`. Every module declared in `mod.rs` must be listed as
   a decision module or a driver in `tests/mod.rs`, so a new module is never
-  left unscanned. The scan checks names, not types, and does not cover I/O
-  through `std::io` or a lookup through `ToSocketAddrs`.
+  left unscanned. The scan checks names, not types, so an item reached under
+  a name not on its lists passes.
 
 **Host-visible behaviour:**
 

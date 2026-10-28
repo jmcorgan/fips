@@ -12,20 +12,20 @@ source file's private items. Two are not:
   adapter's decision modules (`config.rs`, `core.rs`, `exthdr.rs`, `icmp.rs`,
   `icmp_rate_limit.rs`, `inbound.rs`, `ipv6_shim.rs`, `mss.rs`, `mtu.rs`,
   `outbound.rs`, `tcp_mss.rs`) read no clock and reach no async runtime,
-  channel, thread, OS or socket: a scan of each one's source, without its
-  comments, literals and test-only items, finds no async code, runtime,
-  channel or link channel end, thread, clock read (called or passed as a
-  function), OS call, socket, or path through one of the adapter's driver
-  modules, renamed or not. The limiter's public `should_send` is the one
-  clock read allowed. Every module `../mod.rs` declares must be listed as a
-  decision module or a driver, and only one; lines planted in a copy of
-  `outbound.rs` show the scan finds each kind of item, and ignores one in a
-  comment, a literal or a test-only item while still finding one a feature
-  build compiles. It is a check of names, not types: an item reached under
-  another name passes, as does I/O through `std::io` or a name lookup through
-  `ToSocketAddrs`, which are not on its lists. The DNS responder's query
-  decisions are not scanned, because they share `dns.rs` with its sockets,
-  which makes it a driver.
+  channel, thread, OS, I/O, socket or name lookup: a scan of each one's
+  source, without its comments, literals and test-only items, finds no async
+  code, runtime, channel or link channel end, thread, clock read (called or
+  passed as a function), OS call, path through `std::io` or `std::fs`, socket,
+  lookup through `ToSocketAddrs`, or path through one of the adapter's driver
+  modules, renamed or not. The limiter's public `should_send` is the one clock
+  read allowed. Every module `../mod.rs` declares must be listed as a decision
+  module or a driver, and only one; lines planted in a copy of `outbound.rs`
+  show the scan finds each kind of item, and ignores one in a comment, a
+  literal or a test-only item while still finding one a feature build
+  compiles. It is a check of names, not types: an item reached under a name
+  not on its lists passes. The DNS responder's query decisions are not
+  scanned, because they share `dns.rs` with its sockets, which makes it a
+  driver.
 - `scan.rs` is its helper module (`tests::scan`) for the tests that read the
   adapter's own source as text: where an identifier, a string or char literal
   (raw strings included), or a bracketed group ends. It tests no file.

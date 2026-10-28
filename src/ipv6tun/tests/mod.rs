@@ -1,14 +1,14 @@
 //! Tests of the IPv6 adapter as a whole: its decision modules read no clock
-//! and reach no async runtime, channel, thread, OS or socket. They take the
-//! time from their caller and return what to do rather than doing it.
+//! and reach no async runtime, channel, thread, OS, I/O, socket or name
+//! lookup. They take the time from their caller and return what to do rather
+//! than doing it.
 //!
 //! The check is a scan of each decision module's source, with its comments,
 //! string and char literals, and test-only items removed. It is a check of
 //! names: a decision module may still import the link's message types from
 //! `link.rs`, which also defines the channel ends, so this does not make the
-//! decision modules compile without tokio. Nor does it find I/O through
-//! `std::io` (the console or an open file) or a name lookup through
-//! `ToSocketAddrs`, whose names are not on its lists.
+//! decision modules compile without tokio, and an item reached under a name
+//! not on its lists passes.
 //!
 //! The DNS responder (`dns.rs`) is a driver here: its query decisions
 //! (`reply_path`, `mesh_query`, `returns_by`, `screened`,
@@ -99,13 +99,17 @@ const NAMES: &[&str] = &[
     "UnixStream",
     "UnixListener",
     "UnixDatagram",
+    // Name lookups.
+    "ToSocketAddrs",
+    "to_socket_addrs",
 ];
 
-/// Path segments a decision module may not name a path through: the OS
-/// modules of `std`, the `tun` and Windows crates, and the adapter's own
+/// Path segments a decision module may not name a path through: the OS and
+/// I/O modules of `std`, the `tun` and Windows crates, and the adapter's own
 /// driver modules.
 const PATHS: &[&str] = &[
     "fs",
+    "io",
     "process",
     "os",
     "env",
@@ -260,9 +264,9 @@ fn allowed_reads(file: &str) -> usize {
         .map_or(0, |(_, n)| *n)
 }
 
-/// No decision module names a runtime, channel, thread, clock, OS or socket
-/// item outside its comments, literals and test-only items, and only the
-/// limiter's public wrapper reads the clock.
+/// No decision module names a runtime, channel, thread, clock, OS, I/O,
+/// socket or name lookup item outside its comments, literals and test-only
+/// items, and only the limiter's public wrapper reads the clock.
 #[test]
 fn no_decision_module_names_a_runtime_channel_thread_clock_os_or_socket_item() {
     for (file, source) in DECISIONS {
@@ -340,6 +344,16 @@ fn the_scan_finds_a_runtime_item_planted_in_a_decision_module() {
         ),
         ("fn tick() -> u64 { crate::time::mono_ms() }", "mono_ms"),
         ("fn raw() -> i32 { unsafe { libc::getpid() } }", "libc"),
+        ("fn out() { let _ = std::io::stdout(); }", "io::"),
+        ("use std::io::{self, Write};", "io::"),
+        (
+            "fn any<T: std::net::ToSocketAddrs>(_: T) {}",
+            "ToSocketAddrs",
+        ),
+        (
+            "fn resolve() { use std::net::*; let _ = \"localhost:53\".to_socket_addrs(); }",
+            "to_socket_addrs",
+        ),
         (
             "fn read() { let _ = std::fs::read(\"/etc/hosts\"); }",
             "fs::",
