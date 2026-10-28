@@ -296,3 +296,132 @@ fn repeated_packet_too_big_on_the_app_owned_path_is_answered_once() {
     assert_eq!(answers.len(), 1, "one Packet Too Big");
     assert_eq!(answers[0][40], 2, "ICMPv6 type 2");
 }
+
+/// The most Destination Unreachable the bucket can let through within
+/// `elapsed` of being filled: its burst, and what it refills in that time
+/// rounded up.
+fn unreachable_ceiling(elapsed: Duration) -> usize {
+    use crate::ipv6tun::icmp::{UNREACHABLE_BURST, UNREACHABLE_RATE};
+    UNREACHABLE_BURST as usize + (elapsed.as_secs_f64() * UNREACHABLE_RATE).ceil() as usize
+}
+
+/// Handles with a TUN queue up that holds everything they send, the host's
+/// end of it, and when they were made (their bucket is full from then).
+fn queued(
+    us: std::net::Ipv6Addr,
+) -> (
+    Handles,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::time::Instant,
+) {
+    let made = std::time::Instant::now();
+    let mut handles = Handles::new(us, Settings::with_tun(true));
+    let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(256);
+    handles.install_sender(tun_tx);
+    (handles, rx, made)
+}
+
+/// Destination Unreachable to the host is rate limited, as RFC 4443 Section
+/// 2.4 (f) requires of the ICMPv6 errors a node originates, by a token
+/// bucket that lets a burst through: a hundred undeliverable packets in a
+/// row on the app-owned path draw the whole burst and no more than the
+/// bucket refills while they are sent.
+#[test]
+fn a_flood_of_undeliverable_packets_on_the_app_owned_path_draws_the_burst_and_at_most_the_refill() {
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let (mut handles, rx, made) = queued(us);
+    let sent = bare(us, any_key().address().to_ipv6(), 80);
+    for _ in 0..100 {
+        assert!(handles.outbound(&sent).is_none());
+    }
+    let ceiling = unreachable_ceiling(made.elapsed());
+    let answers: Vec<Vec<u8>> = rx.try_iter().collect();
+    assert!(answers.iter().all(|a| a[40] == 1), "ICMPv6 type 1");
+    assert!(
+        (crate::ipv6tun::icmp::UNREACHABLE_BURST as usize..=ceiling).contains(&answers.len()),
+        "a hundred undeliverable packets drew {} Destination Unreachable, outside the burst \
+         and the bucket's ceiling of {ceiling}",
+        answers.len()
+    );
+}
+
+/// The same bucket covers the answers to a refusal of the packets the node
+/// held for a destination it found no route to (the lookup timeout): a
+/// hundred held packets draw the burst and no more than the refill.
+#[test]
+fn a_refusal_of_a_hundred_held_packets_draws_the_burst_and_no_more_than_the_refill() {
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let (handles, rx, made) = queued(us);
+    let peer = any_key();
+    let payload =
+        crate::ipv6tun::ipv6_shim::compress_ipv6(&bare(us, peer.address().to_ipv6(), 80)).unwrap();
+    handles.answer(crate::ipv6tun::link::Refusal::NoRoute {
+        peer,
+        payloads: vec![payload; 100],
+    });
+    let ceiling = unreachable_ceiling(made.elapsed());
+    let answers = rx.try_iter().count();
+    assert!(
+        (crate::ipv6tun::icmp::UNREACHABLE_BURST as usize..=ceiling).contains(&answers),
+        "a refusal of a hundred held packets drew {answers} Destination Unreachable, outside \
+         the burst and the bucket's ceiling of {ceiling}"
+    );
+}
+
+/// The TUN reader and the handles draw on one Destination Unreachable
+/// bucket, so the adapter's total is one burst and one rate, as RFC 4443
+/// Section 2.4 (f) limits the node: tokens the reader's host path spends are
+/// gone for the handles' answers on the app-owned path.
+#[test]
+fn the_tun_reader_and_the_handles_draw_on_one_destination_unreachable_bucket() {
+    use fips_core::time::Clock;
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let (mut handles, rx, _) = queued(us);
+    handles.budget_unreachable(3, 0.0);
+    let (datagrams, _node) = tokio::sync::mpsc::channel(1);
+    let host = handles.reader_host(datagrams);
+    {
+        let mut bucket = host.unreachable.lock().unwrap();
+        let now = crate::time::HostClock.now();
+        for spent in 0..3 {
+            assert!(bucket.try_acquire(now), "the reader's token {spent}");
+        }
+    }
+    let sent = bare(us, any_key().address().to_ipv6(), 80);
+    assert!(handles.outbound(&sent).is_none());
+    assert_eq!(
+        rx.try_iter().count(),
+        0,
+        "the handles answered from a bucket the reader had emptied"
+    );
+}
+
+/// Code 5 answers to packets from a source other than ours draw on the same
+/// Destination Unreachable bucket: a hundred in a row on the app-owned path
+/// draw the burst and no more than the refill.
+#[test]
+fn a_flood_from_a_foreign_source_on_the_app_owned_path_draws_the_burst_and_no_more_than_the_refill()
+{
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let (mut handles, rx, made) = queued(us);
+    let sent = bare(
+        "2001:db8::5".parse().unwrap(),
+        any_key().address().to_ipv6(),
+        80,
+    );
+    for _ in 0..100 {
+        assert!(handles.outbound(&sent).is_none(), "not forwarded");
+    }
+    let ceiling = unreachable_ceiling(made.elapsed());
+    let answers: Vec<Vec<u8>> = rx.try_iter().collect();
+    assert!(
+        answers.iter().all(|a| a[40] == 1 && a[41] == 5),
+        "ICMPv6 type 1, code 5"
+    );
+    assert!(
+        (crate::ipv6tun::icmp::UNREACHABLE_BURST as usize..=ceiling).contains(&answers.len()),
+        "a hundred packets from a foreign source drew {} answers, outside the burst and the \
+         bucket's ceiling of {ceiling}",
+        answers.len()
+    );
+}

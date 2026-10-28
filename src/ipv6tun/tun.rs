@@ -41,6 +41,7 @@ use super::icmp_rate_limit::IcmpRateLimiter;
 use super::mss::{Remote, clamp};
 use super::outbound::{FromTun, Host, from_tun};
 use crate::time::HostClock;
+use fips_core::node::rate_limit::TokenBucket;
 use fips_core::time::Clock;
 use std::sync::{Mutex, PoisonError};
 
@@ -53,14 +54,34 @@ pub type TunOutboundTx = tokio::sync::mpsc::Sender<Vec<u8>>;
 /// Channel receiver of those packets (consumed by Node's RX loop).
 pub type TunOutboundRx = tokio::sync::mpsc::Receiver<Vec<u8>>;
 
+/// The token bucket every Destination Unreachable sent to the host draws
+/// on, shared by the TUN reader and the adapter's handles.
+pub(crate) type UnreachableLimiter = Arc<Mutex<TokenBucket<HostClock>>>;
+
+/// A full Destination Unreachable bucket: [`UNREACHABLE_BURST`] at once, then
+/// [`UNREACHABLE_RATE`] a second (RFC 4443 Section 2.4 (f)).
+///
+/// [`UNREACHABLE_BURST`]: super::icmp::UNREACHABLE_BURST
+/// [`UNREACHABLE_RATE`]: super::icmp::UNREACHABLE_RATE
+pub(crate) fn unreachable_limiter() -> UnreachableLimiter {
+    use super::icmp::{UNREACHABLE_BURST, UNREACHABLE_RATE};
+    Arc::new(Mutex::new(TokenBucket::with_params(
+        UNREACHABLE_BURST,
+        UNREACHABLE_RATE,
+        HostClock.now(),
+    )))
+}
+
 /// What the TUN reader needs to run the host half for each packet itself:
-/// the adapter's state, the Packet Too Big limiter it shares, and the
-/// link's channel of datagrams to the node.
+/// the adapter's state, the ICMPv6 limiters it shares, and the link's
+/// channel of datagrams to the node.
 pub(crate) struct HostPath {
     /// The adapter's state: the node-wide IPv6 MTU and the key map.
     pub(crate) state: super::core::MeshState,
     /// The Packet Too Big limiter.
     pub(crate) limiter: Arc<Mutex<IcmpRateLimiter>>,
+    /// The Destination Unreachable token bucket.
+    pub(crate) unreachable: UnreachableLimiter,
     /// Datagrams to the node.
     pub(crate) datagrams: tokio::sync::mpsc::Sender<super::link::Datagram>,
 }
@@ -700,7 +721,7 @@ fn handle_tun_packet(
         }
         FromTun::OffMesh(response) => {
             trace!(name = %name, len = response.len(), "Sending ICMPv6 Destination Unreachable (non-FIPS destination)");
-            tun_tx.send(response).is_ok()
+            answer_unreachable(response, &host.unreachable, Some(tun_tx))
         }
         FromTun::Host {
             clamped,
@@ -714,7 +735,7 @@ fn handle_tun_packet(
                 // Channel closed, shutdown
                 Host::Mesh(datagram) => host.datagrams.blocking_send(datagram).is_ok(),
                 Host::Unreachable(response) => {
-                    let _ = tun_tx.send(response);
+                    answer_unreachable(response, &host.unreachable, Some(tun_tx));
                     true
                 }
                 Host::TooBig(mtu) => {
@@ -724,6 +745,40 @@ fn handle_tun_packet(
             }
         }
     }
+}
+
+/// Send the host `response`, a Destination Unreachable, if the bucket has a
+/// token now, and queue it toward the host when a queue is up. The bucket is
+/// locked, and the clock read, only here and in [`answer_oversize`]. A token
+/// is spent whether or not a queue is up, as the Packet Too Big limiter
+/// counts a source either way. Returns false only when the queue was closed
+/// as the answer went to it.
+pub(crate) fn answer_unreachable(
+    response: Vec<u8>,
+    bucket: &Mutex<TokenBucket<HostClock>>,
+    tun_tx: Option<&TunTx>,
+) -> bool {
+    unreachable_at(response, bucket, HostClock.now(), tun_tx)
+}
+
+/// [`answer_unreachable`] at `now`.
+pub(crate) fn unreachable_at(
+    response: Vec<u8>,
+    bucket: &Mutex<TokenBucket<HostClock>>,
+    now: <HostClock as Clock>::Instant,
+    tun_tx: Option<&TunTx>,
+) -> bool {
+    // A poisoned lock means a thread panicked mid-check; the bucket's state
+    // is still usable.
+    if !bucket
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .try_acquire(now)
+    {
+        debug!("Rate limiting ICMPv6 Destination Unreachable");
+        return true;
+    }
+    tun_tx.is_none_or(|tun_tx| tun_tx.send(response).is_ok())
 }
 
 /// Answer `packet` with Packet Too Big reporting `mtu`, if the limiter lets
@@ -1625,6 +1680,7 @@ mod tests {
             HostPath {
                 state,
                 limiter,
+                unreachable: unreachable_limiter(),
                 datagrams,
             },
             rx,
@@ -1670,6 +1726,7 @@ mod tests {
         let (outbound_tx, mut outbound_rx) = host_path(Some(key));
         let lookup = empty_lookup();
         let mut pkt = ipv6_packet_to(&peer);
+        pkt[8..24].copy_from_slice(our_addr.as_bytes());
 
         assert!(handle_tun_packet(
             &mut pkt,

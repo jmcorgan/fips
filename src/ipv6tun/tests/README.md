@@ -9,7 +9,7 @@ source file's private items. Two are not:
 - `mod.rs` is the module for the adapter's directory tests, those of the
   adapter as a whole rather than of one file, declared from `../mod.rs` as
   `#[cfg(test)] mod tests;`. It declares `scan.rs`. It checks that the
-  adapter's decision modules (`config.rs`, `core.rs`, `icmp.rs`,
+  adapter's decision modules (`config.rs`, `core.rs`, `exthdr.rs`, `icmp.rs`,
   `icmp_rate_limit.rs`, `inbound.rs`, `ipv6_shim.rs`, `mss.rs`, `mtu.rs`,
   `outbound.rs`, `tcp_mss.rs`) read no clock and reach no async runtime,
   channel, thread, OS or socket: a scan of each one's source, without its
@@ -80,11 +80,26 @@ The others:
   (`clamp`) clamps a SYN by the stored path to its source for a packet toward
   the host and to its destination for one from it, leaves a packet too short
   to hold its source unclamped, and does not clamp a segment that is not a
-  SYN.
+  SYN; a SYN-ACK from the mesh behind a Hop-by-Hop header is clamped to the
+  ceiling a plain one gets.
+- `exthdr.rs` tests `../exthdr.rs`: the extension header walk finds the
+  upper-layer header behind each header it steps over (Hop-by-Hop, Routing,
+  Destination Options, Authentication, a first Fragment) and behind a chain
+  of them, at the offset where it starts, marked sealed behind an
+  Authentication or Fragment header; it stops at ESP, No Next Header and an
+  unknown header; a later fragment names its protocol and no header; and a
+  chain that runs past the packet is reported as truncated, not read past.
 - `icmp.rs` tests `../icmp.rs` as module `answer_tests`: the functions that
   build the answers the adapter owes the host and return them rather than
   send them. Destination Unreachable (`unreachable`) is built from our address
   for a packet owed an ICMPv6 error and not for one from a multicast source.
+  An ICMPv6 error of each type, or a Redirect, behind each extension header
+  chain draws neither Destination Unreachable nor Packet Too Big, while an
+  Echo Request behind the same chains draws both; a later fragment of an
+  ICMPv6 message draws neither and one of UDP both; and a packet whose
+  extension headers run past its end draws neither. Packet Too Big is never
+  built with a multicast or unspecified source: not by `too_big` for a packet
+  to a multicast group, and not by the builder given such a source.
   Packet Too Big (`too_big`) is judged by the per-source limiter at the time
   given: an answer with no TUN queue up still counts against its source, so
   one to the same source within the interval is held back, and one at the end
@@ -111,13 +126,33 @@ The others:
   nor the length field, so a packet from a foreign source is answered as if
   sent from ours, and one to a destination outside `fd00::/8` or with a
   wrong length field (which only an embedder that owns the TUN can send) is
-  quoted as rebuilt. The system TUN reader's decision (`from_tun`) answers a
+  quoted as rebuilt. A packet the host sends from a source other than our
+  address, outside the mesh or in it, is answered on both paths with
+  Destination Unreachable code 5 and never becomes a datagram, whether its
+  destination names a held key or not; one from the unspecified address or a
+  multicast source gets nothing; and the refusal is logged at debug with the
+  source. An oversized packet to a destination outside `fd00::/8` draws no
+  Packet Too Big: one to a multicast group draws nothing, and one to a
+  unicast address outside the mesh Destination Unreachable, as at any size.
+  The system TUN reader's decision (`from_tun`) answers a
   destination outside `fd00::/8` itself, hairpins a packet to us with its
   checksum finished, and clamps a SYN to the stored path before the checks
   every packet from the host gets, which a packet an embedder sends gets
-  alone; a packet that is not IPv6 gets nothing on either path, even when
+  alone, and a SYN behind a Hop-by-Hop header is clamped to the stored path
+  as a plain one is, with its checksum still valid, and handed to the mesh
+  clamped; a packet that is not IPv6 gets nothing on either path, even when
   its bytes read as our address or a held key's; and a refusal of several
   payloads is owed one answer each, in order.
+- `tcp_mss.rs` tests `../tcp_mss.rs` as module `chain_tests`: a SYN behind
+  Hop-by-Hop, Routing or Destination Options headers, alone or chained, is
+  clamped to the same ceiling as a plain one (RFC 9293 Section 3.7.1) and
+  keeps a valid checksum; one behind an Authentication, Fragment, ESP or
+  unknown header is left exactly as it came; one whose MSS is within the
+  ceiling is left alone; the checksum stays valid with the MSS value at an
+  odd offset; and for a SYN with no extension header the clamp writes the
+  same bytes as rewriting the option and recomputing the whole checksum, as
+  it did before.
+  The older tests stay in the file's inline `tests` module.
 - `inbound.rs` tests `../inbound.rs`: the CE marking sets the ECN bits of an
   ECN-capable packet, leaves a Not-ECT packet unmarked, and leaves a packet
   too short to hold a Traffic Class unchanged; a delivered packet is rebuilt
@@ -160,7 +195,11 @@ The others:
   host ends the reader when it was to hairpin a packet or answer one addressed
   outside the mesh, and not when it was to answer a mesh destination with
   Destination Unreachable or Packet Too Big; and a closed datagram channel to
-  the node ends it.
+  the node ends it. A hundred packets read in a row, to a destination outside
+  the mesh or to one no key names, draw the Destination Unreachable burst and
+  no more than the bucket refills meanwhile; and the bucket, judged at given
+  times, lets ten go at once, one more a tenth of a second later, and no more
+  than ten after a long quiet spell.
 - `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
   loaded `inet fips` table that polices another interface than the TUN is
   reported as no firewall, every listener unfiltered, and one that polices
@@ -184,7 +223,12 @@ The others:
   on the app-owned path and for a refusal: the Packet Too Big limiter counts a
   refusal's source while no TUN queue is up, so a second refusal from it once
   a queue is up is held back, and two oversize packets from one source in a
-  row are answered with one Packet Too Big.
+  row are answered with one Packet Too Big; a hundred undeliverable packets
+  on the app-owned path, a hundred from a foreign source, and a refusal of a
+  hundred held packets each draw the Destination Unreachable burst and no
+  more than the bucket refills meanwhile; and the host path the handles
+  build for the TUN reader draws on their bucket, so tokens it spends are
+  gone for the handles' answers.
 - `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
   `target_tests`: the warning about a firewall that polices another
   interface than the TUN keeps the `fips::control::firewall_state` target it

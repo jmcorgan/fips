@@ -36,9 +36,13 @@ Decision modules:
 - `core.rs`: the adapter's own copy of what the node tells it over the link:
   payload limits turned into IPv6 terms, the keys the node can route to by
   address prefix, and the keys the DNS responder handed out.
+- `exthdr.rs`: walks a packet's IPv6 extension headers to its upper-layer
+  header, for the ICMPv6 error checks and the MSS clamp.
 - `icmp.rs`: builds Destination Unreachable and Packet Too Big (RFC 4443) and
   returns them; Packet Too Big is rate limited per source at a time the caller
-  gives. Re-exports the MTU names from `mtu.rs` so their public paths stay.
+  gives, and Destination Unreachable by a token bucket whose burst and rate
+  are named here. Re-exports the MTU names from `mtu.rs` so their public paths
+  stay.
 - `icmp_rate_limit.rs`: the per-source Packet Too Big limiter, judged at a
   given time (`check`). Its public `should_send` reads the clock for callers
   outside the adapter and is the one clock read the guard allows.
@@ -54,13 +58,16 @@ Decision modules:
   TUN reader read, `outbound` for the checks every packet gets, `answer` for a
   datagram the node refused. Each returns what to send (`FromTun`, `Host`,
   `Owed`) rather than sending it.
-- `tcp_mss.rs`: finds and rewrites the MSS option in a TCP SYN.
+- `tcp_mss.rs`: finds and rewrites the MSS option in a TCP SYN, behind any
+  Hop-by-Hop, Routing and Destination Options headers, updating the checksum
+  for the bytes it rewrites.
 
 Drivers:
 
 - `tun.rs`: the TUN device on each platform, its reader and writer threads,
-  and `answer_oversize`, the only place on the host path that reads the clock
-  and locks the Packet Too Big limiter.
+  and `answer_oversize` and `answer_unreachable`, the only places on the host
+  path that read the clock and lock the ICMPv6 limiters: the Packet Too Big
+  limiter and the Destination Unreachable token bucket.
 - `lifecycle.rs`: start and stop of the TUN and DNS children, the `Handles`
   the node drives (`outbound`, `answer`, `deliver`), the task that applies the
   node's link messages (`run_link`), and the delivery outcome (`Delivery`).
@@ -142,8 +149,19 @@ tests or compile-time checks.
 - A closed queue toward the host stops the system TUN reader only when it was
   hairpinning a packet or answering one addressed outside the mesh; a closed
   datagram channel to the node always stops it.
+- A packet from the host whose source is not the node's own address never
+  reaches the mesh, on either path: the receiver would rebuild it with that
+  address as its source. The shared step answers it with Destination
+  Unreachable code 5, or with nothing when its source is unspecified or
+  multicast. The system TUN reader answers a destination outside `fd00::/8`,
+  hairpins a packet to the node and clamps a SYN before that step, so a
+  foreign-source packet to an off-mesh destination is answered code 0.
 - The Packet Too Big limiter counts a source whether or not a TUN queue is up
   to take the answer.
+- Every Destination Unreachable the host is sent draws on one token bucket for
+  the adapter, shared by the reader and the handles: a burst of 10, then 10 a
+  second (RFC 4443 Section 2.4 (f)). A token is spent whether or not a TUN
+  queue is up.
 - A SYN is clamped before the checks every packet gets, so a datagram carries
   the clamped segment and an ICMPv6 answer quotes it.
 - The DNS responder hands a resolved identity to the node before it sends the

@@ -25,6 +25,7 @@ use scan::{close, ident, literal_end};
 const DECISIONS: &[(&str, &str)] = &[
     ("config.rs", include_str!("../config.rs")),
     ("core.rs", include_str!("../core.rs")),
+    ("exthdr.rs", include_str!("../exthdr.rs")),
     ("icmp.rs", include_str!("../icmp.rs")),
     ("icmp_rate_limit.rs", include_str!("../icmp_rate_limit.rs")),
     ("inbound.rs", include_str!("../inbound.rs")),

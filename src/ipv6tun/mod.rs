@@ -10,6 +10,7 @@ mod bsdnet;
 pub mod config;
 pub(crate) mod core;
 pub mod dns;
+pub(crate) mod exthdr;
 pub mod firewall_state;
 pub mod icmp;
 pub mod icmp_rate_limit;

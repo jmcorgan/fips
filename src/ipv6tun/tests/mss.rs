@@ -202,7 +202,8 @@ fn the_clamp_fallback_logs_under_the_mss_module_target() {
 
 /// A SYN from `src` to `dst`: a 40-byte IPv6 header carrying TCP and a
 /// 24-byte TCP header with data offset 6, the SYN flag and one MSS option of
-/// `mss`. The checksum is left zero; the clamp recomputes it after a rewrite.
+/// `mss`. The checksum is left zero; these tests read the MSS option, and
+/// the clamp only updates the checksum for the bytes it rewrites.
 fn syn_packet(src: &Ipv6Address, dst: &Ipv6Address, mss: u16) -> Vec<u8> {
     let mut packet = vec![0u8; 64];
     packet[0] = 0x60;
@@ -282,4 +283,37 @@ fn a_segment_that_is_not_a_syn_is_not_clamped() {
         None
     );
     assert_eq!(mss_option(&packet), 1440);
+}
+
+/// A SYN-ACK arriving from the mesh whose TCP header follows an 8-byte
+/// Hop-by-Hop Options header is clamped on its way to the host, as the TUN
+/// writers clamp it, to the far end's ceiling, as a plain SYN-ACK is (RFC
+/// 9293 Section 3.7.1: the MSS option counts no extension header).
+#[test]
+fn an_inbound_syn_ack_behind_a_hop_by_hop_header_is_clamped_to_the_ceiling_a_plain_one_gets() {
+    let far = fips_addr_with_node_byte(0x42);
+    let near = fips_addr_with_node_byte(0x55);
+    let mut p = vec![0u8; 40 + 8 + 24];
+    p[0] = 0x60;
+    p[4..6].copy_from_slice(&32u16.to_be_bytes());
+    p[6] = 0; // Hop-by-Hop Options
+    p[7] = 64;
+    p[8..24].copy_from_slice(far.as_bytes());
+    p[24..40].copy_from_slice(near.as_bytes());
+    // Hop-by-Hop: next header TCP, length 0 (8 bytes), one PadN.
+    p[40..48].copy_from_slice(&[6, 0, 1, 4, 0, 0, 0, 0]);
+    p[48 + 12] = 6 << 4;
+    p[48 + 13] = 0x12; // SYN, ACK
+    p[68..72].copy_from_slice(&[2, 4, 0x05, 0xa0]); // MSS 1440
+
+    assert_eq!(
+        clamp(&mut p, 1360, &empty_lookup(), Remote::Source),
+        Some(1143),
+        "clamped by the conservative ceiling"
+    );
+    assert_eq!(
+        u16::from_be_bytes([p[70], p[71]]),
+        1143,
+        "the conservative 1143, nothing taken off for the header"
+    );
 }

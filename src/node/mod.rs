@@ -3529,6 +3529,13 @@ impl Node {
         self.discovery_sign_limiter = LookupSignRateLimiter::with_params(burst, rate);
     }
 
+    /// Replace the bucket of Destination Unreachable replies to the host
+    /// with a full one of `burst` at `rate` a second (for tests).
+    #[cfg(test)]
+    pub(crate) fn budget_unreachable(&mut self, burst: u32, rate: f64) {
+        self.supervisor.ipv6tun.budget_unreachable(burst, rate);
+    }
+
     /// Disable the discovery forward rate limiter (for tests).
     #[cfg(test)]
     pub(crate) fn disable_discovery_forward_rate_limit(&mut self) {
@@ -4083,10 +4090,14 @@ impl Node {
     /// not refuse an off-mesh destination up front either: it looks up bytes 1
     /// to 15 of any destination in the identity cache and, on a miss, answers
     /// with ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the
-    /// node's own mesh address; an oversize packet gets Packet Too Big on the
-    /// same channel. The embedder should push only `fd00::/8`-destined IPv6
-    /// packets, expect ICMPv6 errors on `app_inbound_rx`, and clamp TCP MSS on
-    /// SYN-flagged segments in both directions.
+    /// node's own mesh address; an oversize packet to an `fd00::/8` destination
+    /// gets Packet Too Big on the same channel, and one to any other destination
+    /// is answered as undeliverable. A packet whose source is not the node's
+    /// own mesh address is not forwarded: it is answered with Destination
+    /// Unreachable code 5 (source address failed ingress/egress policy). The
+    /// embedder should push only `fd00::/8`-destined IPv6 packets sent from
+    /// the node's mesh address, expect ICMPv6 errors on `app_inbound_rx`, and
+    /// clamp TCP MSS on SYN-flagged segments in both directions.
     ///
     /// `app_inbound_rx` holds at most `node.buffers.host_channel` packets. The
     /// node never waits for the app: a packet that finds the queue full is

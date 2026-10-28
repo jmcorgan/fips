@@ -2322,12 +2322,12 @@ async fn test_transport_mtu_fallback_when_no_operational_transports() {
 // Default MTUs carry every IPv6 packet up to the IPv6 minimum
 // ============================================================================
 
-/// An IPv6 packet from `tun_packet_to(dest)` padded to `len` bytes, with its
+/// An IPv6 packet from `tun_packet(node, dest)` padded to `len` bytes, with its
 /// payload length field set to match.
-fn sized_packet(dest: &NodeAddr, len: usize) -> Vec<u8> {
-    use super::discovery::tun_packet_to;
+fn sized_packet(node: &Node, dest: &NodeAddr, len: usize) -> Vec<u8> {
+    use super::discovery::tun_packet;
 
-    let mut pkt = tun_packet_to(dest);
+    let mut pkt = tun_packet(node, dest);
     pkt.resize(len, 0);
     let payload = u16::try_from(len - 40).unwrap();
     pkt[4..6].copy_from_slice(&payload.to_be_bytes());
@@ -2357,7 +2357,8 @@ async fn test_node_with_a_default_udp_transport_forwards_a_1280_byte_ipv6_packet
     // size check is refused only for want of a route.
     let dest = *Identity::generate().node_addr();
 
-    node.handle_tun_outbound(sized_packet(&dest, 1280)).await;
+    node.handle_tun_outbound(sized_packet(&node, &dest, 1280))
+        .await;
     let answers = drain_tun(&rx);
     assert_eq!(
         answers.len(),
@@ -2377,7 +2378,8 @@ async fn test_node_with_a_default_udp_transport_forwards_a_1280_byte_ipv6_packet
     );
     assert_no_route(&answers[0]);
 
-    node.handle_tun_outbound(sized_packet(&dest, 1281)).await;
+    node.handle_tun_outbound(sized_packet(&node, &dest, 1281))
+        .await;
     let answers = drain_tun(&rx);
     assert_eq!(
         answers.len(),

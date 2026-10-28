@@ -359,3 +359,195 @@ fn a_refusal_of_several_payloads_is_owed_one_answer_each_in_order() {
     );
     assert_eq!(owed, vec![Owed::TooBig(first, 1033)]);
 }
+
+/// A packet from the host whose source is not our address is not handed to
+/// the mesh, where the receiver would rebuild it with our address as its
+/// source and its checksum would fail: the host is answered with
+/// Destination Unreachable code 5, source address failed ingress/egress
+/// policy (RFC 4443 Section 3.1), from our address. This holds on the system
+/// TUN path and on the shared step an embedder's packets take, for a source
+/// outside the mesh and for another mesh address, and whether the
+/// destination names a key the adapter holds or not.
+#[test]
+fn a_packet_from_a_source_other_than_our_address_is_answered_source_policy_and_not_forwarded() {
+    let peer = any_key();
+    let state = state_with(peer, 1400);
+    let held = peer.address().to_ipv6();
+    let stranger = any_key().address().to_ipv6();
+    for src in ["2001:db8::5", "fd00::5"] {
+        let src: Ipv6Addr = src.parse().unwrap();
+        for dst in [held, stranger] {
+            let sent = packet(src, dst, 80);
+            let refused =
+                build_dest_unreachable(&sent, DestUnreachableCode::SourcePolicy, us()).unwrap();
+            let mut read = sent.clone();
+            assert_eq!(
+                from_tun(&mut read, 1360, &PathMtuReplica::default(), &state, us()),
+                FromTun::Host {
+                    clamped: None,
+                    host: Host::Unreachable(refused.clone()),
+                },
+                "system TUN path, from {src} to {dst}"
+            );
+            assert_eq!(
+                outbound(&sent, &state, us()),
+                Host::Unreachable(refused),
+                "shared step, from {src} to {dst}"
+            );
+        }
+    }
+}
+
+/// A packet from the unspecified address or a multicast source is refused
+/// with no answer at all, since its source names no single node to tell
+/// (RFC 4443 Section 2.4 (e.6)).
+#[test]
+fn a_packet_from_the_unspecified_address_or_a_multicast_source_is_refused_unanswered() {
+    let peer = any_key();
+    let state = state_with(peer, 1400);
+    for src in ["::", "ff02::1"] {
+        let sent = packet(src.parse().unwrap(), peer.address().to_ipv6(), 80);
+        let mut read = sent.clone();
+        assert_eq!(
+            from_tun(&mut read, 1360, &PathMtuReplica::default(), &state, us()),
+            FromTun::Host {
+                clamped: None,
+                host: Host::Nothing,
+            },
+            "system TUN path, from {src}"
+        );
+        assert_eq!(
+            outbound(&sent, &state, us()),
+            Host::Nothing,
+            "shared step, from {src}"
+        );
+    }
+}
+
+/// The refusal is logged at debug under the outbound module's target, with
+/// the source it refused.
+#[test]
+fn a_refused_foreign_source_is_logged_at_debug_with_the_source() {
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    let state = state_with(any_key(), 1400);
+    let src: Ipv6Addr = "2001:db8::5".parse().unwrap();
+    outbound(
+        &packet(src, any_key().address().to_ipv6(), 80),
+        &state,
+        us(),
+    );
+    let message = "Refusing a packet from the host whose source is not our address";
+    assert_eq!(logs.targets(message), vec!["fips::ipv6tun::outbound"]);
+    let line = logs.line(message).unwrap();
+    assert!(line.starts_with("DEBUG"), "logged at debug: {line}");
+    assert_eq!(
+        crate::testutil::log_field(&line, "src"),
+        Some("2001:db8::5")
+    );
+}
+
+/// An oversized packet to a destination outside `fd00::/8`, which only an
+/// embedder that owns the TUN can send, draws no Packet Too Big: the mesh
+/// could not carry it at any size. One to a multicast group draws no answer
+/// at all (RFC 4443 Section 2.4 (e.3)), and one to a unicast address
+/// outside the mesh draws Destination Unreachable from our address, as a
+/// packet to it of any size does. Each answer is followed through the
+/// decisions the driver takes: the shared step, then `too_big` for a
+/// Packet Too Big.
+#[test]
+fn an_oversized_packet_to_a_destination_outside_the_mesh_draws_no_packet_too_big() {
+    let state = state_with(any_key(), 1000);
+    let over = usize::from(state.ipv6_mtu()) + 1;
+    let sent = |dst: Ipv6Addr| {
+        let packet = packet(us(), dst, over);
+        let mut limiter = IcmpRateLimiter::new();
+        match outbound(&packet, &state, us()) {
+            Host::TooBig(mtu) => too_big(&packet, mtu, &mut limiter, Instant::now(), true),
+            Host::Unreachable(reply) => Some(reply),
+            Host::Nothing => None,
+            Host::Mesh(_) => panic!("{dst} is not a mesh destination"),
+        }
+    };
+    for group in ["ff02::1", "ff0e::1:3"] {
+        let group: Ipv6Addr = group.parse().unwrap();
+        assert_eq!(sent(group), None, "an answer to a packet to {group}");
+    }
+    let outside: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    assert_eq!(
+        sent(outside),
+        Some(from_us(&packet(us(), outside, over))),
+        "the answer to a packet to {outside}"
+    );
+}
+
+/// The folded one's complement sum of the TCP segment at `at` in `packet`
+/// with its IPv6 pseudo-header; 0xffff when its checksum is valid.
+fn tcp_sum(packet: &[u8], at: usize) -> u16 {
+    let mut sum: u32 = 0;
+    for pair in packet[8..40].chunks(2) {
+        sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+    }
+    sum += (packet.len() - at) as u32 + 6;
+    for pair in packet[at..].chunks(2) {
+        sum += u32::from(u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    sum as u16
+}
+
+/// On the system TUN path, a SYN whose TCP header follows an 8-byte
+/// Hop-by-Hop Options header is clamped to the stored path as one with TCP
+/// straight after the fixed header is (RFC 9293 Section 3.7.1: the MSS
+/// option counts no extension header), keeps a valid TCP checksum, and is
+/// handed to the mesh clamped.
+#[test]
+fn a_syn_behind_a_hop_by_hop_header_is_clamped_to_the_stored_path_as_a_plain_syn_is() {
+    let peer = any_key();
+    let state = state_with(peer, 1400);
+    let paths = PathMtuReplica::default();
+    paths
+        .write()
+        .unwrap()
+        .insert(peer.address(), crate::node::path_mtu::payload_limit(1000));
+
+    // The same SYN, clamped to 863 with no extension header, as the system
+    // TUN path test above shows.
+    let plain = syn(us(), peer.address().to_ipv6());
+    let mut sent = plain[..40].to_vec();
+    // Hop-by-Hop Options: next header TCP, length 0 (8 bytes), one PadN.
+    sent.extend_from_slice(&[6, 0, 1, 4, 0, 0, 0, 0]);
+    sent.extend_from_slice(&plain[40..]);
+    sent[4..6].copy_from_slice(&32u16.to_be_bytes());
+    sent[6] = 0;
+    sent[48 + 16] = 0;
+    sent[48 + 17] = 0;
+    let sum = !tcp_sum(&sent, 48);
+    sent[48 + 16..48 + 18].copy_from_slice(&sum.to_be_bytes());
+    assert_eq!(
+        tcp_sum(&sent, 48),
+        0xffff,
+        "the SYN starts with a valid checksum"
+    );
+
+    let verdict = from_tun(&mut sent, 1360, &paths, &state, us());
+    assert_eq!(
+        u16::from_be_bytes([sent[70], sent[71]]),
+        863,
+        "the stored path's 863, nothing taken off for the header"
+    );
+    assert_eq!(
+        tcp_sum(&sent, 48),
+        0xffff,
+        "the clamped SYN's checksum is valid"
+    );
+    let FromTun::Host {
+        clamped: Some(_),
+        host: Host::Mesh(datagram),
+    } = verdict
+    else {
+        panic!("clamped and forwarded: {verdict:?}");
+    };
+    assert_eq!(Some(datagram.payload), compress_ipv6(&sent));
+}

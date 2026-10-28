@@ -542,6 +542,7 @@ fn reader_host(
     let host = HostPath {
         state,
         limiter,
+        unreachable: unreachable_limiter(),
         datagrams,
     };
     (host, PathMtuReplica::default(), rx)
@@ -650,4 +651,79 @@ fn a_closed_datagram_channel_ends_the_reader() {
         &host,
         &paths
     ));
+}
+
+/// The system TUN reader draws on the same Destination Unreachable bucket
+/// (RFC 4443 Section 2.4 (f)): a hundred packets in a row draw the whole
+/// burst and no more than the bucket refills while they are read, both for
+/// a destination outside the mesh, which the reader answers itself, and for
+/// a mesh destination no key names.
+#[test]
+fn a_flood_read_from_the_tun_draws_the_destination_unreachable_burst_and_no_more_than_the_refill() {
+    use crate::ipv6tun::icmp::{UNREACHABLE_BURST, UNREACHABLE_RATE};
+    let ours = *crate::Identity::generate().address();
+    let known = crate::ipv6tun::link::any_key();
+    let stranger = *crate::ipv6tun::link::any_key().address().as_bytes();
+    let off_mesh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let mut drawn = Vec::new();
+    for (what, dst) in [
+        ("off the mesh", off_mesh.octets()),
+        ("unknown key", stranger),
+    ] {
+        let made = std::time::Instant::now();
+        let (host, paths, _datagrams) = reader_host(known);
+        let (tun_tx, tun_rx) = TunTx::bounded(256);
+        for _ in 0..100 {
+            let mut packet = bare(&ours, &dst, 60);
+            assert!(handle_tun_packet(
+                &mut packet,
+                1360,
+                "test0",
+                ours,
+                &tun_tx,
+                &host,
+                &paths
+            ));
+        }
+        let ceiling = UNREACHABLE_BURST as usize
+            + (made.elapsed().as_secs_f64() * UNREACHABLE_RATE).ceil() as usize;
+        let sent = tun_rx.try_iter().count();
+        drawn.push((what, sent, ceiling));
+    }
+    assert!(
+        drawn
+            .iter()
+            .all(|&(_, sent, ceiling)| (UNREACHABLE_BURST as usize..=ceiling).contains(&sent)),
+        "a hundred packets each drew (case, Destination Unreachable, the bucket's ceiling), \
+         each to be at least the burst and at most the ceiling: {drawn:?}"
+    );
+}
+
+/// The Destination Unreachable bucket, judged at given times: the burst of
+/// ten goes at once and the eleventh is held back; a tenth of a second
+/// later one more goes; and after a long quiet spell no more than the burst
+/// goes, since the bucket holds no more than that.
+#[test]
+fn destination_unreachable_goes_ten_at_once_then_one_a_tenth_of_a_second() {
+    let bucket = unreachable_limiter();
+    let t0 = HostClock.now();
+    let at = |ms: u64| {
+        crate::time::HostInstant::from(
+            std::time::Instant::from(t0) + std::time::Duration::from_millis(ms),
+        )
+    };
+    let (tun_tx, rx) = TunTx::bounded(64);
+    let sends = |n: usize, now| {
+        for _ in 0..n {
+            assert!(unreachable_at(vec![1], &bucket, now, Some(&tun_tx)));
+        }
+        rx.try_iter().count()
+    };
+    assert_eq!(sends(11, t0), 10, "the burst at once");
+    assert_eq!(sends(2, at(100)), 1, "one more a tenth of a second on");
+    assert_eq!(
+        sends(20, at(10_100)),
+        10,
+        "no more than the burst after a quiet spell"
+    );
 }
