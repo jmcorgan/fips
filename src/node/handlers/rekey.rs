@@ -368,16 +368,19 @@ impl Node {
         }
     }
 
-    /// Close the end-to-end session with `addr` and what describes it: its
-    /// queued packets and the path MTU learned for `addr`, which gives way
-    /// to the link seed when `addr` is a direct peer. Returns whether a
-    /// session was held.
+    /// Close the end-to-end session with `addr` and what describes it: the
+    /// path MTU learned for `addr`, which gives way to the link seed when
+    /// `addr` is a direct peer. Returns whether a session was held.
+    ///
+    /// The IPv6 adapter's packets held for `addr` are left for the caller.
+    /// A peer restart leaves them held: the peer is back, so the next
+    /// session to it sends them, and the held-packet backstop answers them
+    /// if nothing can reach it or they outlive the age bound.
     pub(in crate::node) fn close_session(&mut self, addr: &NodeAddr) -> bool {
         let entry = self.sessions.remove(addr);
         if let Some(mmp) = entry.as_ref().and_then(|e| e.mmp()) {
             Self::log_session_mmp_teardown(&self.peer_display_name(addr), mmp);
         }
-        self.pending_tun_packets.remove(addr);
         self.path_mtu_lookup_release(addr);
         entry.is_some()
     }
@@ -895,9 +898,13 @@ impl Node {
                     "FSP peer restarted, session rekeyed under its new startup epoch"
                 );
             }
+            // The session's setup ran out, or its machine closed it, so
+            // nothing will send what is held behind it: answer each packet
+            // with no route, as a lookup timeout does.
             Output::Teardown(why) => {
                 let name = self.peer_display_name(addr);
                 self.close_session(addr);
+                self.release_held_tun(addr);
                 if opening {
                     info!(dest = %name, ?why, "Session handshake timed out, removing");
                 } else {

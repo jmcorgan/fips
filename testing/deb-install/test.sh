@@ -55,8 +55,8 @@ DAEMON_TIMEOUT=15
 # Bounds on a single `systemctl start`, which is not a wait loop and needs its
 # own limit. See start_unit() for why an unbounded one can never return.
 UNIT_START_TIMEOUT=30
-# fips-gateway.service's ExecStartPre waits up to 30s for fips0 to appear, by
-# design, so its start legitimately takes longer than any other.
+# fips-gateway.service has needed longer than other units since its start
+# waited for fips0; kept, as a bound that a healthy start never reaches.
 GATEWAY_START_TIMEOUT=60
 # The gateway-enable block restarts fips.service inside the container. Above
 # systemd's default TimeoutStopSec of 90s, so a wedged stop trips this rather
@@ -397,9 +397,10 @@ check_remove_clears_dns() {
     esac
 
     # The gateway-enable restart of fips.service is passed on to fips-dns
-    # (Requires=fips.service), whose setup waits for fips0 before it writes the
-    # file, and nothing since has waited for it. After=fips.service stops the
-    # old instance before the daemon, so active here means the new setup ran.
+    # (Requires=fips.service), which writes the file only when its setup
+    # finishes, and nothing since has waited for it. After=fips.service stops
+    # the old instance before the daemon, so active here means the new setup
+    # ran.
     if ! wait_for_service_active "$name" fips-dns.service; then
         fail "remove: fips-dns.service not active again after the gateway-enable restart"
         echo "  --- fips-dns.service journal ---"
@@ -696,8 +697,8 @@ DOCKERFILE
 
     # Wait for fips-dns.service to finish. Its start job is queued rather than
     # waited on above, so this is what makes /run/fips/dns-backend safe to read:
-    # fips-dns-setup waits up to 30s for fips0 and restarts systemd-resolved
-    # before it writes that file, so reading it on a timer races the setup.
+    # fips-dns-setup restarts systemd-resolved before it writes that file, so
+    # reading it on a timer races the setup.
     # RemainAfterExit=yes makes is-active correct for this oneshot.
     if wait_for_service_active "$name" fips-dns.service; then
         pass "fips-dns.service completed"
@@ -795,11 +796,17 @@ DOCKERFILE
     fi
 
     start_unit "$name" fips-gateway.service "$GATEWAY_START_TIMEOUT" >/dev/null 2>&1 || true
-    sleep 3
+    # The start returns once the gateway process runs; it then waits for the
+    # TUN and probes the daemon's resolver, which can take up to about 40 s
+    # after a daemon restart, so the journal is polled rather than read once.
     # Captured before matching: under pipefail, grep -q exiting at its match
     # can kill the writer with SIGPIPE and turn the match into a miss.
-    local gateway_journal
-    gateway_journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null)
+    local gateway_journal="" _i
+    for _i in $(seq 1 45); do
+        gateway_journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null) || gateway_journal=""
+        grep -q "DNS upstream is reachable" <<<"$gateway_journal" && break
+        sleep 1
+    done
     if grep -q "DNS upstream is reachable" <<<"$gateway_journal"; then
         pass "fips-gateway reaches DNS upstream at [::1]:5354 via .deb install"
     else
@@ -1265,10 +1272,9 @@ check_pkg_status() {
 # An operator who disabled fips-dns must find it still disabled after the
 # package is configured again. Then, on a host whose daemon config renames the
 # TUN (tun.name: mesh0), so fips0 never exists, an upgrade must configure
-# cleanly with fips-dns running, because fips-dns-setup takes the name from the
-# config and the resolved backends never wait for the interface. The disable
-# check runs first, on the default name, so that it does not depend on the
-# upgrade's outcome.
+# cleanly with fips-dns running, because no fips-dns-setup backend waits for
+# the interface. The disable check runs first, on the default name, so that it
+# does not depend on the upgrade's outcome.
 _upgrade_renamed_tun() {
     local name="$1" image="$2" deb="$3"
     log "configure with fips-dns disabled, then upgrade with tun.name mesh0 ($name)"

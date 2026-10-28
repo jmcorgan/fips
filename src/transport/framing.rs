@@ -31,7 +31,7 @@ pub enum StreamError {
     UnknownVersion(u8),
     /// Unknown FMP phase byte — protocol error, close connection.
     UnknownPhase(u8),
-    /// Payload length exceeds the connection's MTU — corrupted or malicious.
+    /// Payload length exceeds the caller's bound, so the frame is corrupted or malicious.
     PayloadTooLarge {
         payload_len: u16,
         max_payload_len: u16,
@@ -107,15 +107,15 @@ const MSG3_MIN_PAYLOAD_LEN: u16 = (MSG3_MIN_WIRE_SIZE - PREFIX_SIZE) as u16;
 /// # Arguments
 ///
 /// * `reader` - Any async reader (typically an `OwnedReadHalf`)
-/// * `mtu` - The connection's MTU for validation of established frame sizes
+/// * `mtu` - The largest established frame to accept, in bytes
 ///
 /// # Errors
 ///
-/// * `UnknownVersion` — non-zero version nibble (not a FIPS connection)
-/// * `UnknownPhase` — unrecognized phase nibble (protocol error)
-/// * `PayloadTooLarge` — established frame exceeds MTU
-/// * `HandshakeSizeMismatch` — handshake packet has wrong payload_len
-/// * `Io` — underlying read error (including EOF)
+/// * `UnknownVersion` - non-zero version nibble (not a FIPS connection)
+/// * `UnknownPhase` - unrecognized phase nibble (protocol error)
+/// * `PayloadTooLarge` - established frame larger than `mtu`
+/// * `HandshakeSizeMismatch` - handshake packet has wrong payload_len
+/// * `Io` - underlying read error (including EOF)
 pub async fn read_fmp_packet<R: AsyncRead + Unpin>(
     reader: &mut R,
     mtu: u16,

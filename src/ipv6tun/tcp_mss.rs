@@ -3,6 +3,8 @@
 //! Intercepts TCP SYN packets and reduces the MSS option to ensure
 //! TCP segments fit within the FIPS effective MTU after encapsulation.
 
+use super::exthdr::{Chain, upper};
+
 /// TCP header minimum length (without options).
 const TCP_HEADER_MIN_LEN: usize = 20;
 
@@ -37,20 +39,30 @@ fn get_tcp_data_offset(tcp_header: &[u8]) -> usize {
 /// Clamp TCP MSS in a SYN packet if needed.
 ///
 /// Searches for the MSS option in TCP options and reduces it if it exceeds
-/// the maximum safe MSS for the given MTU.
+/// the maximum safe MSS for the given MTU. The TCP header is found behind
+/// any Hop-by-Hop, Routing and Destination Options headers, and the SYN is
+/// clamped to the same `max_mss` as one without them: the MSS option counts
+/// neither IP nor TCP options, and a sender takes its own extension headers
+/// off its segments (RFC 9293 Section 3.7.1). A segment behind an
+/// Authentication or Fragment header is left alone, since the first
+/// authenticates it and the second leaves part of it in other fragments, as
+/// is one behind ESP or a header the walk does not know. The TCP checksum is
+/// updated for the two bytes rewritten rather than recomputed, so it does not
+/// depend on the pseudo-header's destination, which a Routing header can make
+/// another address than the fixed header's.
 ///
 /// Returns true if the packet was modified (MSS was clamped).
 pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
-    // Validate IPv6 header
-    if ipv6_packet.len() < 40 || ipv6_packet[0] >> 4 != 6 {
+    // Find the TCP header behind any extension headers that may be stepped
+    // over; the walk also validates the IPv6 header.
+    let Chain::Upper {
+        proto: 6,
+        at: tcp_start,
+        sealed: false,
+    } = upper(ipv6_packet)
+    else {
         return false;
-    }
-
-    // Check if next header is TCP (6)
-    let next_header = ipv6_packet[6];
-    if next_header != 6 {
-        return false;
-    }
+    };
 
     // A ceiling of zero carries no information and an MSS option of zero is
     // not a legal segment size. Refuse the clamp rather than write it.
@@ -58,8 +70,6 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
         return false;
     }
 
-    // Get TCP header start
-    let tcp_start = 40;
     if ipv6_packet.len() < tcp_start + TCP_HEADER_MIN_LEN {
         return false;
     }
@@ -119,11 +129,7 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
 
             // Clamp if needed
             if current_mss > max_mss {
-                ipv6_packet[i + 2..i + 4].copy_from_slice(&max_mss.to_be_bytes());
-
-                // Recompute the now-stale checksum over the rewritten header.
-                recalculate_l4_checksum(ipv6_packet);
-
+                rewrite(ipv6_packet, tcp_start, i + 2, max_mss);
                 modified = true;
             }
             break; // MSS option found, no need to continue
@@ -135,12 +141,40 @@ pub fn clamp_tcp_mss(ipv6_packet: &mut [u8], max_mss: u16) -> bool {
     modified
 }
 
+/// Write `value` at `at` in the TCP segment that starts at `tcp`, and update
+/// the segment's checksum for the change (RFC 1624, equation 3) rather than
+/// recompute it. The checksum sums 16-bit words counted from the start of the
+/// segment, so a value at an odd offset touches two of them; both are
+/// updated. The caller has checked that the words the value touches lie
+/// inside the TCP header.
+fn rewrite(packet: &mut [u8], tcp: usize, at: usize, value: u16) {
+    let first = tcp + ((at - tcp) & !1);
+    let end = tcp + ((at + 2 - tcp + 1) & !1);
+    let words = |p: &[u8]| -> u32 {
+        p[first..end]
+            .chunks(2)
+            .map(|w| u32::from(u16::from_be_bytes([w[0], w[1]])))
+            .sum()
+    };
+    let old = words(packet);
+    let old_words = (end - first) as u32 / 2;
+    packet[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    let new = words(packet);
+    let checksum = u16::from_be_bytes([packet[tcp + 16], packet[tcp + 17]]);
+    // ~HC + ~m + m', with ~m summed as 0xffff - m for each old word.
+    let mut sum = u32::from(!checksum) + old_words * 0xffff - old + new;
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    packet[tcp + 16..tcp + 18].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+}
+
 /// Recalculate the TCP or UDP checksum (IPv6 pseudo-header + segment) in place.
 ///
-/// Completes the checksum macOS leaves offloaded on hairpinned self-traffic, and
-/// is reused by MSS clamping. No-op for other next-headers (e.g. ICMPv6) and for
-/// malformed packets. Assumes the L4 header follows the 40-byte IPv6 header, as
-/// all FIPS packets do.
+/// Completes the checksum macOS leaves offloaded on hairpinned self-traffic.
+/// No-op for other next-headers (e.g. ICMPv6) and for malformed packets.
+/// Assumes the L4 header follows the 40-byte IPv6 header, as a hairpinned
+/// packet with no extension header has it.
 pub fn recalculate_l4_checksum(ipv6_packet: &mut [u8]) {
     if ipv6_packet.len() < 40 || ipv6_packet[0] >> 4 != 6 {
         return;
@@ -423,3 +457,7 @@ mod tests {
         assert_eq!(pkt, before, "truncated packet must be left untouched");
     }
 }
+
+#[cfg(test)]
+#[path = "tests/tcp_mss.rs"]
+mod chain_tests;

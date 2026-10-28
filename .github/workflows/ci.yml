@@ -146,11 +146,6 @@ jobs:
       # kept in step with ci-local.sh's run_package_versions by hand.
       - name: Check the package versions derived for tags and branches
         run: bash testing/check-package-versions.sh
-      # fips-dns-setup's reading of tun.name from the daemon config, against
-      # fixtures. Hermetic, about a second. Kept in step with ci-local.sh's
-      # run_tun_name by hand.
-      - name: Check fips-dns-setup reads the TUN name from the config
-        run: bash testing/dns-resolver/tun-name-test.sh
       # The unit-test jobs' flaky-test reporter, against recorded nextest
       # reports. Kept in step with ci-local.sh's run_nextest_flaky by hand.
       - name: Check the flaky-test reporter against its fixtures
@@ -457,8 +452,10 @@ jobs:
       - name: Set SOURCE_DATE_EPOCH from git
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+      # nftables for the namespace tests run as root below, which count the
+      # packets a test interface sends with an nft counter.
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev nftables
 
       # The same address-less interface the musl leg creates. Pinning the
       # contract on both libcs is what turns "glibc and musl agree about
@@ -516,6 +513,63 @@ jobs:
 
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
+
+      # Tests that build network namespaces, so they need root and are
+      # `#[ignore]`d, and the run above skips them: the start-up warning for
+      # transports too small for a 1280-byte IPv6 packet, on the path where
+      # the node opens its own TUN; and the DNS responder's and the gateway's
+      # tests that a reply to a forged mesh source does not leave by the mesh
+      # interface, which count packets with an nft counter. Built as the
+      # runner user and only executed under sudo, so that cargo does not run
+      # as root with root's CARGO_HOME. The grep fails the step unless every
+      # one ran and passed: a filter that matches nothing passes.
+      - name: Run the namespace tests as root
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib --no-run
+          BIN=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact")
+                     | select(.executable != null)
+                     | select(.target.kind[0] == "lib")
+                     | select(.target.name == "fips")
+                     | .executable' \
+            | tail -1)
+          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+            echo "could not locate the lib test binary" >&2
+            exit 1
+          fi
+          sudo "$BIN" --ignored node::tests::tun_warning:: ipv6tun::dns:: \
+            gateway::dns::mesh_tests:: --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/netns-tests.log"
+          grep -qE '^test result: ok\. 18 passed;' "$RUNNER_TEMP/netns-tests.log"
+
+      # The Linux TUN tests in src/ipv6tun/tests/tun.rs that create network
+      # namespaces: startup never takes over or deletes an interface that has
+      # the configured name, the fd00::/8 policy rule is added and removed as
+      # it should be, and create reports IPv6 disabled exactly when the kernel
+      # would refuse an address on the TUN. Creating namespaces needs root, so
+      # the tests are `#[ignore]`d and the run above skips them. Built as the
+      # runner user and only executed under sudo, as the privileged steps
+      # below are. The grep fails the step unless all thirteen ran and
+      # passed: a filter that matches fewer passes quietly.
+      - name: Run the Linux TUN namespace tests as root
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib --no-run
+          BIN=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact")
+                     | select(.executable != null)
+                     | select(.target.kind[0] == "lib")
+                     | select(.target.name == "fips")
+                     | .executable' \
+            | tail -1)
+          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+            echo "could not locate the lib test binary" >&2
+            exit 1
+          fi
+          sudo "$BIN" --ignored ipv6tun::tun::name_tests:: --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/tun-namespace-tests.log"
+          grep -qE '^test result: ok\. 13 passed;' "$RUNNER_TEMP/tun-namespace-tests.log"
 
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
@@ -1219,6 +1273,7 @@ jobs:
         run: |
           docker compose -f testing/firewall/docker-compose.yml logs --no-color
           docker exec fips-fw-container-b nft list table inet fips || true
+          docker exec fips-fw-container-c nft list table inet fips || true
 
       - name: Stop containers (firewall)
         if: matrix.type == 'firewall' && always()

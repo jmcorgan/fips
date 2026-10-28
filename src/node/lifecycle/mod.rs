@@ -2472,6 +2472,9 @@ impl Node {
     /// - **Seam (b), dropping the packet channels** (after all transports, before
     ///   TUN) always runs.
     async fn execute_teardown(&mut self, actions: Vec<Action>, broadcast_disconnect: bool) {
+        // The TUN goes down here, so the IPv6-minimum warning is not judged
+        // again until a later start's TUN comes up.
+        self.node_mtu.idle_short();
         // `broadcast_disconnect = false` (drain path) marks the fan-out already
         // done so neither the in-loop seam nor the trailing seam fires.
         let mut disconnect_done = !broadcast_disconnect;

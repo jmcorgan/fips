@@ -32,11 +32,21 @@ actively DROP'd by the fips chain (not silently unrouted).
   adapter socket that does not answer fails the case instead of passing
   it.
 
+- **(f)** The daemon checks the loaded table against the TUN it brought
+  up, by the TUN's name. Cases (a) to (e) run with the TUN named `fips0`,
+  the name `fips.nft` ships with, so they cannot tell that check from one
+  made against a hard-coded `fips0`. `node-c` names its TUN `mesh0`, and
+  its container loads the shipped file, still scoped to `fips0`, before
+  the daemon starts. The suite asserts that the daemon logs its startup
+  warning naming `fips0` and `mesh0` exactly once, that `node-c`'s
+  listener report reads `firewall_active: false`, and that it reads
+  `true` once the file is reloaded rewritten to `mesh0`.
+
 ## Files
 
-- `test.sh`: the suite; starts the two nodes and runs cases (a) to (e).
+- `test.sh`: the suite; starts the three nodes and runs cases (a) to (f).
 - `generate-configs.sh`: writes the node configs and the drop-in.
-- `docker-compose.yml`: the two-node topology.
+- `docker-compose.yml`: the three-node topology.
 - `table-check.sh`: `table_has`, sourced by `test.sh`; reports whether a
   container's `inet fips` table contains a given rule.
 - `table-check-test.sh`: hermetic cases for `table_has`, run as a guard by
@@ -53,12 +63,14 @@ is the race's shape, and fails against the piped form.
 
 ## Topology
 
-Two FIPS nodes peered over UDP on a Docker bridge network:
+Two FIPS nodes peered over UDP on a Docker bridge network, and a third
+on its own:
 
-| Container               | Hostname | Firewall |
-|-------------------------|----------|----------|
-| `fips-fw-container-a`   | `host-a` | none (probe) |
-| `fips-fw-container-b`   | `host-b` | `fips.nft` + drop-in |
+| Container               | Hostname | TUN     | Firewall |
+|-------------------------|----------|---------|----------|
+| `fips-fw-container-a`   | `host-a` | `fips0` | none (probe) |
+| `fips-fw-container-b`   | `host-b` | `fips0` | `fips.nft` + drop-in |
+| `fips-fw-container-c`   | `host-c` | `mesh0` | `fips.nft`, loaded first |
 
 The bridge network requests no subnet, so docker assigns one from its own
 address pool and two concurrent runs never contend for a fixed range. No
@@ -73,9 +85,11 @@ are derived from the node npubs.
 containing `tcp dport 22 accept`. `node-a` is unfirewalled and serves
 as the probe origin.
 
-Both containers run the unified test image's `default` mode, which
+All three containers run the unified test image's `default` mode, which
 starts dnsmasq + sshd (port 22) + iperf3 + python http.server on
-port 8000 + the FIPS daemon.
+port 8000 + the FIPS daemon. `node-c`'s compose entry runs
+`nft -f /etc/fips/fips.nft` before that entrypoint, so the table is in
+place when the daemon brings its TUN up; it has no peers and no DNS.
 
 ## fips-firewall.service activation
 
@@ -138,6 +152,9 @@ PASS: (e) table scoped to notfips0 does not police fips0: TCP/8000 reachable
 PASS: (e) listener report shows the firewall as not policing the TUN
 PASS: fips-fw-container-b: fips.nft baseline + drop-in loaded
 PASS: (e) real fips.nft reloaded: TCP/8000 dropped and the report shows the firewall active
+=== Case (f): a TUN named mesh0, started under a table scoped to fips0
+PASS: (f) startup warning names fips0 and mesh0
+PASS: (f) listener report judges the table against mesh0, not fips0
 === Firewall integration test passed
 ```
 

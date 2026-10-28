@@ -96,8 +96,27 @@ pub fn resolve_fips_query_with_hosts(
     name: &str,
     hosts: &HostMap,
 ) -> Option<(Ipv6Addr, NodeAddr, secp256k1::PublicKey)> {
-    let label = extract_fips_label(name)?;
+    resolve_label(extract_fips_label(name)?, hosts)
+}
 
+/// The label a `.fips` question carries: the first of exactly two labels
+/// whose second is `fips`, ignoring ASCII case, when it is UTF-8. Any other
+/// name, a single label holding a dot among them, is not under `fips`.
+fn fips_label<'q>(query: &'q Query<'_>) -> Option<&'q str> {
+    let mut labels = query.labels();
+    let (first, last) = (labels.next()?, labels.next()?);
+    if labels.next().is_some() || !last.eq_ignore_ascii_case(b"fips") {
+        return None;
+    }
+    std::str::from_utf8(first).ok()
+}
+
+/// Resolve the label before `.fips`: a hostname in the host map, or else an
+/// npub.
+fn resolve_label(
+    label: &str,
+    hosts: &HostMap,
+) -> Option<(Ipv6Addr, NodeAddr, secp256k1::PublicKey)> {
     // Try host map first, then direct npub
     let npub_owned;
     let npub = if let Some(mapped) = hosts.lookup_npub(label) {
@@ -202,9 +221,10 @@ impl Answering {
 /// A resolvable name gets its address for AAAA and an empty NOERROR (NODATA)
 /// for any other type, known or not: NXDOMAIN would tell the client the name
 /// does not exist, causing resolvers like nslookup to give up without trying
-/// AAAA. An unresolvable name gets NXDOMAIN.
+/// AAAA. An unresolvable name, or one not under `fips` (see [`fips_label`]),
+/// gets NXDOMAIN.
 fn answer(query: &Query<'_>, ttl: u32, hosts: &HostMap) -> (Vec<u8>, Option<DnsResolvedIdentity>) {
-    match resolve_fips_query_with_hosts(&query.name, hosts) {
+    match fips_label(query).and_then(|label| resolve_label(label, hosts)) {
         Some((ipv6, node_addr, pubkey)) if query.qtype == TYPE_AAAA => {
             let records = [dnsmsg::aaaa(ipv6, ttl)];
             let bytes = dnsmsg::reply(query, Rcode::NOERROR, AA, &records, &[]);
@@ -326,7 +346,7 @@ pub(crate) fn mesh_query(arrival: Arrival, src: std::net::SocketAddr, mesh: Mesh
 
 /// How a reply to a DNS query is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplyPath {
+pub(crate) enum ReplyPath {
     /// To the query's source by the routing table.
     Routed,
     /// To the query's source, only out of the interface with this index.
@@ -384,7 +404,7 @@ enum ReplyPath {
 ///
 /// The decision is one pure function for every target, so its table is
 /// tested on any host; `strict_pin` says whether the target holds a pin.
-fn reply_path(
+pub(crate) fn reply_path(
     src: std::net::SocketAddr,
     arrival_ifindex: Option<u32>,
     mesh_ifindex: Option<u32>,
@@ -495,7 +515,7 @@ fn check_returning(
 /// Whether a socket with local address `local` is bound to the wildcard
 /// address (`::` or `0.0.0.0`). An unreadable address counts as specific,
 /// the form for which [`reply_path`] withholds more.
-fn wildcard_bind(local: std::io::Result<std::net::SocketAddr>) -> bool {
+pub(crate) fn wildcard_bind(local: std::io::Result<std::net::SocketAddr>) -> bool {
     local.is_ok_and(|addr| addr.ip().is_unspecified())
 }
 
@@ -611,7 +631,7 @@ pub(crate) async fn run_responder(
 /// other target a `Pinned` path is treated as `Returning`. `mesh_addr` is the
 /// node's own mesh address while a TUN is up, which a `Returning` check
 /// uses.
-async fn send_reply(
+pub(crate) async fn send_reply(
     socket: &tokio::net::UdpSocket,
     buf: &[u8],
     dst: std::net::SocketAddr,

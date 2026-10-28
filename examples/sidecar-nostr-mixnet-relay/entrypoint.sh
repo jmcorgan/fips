@@ -58,7 +58,9 @@ transports:
   udp:
     bind_addr: "${FIPS_UDP_BIND}"
     # 1472 = Docker bridge IPv4 max (1500 MTU - 8 UDP - 20 IPv4 header).
-    # Override with FIPS_UDP_MTU=1280 for IPv6-min-safe deploys.
+    # Keep FIPS_UDP_MTU at 1357 or more, the smallest that carries every
+    # IPv6 packet up to 1280 bytes; lower it only for an underlay path that
+    # cannot carry 1385-byte IPv4 packets.
     mtu: ${FIPS_UDP_MTU}
   tcp:
     bind_addr: "${FIPS_TCP_BIND}"

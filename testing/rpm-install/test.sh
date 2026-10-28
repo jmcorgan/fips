@@ -478,9 +478,9 @@ check_resolution() {
     local name="$1"
 
     # fips-dns.service was queued, not waited on, and fips-dns-setup writes the
-    # backend file only after up to 30 s for fips0 and a resolver restart, so
-    # reading it before the oneshot finishes races the setup. RemainAfterExit
-    # makes is-active the right test.
+    # backend file only after a resolver restart, so reading it before the
+    # oneshot finishes races the setup. RemainAfterExit makes is-active the
+    # right test.
     if wait_for_service_active "$name" fips-dns.service; then
         pass "fips-dns.service completed"
     else

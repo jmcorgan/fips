@@ -349,7 +349,7 @@ optional `TcpListener` for inbound connections.
 | -------- | ----- |
 | Addressing | host:port — IP address or DNS hostname |
 | Default MTU | 1400 bytes |
-| Per-link MTU | None: TCP reports the configured `mtu` to FMP and checks sends against it |
+| Per-link MTU | None: TCP reports the configured `mtu` to FMP and checks sends against it; it receives frames up to 65535 bytes whatever the local value |
 | Framing | FMP header-based (zero overhead) |
 | Connection model | Non-blocking connect, connect-on-send fallback, optional listener |
 | Platform | Cross-platform (no `#[cfg]` gates) |

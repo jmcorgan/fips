@@ -41,6 +41,7 @@ use super::icmp_rate_limit::IcmpRateLimiter;
 use super::mss::{Remote, clamp};
 use super::outbound::{FromTun, Host, from_tun};
 use crate::time::HostClock;
+use fips_core::node::rate_limit::TokenBucket;
 use fips_core::time::Clock;
 use std::sync::{Mutex, PoisonError};
 
@@ -53,14 +54,34 @@ pub type TunOutboundTx = tokio::sync::mpsc::Sender<Vec<u8>>;
 /// Channel receiver of those packets (consumed by Node's RX loop).
 pub type TunOutboundRx = tokio::sync::mpsc::Receiver<Vec<u8>>;
 
+/// The token bucket every Destination Unreachable sent to the host draws
+/// on, shared by the TUN reader and the adapter's handles.
+pub(crate) type UnreachableLimiter = Arc<Mutex<TokenBucket<HostClock>>>;
+
+/// A full Destination Unreachable bucket: [`UNREACHABLE_BURST`] at once, then
+/// [`UNREACHABLE_RATE`] a second (RFC 4443 Section 2.4 (f)).
+///
+/// [`UNREACHABLE_BURST`]: super::icmp::UNREACHABLE_BURST
+/// [`UNREACHABLE_RATE`]: super::icmp::UNREACHABLE_RATE
+pub(crate) fn unreachable_limiter() -> UnreachableLimiter {
+    use super::icmp::{UNREACHABLE_BURST, UNREACHABLE_RATE};
+    Arc::new(Mutex::new(TokenBucket::with_params(
+        UNREACHABLE_BURST,
+        UNREACHABLE_RATE,
+        HostClock.now(),
+    )))
+}
+
 /// What the TUN reader needs to run the host half for each packet itself:
-/// the adapter's state, the Packet Too Big limiter it shares, and the
-/// link's channel of datagrams to the node.
+/// the adapter's state, the ICMPv6 limiters it shares, and the link's
+/// channel of datagrams to the node.
 pub(crate) struct HostPath {
     /// The adapter's state: the node-wide IPv6 MTU and the key map.
     pub(crate) state: super::core::MeshState,
     /// The Packet Too Big limiter.
     pub(crate) limiter: Arc<Mutex<IcmpRateLimiter>>,
+    /// The Destination Unreachable token bucket.
+    pub(crate) unreachable: UnreachableLimiter,
     /// Datagrams to the node.
     pub(crate) datagrams: tokio::sync::mpsc::Sender<super::link::Datagram>,
 }
@@ -84,9 +105,10 @@ pub enum TunError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// IPv6 cannot be used on the TUN; the text says why and what to change.
     #[cfg(unix)]
-    #[error("IPv6 is disabled (set net.ipv6.conf.all.disable_ipv6=0)")]
-    Ipv6Disabled,
+    #[error("IPv6 is disabled: {0}")]
+    Ipv6Disabled(String),
 }
 
 #[cfg(unix)]
@@ -146,11 +168,14 @@ impl TunDevice {
     /// before create. On macOS and FreeBSD the kernel names the device, and
     /// `tun.name` is not used to find an existing one.
     ///
+    /// Returns `Ipv6Disabled`, saying why, when the kernel has no IPv6 or,
+    /// on Linux, when the device has IPv6 disabled on it, which a new
+    /// interface takes from `net.ipv6.conf.default.disable_ipv6`.
+    ///
     /// This requires CAP_NET_ADMIN capability (run with sudo or setcap).
     pub async fn create(config: &TunConfig, address: Ipv6Address) -> Result<Self, TunError> {
-        // Check if IPv6 is enabled
-        if platform::is_ipv6_disabled() {
-            return Err(TunError::Ipv6Disabled);
+        if let Some(why) = platform::ipv6_off() {
+            return Err(TunError::Ipv6Disabled(why));
         }
 
         #[cfg(target_os = "linux")]
@@ -220,6 +245,16 @@ impl TunDevice {
                 .tun_name()
                 .map_err(|e| TunError::Configure(format!("failed to get device name: {}", e)))?
         };
+
+        // A new interface takes its `disable_ipv6` from `conf/default`, and a
+        // reopened one keeps its own, so only the device itself can say
+        // whether the address add below will be refused.
+        #[cfg(target_os = "linux")]
+        if let Some(why) =
+            platform::disabled_on(std::path::Path::new(platform::SYSCTL_ROOT), &actual_name)
+        {
+            return Err(TunError::Ipv6Disabled(why));
+        }
 
         // Configure address and bring up via platform-specific method
         platform::configure_interface(&actual_name, address.to_ipv6(), mtu).await?;
@@ -700,7 +735,7 @@ fn handle_tun_packet(
         }
         FromTun::OffMesh(response) => {
             trace!(name = %name, len = response.len(), "Sending ICMPv6 Destination Unreachable (non-FIPS destination)");
-            tun_tx.send(response).is_ok()
+            answer_unreachable(response, &host.unreachable, Some(tun_tx))
         }
         FromTun::Host {
             clamped,
@@ -714,7 +749,7 @@ fn handle_tun_packet(
                 // Channel closed, shutdown
                 Host::Mesh(datagram) => host.datagrams.blocking_send(datagram).is_ok(),
                 Host::Unreachable(response) => {
-                    let _ = tun_tx.send(response);
+                    answer_unreachable(response, &host.unreachable, Some(tun_tx));
                     true
                 }
                 Host::TooBig(mtu) => {
@@ -724,6 +759,40 @@ fn handle_tun_packet(
             }
         }
     }
+}
+
+/// Send the host `response`, a Destination Unreachable, if the bucket has a
+/// token now, and queue it toward the host when a queue is up. The bucket is
+/// locked, and the clock read, only here and in [`answer_oversize`]. A token
+/// is spent whether or not a queue is up, as the Packet Too Big limiter
+/// counts a source either way. Returns false only when the queue was closed
+/// as the answer went to it.
+pub(crate) fn answer_unreachable(
+    response: Vec<u8>,
+    bucket: &Mutex<TokenBucket<HostClock>>,
+    tun_tx: Option<&TunTx>,
+) -> bool {
+    unreachable_at(response, bucket, HostClock.now(), tun_tx)
+}
+
+/// [`answer_unreachable`] at `now`.
+pub(crate) fn unreachable_at(
+    response: Vec<u8>,
+    bucket: &Mutex<TokenBucket<HostClock>>,
+    now: <HostClock as Clock>::Instant,
+    tun_tx: Option<&TunTx>,
+) -> bool {
+    // A poisoned lock means a thread panicked mid-check; the bucket's state
+    // is still usable.
+    if !bucket
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .try_acquire(now)
+    {
+        debug!("Rate limiting ICMPv6 Destination Unreachable");
+        return true;
+    }
+    tun_tx.is_none_or(|tun_tx| tun_tx.send(response).is_ok())
 }
 
 /// Answer `packet` with Packet Too Big reporting `mtu`, if the limiter lets
@@ -1205,8 +1274,9 @@ mod platform {
     use super::TunError;
     use std::net::Ipv6Addr;
 
-    pub fn is_ipv6_disabled() -> bool {
-        false
+    /// Never a reason: the embedder's TUN is not created here.
+    pub fn ipv6_off() -> Option<String> {
+        None
     }
     pub async fn delete_interface(_name: &str) -> Result<(), TunError> {
         Ok(())
@@ -1227,13 +1297,57 @@ mod platform {
     use rtnetlink::packet_route::rule::RuleAttribute;
     use rtnetlink::{Handle, LinkUnspec, RouteMessageBuilder, RuleAddRequest, new_connection};
     use std::net::Ipv6Addr;
+    use std::path::Path;
     use tracing::{debug, warn};
 
-    /// Check if IPv6 is disabled system-wide.
-    pub fn is_ipv6_disabled() -> bool {
-        std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6")
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false)
+    /// Where the kernel publishes the network sysctls of the calling
+    /// thread's network namespace.
+    pub const SYSCTL_ROOT: &str = "/proc/sys";
+
+    /// Why IPv6 cannot be used at all, before any device is created.
+    pub fn ipv6_off() -> Option<String> {
+        stack_off(Path::new(SYSCTL_ROOT))
+    }
+
+    /// Why IPv6 cannot be used at all, judged from the sysctl tree at
+    /// `root`: a kernel booted with `ipv6.disable=1` has `net` but no
+    /// `net/ipv6`. A tree with no `net` says nothing, so it passes.
+    pub fn stack_off(root: &Path) -> Option<String> {
+        let net = root.join("net");
+        (net.is_dir() && !net.join("ipv6").is_dir()).then(|| {
+            "the kernel has no IPv6 stack (no /proc/sys/net/ipv6); \
+             remove ipv6.disable=1 from the kernel command line"
+                .to_string()
+        })
+    }
+
+    /// Why IPv6 is disabled on the interface `name`, judged from the
+    /// sysctl tree at `root`, or `None` when it is enabled there or its
+    /// `disable_ipv6` cannot be read. Only the interface's own value
+    /// decides; `conf/default` is named when it is why a new interface
+    /// came up disabled. The remedy offered is the narrowest that works:
+    /// `conf/default` for a new interface, the interface's own knob for a
+    /// persistent one. Writing `conf/all` would also enable IPv6 on every
+    /// other interface, so it is not offered.
+    pub fn disabled_on(root: &Path, name: &str) -> Option<String> {
+        let conf = root.join("net/ipv6/conf");
+        let set = |dir: &str| {
+            std::fs::read_to_string(conf.join(dir).join("disable_ipv6"))
+                .is_ok_and(|v| v.trim() == "1")
+        };
+        if !set(name) {
+            return None;
+        }
+        Some(if set("default") {
+            format!(
+                "net.ipv6.conf.{name}.disable_ipv6 is 1, which new interfaces take from \
+                 net.ipv6.conf.default.disable_ipv6 (also 1); set \
+                 net.ipv6.conf.default.disable_ipv6=0, or \
+                 net.ipv6.conf.{name}.disable_ipv6=0 if {name} is a persistent TUN"
+            )
+        } else {
+            format!("net.ipv6.conf.{name}.disable_ipv6 is 1; set it to 0")
+        })
     }
 
     /// Refuse an existing interface named `name` unless it is a TUN.
@@ -1493,24 +1607,26 @@ pub(super) mod platform {
     /// The mesh address space routed into the TUN: `fd00::/8`.
     const MESH_PREFIX: (Ipv6Addr, u8) = (Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8);
 
-    /// Check if IPv6 is disabled system-wide.
+    /// Why IPv6 cannot be used at all.
     ///
     /// macOS: `net.inet6.ip6.disabled` is 1 when IPv6 is turned off; a
     /// kernel without that name, or any failure to read it, counts as
     /// enabled.
     #[cfg(target_os = "macos")]
-    pub fn is_ipv6_disabled() -> bool {
+    pub fn ipv6_off() -> Option<String> {
         matches!(bsdnet::sysctl_int("net.inet6.ip6.disabled"), Ok(1))
+            .then(|| "net.inet6.ip6.disabled is 1; set it to 0".to_string())
     }
 
-    /// Check if IPv6 is disabled system-wide.
+    /// Why IPv6 cannot be used at all.
     ///
     /// FreeBSD: `kern.features.inet6` is 1 when the kernel has IPv6 support.
     /// On a kernel built without INET6 the name is absent (`ENOENT`), so any
     /// failure to read it, or any other value, means disabled.
     #[cfg(target_os = "freebsd")]
-    pub fn is_ipv6_disabled() -> bool {
-        !matches!(bsdnet::sysctl_int("kern.features.inet6"), Ok(1))
+    pub fn ipv6_off() -> Option<String> {
+        (!matches!(bsdnet::sysctl_int("kern.features.inet6"), Ok(1)))
+            .then(|| "the kernel has no IPv6 support (kern.features.inet6 is not 1)".to_string())
     }
 
     /// Take a network interface down at shutdown, by clearing `IFF_UP`.
@@ -1625,6 +1741,7 @@ mod tests {
             HostPath {
                 state,
                 limiter,
+                unreachable: unreachable_limiter(),
                 datagrams,
             },
             rx,
@@ -1670,6 +1787,7 @@ mod tests {
         let (outbound_tx, mut outbound_rx) = host_path(Some(key));
         let lookup = empty_lookup();
         let mut pkt = ipv6_packet_to(&peer);
+        pkt[8..24].copy_from_slice(our_addr.as_bytes());
 
         assert!(handle_tun_packet(
             &mut pkt,

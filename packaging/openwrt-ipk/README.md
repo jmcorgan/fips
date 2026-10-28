@@ -362,26 +362,47 @@ section in `/etc/fips/fips.yaml`:
 /etc/init.d/fips-gateway start
 ```
 
-The first start gives `br-lan` the address `2001:2:f1b5::1/64`
-(`network.lan.ip6addr`), replacing any address you set there: Android
-and Chrome send no AAAA queries on a LAN that has only ULA addresses.
-The address lies in an unassigned part of IANA's `2001::/23` block and
-is not routed on the internet. It stays across stops and restarts
-while the service is enabled, because changing it reloads the network,
-which on OpenWrt 25.12 recreates `br-lan` and drops the LAN for a few
-seconds. Turning the gateway off deletes it: `disable` of a stopped
-gateway, `stop` of a disabled one (so `stop` and `disable` in either
-order), a start with `gateway.enabled` not true in `fips.yaml`, and
-removing the package. Disabling a running gateway and then rebooting
-deletes nothing: `disable` keeps the address while the gateway runs,
-and a disabled service is neither stopped at shutdown nor started at
-boot. Run `/etc/init.d/fips-gateway stop` once afterwards; it deletes
-the address and withdraws the gateway's RA settings.
+The first start gives the LAN the address `2001:2:f1b5::1/64`
+(`network.lan.ip6addr`), because Android and Chrome send no AAAA
+queries on a LAN that has only ULA addresses. An IPv6 address you set
+there yourself is left in place and the gateway's address is not added
+beside it, so on a LAN whose only address you set is a ULA those
+clients still send no AAAA queries. The address lies in an unassigned
+part of IANA's `2001::/23` block and is not routed on the internet. It
+stays across stops and restarts while the service is enabled, because
+changing it reloads the network, which on OpenWrt 25.12 recreates
+`br-lan` and drops the LAN for a few seconds. Turning the gateway off
+deletes it: `disable` of a stopped gateway, `stop` of a disabled one
+(so `stop` and `disable` in either order), a start with
+`gateway.enabled` not true in `fips.yaml`, and removing the package.
+Disabling a running gateway and then rebooting deletes nothing:
+`disable` keeps the address while the gateway runs, and a disabled
+service is neither stopped at shutdown nor started at boot. Run
+`/etc/init.d/fips-gateway stop` once afterwards; it deletes the
+address and withdraws the gateway's RA settings.
+
+While it runs, the gateway sets the LAN's `ra_default` to 2, so that
+odhcpd advertises a default route even without upstream IPv6, and
+advertises a route to its address pool. It keeps the `ra_default` it
+replaced in `/etc/fips/gateway-ra-default.saved`, and a stop puts that
+value back, also after a power loss while the gateway ran. A stop with
+nothing saved, such as the one every package upgrade and removal makes
+whether or not the gateway ran, leaves `ra_default` alone unless it is
+2, the value an older package's start left.
+
+The LAN is the device `gateway.lan_interface` names, `br-lan` by
+default, which may be a VLAN device such as `br-lan.3`. The pool
+route, its advertisement, the address and `ra_default` go to the
+network interface whose `device` is that name, or to `lan` when no
+interface has it. Read `network.lan` in this section as that
+interface.
 
 On a router with upstream IPv6, while the address is present, LAN
-clients may use it as the source for connections to destinations in
-`2001::/16`, which share a longer prefix with it than with a real
-global address, and those connections then fail or fall back slowly.
+clients may use it as the source for connections to any destination
+that shares more leading bits with it than with the client's upstream
+address, and those connections then fail or fall back slowly. With an
+upstream address in `2a00::/7`, that is every destination in
+`2000::/5`.
 
 A sysupgrade that keeps settings but drops the package runs none of
 the steps above. Delete the address by hand:

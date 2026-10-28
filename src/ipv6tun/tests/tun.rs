@@ -1,14 +1,18 @@
 //! Tests that TUN startup never deletes, downs or takes over an interface
 //! that already has the configured `tun.name`, other than reopening an
-//! unheld persistent TUN of that name; and that the `fd00::/8` policy rule
+//! unheld persistent TUN of that name; that the `fd00::/8` policy rule
 //! startup adds is removed at stop, replaces an older rule rather than
-//! sitting beside it, and is harmless when an exit without stop leaves it.
+//! sitting beside it, and is harmless when an exit without stop leaves it;
+//! and that a TUN on which the kernel would refuse IPv6 is reported as
+//! `Ipv6Disabled`, judged from a copy of the sysctl tree without root and
+//! from the kernel's own in a namespace.
 //!
-//! The namespace tests need root, so no CI job runs them: they are run by
-//! hand under `sudo` with `--ignored`, and that run is the only coverage of
-//! the Linux outcomes. macOS and FreeBSD are not run at all; there the
-//! kernel names the device, and after the fix no code touches an interface
-//! by `tun.name` before create. The module is Linux only.
+//! The namespace tests need root, so they are `#[ignore]`d. GitHub's Linux
+//! unit-test job runs them under `sudo` with `--ignored`; local CI does not,
+//! so locally they are run by hand that way. macOS and FreeBSD are not run
+//! at all; there the kernel names the device, and after the fix no code
+//! touches an interface by `tun.name` before create. The module is Linux
+//! only.
 //!
 //! Tests of the reader's packet handler, its MSS clamp and which closed
 //! channel ends it, also live here, because only `tun.rs`'s child modules
@@ -524,6 +528,233 @@ fn startup_replaces_an_older_rule_rather_than_adding_beside_it() {
     );
 }
 
+/// A copy of the kernel's sysctl tree under a temporary directory, holding
+/// only the files the IPv6 checks read.
+struct SysctlTree(tempfile::TempDir);
+
+impl SysctlTree {
+    /// A tree with `net` and nothing in it.
+    fn new() -> Self {
+        let tree = Self(tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(tree.root().join("net/core")).unwrap();
+        tree
+    }
+
+    /// A tree with an IPv6 stack whose `all` and `default` read `all` and
+    /// `default`.
+    fn with_ipv6(all: u8, default: u8) -> Self {
+        let tree = Self::new();
+        tree.knob("all", all);
+        tree.knob("default", default);
+        tree
+    }
+
+    /// Write `value` to `net/ipv6/conf/<dir>/disable_ipv6`, as the kernel
+    /// shows it, with a trailing newline.
+    fn knob(&self, dir: &str, value: u8) {
+        let conf = self.root().join("net/ipv6/conf").join(dir);
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(conf.join("disable_ipv6"), format!("{value}\n")).unwrap();
+    }
+
+    /// The tree's root, standing for `/proc/sys`.
+    fn root(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+/// A kernel booted with `ipv6.disable=1` has `/proc/sys/net` but no
+/// `/proc/sys/net/ipv6`. That is refused before any device is created, and
+/// the reason names the boot parameter.
+#[test]
+fn a_kernel_with_no_ipv6_stack_is_refused_naming_the_boot_parameter() {
+    let tree = SysctlTree::new();
+    let why = platform::stack_off(tree.root()).expect("no net/ipv6 is refused");
+    assert!(
+        why.contains("ipv6.disable=1"),
+        "names the boot parameter: {why}"
+    );
+}
+
+/// A kernel with an IPv6 stack passes the stack check whatever its
+/// `disable_ipv6` knobs say; those are judged on the device.
+#[test]
+fn a_kernel_with_an_ipv6_stack_passes_the_stack_check() {
+    assert_eq!(
+        platform::stack_off(SysctlTree::with_ipv6(1, 1).root()),
+        None
+    );
+}
+
+/// A sysctl tree with no `net` at all (no `/proc` mounted) says nothing
+/// about IPv6, so it does not refuse the TUN.
+#[test]
+fn a_sysctl_tree_with_no_net_directory_passes_the_stack_check() {
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(platform::stack_off(empty.path()), None);
+}
+
+/// A device whose own `disable_ipv6` is 1 is refused although `all` and
+/// `default` are 0, as a reopened persistent TUN keeps its own value. The
+/// reason names the device's knob and not `default`.
+#[test]
+fn a_device_whose_own_disable_ipv6_is_set_is_refused_with_all_and_default_clear() {
+    let tree = SysctlTree::with_ipv6(0, 0);
+    tree.knob(NAME, 1);
+    let why = platform::disabled_on(tree.root(), NAME).expect("refused");
+    assert!(
+        why.contains("net.ipv6.conf.fipst0.disable_ipv6 is 1; set it to 0"),
+        "names the device's knob: {why}"
+    );
+    assert!(!why.contains("default"), "does not blame default: {why}");
+}
+
+/// A new device takes `disable_ipv6` from `conf/default`. With `default` 1
+/// and `all` 0 it is refused, and the reason names `default` and offers
+/// clearing it, or the device's own knob for a persistent TUN. It does not
+/// offer writing `all`, which would also enable IPv6 on every other
+/// interface.
+#[test]
+fn a_device_disabled_through_conf_default_is_refused_offering_default_or_its_own_knob_not_all() {
+    let tree = SysctlTree::with_ipv6(0, 1);
+    tree.knob(NAME, 1);
+    let why = platform::disabled_on(tree.root(), NAME).expect("refused");
+    for part in [
+        "net.ipv6.conf.fipst0.disable_ipv6 is 1",
+        "set net.ipv6.conf.default.disable_ipv6=0",
+        "net.ipv6.conf.fipst0.disable_ipv6=0 if fipst0 is a persistent TUN",
+    ] {
+        assert!(why.contains(part), "names {part}: {why}");
+    }
+    assert!(!why.contains("conf.all"), "does not offer conf/all: {why}");
+}
+
+/// Only the device's own value decides whether the kernel takes an IPv6
+/// address on it: with its knob 0 the device passes though `all` and
+/// `default` are both 1.
+#[test]
+fn a_device_whose_own_disable_ipv6_is_clear_passes_with_all_and_default_set() {
+    let tree = SysctlTree::with_ipv6(1, 1);
+    tree.knob(NAME, 0);
+    assert_eq!(platform::disabled_on(tree.root(), NAME), None);
+}
+
+/// A device whose `disable_ipv6` cannot be read (the kernel keeps no IPv6
+/// state for it) is not refused here; the configure that follows reports
+/// whatever fails.
+#[test]
+fn a_device_with_no_readable_disable_ipv6_passes() {
+    let tree = SysctlTree::with_ipv6(1, 1);
+    assert_eq!(platform::disabled_on(tree.root(), NAME), None);
+}
+
+/// Set `net.ipv6.conf.<knob>.disable_ipv6` to `value` inside `ns`.
+fn set_knob(ns: &TunNetns, knob: &str, value: u8) {
+    crate::testutil::run_ok(
+        "ip",
+        &[
+            "netns",
+            "exec",
+            &ns.0,
+            "sysctl",
+            "-qw",
+            &format!("net.ipv6.conf.{knob}.disable_ipv6={value}"),
+        ],
+    );
+}
+
+/// A host whose new interfaces get IPv6 disabled through
+/// `net.ipv6.conf.default.disable_ipv6=1` alone, with `conf/all` left at 0,
+/// gives the TUN no IPv6. Create reports that as `Ipv6Disabled`, naming the
+/// `default` knob, rather than failing later in the address add with a
+/// netlink error that does not say IPv6 is off, and leaves no device.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn create_reports_ipv6_disabled_when_only_conf_default_disables_it() {
+    let ns = TunNetns::new();
+    set_knob(&ns, "default", 1);
+
+    let Err(err) = ns.create() else {
+        panic!("create succeeded although new interfaces have IPv6 disabled");
+    };
+    assert!(
+        matches!(err, TunError::Ipv6Disabled(_)),
+        "create reports IPv6 disabled, not: {err} ({err:?})"
+    );
+    assert!(
+        err.to_string()
+            .contains("net.ipv6.conf.default.disable_ipv6"),
+        "the message names the default knob: {err}"
+    );
+    assert_eq!(ns.link(), None, "the refused device was left behind");
+}
+
+/// A persistent TUN whose own `disable_ipv6` is 1, with `all` and `default`
+/// 0, is reopened and refused as `Ipv6Disabled` naming its own knob, and the
+/// link is kept (same index and kind). Opening it has already set its MTU to
+/// the configured one, as before this check existed.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn create_reports_ipv6_disabled_on_a_persistent_tun_whose_own_knob_is_set() {
+    let ns = TunNetns::new();
+    ns.ip(&["tuntap", "add", NAME, "mode", "tun"]);
+    set_knob(&ns, NAME, 1);
+    let before = ns.link().expect("the persistent TUN exists");
+
+    let Err(err) = ns.create() else {
+        panic!("create succeeded on a TUN with IPv6 disabled on it");
+    };
+    assert!(
+        matches!(err, TunError::Ipv6Disabled(_)),
+        "create reports IPv6 disabled, not: {err} ({err:?})"
+    );
+    assert!(
+        err.to_string()
+            .contains("net.ipv6.conf.fipst0.disable_ipv6"),
+        "the message names the device's knob: {err}"
+    );
+    assert_eq!(
+        ns.link(),
+        Some(before),
+        "the persistent TUN was removed or replaced"
+    );
+}
+
+/// A persistent TUN whose own `disable_ipv6` is 0 is reopened and configured
+/// although `all`, and with it `default`, are 1: the kernel takes an address
+/// on it, so create judges the device alone and consults neither.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn create_succeeds_on_a_persistent_tun_whose_own_knob_is_clear_under_all_and_default_set() {
+    let ns = TunNetns::new();
+    ns.ip(&["tuntap", "add", NAME, "mode", "tun"]);
+    set_knob(&ns, "all", 1);
+    set_knob(&ns, NAME, 0);
+
+    let device = ns
+        .create()
+        .expect("a persistent TUN with IPv6 on is reopened and configured");
+    assert_eq!(ns.mesh_addresses().len(), 1, "the TUN has its mesh address");
+    ns.shutdown(device).expect("the TUN is shut down");
+}
+
+/// `conf/all` set to 1 and `conf/default` cleared afterwards leaves new
+/// interfaces with IPv6 on, and the kernel takes an address on them, so
+/// create succeeds rather than refusing on `all` alone.
+#[test]
+#[ignore = "needs root: creates network namespaces"]
+fn create_succeeds_when_all_is_set_but_default_was_cleared_after_it() {
+    let ns = TunNetns::new();
+    set_knob(&ns, "all", 1);
+    set_knob(&ns, "default", 0);
+
+    let device = ns
+        .create()
+        .expect("a new TUN with IPv6 on is created and configured");
+    assert_eq!(ns.mesh_addresses().len(), 1, "the TUN has its mesh address");
+    ns.shutdown(device).expect("the TUN is shut down");
+}
+
 /// A host path whose map knows `peer`, with its replica and the node's end of
 /// its datagram channel.
 fn reader_host(
@@ -542,6 +773,7 @@ fn reader_host(
     let host = HostPath {
         state,
         limiter,
+        unreachable: unreachable_limiter(),
         datagrams,
     };
     (host, PathMtuReplica::default(), rx)
@@ -650,4 +882,79 @@ fn a_closed_datagram_channel_ends_the_reader() {
         &host,
         &paths
     ));
+}
+
+/// The system TUN reader draws on the same Destination Unreachable bucket
+/// (RFC 4443 Section 2.4 (f)): a hundred packets in a row draw the whole
+/// burst and no more than the bucket refills while they are read, both for
+/// a destination outside the mesh, which the reader answers itself, and for
+/// a mesh destination no key names.
+#[test]
+fn a_flood_read_from_the_tun_draws_the_destination_unreachable_burst_and_no_more_than_the_refill() {
+    use crate::ipv6tun::icmp::{UNREACHABLE_BURST, UNREACHABLE_RATE};
+    let ours = *crate::Identity::generate().address();
+    let known = crate::ipv6tun::link::any_key();
+    let stranger = *crate::ipv6tun::link::any_key().address().as_bytes();
+    let off_mesh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let mut drawn = Vec::new();
+    for (what, dst) in [
+        ("off the mesh", off_mesh.octets()),
+        ("unknown key", stranger),
+    ] {
+        let made = std::time::Instant::now();
+        let (host, paths, _datagrams) = reader_host(known);
+        let (tun_tx, tun_rx) = TunTx::bounded(256);
+        for _ in 0..100 {
+            let mut packet = bare(&ours, &dst, 60);
+            assert!(handle_tun_packet(
+                &mut packet,
+                1360,
+                "test0",
+                ours,
+                &tun_tx,
+                &host,
+                &paths
+            ));
+        }
+        let ceiling = UNREACHABLE_BURST as usize
+            + (made.elapsed().as_secs_f64() * UNREACHABLE_RATE).ceil() as usize;
+        let sent = tun_rx.try_iter().count();
+        drawn.push((what, sent, ceiling));
+    }
+    assert!(
+        drawn
+            .iter()
+            .all(|&(_, sent, ceiling)| (UNREACHABLE_BURST as usize..=ceiling).contains(&sent)),
+        "a hundred packets each drew (case, Destination Unreachable, the bucket's ceiling), \
+         each to be at least the burst and at most the ceiling: {drawn:?}"
+    );
+}
+
+/// The Destination Unreachable bucket, judged at given times: the burst of
+/// ten goes at once and the eleventh is held back; a tenth of a second
+/// later one more goes; and after a long quiet spell no more than the burst
+/// goes, since the bucket holds no more than that.
+#[test]
+fn destination_unreachable_goes_ten_at_once_then_one_a_tenth_of_a_second() {
+    let bucket = unreachable_limiter();
+    let t0 = HostClock.now();
+    let at = |ms: u64| {
+        crate::time::HostInstant::from(
+            std::time::Instant::from(t0) + std::time::Duration::from_millis(ms),
+        )
+    };
+    let (tun_tx, rx) = TunTx::bounded(64);
+    let sends = |n: usize, now| {
+        for _ in 0..n {
+            assert!(unreachable_at(vec![1], &bucket, now, Some(&tun_tx)));
+        }
+        rx.try_iter().count()
+    };
+    assert_eq!(sends(11, t0), 10, "the burst at once");
+    assert_eq!(sends(2, at(100)), 1, "one more a tenth of a second on");
+    assert_eq!(
+        sends(20, at(10_100)),
+        10,
+        "no more than the burst after a quiet spell"
+    );
 }

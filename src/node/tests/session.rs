@@ -11403,3 +11403,177 @@ async fn characterize_a_default_node_behind_a_1280_byte_forwarder_loses_1280_byt
         cleanup_nodes(&mut nodes).await;
     }
 }
+
+// ============================================================================
+// TUN packets held behind a session: every discard answers the host
+// ============================================================================
+
+/// The ICMPv6 type of each packet written to the TUN, for failure messages.
+fn icmp_types(answers: &[Vec<u8>]) -> Vec<u8> {
+    answers
+        .iter()
+        .map(|a| a.get(40).copied().unwrap_or(0))
+        .collect()
+}
+
+/// Packets held behind a session this node opened are answered with ICMPv6
+/// no-route when the session's handshake times out, as a lookup timeout
+/// answers them, rather than dropped in silence.
+#[tokio::test]
+async fn held_tun_packets_are_answered_with_no_route_when_the_session_handshake_times_out() {
+    use super::discovery::{assert_no_route, drain_tun, install_tun_channel, tun_packet};
+
+    let mut node = make_node();
+    let rx = install_tun_channel(&mut node);
+    let remote = Identity::generate();
+    let dest = *remote.node_addr();
+    node.sessions.insert(
+        dest,
+        crate::node::session::SessionEntry::opened_for_test(
+            &remote.pubkey_full(),
+            node.identity().keypair(),
+            session_at(1000),
+        ),
+    );
+    let peer = crate::ipv6tun::link::PeerKey::from_xonly(&remote.pubkey());
+    let packet = tun_packet(&node, &dest);
+    node.test_hold(dest, peer, packet.clone());
+    node.test_hold(dest, peer, packet);
+    assert_eq!(
+        node.pending_tun_total_packets(),
+        2,
+        "precondition: two held"
+    );
+
+    let deadline = 1000 + node.config().node.rate_limit.handshake_timeout_secs * 1000;
+    node.poll_session_rekeys(session_at(deadline)).await;
+    assert!(
+        !node.sessions.contains_key(&dest),
+        "precondition: the handshake timeout removed the session"
+    );
+    assert_eq!(
+        node.pending_tun_total_packets(),
+        0,
+        "precondition: nothing held"
+    );
+
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        2,
+        "each packet held behind the timed-out session must be answered (types written: {:?})",
+        icmp_types(&answers)
+    );
+    for answer in &answers {
+        assert_no_route(answer);
+    }
+}
+
+/// Two linked nodes, the first outside the routing hold with a second peer
+/// whose filter reaches `node1` when `reach` holds, and one TUN packet held
+/// behind a session the first is setting up to `node1`. Returns the nodes,
+/// the first node's TUN receiver and `node1`'s address.
+async fn held_behind(reach: bool) -> (Vec<TestNode>, std::sync::mpsc::Receiver<Vec<u8>>, NodeAddr) {
+    use super::discovery::{insert_filter_peer, install_tun_channel, leave_hold, tun_packet};
+
+    let edges = vec![(0, 1)];
+    let mut nodes = run_tree_test(2, &edges, false).await;
+    verify_tree_convergence(&nodes);
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_identity = nodes[1].node.identity().clone();
+    let reaches = if reach { vec![node1_addr] } else { Vec::new() };
+    insert_filter_peer(&mut nodes[0].node, &reaches, false);
+    leave_hold(&mut nodes[0].node);
+
+    let rx = install_tun_channel(&mut nodes[0].node);
+    let entry = crate::node::session::SessionEntry::opened_for_test(
+        &node1_identity.pubkey_full(),
+        nodes[0].node.identity().keypair(),
+        session_at(1000),
+    );
+    nodes[0].node.sessions.insert(node1_addr, entry);
+    let packet = tun_packet(&nodes[0].node, &node1_addr);
+    nodes[0].node.test_hold(
+        node1_addr,
+        crate::ipv6tun::link::PeerKey::from_xonly(&node1_identity.pubkey()),
+        packet,
+    );
+    (nodes, rx, node1_addr)
+}
+
+/// Removing a peer ends the session being set up to it but keeps the packet
+/// held behind it, unanswered: the peer may be back at once, as after a
+/// replacement or a restart, and the next session would send it. When no
+/// other peer can reach the removed one, the held-packet backstop answers it
+/// with no route at its next pass.
+#[tokio::test]
+async fn a_tun_packet_held_behind_a_removed_peers_session_is_kept_then_answered_once_unreachable() {
+    use super::discovery::{assert_no_route, drain_tun};
+
+    let (mut nodes, rx, node1_addr) = held_behind(false).await;
+    nodes[0].node.remove_active_peer(&node1_addr);
+    assert!(
+        nodes[0].node.get_session(&node1_addr).is_none(),
+        "precondition: the session went with the peer"
+    );
+    assert!(
+        drain_tun(&rx).is_empty(),
+        "the removal itself must not answer the held packet"
+    );
+    assert_eq!(
+        nodes[0].node.pending_tun_total_packets(),
+        1,
+        "the packet held behind the removed peer's session must stay held, not be dropped"
+    );
+
+    nodes[0]
+        .node
+        .release_stranded_tun_packets(std::time::Instant::now());
+    let answers = drain_tun(&rx);
+    assert_eq!(
+        answers.len(),
+        1,
+        "with no peer reaching the removed one, the backstop must answer the held \
+         packet (types written: {:?})",
+        icmp_types(&answers)
+    );
+    assert_no_route(&answers[0]);
+    assert_eq!(nodes[0].node.pending_tun_total_packets(), 0);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A packet held behind the session to a removed peer that another peer's
+/// filter still reaches is neither dropped nor answered: the destination may
+/// be reached the other way, so it waits for the next session to it, as any
+/// packet to a destination with a route does.
+#[tokio::test]
+async fn a_tun_packet_held_behind_a_removed_peers_session_stays_held_while_another_peer_reaches_it()
+{
+    use super::discovery::drain_tun;
+
+    let (mut nodes, rx, node1_addr) = held_behind(true).await;
+    nodes[0].node.remove_active_peer(&node1_addr);
+    assert!(
+        nodes[0].node.get_session(&node1_addr).is_none(),
+        "precondition: the session went with the peer"
+    );
+    nodes[0]
+        .node
+        .release_stranded_tun_packets(std::time::Instant::now());
+
+    let answers = drain_tun(&rx);
+    assert!(
+        answers.is_empty(),
+        "a destination another peer reaches must not be answered as unreachable \
+         (types written: {:?})",
+        icmp_types(&answers)
+    );
+    assert_eq!(
+        nodes[0].node.pending_tun_total_packets(),
+        1,
+        "the packet must stay held for the next session to the destination"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}

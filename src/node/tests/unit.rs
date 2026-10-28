@@ -2326,12 +2326,12 @@ async fn test_transport_mtu_fallback_when_no_operational_transports() {
 // Default MTUs carry every IPv6 packet up to the IPv6 minimum
 // ============================================================================
 
-/// An IPv6 packet from `tun_packet_to(dest)` padded to `len` bytes, with its
+/// An IPv6 packet from `tun_packet(node, dest)` padded to `len` bytes, with its
 /// payload length field set to match.
-fn sized_packet(dest: &NodeAddr, len: usize) -> Vec<u8> {
-    use super::discovery::tun_packet_to;
+fn sized_packet(node: &Node, dest: &NodeAddr, len: usize) -> Vec<u8> {
+    use super::discovery::tun_packet;
 
-    let mut pkt = tun_packet_to(dest);
+    let mut pkt = tun_packet(node, dest);
     pkt.resize(len, 0);
     let payload = u16::try_from(len - 40).unwrap();
     pkt[4..6].copy_from_slice(&payload.to_be_bytes());
@@ -2361,7 +2361,8 @@ async fn test_node_with_a_default_udp_transport_forwards_a_1280_byte_ipv6_packet
     // size check is refused only for want of a route.
     let dest = *Identity::generate().node_addr();
 
-    node.handle_tun_outbound(sized_packet(&dest, 1280)).await;
+    node.handle_tun_outbound(sized_packet(&node, &dest, 1280))
+        .await;
     let answers = drain_tun(&rx);
     assert_eq!(
         answers.len(),
@@ -2381,7 +2382,8 @@ async fn test_node_with_a_default_udp_transport_forwards_a_1280_byte_ipv6_packet
     );
     assert_no_route(&answers[0]);
 
-    node.handle_tun_outbound(sized_packet(&dest, 1281)).await;
+    node.handle_tun_outbound(sized_packet(&node, &dest, 1281))
+        .await;
     let answers = drain_tun(&rx);
     assert_eq!(
         answers.len(),
@@ -5927,6 +5929,197 @@ async fn the_first_packet_to_a_name_just_resolved_is_held_even_when_it_reaches_t
         node.pending_tun_total_packets(),
         1,
         "held behind session setup"
+    );
+    node.stop().await.unwrap();
+}
+
+/// A running node whose transports carried a 1280-byte IPv6 packet at start
+/// warns when a narrower transport binds later and its presence edge reaches
+/// the receive loop: the shortfall is judged where the bound set changes, not
+/// only once at start. A second edge that leaves the node as short as before
+/// does not warn again.
+#[tokio::test]
+async fn a_narrow_transport_binding_after_start_draws_one_ipv6_minimum_warning_from_the_rx_loop() {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    config.tun.enabled = true;
+    config.node.control.enabled = false;
+    let mut node = make_node_with(config);
+    let (_outbound_tx, _tun_rx) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    assert_eq!(
+        node.ipv6_shortfall(),
+        None,
+        "precondition: the default UDP MTU carries a 1280-byte IPv6 packet at start"
+    );
+
+    // An interface-bound transport binds after start, onto a narrow link,
+    // and its binder reports the edge to the running node.
+    let late = node.allocate_transport_id();
+    let narrow = make_udp_transport_with_mtu(late.as_u32(), 1280).await;
+    node.transports.insert(late, narrow);
+    assert_eq!(
+        node.ipv6_shortfall(),
+        Some(77),
+        "precondition: the late transport leaves the node short of the IPv6 minimum"
+    );
+    let presence = node
+        .transport_presence_tx
+        .clone()
+        .expect("a started node holds the presence sender");
+    for _ in 0..2 {
+        presence
+            .send(crate::transport::TransportPresence {
+                transport_id: late,
+                present: true,
+                health_relevant: false,
+            })
+            .await
+            .expect("presence edge queued");
+    }
+
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    let _ = tokio::time::timeout(Duration::from_millis(300), node.run_rx_loop()).await;
+    drop(guard);
+
+    assert_eq!(
+        node.tun_mss_ceiling(),
+        crate::ipv6tun::icmp::mss_ceiling(1280),
+        "control: the rx loop handled the edge and tightened the ceiling"
+    );
+    let warnings = logs.warnings();
+    let hits = warnings
+        .iter()
+        .filter(|line| line.contains("too small for the IPv6 minimum"))
+        .count();
+    assert_eq!(
+        hits, 1,
+        "a late-bound narrow transport must draw the IPv6-minimum warning once, \
+         not per edge: {warnings:?}"
+    );
+    node.stop().await.unwrap();
+}
+
+/// A stopped node judges the IPv6 minimum no more: a change to its bound set
+/// after `stop()` draws no warning, so a later start warns only once its own
+/// TUN is up.
+#[tokio::test]
+async fn a_stopped_node_does_not_warn_of_the_ipv6_minimum_when_its_bound_set_changes() {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    config.tun.enabled = true;
+    config.node.control.enabled = false;
+    let mut node = make_node_with(config);
+    let (_outbound_tx, _tun_rx) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    assert_eq!(
+        node.ipv6_shortfall(),
+        None,
+        "precondition: the default UDP MTU carries a 1280-byte IPv6 packet at start"
+    );
+    node.stop().await.unwrap();
+
+    let late = node.allocate_transport_id();
+    let narrow = make_udp_transport_with_mtu(late.as_u32(), 1280).await;
+    node.transports.insert(late, narrow);
+    assert!(
+        node.ipv6_shortfall().is_some(),
+        "precondition: the inserted transport leaves the node short of the IPv6 minimum"
+    );
+
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    node.refresh_tun_mss_ceiling();
+    drop(guard);
+    let warnings = logs.warnings();
+    let hits = warnings
+        .iter()
+        .filter(|line| line.contains("too small for the IPv6 minimum"))
+        .count();
+    assert_eq!(
+        hits, 0,
+        "a stopped node has no TUN to warn about: {warnings:?}"
+    );
+}
+
+/// A node whose TUN thread has ended judges the IPv6 minimum no more: a
+/// narrow transport that binds afterwards draws no warning, since there is no
+/// TUN left to carry the packets it would be about.
+///
+/// An app-owned TUN has no threads, so the exit is sent on the adapter's
+/// channel as a system TUN's thread would send it; the receive loop's arm
+/// reads only the exit. Had the arm not stopped the watch, the narrow edge
+/// would warn, so the test cannot pass with the exit unheard.
+///
+/// Both are queued before the one run of the loop: the loop takes its
+/// receivers and a second run would read empty stand-ins.
+#[tokio::test]
+async fn a_node_whose_tun_thread_ended_draws_no_ipv6_minimum_warning_when_a_narrow_link_binds() {
+    let mut config = crate::Config::new();
+    config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        ..Default::default()
+    });
+    config.dns.enabled = false;
+    config.tun.enabled = true;
+    config.node.control.enabled = false;
+    let mut node = make_node_with(config);
+    let (_outbound_tx, _tun_rx) = node.enable_app_owned_tun();
+    node.start().await.unwrap();
+    assert_eq!(
+        node.ipv6_shortfall(),
+        None,
+        "precondition: the default UDP MTU carries a 1280-byte IPv6 packet at start"
+    );
+
+    // A TUN thread ends on its own, and then a narrow transport binds. The
+    // loop's arms are biased, the adapter's exits ahead of presence edges, so
+    // it hears of the exit first.
+    node.supervisor
+        .ipv6tun
+        .exit_sender()
+        .expect("a started node holds the adapter's exit sender")
+        .send(crate::ipv6tun::lifecycle::Exit::Tun)
+        .await
+        .expect("exit queued");
+    let late = node.allocate_transport_id();
+    let narrow = make_udp_transport_with_mtu(late.as_u32(), 1280).await;
+    node.transports.insert(late, narrow);
+    node.transport_presence_tx
+        .clone()
+        .expect("a started node holds the presence sender")
+        .send(crate::transport::TransportPresence {
+            transport_id: late,
+            present: true,
+            health_relevant: false,
+        })
+        .await
+        .expect("presence edge queued");
+
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    let _ = tokio::time::timeout(Duration::from_millis(300), node.run_rx_loop()).await;
+    drop(guard);
+
+    assert_eq!(
+        node.tun_mss_ceiling(),
+        crate::ipv6tun::icmp::mss_ceiling(1280),
+        "control: the rx loop handled the edge and tightened the ceiling"
+    );
+    let hits = logs
+        .warnings()
+        .iter()
+        .filter(|line| line.contains("too small for the IPv6 minimum"))
+        .count();
+    assert_eq!(
+        hits, 0,
+        "a node whose TUN thread ended has no TUN to warn about"
     );
     node.stop().await.unwrap();
 }

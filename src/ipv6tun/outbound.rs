@@ -15,10 +15,12 @@
 //! then the shared step), [`outbound`] for the shared step, which is all a
 //! packet an embedder that owns the TUN sends gets, and [`answer`] for a
 //! refusal. The TUN reader and the adapter's handles carry the result out,
-//! and only they consult the Packet Too Big limiter, when told to.
+//! and only they consult the ICMPv6 limiters: the Packet Too Big limiter
+//! when told to, and the Destination Unreachable bucket for every
+//! Destination Unreachable.
 
 use super::core::{MeshState, PathMtuReplica};
-use super::icmp::unreachable;
+use super::icmp::{source_refused, unreachable};
 use super::ipv6_shim::{compress_ipv6, decompress_ipv6};
 use super::link::{Datagram, PeerKey, Refusal};
 use super::mss::{Remote, clamp};
@@ -27,6 +29,7 @@ use super::tcp_mss::recalculate_l4_checksum;
 use crate::identity::IPV6_ADDRESS_PREFIX;
 use fips_core::identity::NodePrefix;
 use std::net::Ipv6Addr;
+use tracing::debug;
 
 /// What the host half does with one packet from the host, on either path.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,8 +39,9 @@ pub(crate) enum Host {
     Nothing,
     /// Hand the node this datagram.
     Mesh(Datagram),
-    /// Send the host this Destination Unreachable. A closed queue toward the
-    /// host is ignored.
+    /// Send the host this Destination Unreachable, if the Destination
+    /// Unreachable bucket has a token. A closed queue toward the host is
+    /// ignored.
     Unreachable(Vec<u8>),
     /// Send the host Packet Too Big for the packet, reporting this MTU, if
     /// the limiter lets the packet's source have one. A closed queue toward
@@ -55,7 +59,8 @@ pub(crate) enum FromTun {
     /// checksum now complete. A closed queue toward the host ends the reader.
     Hairpin,
     /// The destination is outside `fd00::/8`: send the host this Destination
-    /// Unreachable. A closed queue toward the host ends the reader.
+    /// Unreachable, if the Destination Unreachable bucket has a token. A
+    /// closed queue toward the host ends the reader.
     OffMesh(Vec<u8>),
     /// A mesh destination: the shared step's verdict, on the packet as
     /// clamped. `clamped` is the MSS a SYN was clamped to, if it was.
@@ -70,7 +75,8 @@ pub(crate) enum FromTun {
 /// An answer the host is owed for a datagram the node refused.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Owed {
-    /// Send the host this Destination Unreachable.
+    /// Send the host this Destination Unreachable, if the Destination
+    /// Unreachable bucket has a token.
     Unreachable(Vec<u8>),
     /// Send the host Packet Too Big for this rebuilt packet, reporting this
     /// MTU, if the limiter lets its source have one.
@@ -169,15 +175,29 @@ pub(crate) fn from_tun(
 /// both paths take, and all a packet an embedder that owns the TUN sends
 /// gets.
 ///
-/// A packet that is not IPv6 is dropped. A packet to a destination whose
+/// A packet that is not IPv6 is dropped. A packet whose source is not
+/// `our_addr` never reaches the mesh, whose receiver would rebuild it with
+/// our address as its source, so that its checksum fails there: it is
+/// answered with Destination Unreachable code 5 (source address failed
+/// ingress/egress policy) from `our_addr`. A packet to a destination whose
 /// prefix names a key goes to the node whatever its size: the node judges it
 /// against the limit it carries now, which the adapter's copy can trail. A
-/// packet to any other destination is answered here, with Packet Too Big
-/// when it is over the node-wide IPv6 MTU last published, as the size check
-/// comes first, and with Destination Unreachable from `our_addr` otherwise.
+/// packet to any other destination is answered here: one to `fd00::/8` with
+/// Packet Too Big when it is over the node-wide IPv6 MTU last published, as
+/// the size check comes first, and every other with Destination Unreachable
+/// from `our_addr`, or nothing when it is owed no ICMPv6 error. A
+/// destination outside `fd00::/8`, which only an embedder that owns the TUN
+/// can send, is never too big: the mesh could not carry it at any size.
 pub(crate) fn outbound(packet: &[u8], state: &MeshState, our_addr: Ipv6Addr) -> Host {
     if packet.len() < 40 || packet[0] >> 4 != 6 {
         return Host::Nothing;
+    }
+    if packet[8..24] != our_addr.octets() {
+        debug!(
+            src = %Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).unwrap()),
+            "Refusing a packet from the host whose source is not our address"
+        );
+        return source_refused(packet, our_addr).map_or(Host::Nothing, Host::Unreachable);
     }
     if let Some(peer) = state.key(&destination(packet)) {
         // What compression refuses, anything shorter than an IPv6 header or
@@ -187,7 +207,7 @@ pub(crate) fn outbound(packet: &[u8], state: &MeshState, our_addr: Ipv6Addr) -> 
         });
     }
     match admit(packet, state.ipv6_mtu()) {
-        Admit::TooBig(mtu) => Host::TooBig(mtu),
+        Admit::TooBig(mtu) if packet[24] == IPV6_ADDRESS_PREFIX => Host::TooBig(mtu),
         _ => unreachable(packet, our_addr).map_or(Host::Nothing, Host::Unreachable),
     }
 }

@@ -78,14 +78,19 @@ Format rules:
 
 - One hostname and one npub per line, separated by
   whitespace.
-- Hostnames are lowercase letters, digits, and hyphens; max
-  63 characters.
+- Hostnames are letters, digits, and hyphens; max 63
+  characters. Case does not matter: names are stored and
+  matched in lowercase.
 - Comments start with `#` and continue to end of line; blank
   lines are ignored.
 - On duplicate hostnames, the last entry wins.
 
 The daemon picks up the change on the next DNS query — no
-restart required (the file's mtime is checked on each query).
+restart required (the file's mtime is checked on each query). If a change
+leaves the file unreadable, for example a byte saved that is not UTF-8 or
+the file written with a mode the daemon cannot read, the names last read
+stay in use and the daemon logs a warning; it reads the file again once it
+can, so restoring read access needs no restart.
 Verify:
 
 ```sh

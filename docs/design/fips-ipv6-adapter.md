@@ -240,6 +240,19 @@ Clamping is applied in two places:
 - **TUN writer** (inbound): clamps MSS on inbound SYN-flagged segments
   (a remote initiator's SYN as well as the SYN-ACK answering a local one)
 
+The clamp finds the TCP header behind any Hop-by-Hop, Routing and
+Destination Options headers and clamps the SYN to the same ceiling as one
+without them. The MSS option is the effective MTU less the fixed IPv6 and
+TCP headers, and a sender takes the extension headers it sends off its own
+segments (RFC 9293 Section 3.7.1), so the clamp takes nothing off for them.
+It leaves a SYN behind an Authentication, Fragment or ESP header, or a
+header it does not know, unclamped: the first authenticates the segment, the
+second leaves part of it in other fragments, and the others hide the TCP
+header. It updates the TCP checksum for the two bytes it
+rewrites rather than recomputing it, so the checksum does not depend on the
+pseudo-header's destination, which a Routing header can make another
+address than the fixed header's.
+
 Together, these ensure both directions of a TCP connection use
 appropriately sized segments from the start, avoiding the initial
 oversized packet loss that would occur with ICMP Packet Too Big
@@ -252,7 +265,15 @@ fallback) and the rationale for `max_mss` semantics are in
 Packet Too Big is limited per source address to one message per 100 ms
 (a minimum interval, not a token bucket), which prevents a storm when an
 application sends a burst of oversized packets.
-Destination Unreachable is not rate-limited.
+
+Destination Unreachable is limited by one token bucket for the whole
+adapter, as RFC 4443 Section 2.4 (f) requires: a burst of 10, then 10 a
+second, the defaults the RFC gives for a small or mid-size device. The
+bucket covers every Destination Unreachable the host is sent: for a
+destination outside `fd00::/8`, for one no key names, and for the packets
+the node held for a destination it found no route to. It is one bucket
+rather than one per source because nearly every packet the host sends to
+the mesh comes from the node's own address.
 
 ## TUN Interface
 
@@ -280,14 +301,20 @@ The TUN reader receives raw IPv6 packets from applications and processes them:
 
 1. Validate IPv6 header
 2. Extract destination `fd00::/8` address
-3. Look up identity cache — miss returns ICMPv6 Destination Unreachable
-4. Retrieve NodeAddr and PublicKey from cache
-5. Look up or establish FSP session
-6. Compress IPv6 header: strip addresses and payload length, build format 0x00
+3. Check the source is the node's own address: any other returns ICMPv6
+   Destination Unreachable code 5 (source address failed ingress/egress
+   policy), since the receiver rebuilds the source from the session. The
+   check comes after the off-mesh answer, the hairpin and the MSS clamp, so a
+   packet from any source to a destination outside `fd00::/8` is answered
+   code 0 (no route), and a SYN is clamped before it is refused
+4. Look up identity cache — miss returns ICMPv6 Destination Unreachable
+5. Retrieve NodeAddr and PublicKey from cache
+6. Look up or establish FSP session
+7. Compress IPv6 header: strip addresses and payload length, build format 0x00
    payload with residual fields (traffic class, flow label, next header, hop limit)
-7. Prepend port header (src_port=256, dst_port=256)
-8. Encrypt with session keys
-9. Route through FMP toward destination
+8. Prepend port header (src_port=256, dst_port=256)
+9. Encrypt with session keys
+10. Route through FMP toward destination
 
 ### Writer Thread
 
@@ -374,7 +401,12 @@ system TUN's reader and writer. Nor does FIPS refuse an off-mesh destination up
 front: `handle_tun_outbound` looks up bytes 1 to 15 of any destination in the
 identity cache, and on a miss answers with ICMPv6
 Destination Unreachable on `app_inbound_rx`, sourced from the node's own mesh
-address. An oversize packet gets Packet Too Big on the same channel. The
+address. An oversize packet to an `fd00::/8` destination gets Packet Too Big
+on the same channel; one to any other destination is answered as
+undeliverable, with Destination Unreachable, or with nothing for a multicast
+group, since the mesh could not carry it at any size. A packet
+whose source is not the node's own mesh address is not forwarded; it is
+answered with Destination Unreachable code 5, as on the system TUN. The
 embedder is therefore responsible for routing only `fd00::/8` to its TUN, for
 expecting ICMPv6 errors on `app_inbound_rx`, and for clamping TCP MSS on
 SYN-flagged segments in both directions.

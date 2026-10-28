@@ -10,6 +10,9 @@
 #   (e) table scoped to an interface that is not the TUN → the TUN is
 #       not policed, and the daemon's listener report says so; reloading
 #       the real file restores (a)
+#   (f) a TUN named mesh0, started with the fips0-scoped file already
+#       loaded → the daemon warns once at startup naming both interfaces,
+#       and its listener report judges the table against mesh0, not fips0
 #
 # fips-firewall.service activation: the unit's ExecStart is
 # `/usr/sbin/nft -f /etc/fips/fips.nft`. The test image does not run
@@ -31,6 +34,9 @@ source "$SCRIPT_DIR/table-check.sh"
 
 CONTAINER_A="fips-fw-container-a${FIPS_CI_NAME_SUFFIX:-}"
 CONTAINER_B="fips-fw-container-b${FIPS_CI_NAME_SUFFIX:-}"
+CONTAINER_C="fips-fw-container-c${FIPS_CI_NAME_SUFFIX:-}"
+# node-c's tun.name (generate-configs.sh).
+TUN_C="mesh0"
 
 NPUB_A="npub1sjlh2c3x9w7kjsqg2ay080n2lff2uvt325vpan33ke34rn8l5jcqawh57m"
 NPUB_B="npub1tdwa4vjrjl33pcjdpf2t4p027nl86xrx24g4d3avg4vwvayr3g8qhd84le"
@@ -74,22 +80,24 @@ fail() {
     exit 1
 }
 
-# Wait for fips0 to exist and have a global IPv6 address inside container.
+# Wait for the TUN (fips0 unless a third argument names it) to exist and
+# have a global IPv6 address inside container.
 wait_for_fips0() {
     local container="$1"
     local timeout="${2:-30}"
+    local tun="${3:-fips0}"
     for _ in $(seq 1 "$timeout"); do
         # Captured before matching: under pipefail, grep -q exiting at its
         # match can kill the writer with SIGPIPE and turn the match into a
         # miss. Captured inside the condition so that set -e does not end
         # the script while fips0 is not up yet.
         if grep -qE 'inet6 fd[0-9a-f]+:' \
-            <<<"$(docker exec "$container" ip -6 addr show fips0 2>/dev/null)"; then
+            <<<"$(docker exec "$container" ip -6 addr show "$tun" 2>/dev/null)"; then
             return 0
         fi
         sleep 1
     done
-    fail "$container fips0 did not come up within ${timeout}s"
+    fail "$container $tun did not come up within ${timeout}s"
 }
 
 # Connected-peer count for a container, or the empty string if it did not
@@ -439,5 +447,60 @@ if [ "$FW_ACTIVE" != "true" ]; then
     fail "(e) after reloading the real fips.nft, firewall_active should be true again (got '${FW_ACTIVE}')"
 fi
 pass "(e) real fips.nft reloaded: TCP/${UNALLOWED_PORT} dropped and the report shows the firewall active"
+
+# ── (f) A TUN not named fips0 ──────────────────────────────────────────
+# Cases (a) to (e) run with the TUN named fips0, the name fips.nft ships
+# with, so they would pass with the daemon checking the table against a
+# hard-coded "fips0". node-c's TUN is mesh0, and its container loads the
+# shipped file before the daemon starts. The daemon's one startup check must
+# then warn naming fips0 and mesh0, and its listener report must judge the
+# table against mesh0: not policing it under the shipped file, policing it
+# once the file is rewritten to mesh0.
+log "Case (f): a TUN named ${TUN_C}, started under a table scoped to fips0"
+wait_for_fips0 "$CONTAINER_C" 40 "$TUN_C"
+
+SCOPE_WARNING="The inet fips firewall polices fips0, not the TUN ${TUN_C}"
+# The check runs off the start path once the TUN is up, so allow it a few
+# seconds. The log is captured before matching, as in wait_for_fips0.
+WARNED=false
+for _ in $(seq 1 15); do
+    if grep -qF -- "$SCOPE_WARNING" <<<"$(docker logs "$CONTAINER_C" 2>&1)"; then
+        WARNED=true
+        break
+    fi
+    sleep 1
+done
+if [ "$WARNED" != true ]; then
+    docker logs "$CONTAINER_C" 2>&1 | tail -n 40 >&2 || true
+    fail "(f) the daemon did not warn at startup that the table polices fips0, not ${TUN_C}"
+fi
+WARNINGS="$(grep -cF -- "$SCOPE_WARNING" <<<"$(docker logs "$CONTAINER_C" 2>&1)" || true)"
+if [ "$WARNINGS" != "1" ]; then
+    fail "(f) the startup scope warning should appear once, appeared ${WARNINGS} times"
+fi
+pass "(f) startup warning names fips0 and ${TUN_C}"
+
+FW_ACTIVE="$(read_firewall_active "$CONTAINER_C")"
+if [ "$FW_ACTIVE" != "false" ]; then
+    fail "(f) with the table scoped to fips0 and the TUN named ${TUN_C}, the" \
+        "listener report should report firewall_active false (got '${FW_ACTIVE}';" \
+        "empty means the adapter's socket did not answer)"
+fi
+docker exec "$CONTAINER_C" sh -c \
+    "sed 's/\"fips0\"/\"${TUN_C}\"/g' /etc/fips/fips.nft > /tmp/fips-tun-c.nft"
+docker exec "$CONTAINER_C" nft -f /tmp/fips-tun-c.nft
+TABLE_RC=0
+table_has "$CONTAINER_C" "iifname != \"${TUN_C}\" return" || TABLE_RC=$?
+if [ "$TABLE_RC" -eq 2 ]; then
+    fail "(f) could not list the rewritten table on $CONTAINER_C"
+elif [ "$TABLE_RC" -ne 0 ]; then
+    fail "(f) the rewritten table is not scoped to ${TUN_C}; the sed did not change the scoping rule"
+fi
+FW_ACTIVE="$(read_firewall_active "$CONTAINER_C")"
+if [ "$FW_ACTIVE" != "true" ]; then
+    fail "(f) with the table scoped to ${TUN_C}, the listener report should" \
+        "report firewall_active true (got '${FW_ACTIVE}')"
+fi
+pass "(f) listener report judges the table against ${TUN_C}, not fips0"
 
 log "Firewall integration test passed"

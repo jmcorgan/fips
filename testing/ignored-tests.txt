@@ -22,6 +22,8 @@ benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
 environment   fips-mesh  gateway::dns::mesh_tests::a_dns_query_arriving_on_fips0_is_not_answered_and_mints_no_mapping  src/gateway/tests/dns.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh  src/gateway/tests/dns.rs
+environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh_on_a_specific_bind  src/gateway/tests/dns.rs
 environment   fips-mesh  gateway::dns::mesh_tests::a_lan_query_on_a_wildcard_listener_is_still_answered_with_a_pool_address  src/gateway/tests/dns.rs
 environment   fips-mesh  gateway::dns::mesh_tests::a_query_arriving_on_a_recreated_fips0_is_still_not_answered  src/gateway/tests/dns.rs
 environment   fips-mesh  ipv6tun::bsdnet::tests::a_route_added_twice_through_the_same_interface_is_accepted  src/ipv6tun/tests/bsdnet.rs
@@ -44,6 +46,10 @@ environment   fips-mesh  ipv6tun::dns::reply_tests::a_lan_client_on_a_wildcard_b
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_on_a_specific_bind_is_not_answered_into_an_addressless_mesh_interface  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::an_on_link_ula_client_on_a_specific_bind_is_answered_with_an_addressless_mesh_interface  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_still_reaches_a_bare_mesh_interface_when_the_mesh_address_is_on_another_interface  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_reports_ipv6_disabled_when_only_conf_default_disables_it  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_reports_ipv6_disabled_on_a_persistent_tun_whose_own_knob_is_set  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_succeeds_when_all_is_set_but_default_was_cleared_after_it  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_succeeds_on_a_persistent_tun_whose_own_knob_is_clear_under_all_and_default_set  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::startup_refuses_and_keeps_a_dummy_link_that_has_the_configured_tun_name  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::a_second_create_on_a_held_tun_name_fails_and_leaves_the_first_device_in_place  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::startup_reopens_an_unheld_persistent_tun_with_the_configured_name  src/ipv6tun/tests/tun.rs
@@ -60,6 +66,7 @@ environment   fips-mesh  mdns::tests::matched_scope_peers_observe_each_other  sr
 environment   fips-mesh  node::netmon::tests::a_route_change_alone_reaches_the_watcher  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_going_down_is_reported_only_when_a_peer_was_reached_over_it  src/node/netmon/tests.rs
 environment   fips-mesh  node::netmon::tests::an_interface_no_peer_is_reached_through_does_not_move_the_fingerprint  src/node/netmon/tests.rs
+environment   fips-mesh  node::tests::tun_warning::start_with_a_system_tun_warns_once_when_the_udp_mtu_is_too_small_for_a_1280_byte_ipv6_packet_and_not_at_the_default  src/node/tests/tun_warning.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::the_radio_comes_up_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::dials_a_peer_on_hardware  src/transport/ble/io_macos/corebluetooth.rs
 environment   fips-mesh  transport::ble::io_macos::corebluetooth::tests::a_blocked_reader_exits_when_its_stream_is_dropped_on_hardware  src/transport/ble/io_macos/corebluetooth.rs

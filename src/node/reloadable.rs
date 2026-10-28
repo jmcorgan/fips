@@ -28,10 +28,11 @@
 //!   valid before the node starts serving reads.
 //!
 //! `reload` returns `bool` rather than a value or `Result`: the underlying
-//! loaders already absorb I/O errors internally (a missing or unreadable
-//! source degrades to an empty/base snapshot plus a warning), so callers have
-//! nothing to handle. The return flag reports only whether the snapshot was
-//! replaced, which is all the tick loop needs for logging.
+//! loaders already absorb I/O errors internally (a missing source degrades to
+//! an empty/base snapshot, an unreadable one keeps the last snapshot with a
+//! warning and is read again on the next tick), so callers have nothing to
+//! handle. The return flag reports only whether the snapshot was replaced,
+//! which is all the tick loop needs for logging.
 //!
 //! # What is and isn't `Reloadable`
 //!
@@ -64,7 +65,7 @@
 
 use std::sync::Arc;
 
-use crate::hosts::{HostMap, file_mtime};
+use crate::hosts::{HostMap, HostMapReloader};
 
 /// A resource backed by a lock-free [`arc_swap::ArcSwap`] snapshot that can be
 /// re-read from its source on demand.
@@ -94,44 +95,32 @@ pub trait Reloadable: Send {
 /// Reloadable hostname → npub map (base peer aliases merged with the operator
 /// hosts file).
 ///
-/// Holds the base map (from peer-config aliases, replaced when the peer list
-/// is replaced at runtime) plus the change-detection state for the hosts
-/// file. The effective map (base merged
-/// with the hosts file) is published through an [`arc_swap::ArcSwap`] so the
-/// display path can read it without locking.
+/// Holds a [`HostMapReloader`], which keeps the base map (from peer-config
+/// aliases, replaced when the peer list is replaced at runtime), the hosts
+/// file as last read and its change-detection state, as the DNS responder's
+/// does. The effective map (base merged with the hosts file) is published
+/// through an [`arc_swap::ArcSwap`] so the display path can read it without
+/// locking.
 pub struct HostMapReloadable {
     /// Reader-facing effective snapshot (base merged with hosts file).
     snapshot: arc_swap::ArcSwap<HostMap>,
-    /// Base map from peer-config aliases. Read by `reload` and replaced by
-    /// `set_base`, both reached only through `&mut Node`.
-    base: HostMap,
-    /// The hosts file as last read, kept so a new base can be merged under
-    /// it without reading the file again. Written by `new` and `reload`.
-    file: HostMap,
-    /// Path to the operator hosts file. Read only by `reload`.
-    path: std::path::PathBuf,
-    /// Last observed modification time of the hosts file (`None` if absent).
-    /// Read only by `reload`.
-    last_mtime: Option<std::time::SystemTime>,
+    /// The base, the hosts file as last read and its mtime. Touched only by
+    /// `reload` and `set_base`, both reached only through `&mut Node`.
+    reloader: HostMapReloader,
 }
 
 impl HostMapReloadable {
     /// Create a reloadable host map.
     ///
     /// Performs the initial load of the hosts file and merges it over the
-    /// base map so the published snapshot is valid immediately.
+    /// base map so the published snapshot is valid immediately. A failed
+    /// first read publishes the base alone and is retried by the next
+    /// `reload`.
     pub fn new(base: HostMap, path: std::path::PathBuf) -> Self {
-        let last_mtime = file_mtime(&path);
-        let hosts_file = HostMap::load_hosts_file(&path);
-        let mut effective = base.clone();
-        effective.merge(hosts_file.clone());
-
+        let reloader = HostMapReloader::new(base, path);
         Self {
-            snapshot: arc_swap::ArcSwap::from(Arc::new(effective)),
-            base,
-            file: hosts_file,
-            path,
-            last_mtime,
+            snapshot: arc_swap::ArcSwap::from(Arc::new(reloader.hosts().clone())),
+            reloader,
         }
     }
 
@@ -142,10 +131,8 @@ impl HostMapReloadable {
     /// reached only through `&mut Node`, which keeps one writer at a time;
     /// readers see either the whole old snapshot or the whole new one.
     pub(crate) fn set_base(&mut self, base: HostMap) {
-        let mut effective = base.clone();
-        effective.merge(self.file.clone());
-        self.base = base;
-        self.snapshot.store(Arc::new(effective));
+        self.reloader.set_base(base);
+        self.snapshot.store(Arc::new(self.reloader.hosts().clone()));
     }
 }
 
@@ -153,27 +140,12 @@ impl Reloadable for HostMapReloadable {
     type Snapshot = HostMap;
 
     async fn reload(&mut self) -> bool {
-        let current_mtime = file_mtime(&self.path);
-
-        if current_mtime == self.last_mtime {
+        // Logs "Reloaded hosts file" itself when the map changes, and keeps
+        // the last map when the file does not read.
+        if !self.reloader.check_reload() {
             return false;
         }
-
-        // File appeared, disappeared, or was modified.
-        self.last_mtime = current_mtime;
-        let hosts_file = HostMap::load_hosts_file(&self.path);
-        let mut new_effective = self.base.clone();
-        new_effective.merge(hosts_file.clone());
-        self.file = hosts_file;
-
-        let count = new_effective.len();
-        self.snapshot.store(Arc::new(new_effective));
-
-        tracing::info!(
-            path = %self.path.display(),
-            entries = count,
-            "Reloaded hosts file"
-        );
+        self.snapshot.store(Arc::new(self.reloader.hosts().clone()));
         true
     }
 
@@ -398,3 +370,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/reloadable.rs"]
+mod reload_tests;

@@ -31,7 +31,8 @@ use super::outbound::{Host, Owed, answer, outbound};
 use super::status::{Responder, Shown, StatusSource, serve};
 use super::tun::{
     HostPath, MssCeiling, TunDevice, TunError, TunOutboundRx, TunOutboundTx, TunState, TunTx,
-    answer_oversize, run_tun_reader, shutdown_tun_interface,
+    UnreachableLimiter, answer_oversize, answer_unreachable, run_tun_reader,
+    shutdown_tun_interface, unreachable_limiter,
 };
 use crate::hosts::{DEFAULT_HOSTS_PATH, HostMap, HostMapReloader};
 use crate::{IdentityError, Ipv6Address};
@@ -142,6 +143,9 @@ pub(crate) struct Handles {
     /// Per-source limiter of the Packet Too Big replies sent to the host,
     /// shared with the TUN reader thread.
     icmp_limiter: Arc<Mutex<IcmpRateLimiter>>,
+    /// Token bucket of the Destination Unreachable replies sent to the host,
+    /// shared with the TUN reader thread.
+    unreachable: UnreachableLimiter,
 
     /// Kernel name of the TUN device this node created, used to delete or
     /// down it at teardown. Set only while a system TUN is up; an app-owned
@@ -207,6 +211,7 @@ impl Handles {
             our_addr,
             tun_state,
             icmp_limiter: Arc::new(Mutex::new(IcmpRateLimiter::new())),
+            unreachable: unreachable_limiter(),
             mesh: MeshState::new(),
             datagrams: None,
             learned: None,
@@ -344,12 +349,40 @@ impl Handles {
         None
     }
 
-    /// Queue an ICMPv6 answer toward the host, if a TUN queue is up,
-    /// ignoring a closed one.
+    /// Queue a Destination Unreachable toward the host, if the bucket has a
+    /// token and a TUN queue is up, ignoring a closed one.
     fn reply(&self, response: Vec<u8>) {
-        if let Some(tun_tx) = &self.tun_tx {
-            let _ = tun_tx.send(response);
+        answer_unreachable(response, &self.unreachable, self.tun_tx.as_ref());
+    }
+
+    /// The host path the TUN reader runs, sending its datagrams on
+    /// `datagrams`: the handles' state and both limiters, shared rather than
+    /// copied, so the reader and the handles draw on one Destination
+    /// Unreachable bucket and one Packet Too Big limiter.
+    pub(crate) fn reader_host(&self, datagrams: Sender<Datagram>) -> HostPath {
+        HostPath {
+            state: self.mesh.clone(),
+            limiter: self.icmp_limiter.clone(),
+            unreachable: self.unreachable.clone(),
+            datagrams,
         }
+    }
+
+    /// Replace the Destination Unreachable bucket with a full one of `burst`
+    /// tokens refilling at `rate` a second, for tests whose subject is not
+    /// the limit.
+    #[cfg(test)]
+    pub(crate) fn budget_unreachable(&mut self, burst: u32, rate: f64) {
+        use fips_core::time::Clock;
+        *self
+            .unreachable
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            fips_core::node::rate_limit::TokenBucket::with_params(
+                burst,
+                rate,
+                crate::time::HostClock.now(),
+            );
     }
 
     /// Hand the host a datagram a peer sent to the IPv6 port: rebuild the
@@ -663,11 +696,7 @@ impl Handles {
                 "the TUN threads started before the attach".into(),
             ));
         };
-        let host = HostPath {
-            state: self.mesh.clone(),
-            limiter: self.icmp_limiter.clone(),
-            datagrams,
-        };
+        let host = self.reader_host(datagrams);
 
         // Spawn reader thread. Like the writer, it
         // self-reports `Exit::Tun` on exit or panic (sync

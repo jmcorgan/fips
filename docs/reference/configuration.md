@@ -22,7 +22,15 @@ locations, lowest to highest priority:
 | 4 (highest) | `./fips.yaml` | Deployment-specific overrides |
 
 All found files are loaded and merged in priority order. Values from higher
-priority files override those from lower priority files. This allows a system
+priority files override those from lower priority files. Keys under
+`node`, `tun` and `dns` are layered one by one: a key a file does not set
+keeps the value a lower priority file gave it. This holds for the on-off
+settings too: set `tun.enabled`, `dns.enabled` or
+`node.identity.persistent` to `false` in a higher priority file to turn it
+off there. The other sections are replaced whole: a higher priority file
+that sets a transport type under `transports` (such as `udp`), a non-empty
+`peers` list or a `gateway` section replaces that whole section, so repeat
+in it every key you want kept. This allows a system
 administrator to set site-wide defaults in the priority 1 path above,
 `/usr/local/etc/fips/fips.yaml` on macOS and FreeBSD,
 `C:\ProgramData\fips\fips.yaml` on Windows and
@@ -754,8 +762,11 @@ with the node for routing.
 | `dns.port` | u16 | `5354` | Listen port |
 | `dns.ttl` | u32 | `300` | AAAA record TTL in seconds. Values above 2147483647 are treated as 2147483647. |
 
-The `dns.ttl` value should not exceed `node.cache.coord_ttl_secs` to avoid
-stale address mappings.
+The answer for an `<npub>.fips` name is derived from the npub, so it
+cannot go stale. The answer for a host alias can: after the alias is
+pointed at another npub in `/etc/fips/hosts`, a client may keep the old
+address for up to `dns.ttl` seconds. `dns.ttl` is not tied to
+`node.cache.coord_ttl_secs`.
 
 ### Host Mapping
 
@@ -769,7 +780,10 @@ The host map is populated from two sources:
 
 On conflict, hosts-file entries take precedence over peer aliases. The
 hosts file is auto-reloaded on modification (mtime change) without
-restarting the daemon. Hostnames are case-insensitive.
+restarting the daemon. If it cannot be read (no permission, or a byte that
+is not UTF-8), the names last read stay in use, a warning is logged and the
+file is read again until it can be, so a permission fix needs no restart.
+Removing the file removes its names. Hostnames are case-insensitive.
 
 The installer ships `/etc/fips/hosts` pre-populated with the public test
 mesh roster (`test-us01` … `test-uk01`). Operator-style guide for
@@ -915,7 +929,7 @@ overhead.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.tcp.bind_addr` | string | *(none)* | Listen address (e.g., `"0.0.0.0:8443"`). If omitted, outbound-only mode. |
-| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. |
+| `transports.tcp.mtu` | u16 | `1400` | Default MTU. TCP reports the configured `mtu` to FMP and checks sends against it; it does not report a per-connection MTU. Received frames are accepted up to 65535 bytes whatever the local value, so peers with different values interoperate. |
 | `transports.tcp.connect_timeout_ms` | u64 | `5000` | Outbound connect timeout in milliseconds |
 | `transports.tcp.nodelay` | bool | `true` | `TCP_NODELAY` (disable Nagle for low latency) |
 | `transports.tcp.keepalive_secs` | u64 | `30` | TCP keepalive interval in seconds (0 = disabled) |

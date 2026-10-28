@@ -8,11 +8,16 @@
 //! The IPv6 MTU arithmetic lives in `mtu.rs`; its public names are
 //! re-exported here so their paths stay.
 
+use super::exthdr::{Chain, upper};
 use super::icmp_rate_limit::IcmpRateLimiter;
 use std::net::Ipv6Addr;
 use std::time::Instant;
 
 use tracing::debug;
+
+/// ICMPv6 Redirect (RFC 4861): numbered as an informational message, but
+/// RFC 4443 Section 2.4 (e.2) forbids answering it with an error.
+const ICMPV6_REDIRECT: u8 = 137;
 
 /// ICMPv6 message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +80,8 @@ pub use super::mtu::{FIPS_IPV6_OVERHEAD, effective_ipv6_mtu, mss_ceiling};
 /// Returns false if the packet is:
 /// - Too short to be valid IPv6
 /// - Not IPv6
-/// - An ICMPv6 error message itself
+/// - An ICMPv6 error message or a Redirect itself, behind any extension
+///   headers
 /// - Has a multicast source address
 /// - Has a multicast destination address
 /// - Has an unspecified source address (::)
@@ -113,17 +119,30 @@ pub fn should_send_icmp_error(packet: &[u8]) -> bool {
         return false;
     }
 
-    // Don't send errors for ICMPv6 error messages (types 0-127)
-    let next_header = packet[6];
-    if next_header == IPPROTO_ICMPV6 && packet.len() > IPV6_HEADER_LEN {
-        let icmp_type = packet[IPV6_HEADER_LEN];
-        // ICMPv6 error messages are types 0-127
-        if icmp_type < 128 {
-            return false;
-        }
-    }
+    // Don't send errors for ICMPv6 error messages or Redirects, wherever
+    // the ICMPv6 header sits
+    !maybe_error(packet)
+}
 
-    true
+/// Whether `packet` is, or cannot be shown not to be, an ICMPv6 error
+/// message (types 0 to 127) or a Redirect, which RFC 4443 Section 2.4 (e.1)
+/// and (e.2) forbid answering with an error. The ICMPv6 header is looked for
+/// past any extension headers. A packet whose chain runs past its end, an
+/// ICMPv6 message too short to hold its type, and a later fragment of an
+/// ICMPv6 message cannot be shown not to be one.
+fn maybe_error(packet: &[u8]) -> bool {
+    match upper(packet) {
+        Chain::Upper {
+            proto: IPPROTO_ICMPV6,
+            at,
+            ..
+        } => packet
+            .get(at)
+            .is_none_or(|&kind| kind < 128 || kind == ICMPV6_REDIRECT),
+        Chain::Upper { .. } => false,
+        Chain::LaterFragment { proto } => proto == IPPROTO_ICMPV6,
+        Chain::Truncated => true,
+    }
 }
 
 /// Build an ICMPv6 Destination Unreachable response.
@@ -229,7 +248,8 @@ pub fn build_dest_unreachable(
 ///
 /// ## Returns
 /// Complete IPv6 packet containing the ICMP Packet Too Big message,
-/// ready to be written to the TUN interface.
+/// ready to be written to the TUN interface, or `None` when the original
+/// packet is owed no error or `our_addr` is not a unicast address.
 pub fn build_packet_too_big(
     original_packet: &[u8],
     mtu: u32,
@@ -256,14 +276,15 @@ pub fn build_packet_too_big(
         return None;
     }
 
-    // Don't send ICMP in response to ICMP errors (avoid loops)
-    let next_header = original_packet[6];
-    if next_header == IPPROTO_ICMPV6 && original_packet.len() > IPV6_HEADER_LEN {
-        let icmp_type = original_packet[IPV6_HEADER_LEN];
-        // ICMPv6 error messages are types 0-127
-        if icmp_type < 128 {
-            return None;
-        }
+    // The message's own source must be a unicast address (RFC 4443 Section
+    // 2.2); `too_big` passes the packet's destination here.
+    if our_addr.is_unspecified() || our_addr.octets()[0] == 0xff {
+        return None;
+    }
+
+    // Don't send ICMP in response to ICMP errors or Redirects (avoid loops)
+    if maybe_error(original_packet) {
+        return None;
     }
 
     // Calculate how much of the original packet to include
@@ -321,16 +342,37 @@ pub fn build_packet_too_big(
     Some(response)
 }
 
+/// The burst of Destination Unreachable the host may be sent at once: the
+/// bucket size RFC 4443 Section 2.4 (f) gives as a default for a small or
+/// mid-size device.
+pub(crate) const UNREACHABLE_BURST: u32 = 10;
+
+/// The long-term rate, per second, at which Destination Unreachable is sent
+/// to the host once the burst is spent (RFC 4443 Section 2.4 (f)).
+pub(crate) const UNREACHABLE_RATE: f64 = 10.0;
+
 /// Destination Unreachable (no route) for `packet`, from `our_addr`, or
 /// `None` when `packet` is not owed an ICMPv6 error (see
 /// [`should_send_icmp_error`]).
 ///
-/// Not rate limited: only Packet Too Big goes through the limiter.
+/// The caller sends what this returns only when the Destination Unreachable
+/// token bucket ([`UNREACHABLE_BURST`] at [`UNREACHABLE_RATE`]) has a token.
 pub(crate) fn unreachable(packet: &[u8], our_addr: Ipv6Addr) -> Option<Vec<u8>> {
     if !should_send_icmp_error(packet) {
         return None;
     }
     build_dest_unreachable(packet, DestUnreachableCode::NoRoute, our_addr)
+}
+
+/// Destination Unreachable code 5, source address failed ingress/egress
+/// policy (RFC 4443 Section 3.1), for `packet`, from `our_addr`, or `None`
+/// when `packet` is not owed an ICMPv6 error (see [`should_send_icmp_error`]).
+/// Sent under the same token bucket as [`unreachable`].
+pub(crate) fn source_refused(packet: &[u8], our_addr: Ipv6Addr) -> Option<Vec<u8>> {
+    if !should_send_icmp_error(packet) {
+        return None;
+    }
+    build_dest_unreachable(packet, DestUnreachableCode::SourcePolicy, our_addr)
 }
 
 /// Packet Too Big for `packet`, reporting `mtu`, if `limiter` lets the

@@ -2801,15 +2801,15 @@ pub(super) fn drain_tun(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>>
     std::iter::from_fn(|| rx.try_recv().ok()).collect()
 }
 
-/// A valid IPv6 packet from a local, non-multicast source to `dest`'s FIPS
-/// address, so `should_send_icmp_error` lets an answer through.
-pub(super) fn tun_packet_to(dest: &NodeAddr) -> Vec<u8> {
+/// A valid IPv6 packet from `node`'s own FIPS address, as the host sends
+/// it, to `dest`'s, so `should_send_icmp_error` lets an answer through.
+pub(super) fn tun_packet(node: &Node, dest: &NodeAddr) -> Vec<u8> {
     let mut pkt = vec![0u8; 40];
     pkt[0] = 0x60;
     pkt[6] = 17;
     pkt[7] = 64;
-    pkt[8] = 0xfd;
-    pkt[23] = 0x01;
+    let src_ipv6 = crate::Ipv6Address::from_node_addr(node.node_addr()).to_ipv6();
+    pkt[8..24].copy_from_slice(&src_ipv6.octets());
     let dest_ipv6 = crate::Ipv6Address::from_node_addr(dest).to_ipv6();
     pkt[24..40].copy_from_slice(&dest_ipv6.octets());
     pkt
@@ -2838,7 +2838,7 @@ fn registered_destination(node: &mut Node) -> NodeAddr {
 
 /// Insert an authenticated peer whose filter holds exactly `reaches`, and,
 /// when `tree`, make it a tree peer by having it declare this node its parent.
-fn insert_filter_peer(node: &mut Node, reaches: &[NodeAddr], tree: bool) -> NodeAddr {
+pub(super) fn insert_filter_peer(node: &mut Node, reaches: &[NodeAddr], tree: bool) -> NodeAddr {
     insert_filter_peer_as(node, &Identity::generate(), reaches, tree)
 }
 
@@ -2886,7 +2886,7 @@ fn set_peer_filter(node: &mut Node, peer: &NodeAddr, reaches: &[NodeAddr], seque
 }
 
 /// Stand outside the routing hold: the node's peers appeared a minute ago.
-fn leave_hold(node: &mut Node) {
+pub(super) fn leave_hold(node: &mut Node) {
     node.backdate_hold_for_test(std::time::Duration::from_secs(60));
     assert!(
         !node.routing_hold_active(std::time::Instant::now()),
@@ -2904,7 +2904,7 @@ async fn a_tun_packet_to_a_destination_no_peer_filter_reaches_is_answered_with_n
     let dest = registered_destination(&mut node);
     let misses = node.metrics().lookup.req_bloom_miss.get();
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
 
     assert_eq!(
         node.metrics().lookup.req_bloom_miss.get(),
@@ -2932,13 +2932,17 @@ async fn two_hundred_fifty_seven_unreachable_destinations_each_get_no_route_and_
     insert_filter_peer(&mut node, &[], false);
     leave_hold(&mut node);
     let sends = node.config().node.session.pending_max_destinations + 1;
+    // Each answer is the node refusing one destination. The adapter's
+    // Destination Unreachable bucket would cut them to its burst, which is
+    // not this test's subject, so it is made wide enough for all of them.
+    node.budget_unreachable(u32::try_from(sends).unwrap(), 0.0);
     let misses = node.metrics().lookup.req_bloom_miss.get();
 
     let mut answers = 0usize;
     let mut largest_held = 0usize;
     for _ in 0..sends {
         let dest = registered_destination(&mut node);
-        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+        node.handle_tun_outbound(tun_packet(&node, &dest)).await;
         for answer in drain_tun(&rx) {
             assert_no_route(&answer);
             answers += 1;
@@ -2974,7 +2978,7 @@ async fn a_tun_packet_whose_destination_only_a_non_tree_peer_filter_reaches_is_a
     let initiated = node.metrics().lookup.req_initiated.get();
     let misses = node.metrics().lookup.req_bloom_miss.get();
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
 
     assert_eq!(
         node.metrics().lookup.req_initiated.get(),
@@ -3011,7 +3015,7 @@ async fn after_the_hold_a_packet_to_a_direct_peer_whose_session_setup_fails_is_n
     );
     let initiated = node.metrics().lookup.req_initiated.get();
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
 
     assert_eq!(
         node.metrics().lookup.req_initiated.get(),
@@ -3044,7 +3048,7 @@ async fn inside_the_hold_a_bloom_miss_packet_is_held_and_the_tick_releases_it_wi
     assert_eq!(node.connection_count(), 0, "precondition: no handshake");
     let dest = registered_destination(&mut node);
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(node.pending_tun_destinations(), 1, "held inside the hold");
     assert!(drain_tun(&rx).is_empty(), "not answered inside the hold");
 
@@ -3083,12 +3087,12 @@ async fn a_packet_answered_after_the_hold_also_answers_the_packets_held_for_its_
     let dest = registered_destination(&mut node);
     let misses = node.metrics().lookup.req_bloom_miss.get();
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(node.pending_tun_destinations(), 1, "held inside the hold");
     assert!(drain_tun(&rx).is_empty(), "not answered inside the hold");
 
     node.backdate_hold_for_test(std::time::Duration::from_secs(60));
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
 
     assert_eq!(
         node.metrics().lookup.req_bloom_miss.get(),
@@ -3119,7 +3123,7 @@ async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_pa
     node.test_hold(
         dest,
         crate::ipv6tun::link::PeerKey::from_xonly(&unknown.pubkey()),
-        tun_packet_to(&dest),
+        tun_packet(&node, &dest),
     );
     node.retry_session_after_discovery(dest).await;
     let no_identity = (drain_tun(&rx), node.pending_tun_destinations());
@@ -3128,7 +3132,7 @@ async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_pa
     let mut node = make_node();
     let rx = install_tun_channel(&mut node);
     let dest = registered_destination(&mut node);
-    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    node.queue_pending_tun_packet_for_test(dest, tun_packet(&node, &dest));
     node.retry_session_after_discovery(dest).await;
     let no_route = (drain_tun(&rx), node.pending_tun_destinations());
 
@@ -3147,7 +3151,7 @@ async fn a_lookup_that_completes_without_starting_a_session_releases_the_held_pa
             crate::node::session::session_at(1000),
         ),
     );
-    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    node.queue_pending_tun_packet_for_test(dest, tun_packet(&node, &dest));
     let full = node.stats().session.table_full;
     node.retry_session_after_discovery(dest).await;
     assert_eq!(
@@ -3191,7 +3195,7 @@ async fn a_held_destination_older_than_the_lookup_schedule_plus_handshake_timeou
     leave_hold(&mut node);
     let initiated = node.metrics().lookup.req_initiated.get();
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(
         node.metrics().lookup.req_initiated.get(),
         initiated + 1,
@@ -3224,12 +3228,12 @@ async fn a_destination_first_held_inside_the_hold_whose_lookup_starts_later_is_a
     let dest = registered_destination(&mut node);
     let peer = insert_filter_peer(&mut node, &[], true);
     assert!(node.routing_hold_active(std::time::Instant::now()));
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     node.backdate_held_for_test(&dest, backdate);
     let first = node.pending_tun_since[&dest].since;
     set_peer_filter(&mut node, &peer, &[dest], 2);
     let initiated = node.metrics().lookup.req_initiated.get();
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(
         node.metrics().lookup.req_initiated.get(),
         initiated + 1,
@@ -3249,7 +3253,7 @@ async fn a_destination_first_held_inside_the_hold_whose_lookup_starts_later_is_a
     let dest = registered_destination(&mut node);
     insert_filter_peer(&mut node, &[], true);
     assert!(node.routing_hold_active(std::time::Instant::now()));
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     node.backdate_held_for_test(&dest, backdate);
     let first = node.pending_tun_since[&dest].since;
     node.lookup.pending_lookups.insert(
@@ -3257,7 +3261,7 @@ async fn a_destination_first_held_inside_the_hold_whose_lookup_starts_later_is_a
         crate::proto::lookup::PendingLookup::new(Node::now_ms()),
     );
     let deduplicated = node.metrics().lookup.req_deduplicated.get();
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(
         node.metrics().lookup.req_deduplicated.get(),
         deduplicated + 1,
@@ -3281,14 +3285,14 @@ async fn a_node_with_no_peers_holds_a_bloom_miss_packet_and_rearms_the_hold_when
     let rx = install_tun_channel(&mut node);
     assert!(node.routing_hold_active(now()), "no peers: inside the hold");
     let first = registered_destination(&mut node);
-    node.handle_tun_outbound(tun_packet_to(&first)).await;
+    node.handle_tun_outbound(tun_packet(&node, &first)).await;
     assert_eq!(node.pending_tun_destinations(), 1, "held with no peers");
     assert!(drain_tun(&rx).is_empty());
 
     let peer = insert_filter_peer(&mut node, &[], false);
     leave_hold(&mut node);
     let second = registered_destination(&mut node);
-    node.handle_tun_outbound(tun_packet_to(&second)).await;
+    node.handle_tun_outbound(tun_packet(&node, &second)).await;
     let answers = drain_tun(&rx);
     assert_eq!(answers.len(), 1, "answered once outside the hold");
     assert_no_route(&answers[0]);
@@ -3301,7 +3305,7 @@ async fn a_node_with_no_peers_holds_a_bloom_miss_packet_and_rearms_the_hold_when
         "regaining a peer must re-arm the hold"
     );
     let third = registered_destination(&mut node);
-    node.handle_tun_outbound(tun_packet_to(&third)).await;
+    node.handle_tun_outbound(tun_packet(&node, &third)).await;
     assert!(drain_tun(&rx).is_empty(), "held inside the re-armed hold");
     assert_eq!(node.pending_tun_destinations(), 2);
 
@@ -3322,7 +3326,7 @@ async fn a_stale_first_held_stamp_left_by_a_removal_site_that_does_not_clear_it_
     insert_filter_peer(&mut node, &[dest], true);
     leave_hold(&mut node);
     let initiated = node.metrics().lookup.req_initiated.get();
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(
         node.metrics().lookup.req_initiated.get(),
         initiated + 1,
@@ -3370,7 +3374,7 @@ async fn with_the_held_table_full_of_destinations_awaiting_lookups_a_new_destina
         node.lookup
             .pending_lookups
             .insert(dest, PendingLookup::new(0));
-        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+        node.handle_tun_outbound(tun_packet(&node, &dest)).await;
         held.push(dest);
     }
     assert_eq!(node.pending_tun_destinations(), cap, "precondition: full");
@@ -3379,7 +3383,7 @@ async fn with_the_held_table_full_of_destinations_awaiting_lookups_a_new_destina
     node.lookup
         .pending_lookups
         .insert(late, PendingLookup::new(0));
-    node.handle_tun_outbound(tun_packet_to(&late)).await;
+    node.handle_tun_outbound(tun_packet(&node, &late)).await;
 
     assert!(
         drain_tun(&rx).is_empty(),
@@ -3410,7 +3414,7 @@ async fn with_the_held_table_full_of_destinations_awaiting_lookups_a_new_destina
     assert_no_route(&answers[0]);
     assert_eq!(node.pending_tun_destinations(), cap - 1);
 
-    node.handle_tun_outbound(tun_packet_to(&late)).await;
+    node.handle_tun_outbound(tun_packet(&node, &late)).await;
     assert!(drain_tun(&rx).is_empty());
     assert!(
         node.pending_tun_packets.contains_key(&late),
@@ -3431,8 +3435,8 @@ async fn with_backoff_enabled_inside_the_hold_a_suppressed_retransmit_is_held_wi
     let dest = registered_destination(&mut node);
     let suppressed = node.metrics().lookup.req_backoff_suppressed.get();
 
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
 
     assert_eq!(
         node.metrics().lookup.req_backoff_suppressed.get(),
@@ -3454,7 +3458,7 @@ async fn a_destination_held_inside_the_hold_whose_filter_arrives_before_the_hold
     let peer = insert_filter_peer(&mut node, &[], false);
     assert!(node.routing_hold_active(std::time::Instant::now()));
     let dest = registered_destination(&mut node);
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(node.pending_tun_destinations(), 1, "precondition: held");
 
     set_peer_filter(&mut node, &peer, &[dest], 2);
@@ -3494,7 +3498,7 @@ async fn retransmits_riding_a_lookup_frozen_by_a_backward_clock_step_do_not_keep
     node.lookup.pending_lookups.insert(dest, frozen);
 
     let deduplicated = node.metrics().lookup.req_deduplicated.get();
-    node.handle_tun_outbound(tun_packet_to(&dest)).await;
+    node.handle_tun_outbound(tun_packet(&node, &dest)).await;
     assert_eq!(
         node.metrics().lookup.req_deduplicated.get(),
         deduplicated + 1,
@@ -3512,7 +3516,7 @@ async fn retransmits_riding_a_lookup_frozen_by_a_backward_clock_step_do_not_keep
     let mut rounds = Vec::new();
     for _ in 0..6 {
         node.backdate_held_for_test(&dest, step);
-        node.handle_tun_outbound(tun_packet_to(&dest)).await;
+        node.handle_tun_outbound(tun_packet(&node, &dest)).await;
         let at = *stamped.get_or_insert_with(|| node.pending_tun_since[&dest].since);
         node.release_stranded_tun_packets(at);
         if !node.pending_tun_since.contains_key(&dest) {
@@ -3558,7 +3562,7 @@ async fn a_lookup_answer_for_a_destination_with_a_session_entry_but_no_cached_id
         !node.has_cached_identity(&dest_addr),
         "precondition: the identity is not cached"
     );
-    node.queue_pending_tun_packet_for_test(dest_addr, tun_packet_to(&dest_addr));
+    node.queue_pending_tun_packet_for_test(dest_addr, tun_packet(&node, &dest_addr));
 
     node.retry_session_after_discovery(dest_addr).await;
     assert!(
@@ -3581,7 +3585,7 @@ async fn a_failed_session_retry_after_a_lookup_answer_leaves_packets_held_behind
     // Control: with no session entry, a retry this node cannot route fails
     // and answers the held packet.
     let unrouted = registered_destination(&mut node);
-    node.queue_pending_tun_packet_for_test(unrouted, tun_packet_to(&unrouted));
+    node.queue_pending_tun_packet_for_test(unrouted, tun_packet(&node, &unrouted));
     node.retry_session_after_discovery(unrouted).await;
     assert!(
         !node.sessions.contains_key(&unrouted),
@@ -3604,7 +3608,7 @@ async fn a_failed_session_retry_after_a_lookup_answer_leaves_packets_held_behind
             Node::session_now(),
         ),
     );
-    node.queue_pending_tun_packet_for_test(dest, tun_packet_to(&dest));
+    node.queue_pending_tun_packet_for_test(dest, tun_packet(&node, &dest));
 
     node.retry_session_after_discovery(dest).await;
     assert!(

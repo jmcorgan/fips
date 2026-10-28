@@ -385,6 +385,12 @@ impl Node {
                         // republished, so nothing outside the node can observe
                         // an address the listener no longer answers on.
                         self.supervisor.ipv6tun.exited(exit);
+                        // With a TUN thread gone the node has no TUN to warn
+                        // for, so the IPv6-minimum warning is not judged again
+                        // until a later start's TUN comes up.
+                        if exit == crate::ipv6tun::lifecycle::Exit::Tun {
+                            self.node_mtu.idle_short();
+                        }
                         self.step_child_exited(exit.into());
                         self.refresh_tun_mss_ceiling();
                     }

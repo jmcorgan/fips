@@ -201,12 +201,17 @@ impl Node {
         //   2. initiate_session() finds is_established() == true on the stale entry
         //      and silently returns Ok(()), preventing a new session from being
         //      established even after the link layer reconnects successfully.
+        //
+        // The IPv6 adapter's packets held for the node stay. The node may
+        // still be reachable through another peer, or be back at once when
+        // this removal is a replacement or a restart, so the next session to
+        // it sends them; the held-packet backstop answers them with no route
+        // if nothing can reach it.
         if let Some(session_entry) = self.sessions.remove(node_addr)
             && let Some(mmp) = session_entry.mmp()
         {
             Self::log_session_mmp_teardown(&peer_name, mmp);
         }
-        self.pending_tun_packets.remove(node_addr);
 
         // Release the path MTU state this peer's promotion seeded: the link it
         // measured has just gone. The other callers all fire on session state,

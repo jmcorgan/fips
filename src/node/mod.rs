@@ -1915,6 +1915,7 @@ impl Node {
             );
         }
         self.publish_mtu();
+        self.judge_shortfall();
     }
 
     /// How many bytes the effective IPv6 MTU falls short of the IPv6
@@ -1936,11 +1937,26 @@ impl Node {
         (short > 0).then_some(short)
     }
 
-    /// Warn when the bound transports cannot carry a 1280-byte IPv6 packet.
+    /// Warn when the bound transports cannot carry a 1280-byte IPv6 packet,
+    /// and judge that again at each later change to the bound set.
     ///
-    /// Logged once where the TUN comes up; the TUN still comes up.
+    /// Called where the TUN comes up; the TUN still comes up. From then on
+    /// [`Self::refresh_tun_mss_ceiling`] warns each time the node newly falls
+    /// short, such as when a narrow interface-bound transport binds after
+    /// start, and not again while it stays short.
     pub(crate) fn warn_shortfall(&self) {
-        if let Some(short) = self.ipv6_shortfall() {
+        self.node_mtu.arm_short();
+        self.judge_shortfall();
+    }
+
+    /// Warn if the bound transports have newly fallen short of the IPv6
+    /// minimum while a TUN is up.
+    fn judge_shortfall(&self) {
+        let short = self.ipv6_shortfall();
+        if !self.node_mtu.judge_short(short.is_some()) {
+            return;
+        }
+        if let Some(short) = short {
             tracing::warn!(
                 transport_mtu = self.transport_mtu(),
                 effective_ipv6_mtu = self.effective_ipv6_mtu(),
@@ -3597,6 +3613,13 @@ impl Node {
         self.discovery_sign_limiter = LookupSignRateLimiter::with_params(burst, rate);
     }
 
+    /// Replace the bucket of Destination Unreachable replies to the host
+    /// with a full one of `burst` at `rate` a second (for tests).
+    #[cfg(test)]
+    pub(crate) fn budget_unreachable(&mut self, burst: u32, rate: f64) {
+        self.supervisor.ipv6tun.budget_unreachable(burst, rate);
+    }
+
     /// Disable the discovery forward rate limiter (for tests).
     #[cfg(test)]
     pub(crate) fn disable_discovery_forward_rate_limit(&mut self) {
@@ -4146,10 +4169,14 @@ impl Node {
     /// not refuse an off-mesh destination up front either: it looks up bytes 1
     /// to 15 of any destination in the identity cache and, on a miss, answers
     /// with ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the
-    /// node's own mesh address; an oversize packet gets Packet Too Big on the
-    /// same channel. The embedder should push only `fd00::/8`-destined IPv6
-    /// packets, expect ICMPv6 errors on `app_inbound_rx`, and clamp TCP MSS on
-    /// SYN-flagged segments in both directions.
+    /// node's own mesh address; an oversize packet to an `fd00::/8` destination
+    /// gets Packet Too Big on the same channel, and one to any other destination
+    /// is answered as undeliverable. A packet whose source is not the node's
+    /// own mesh address is not forwarded: it is answered with Destination
+    /// Unreachable code 5 (source address failed ingress/egress policy). The
+    /// embedder should push only `fd00::/8`-destined IPv6 packets sent from
+    /// the node's mesh address, expect ICMPv6 errors on `app_inbound_rx`, and
+    /// clamp TCP MSS on SYN-flagged segments in both directions.
     ///
     /// `app_inbound_rx` holds at most `node.buffers.host_channel` packets. The
     /// node never waits for the app: a packet that finds the queue full is

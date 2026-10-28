@@ -245,6 +245,45 @@ fn the_panel_reads_the_configured_tun_while_none_is_up() {
     assert_eq!(disabled_responder().panel_tun(), "fips0");
 }
 
+/// A responder whose published status has the TUN `up` (or none up), with
+/// `configured` as `tun.name`.
+fn responder_with(up: Option<&str>, configured: &str) -> Responder {
+    let handles = Handles::new(fixture_fips0_addr(), Settings::with_tun(false));
+    let (_publisher, shown) = tokio::sync::watch::channel(Shown {
+        tun_state: if up.is_some() {
+            TunState::Active
+        } else {
+            TunState::Disabled
+        },
+        tun_name: up.map(str::to_string),
+        dns_local_addr: None,
+        drops: None,
+    });
+    Responder {
+        source: StatusSource {
+            shown,
+            mesh: handles.status().mesh,
+        },
+        fips0: fixture_fips0_addr(),
+        configured: configured.to_string(),
+    }
+}
+
+/// The panel judges the firewall against the TUN that is up, by the name
+/// the kernel gave it (on macOS and FreeBSD not `tun.name`), rather than
+/// against the configured name.
+#[test]
+fn the_panel_reads_the_name_of_the_tun_that_is_up_over_the_configured_one() {
+    assert_eq!(responder_with(Some("utun3"), "fips0").panel_tun(), "utun3");
+}
+
+/// With no TUN up the panel falls back to `tun.name` as configured, not to
+/// the default `fips0`.
+#[test]
+fn the_panel_reads_a_configured_tun_name_other_than_fips0_while_none_is_up() {
+    assert_eq!(responder_with(None, "mesh0").panel_tun(), "mesh0");
+}
+
 #[test]
 fn a_named_tun_is_rendered_by_its_name() {
     let mut status = Ipv6TunStatus {

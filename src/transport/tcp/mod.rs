@@ -60,6 +60,16 @@ use tracing::{debug, info, trace, warn};
 // TCP Transport
 // ============================================================================
 
+/// The largest established frame a receive loop accepts: the largest `mtu`
+/// any peer can be configured with, since `mtu` is a `u16`, and so the
+/// largest frame any peer's `check_mtu` admits.
+///
+/// Nothing tells a TCP sender its peer's configured `mtu`, so bounding
+/// receives by the local value closes the connection on every frame
+/// between two peers' differing values. The bound guards allocation only:
+/// a stream does not tie a frame to a segment or to the local `mtu`.
+const RECV_CEILING: u16 = u16::MAX;
+
 /// TCP transport for FIPS.
 ///
 /// Provides connection-oriented, reliable byte stream delivery over TCP/IP.
@@ -427,9 +437,11 @@ impl TcpTransport {
 
     /// Reject a packet larger than the transport MTU before queueing it.
     ///
-    /// Without this, the receiver's FMP stream reader would see
-    /// payload_len > max and close the connection, causing a disruptive
-    /// reset-reconnect cycle.
+    /// The MTU is what this transport reports to the node, so the refusal
+    /// is the `MtuExceeded` signal path MTU discovery acts on. Receivers
+    /// accept frames up to `RECV_CEILING`, the largest `mtu` any peer can
+    /// be configured with, so a frame this check admits is never refused
+    /// for its size by a peer with a smaller `mtu`.
     fn check_mtu(&self, data: &[u8]) -> Result<(), TransportError> {
         if data.len() > self.config.mtu() as usize {
             self.stats.record_mtu_exceeded();
@@ -532,9 +544,6 @@ impl TcpTransport {
         let key = PoolKey::outbound(addr.clone());
         let recv_key = key.clone();
         let send_key = key.clone();
-        // Frames are bounded by the configured MTU, the bound the sender's
-        // `check_mtu` applies; a stream does not tie a frame to a segment.
-        let mtu = self.config.mtu();
         let id = next_conn_id();
         let msg2_sent = Arc::new(AtomicBool::new(false));
         let recv_msg2_sent = msg2_sent.clone();
@@ -547,7 +556,6 @@ impl TcpTransport {
                 id,
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // Outbound connections hold no inbound slot and are not
@@ -832,7 +840,6 @@ impl TcpTransport {
         let id = next_conn_id();
         let msg2_sent = Arc::new(AtomicBool::new(false));
         let recv_msg2_sent = msg2_sent.clone();
-        let mtu = self.config.mtu();
 
         let recv_task = tokio::spawn(async move {
             tcp_receive_loop(
@@ -842,7 +849,6 @@ impl TcpTransport {
                 id,
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // Outbound connections hold no inbound slot and are not
@@ -909,7 +915,8 @@ impl Transport for TcpTransport {
 
     fn link_mtu(&self, _addr: &TransportAddr) -> u16 {
         // Every TCP link uses the configured MTU: the send path checks
-        // against it and each receive loop bounds frames by it.
+        // against it. Receive loops accept frames up to `RECV_CEILING`, so
+        // a peer configured with a smaller MTU still takes them.
         self.config.mtu()
     }
 
@@ -1164,7 +1171,6 @@ async fn accept_loop(
                         id,
                         recv_packet_tx,
                         recv_pool,
-                        mtu,
                         recv_stats,
                         Direction::Inbound,
                         Some(deadline),
@@ -1408,8 +1414,9 @@ async fn tcp_send_loop(
 
 /// Per-connection TCP receive loop.
 ///
-/// Reads complete FMP packets using the stream reader, delivers them to
-/// the node via the packet channel. On error or EOF, removes the
+/// Reads complete FMP packets using the stream reader, accepting
+/// established frames up to `RECV_CEILING`, and delivers them to the node
+/// via the packet channel. On error or EOF, removes the
 /// connection from the pool and exits. `direction` is captured here so
 /// the cleanup path can decrement the correct `pool_inbound` /
 /// `pool_outbound` counter regardless of whether the matching pool
@@ -1440,7 +1447,6 @@ async fn tcp_receive_loop(
     id: ConnId,
     packet_tx: PacketTx,
     pool: ConnectionPool,
-    mtu: u16,
     stats: Arc<TcpStats>,
     direction: Direction,
     deadline: Option<InboundDeadline>,
@@ -1480,7 +1486,9 @@ async fn tcp_receive_loop(
                 // long as it keeps the socket open.
                 Some(d) => {
                     let limit = d.for_read(first);
-                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, mtu)).await {
+                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, RECV_CEILING))
+                        .await
+                    {
                         Ok(result) => result,
                         Err(_) => {
                             // Not a recv error: `record_recv_error` means
@@ -1498,7 +1506,7 @@ async fn tcp_receive_loop(
                         }
                     }
                 }
-                None => read_fmp_packet(&mut reader, mtu).await,
+                None => read_fmp_packet(&mut reader, RECV_CEILING).await,
             };
             first = false;
 
@@ -1677,7 +1685,8 @@ fn configure_accepted_socket(
 ///
 /// Recorded per connection and logged as a diagnostic only. It bounds
 /// nothing: a TCP stream does not tie a frame to a segment, so every
-/// connection sends and receives frames up to the configured `mtu`.
+/// connection sends frames up to the configured `mtu` and receives them up
+/// to `RECV_CEILING`.
 fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
     // Try to read TCP_MAXSEG. Not all platforms support this.
     #[cfg(target_os = "linux")]
@@ -1716,6 +1725,10 @@ fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "tests/mss.rs"]
 mod mss_tests;
+
+#[cfg(test)]
+#[path = "tests/mtu.rs"]
+mod mtu_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2986,7 +2999,6 @@ mod tests {
             id,
             tx,
             pool.clone(),
-            1400,
             stats.clone(),
             Direction::Inbound,
             Some(InboundDeadline {
@@ -3326,7 +3338,6 @@ mod tests {
             next_conn_id(),
             tx,
             pool.clone(),
-            1400,
             stats.clone(),
             Direction::Outbound,
             None,
