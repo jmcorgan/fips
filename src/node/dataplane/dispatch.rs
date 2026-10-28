@@ -213,16 +213,20 @@ impl Node {
         // the mesh and owes this link nothing. A replayed msg1 can promote
         // and replace such a peering as often as the replay memory allows,
         // and ending the session each time would let a replayer end it that
-        // often. The session and its held packets stay, set aside while the
-        // path MTU release below runs so the estimate it made of its own path
-        // is kept too.
+        // often. The session stays, set aside while the path MTU release
+        // below runs so the estimate it made of its own path is kept too.
+        //
+        // Either way the IPv6 adapter's packets held for the node stay. The
+        // node may still be reachable through another peer, or be back at
+        // once when this removal is a replacement or a restart, so the next
+        // session to it sends them; the held-packet backstop answers them
+        // with no route if nothing can reach it.
         let kept_session = if peer.is_heard() {
             if let Some(session_entry) = self.sessions.remove(node_addr)
                 && let Some(mmp) = session_entry.mmp()
             {
                 Self::log_session_mmp_teardown(&peer_name, mmp);
             }
-            self.pending_tun_packets.remove(node_addr);
             None
         } else {
             self.sessions.remove(node_addr)

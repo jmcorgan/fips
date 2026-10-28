@@ -444,9 +444,10 @@ impl Node {
                     // whose outputs free every index its sessions hold (current,
                     // pending, previous), drop their `peers_by_index` entries
                     // and unregister their decrypt workers, frees the rekey
-                    // handshake's index, and removes the FSP `sessions` entry
-                    // and `pending_tun_packets`. The machine emits NO
-                    // `FreeIndex` for those slots, so there is no double-free.
+                    // handshake's index, and removes the FSP `sessions` entry;
+                    // the packets held for the peer stay for its next session.
+                    // The machine emits NO `FreeIndex` for those slots, so
+                    // there is no double-free.
                     let gone = *ambient.verified_identity.node_addr();
                     let held = self.peer_link(&gone);
                     self.remove_active_peer(&gone);

@@ -440,6 +440,10 @@ impl Node {
 
     /// Remove a probe-created session, or decline and say why.
     ///
+    /// The path MTU the session learned for the target goes with it, as at
+    /// every other session close: an entry the session tightened carries no
+    /// deadline, so nothing else would release it.
+    ///
     /// `pending_tun_packets` is deliberately untouched: the idle-purge path
     /// removes it because it runs after the idle timeout, but here the map can
     /// only hold real user packets queued while the session was `Initiating`.
@@ -463,6 +467,7 @@ impl Node {
             Self::log_session_mmp_teardown(&name, mmp);
         }
         self.sessions.remove(&job.target);
+        self.path_mtu_lookup_release(&job.target);
         debug!(probe_id = job.id, dest = %name, "Probe tore down the session it opened");
     }
 

@@ -502,3 +502,60 @@ async fn concurrent_probes_to_one_target_do_not_both_own_it() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+/// A value written into `path_mtu_lookup` inside a session (a path MTU
+/// notification, a reactive MtuExceeded) carries no deadline: it is
+/// released by the event that ends the session. The idle purge and the
+/// session's close do that. The probe's teardown removes the session it
+/// opened the same way, so it must release the entry too, restoring the
+/// direct peer's link seed.
+#[tokio::test]
+async fn probe_teardown_releases_the_clamp_entry_the_probes_session_tightened() {
+    let mut nodes = two_peered_nodes().await;
+    let node1_addr = *nodes[1].node.node_addr();
+    let node1_fips = crate::Ipv6Address::from_node_addr(&node1_addr);
+    let seed = nodes[0].node.path_mtu_lookup_get(&node1_fips);
+    let id = start_probe(&mut nodes, 1).await;
+
+    for _ in 0..20 {
+        pump(&mut nodes).await;
+        let snap = nodes[0].node.probe_job(id).unwrap().probe().snapshot();
+        if snap.session.verdict == StageVerdict::Ok {
+            break;
+        }
+    }
+    assert!(
+        nodes[0]
+            .node
+            .get_session(&node1_addr)
+            .is_some_and(|e| e.is_established()),
+        "precondition: the probe established its session"
+    );
+
+    // The session learns a tighter path MTU than the link seed.
+    let tightened = seed.map_or(1300, |s| s - 100);
+    nodes[0].node.path_mtu_lookup_insert(node1_fips, tightened);
+
+    nodes[0]
+        .node
+        .api_probe_cancel(id)
+        .await
+        .expect("cancel accepted");
+    assert!(
+        nodes[0].node.get_session(&node1_addr).is_none(),
+        "precondition: the teardown removed the probe's session"
+    );
+
+    // Nothing else releases a held entry: the expiry pass skips it.
+    nodes[0]
+        .node
+        .purge_expired_path_mtu(Node::now_ms() + 86_400_000);
+    assert_eq!(
+        nodes[0].node.path_mtu_lookup_get(&node1_fips),
+        seed,
+        "the clamp entry the probe's session tightened (seed {seed:?}, tightened {tightened}) \
+         must not outlive the session"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}

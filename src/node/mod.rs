@@ -1891,6 +1891,7 @@ impl Node {
             );
         }
         self.publish_mtu();
+        self.judge_shortfall();
     }
 
     /// How many bytes the effective IPv6 MTU falls short of the IPv6
@@ -1912,11 +1913,26 @@ impl Node {
         (short > 0).then_some(short)
     }
 
-    /// Warn when the bound transports cannot carry a 1280-byte IPv6 packet.
+    /// Warn when the bound transports cannot carry a 1280-byte IPv6 packet,
+    /// and judge that again at each later change to the bound set.
     ///
-    /// Logged once where the TUN comes up; the TUN still comes up.
+    /// Called where the TUN comes up; the TUN still comes up. From then on
+    /// [`Self::refresh_tun_mss_ceiling`] warns each time the node newly falls
+    /// short, such as when a narrow interface-bound transport binds after
+    /// start, and not again while it stays short.
     pub(crate) fn warn_shortfall(&self) {
-        if let Some(short) = self.ipv6_shortfall() {
+        self.node_mtu.arm_short();
+        self.judge_shortfall();
+    }
+
+    /// Warn if the bound transports have newly fallen short of the IPv6
+    /// minimum while a TUN is up.
+    fn judge_shortfall(&self) {
+        let short = self.ipv6_shortfall();
+        if !self.node_mtu.judge_short(short.is_some()) {
+            return;
+        }
+        if let Some(short) = short {
             tracing::warn!(
                 transport_mtu = self.transport_mtu(),
                 effective_ipv6_mtu = self.effective_ipv6_mtu(),

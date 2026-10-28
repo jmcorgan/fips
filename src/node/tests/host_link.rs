@@ -1457,3 +1457,47 @@ fn the_adapter_settings_are_the_node_configuration_it_reads() {
         }]
     );
 }
+
+/// The IPv6-minimum warning is owed once each time the transports newly fall
+/// short while a TUN is up: not before a TUN is up, not again while they
+/// stay short, and again after they recover and fall short anew.
+#[test]
+fn the_ipv6_minimum_watch_warns_once_per_fall_short_while_a_tun_is_up_and_never_while_idle() {
+    use crate::node::handlers::host_link::ShortWatch::{Clear, Idle, Warned};
+    // (state, short, next state, warn)
+    let table = [
+        (Idle, false, Idle, false),
+        (Idle, true, Idle, false),
+        (Clear, false, Clear, false),
+        (Clear, true, Warned, true),
+        (Warned, true, Warned, false),
+        (Warned, false, Clear, false),
+    ];
+    for (state, short, next, warn) in table {
+        assert_eq!(
+            state.judge(short),
+            (next, warn),
+            "{state:?} judged short={short}"
+        );
+    }
+
+    // The same rules through the node's feed, as a run of changes.
+    let feed = crate::node::handlers::host_link::NodeMtuFeed::new();
+    let warned: Vec<bool> = [true, true]
+        .iter()
+        .map(|short| feed.judge_short(*short))
+        .collect();
+    assert_eq!(warned, [false, false], "no TUN is up yet, so nothing warns");
+    feed.arm_short();
+    let warned: Vec<bool> = [true, true, false, true, true]
+        .iter()
+        .map(|short| feed.judge_short(*short))
+        .collect();
+    assert_eq!(
+        warned,
+        [true, false, false, true, false],
+        "warn at each fall short, once"
+    );
+    feed.idle_short();
+    assert!(!feed.judge_short(true), "an idle watch does not warn");
+}

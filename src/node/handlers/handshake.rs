@@ -977,7 +977,7 @@ impl Node {
                 // `[InvalidateSendState, ReportLost{peer}]`:
                 //   InvalidateSendState → remove_active_peer(old): frees the four
                 //     index slots + `peers_by_index` + decrypt unregister + FSP
-                //     `sessions` + `pending_tun_packets`. The fresh leg's
+                //     `sessions`, keeping the packets held for the peer. The fresh leg's
                 //     `our_index` is None, so the machine emits NO
                 //     UnregisterDecryptSession.
                 //   ReportLost{peer} → note_link_dead(old): reconnect backoff.

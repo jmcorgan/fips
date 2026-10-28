@@ -2716,7 +2716,7 @@ fn registered_destination(node: &mut Node) -> NodeAddr {
 
 /// Insert an authenticated peer whose filter holds exactly `reaches`, and,
 /// when `tree`, make it a tree peer by having it declare this node its parent.
-fn insert_filter_peer(node: &mut Node, reaches: &[NodeAddr], tree: bool) -> NodeAddr {
+pub(super) fn insert_filter_peer(node: &mut Node, reaches: &[NodeAddr], tree: bool) -> NodeAddr {
     insert_filter_peer_as(node, &Identity::generate(), reaches, tree)
 }
 
@@ -2764,7 +2764,7 @@ fn set_peer_filter(node: &mut Node, peer: &NodeAddr, reaches: &[NodeAddr], seque
 }
 
 /// Stand outside the routing hold: the node's peers appeared a minute ago.
-fn leave_hold(node: &mut Node) {
+pub(super) fn leave_hold(node: &mut Node) {
     node.backdate_hold_for_test(std::time::Duration::from_secs(60));
     assert!(
         !node.routing_hold_active(std::time::Instant::now()),

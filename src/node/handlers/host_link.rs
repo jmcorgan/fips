@@ -15,7 +15,7 @@
 //! identity cache, checked against an established session's path MTU, then
 //! sent, queued or refused. A refusal goes back to the adapter in line.
 
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
 use secp256k1::PublicKey;
 
@@ -27,13 +27,51 @@ use crate::ipv6tun::tun::IPV6_MIN_MTU;
 use crate::node::path_mtu::payload_limit;
 use crate::node::{Node, NodeError};
 
-/// What the node has published of its node-wide limit, and the ceiling it
-/// last logged at a transport change.
+/// Where the warning that the bound transports cannot carry a 1280-byte
+/// IPv6 packet stands, judged each time the bound set changes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ShortWatch {
+    /// No TUN is up, so nothing is judged.
+    Idle,
+    /// A TUN is up and the transports carry the IPv6 minimum.
+    Clear,
+    /// A TUN is up and the transports fell short; the warning was given.
+    Warned,
+}
+
+impl ShortWatch {
+    /// The state after judging whether the transports are `short`, and
+    /// whether to warn now: once each time they newly fall short while a
+    /// TUN is up, not again on each change that leaves them short.
+    pub(crate) fn judge(self, short: bool) -> (Self, bool) {
+        match (self, short) {
+            (Self::Idle, _) => (Self::Idle, false),
+            (Self::Clear, true) => (Self::Warned, true),
+            (Self::Warned, true) => (Self::Warned, false),
+            (_, false) => (Self::Clear, false),
+        }
+    }
+
+    /// The watch an `AtomicU8` holds; an unknown value reads as `Idle`.
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Clear,
+            2 => Self::Warned,
+            _ => Self::Idle,
+        }
+    }
+}
+
+/// What the node has published of its node-wide limit, the ceiling it last
+/// logged at a transport change, and where the IPv6-minimum warning stands.
 pub(crate) struct NodeMtuFeed {
     /// The payload limit last pushed, or the one `Attached` will carry.
     published: AtomicU16,
     /// The TCP MSS ceiling last logged at a transport change.
     logged: AtomicU16,
+    /// A [`ShortWatch`].
+    short: AtomicU8,
 }
 
 impl NodeMtuFeed {
@@ -43,7 +81,26 @@ impl NodeMtuFeed {
         Self {
             published: AtomicU16::new(payload_limit(IPV6_MIN_MTU)),
             logged: AtomicU16::new(mss_ceiling(IPV6_MIN_MTU)),
+            short: AtomicU8::new(ShortWatch::Idle as u8),
         }
+    }
+
+    /// Stop judging the IPv6 minimum until a TUN comes up again.
+    pub(crate) fn idle_short(&self) {
+        self.short.store(ShortWatch::Idle as u8, Ordering::Relaxed);
+    }
+
+    /// Start judging the IPv6 minimum afresh, as a TUN comes up.
+    pub(crate) fn arm_short(&self) {
+        self.short.store(ShortWatch::Clear as u8, Ordering::Relaxed);
+    }
+
+    /// Judge whether the transports are `short` of the IPv6 minimum, and
+    /// say whether to warn now (see [`ShortWatch::judge`]).
+    pub(crate) fn judge_short(&self, short: bool) -> bool {
+        let (next, warn) = ShortWatch::from_u8(self.short.load(Ordering::Relaxed)).judge(short);
+        self.short.store(next as u8, Ordering::Relaxed);
+        warn
     }
 
     /// Swap in the TCP MSS ceiling `ceiling`, returning the one last logged.

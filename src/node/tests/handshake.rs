@@ -3379,6 +3379,13 @@ async fn removing_an_unheard_peering_keeps_the_end_to_end_session() {
         "precondition: the capture promoted a phantom"
     );
     install_end_to_end_session(&mut node, &initiator);
+    let rx = crate::node::tests::discovery::install_tun_channel(&mut node);
+    let packet = crate::node::tests::discovery::tun_packet(&node, &initiator_addr);
+    node.test_hold(
+        initiator_addr,
+        crate::ipv6tun::link::PeerKey::from_xonly(&initiator.identity().pubkey()),
+        packet,
+    );
 
     // The link-dead reap of a phantom goes through the same removal.
     node.remove_active_peer(&initiator_addr);
@@ -3391,6 +3398,15 @@ async fn removing_an_unheard_peering_keeps_the_end_to_end_session() {
         end_to_end_alive(&node, &initiator_addr),
         "removing a peering that never carried a frame must not end the \
          end-to-end session with that node"
+    );
+    assert_eq!(
+        node.pending_tun_total_packets(),
+        1,
+        "nor drop the TUN packets held for that node"
+    );
+    assert!(
+        crate::node::tests::discovery::drain_tun(&rx).is_empty(),
+        "nor answer them"
     );
 }
 

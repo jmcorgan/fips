@@ -152,6 +152,58 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
     cleanup_nodes(&mut r.nodes).await;
 }
 
+/// A restart our rekey msg2 reveals ends the session A was still setting up
+/// to B, but keeps the TUN packet held behind it, unanswered: B is back, so
+/// the next session to it sends the packet, where an answer would fail a
+/// connect that the restarted peer could take.
+#[tokio::test]
+async fn a_restart_seen_in_a_rekey_msg2_keeps_the_tun_packets_held_behind_the_session_it_ends() {
+    use crate::node::tests::discovery::{drain_tun, install_tun_channel, tun_packet};
+
+    let mut nodes = linked_pair(
+        rekey_config(REKEY_AFTER_SECS),
+        rekey_config(REKEY_AFTER_SECS),
+    )
+    .await;
+    let b_addr = *nodes[1].node.node_addr();
+    let b_identity = nodes[1].node.identity().clone();
+    let rx = install_tun_channel(&mut nodes[0].node);
+    let entry = crate::node::session::SessionEntry::opened_for_test(
+        &b_identity.pubkey_full(),
+        nodes[0].node.identity().keypair(),
+        crate::node::session::session_at(1_000),
+    );
+    nodes[0].node.sessions.insert(b_addr, entry);
+    let packet = tun_packet(&nodes[0].node, &b_addr);
+    nodes[0].node.test_hold(
+        b_addr,
+        crate::ipv6tun::link::PeerKey::from_xonly(&b_identity.pubkey()),
+        packet,
+    );
+
+    let mut r = reveal_restart(nodes).await;
+    cutover(&mut r.nodes[0], &b_addr).await;
+
+    let a = &r.nodes[0].node;
+    assert!(
+        a.get_session(&b_addr).is_none(),
+        "precondition: the revealed restart ended the session in setup"
+    );
+    let answers = drain_tun(&rx);
+    assert!(
+        answers.is_empty(),
+        "a restarted peer is back, so its held packets must not be answered as \
+         unreachable: {answers:?}"
+    );
+    assert_eq!(
+        a.pending_tun_total_packets(),
+        1,
+        "the packet held behind the ended session must stay held for the next session"
+    );
+
+    cleanup_nodes(&mut r.nodes).await;
+}
+
 /// This node dials an identity it already holds, and the msg2 carries a
 /// startup epoch other than the one on record: the peer restarted, so the
 /// two handshakes are no cross-connection. In either address order the
