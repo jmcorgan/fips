@@ -4,7 +4,9 @@
 # Two FIPS nodes (a, b). node-b mounts the production fips.nft baseline
 # plus a single drop-in (.nft) under /etc/fips/fips.d/ that allows TCP
 # port 22 inbound — the test asserts this is honored. node-a is a
-# probe-only node with no firewall.
+# probe-only node with no firewall. node-c stands alone with a TUN named
+# mesh0 and the production fips.nft, still scoped to fips0, loaded before its
+# daemon starts (case f).
 
 set -euo pipefail
 
@@ -113,6 +115,26 @@ EOF
 write_file "$GENERATED_DIR/node-b/fips.d/services.nft" <<'EOF'
 tcp dport 22 accept
 EOF
+
+# ── node-c: a TUN not named fips0 (Case f) ───────────────────────────
+# No peers and no DNS: case (f) reads only its startup log and its listener
+# report.
+write_file "$GENERATED_DIR/node-c/fips.yaml" <<EOF
+tun:
+  enabled: true
+  name: mesh0
+  mtu: 1280
+
+dns:
+  enabled: false
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+
+peers: []
+EOF
+mkdir -p "$GENERATED_DIR/node-c/fips.d"
 
 write_hosts_file node-a
 write_hosts_file node-b

@@ -46,6 +46,10 @@ environment   fips-mesh  ipv6tun::dns::reply_tests::a_lan_client_on_a_wildcard_b
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_on_a_specific_bind_is_not_answered_into_an_addressless_mesh_interface  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::an_on_link_ula_client_on_a_specific_bind_is_answered_with_an_addressless_mesh_interface  src/ipv6tun/tests/dns.rs
 environment   fips-mesh  ipv6tun::dns::reply_tests::a_forged_mesh_source_still_reaches_a_bare_mesh_interface_when_the_mesh_address_is_on_another_interface  src/ipv6tun/tests/dns.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_reports_ipv6_disabled_when_only_conf_default_disables_it  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_reports_ipv6_disabled_on_a_persistent_tun_whose_own_knob_is_set  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_succeeds_when_all_is_set_but_default_was_cleared_after_it  src/ipv6tun/tests/tun.rs
+environment   fips-mesh  ipv6tun::tun::name_tests::create_succeeds_on_a_persistent_tun_whose_own_knob_is_clear_under_all_and_default_set  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::startup_refuses_and_keeps_a_dummy_link_that_has_the_configured_tun_name  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::a_second_create_on_a_held_tun_name_fails_and_leaves_the_first_device_in_place  src/ipv6tun/tests/tun.rs
 environment   fips-mesh  ipv6tun::tun::name_tests::startup_reopens_an_unheld_persistent_tun_with_the_configured_name  src/ipv6tun/tests/tun.rs

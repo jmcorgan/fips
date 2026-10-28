@@ -537,6 +537,34 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/tun-warning-test.log"
           grep -qE '^test result: ok\. 1 passed;' "$RUNNER_TEMP/tun-warning-test.log"
 
+      # The Linux TUN tests in src/ipv6tun/tests/tun.rs that create network
+      # namespaces: startup never takes over or deletes an interface that has
+      # the configured name, the fd00::/8 policy rule is added and removed as
+      # it should be, and create reports IPv6 disabled exactly when the kernel
+      # would refuse an address on the TUN. Creating namespaces needs root, so
+      # the tests are `#[ignore]`d and the run above skips them. Built as the
+      # runner user and only executed under sudo, as the privileged steps
+      # below are. The grep fails the step unless all thirteen ran and
+      # passed: a filter that matches fewer passes quietly.
+      - name: Run the Linux TUN namespace tests as root
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib --no-run
+          BIN=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact")
+                     | select(.executable != null)
+                     | select(.target.kind[0] == "lib")
+                     | select(.target.name == "fips")
+                     | .executable' \
+            | tail -1)
+          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+            echo "could not locate the lib test binary" >&2
+            exit 1
+          fi
+          sudo "$BIN" --ignored ipv6tun::tun::name_tests:: --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/tun-namespace-tests.log"
+          grep -qE '^test result: ok\. 13 passed;' "$RUNNER_TEMP/tun-namespace-tests.log"
+
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
       # summary, so a flake is seen without failing an unrelated run. The
@@ -1239,6 +1267,7 @@ jobs:
         run: |
           docker compose -f testing/firewall/docker-compose.yml logs --no-color
           docker exec fips-fw-container-b nft list table inet fips || true
+          docker exec fips-fw-container-c nft list table inet fips || true
 
       - name: Stop containers (firewall)
         if: matrix.type == 'firewall' && always()

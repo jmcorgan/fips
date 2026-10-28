@@ -189,8 +189,18 @@ The others:
   beside it, and a rule left by an exit without stop does not send another
   routing table's ULA traffic out the default route. It covers the pure kind
   decision (`existing_link_verdict`) and, in root network-namespace tests,
-  `TunDevice::create` and teardown themselves. The tests of the reader's
-  packet handler need no root: the reader clamps a SYN by the stored path to
+  `TunDevice::create` and teardown themselves. Create reports
+  `Ipv6Disabled` when the kernel would refuse IPv6 on the device: the pure
+  checks (`stack_off`, `disabled_on`) are tested without root against a copy
+  of the sysctl tree in a temporary directory (a kernel with no `net/ipv6`,
+  and a device whose own `disable_ipv6` is set, whether by `conf/default` or
+  on its own, while `all` and `default` alone decide nothing), and namespace
+  tests show create refusing a new TUN under `conf/default` and a persistent
+  one with its own knob set (keeping that link, same index and kind, with
+  its MTU already set to the configured one), and succeeding with `all` set
+  and `default` cleared and on a persistent TUN whose own knob is clear
+  under `all` and `default`. The tests of the reader's packet handler need
+  no root: the reader clamps a SYN by the stored path to
   its destination before handing it to the mesh; a closed queue toward the
   host ends the reader when it was to hairpin a packet or answer one addressed
   outside the mesh, and not when it was to answer a mesh destination with
@@ -208,9 +218,12 @@ The others:
   published status equals what the node's facades read from the handles,
   the drop count is read from the current queue when asked, the status
   socket answers `show_status` with its four keys and an unknown command as
-  unknown, the panel reads the configured TUN name while no TUN is up, a
-  named TUN is rendered by its name, and on Windows the listener binds on
-  loopback.
+  unknown, the panel reads the configured TUN name while no TUN is up
+  (including one other than `fips0`) and the name of the TUN that is up
+  over the configured one, a named TUN is rendered by its name, and on
+  Windows the listener binds on loopback. The status socket's own use of
+  that name, and the startup warning about a table scoped to another
+  interface, are covered end to end by case (f) of `testing/firewall`.
 - `lifecycle.rs` tests `../lifecycle.rs`: each child exit is reported once,
   after a panic or a return, and not after an abort; the DNS responder's task
   reports on the exit channel the start opened, the one `exits` returned;
@@ -261,10 +274,11 @@ The others:
 - The network-namespace tests, and the macOS and FreeBSD tests that change
   routes or create a device, need root. They are `#[ignore]`d, so the normal
   test run skips them; build with `cargo test --lib --no-run` and run the test
-  binary under `sudo` with `--ignored`. The FreeBSD package workflow and the
-  macOS unit-test job run the `bsdnet` tests that way, with
-  `--include-ignored`, and the Windows unit-test job, whose runner is
-  elevated, the `winnet` ones. They share the namespace harness
+  binary under `sudo` with `--ignored`. The Linux unit-test job runs the
+  `tun.rs` namespace tests that way; the FreeBSD package workflow and the
+  macOS unit-test job run the `bsdnet` tests, with `--include-ignored`, and
+  the Windows unit-test job, whose runner is elevated, the `winnet` ones.
+  Local CI runs none of them. They share the namespace harness
   (`ForgedSourceNetns`) with the inline tests in `../dns.rs`, which exposes it
   as `pub(super)`. The generic parts, running a setup command
   (`testutil::run_ok`) and running code inside a named namespace

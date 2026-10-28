@@ -64,3 +64,19 @@ services:
       - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-b/fips.d:/etc/fips/fips.d:ro
     networks:
       - fw-net
+
+  # Case (f): a TUN named mesh0, with the production fips.nft (scoped to
+  # fips0) loaded before the daemon starts, so that the daemon's startup
+  # check finds a table policing another interface.
+  service-c:
+    <<: *fips-common
+    container_name: fips-fw-container-c${FIPS_CI_NAME_SUFFIX:-}
+    hostname: host-c
+    entrypoint: ["/bin/sh", "-c", "nft -f /etc/fips/fips.nft && exec /usr/local/bin/entrypoint.sh"]
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/fips.yaml:/etc/fips/fips.yaml:ro
+      - ../../packaging/common/fips.nft:/etc/fips/fips.nft:ro
+      - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/node-c/fips.d:/etc/fips/fips.d:ro
+    networks:
+      - fw-net
