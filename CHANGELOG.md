@@ -714,6 +714,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fips::control::queries::show_status` returns the node's keys only. Where
   a transport's MTU is below 110 bytes, too small for any IPv6 packet,
   `effective_ipv6_mtu` now reads 33 rather than the transport MTU less 77.
+- **Breaking for configurations layered across several search-path files**:
+  run without `--config`, `fips` now layers `tun.enabled`, `dns.enabled` and
+  `node.identity.persistent` across the config files on its search path like
+  every `node` key: the last file that sets one decides it, and a file that
+  does not set it leaves it as an earlier file set it. A later file could not
+  turn the TUN or a persistent identity off, and a later file that did not
+  mention `dns.enabled` turned the DNS responder back on. Check the files on
+  the search path before upgrading: a later `tun.enabled: false` now stops the
+  TUN being created; an earlier `dns.enabled: false` now keeps the responder
+  off unless a later file sets it true; and a later
+  `node.identity.persistent: false` now starts the node with an ephemeral
+  identity and moves `fips.key` aside to `fips.key.unused`, or, when nothing
+  else in the files configures the node, refuses to start. Services started
+  with `--config`, or on Windows with `FIPS_CONFIG` set, are not affected.
+
+#### Library surface and internals
+
+- **Source-breaking for consumers of the library crate**:
+  `fips::ipv6tun::tun::TunError::Ipv6Disabled` carries the reason as a
+  `String`; match it as `Ipv6Disabled(_)`.
 
 #### Packaging
 
@@ -1343,6 +1363,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries that no longer resolved read as an attack or a network fault.
   Anything in `fips.pub` that is not an npub is logged as "unreadable", so
   an nsec put there by mistake does not reach the log.
+- The hosts file (`/etc/fips/hosts` on Linux) no longer drops its names when
+  it cannot be read, for example after an edit saved a byte that is not UTF-8
+  or the file was written with a mode the daemon cannot read. The DNS
+  responder and the names in log lines keep the names last read, and the file
+  is read again at the next query or tick, so a permission fix takes effect
+  without a restart. One warning is logged when reads start failing and an
+  info line when the file reads again. Removing the file still removes its
+  names.
 
 #### Routing and discovery
 
@@ -1403,6 +1431,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting, so the host's first packet could miss it and a TCP connect could
   fail at once. Every waiting resolution is now registered before each host
   packet is handled.
+
+- The IPv6 adapter no longer answers an ICMPv6 error that follows IPv6
+  extension headers with another ICMPv6 error. Both checks looked only at the
+  header straight after the fixed one; they now walk Hop-by-Hop, Routing,
+  Destination Options, Authentication and first Fragment headers, as RFC 4443
+  Section 2.4 (e.1) requires.
+
+- The IPv6 adapter no longer answers an ICMPv6 Redirect with an ICMPv6 error,
+  with or without extension headers, as RFC 4443 Section 2.4 (e.2) requires.
+
+- ICMPv6 Destination Unreachable to the host is now rate limited, as RFC 4443
+  Section 2.4 (f) requires, by one token bucket for the adapter: a burst of
+  10, then 10 a second. A local flood to unreachable or off-mesh destinations,
+  or a lookup timeout over many held packets, drew one answer per packet
+  before.
+
+- A packet the host sends from an address other than the node's own is no
+  longer forwarded into the mesh, where it was lost: the receiver rebuilds the
+  header with the node's address as source, and the transport checksum then
+  fails. One bound for the mesh is answered with ICMPv6 Destination
+  Unreachable code 5 (source address failed ingress/egress policy) and logged
+  at debug. This applies to an app-owned TUN too: an embedder must push
+  packets sent from the node's address.
+
+- An oversized packet to a destination outside `fd00::/8`, which only an
+  embedder that owns the TUN can send, is no longer answered with ICMPv6
+  Packet Too Big; for a multicast destination that answer carried the group as
+  its source. It is now answered as undeliverable at any size: Destination
+  Unreachable for a unicast destination, nothing for a multicast one.
+
+- The TCP MSS clamp now clamps a SYN or SYN-ACK whose TCP header follows
+  Hop-by-Hop, Routing or Destination Options headers, to the same ceiling as
+  one without them, so such connections no longer stall once segments reach
+  full size. A SYN behind an Authentication, Fragment or ESP header is still
+  left alone.
+
+- A probe that tears down the session it opened no longer leaves a tighter
+  path MTU learned during the probe clamping the TCP MSS of new connections to
+  that destination.
+
+- Packets sent to a destination while its session is being set up are no
+  longer dropped without a word when that session ends. When the session's
+  setup times out they are answered with ICMPv6 Destination Unreachable, so a
+  connect or ping fails at once rather than waiting for its own timeout. When
+  the session ends because its peer was removed or restarted, they stay held
+  for the next session to that destination, and are answered once nothing can
+  reach it.
+
+- The warning that the transports are too small for a 1280-byte IPv6 packet is
+  now also given when an interface-bound transport binds after start and
+  leaves the node short, once each time the node falls short, rather than only
+  when the TUN comes up.
+
+- On Linux, a TUN on which the kernel refuses IPv6 is now reported as "IPv6 is
+  disabled", naming the setting to change, instead of failing later with a
+  netlink "Permission denied" (when `net.ipv6.conf.default.disable_ipv6` is 1,
+  which a new interface takes, or a reopened persistent TUN has its own
+  `disable_ipv6` set) or "Operation not supported" (when the kernel was booted
+  with `ipv6.disable=1`). The node still continues without a TUN. A TUN is no
+  longer refused because `net.ipv6.conf.all.disable_ipv6` is 1 when the
+  interface's own setting is 0, which the kernel accepts.
+
+- The `.fips` DNS responder and `fips-gateway` judge whether a name is under
+  `fips` by its labels. A single DNS label holding a dot, such as
+  `gateway.fips` sent as one label, was answered as the name `gateway.fips`,
+  and the gateway mapped a pool address for it; it now gets NXDOMAIN from the
+  responder and REFUSED from the gateway. Names that resolvers send for
+  `.fips` lookups are not affected.
 
 #### Documentation
 
