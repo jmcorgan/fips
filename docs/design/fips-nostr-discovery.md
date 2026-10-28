@@ -322,9 +322,10 @@ dial path that triggered the original punch.
 
 ### Auto-connect semantics
 
-Discovery does not itself initiate connections. It only supplies
-addresses. Dial attempts originate from the existing peer-connection
-machinery:
+Apart from the dial that follows an answered inbound traversal offer
+(last item below), discovery does not itself initiate connections. It
+only supplies addresses. Dial attempts originate from the existing
+peer-connection machinery:
 
 - **Configured peers** (`peers[]` with `connect_policy: auto_connect`)
   are dialed on startup and on retry. When `via_nostr` is set, advert
@@ -337,6 +338,15 @@ machinery:
   prior attempt has drained.
 - **Manual dials** (`fipsctl connect`) can target any configured peer
   and use the same dial path, including Nostr resolution if configured.
+- **Inbound traversal offers** are answered under every `policy`,
+  `configured_only` included, from any npub while the node is below
+  `max_peers`, within the offer limits under "Rate limits and
+  safeguards" below. When the hole punch succeeds, the node adopts
+  the punched socket and dials the offerer over it, subject to
+  `max_peers` again and the peer ACL. That dial is outbound, so
+  `accept_connections: false` on the UDP transport does not stop the
+  link; only the ACL does (`peers.deny`, or `ALL` in `peers.deny` for
+  an allowlist-only node).
 
 ### Rate limits and safeguards
 
