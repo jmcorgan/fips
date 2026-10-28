@@ -4,8 +4,13 @@ The IPv6 adapter: everything that lets ordinary IPv6 applications on the host
 use the mesh. It owns the TUN device and its reader and writer threads, the
 `.fips` DNS responder, the ICMPv6 errors the host is owed, the TCP MSS clamp,
 the IPv6 header compression on the mesh's IPv6 port (FSP port 256), and the
-adapter's own status socket. The node reaches it through one seam, the link
-(`link.rs`), and through the start and stop handles in `lifecycle.rs`.
+adapter's own status socket. At run time the node reaches it in two places:
+the link (`link.rs`) and the handles in `lifecycle.rs`. Other code in the
+tree also uses its types, constants and functions that hold no adapter
+state: the MTU arithmetic, the configuration sections, the status and
+listening reports, and the DNS responder's socket helpers. Relation to the
+rest of the tree lists every caller from outside the module, and what the
+module uses in turn.
 
 The adapter takes packets from the host in one of two ways:
 
@@ -93,14 +98,101 @@ each file.
 
 ## Relation to the rest of the tree
 
-The node's side of the seam is in `src/node`: `handlers/host_link.rs` builds
-the link, `dataplane/rx_loop.rs` drains the adapter's datagrams and learned
-keys, `handlers/session.rs` hands the adapter refusals and deliveries, and
-`lifecycle/` and `lifecycle/supervisor.rs` start and stop the children
-through `lifecycle.rs`. `src/control/compose.rs` merges the status socket's
-answer into the node's for `fipsctl` and `fipstop`, and
-`config::ipv6tun_socket` derives that socket's path. The design is
-`docs/design/fips-ipv6-adapter.md`.
+The design is `docs/design/fips-ipv6-adapter.md`.
+
+The node's side of the run-time seam is in `src/node`:
+
+- **The link** (`link.rs`). `handlers/host_link.rs` answers the adapter's
+  `Attach`, sends it `FromMesh` messages such as `Attached`, and handles
+  each `Datagram` it sends. `lifecycle/supervisor.rs` holds the node's end
+  (`HostLink`) and the receivers (`DatagramRx`, `LearnedRx`) until
+  `dataplane/rx_loop.rs` takes them to drain the adapter's datagrams and
+  learned keys (`Learned`). `handlers/session.rs` hands the adapter refusals
+  and deliveries (`Refusal`, `Deliver`), and `identities.rs` and
+  `path_mtu.rs` push the keys the node knows and its path MTUs
+  (`FromMesh::KnownKey`, `FromMesh::PathMtu`). The node names the remote end
+  of each of these, of a held packet and of a path-MTU seed by `PeerKey`, so
+  `handlers/handshake.rs`, `handlers/lookup.rs`, `handlers/timeout.rs` and
+  `mod.rs` use it too.
+- **The handles** (`lifecycle.rs`). `Node::new` and `Node::with_identity` in
+  `mod.rs` build `Handles` from `adapter_settings`, which turns the node's
+  configuration into `config::Settings` and the peer aliases into
+  `config::Alias`; `lifecycle/supervisor.rs` holds them. `lifecycle/` starts
+  and stops the TUN and DNS children through them, the receive loop and the
+  handlers drive them for each packet (`outbound`, `answer`, `deliver`),
+  `dataplane/rx_loop.rs` and `lifecycle/supervisor.rs` take a child's exit
+  (`Exit`, `ExitRx`), and `handlers/session.rs` reads what became of a
+  delivery (`Delivery`). The
+  `Node` methods `tun_state`, `tun_name`, `tun_tx`, `enable_app_owned_tun`
+  and `dns_local_addr` read or install through them, with the TUN types
+  `tun.rs` exports (`TunState`, `TunTx`, `TunOutboundTx`, and `TunError`
+  behind `NodeError::Tun`).
+
+Everything else from outside the module uses a type, a constant or a
+function that holds no adapter state, so it adds no run-time crossing:
+
+- **MTU arithmetic** (`mtu.rs`, and `IPV6_MIN_MTU` from `mss.rs` through
+  `tun.rs`). The node calls the adapter's functions so that each figure has
+  one definition. `src/node/mod.rs` derives the node's effective IPv6 MTU
+  (`effective_ipv6_mtu`), the MSS ceiling it publishes (`mss_ceiling`) and
+  how far the bound transports fall short of the IPv6 minimum, which it
+  warns about; `handlers/host_link.rs` starts its MTU feed at the IPv6
+  minimum. `handlers/lookup.rs` calls `mss_ceiling` on a link MTU to warn
+  when a link leaves no room for a TCP payload byte; the warning stays in
+  the node because it fires on every link seed and logs the raw link MTU,
+  where the adapter is sent only a payload limit. `src/config/transport.rs`
+  sets the default UDP MTU to `IPV6_MIN_MTU + FIPS_IPV6_OVERHEAD`.
+- **Configuration** (`config.rs`, `link.rs`). `src/config/mod.rs` embeds
+  `TunConfig` and `DnsConfig` as the `tun` and `dns` sections, and
+  `src/lib.rs` re-exports both at the crate root. `src/config/node.rs`
+  grants the adapter its port (`IPV6_PORT`) by default, and
+  `src/config/mod.rs` refuses any other grant of that port while the TUN is
+  enabled.
+- **Status and the listening panel** (`status.rs`, `listening.rs`,
+  `firewall_state.rs`). `src/control/queries.rs` keeps
+  `show_listening_sockets` for library callers by calling
+  `status::listening`, and `src/control/mod.rs` re-exports `listening` and
+  `firewall_state` so `fips::control::listening` and
+  `fips::control::firewall_state` keep working. `src/control/compose.rs`
+  merges the status socket's answer into the node's for `fipsctl` and
+  `fipstop`; it names the adapter's keys itself and imports nothing from
+  the module.
+- **DNS socket helpers** (`dns.rs`). The gateway's resolver in
+  `src/gateway/dns.rs` (Linux only) uses six of the responder's functions,
+  so that it refuses a query arriving on the mesh interface and keeps a
+  reply to a mesh source out of the mesh as the responder does:
+  `set_recv_pktinfo_v6` and `recv_with_pktinfo` learn the interface a query
+  arrived on, `is_mesh_interface_query` judges it, and `wildcard_bind`,
+  `reply_path` and `send_reply` send the reply on the right path.
+
+Tests outside the module reach further, for example into `icmp.rs`,
+`ipv6_shim.rs`, `mss.rs`, `core.rs`, `inbound.rs`, `status.rs` and the
+responder's `handle_dns_packet`, from `src/node/tests`, `src/gateway/tests`,
+`src/control/tests` and the `#[cfg(test)]` helpers in `src/node`. Those uses
+are not part of the seam.
+
+The other way, outside its tests the module uses from the rest of the crate
+and from `fips-core`:
+
+- **Identity types**: `Ipv6Address`, `NodeAddr`, `PeerIdentity`,
+  `IdentityError` and `identity::IPV6_ADDRESS_PREFIX` from the crate, and
+  `PeerKey` and `NodePrefix` from `fips_core::identity`, for the addresses
+  it derives and the keys the link names.
+- **Framing sizes**: `proto::framing::{FIPS_OVERHEAD, payload_limit}` and
+  `proto::fsp::wire::FSP_PORT_HEADER_SIZE`, from which `mtu.rs` and
+  `core.rs` derive every MTU and MSS figure.
+- **Time and rate limiting**: `time::HostClock`, `fips_core::time::Clock`
+  and `fips_core::node::rate_limit::TokenBucket`, in `tun.rs` and
+  `lifecycle.rs`: the clock the two ICMPv6 limiters are judged at, and the
+  Destination Unreachable token bucket itself.
+- **DNS**: `dnsmsg` (message parsing and screening, and `clamp_ttl` in
+  `config.rs`), `hosts` (`HostMap`, `HostMapReloader`,
+  `DEFAULT_HOSTS_PATH`) and `utils::onlink::OnLinkPrefixes`, in `dns.rs`
+  and `lifecycle.rs`.
+- **The status socket**: `config::ipv6tun_socket` for its path,
+  `control::protocol::{Request, Response}` and `control::serve` for the
+  control socket's framing, and `utils::sockbind` to bind and remove it, in
+  `status.rs`.
 
 ## Invariants
 
