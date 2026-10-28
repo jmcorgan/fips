@@ -15,6 +15,18 @@ can reach the source file's private items.
   network-namespace tests, the replies themselves, including with a mesh
   interface that carries no address (`ForgedSourceNetns::with_addressless_mesh`)
   and one known residual case pinned as a test.
+- `ipv6_frag.rs` tests `../ipv6_frag.rs` as module `tests`: which packets
+  the ingress node splits into IPv6 fragments for a path under 1280 and
+  which it leaves to a Packet Too Big (one that fits, one over 1280, a
+  malformed one, an MTU too small for ten fragments, a Hop-by-Hop or
+  Routing header, headers through the upper-layer one that would not fit
+  in the first fragment, a later host-made fragment whose inner header is
+  Hop-by-Hop, Routing or Fragment, a host-made fragment near the offset
+  limit), that the fragments fit the MTU and reassemble to the original,
+  how many fragments a 1280-byte packet becomes, that a host-made fragment
+  is split under its own identification, offset and final M flag, and the
+  MTU a Packet Too Big reports for a packet over 1280. Pure functions, no
+  I/O.
 - `tun.rs` tests `../tun.rs` as module `name_tests`: TUN startup never
   deletes, downs or takes over an existing interface named `tun.name`. A
   link of any kind but TUN is refused and left untouched, a TUN another

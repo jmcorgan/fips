@@ -203,7 +203,7 @@ for the per-destination MTU storage layout.
 
 - [../design/fips-mtu.md](../design/fips-mtu.md) — encapsulation
   overhead, the proactive `path_mtu` field, the reactive
-  `MtuExceeded` mechanism, MSS clamping, the no-fragmentation
+  `MtuExceeded` mechanism, MSS clamping, the fragmentation
   policy.
 - [../design/fips-mmp.md](../design/fips-mmp.md) — what the MMP
   metrics mean and how they are computed.

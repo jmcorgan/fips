@@ -3740,17 +3740,25 @@ impl Node {
     ///
     /// Also performs MTU checking: if the packet (plus FIPS overhead) exceeds
     /// the transport MTU, an ICMP Packet Too Big message is sent back to the
-    /// source and the packet is dropped.
+    /// source and the packet is dropped, unless it is a packet of at most
+    /// 1280 bytes the host could not have sized down, which is sent as IPv6
+    /// fragments instead (see `crate::upper::ipv6_frag`).
     pub(in crate::node) async fn handle_tun_outbound(&mut self, ipv6_packet: Vec<u8>) {
+        use crate::upper::ipv6_frag::{can_fragment, packet_too_big_mtu};
+
         // Validate IPv6 header
         if ipv6_packet.len() < 40 || ipv6_packet[0] >> 4 != 6 {
             return;
         }
 
-        // Check if packet will fit after FIPS encapsulation
+        // Check if packet will fit after FIPS encapsulation. One that does
+        // not but can be fragmented carries on whole: it is split only where
+        // it is sent, so the checks and the pending queue below see the
+        // original packet.
         let effective_mtu = self.effective_ipv6_mtu() as usize;
-        if ipv6_packet.len() > effective_mtu {
-            self.send_icmpv6_packet_too_big(&ipv6_packet, effective_mtu as u32);
+        if ipv6_packet.len() > effective_mtu && !can_fragment(&ipv6_packet, effective_mtu) {
+            let report = packet_too_big_mtu(ipv6_packet.len(), effective_mtu);
+            self.send_icmpv6_packet_too_big(&ipv6_packet, report);
             return;
         }
 
@@ -3773,17 +3781,15 @@ impl Node {
             if entry.is_established() {
                 // Check per-destination path MTU learned from MtuExceeded signals.
                 // The first oversized packet is forwarded normally and triggers
-                // the MtuExceeded signal; subsequent packets are caught here and
-                // generate ICMPv6 Packet Too Big back to the application.
-                if let Some(mmp) = entry.mmp() {
-                    let path_mtu = mmp.path_mtu.current_mtu();
-                    let path_ipv6_mtu = crate::upper::icmp::effective_ipv6_mtu(path_mtu) as usize;
-                    if path_ipv6_mtu < effective_mtu && ipv6_packet.len() > path_ipv6_mtu {
-                        self.send_icmpv6_packet_too_big(&ipv6_packet, path_ipv6_mtu as u32);
-                        return;
-                    }
+                // the MtuExceeded signal; subsequent packets are fragmented
+                // when they can be, or answered with ICMPv6 Packet Too Big.
+                let mtu = self.tun_send_mtu(&dest_addr);
+                if ipv6_packet.len() > mtu && !can_fragment(&ipv6_packet, mtu) {
+                    let report = packet_too_big_mtu(ipv6_packet.len(), mtu);
+                    self.send_icmpv6_packet_too_big(&ipv6_packet, report);
+                    return;
                 }
-                if let Err(e) = self.send_ipv6_packet(&dest_addr, &ipv6_packet).await {
+                if let Err(e) = self.send_tun_packet(&dest_addr, &ipv6_packet, mtu).await {
                     debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
                     self.relookup_lost_route(&dest_addr).await;
                 }
@@ -4054,15 +4060,60 @@ impl Node {
             Some(q) => q,
             None => return,
         };
+        let mtu = self.tun_send_mtu(dest_addr);
         for mut packet in packets {
             if let Some(mss) = self.reclamp_held_syn(&mut packet) {
                 debug!(dest = %self.peer_display_name(dest_addr), max_mss = mss, "Clamped held TCP SYN again at release");
             }
-            if let Err(e) = self.send_ipv6_packet(dest_addr, &packet).await {
+            if let Err(e) = self.send_tun_packet(dest_addr, &packet, mtu).await {
                 debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
                 break;
             }
         }
+    }
+
+    /// The largest IPv6 packet a host's packet to `dest_addr` may be sent
+    /// as: the node's own effective IPv6 MTU, or the session's path MTU in
+    /// IPv6 terms when that is smaller.
+    fn tun_send_mtu(&self, dest_addr: &NodeAddr) -> usize {
+        let effective_mtu = self.effective_ipv6_mtu() as usize;
+        let path_ipv6_mtu = self
+            .sessions
+            .get(dest_addr)
+            .and_then(|entry| entry.mmp())
+            .map(|mmp| crate::upper::icmp::effective_ipv6_mtu(mmp.path_mtu.current_mtu()) as usize);
+        path_ipv6_mtu.map_or(effective_mtu, |path| path.min(effective_mtu))
+    }
+
+    /// Send a host's IPv6 packet on an established session: as IPv6
+    /// fragments when it is over `mtu` and `fragment_for_path` splits it,
+    /// otherwise whole. Fragments are sent in order and the first failure
+    /// stops the rest, so there is one result per original packet; a
+    /// destination left with part of a datagram drops it at its reassembly
+    /// timeout.
+    async fn send_tun_packet(
+        &mut self,
+        dest_addr: &NodeAddr,
+        packet: &[u8],
+        mtu: usize,
+    ) -> Result<(), NodeError> {
+        if packet.len() > mtu
+            && let Some(fragments) =
+                crate::upper::ipv6_frag::fragment_for_path(packet, mtu, rand::random())
+        {
+            trace!(
+                dest = %self.peer_display_name(dest_addr),
+                len = packet.len(),
+                mtu,
+                fragments = fragments.len(),
+                "Fragmenting TUN packet for a path under the IPv6 minimum"
+            );
+            for fragment in &fragments {
+                self.send_ipv6_packet(dest_addr, fragment).await?;
+            }
+            return Ok(());
+        }
+        self.send_ipv6_packet(dest_addr, packet).await
     }
 
     /// Clamp a held TCP SYN again with the path MTU known at release.

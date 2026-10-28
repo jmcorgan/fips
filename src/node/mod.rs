@@ -1658,11 +1658,12 @@ impl Node {
     /// minimum (1280), or `None` when it does not.
     ///
     /// A host never lowers its path MTU below 1280 on a Packet Too Big, so
-    /// with a shortfall every non-TCP IPv6 packet between the effective MTU
-    /// and 1280 bytes is lost. Returns `None` while no transport is
-    /// operational: there is nothing bound to judge, and the configured
-    /// fallback in [`Self::transport_mtu`] would otherwise report one before
-    /// any transport has come up.
+    /// with a shortfall every IPv6 packet between the effective MTU and 1280
+    /// bytes is sent as IPv6 fragments (`crate::upper::ipv6_frag`), or lost
+    /// where the effective MTU is too small to fragment for. Returns `None`
+    /// while no transport is operational: there is nothing bound to judge,
+    /// and the configured fallback in [`Self::transport_mtu`] would otherwise
+    /// report one before any transport has come up.
     pub(crate) fn ipv6_shortfall(&self) -> Option<u16> {
         if !self.transports.values().any(|h| h.is_operational()) {
             return None;
@@ -1680,7 +1681,7 @@ impl Node {
                 transport_mtu = self.transport_mtu(),
                 effective_ipv6_mtu = self.effective_ipv6_mtu(),
                 short_by = short,
-                "Transport MTU too small for the IPv6 minimum: IPv6 packets above the effective MTU and up to 1280 bytes will be dropped for every protocol except TCP; set each transport's mtu to at least {}",
+                "Transport MTU too small for the IPv6 minimum: IPv6 packets above the effective MTU and up to 1280 bytes will be sent as IPv6 fragments, two to ten datagrams each, or dropped if the effective MTU is under 176; set each transport's mtu to at least {}",
                 crate::upper::tun::IPV6_MIN_MTU + crate::upper::icmp::FIPS_IPV6_OVERHEAD
             );
         }

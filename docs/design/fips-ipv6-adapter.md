@@ -206,10 +206,14 @@ transport path MTU for the IPv6 adapter is therefore:
 1280 + 77 = 1357 bytes
 ```
 
-Transports with smaller MTUs (radio at ~250 bytes, serial at 256
-bytes) cannot support the IPv6 adapter without some form of internal
-fragmentation and reassembly. Otherwise, applications on those
-transports must use the native FIPS datagram API.
+On a path below that, the ingress node fragments a host's packets of
+up to 1280 bytes into IPv6 fragments the destination host reassembles
+(see [fips-mtu.md](fips-mtu.md#fragmentation-policy)), down to a
+transport MTU of 253 bytes (IPv6 MTU 176, at most ten fragments).
+Transports with smaller MTUs (radio at ~250 bytes) cannot support the
+IPv6 adapter without some form of internal fragmentation and
+reassembly. Otherwise, applications on those transports must use the
+native FIPS datagram API.
 
 ### TUN-Side ICMP Packet Too Big
 
@@ -218,6 +222,12 @@ the adapter generates an ICMPv6 Packet Too Big message and delivers
 it back to the application via the TUN. This triggers the kernel's
 Path MTU Discovery mechanism, which adjusts TCP segment sizes for
 subsequent transmissions.
+
+A host ignores a Packet Too Big that reports less than 1280, so where
+the effective IPv6 MTU toward a destination is under 1280 the adapter
+sends a packet of up to 1280 bytes as IPv6 fragments instead, and
+answers a packet over 1280 with a Packet Too Big reporting 1280, which
+the host accepts.
 
 ICMP Packet Too Big generation is rate-limited per source address
 (100ms interval) to prevent storms from applications sending many
@@ -437,17 +447,20 @@ DNS-specific one.
 | Path MTU tracking (SessionDatagram field) | **Implemented** |
 | Path MTU notification (end-to-end echo) | **Implemented** |
 | Endpoint fragmentation/reassembly | Transport drivers |
+| IPv6 fragmentation at the ingress node (paths under 1280) | **Implemented** |
 
 ## Design Considerations
 
-### Path MTU Discovery and No-Fragmentation Policy
+### Path MTU Discovery and Fragmentation Policy
 
 Path MTU Discovery (proactive `path_mtu` annotation, reactive
-MtuExceeded, end-to-end PathMtuNotification) and the no-fragmentation
-policy that drives the design both live in the unified MTU treatment
-at [fips-mtu.md](fips-mtu.md). The adapter is a consumer of that
-model — its job is to enforce the resulting effective IPv6 MTU at the
-TUN with ICMP Packet Too Big and TCP MSS clamping.
+MtuExceeded, end-to-end PathMtuNotification) and the fragmentation
+policy that drives the design (none in transit; at the ingress node
+only below 1280) both live in the unified MTU treatment at
+[fips-mtu.md](fips-mtu.md). The adapter is a consumer of that model —
+its job is to enforce the resulting effective IPv6 MTU at the TUN with
+ICMP Packet Too Big, TCP MSS clamping and, below 1280, IPv6
+fragmentation.
 
 ## References
 
@@ -456,7 +469,7 @@ TUN with ICMP Packet Too Big and TCP MSS clamping.
   identity model
 - [fips-session-layer.md](fips-session-layer.md) — FSP (below the adapter)
 - [fips-mtu.md](fips-mtu.md) — Unified path MTU model (proactive,
-  reactive, hysteresis, no-fragmentation)
+  reactive, hysteresis, fragmentation policy)
 - [../reference/wire-formats.md](../reference/wire-formats.md) — FSP and
   SessionDatagram wire formats
 - [../reference/configuration.md](../reference/configuration.md) — TUN
