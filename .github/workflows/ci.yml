@@ -418,13 +418,14 @@ jobs:
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 
-      # The start-up warning for transports too small for a 1280-byte IPv6
-      # packet, on the path where the node opens its own TUN. Creating the TUN
-      # needs root, so the test is `#[ignore]`d and the run above skips it.
-      # Built as the runner user and only executed under sudo, so that cargo
-      # does not run as root with root's CARGO_HOME. The grep fails the step
-      # unless the test ran and passed: a filter that matches nothing passes.
-      - name: Run the system TUN warning test as root
+      # The unit tests that need root and network namespaces, which are
+      # `#[ignore]`d so the run above skips them: on this branch, the start-up
+      # warning for transports too small for a 1280-byte IPv6 packet, on the
+      # path where the node opens its own TUN. testing/root-tests.sh holds the
+      # filters and the number of tests each must pass, and fails unless every
+      # one ran and passed. Built as the runner user and only the script runs
+      # under sudo, so that cargo does not run as root with root's CARGO_HOME.
+      - name: Run the root-only namespace tests
         shell: bash
         run: |
           cargo test -p fips-mesh --lib --no-run
@@ -439,9 +440,7 @@ jobs:
             echo "could not locate the lib test binary" >&2
             exit 1
           fi
-          sudo "$BIN" --ignored node::tests::tun_warning:: --test-threads=1 \
-            2>&1 | tee "$RUNNER_TEMP/tun-warning-test.log"
-          grep -qE '^test result: ok\. 1 passed;' "$RUNNER_TEMP/tun-warning-test.log"
+          sudo bash testing/root-tests.sh "$BIN"
 
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run

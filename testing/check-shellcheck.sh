@@ -6,9 +6,10 @@
 # its test (.github/scripts/blossom-upload.sh, test-blossom-upload.sh), over
 # the cross-target compile check that ci-local.sh runs (testing/cross-check/),
 # over the crate publication check that crate.yml runs
-# (testing/check-crate.sh), and over the FreeBSD package's upgrade test
+# (testing/check-crate.sh), over the FreeBSD package's upgrade test
 # (packaging/freebsd/test-upgrade.sh), which the FreeBSD Package workflow runs
-# in its VM.
+# in its VM, and over the root-only test runner that ci.yml and ci-local.sh
+# run and the internal builder is to run (testing/root-tests.sh).
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -27,7 +28,8 @@
 #     exclusions; it runs under FreeBSD's sh, which supports `local` too.
 #   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
 #     keep-pinned-toolchain.sh, the three
-#     testing/cross-check/ scripts and testing/check-crate.sh as bash, with
+#     testing/cross-check/ scripts, testing/check-crate.sh and
+#     testing/root-tests.sh as bash, with
 #     no exclusions. They are CI scripts, not shipped ones, and the sh
 #     exclusion set below misfires on bash.
 #
@@ -75,6 +77,7 @@ BASH_TARGETS=(
     ".github/scripts/keep-pinned-toolchain.sh"
     "testing/cross-check/check.sh"
     "testing/check-crate.sh"
+    "testing/root-tests.sh"
     "testing/cross-check/zig-cc"
     "testing/cross-check/zig-ar"
 )

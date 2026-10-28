@@ -2,7 +2,8 @@
 # Tests for ci-local.sh's argument handling: an unknown option or an option
 # missing its value is a usage error (exit 2, message on stderr), and --help
 # still exits 0 with the usage on stdout. --rerun <suite> rejects an unknown
-# suite name and the options it cannot be combined with, before any build.
+# suite name and the options it cannot be combined with, before any build, and
+# --build-only rejects --root-tests, whose stage it would skip.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -88,7 +89,8 @@ expect_usage_error "-j without a value" "-j needs a value" -j
 expect_usage_error "--rerun without a value" "--rerun needs a value" --rerun
 expect_usage_error "--rerun of an unknown suite" "Unknown suite: no-such-suite" \
     --rerun no-such-suite
-for opt in --only --build-only --test-only --skip-integration --cross-check; do
+for opt in --only --build-only --test-only --skip-integration --cross-check \
+        --root-tests; do
     args=(--rerun firewall "$opt")
     [ "$opt" = --only ] && args+=(firewall)
     expect_usage_error "--rerun with $opt" \
@@ -102,6 +104,11 @@ expect_usage_error "--rerun chaos-tcp-mesh is a known suite" \
     "--rerun cannot be combined with --build-only" \
     --rerun chaos-tcp-mesh --build-only
 expect_help "--rerun with --help" --rerun firewall --help
+
+expect_usage_error "--build-only with --root-tests" \
+    "--root-tests cannot be combined with --build-only" --build-only --root-tests
+expect_usage_error "--root-tests with --build-only" \
+    "--root-tests cannot be combined with --build-only" --root-tests --build-only
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
