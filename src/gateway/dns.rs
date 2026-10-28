@@ -34,15 +34,14 @@ pub struct DnsAllocation {
     pub is_new: bool,
 }
 
-/// Extract the `.fips` query name from a question name in text form.
-/// Returns Some(name) if the query is for a `.fips` domain, None otherwise.
-fn extract_fips_name(name: &str) -> Option<String> {
-    let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".fips") || lower.ends_with(".fips.") {
-        Some(lower.trim_end_matches('.').to_string())
-    } else {
-        None
-    }
+/// Whether a question name is under `fips`: two labels or more, the last
+/// `fips` ignoring ASCII case. Read from the wire labels, since a label may
+/// hold a dot and the one label `a\.fips` is not under `fips`.
+fn under_fips(query: &Query<'_>) -> bool {
+    let (count, last) = query
+        .labels()
+        .fold((0, None), |(count, _), label| (count + 1, Some(label)));
+    count >= 2 && last.is_some_and(|label| label.eq_ignore_ascii_case(b"fips"))
 }
 
 /// Extract the AAAA (IPv6) address from a DNS response.
@@ -477,14 +476,11 @@ async fn resolve_query(
     pool: &std::sync::Arc<tokio::sync::Mutex<VirtualIpPool>>,
     event_tx: &tokio::sync::mpsc::Sender<PoolEvent>,
 ) -> Vec<u8> {
-    // Check if this is a .fips query
-    let fips_name = match extract_fips_name(&query.name) {
-        Some(name) => name,
-        None => {
-            trace!(id = query.id, "Non-.fips query, returning REFUSED");
-            return build_refused(&query);
-        }
-    };
+    if !under_fips(&query) {
+        trace!(id = query.id, "Non-.fips query, returning REFUSED");
+        return build_refused(&query);
+    }
+    let fips_name = query.name.to_ascii_lowercase();
 
     debug!(name = %fips_name, id = query.id, "Forwarding .fips query to daemon");
 
@@ -733,7 +729,10 @@ pub(in crate::gateway) mod tests {
 
     /// A fake upstream that answers one query with a scripted list of
     /// datagrams, in order, from its own socket.
-    fn spawn_upstream<F>(socket: UdpSocket, replies: F) -> tokio::task::JoinHandle<()>
+    pub(in crate::gateway) fn spawn_upstream<F>(
+        socket: UdpSocket,
+        replies: F,
+    ) -> tokio::task::JoinHandle<()>
     where
         F: FnOnce(u16) -> Vec<Vec<u8>> + Send + 'static,
     {
@@ -1195,25 +1194,24 @@ pub(in crate::gateway) mod tests {
         assert_ne!(socket.local_addr().unwrap().port(), 0);
     }
 
+    /// A query for a name under fips is in the zone.
     #[test]
-    fn test_extract_fips_name() {
+    fn test_in_fips_zone() {
         let bytes = build_query(1, "test.fips");
         let Screen::Query(query) = dnsmsg::screen(&bytes, 53000) else {
             panic!("a clean AAAA query passes the screen");
         };
-        assert_eq!(
-            extract_fips_name(&query.name),
-            Some("test.fips".to_string())
-        );
+        assert!(under_fips(&query));
     }
 
+    /// A query for a name outside fips is not in the zone.
     #[test]
-    fn test_extract_non_fips_name() {
+    fn test_not_in_fips_zone() {
         let bytes = build_query(1, "example.com");
         let Screen::Query(query) = dnsmsg::screen(&bytes, 53000) else {
             panic!("a clean AAAA query passes the screen");
         };
-        assert!(extract_fips_name(&query.name).is_none());
+        assert!(!under_fips(&query));
     }
 
     #[test]
@@ -1675,28 +1673,6 @@ mod screening_tests {
         assert_eq!(rcode(&reply), 13, "rcode");
         assert_eq!(word(&reply, 8), 0, "no authority record");
         assert_eq!(reply.len(), datagram.len(), "reply length");
-    }
-
-    #[tokio::test]
-    async fn an_upstream_nxdomain_for_the_single_label_dot_fips_is_relayed_in_an_82_byte_reply() {
-        let (upstream, _, handle) = fake_upstream(|q| upstream_answer(q, NXDOMAIN, None)).await;
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let name = [5, b'.', b'f', b'i', b'p', b's', 0];
-        let datagram = message(
-            0x2701,
-            0,
-            [1, 0, 0, 0],
-            &question(&name, TYPE_AAAA, CLASS_IN),
-        );
-        assert_eq!(datagram.len(), 23);
-        let reply = ask(&datagram, CLIENT_PORT, upstream, &pool(), &event_tx)
-            .await
-            .expect("answered");
-        assert_eq!(rcode(&reply), NXDOMAIN, "rcode");
-        assert_eq!(soa_owner(&reply, datagram.len()), ".fips");
-        assert_eq!(&reply[23..25], &[0xC0, 0x0C], "owned by the question name");
-        assert_eq!(reply.len(), datagram.len() + 59, "reply length");
-        handle.abort();
     }
 
     #[tokio::test]

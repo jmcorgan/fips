@@ -5,7 +5,9 @@ source file. Each file here is a child module of the source file it tests,
 declared from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod
 <name>;`, so it can reach the source file's private items.
 
-- `dns.rs` tests `../dns.rs` as module `mesh_tests`: the gateway DNS
+- `dns.rs` tests `../dns.rs` as module `mesh_tests`: the gateway forwards
+  only names whose last wire label is `fips` and refuses the rest, a single
+  label holding a dot among them; and the gateway DNS
   listener does not answer, forward or map a query that arrived on the mesh
   interface, the daemon's TUN, whose name `serve` is given (`fips0` in these
   tests). It covers the drop rule (`mesh_arrival`), that
@@ -52,9 +54,10 @@ declared from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod
   helpers these tests share as `pub(in crate::gateway)`, so the tests of
   other files in `src/gateway/` can use them too.
 - The network-namespace tests need root. They are `#[ignore]`d, so the
-  normal test run skips them, and no CI job runs them; build with
-  `cargo test --lib --no-run` and run the test binary under `sudo` with
-  `--ignored`. They use the crate-wide namespace helpers in
+  normal test run skips them; the GitHub Linux unit-test job runs them under
+  `sudo` in its namespace step, and the internal builder does not. By hand,
+  build with `cargo test --lib --no-run` and run the test binary under
+  `sudo` with `--ignored`. They use the crate-wide namespace helpers in
   `src/testutil.rs` (`run_ok`, `in_netns`).
 - The listener resolves the mesh interface's index, and on a specific bind
   probes the reply's route, in the calling thread's network namespace for

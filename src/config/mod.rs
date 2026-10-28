@@ -1498,12 +1498,65 @@ impl<'de> Deserialize<'de> for KeyName {
     }
 }
 
-/// The `node` key tree of a config file; every other section is skipped.
+/// The key trees of a config file's `node`, `tun` and `dns` sections; every
+/// other section is skipped.
 #[derive(Deserialize)]
-struct NodeKeys {
+struct FileKeys {
     /// The key tree of `node`, if the file has one.
     #[serde(default)]
     node: Option<Keys>,
+    /// The key tree of `tun`, if the file has one.
+    #[serde(default)]
+    tun: Option<Keys>,
+    /// The key tree of `dns`, if the file has one.
+    #[serde(default)]
+    dns: Option<Keys>,
+}
+
+/// Which of the three on-off settings a later config file set, so that
+/// [`Config::merge`] takes each one's value from that file only if it did.
+#[derive(Debug, Clone, Copy)]
+struct Named {
+    /// `tun.enabled`.
+    tun: bool,
+    /// `dns.enabled`.
+    dns: bool,
+    /// `node.identity.persistent`.
+    persistent: bool,
+}
+
+impl Named {
+    /// Read from a file's key trees: a setting is named when its key is
+    /// present and not null.
+    fn from_keys(keys: &FileKeys) -> Self {
+        Self {
+            tun: names(keys.tun.as_ref(), &["enabled"]),
+            dns: names(keys.dns.as_ref(), &["enabled"]),
+            persistent: names(keys.node.as_ref(), &["identity", "persistent"]),
+        }
+    }
+
+    /// Inferred from deserialised values alone, which cannot tell a setting
+    /// left at its default from one set to it: `tun.enabled` and
+    /// `node.identity.persistent` count as set only when true, and
+    /// `dns.enabled` always.
+    fn guessed(config: &Config) -> Self {
+        Self {
+            tun: config.tun.enabled,
+            dns: true,
+            persistent: config.node.identity.persistent,
+        }
+    }
+}
+
+/// Whether the key at `path` under `keys` is present and not null.
+fn names(keys: Option<&Keys>, path: &[&str]) -> bool {
+    match (keys, path.split_first()) {
+        (Some(Keys::Null) | None, _) => false,
+        (Some(_), None) => true,
+        (Some(Keys::Map(map)), Some((first, rest))) => names(map.get(*first), rest),
+        (Some(Keys::Leaf), Some(_)) => false,
+    }
 }
 
 /// The six scalar names of the deprecated `node.discovery` block, which fold
@@ -1543,12 +1596,16 @@ fn submap<'a>(map: &'a mut BTreeMap<String, Keys>, name: &str) -> &'a mut BTreeM
 /// its priority. A marker is placed only for a legacy key that is present and
 /// not null, because the fold acts only on those.
 ///
+/// Also returns which on-off settings the file named (see [`Named`]), read
+/// in the same scan.
+///
 /// This parses the file text a second time. serde_yaml copies each scalar it
 /// reads, `node.identity.nsec` included, into a buffer it frees without
 /// clearing, so the scan leaves one more such copy than the typed parse does.
 /// The visitor itself copies no value.
-fn node_keys(text: &str) -> Result<BTreeMap<String, Keys>, serde_yaml::Error> {
-    let raw: NodeKeys = serde_yaml::from_str(text)?;
+fn node_keys(text: &str) -> Result<(BTreeMap<String, Keys>, Named), serde_yaml::Error> {
+    let raw: FileKeys = serde_yaml::from_str(text)?;
+    let named = Named::from_keys(&raw);
     let mut keys = match raw.node {
         Some(Keys::Map(keys)) => keys,
         _ => BTreeMap::new(),
@@ -1563,7 +1620,7 @@ fn node_keys(text: &str) -> Result<BTreeMap<String, Keys>, serde_yaml::Error> {
             submap(&mut keys, "rendezvous").insert(name.to_owned(), Keys::Leaf);
         }
     }
-    Ok(keys)
+    Ok((keys, named))
 }
 
 /// Clear every string under `value` before it is dropped.
@@ -1717,8 +1774,10 @@ impl Config {
     ///
     /// Paths are processed in order, with later paths overriding earlier ones.
     /// The `node` section is layered per key: a key a later file sets wins,
-    /// and a key set only in an earlier file survives. The other sections, and
-    /// `node.identity`, follow [`Config::merge`].
+    /// and a key set only in an earlier file survives. `tun.enabled`,
+    /// `dns.enabled` and `node.identity.persistent` follow the same rule. The
+    /// rest of the other sections, and of `node.identity`, follow
+    /// [`Config::merge`].
     pub fn load_from_paths(paths: &[PathBuf]) -> Result<(Self, Vec<PathBuf>), ConfigError> {
         let mut config = Config::default();
         let mut loaded_paths = Vec::new();
@@ -1736,11 +1795,11 @@ impl Config {
                     path: path.to_path_buf(),
                     source: e,
                 };
-                let keys = node_keys(&contents).map_err(parse_error)?;
+                let (keys, named) = node_keys(&contents).map_err(parse_error)?;
                 let typed = node_value(&file_config.node).map_err(parse_error)?;
                 layered |= !keys.is_empty();
                 overlay(&mut node, &keys, Some(&typed));
-                config.merge(file_config);
+                config.merge_named(file_config, named);
                 loaded_paths.push(path.clone());
             }
         }
@@ -1917,12 +1976,22 @@ impl Config {
 
     /// Merge another configuration into this one.
     ///
-    /// Values from `other` override values in `self` when present. From
-    /// `node` only `identity` and `leaf_only` are merged here;
-    /// `load_from_paths` layers the rest of `node` from the files themselves,
-    /// since a deserialised config cannot tell an omitted key from one set to
-    /// its default.
-    pub fn merge(&mut self, mut other: Config) {
+    /// Values from `other` override values in `self` when present. A
+    /// deserialised config cannot tell an omitted key from one set to its
+    /// default, so the on-off settings are judged by value: `other` turns
+    /// `tun.enabled` and `node.identity.persistent` on but never off, and
+    /// always decides `dns.enabled`. From `node` only `identity` and
+    /// `leaf_only` are merged here. `load_from_paths` reads from the files
+    /// themselves which keys each one set, and layers `node` and the on-off
+    /// settings by those.
+    pub fn merge(&mut self, other: Config) {
+        let named = Named::guessed(&other);
+        self.merge_named(other, named);
+    }
+
+    /// [`Config::merge`], taking each on-off setting from `other` only where
+    /// `named` says the file set it.
+    fn merge_named(&mut self, mut other: Config, named: Named) {
         // Merge node.identity section. The nsec is taken rather than moved
         // out of `other.node.identity`, which clears its private key on drop
         // and so cannot be left partially moved.
@@ -1936,16 +2005,16 @@ impl Config {
             }
             self.node.identity.nsec = other.node.identity.nsec.take();
         }
-        if other.node.identity.persistent {
-            self.node.identity.persistent = true;
+        if named.persistent {
+            self.node.identity.persistent = other.node.identity.persistent;
         }
         // Merge node.leaf_only
         if other.node.leaf_only {
             self.node.leaf_only = true;
         }
         // Merge the IPv6 adapter's tun and dns sections
-        self.tun.merge(other.tun);
-        self.dns.merge(other.dns);
+        self.tun.merge(other.tun, named.tun);
+        self.dns.merge(other.dns, named.dns);
         // Merge transports section
         self.transports.merge(other.transports);
         // Merge peers (replace if non-empty)

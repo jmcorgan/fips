@@ -238,8 +238,9 @@ pub fn file_mtime(path: &Path) -> Option<SystemTime> {
 /// Holds the base host map (from peer config aliases), the hosts file as last
 /// read, and the current effective map (base + hosts file). On each
 /// `check_reload()`, stats the hosts file and rebuilds the effective map if
-/// the mtime has changed. The base is replaced when the node's peer list is
-/// replaced at runtime.
+/// the mtime has changed and the file reads; a file that does not read leaves
+/// the last map in place and is read again on the next check. The base is
+/// replaced when the node's peer list is replaced at runtime.
 pub struct HostMapReloader {
     /// Base map from peer config aliases, replaced by `set_base`.
     base: HostMap,
@@ -252,6 +253,9 @@ pub struct HostMapReloader {
     path: std::path::PathBuf,
     /// Last observed modification time (None if file didn't exist).
     last_mtime: Option<SystemTime>,
+    /// Whether the last read failed, so `check_reload` warns once per run of
+    /// failed reads rather than on every check.
+    failing: bool,
 }
 
 impl HostMapReloader {
@@ -262,11 +266,11 @@ impl HostMapReloader {
         // A failed initial read records no mtime, so the next check sees a
         // change and retries rather than treating the unread file as empty
         // for the lifetime of the process.
-        let (last_mtime, hosts_file) = match HostMap::try_load_hosts_file(&path) {
-            Ok(map) => (file_mtime(&path), map),
+        let (last_mtime, hosts_file, failing) = match HostMap::try_load_hosts_file(&path) {
+            Ok(map) => (file_mtime(&path), map, false),
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "Failed to read hosts file");
-                (None, HostMap::new())
+                (None, HostMap::new(), true)
             }
         };
         let mut effective = base.clone();
@@ -278,6 +282,7 @@ impl HostMapReloader {
             effective,
             path,
             last_mtime,
+            failing,
         }
     }
 
@@ -293,18 +298,38 @@ impl HostMapReloader {
 
     /// Check if the hosts file has been modified and reload if so.
     ///
-    /// Returns `true` if the map was reloaded.
+    /// A read that fails keeps the map last read and records no mtime, as
+    /// [`Self::try_check_reload`] does, so the next call reads the file again:
+    /// a permission fix, which leaves the mtime alone, is picked up. The first
+    /// failure of a run is logged at warn and the rest at debug; the read that
+    /// ends the run is logged at info. Only a read ends a run: an unchanged
+    /// modification time reads nothing. An absent file is not a failure: it
+    /// leaves only the base. Returns `true` if the map was reloaded.
     pub fn check_reload(&mut self) -> bool {
-        let current_mtime = file_mtime(&self.path);
-
-        if current_mtime == self.last_mtime {
-            return false;
+        match self.try_check_reload() {
+            Ok(changed) => {
+                if changed && std::mem::take(&mut self.failing) {
+                    info!(
+                        path = %self.path.display(),
+                        "Hosts file read again after a failed read"
+                    );
+                }
+                changed
+            }
+            Err(e) => {
+                if self.failing {
+                    debug!(path = %self.path.display(), error = %e, "Hosts file still unreadable");
+                } else {
+                    warn!(
+                        path = %self.path.display(),
+                        error = %e,
+                        "Failed to read hosts file; keeping the names last read"
+                    );
+                }
+                self.failing = true;
+                false
+            }
         }
-
-        // File appeared, disappeared, or was modified
-        self.last_mtime = current_mtime;
-        self.apply(HostMap::load_hosts_file(&self.path));
-        true
     }
 
     /// Check if the hosts file has been modified and reload if so, reporting

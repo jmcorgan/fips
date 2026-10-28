@@ -52,7 +52,10 @@ The others:
   or returns what the screen made of the datagram with the path a reply
   takes, without reading the host map; the second (`answer`) answers a query
   that passed, with the host map, and returns the reply and any identity it
-  resolved.
+  resolved. It also covers which names the responder answers, judged by wire
+  label (a single label holding a dot is not under `fips`), and how a hosts
+  file that cannot be read keeps the names last read, is read again on the
+  next query, and is logged once per run of failures.
 - `core.rs` tests `../core.rs`: that the payload limits the node publishes
   give the same TCP MSS ceiling as the transport MTU they come from, for
   every MTU, and the same IPv6 MTU from 110 bytes up (below 110 no IPv6
@@ -275,9 +278,10 @@ The others:
   routes or create a device, need root. They are `#[ignore]`d, so the normal
   test run skips them; build with `cargo test --lib --no-run` and run the test
   binary under `sudo` with `--ignored`. The Linux unit-test job runs the
-  `tun.rs` namespace tests that way; the FreeBSD package workflow and the
-  macOS unit-test job run the `bsdnet` tests, with `--include-ignored`, and
-  the Windows unit-test job, whose runner is elevated, the `winnet` ones.
+  `tun.rs` namespace tests that way, and the `dns` ones in its namespace
+  step; the FreeBSD package workflow and the macOS unit-test job run the
+  `bsdnet` tests, with `--include-ignored`, and the Windows unit-test job,
+  whose runner is elevated, the `winnet` ones.
   Local CI runs none of them. They share the namespace harness
   (`ForgedSourceNetns`) with the inline tests in `../dns.rs`, which exposes it
   as `pub(super)`. The generic parts, running a setup command

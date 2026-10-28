@@ -913,3 +913,273 @@ fn only_a_query_off_the_mesh_and_past_the_screen_is_passed_to_be_answered() {
     assert!(identity.is_some(), "an AAAA for an npub resolves it");
     assert_eq!(&bytes[..2], &query[..2]);
 }
+
+/// A raw query of `qtype` whose question name is the given wire labels, each
+/// written with its own length byte, so a label may hold a dot.
+fn wire_query(labels: &[&[u8]], qtype: u16) -> Vec<u8> {
+    let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in labels {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label);
+    }
+    query.push(0);
+    query.extend_from_slice(&qtype.to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes());
+    query
+}
+
+/// The response code and answer count of a reply.
+fn rcode_answers(reply: &[u8]) -> (u8, u16) {
+    (reply[3] & 0x0f, u16::from_be_bytes([reply[6], reply[7]]))
+}
+
+/// A host map that maps `gateway` to `npub`.
+fn gateway_map(npub: &str) -> HostMap {
+    let mut hosts = HostMap::new();
+    hosts.insert("gateway", npub).unwrap();
+    hosts
+}
+
+/// A name is under `fips` only when its last wire label is `fips`: a single
+/// label holding a dot (`gateway\.fips.`), or a last label `fips.`, gets
+/// NXDOMAIN for AAAA and for another type and resolves no identity, as does
+/// a name with `fips` as a label short of the last, while
+/// the two labels `gateway` and `fips`, in any case, still resolve, for a
+/// host-map name and for an npub (RFC 1034 Section 3.1: a name is its
+/// labels, and a dot inside a label is part of that label).
+#[test]
+fn only_a_name_whose_last_label_is_fips_resolves_and_a_dot_inside_a_label_does_not_split_it() {
+    let npub = crate::Identity::generate().npub();
+    let hosts = gateway_map(&npub);
+    for labels in [
+        &[&b"gateway"[..], b"fips"][..],
+        &[&b"GateWay"[..], b"FiPs"][..],
+        &[npub.as_bytes(), b"fips"][..],
+    ] {
+        let (reply, identity) =
+            handle_dns_packet(&wire_query(labels, 28), 4444, 300, &hosts).unwrap();
+        assert_eq!(rcode_answers(&reply), (0, 1), "{labels:?} resolves");
+        assert!(identity.is_some(), "{labels:?} resolves an identity");
+    }
+    // The one label `<npub>.fips` is 68 bytes, past the 63 a label may
+    // hold, so the screen refuses it with FORMERR before it is answered.
+    for labels in [
+        &[&b"gateway.fips"[..]][..],
+        &[&b"gateway"[..], b"fips."][..],
+        &[npub.as_bytes(), b"fips."][..],
+        &[&b"gateway"[..], b"fips", b"example"][..],
+    ] {
+        for qtype in [28, 16] {
+            let (reply, identity) =
+                handle_dns_packet(&wire_query(labels, qtype), 4444, 300, &hosts).unwrap();
+            assert_eq!(
+                rcode_answers(&reply),
+                (3, 0),
+                "type {qtype} for {labels:?}: want NXDOMAIN and no answer"
+            );
+            assert!(identity.is_none(), "{labels:?} resolved an identity");
+        }
+    }
+}
+
+/// Every AAAA answer's owner is the question name itself, a pointer to
+/// offset 12: the answer never names labels other than the question's.
+#[test]
+fn an_aaaa_answer_owner_is_a_pointer_to_the_question_name() {
+    let npub = crate::Identity::generate().npub();
+    let hosts = gateway_map(&npub);
+    for labels in [
+        &[&b"gateway"[..], b"fips"][..],
+        &[&b"GATEWAY"[..], b"Fips"][..],
+    ] {
+        let query = wire_query(labels, 28);
+        let (reply, _) = handle_dns_packet(&query, 4444, 300, &hosts).unwrap();
+        assert_eq!(rcode_answers(&reply).1, 1, "{labels:?} is answered");
+        assert_eq!(
+            &reply[query.len()..query.len() + 2],
+            &[0xc0, 0x0c],
+            "owner of the answer to {labels:?}"
+        );
+    }
+}
+
+/// Set a file's modification time.
+fn set_mtime(path: &std::path::Path, at: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
+/// Whether the responder, with its host map as `refresh_hosts` leaves it,
+/// resolves `<name>.fips` for AAAA.
+fn resolves(reloader: &mut HostMapReloader, name: &str) -> bool {
+    refresh_hosts(reloader, None);
+    let query = wire_query(&[name.as_bytes(), b"fips"], 28);
+    let (_, identity) = handle_dns_packet(&query, 4444, 300, reloader.hosts()).unwrap();
+    identity.is_some()
+}
+
+/// A hosts file whose good load is followed by `gateway` mapped and a
+/// modification time a minute ago, and the reloader that read it.
+fn loaded_hosts(
+    dir: &tempfile::TempDir,
+) -> (std::path::PathBuf, std::time::SystemTime, HostMapReloader) {
+    let path = dir.path().join("hosts");
+    let npub = crate::Identity::generate().npub();
+    std::fs::write(&path, format!("gateway {npub}\n")).unwrap();
+    let at = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    set_mtime(&path, at);
+    let reloader = HostMapReloader::new(HostMap::new(), path.clone());
+    (path, at, reloader)
+}
+
+/// A hosts file that stops reading (here, non-UTF-8 bytes) after a good load
+/// leaves the names it held resolving: the responder keeps its last good map
+/// rather than dropping every hosts-file name.
+#[test]
+fn a_hosts_file_that_becomes_unreadable_keeps_its_last_names_resolving() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, at, mut reloader) = loaded_hosts(&dir);
+    assert!(resolves(&mut reloader, "gateway"), "the good load");
+
+    std::fs::write(&path, b"# caf\xe9\ngateway npub1notread\n").unwrap();
+    set_mtime(&path, at + std::time::Duration::from_secs(10));
+    assert!(
+        resolves(&mut reloader, "gateway"),
+        "gateway stopped resolving once the hosts file could not be read"
+    );
+}
+
+/// A hosts file that overrides a peer alias and then stops reading keeps its
+/// override: the alias the file replaced does not come back, since the
+/// responder keeps the map last read rather than rebuilding it from the
+/// peer aliases alone.
+#[test]
+fn a_hosts_file_that_becomes_unreadable_keeps_its_override_of_a_peer_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts");
+    let alias = crate::Identity::generate().npub();
+    let file = crate::Identity::generate().npub();
+    std::fs::write(&path, format!("gateway {file}\n")).unwrap();
+    let at = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    set_mtime(&path, at);
+    let mut reloader = HostMapReloader::new(gateway_map(&alias), path.clone());
+    assert!(resolves(&mut reloader, "gateway"), "the good load");
+    assert_eq!(reloader.hosts().lookup_npub("gateway"), Some(file.as_str()));
+
+    std::fs::write(&path, b"# caf\xe9\ngateway npub1notread\n").unwrap();
+    set_mtime(&path, at + std::time::Duration::from_secs(10));
+    assert!(
+        resolves(&mut reloader, "gateway"),
+        "gateway stopped resolving"
+    );
+    assert_eq!(
+        reloader.hosts().lookup_npub("gateway"),
+        Some(file.as_str()),
+        "the peer alias the hosts file overrode came back once the file could not be read"
+    );
+}
+
+/// A failed hosts-file read is tried again on the next query even when the
+/// file then reads without its modification time changing, as after a
+/// `chmod` fix: the names it then holds resolve.
+#[test]
+fn a_failed_hosts_file_read_is_retried_though_the_mtime_did_not_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, at, mut reloader) = loaded_hosts(&dir);
+    assert!(resolves(&mut reloader, "gateway"), "the good load");
+
+    let failed = at + std::time::Duration::from_secs(10);
+    std::fs::write(&path, b"\xff\xfe not text\n").unwrap();
+    set_mtime(&path, failed);
+    refresh_hosts(&mut reloader, None);
+
+    let later = crate::Identity::generate().npub();
+    std::fs::write(&path, format!("later {later}\n")).unwrap();
+    set_mtime(&path, failed);
+    assert!(
+        resolves(&mut reloader, "later"),
+        "a name added while the file was unreadable never resolved, because the failed \
+         read was not retried"
+    );
+    assert!(
+        !resolves(&mut reloader, "gateway"),
+        "the name the readable file dropped still resolves"
+    );
+}
+
+/// A hosts file removed after a good load is not a failed read: its names
+/// stop resolving, as before.
+#[test]
+fn a_hosts_file_removed_after_a_good_load_drops_its_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _, mut reloader) = loaded_hosts(&dir);
+    assert!(resolves(&mut reloader, "gateway"), "the good load");
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        !resolves(&mut reloader, "gateway"),
+        "gateway still resolves with the hosts file removed"
+    );
+}
+
+/// A run of failed reads warns once, however many queries retry it, and the
+/// read that ends the run is logged once at info.
+#[test]
+fn a_run_of_failed_hosts_file_reads_warns_once_and_its_end_is_logged() {
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    let dir = tempfile::tempdir().unwrap();
+    let (path, at, mut reloader) = loaded_hosts(&dir);
+    let failed = at + std::time::Duration::from_secs(10);
+    std::fs::write(&path, b"\xff\xfe not text\n").unwrap();
+    set_mtime(&path, failed);
+    for _ in 0..3 {
+        refresh_hosts(&mut reloader, None);
+    }
+    let warned = logs.lines_with("Failed to read hosts file; keeping the names last read");
+    assert_eq!(
+        warned.len(),
+        1,
+        "warnings for three failed reads: {warned:?}"
+    );
+    assert!(warned[0].starts_with("WARN"), "{}", warned[0]);
+    assert!(
+        logs.lines_with("Hosts file read again after a failed read")
+            .is_empty()
+    );
+
+    std::fs::write(&path, "# readable\n").unwrap();
+    set_mtime(&path, failed);
+    refresh_hosts(&mut reloader, None);
+    refresh_hosts(&mut reloader, None);
+    let again = logs.lines_with("Hosts file read again after a failed read");
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert!(again[0].starts_with("INFO"), "{}", again[0]);
+}
+
+/// A run of failed reads is ended only by a read: when the modification time
+/// returns to that of the last good read while the file is still unreadable,
+/// no read happens, so no "read again" line is logged and the run goes on.
+#[test]
+fn a_failed_read_run_is_not_ended_by_the_mtime_returning_to_the_last_good_read() {
+    let (logs, _guard) = crate::testutil::capture_logs_scoped();
+    let dir = tempfile::tempdir().unwrap();
+    let (path, at, mut reloader) = loaded_hosts(&dir);
+    std::fs::write(&path, b"\xff\xfe not text\n").unwrap();
+    set_mtime(&path, at + std::time::Duration::from_secs(10));
+    assert!(!reloader.check_reload());
+    set_mtime(&path, at);
+    assert!(!reloader.check_reload());
+    assert!(
+        logs.lines_with("Hosts file read again after a failed read")
+            .is_empty(),
+        "a read that did not happen was logged"
+    );
+
+    set_mtime(&path, at + std::time::Duration::from_secs(20));
+    assert!(!reloader.check_reload());
+    let warned = logs.lines_with("Failed to read hosts file; keeping the names last read");
+    assert_eq!(warned.len(), 1, "the run warned again: {warned:?}");
+}

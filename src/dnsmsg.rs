@@ -150,10 +150,33 @@ pub(crate) struct Query<'a> {
     /// The question, QNAME through QCLASS, exactly as received.
     question: &'a [u8],
     /// The question name in text form, identical to `simple-dns`'s `Name`
-    /// display: labels joined by `.`, no trailing dot.
+    /// display: labels joined by `.`, no trailing dot. A dot inside a label
+    /// is not escaped, so this is for logs and text lookups only; which zone
+    /// the name is in is read from [`Query::labels`].
+    // Outside tests only the gateway reads it, and the gateway is Linux-only.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub name: String,
     /// The question type, as received.
     pub qtype: u16,
+}
+
+impl Query<'_> {
+    /// The question name's labels in order, each as its bytes on the wire.
+    ///
+    /// A label can hold any byte, a dot included, so a responder deciding
+    /// which zone a name is in reads its labels here rather than splitting
+    /// [`Query::name`], whose text cannot tell `a.fips` (two labels) from the
+    /// one label `a\.fips`.
+    pub(crate) fn labels(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        let wire = &self.question[..self.question.len() - 4];
+        let mut pos = 0;
+        std::iter::from_fn(move || {
+            let len = usize::from(*wire.get(pos)?);
+            let label = wire.get(pos + 1..pos + 1 + len).filter(|_| len != 0)?;
+            pos += 1 + len;
+            Some(label)
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]

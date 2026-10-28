@@ -1,4 +1,5 @@
-//! Tests that the gateway DNS listener does not answer queries arriving on
+//! Tests that the gateway DNS listener forwards only names under `fips`, as
+//! the wire labels give them, that it does not answer queries arriving on
 //! the mesh interface, that it does not send a reply to a LAN query with a
 //! forged mesh source into the mesh, and that the gateway's startup probe of
 //! the daemon's resolver passes only on the daemon's answer to its own
@@ -14,7 +15,9 @@
 //! namespace, beside a LAN veth to a LAN namespace, and run the real listener
 //! and `serve` inside it.
 
-use super::tests::{TEST_TTL, assert_pool_answer, build_answer, build_query, test_pool};
+use super::tests::{
+    TEST_TTL, assert_pool_answer, build_answer, build_query, spawn_upstream, test_pool,
+};
 use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -716,4 +719,87 @@ async fn a_lan_query_from_a_forged_mesh_source_is_not_answered_into_the_mesh_on_
         "listener bound to fdab::1",
     )
     .await;
+}
+
+/// A query whose question name is the given wire labels, each written with
+/// its own length byte, so a label may hold a dot.
+fn wire_query(id: u16, labels: &[&[u8]]) -> Vec<u8> {
+    let mut query = id.to_be_bytes().to_vec();
+    query.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in labels {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label);
+    }
+    query.push(0);
+    query.extend_from_slice(&28u16.to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes());
+    query
+}
+
+/// A name the gateway is not authoritative for gets REFUSED carrying the
+/// question, is not forwarded to the daemon and mints no pool mapping, when
+/// its text reads as a `.fips` name but its labels do not end in `fips`: the
+/// one label `gateway.fips`, the one label `.fips`, and `gateway` under a
+/// last label `fips.` (RFC 1034 Section 3.1; the gateway answers only for
+/// names under `fips`). The zone apex `fips` itself is refused too, as
+/// before.
+#[tokio::test]
+async fn a_name_whose_last_label_is_not_fips_is_refused_and_not_forwarded() {
+    let upstream = UdpSocket::bind("[::1]:0").await.unwrap();
+    let to = upstream.local_addr().unwrap();
+    let pool = test_pool();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+    for labels in [
+        &[&b"gateway.fips"[..]][..],
+        &[&b".fips"[..]][..],
+        &[&b"gateway"[..], b"fips."][..],
+        &[&b"fips"[..]][..],
+    ] {
+        let query = wire_query(0x1234, labels);
+        let reply = handle_query(&query, 53000, to, TEST_TTL, &pool, &event_tx)
+            .await
+            .expect("a reply");
+        assert_eq!(
+            (reply[3] & 0x0f, &reply[12..]),
+            (5, &query[12..]),
+            "{labels:?}: want REFUSED with the question and nothing else"
+        );
+        let mut buf = [0u8; 512];
+        assert!(
+            upstream.try_recv_from(&mut buf).is_err(),
+            "{labels:?} was forwarded to the daemon"
+        );
+        assert!(event_rx.try_recv().is_err(), "{labels:?} minted a mapping");
+    }
+}
+
+/// The two labels `gateway` and `fips`, in any case, are forwarded and
+/// answered with a pool address, so the label check does not refuse a name
+/// under `fips`.
+#[tokio::test]
+async fn the_two_labels_gateway_and_fips_in_any_case_are_forwarded_and_mapped() {
+    for labels in [
+        &[&b"gateway"[..], b"fips"][..],
+        &[&b"GateWay"[..], b"FIPS"][..],
+    ] {
+        let socket = UdpSocket::bind("[::1]:0").await.unwrap();
+        let to = socket.local_addr().unwrap();
+        let name = String::from_utf8(labels.join(&b"."[..])).unwrap();
+        let handle = spawn_upstream(socket, move |id| vec![build_answer(id, &name, "fd00::1")]);
+        let pool = test_pool();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let reply = handle_query(
+            &wire_query(0x1235, labels),
+            53000,
+            to,
+            TEST_TTL,
+            &pool,
+            &event_tx,
+        )
+        .await
+        .expect("a reply");
+        handle.abort();
+        assert_pool_answer(&reply);
+        assert!(event_rx.try_recv().is_ok(), "{labels:?} minted no mapping");
+    }
 }
