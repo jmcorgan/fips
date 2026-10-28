@@ -123,10 +123,12 @@ impl MacRadio {
 
     /// As [`Self::start`], calling `on_denied` once if CoreBluetooth refuses
     /// this process — which it always does to a root launchd daemon.
+    /// `on_denied` returns whether its fallback started; only then does this
+    /// radio retire.
     pub fn start_with(
         slot: Arc<BleRadioSlot>,
         mtu: u16,
-        on_denied: Option<Box<dyn FnOnce() + Send>>,
+        on_denied: Option<Box<dyn FnOnce() -> bool + Send>>,
     ) -> Arc<Self> {
         let shared = Arc::new(Shared {
             queue: DispatchQueue::new("com.fips.ble", DispatchQueueAttr::SERIAL),
@@ -201,12 +203,16 @@ pub fn start_daemon_radio(
             match super::agent_server::AgentServer::start(slot, &agent_socket) {
                 Ok(server) => {
                     let _ = agent.set(server);
+                    true
                 }
-                Err(e) => warn!(
-                    path = %agent_socket.display(),
-                    error = %e,
-                    "BLE: could not listen for the fips BLE agent"
-                ),
+                Err(e) => {
+                    warn!(
+                        path = %agent_socket.display(),
+                        error = %e,
+                        "BLE: could not listen for the fips BLE agent"
+                    );
+                    false
+                }
             }
         })
     };
@@ -247,8 +253,9 @@ struct Shared {
     /// because [`BleRadio::listen`] is synchronous and is called from the
     /// transport, not from the queue.
     psm: AtomicU16,
-    /// Called once, the first time CoreBluetooth reports `Unauthorized`.
-    on_denied: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Called once, the first time CoreBluetooth reports `Unauthorized`;
+    /// returns whether its fallback started.
+    on_denied: Mutex<Option<Box<dyn FnOnce() -> bool + Send>>>,
     state: Mutex<QueueState>,
 }
 
@@ -267,20 +274,14 @@ impl Shared {
     }
 
     /// CoreBluetooth refused this process; run the fallback, once. Returns
-    /// whether there was one, in which case this radio retires.
+    /// whether the fallback started, in which case this radio retires.
     fn denied(&self) -> bool {
         let hook = self
             .on_denied
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        match hook {
-            Some(hook) => {
-                hook();
-                true
-            }
-            None => false,
-        }
+        hook.is_some_and(|hook| hook())
     }
 
     /// The bridge for session `generation`, if that is still the live one.
@@ -305,8 +306,14 @@ impl Shared {
             st.listener.power_off();
             st.service = None;
             self.psm.store(0, Ordering::Relaxed);
-        } else if !st.manager_pending && st.listener.wants_publish() {
-            st.publish();
+        } else if !st.manager_pending {
+            if let Some(hold) = st.listener.begin_hold() {
+                debug!("BLE: holding the publish for an abandoned publish's answer");
+                self.end_hold_later(hold, weak);
+            }
+            if st.listener.wants_publish() {
+                st.publish();
+            }
         }
 
         let up = st.central_on && st.manager_on && st.listener.published().is_some();
@@ -402,6 +409,8 @@ impl Shared {
                 if st.manager_on {
                     st.unpublish_stale();
                 }
+                // A publish held for this answer goes out now.
+                self.power_changed(st, weak);
                 return;
             }
             PublishOutcome::Failed {
@@ -469,6 +478,21 @@ impl Shared {
             st.listener.retry_fired();
             if st.wants_advertising {
                 shared.republish(&mut st);
+            }
+        });
+    }
+
+    /// End hold `hold` after [`PUBLISH_RETRY`] if the abandoned publish's
+    /// answer has not ended it first, and publish.
+    fn end_hold_later(&self, hold: u64, weak: &Weak<Shared>) {
+        let weak = weak.clone();
+        let when = DispatchTime::try_from(PUBLISH_RETRY).unwrap_or(DispatchTime::FOREVER);
+        let _ = self.queue.after(when, move || {
+            let Some(shared) = weak.upgrade() else { return };
+            let mut st = shared.lock();
+            if st.listener.end_hold(hold) {
+                debug!("BLE: no answer to the abandoned publish; publishing");
+                shared.power_changed(&mut st, &weak);
             }
         });
     }
@@ -924,11 +948,13 @@ impl OpenChannel {
     }
 }
 
-/// A CoreBluetooth object carried into a closure that runs on the queue.
-struct QueueOnly<T>(#[allow(dead_code)] T);
+/// A replaced peripheral manager carried into a closure that runs on the
+/// queue, to be released there.
+struct QueueOnly(#[allow(dead_code)] Retained<CBPeripheralManager>);
 
-// SAFETY: only moved to the radio's queue and used (dropped) there.
-unsafe impl<T> Send for QueueOnly<T> {}
+// SAFETY: the peripheral manager is only moved to the radio's queue and
+// dropped there.
+unsafe impl Send for QueueOnly {}
 
 /// Everything CoreBluetooth, touched only on the queue.
 #[derive(Default)]
