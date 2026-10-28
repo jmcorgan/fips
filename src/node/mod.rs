@@ -3738,7 +3738,10 @@ impl Node {
     /// With this set, [`Self::start`] skips system-TUN creation (it gates on
     /// `tun_tx` being unset). Packets pushed into `app_outbound_tx` bypass the
     /// system-TUN reader's `handle_tun_packet`, so FIPS does not filter them by
-    /// the `fd00::/8` prefix and clamps no TCP MSS in either direction. It does
+    /// the `fd00::/8` prefix, and of the TCP MSS clamps only one applies: any
+    /// SYN-flagged segment (a SYN or a SYN-ACK) held until its session is
+    /// established is clamped when it is released, as on a system TUN. No
+    /// other SYN-flagged segment is clamped, in either direction. FIPS does
     /// not refuse an off-mesh destination up front either: it looks up bytes 1
     /// to 15 of any destination in the identity cache and, on a miss, answers
     /// with ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the

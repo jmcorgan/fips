@@ -233,12 +233,18 @@ interface and clamps the Maximum Segment Size (MSS) option:
 clamped_mss = effective_ipv6_mtu - 40 (IPv6 header) - 20 (TCP header)
 ```
 
-Clamping is applied in two places:
+Clamping is applied in three places:
 
 - **TUN reader** (outbound): clamps MSS on outbound SYN-flagged
   segments (a local initiator's SYN, a local listener's SYN-ACK)
 - **TUN writer** (inbound): clamps MSS on inbound SYN-flagged segments
   (a remote initiator's SYN as well as the SYN-ACK answering a local one)
+- **Release of held packets** (outbound): a SYN-flagged segment held
+  while discovery and the session handshake run is clamped again when
+  the session is established, with the path MTU discovery has just
+  stored, since the reader clamped it before that value was known. This
+  is done by the node, not the TUN reader, so it applies to an
+  [app-owned TUN](#app-owned-tun-embedded-hosts) as well
 
 Together, these ensure both directions of a TCP connection use
 appropriately sized segments from the start, avoiding the initial
@@ -354,16 +360,19 @@ With the channels installed, `start()` skips system-TUN creation (it gates on
 
 Because packets enter via `app_outbound_tx` rather than the Reader Thread, they
 **bypass `handle_tun_packet`**: FIPS does not filter them by the `fd00::/8`
-prefix, and it clamps no TCP MSS in either direction, since the
-[TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping) is done only by the
-system TUN's reader and writer. Nor does FIPS refuse an off-mesh destination up
-front: `handle_tun_outbound` looks up bytes 1 to 15 of any destination in the
-identity cache, and on a miss answers with ICMPv6
-Destination Unreachable on `app_inbound_rx`, sourced from the node's own mesh
-address. An oversize packet gets Packet Too Big on the same channel. The
-embedder is therefore responsible for routing only `fd00::/8` to its TUN, for
-expecting ICMPv6 errors on `app_inbound_rx`, and for clamping TCP MSS on
-SYN-flagged segments in both directions.
+prefix, and of the [TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping) only
+the clamp at the release of held packets applies: any SYN-flagged segment (a SYN
+or a SYN-ACK) held until its session is established is clamped when it is
+released, as on a system TUN. Every other SYN-flagged segment, in either
+direction, goes unclamped, since those clamps are done by the system TUN's
+reader and writer.
+Nor does FIPS refuse an off-mesh destination up front: `handle_tun_outbound`
+looks up bytes 1 to 15 of any destination in the identity cache, and on a miss
+answers with ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the
+node's own mesh address. An oversize packet gets Packet Too Big on the same
+channel. The embedder is therefore responsible for routing only `fd00::/8` to
+its TUN, for expecting ICMPv6 errors on `app_inbound_rx`, and for clamping TCP
+MSS on SYN-flagged segments in both directions.
 
 ### App-Owned DNS Path (embedded hosts)
 

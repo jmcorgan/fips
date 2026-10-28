@@ -4054,12 +4054,35 @@ impl Node {
             Some(q) => q,
             None => return,
         };
-        for packet in packets {
+        for mut packet in packets {
+            if let Some(mss) = self.reclamp_held_syn(&mut packet) {
+                debug!(dest = %self.peer_display_name(dest_addr), max_mss = mss, "Clamped held TCP SYN again at release");
+            }
             if let Err(e) = self.send_ipv6_packet(dest_addr, &packet).await {
                 debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
                 break;
             }
         }
+    }
+
+    /// Clamp a held TCP SYN again with the path MTU known at release.
+    ///
+    /// The TUN reader clamps a SYN when it reads it, which for a new
+    /// destination is before discovery has returned the path MTU, so the SYN
+    /// carries the IPv6-minimum ceiling even when the path is narrower. The
+    /// SYN is then held until discovery and the session handshake finish, by
+    /// which time discovery's value is in `path_mtu_lookup`. The clamp only
+    /// lowers, so applying it again cannot loosen it. Returns the MSS written,
+    /// or `None` when the packet is not a SYN or already fits.
+    pub(in crate::node) fn reclamp_held_syn(&self, packet: &mut [u8]) -> Option<u16> {
+        use crate::upper::tcp_mss::{clamp_tcp_mss, is_ipv6_tcp_syn};
+        if !is_ipv6_tcp_syn(packet) {
+            return None;
+        }
+        let ceiling = crate::upper::icmp::mss_ceiling(self.transport_mtu());
+        let mss =
+            crate::upper::tun::per_flow_max_mss(&self.path_mtu_lookup, &packet[24..40], ceiling);
+        clamp_tcp_mss(packet, mss).then_some(mss)
     }
 
     /// Retry session initiation after discovery provided coordinates.

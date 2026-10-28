@@ -276,7 +276,10 @@ minimum). The fallback handles cold-flow first-SYN traffic — the very
 first SYN of a flow may arrive before the MMP path-MTU echo and any
 per-flow lookup has been populated, so the conservative ceiling
 prevents the SYN-ACK chain from negotiating a too-large MSS that
-would later drop.
+would later drop. A SYN-flagged segment held until its session is
+established is clamped again when it is released, with the path MTU
+discovery has just stored, so the first connection to a new
+destination gets the learned MSS rather than the fallback.
 
 The adapter integrates with the MTU subsystem rather than owning it.
 The "why we clamp and what `max_mss` means" lives here in the MTU

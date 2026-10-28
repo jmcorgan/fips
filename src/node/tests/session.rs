@@ -11861,3 +11861,185 @@ async fn characterize_a_default_node_behind_a_1280_byte_forwarder_loses_1280_byt
         cleanup_nodes(&mut nodes).await;
     }
 }
+
+// ============================================================================
+// A TCP SYN held behind discovery is clamped again at release
+// ============================================================================
+
+/// Build a converged three-node chain with the given MTUs in which node 0
+/// knows node 2's identity, as DNS resolution would leave it, and nothing
+/// else: no coordinates and no session, so node 0's first packet to node 2
+/// waits for discovery and the handshake.
+async fn discovery_chain(mtus: [u16; 3]) -> Vec<TestNode> {
+    let mut nodes = run_tree_test_with_mtus(&mtus, &[(0, 1), (1, 2)]).await;
+    verify_tree_convergence(&nodes);
+    let c_addr = *nodes[2].node.node_addr();
+    let c_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(c_addr, c_pubkey);
+    assert!(
+        nodes[0].node.coord_cache().get_entry(&c_addr).is_none(),
+        "setup: node 0 has no coordinates for node 2"
+    );
+    assert!(
+        nodes[0].node.get_session(&c_addr).is_none(),
+        "setup: no session from node 0 to node 2"
+    );
+    nodes
+}
+
+/// An IPv6 TCP segment from `src` to `dst` with the given flags and an MSS
+/// option of `mss`, carrying a valid checksum.
+fn build_tcp_segment(
+    src: &crate::FipsAddress,
+    dst: &crate::FipsAddress,
+    flags: u8,
+    mss: u16,
+) -> Vec<u8> {
+    let mut tcp = [0u8; 24];
+    tcp[0..2].copy_from_slice(&40000u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    tcp[4..8].copy_from_slice(&0x0102_0304u32.to_be_bytes());
+    tcp[12] = 6 << 4; // data offset: 24 bytes
+    tcp[13] = flags;
+    tcp[14..16].copy_from_slice(&64240u16.to_be_bytes());
+    tcp[20] = 2; // MSS option
+    tcp[21] = 4;
+    tcp[22..24].copy_from_slice(&mss.to_be_bytes());
+    let mut packet = build_ipv6_packet(src, dst, &tcp);
+    packet[6] = 6;
+    crate::upper::tcp_mss::recalculate_l4_checksum(&mut packet);
+    packet
+}
+
+/// An IPv6 TCP SYN from `src` to `dst` advertising MSS `mss`.
+fn build_tcp_syn(src: &crate::FipsAddress, dst: &crate::FipsAddress, mss: u16) -> Vec<u8> {
+    build_tcp_segment(src, dst, 0x02, mss)
+}
+
+/// The MSS option value of a segment built by `build_tcp_segment`.
+fn tcp_mss_of(packet: &[u8]) -> u16 {
+    assert_eq!(packet[60], 2, "MSS option kind");
+    u16::from_be_bytes([packet[62], packet[63]])
+}
+
+/// Whether a TCP or UDP packet's checksum is the one its contents give.
+fn l4_checksum_verifies(packet: &[u8]) -> bool {
+    let mut recomputed = packet.to_vec();
+    crate::upper::tcp_mss::recalculate_l4_checksum(&mut recomputed);
+    recomputed == packet
+}
+
+/// A lone node and a destination address on the mesh, for the re-clamp's
+/// unit tests.
+fn reclamp_node() -> (Node, crate::FipsAddress, crate::FipsAddress) {
+    let node = make_node();
+    let src = crate::FipsAddress::from_node_addr(node.node_addr());
+    let dst = crate::FipsAddress::from_node_addr(Identity::generate().node_addr());
+    (node, src, dst)
+}
+
+#[test]
+fn a_held_syn_is_clamped_again_to_the_path_mtu_discovery_stored() {
+    let (node, src, dst) = reclamp_node();
+    node.path_mtu_lookup_insert(dst, 1200);
+    let mut syn = build_tcp_syn(&src, &dst, 1143);
+
+    assert_eq!(node.reclamp_held_syn(&mut syn), Some(1063));
+    assert_eq!(tcp_mss_of(&syn), 1063);
+    assert!(l4_checksum_verifies(&syn), "checksum recomputed");
+}
+
+#[test]
+fn a_held_syn_keeps_its_mss_when_no_path_mtu_is_stored() {
+    let (node, src, dst) = reclamp_node();
+    let syn = build_tcp_syn(&src, &dst, 1143);
+    let mut released = syn.clone();
+
+    assert_eq!(node.reclamp_held_syn(&mut released), None);
+    assert_eq!(released, syn);
+}
+
+#[test]
+fn reclamping_never_raises_a_syn_mss() {
+    let (node, src, dst) = reclamp_node();
+    node.path_mtu_lookup_insert(dst, 1500);
+    // The ceiling for this destination is 1143 (the node's own, under the
+    // 1363 the stored entry allows); a SYN below it would be raised by a
+    // clamp that writes whenever the values differ.
+    let syn = build_tcp_syn(&src, &dst, 1000);
+    let mut released = syn.clone();
+
+    assert_eq!(node.reclamp_held_syn(&mut released), None);
+    assert_eq!(released, syn);
+}
+
+#[test]
+fn a_held_packet_that_is_not_a_tcp_syn_is_released_unchanged() {
+    let (node, src, dst) = reclamp_node();
+    node.path_mtu_lookup_insert(dst, 1200);
+    let ack = build_tcp_segment(&src, &dst, 0x10, 1143);
+    let mut udp = build_ipv6_packet(&src, &dst, &[0u8; 64]);
+    udp[6] = 17;
+    udp[44..46].copy_from_slice(&64u16.to_be_bytes());
+    crate::upper::tcp_mss::recalculate_l4_checksum(&mut udp);
+
+    for packet in [ack, udp] {
+        let mut released = packet.clone();
+        assert_eq!(node.reclamp_held_syn(&mut released), None);
+        assert_eq!(released, packet);
+    }
+}
+
+/// Drive the chain until node 2's host has received something, or a bounded
+/// number of quiet rounds have passed, and return what it received.
+async fn drive_until_delivered(
+    nodes: &mut [TestNode],
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+) -> Vec<Vec<u8>> {
+    let mut delivered = Vec::new();
+    for _ in 0..20 {
+        drain_to_quiescence(nodes).await;
+        delivered.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+        if !delivered.is_empty() {
+            break;
+        }
+    }
+    delivered
+}
+
+#[tokio::test]
+async fn the_first_syn_to_a_new_destination_across_a_narrow_transit_link_arrives_with_the_mss_discovery_learned()
+ {
+    let mut nodes = discovery_chain([1357, 1200, 1357]).await;
+    let a_fips = crate::FipsAddress::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::FipsAddress::from_node_addr(nodes[2].node.node_addr());
+    let (c_tx, c_rx) = std::sync::mpsc::channel();
+    nodes[2].node.supervisor.tun_tx = Some(c_tx);
+    let initiated = nodes[0].node.metrics().lookup.req_initiated.get();
+
+    // What the TUN reader leaves in a SYN to a destination it has no path
+    // MTU for.
+    let syn = build_tcp_syn(&a_fips, &c_fips, 1143);
+    nodes[0].node.handle_tun_outbound(syn).await;
+    assert_eq!(
+        nodes[0].node.pending_tun_total_packets(),
+        1,
+        "precondition: the SYN is held"
+    );
+
+    let delivered = drive_until_delivered(&mut nodes, &c_rx).await;
+    assert!(
+        nodes[0].node.metrics().lookup.req_initiated.get() > initiated,
+        "precondition: discovery ran"
+    );
+    assert_eq!(
+        nodes[0].node.path_mtu_lookup_get(&c_fips),
+        Some(1200),
+        "precondition: discovery stored the narrow path"
+    );
+    assert_eq!(delivered.len(), 1, "the SYN arrives");
+    assert_eq!(tcp_mss_of(&delivered[0]), 1063);
+    assert!(l4_checksum_verifies(&delivered[0]), "checksum recomputed");
+
+    cleanup_nodes(&mut nodes).await;
+}

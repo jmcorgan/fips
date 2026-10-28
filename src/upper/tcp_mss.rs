@@ -26,6 +26,15 @@ fn is_tcp_syn(tcp_header: &[u8]) -> bool {
     (tcp_header[TCP_FLAGS_OFFSET] & TCP_FLAG_SYN) != 0
 }
 
+/// Whether an IPv6 packet is a TCP segment with SYN set, with TCP directly
+/// after the fixed header (the only shape [`clamp_tcp_mss`] rewrites).
+pub(crate) fn is_ipv6_tcp_syn(ipv6_packet: &[u8]) -> bool {
+    ipv6_packet.len() >= 40
+        && ipv6_packet[0] >> 4 == 6
+        && ipv6_packet[6] == 6
+        && is_tcp_syn(&ipv6_packet[40..])
+}
+
 /// Get the TCP data offset (header length in 32-bit words).
 fn get_tcp_data_offset(tcp_header: &[u8]) -> usize {
     if tcp_header.len() < TCP_HEADER_MIN_LEN {
