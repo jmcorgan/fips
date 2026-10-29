@@ -1046,3 +1046,101 @@ fn test_clear_slot_drops_a_present_value_once_and_leaves_none() {
     clear_slot(&mut flag);
     assert_eq!(flag, None);
 }
+
+// ===== Cost of reading an IK msg2 =====
+
+/// An IK initiator that has sent msg1, and a responder that has read it and
+/// written its msg2. Returns the initiator, the responder and the msg2.
+fn ik_pair_at_msg2() -> (HandshakeState, HandshakeState, Vec<u8>) {
+    let responder_keypair = generate_keypair();
+    let mut initiator =
+        HandshakeState::new_initiator(generate_keypair(), responder_keypair.public_key());
+    initiator.set_local_epoch(generate_epoch());
+    let mut responder = HandshakeState::new_responder(responder_keypair);
+    responder.set_local_epoch(generate_epoch());
+
+    let msg1 = initiator.write_message_1().unwrap();
+    responder.read_message_1(&msg1).unwrap();
+    let msg2 = responder.write_message_2().unwrap();
+    (initiator, responder, msg2)
+}
+
+/// A full-length msg2 whose ephemeral is a valid point and whose encrypted
+/// epoch does not authenticate: the read reaches the DHs before it fails.
+fn garbage_ik_msg2() -> Vec<u8> {
+    let mut msg2 = generate_keypair().public_key().serialize().to_vec();
+    msg2.resize(HANDSHAKE_MSG2_SIZE, 0xA5);
+    msg2
+}
+
+/// Both sides' sessions decrypt each other's first message.
+fn assert_sessions_talk(initiator: HandshakeState, responder: HandshakeState) {
+    let mut initiator = initiator.into_session().unwrap();
+    let mut responder = responder.into_session().unwrap();
+
+    let counter = initiator.current_send_counter();
+    let ciphertext = initiator.encrypt(b"initiator to responder").unwrap();
+    let plaintext = responder
+        .decrypt_with_replay_check(&ciphertext, counter)
+        .unwrap();
+    assert_eq!(plaintext, b"initiator to responder");
+
+    let counter = responder.current_send_counter();
+    let ciphertext = responder.encrypt(b"responder to initiator").unwrap();
+    let plaintext = initiator
+        .decrypt_with_replay_check(&ciphertext, counter)
+        .unwrap();
+    assert_eq!(plaintext, b"responder to initiator");
+}
+
+#[test]
+fn a_refused_ik_msg2_runs_one_dh_and_the_genuine_msg2_still_reads() {
+    let (mut initiator, responder, msg2) = ik_pair_at_msg2();
+
+    let before = dh_ops();
+    let refused = initiator.try_read_message_2(&garbage_ik_msg2());
+    let spent = dh_ops() - before;
+    assert!(
+        matches!(refused, Err(NoiseError::DecryptionFailed)),
+        "a garbage msg2 must fail at the epoch AEAD, got {refused:?}"
+    );
+    assert_eq!(spent, 1, "a refused msg2 must cost exactly one DH (ee)");
+
+    initiator
+        .try_read_message_2(&msg2)
+        .expect("the genuine msg2 must read after a refused one");
+    assert!(initiator.is_complete());
+    assert!(responder.is_complete());
+    assert_sessions_talk(initiator, responder);
+}
+
+#[test]
+fn a_genuine_ik_msg2_read_runs_one_dh() {
+    let (mut initiator, responder, msg2) = ik_pair_at_msg2();
+
+    let before = dh_ops();
+    initiator.read_message_2(&msg2).unwrap();
+    assert_eq!(
+        dh_ops() - before,
+        1,
+        "reading the genuine msg2 must cost exactly one DH (ee)"
+    );
+    assert_sessions_talk(initiator, responder);
+}
+
+#[test]
+fn an_invalid_point_msg2_runs_no_dh() {
+    let (mut initiator, _responder, _msg2) = ik_pair_at_msg2();
+
+    let before = dh_ops();
+    let refused = initiator.try_read_message_2(&[0xFF; HANDSHAKE_MSG2_SIZE]);
+    assert!(
+        matches!(refused, Err(NoiseError::InvalidPublicKey)),
+        "an invalid ephemeral must be refused at the point parse, got {refused:?}"
+    );
+    assert_eq!(
+        dh_ops() - before,
+        0,
+        "a msg2 with an invalid ephemeral must be refused before any DH"
+    );
+}

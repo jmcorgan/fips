@@ -955,7 +955,7 @@ async fn test_session_100_nodes() {
 // ============================================================================
 
 /// Build a minimal valid IPv6 packet with given source and destination addresses.
-fn build_ipv6_packet(
+pub(super) fn build_ipv6_packet(
     src: &crate::FipsAddress,
     dst: &crate::FipsAddress,
     payload: &[u8],
@@ -1445,18 +1445,18 @@ async fn aged_link_pair(
 
 /// A two-node pair caught mid FMP rekey, with node 1's msg2 held back from
 /// node 0. Built by [`rekey_pair_with_held_msg2`].
-struct HeldMsg2Pair {
-    nodes: Vec<TestNode>,
-    node0_addr: NodeAddr,
-    node1_addr: NodeAddr,
-    fips0: crate::FipsAddress,
-    fips1: crate::FipsAddress,
-    tun0_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    tun1_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    node0_idx_before: Option<crate::utils::index::SessionIndex>,
-    node1_idx_before: Option<crate::utils::index::SessionIndex>,
-    rekey_idx: crate::utils::index::SessionIndex,
-    held_msg2: crate::transport::ReceivedPacket,
+pub(super) struct HeldMsg2Pair {
+    pub(super) nodes: Vec<TestNode>,
+    pub(super) node0_addr: NodeAddr,
+    pub(super) node1_addr: NodeAddr,
+    pub(super) fips0: crate::FipsAddress,
+    pub(super) fips1: crate::FipsAddress,
+    pub(super) tun0_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    pub(super) tun1_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    pub(super) node0_idx_before: Option<crate::utils::index::SessionIndex>,
+    pub(super) node1_idx_before: Option<crate::utils::index::SessionIndex>,
+    pub(super) rekey_idx: crate::utils::index::SessionIndex,
+    pub(super) held_msg2: crate::transport::ReceivedPacket,
 }
 
 /// Build a two-node pair with an FSP session, age both link sessions past
@@ -1467,7 +1467,7 @@ struct HeldMsg2Pair {
 /// new session it committed at msg1 and node 0 is mid-cycle when this
 /// returns. Both directions are shown to decode before the rekey, so a later
 /// delivery failure is the rekey's and not the harness's.
-async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
+pub(super) async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
     use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG2};
     use crate::transport::ReceivedPacket;
 

@@ -33,6 +33,7 @@ mod heartbeat;
 mod lan_label;
 mod lookup_echo;
 mod mmp_chartests;
+mod msg2_refused_reads;
 mod probe;
 mod rekey_parity;
 mod routing;

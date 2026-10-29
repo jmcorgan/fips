@@ -46,6 +46,8 @@ use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub use handshake::HandshakeState;
+#[cfg(test)]
+pub(crate) use handshake::dh_ops;
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;
 
