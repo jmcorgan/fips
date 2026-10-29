@@ -51,10 +51,12 @@
 # 'optional: true'. The daemon treats a named interface that is not there as
 # ABSENT rather than as a start failure: it waits, binds the moment the
 # interface appears, and unbinds again when it goes away. So this helper
-# rewrites no fips.yaml and restarts no daemon: besides the interface, it
-# changes only the fips_mesh firewall zone and reloads the firewall, and the
-# rates subcommand sets basic_rate on mesh interfaces. 'optional: true' is what keeps a stock install that never runs this
-# script from reporting Degraded for an interface it was never going to have.
+# rewrites no fips.yaml and restarts no daemon: besides the interface
+# section, which includes its basic_rate, it changes only the fips_mesh
+# firewall zone and reloads the firewall, and the rates subcommand sets
+# basic_rate on existing mesh interfaces that have none. 'optional: true' is
+# what keeps a stock install that never runs this script from reporting
+# Degraded for an interface it was never going to have.
 # See docs/how-to/set-up-80211s-mesh-backhaul.md for the full guide.
 
 DEFAULT_MESH_ID="fips-mesh"

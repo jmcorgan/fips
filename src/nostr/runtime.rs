@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use nostr::nips::nip19::ToBech32;
 use nostr::prelude::{
-    Alphabet, Event, EventBuilder, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag,
-    Tag, TagKind, TagStandard, Timestamp,
+    Alphabet, Event, EventBuilder, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Tag,
+    TagKind, TagStandard, Timestamp,
 };
 use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
 use serde::Serialize;
@@ -807,14 +807,12 @@ impl NostrRendezvous {
             handle.abort();
         }
 
-        // Don't proactively retract the advert via NIP-09 on shutdown.
+        // Shutdown sends no NIP-09 retraction of the advert.
         // Parameterized-replaceable semantics handle restart supersedence,
         // and NIP-40 expiration (advert_ttl_secs) bounds staleness on
         // permanent shutdown. An explicit retraction races with the next
         // daemon's republish on strict relays (e.g. Damus rate-limits the
         // burst, leaving the advert deleted and never restored).
-        let _ = self.advert.take_event_id();
-
         if let Some(handle) = self.notify_task.lock().await.take() {
             handle.abort();
         }
@@ -1199,12 +1197,6 @@ impl NostrRendezvous {
     async fn publish_advert(&self) -> Result<(), BootstrapError> {
         let advert = match self.advert.plan_publish()? {
             PublishPlan::Nothing => return Ok(()),
-            PublishPlan::Delete(event_id) => {
-                self.publish_delete(&self.config.advert_relays, [event_id])
-                    .await?;
-                self.advert.clear_event_id();
-                return Ok(());
-            }
             PublishPlan::Publish(advert) => advert,
         };
 
@@ -1237,7 +1229,6 @@ impl NostrRendezvous {
         // NIP-09 delete here is redundant and races with the replacement
         // publish, which strict relays (e.g. Damus) honor by removing the
         // new advert too.
-        self.advert.set_event_id(event.id);
         Ok(())
     }
 
@@ -2054,20 +2045,6 @@ impl NostrRendezvous {
             .expect("sent_signals lock")
             .push(serde_json::to_string(payload)?);
         Ok(signal)
-    }
-
-    async fn publish_delete<I>(&self, relays: &[String], ids: I) -> Result<(), BootstrapError>
-    where
-        I: IntoIterator<Item = EventId>,
-    {
-        let event = EventBuilder::delete(nostr::nips::nip09::EventDeletionRequest::new().ids(ids))
-            .sign_with_keys(&self.keys)
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        self.client
-            .send_event_to(relays.to_vec(), &event)
-            .await
-            .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        Ok(())
     }
 }
 

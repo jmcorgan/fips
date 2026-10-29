@@ -336,7 +336,9 @@ impl RendezvousDriver {
         fallback
     }
 
-    /// Publish (or withdraw) the local overlay advert built from `snapshot`.
+    /// Publish the local overlay advert built from `snapshot`. When no advert
+    /// results, publishing stops; the advert already on relays is not
+    /// withdrawn and ages out by its NIP-40 expiration.
     /// `bootstrap` is passed explicitly because the startup path refreshes the
     /// advert before the engine handle is installed on the driver.
     pub async fn refresh_overlay_advert(

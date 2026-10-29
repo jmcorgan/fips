@@ -2507,8 +2507,9 @@ impl Node {
                     self.supervisor.ipv6tun.stop_dns();
                 }
                 Child::Nostr => {
-                    // Stop Nostr overlay discovery background work and withdraw
-                    // any advert.
+                    // Stop Nostr overlay discovery background work. The
+                    // published advert is not withdrawn; it ages out by its
+                    // NIP-40 expiration.
                     if let Some(bootstrap) = self.supervisor.nostr_rendezvous.take_engine()
                         && let Err(e) = bootstrap.shutdown().await
                     {

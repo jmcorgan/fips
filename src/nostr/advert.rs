@@ -1,10 +1,9 @@
 //! Synchronous decision core for the Nostr overlay-advert lifecycle.
 //!
 //! `AdvertMachine` owns the advert-related state that previously lived
-//! directly on `NostrRendezvous` — the peer advert cache, the local
-//! advert we publish, and the id of our most recently published advert
-//! event — and hosts the *decision* logic for publishing, caching,
-//! fetching, and pruning adverts.
+//! directly on `NostrRendezvous` — the peer advert cache and the local
+//! advert we publish — and hosts the *decision* logic for publishing,
+//! caching, fetching, and pruning adverts.
 //!
 //! Following the sans-IO shape used by `failure_state`, every method here
 //! is synchronous, performs no network I/O and no `.await`, holds its
@@ -12,14 +11,15 @@
 //! explicit `now_ms: u64` input rather than reading a clock. The async
 //! driver on `NostrRendezvous` reads the clock at the call site, invokes
 //! these methods, and performs the actual relay I/O (`send_event_to`,
-//! `fetch_events_from`, gift-wrap crypto), event signing, NIP-09 deletes,
-//! and `Notify` wakeups described by the returned decisions.
+//! `fetch_events_from`, gift-wrap crypto), event signing, and `Notify`
+//! wakeups described by the returned decisions. No NIP-09 deletion is ever
+//! sent for an advert: a stopped advert is left to NIP-40 expiration.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use nostr::prelude::{Event, EventId};
+use nostr::prelude::Event;
 use rand::seq::IteratorRandom;
 
 use super::runtime::{NostrRendezvous, endpoint_advert_is_publicly_usable};
@@ -31,24 +31,14 @@ use super::types::{
 /// What the async driver should do to satisfy a publish request. Returned
 /// by [`AdvertMachine::plan_publish`]; the machine performs the pure
 /// decision (which advert body, or nothing) and the driver executes the
-/// corresponding relay I/O. [`PublishPlan::Delete`] is
-/// never produced by a running node; see its doc.
+/// corresponding relay I/O.
 #[derive(Debug, Clone)]
 pub(super) enum PublishPlan {
-    /// Nothing to publish (advertising disabled with no prior event, no
-    /// local advert yet, or the advert has no publicly usable endpoints).
+    /// Nothing to publish (advertising disabled, no local advert yet, or
+    /// the advert has no publicly usable endpoints).
     Nothing,
-    /// Advertising is disabled but a prior advert event id is recorded; the
-    /// driver would emit a NIP-09 delete for `EventId` then call
-    /// [`AdvertMachine::clear_event_id`]. This variant is
-    /// never produced by a running node: an id is recorded only after a
-    /// successful publish, which needs `advertise`, and `advertise` is fixed
-    /// for the machine's life. A stopped advert is left to NIP-40 expiration
-    /// instead.
-    Delete(EventId),
     /// Publish this fully-prepared advert body. The driver builds the
-    /// tags/expiration, signs, sends, then records the new event id via
-    /// [`AdvertMachine::set_event_id`].
+    /// tags/expiration, signs, and sends.
     Publish(OverlayAdvert),
 }
 
@@ -188,10 +178,6 @@ pub(super) struct AdvertMachine {
     latch: Mutex<BoundLatch>,
     /// The advert body we currently want to publish, if any.
     local_advert: Mutex<Option<OverlayAdvert>>,
-    /// Id of our most recently published advert event. Only the
-    /// [`PublishPlan::Delete`] arm uses it, and a running node never
-    /// reaches that arm; shutdown discards it.
-    current_event_id: Mutex<Option<EventId>>,
 }
 
 impl AdvertMachine {
@@ -210,7 +196,6 @@ impl AdvertMachine {
             cache: Mutex::new(AdvertCache::default()),
             latch: Mutex::new(BoundLatch::default()),
             local_advert: Mutex::new(None),
-            current_event_id: Mutex::new(None),
         }
     }
 
@@ -471,16 +456,10 @@ impl AdvertMachine {
     }
 
     /// Build the publish decision: which advert body to publish, or nothing.
-    /// The `Delete` arm is unreachable in a running node (see
-    /// [`PublishPlan::Delete`]). Pure logic — the driver performs the relay
-    /// I/O and event signing.
+    /// Pure logic — the driver performs the relay I/O and event signing.
     pub(super) fn plan_publish(&self) -> Result<PublishPlan, BootstrapError> {
-        let previous_event_id = *self.lock_event_id();
         if !self.advertise {
-            return Ok(match previous_event_id {
-                Some(event_id) => PublishPlan::Delete(event_id),
-                None => PublishPlan::Nothing,
-            });
+            return Ok(PublishPlan::Nothing);
         }
 
         let mut advert = match self.lock_local().clone() {
@@ -529,24 +508,6 @@ impl AdvertMachine {
         Ok(PublishPlan::Publish(advert))
     }
 
-    // --- current advert event id -----------------------------------------
-
-    /// Record the id of a just-published advert event.
-    pub(super) fn set_event_id(&self, event_id: EventId) {
-        *self.lock_event_id() = Some(event_id);
-    }
-
-    /// Clear the recorded advert event id. Used only by the driver's
-    /// [`PublishPlan::Delete`] arm, which a running node never reaches.
-    pub(super) fn clear_event_id(&self) {
-        *self.lock_event_id() = None;
-    }
-
-    /// Take and clear the recorded advert event id (shutdown path).
-    pub(super) fn take_event_id(&self) -> Option<EventId> {
-        self.lock_event_id().take()
-    }
-
     // --- lock helpers ---------------------------------------------------
 
     fn lock_protected(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
@@ -571,12 +532,6 @@ impl AdvertMachine {
         self.local_advert
             .lock()
             .expect("advert-machine local-advert mutex poisoned")
-    }
-
-    fn lock_event_id(&self) -> std::sync::MutexGuard<'_, Option<EventId>> {
-        self.current_event_id
-            .lock()
-            .expect("advert-machine event-id mutex poisoned")
     }
 }
 
@@ -776,19 +731,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_publish_nothing_when_disabled_without_prior_event() {
-        // advertise=false, no prior event id -> Nothing.
+    fn plan_publish_nothing_when_advertising_disabled_even_with_a_local_advert() {
         let m = AdvertMachine::new("npub1self".to_string(), false, 10_000_000, 3);
         m.set_local_advert(Some(advert(vec![ep("1.2.3.4:9000")])));
         assert!(matches!(m.plan_publish(), Ok(PublishPlan::Nothing)));
-    }
-
-    #[test]
-    fn event_id_set_clear_take_roundtrip() {
-        let m = machine();
-        assert_eq!(m.take_event_id(), None);
-        m.clear_event_id();
-        assert_eq!(m.take_event_id(), None);
     }
 
     // --- admission under a full cache ------------------------------------
