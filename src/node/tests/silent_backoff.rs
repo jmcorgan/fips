@@ -26,8 +26,10 @@ const NEW_EPOCH: [u8; 8] = [8u8; 8];
 const REFUSAL: &str =
     "Msg1 from a peer whose recent sessions carried no frame, refusing during its back-off";
 
-/// Idle long enough for a same-epoch msg1 to replace the session: past the
-/// 15 s liveness interval.
+/// How long ago `Rig::idle` puts the silent session's promotion and its
+/// last-seen time. A never-heard peering is replaceable by a same-epoch msg1
+/// once its age since promotion reaches `UNHEARD_PEERING_MIN_AGE_MS`; this is
+/// well past that.
 const IDLE_MS: u64 = 16_000;
 
 /// A node with one UDP transport, and a socket playing the silent peer.

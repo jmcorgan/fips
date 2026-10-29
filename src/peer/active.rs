@@ -1055,7 +1055,9 @@ impl ActivePeer {
     }
 
     /// Set the last-seen time without marking the peer heard, as for a
-    /// session that has carried no authenticated frame and gone idle.
+    /// session that has carried no authenticated frame. This does not make a
+    /// never-heard peering replaceable: its age since promotion does (see
+    /// `test_set_authenticated_at`).
     #[cfg(test)]
     pub(crate) fn test_set_last_seen(&mut self, current_time_ms: u64) {
         self.send.last_seen = current_time_ms;
