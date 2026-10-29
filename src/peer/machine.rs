@@ -2089,7 +2089,8 @@ mod tests {
     }
 
     /// XX `EstablishSnapshot` for a net-new inbound (no existing peer). The
-    /// dual-init / cross-connection tests flip the existing-peer fields.
+    /// restart, cross-connection, rekey and duplicate tests flip the
+    /// existing-peer fields.
     fn est_new_peer(our: NodeAddr) -> EstablishSnapshot {
         EstablishSnapshot {
             has_existing_peer: false,
@@ -2648,8 +2649,8 @@ mod tests {
         );
         let our_index = m.our_index().unwrap();
 
-        // Existing peer, same epoch, different link, session younger than the
-        // rekey floor -> CrossConnect.
+        // Existing peer, same epoch, different link, no rekey declared ->
+        // CrossConnect.
         let mut est = est_new_peer(our);
         est.has_existing_peer = true;
         est.existing_peer_epoch = Some([5u8; 8]);

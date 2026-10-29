@@ -107,7 +107,7 @@ fn resend_backoff_exponent_uses_count_plus_one() {
 //
 // The 11 framed characterization tests in `node::tests::establish_xx_chartests`
 // are the behavior oracle; these exercise the pure decision directly over
-// hand-built snapshots, one per branch, with deterministic session ages.
+// hand-built snapshots, one per branch.
 // ===========================================================================
 
 /// No existing peer for this identity -> a net-new promote.
@@ -205,7 +205,7 @@ fn establish_epoch_mismatch_restarts() {
     }
 }
 
-/// Same-epoch, different link, still-fresh session where we are the LARGER node:
+/// Same-epoch, different link, no rekey declared, where we are the LARGER node:
 /// our inbound wins the inline cross-connection (swap to inbound).
 #[test]
 fn establish_cross_connection_larger_node_inbound_wins() {
@@ -226,7 +226,7 @@ fn establish_cross_connection_larger_node_inbound_wins() {
     }
 }
 
-/// Same-epoch, different link, still-fresh session where we are the SMALLER
+/// Same-epoch, different link, no rekey declared, where we are the SMALLER
 /// node: our inbound loses (keep the existing outbound session).
 #[test]
 fn establish_cross_connection_smaller_node_inbound_loses() {
@@ -243,8 +243,8 @@ fn establish_cross_connection_smaller_node_inbound_loses() {
     }
 }
 
-/// Same link (never a cross-connection) with a fresh session and rekey enabled:
-/// neither cross-connection (same link) nor rekey (age < floor) -> duplicate.
+/// Same link with a session and no rekey declared: neither cross-connection
+/// (same link) nor rekey (nothing declared) -> duplicate.
 #[test]
 fn establish_same_link_fresh_is_duplicate() {
     let fmp = Fmp::new();

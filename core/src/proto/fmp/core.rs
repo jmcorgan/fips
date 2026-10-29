@@ -213,7 +213,8 @@ impl EphemeralDigest {
 /// restart detection).
 pub struct WireOutcome {
     /// The initiator's node address, learned from the `msg3` static key. Drives
-    /// both the cross-connection and the dual-init tie-breaks.
+    /// the cross-connection tie-break and names the peer a restart,
+    /// cross-connection or rekey decision targets.
     pub peer_node_addr: NodeAddr,
     /// The initiator's startup epoch captured from the handshake, if present.
     /// `None` when no epoch was carried (treated as same-epoch, never a
@@ -221,14 +222,6 @@ pub struct WireOutcome {
     pub remote_epoch: Option<[u8; 8]>,
 }
 
-/// A snapshot of the `Node` registry state the inbound XX establish decision
-/// reads about the peer whose `msg3` just completed, taken by the shell so the
-/// core decides without touching live `Node` state or reading a clock.
-///
-/// The decision reads no clock at all. It formerly carried a session age and a
-/// config-derived age floor, both resolved shell-side; the sender's declaration
-/// in [`rekey_claim`](EstablishSnapshot::rekey_claim) replaced them, so there is
-/// no timing left for a clock step to perturb.
 /// Minimum interval between accepted epoch changes for one peer identity,
 /// and the recency threshold at which the peering an epoch change would
 /// destroy still counts as live.
@@ -253,6 +246,17 @@ pub struct WireOutcome {
 /// weakens both halves and, below the resend ladder, buys nothing.
 pub const EPOCH_RESTART_MIN_INTERVAL_SECS: u64 = 15;
 
+/// A snapshot of the `Node` registry state the inbound XX establish decision
+/// reads about the peer whose `msg3` just completed, taken by the shell so the
+/// core decides without touching live `Node` state or reading a clock.
+///
+/// The decision reads no clock itself. The shell resolves every time-derived
+/// input before the call: the peering's idle time, whether an epoch change
+/// falls inside the dampening interval, and any silent-session refusal in
+/// force. Whether a `msg3` is a rekey or a fresh dial depends on none of them:
+/// the decision formerly carried a session age and a config-derived age floor
+/// for that, and the sender's declaration in
+/// [`rekey_claim`](EstablishSnapshot::rekey_claim) replaced both.
 pub struct EstablishSnapshot {
     /// The peer identity is already an active peer in the registry. `false` here
     /// is the net-new path (or the post-restart re-promote) — a plain promote.
@@ -417,7 +421,8 @@ pub enum InboundDecision {
     RestartThenPromote { peer: NodeAddr },
     /// Same-epoch cross-connection resolved inline on `msg3`: a session
     /// received a concurrent `msg3` on a different link that declares no
-    /// rekey — so it is a fresh dial crossing ours. `our_inbound_wins` (the larger-NodeAddr side) selects
+    /// rekey — so it is a fresh dial crossing ours, whether or not a rekey of
+    /// ours is in flight. `our_inbound_wins` (the larger-NodeAddr side) selects
     /// swap-to-inbound vs keep-outbound; the shell frees the loser index and
     /// tears down the temporary link either way. `peer` is the tie-break target.
     CrossConnect {

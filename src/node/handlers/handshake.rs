@@ -1653,8 +1653,9 @@ impl Node {
         // the arm's action stream; the driver routes on the decision below,
         // running the actions through the executor and owning only the residual
         // shell bookkeeping (link/map removal, reject records, the duplicate-msg2
-        // resend). The snapshot resolves the one clock read (session age) and the
-        // sender's rekey declaration up front.
+        // resend). The snapshot resolves the sender's rekey declaration and every
+        // clock read (the peering's idle time, the epoch-restart dampening window,
+        // the silent-session refusal) up front, so the decision reads no clock.
         //
         // The declaration replaces a session-age floor that used to partition
         // "too young to be a rekey" from "old enough to be one". That floor was
