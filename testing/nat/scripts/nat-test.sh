@@ -456,12 +456,12 @@ ping_peer() {
 
 # Fail if the relay holds any kind 5 deletion request.
 #
-# A node signs a deletion request with its routing key, so one naming a
+# A node would sign a deletion request with its routing key, so one naming a
 # traversal signal's wrap would tie that key to a signal sent under a one-time
-# key. Nodes delete only adverts they withdraw, and the lab's nodes advertise
-# throughout, so after a scenario the relay should hold none. strfry scan reads
-# the relay's own store and prints one event per line. A scan that cannot run
-# or print parseable events has observed nothing, so it fails the check too.
+# key. Nodes send no NIP-09 deletion requests at all, so after a scenario the
+# relay should hold none. strfry scan reads the relay's own store and prints
+# one event per line. A scan that cannot run or print parseable events has
+# observed nothing, so it fails the check too.
 assert_no_deletion_requests() {
     local relay="$1" events="" report=""
     if ! events="$(docker exec "$relay" strfry scan '{"kinds":[5]}' 2>/dev/null)"; then
