@@ -266,10 +266,18 @@ is defense-in-depth against misbehaving nodes that generate fresh
 rapid-fire lookups for the same target from the same link peer regardless of
 `request_id`. It is keyed on the link peer rather than the request's origin,
 which is unsigned and chosen by the sender, so one neighbour repeating a
-target does not suppress other neighbours' requests for it. Only a request
-that some peer can carry is recorded. The limiter holds at most 4096 entries;
-at that bound the peer holding the most entries loses its oldest, and the new
-entry is always recorded.
+target does not suppress other neighbours' requests for it. Where the link
+peer is the request's origin and relays no one else's requests for that
+target, this keeps origins apart. Otherwise, requests for one target from
+different origins that arrive through the same link peer share one entry,
+whether the link peer relays them all or also originates one, so one origin's
+request for a target can stop other origins' requests for it being forwarded
+there for the interval, and repeating it at the interval keeps them mostly
+stopped. Keying on the origin instead would need the origin to be
+authenticated, which is a wire change. Only a request that some peer can
+carry is recorded. The limiter holds at most 4096 entries; at that bound the
+peer holding the most entries loses its oldest, and the new entry is always
+recorded.
 
 ### LookupResponse
 

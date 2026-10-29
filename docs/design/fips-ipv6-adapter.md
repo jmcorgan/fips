@@ -206,10 +206,14 @@ transport path MTU for the IPv6 adapter is therefore:
 1280 + 77 = 1357 bytes
 ```
 
-Transports with smaller MTUs (radio at ~250 bytes, serial at 256
-bytes) cannot support the IPv6 adapter without some form of internal
-fragmentation and reassembly. Otherwise, applications on those
-transports must use the native FIPS datagram API.
+On a path below that, the ingress node fragments a host's packets of
+up to 1280 bytes into IPv6 fragments the destination host reassembles
+(see [fips-mtu.md](fips-mtu.md#fragmentation-policy)), down to a
+transport MTU of 253 bytes (IPv6 MTU 176, at most ten fragments).
+Transports with smaller MTUs (radio at ~250 bytes) cannot support the
+IPv6 adapter without some form of internal fragmentation and
+reassembly. Otherwise, applications on those transports must use the
+native FIPS datagram API.
 
 ### TUN-Side ICMP Packet Too Big
 
@@ -218,6 +222,19 @@ the adapter generates an ICMPv6 Packet Too Big message and delivers
 it back to the application via the TUN. This triggers the kernel's
 Path MTU Discovery mechanism, which adjusts TCP segment sizes for
 subsequent transmissions.
+
+A host ignores a Packet Too Big that reports less than 1280, so where
+the effective IPv6 MTU toward a destination is under 1280 a packet of up
+to 1280 bytes is sent as IPv6 fragments instead, and a packet over 1280
+is answered with a Packet Too Big reporting 1280, which the host
+accepts. The node decides this, since it holds the limits: where it
+would refuse a datagram as too big, it lets one whose packet can be
+fragmented carry on whole (`outbound::can_split`), and splits it only
+where it sends it, on an established session or when it releases the
+datagrams it held while the session was set up (`outbound::split`, which
+rebuilds the packet, fragments it and compresses each fragment). The
+adapter reports 1280 in the Packet Too Big it builds for a refusal, and
+in the one it answers itself for a destination no key names.
 
 ICMP Packet Too Big generation is rate-limited per source address
 (100ms interval) to prevent storms from applications sending many
@@ -233,12 +250,18 @@ interface and clamps the Maximum Segment Size (MSS) option:
 clamped_mss = effective_ipv6_mtu - 40 (IPv6 header) - 20 (TCP header)
 ```
 
-Clamping is applied in two places:
+Clamping is applied in three places:
 
 - **TUN reader** (outbound): clamps MSS on outbound SYN-flagged
   segments (a local initiator's SYN, a local listener's SYN-ACK)
 - **TUN writer** (inbound): clamps MSS on inbound SYN-flagged segments
   (a remote initiator's SYN as well as the SYN-ACK answering a local one)
+- **Release of held packets** (outbound): a SYN-flagged segment held
+  while discovery and the session handshake run is clamped again when
+  the session is established, with the path MTU discovery has just
+  stored, since the reader clamped it before that value was known. This
+  is done by the node, not the TUN reader, so it applies to an
+  [app-owned TUN](#app-owned-tun-embedded-hosts) as well
 
 The clamp finds the TCP header behind any Hop-by-Hop, Routing and
 Destination Options headers and clamps the SYN to the same ceiling as one
@@ -316,6 +339,15 @@ The TUN reader receives raw IPv6 packets from applications and processes them:
 9. Encrypt with session keys
 10. Route through FMP toward destination
 
+The node does the session steps: the adapter hands it each packet
+compressed, as a datagram with its destination's key. A datagram
+held while its session is set up is sent when the session is
+established. A SYN-flagged segment among them is clamped again first,
+by the node's own path MTU map, which discovery has filled by then
+(`outbound::reclamp`), and any of them over the node's limit or the
+session's path MTU is sent as IPv6 fragments when it can be (see
+[TUN-Side ICMP Packet Too Big](#tun-side-icmp-packet-too-big)).
+
 ### Writer Thread
 
 A single writer thread services a bounded queue of outbound packets:
@@ -380,8 +412,9 @@ before `start()` (and before the node is moved into a background task), mirrorin
 `control_read_handle()`, and returns two app-side channel ends:
 
 - **app → mesh** — the embedder pushes IPv6 packets read from its fd into
-  `app_outbound_tx`. These are drained by `run_rx_loop` into `handle_tun_outbound`
-  and routed exactly as the Reader Thread's output would be.
+  `app_outbound_tx`. `run_rx_loop` drains them through the adapter's
+  `Handles::outbound` into the node's `handle_datagram`, and they are routed
+  exactly as the Reader Thread's output would be.
 - **mesh → app** — inbound mesh traffic on port 256 is reconstructed and written
   to the node's `tun_tx` (the same sink the Writer Thread reads); the embedder
   pulls from `app_inbound_rx` and writes to its fd. The queue is bounded at
@@ -395,14 +428,21 @@ With the channels installed, `start()` skips system-TUN creation (it gates on
 
 Because packets enter via `app_outbound_tx` rather than the Reader Thread, they
 **bypass `handle_tun_packet`**: FIPS does not filter them by the `fd00::/8`
-prefix, and it clamps no TCP MSS in either direction, since the
-[TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping) is done only by the
-system TUN's reader and writer. Nor does FIPS refuse an off-mesh destination up
-front: `handle_tun_outbound` looks up bytes 1 to 15 of any destination in the
-identity cache, and on a miss answers with ICMPv6
-Destination Unreachable on `app_inbound_rx`, sourced from the node's own mesh
-address. An oversize packet to an `fd00::/8` destination gets Packet Too Big
-on the same channel; one to any other destination is answered as
+prefix, and of the [TUN-Side TCP MSS Clamping](#tun-side-tcp-mss-clamping) only
+the clamp at the release of held packets applies: any SYN-flagged segment (a SYN
+or a SYN-ACK) held until its session is established is clamped when it is
+released, as on a system TUN, because the node holds and releases the
+datagrams of both paths. Every other SYN-flagged segment, in either
+direction, goes unclamped, since those clamps are done by the system TUN's
+reader and writer. For the same reason a packet of up to 1280 bytes on a
+path under 1280 is sent as IPv6 fragments, as on a system TUN.
+Nor does FIPS refuse an off-mesh destination up front: `Handles::outbound`
+looks up bytes 1 to 15 of any destination among the keys the node can route to,
+and on a miss answers with ICMPv6 Destination Unreachable on `app_inbound_rx`,
+sourced from the node's own mesh address; a key it holds is resolved again by
+`handle_datagram` through the node's identity cache. An oversize packet to an
+`fd00::/8` destination gets Packet Too Big on the same channel; one to any
+other destination is answered as
 undeliverable, with Destination Unreachable, or with nothing for a multicast
 group, since the mesh could not carry it at any size. A packet
 whose source is not the node's own mesh address is not forwarded; it is
@@ -476,17 +516,20 @@ DNS-specific one.
 | Path MTU tracking (SessionDatagram field) | **Implemented** |
 | Path MTU notification (end-to-end echo) | **Implemented** |
 | Endpoint fragmentation/reassembly | Transport drivers |
+| IPv6 fragmentation at the ingress node (paths under 1280) | **Implemented** |
 
 ## Design Considerations
 
-### Path MTU Discovery and No-Fragmentation Policy
+### Path MTU Discovery and Fragmentation Policy
 
 Path MTU Discovery (proactive `path_mtu` annotation, reactive
-MtuExceeded, end-to-end PathMtuNotification) and the no-fragmentation
-policy that drives the design both live in the unified MTU treatment
-at [fips-mtu.md](fips-mtu.md). The adapter is a consumer of that
-model — its job is to enforce the resulting effective IPv6 MTU at the
-TUN with ICMP Packet Too Big and TCP MSS clamping.
+MtuExceeded, end-to-end PathMtuNotification) and the fragmentation
+policy that drives the design (none in transit; at the ingress node
+only below 1280) both live in the unified MTU treatment at
+[fips-mtu.md](fips-mtu.md). The adapter is a consumer of that model —
+its job is to enforce the resulting effective IPv6 MTU at the TUN with
+ICMP Packet Too Big, TCP MSS clamping and, below 1280, IPv6
+fragmentation.
 
 ## References
 
@@ -495,7 +538,7 @@ TUN with ICMP Packet Too Big and TCP MSS clamping.
   identity model
 - [fips-session-layer.md](fips-session-layer.md) — FSP (below the adapter)
 - [fips-mtu.md](fips-mtu.md) — Unified path MTU model (proactive,
-  reactive, hysteresis, no-fragmentation)
+  reactive, hysteresis, fragmentation policy)
 - [../reference/wire-formats.md](../reference/wire-formats.md) — FSP and
   SessionDatagram wire formats
 - [../reference/configuration.md](../reference/configuration.md) — TUN

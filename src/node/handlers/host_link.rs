@@ -13,8 +13,13 @@
 //! responder handed to the host. The node sends a datagram as the TUN path
 //! always has: checked against the node-wide limit, resolved through the
 //! identity cache, checked against an established session's path MTU, then
-//! sent, queued or refused. A refusal goes back to the adapter in line.
+//! sent, queued or refused. A refusal goes back to the adapter in line. A
+//! datagram over either limit whose packet is at most 1280 bytes, on a path
+//! under 1280, is not refused: it carries on whole and is sent as IPv6
+//! fragments (`outbound::can_split` here, `outbound::split` where the
+//! session sends it).
 
+use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
 use secp256k1::PublicKey;
@@ -23,6 +28,7 @@ use crate::NodeAddr;
 use crate::config::{ConfigError, Grant, Principal};
 use crate::ipv6tun::link::{self, Attach, Datagram, FromMesh, PeerKey, Refusal};
 use crate::ipv6tun::mtu::mss_ceiling;
+use crate::ipv6tun::outbound::can_split;
 use crate::ipv6tun::tun::IPV6_MIN_MTU;
 use crate::node::path_mtu::payload_limit;
 use crate::node::{Node, NodeError};
@@ -247,9 +253,13 @@ impl Node {
         let Datagram { peer, payload } = datagram;
 
         // The node-wide limit, live. A push the adapter has not applied yet
-        // leaves it judging by the last one.
+        // leaves it judging by the last one. A datagram over it that can be
+        // fragmented carries on whole: it is split only where it is sent, so
+        // the checks and the held queue below see the original.
         let limit = self.publish_mtu();
-        if payload.len() > usize::from(limit) {
+        if payload.len() > usize::from(limit)
+            && !can_split(&payload, &peer, self.mesh_addr(), limit)
+        {
             self.refuse(Refusal::TooBig {
                 peer,
                 payload_limit: limit,
@@ -268,15 +278,17 @@ impl Node {
 
         // The path MTU an established session has learned. The first
         // oversized packet is forwarded normally and triggers the
-        // MtuExceeded signal; later ones are refused here, which the
-        // adapter answers with Packet Too Big. Only a path narrower than the
-        // node-wide limit refuses anything the limit above let through.
+        // MtuExceeded signal; later ones are fragmented when they can be,
+        // or refused here, which the adapter answers with Packet Too Big.
+        // Only a path narrower than the node-wide limit refuses anything the
+        // limit above let through.
         if let Some(path_limit) = self
             .sessions
             .get(&dest_addr)
             .filter(|entry| entry.is_established())
             .and_then(|entry| entry.mmp())
             .and_then(|mmp| path_refusal(payload.len(), mmp.path_mtu.current_mtu(), limit))
+            && !can_split(&payload, &peer, self.mesh_addr(), path_limit)
         {
             self.refuse(Refusal::TooBig {
                 peer,
@@ -288,6 +300,15 @@ impl Node {
 
         self.send_outbound(dest_addr, dest_pubkey, peer, payload)
             .await;
+    }
+
+    /// Our own mesh address, the one the attach gives the adapter and the
+    /// source of every datagram it sends: the adapter refuses any other
+    /// source before a datagram reaches the node.
+    pub(in crate::node) fn mesh_addr(&self) -> Ipv6Addr {
+        PeerKey::from_xonly(&self.identity().pubkey())
+            .address()
+            .to_ipv6()
     }
 
     /// The node address and cached key of the destination the adapter named

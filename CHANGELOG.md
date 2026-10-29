@@ -1423,6 +1423,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer sends other ULA traffic, such as Tailscale's `fd7a:115c:a1e0::/48`,
   out the default route. Startup replaces a rule left by an earlier
   version.
+- The first TCP connection to a new destination across a link narrower
+  than 1357 bytes no longer stalls. The node clamped the connection's SYN
+  before discovery had learned the path, so the far end sent segments the
+  narrow link could not carry. A SYN or SYN-ACK held until its session
+  is established is now clamped again when it is sent, with the path
+  MTU discovery returned, on an app-owned TUN as well as a system one.
+- IPv6 packets of up to 1280 bytes on a path that cannot carry 1280
+  bytes are no longer answered with a Packet Too Big below 1280, which
+  hosts ignore, so they are no longer lost for good, including on TCP
+  connections a server accepted with SYN cookies. The node that reads
+  such a packet from its TUN now splits it into IPv6 fragments that the
+  destination host reassembles. When the narrow link is beyond the
+  node's own transport, oversized packets sent before the narrow link's
+  `MtuExceeded` (or the destination's `PathMtuNotification`) arrives are
+  still lost there, as before, and the ones after it are fragmented. No
+  other node needs upgrading. A packet over 1280 bytes on such a path
+  is now answered with a Packet Too Big reporting 1280.
 
 - The first packet to a `.fips` name the node's DNS responder has just
   resolved is no longer answered with ICMPv6 Destination Unreachable when the
@@ -1542,6 +1559,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as a new `silent_backoff` handshake reject, apart from `bad_state`, and
   `HandshakeStats` and `HandshakeStatsSnapshot` gain a public `silent_backoff`
   field.
+- The security reference and the mesh layer design no longer say the peer
+  allowlist is consulted before the handshake. The node rate-limits an
+  inbound msg1, does its Diffie-Hellman operations to learn who sent it and
+  builds msg2 before it applies `peers.allow` and `peers.deny`, still before
+  it registers the link, gives it a session index or sends msg2, so a refused
+  initiator costs the responder's handshake computation, msg2 built but not
+  sent, within the msg1 rate limit.
+  Both now also say that `peers.allow` alone refuses no one: only the listed
+  peers are admitted when `peers.deny` holds `ALL`.
 
 #### Sessions
 
@@ -1616,6 +1642,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accepted filters are merged into the outgoing filters once per tick, not on
   every inbound announce, so one peer can no longer force a full recompute
   per frame.
+- The 0.5.3 entry saying one peer repeating lookups for a target no longer
+  stops other peers' lookups for it being forwarded is true per link, but the
+  forward limiter never sees a lookup's origin, so it separates origins only
+  where their lookups arrive over different links. Lookups for one target from
+  different origins that arrive over the same link share one limiter entry, at
+  any node, the first transit node included when the neighbour there also
+  relays others' lookups. So one origin's lookup for a target can still stop
+  other origins' lookups for it being forwarded there for the forward
+  interval, and repeating it at the interval keeps them mostly stopped. The
+  lookup design document now says so. Closing this needs an authenticated
+  origin, which changes the wire format.
+- The configuration reference, the open discovery tutorial and the Nostr
+  discovery design now say that, with Nostr enabled and the node below
+  `max_peers`, the node answers a traversal offer from any npub under every
+  `policy`, `configured_only` included, and dials the offerer when the hole
+  punch succeeds. `accept_connections: false` does not stop that link; only
+  the peer ACL does, and the offer is still answered and punched.
 
 #### OpenWrt
 

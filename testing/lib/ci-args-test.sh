@@ -2,7 +2,8 @@
 # Tests for ci-local.sh's argument handling: an unknown option or an option
 # missing its value is a usage error (exit 2, message on stderr), and --help
 # still exits 0 with the usage on stdout. --rerun <suite> rejects an unknown
-# suite name and the options it cannot be combined with, before any build.
+# suite name and the options it cannot be combined with, before any build, and
+# --build-only rejects --root-tests, whose stage it would skip.
 #
 # Every case invokes ci-local.sh with arguments that end during parsing, before
 # the load sampler, traps, containers or any build, so the suite is hermetic and
@@ -94,7 +95,7 @@ expect_usage_error "--rerun without a value" "--rerun needs a value" --rerun
 expect_usage_error "--rerun of an unknown suite" "Unknown suite: no-such-suite" \
     --rerun no-such-suite
 for opt in --only --build-only --test-only --skip-integration --cross-check \
-        --baremetal --slow-tests; do
+        --baremetal --slow-tests --root-tests; do
     args=(--rerun firewall "$opt")
     [ "$opt" = --only ] && args+=(firewall)
     expect_usage_error "--rerun with $opt" \
@@ -112,7 +113,14 @@ FIPS_CI_BAREMETAL=1 expect_usage_error "--rerun with FIPS_CI_BAREMETAL=1" \
     "--rerun cannot be combined with --baremetal" --rerun firewall
 FIPS_CI_SLOW_TESTS=1 expect_usage_error "--rerun with FIPS_CI_SLOW_TESTS=1" \
     "--rerun cannot be combined with --slow-tests" --rerun firewall
+FIPS_CI_ROOT_TESTS=1 expect_usage_error "--rerun with FIPS_CI_ROOT_TESTS=1" \
+    "--rerun cannot be combined with --root-tests" --rerun firewall
 expect_help "--rerun with --help" --rerun firewall --help
+
+expect_usage_error "--build-only with --root-tests" \
+    "--root-tests cannot be combined with --build-only" --build-only --root-tests
+expect_usage_error "--root-tests with --build-only" \
+    "--root-tests cannot be combined with --build-only" --root-tests --build-only
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

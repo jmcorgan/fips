@@ -132,9 +132,11 @@ fn every_refusal_of_a_packet_sent_from_our_address_is_answered_byte_for_byte_as_
         let sent = packet(us(), dst, len);
         let payload = compress_ipv6(&sent).unwrap();
 
-        // The answers built from the packet itself.
+        // The answers built from the packet itself. A packet over 1280 is
+        // told 1280, the least a host accepts, rather than the limit's 1033.
+        let mtu = if len > 1280 { 1280 } else { 1033 };
         let mut limiter = IcmpRateLimiter::new();
-        let mut expected: Vec<Vec<u8>> = too_big(&sent, 1033, &mut limiter, Instant::now(), true)
+        let mut expected: Vec<Vec<u8>> = too_big(&sent, mtu, &mut limiter, Instant::now(), true)
             .into_iter()
             .collect();
         expected.extend(std::iter::repeat_n(from_us(&sent), 3));
@@ -182,7 +184,7 @@ fn a_refused_packet_from_a_foreign_source_is_answered_as_if_sent_from_our_addres
 #[test]
 fn packet_too_big_from_a_refusal_reports_the_ipv6_mtu_of_its_payload_limit() {
     let peer = any_key();
-    let sent = packet(us(), peer.address().to_ipv6(), 1300);
+    let sent = packet(us(), peer.address().to_ipv6(), 1250);
     let got = answered(Refusal::TooBig {
         peer,
         payload_limit: 1170,
@@ -550,4 +552,133 @@ fn a_syn_behind_a_hop_by_hop_header_is_clamped_to_the_stored_path_as_a_plain_syn
         panic!("clamped and forwarded: {verdict:?}");
     };
     assert_eq!(Some(datagram.payload), compress_ipv6(&sent));
+}
+
+/// The packet a host reassembles from `fragments`, IPv6 fragments of one
+/// datagram in order, or `None` when they are not a complete set.
+fn reassemble(fragments: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let first = fragments.first()?;
+    let mut data = Vec::new();
+    for (i, f) in fragments.iter().enumerate() {
+        if f.len() < 48 || f[6] != 44 || f[8..40] != first[8..40] || f[44..48] != first[44..48] {
+            return None;
+        }
+        let offset_m = u16::from_be_bytes([f[42], f[43]]);
+        if usize::from(offset_m & 0xfff8) != data.len()
+            || (offset_m & 1 == 1) != (i + 1 < fragments.len())
+        {
+            return None;
+        }
+        data.extend_from_slice(&f[48..]);
+    }
+    let mut packet = first[..40].to_vec();
+    packet[4..6].copy_from_slice(&(data.len() as u16).to_be_bytes());
+    packet[6] = first[40];
+    packet.extend_from_slice(&data);
+    Some(packet)
+}
+
+#[test]
+fn a_compressed_1280_byte_payload_splits_into_compressed_fragments_that_each_fit_the_payload_limit()
+{
+    let peer = any_key();
+    let sent = packet(us(), peer.address().to_ipv6(), 1280);
+    let payload = compress_ipv6(&sent).unwrap();
+
+    // A payload limit of 1090 is an IPv6 MTU of 1123: fragments of 1120 and
+    // 216 bytes, 33 fewer each once compressed.
+    let fragments = split(&payload, &peer, us(), 1090, 0x0102_0304).expect("split");
+    let sizes: Vec<usize> = fragments.iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![1087, 183]);
+    for fragment in &fragments {
+        assert_eq!(fragment[0], 0x00, "compressed format byte");
+        assert_eq!(fragment[5], 44, "next header: Fragment");
+    }
+    let rebuilt: Vec<Vec<u8>> = fragments
+        .iter()
+        .map(|f| decompress_ipv6(f, us().octets(), *peer.address().as_bytes()).unwrap())
+        .collect();
+    assert_eq!(reassemble(&rebuilt), Some(sent));
+}
+
+#[test]
+fn split_and_can_split_leave_a_payload_to_packet_too_big_when_the_limit_carries_1280_or_the_packet_exceeds_1280()
+ {
+    let peer = any_key();
+    let dst = peer.address().to_ipv6();
+    let payload = compress_ipv6(&packet(us(), dst, 1280)).unwrap();
+    assert!(can_split(&payload, &peer, us(), 1090));
+
+    // A payload limit of 1247 is an IPv6 MTU of 1280, which the packet fits.
+    assert_eq!(split(&payload, &peer, us(), 1247, 1), None);
+    assert!(!can_split(&payload, &peer, us(), 1247));
+
+    let over = compress_ipv6(&packet(us(), dst, 1300)).unwrap();
+    assert_eq!(split(&over, &peer, us(), 1090, 1), None);
+    assert!(!can_split(&over, &peer, us(), 1090));
+}
+
+/// A SYN advertising MSS 1143 from us to `dst`, its TCP header behind the
+/// 8-byte extension header `ext` whose type is `nh`, with a valid checksum.
+fn syn_behind(dst: Ipv6Addr, nh: u8, ext: [u8; 8]) -> Vec<u8> {
+    let plain = syn(us(), dst);
+    let mut sent = plain[..40].to_vec();
+    sent.extend_from_slice(&ext);
+    sent.extend_from_slice(&plain[40..]);
+    sent[4..6].copy_from_slice(&32u16.to_be_bytes());
+    sent[6] = nh;
+    sent[48 + 22..48 + 24].copy_from_slice(&1143u16.to_be_bytes());
+    sent[48 + 16] = 0;
+    sent[48 + 17] = 0;
+    let sum = !tcp_sum(&sent, 48);
+    sent[48 + 16..48 + 18].copy_from_slice(&sum.to_be_bytes());
+    assert_eq!(tcp_sum(&sent, 48), 0xffff, "setup: valid checksum");
+    sent
+}
+
+#[test]
+fn the_held_syn_clamp_reaches_a_syn_behind_destination_options_and_leaves_one_behind_a_fragment_header()
+ {
+    let peer = any_key();
+    let dst = peer.address().to_ipv6();
+
+    // Destination Options: next header TCP, length 0 (8 bytes), one PadN.
+    let options = syn_behind(dst, 60, [6, 0, 1, 4, 0, 0, 0, 0]);
+    let mut payload = compress_ipv6(&options).unwrap();
+    assert_eq!(
+        reclamp(&mut payload, &peer, us(), 1143, Some(1090)),
+        Some(1063)
+    );
+    let released = decompress_ipv6(&payload, us().octets(), *peer.address().as_bytes()).unwrap();
+    assert_eq!(u16::from_be_bytes([released[70], released[71]]), 1063);
+    assert_eq!(tcp_sum(&released, 48), 0xffff, "checksum still valid");
+
+    // An atomic fragment: next header TCP, offset 0, M clear.
+    let fragment = syn_behind(dst, 44, [6, 0, 0, 0, 0, 0, 0, 9]);
+    let held = compress_ipv6(&fragment).unwrap();
+    let mut payload = held.clone();
+    assert_eq!(reclamp(&mut payload, &peer, us(), 1143, Some(1090)), None);
+    assert_eq!(payload, held, "left byte for byte as the reader leaves it");
+}
+
+#[test]
+fn a_refusal_or_an_unknown_destination_over_1280_on_a_limit_under_1280_is_told_1280() {
+    let peer = any_key();
+    let sent = packet(us(), peer.address().to_ipv6(), 1300);
+    let owed = answer(
+        Refusal::TooBig {
+            peer,
+            payload_limit: 1170,
+            payload: compress_ipv6(&sent).unwrap(),
+        },
+        us(),
+    );
+    assert_eq!(owed, vec![Owed::TooBig(sent, 1280)]);
+
+    let state = state_with(any_key(), 1000);
+    let stranger = any_key().address().to_ipv6();
+    let over = packet(us(), stranger, 1300);
+    assert_eq!(outbound(&over, &state, us()), Host::TooBig(1280));
+    let under = packet(us(), stranger, 1100);
+    assert_eq!(outbound(&under, &state, us()), Host::TooBig(1033));
 }

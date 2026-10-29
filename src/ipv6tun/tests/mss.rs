@@ -317,3 +317,13 @@ fn an_inbound_syn_ack_behind_a_hop_by_hop_header_is_clamped_to_the_ceiling_a_pla
         "the conservative 1143, nothing taken off for the header"
     );
 }
+
+#[test]
+fn flow_ceiling_gives_the_conservative_ceiling_without_a_usable_entry_and_the_path_mss_otherwise() {
+    // A node-wide ceiling of 1363 is a 1500-byte transport's.
+    assert_eq!(flow_ceiling(None, 1363), 1143);
+    assert_eq!(flow_ceiling(Some(27), 1363), 1143, "tcp_mss(27) is 0");
+    assert_eq!(flow_ceiling(Some(1090), 1363), 1063, "1090 + 33 - 60");
+    assert_eq!(flow_ceiling(None, 1000), 1000);
+    assert_eq!(flow_ceiling(Some(1090), 1000), 1000);
+}

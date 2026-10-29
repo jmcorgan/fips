@@ -7,9 +7,11 @@
 //! `Ipv6Disabled`, judged from a copy of the sysctl tree without root and
 //! from the kernel's own in a namespace.
 //!
-//! The namespace tests need root, so they are `#[ignore]`d. GitHub's Linux
-//! unit-test job runs them under `sudo` with `--ignored`; local CI does not,
-//! so locally they are run by hand that way. macOS and FreeBSD are not run
+//! The namespace tests need root, so they are `#[ignore]`d.
+//! `testing/root-tests.sh` runs them with `--ignored`, as root; GitHub's
+//! Linux unit-test job runs that script under `sudo` on every push, and local
+//! CI only with `--root-tests`, so locally they are otherwise run by hand
+//! that way. macOS and FreeBSD are not run
 //! at all; there the kernel names the device, and after the fix no code
 //! touches an interface by `tun.name` before create. The module is Linux
 //! only.

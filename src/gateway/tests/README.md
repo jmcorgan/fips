@@ -54,8 +54,9 @@ declared from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod
   helpers these tests share as `pub(in crate::gateway)`, so the tests of
   other files in `src/gateway/` can use them too.
 - The network-namespace tests need root. They are `#[ignore]`d, so the
-  normal test run skips them; the GitHub Linux unit-test job runs them under
-  `sudo` in its namespace step, and the internal builder does not. By hand,
+  normal test run skips them. `testing/root-tests.sh` runs them as root:
+  the GitHub Linux unit-test job runs it under `sudo`, local CI with
+  `--root-tests`, and the internal builder does not yet. By hand,
   build with `cargo test --lib --no-run` and run the test binary under
   `sudo` with `--ignored`. They use the crate-wide namespace helpers in
   `src/testutil.rs` (`run_ok`, `in_netns`).

@@ -397,7 +397,7 @@ the FMP design document:
 | Inbound exposure on `fips0` | Default-deny nftables baseline (operator opt-in) |
 | Sybil identities | Discretionary peering + handshake rate limiting + optional peer ACL |
 | Eclipse attack | Diverse peering across independent operators and transports |
-| Unauthorized peer admission | Optional `peers.allow` allowlist consulted before handshake |
+| Unauthorized peer admission | Optional `peers.allow` and `peers.deny` lists, applied after msg1's DH reveals the initiator and before the link is registered, given a session index or answered with msg2; the msg1 rate limit bounds what refused initiators cost. `peers.allow` alone refuses no one: the strict posture needs `ALL` in `peers.deny` (see [Peer ACL](#peer-acl)) |
 | Local impersonation via the native datagram API | API disabled by default; when enabled, `fips` group membership is the only gate and must be treated as key access |
 
 See [../design/fips-mesh-layer.md](../design/fips-mesh-layer.md) for

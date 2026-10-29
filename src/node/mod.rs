@@ -1898,11 +1898,12 @@ impl Node {
     /// minimum (1280), or `None` when it does not.
     ///
     /// A host never lowers its path MTU below 1280 on a Packet Too Big, so
-    /// with a shortfall every non-TCP IPv6 packet between the effective MTU
-    /// and 1280 bytes is lost. Returns `None` while no transport is
-    /// bound: there is nothing to judge, and the configured fallback in
-    /// [`Self::transport_mtu`] would otherwise report one before any
-    /// transport has come up. The test is `is_bound`, as in
+    /// with a shortfall every IPv6 packet between the effective MTU and 1280
+    /// bytes is sent as IPv6 fragments (`crate::ipv6tun::ipv6_frag`), or lost
+    /// where the effective MTU is too small to fragment for. Returns `None`
+    /// while no transport is bound: there is nothing to judge, and the
+    /// configured fallback in [`Self::transport_mtu`] would otherwise report
+    /// one before any transport has come up. The test is `is_bound`, as in
     /// `transport_mtu`: an interface-bound transport whose interface is
     /// absent is operational but carries nothing.
     pub(crate) fn ipv6_shortfall(&self) -> Option<u16> {
@@ -1937,7 +1938,7 @@ impl Node {
                 transport_mtu = self.transport_mtu(),
                 effective_ipv6_mtu = self.effective_ipv6_mtu(),
                 short_by = short,
-                "Transport MTU too small for the IPv6 minimum: IPv6 packets above the effective MTU and up to 1280 bytes will be dropped for every protocol except TCP; set each transport's mtu to at least {}",
+                "Transport MTU too small for the IPv6 minimum: IPv6 packets above the effective MTU and up to 1280 bytes will be sent as IPv6 fragments, two to ten datagrams each, or dropped if the effective MTU is under 176; set each transport's mtu to at least {}",
                 crate::ipv6tun::tun::IPV6_MIN_MTU + crate::ipv6tun::mtu::FIPS_IPV6_OVERHEAD
             );
         }
@@ -4102,7 +4103,10 @@ impl Node {
     /// With this set, [`Self::start`] skips system-TUN creation (it gates on
     /// `tun_tx` being unset). Packets pushed into `app_outbound_tx` bypass the
     /// system-TUN reader's `handle_tun_packet`, so FIPS does not filter them by
-    /// the `fd00::/8` prefix and clamps no TCP MSS in either direction. It does
+    /// the `fd00::/8` prefix, and of the TCP MSS clamps only one applies: any
+    /// SYN-flagged segment (a SYN or a SYN-ACK) held until its session is
+    /// established is clamped when it is released, as on a system TUN. No
+    /// other SYN-flagged segment is clamped, in either direction. FIPS does
     /// not refuse an off-mesh destination up front either: it looks up bytes 1
     /// to 15 of any destination in the identity cache and, on a miss, answers
     /// with ICMPv6 Destination Unreachable on `app_inbound_rx`, sourced from the

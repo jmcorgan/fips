@@ -18,14 +18,23 @@
 //! and only they consult the ICMPv6 limiters: the Packet Too Big limiter
 //! when told to, and the Destination Unreachable bucket for every
 //! Destination Unreachable.
+//!
+//! The node calls three more on a datagram it holds, with the key it was
+//! sent to and our address, and keeps no adapter state for them:
+//! [`can_split`] and [`split`] for a payload over the limit it is sent by,
+//! which goes as IPv6 fragments when the packet is at most 1280 bytes and
+//! the path is under 1280 (see `ipv6_frag`), and [`reclamp`] for a SYN held
+//! while its session was set up, clamped again by the path MTU known when
+//! it is released.
 
 use super::core::{MeshState, PathMtuReplica};
 use super::icmp::{source_refused, unreachable};
+use super::ipv6_frag::{can_fragment, fragment_for_path, packet_too_big_mtu};
 use super::ipv6_shim::{compress_ipv6, decompress_ipv6};
 use super::link::{Datagram, PeerKey, Refusal};
-use super::mss::{Remote, clamp};
+use super::mss::{Remote, clamp, flow_ceiling};
 use super::mtu::ipv6_mtu;
-use super::tcp_mss::recalculate_l4_checksum;
+use super::tcp_mss::{clamp_tcp_mss, recalculate_l4_checksum};
 use crate::identity::IPV6_ADDRESS_PREFIX;
 use fips_core::identity::NodePrefix;
 use std::net::Ipv6Addr;
@@ -183,8 +192,10 @@ pub(crate) fn from_tun(
 /// prefix names a key goes to the node whatever its size: the node judges it
 /// against the limit it carries now, which the adapter's copy can trail. A
 /// packet to any other destination is answered here: one to `fd00::/8` with
-/// Packet Too Big when it is over the node-wide IPv6 MTU last published, as
-/// the size check comes first, and every other with Destination Unreachable
+/// Packet Too Big when it is over the node-wide IPv6 MTU last published (1280
+/// for a packet over 1280 when that MTU is under it, see
+/// [`packet_too_big_mtu`]), as the size check comes first, and every other
+/// with Destination Unreachable
 /// from `our_addr`, or nothing when it is owed no ICMPv6 error. A
 /// destination outside `fd00::/8`, which only an embedder that owns the TUN
 /// can send, is never too big: the mesh could not carry it at any size.
@@ -207,7 +218,9 @@ pub(crate) fn outbound(packet: &[u8], state: &MeshState, our_addr: Ipv6Addr) -> 
         });
     }
     match admit(packet, state.ipv6_mtu()) {
-        Admit::TooBig(mtu) if packet[24] == IPV6_ADDRESS_PREFIX => Host::TooBig(mtu),
+        Admit::TooBig(mtu) if packet[24] == IPV6_ADDRESS_PREFIX => {
+            Host::TooBig(packet_too_big_mtu(packet.len(), mtu as usize))
+        }
         _ => unreachable(packet, our_addr).map_or(Host::Nothing, Host::Unreachable),
     }
 }
@@ -218,7 +231,9 @@ pub(crate) fn outbound(packet: &[u8], state: &MeshState, our_addr: Ipv6Addr) -> 
 ///
 /// The rebuilt packet is the one the host sent whenever the host sent it
 /// from our own address, the normal case; compression keeps every other
-/// header field it had.
+/// header field it had. A Packet Too Big reports the IPv6 MTU of the limit
+/// refused by, or 1280 for a packet over 1280 when that MTU is under it (see
+/// [`packet_too_big_mtu`]).
 pub(crate) fn answer(refusal: Refusal, our_addr: Ipv6Addr) -> Vec<Owed> {
     match refusal {
         Refusal::TooBig {
@@ -226,7 +241,11 @@ pub(crate) fn answer(refusal: Refusal, our_addr: Ipv6Addr) -> Vec<Owed> {
             payload_limit,
             payload,
         } => rebuild(&payload, &peer, our_addr)
-            .map(|packet| Owed::TooBig(packet, u32::from(ipv6_mtu(payload_limit))))
+            .map(|packet| {
+                let mtu = usize::from(ipv6_mtu(payload_limit));
+                let report = packet_too_big_mtu(packet.len(), mtu);
+                Owed::TooBig(packet, report)
+            })
             .into_iter()
             .collect(),
         Refusal::TableFull { peer, payload } => rebuild(&payload, &peer, our_addr)
@@ -247,6 +266,70 @@ pub(crate) fn answer(refusal: Refusal, our_addr: Ipv6Addr) -> Vec<Owed> {
 /// `peer`'s address.
 fn rebuild(payload: &[u8], peer: &PeerKey, our_addr: Ipv6Addr) -> Option<Vec<u8>> {
     decompress_ipv6(payload, our_addr.octets(), *peer.address().as_bytes())
+}
+
+/// Whether [`split`] would send `payload`, a datagram to `peer` from
+/// `our_addr`, as IPv6 fragments that each fit `payload_limit`. `false`
+/// when the payload does not rebuild.
+pub(crate) fn can_split(
+    payload: &[u8],
+    peer: &PeerKey,
+    our_addr: Ipv6Addr,
+    payload_limit: u16,
+) -> bool {
+    rebuild(payload, peer, our_addr)
+        .is_some_and(|packet| can_fragment(&packet, usize::from(ipv6_mtu(payload_limit))))
+}
+
+/// Split `payload`, a datagram to `peer` from `our_addr`, into compressed
+/// IPv6 fragments of at most `payload_limit` bytes each, new ones under
+/// identification `ident`, or `None` when its packet is not this node's to
+/// fragment (see `ipv6_frag::fragment_for_path`).
+///
+/// The packet is rebuilt and fragmented for the IPv6 MTU the limit admits,
+/// and each fragment compresses by the same [`HEADER_SAVING`] bytes that
+/// conversion adds, so it fits the limit. `Some` exactly when [`can_split`]
+/// is true.
+///
+/// [`HEADER_SAVING`]: super::ipv6_shim::HEADER_SAVING
+pub(crate) fn split(
+    payload: &[u8],
+    peer: &PeerKey,
+    our_addr: Ipv6Addr,
+    payload_limit: u16,
+    ident: u32,
+) -> Option<Vec<Vec<u8>>> {
+    let packet = rebuild(payload, peer, our_addr)?;
+    fragment_for_path(&packet, usize::from(ipv6_mtu(payload_limit)), ident)?
+        .iter()
+        .map(|fragment| compress_ipv6(fragment))
+        .collect()
+}
+
+/// Clamp a held SYN in `payload`, a datagram to `peer` from `our_addr`,
+/// again: to the smaller of `ceiling` and the stored path to `peer`, whose
+/// payload limit is `path_limit` (`None` when nothing is stored), as the
+/// system TUN reader clamps a SYN it reads (see [`flow_ceiling`]).
+///
+/// Clamps whatever `clamp_tcp_mss` reaches, a SYN behind Hop-by-Hop,
+/// Routing or Destination Options headers included, and only lowers. On a
+/// change `payload` is replaced by the clamped packet compressed again and
+/// the MSS written is returned; otherwise `payload` is left as it was and
+/// `None` is returned, as for a payload that does not rebuild.
+pub(crate) fn reclamp(
+    payload: &mut Vec<u8>,
+    peer: &PeerKey,
+    our_addr: Ipv6Addr,
+    ceiling: u16,
+    path_limit: Option<u16>,
+) -> Option<u16> {
+    let mut packet = rebuild(payload, peer, our_addr)?;
+    let mss = flow_ceiling(path_limit, ceiling);
+    if !clamp_tcp_mss(&mut packet, mss) {
+        return None;
+    }
+    *payload = compress_ipv6(&packet)?;
+    Some(mss)
 }
 
 #[cfg(test)]

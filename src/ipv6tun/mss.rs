@@ -12,7 +12,7 @@ use tracing::trace;
 /// this large, so an MSS derived from it fits anywhere.
 ///
 /// Three uses, and they must not disagree: the cold-flow fallback in
-/// [`per_flow_max_mss`], and the two seeds of the node-wide limit before any
+/// [`flow_ceiling`], and the two seeds of the node-wide limit before any
 /// transport has bound, the adapter's (`MeshState::new`) and the node's record
 /// of what it has published (`NodeMtuFeed::new`). It is also the value
 /// `Node::transport_mtu()` falls back to when nothing is bound.
@@ -62,19 +62,16 @@ pub type MssCeiling = Arc<std::sync::atomic::AtomicU16>;
 ///
 /// The node reports each learned path as a payload limit; the shim turns it
 /// into an IPv6 MTU, and the 40-byte IPv6 and 20-byte TCP headers come off
-/// that (see [`tcp_mss`](super::mtu::tcp_mss)).
+/// that (see [`tcp_mss`](super::mtu::tcp_mss)). The ceiling itself is
+/// [`flow_ceiling`]'s, which the node's re-clamp of a held SYN shares.
 pub(crate) fn per_flow_max_mss(
     lookup: &PathMtuReplica,
     addr_bytes: &[u8],
     global_max_mss: u16,
 ) -> u16 {
-    use super::mtu::{mss_ceiling, tcp_mss};
+    use super::mtu::tcp_mss;
 
-    // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
-    // payload (1203) → TCP segment after IPv6+TCP headers (1143).
-    // Used as the conservative ceiling for empty-lookup destinations.
-    let conservative_max_mss = mss_ceiling(IPV6_MIN_MTU);
-    let empty_lookup_ceiling = std::cmp::min(global_max_mss, conservative_max_mss);
+    let empty_lookup_ceiling = flow_ceiling(None, global_max_mss);
 
     if addr_bytes.len() != 16 {
         trace!(
@@ -113,6 +110,51 @@ pub(crate) fn per_flow_max_mss(
         return empty_lookup_ceiling;
     };
     let path_max_mss = tcp_mss(payload_limit);
+    let result = flow_ceiling(Some(payload_limit), global_max_mss);
+    // `trace!`, not `warn!`, because this runs on every packet rather than
+    // only on SYNs: one degenerate stored value would otherwise emit a WARN
+    // per packet indefinitely and bury every other warning on the node. The
+    // link promotion path warns once instead.
+    if path_max_mss == 0 {
+        trace!(
+            fips_addr = %fips_addr,
+            payload_limit,
+            empty_lookup_ceiling,
+            "per_flow_max_mss: stored path_mtu leaves no room for a TCP payload byte, using conservative ceiling"
+        );
+        return result;
+    }
+    trace!(
+        fips_addr = %fips_addr,
+        payload_limit,
+        path_max_mss,
+        global_max_mss,
+        result,
+        "per_flow_max_mss: per-destination clamp applied"
+    );
+    result
+}
+
+/// The TCP MSS ceiling for a flow under the node-wide ceiling `global`, given
+/// the payload limit of the stored path to its far end, or `None` when
+/// nothing is stored: `min(global, tcp_mss(payload_limit))`, or the
+/// conservative `min(global, mss_ceiling(1280))` when nothing is stored or
+/// the stored limit leaves no room for one TCP payload byte.
+///
+/// The system TUN reader's clamp ([`per_flow_max_mss`]) and the node's
+/// re-clamp of a held SYN at release both take their ceiling from here, so
+/// the two cannot disagree.
+pub(crate) fn flow_ceiling(payload_limit: Option<u16>, global: u16) -> u16 {
+    use super::mtu::{mss_ceiling, tcp_mss};
+
+    // RFC 8200 IPv6-minimum MTU (1280) → effective FIPS-encapsulated
+    // payload (1203) → TCP segment after IPv6+TCP headers (1143).
+    // Used as the conservative ceiling for empty-lookup destinations.
+    let empty_lookup_ceiling = std::cmp::min(global, mss_ceiling(IPV6_MIN_MTU));
+    let Some(payload_limit) = payload_limit else {
+        return empty_lookup_ceiling;
+    };
+    let path_max_mss = tcp_mss(payload_limit);
     // The actionable floor deliberately does not apply here. Every value a
     // remote party supplies is refused before it can reach this map, at the
     // path MTU state machine, the reactive `MtuExceeded` write and the
@@ -131,30 +173,10 @@ pub(crate) fn per_flow_max_mss(
     // leave the SYN carrying the kernel-natural MSS instead. Fall back to the
     // conservative ceiling there; any positive result is by construction the
     // largest segment the stored MTU admits.
-    //
-    // `trace!`, not `warn!`, because this runs on every packet rather than
-    // only on SYNs: one degenerate stored value would otherwise emit a WARN
-    // per packet indefinitely and bury every other warning on the node. The
-    // link promotion path warns once instead.
     if path_max_mss == 0 {
-        trace!(
-            fips_addr = %fips_addr,
-            payload_limit,
-            empty_lookup_ceiling,
-            "per_flow_max_mss: stored path_mtu leaves no room for a TCP payload byte, using conservative ceiling"
-        );
         return empty_lookup_ceiling;
     }
-    let result = std::cmp::min(global_max_mss, path_max_mss);
-    trace!(
-        fips_addr = %fips_addr,
-        payload_limit,
-        path_max_mss,
-        global_max_mss,
-        result,
-        "per_flow_max_mss: per-destination clamp applied"
-    );
-    result
+    std::cmp::min(global, path_max_mss)
 }
 
 /// Which address of a packet names the far end of its flow: the source of a

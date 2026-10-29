@@ -4146,7 +4146,14 @@ async fn test_tun_outbound_path_mtu_generates_ptb() {
     let reduced_ipv6_mtu = crate::ipv6tun::icmp::effective_ipv6_mtu(reduced_mtu) as usize;
     let local_ipv6_mtu = nodes[0].node.effective_ipv6_mtu() as usize;
     let oversized_payload = vec![0u8; reduced_ipv6_mtu - 39]; // 40-byte hdr + payload > reduced MTU
-    let ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, &oversized_payload);
+    let mut ipv6_packet = build_ipv6_packet(&src_fips, &dst_fips, &oversized_payload);
+    // A Hop-by-Hop header keeps the packet from being fragmented for a path
+    // under 1280, so it is answered with Packet Too Big. It is an 8-byte one
+    // in front of UDP, so the ICMPv6 builder finds an upper layer and
+    // answers.
+    ipv6_packet[6] = 0;
+    ipv6_packet[40] = 17;
+    ipv6_packet[41] = 0;
     assert!(
         ipv6_packet.len() > reduced_ipv6_mtu,
         "packet must exceed path MTU"
@@ -4227,15 +4234,15 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
     // packet that fits A's local MTU (1294) but whose wire size after
     // FIPS encapsulation exceeds B's transport MTU (800), B's forwarding
     // path fails with MtuExceeded and sends an MtuExceeded signal back
-    // to A. A updates PathMtuState, and the next oversized packet
-    // generates ICMPv6 Packet Too Big on TUN.
+    // to A. A updates PathMtuState, and the next oversized packet that
+    // cannot be fragmented generates ICMPv6 Packet Too Big on TUN.
     //
     // This exercises the full PMTUD loop:
     //   1. Oversized packet forwarded A→B
     //   2. B→C forward fails (B's transport MTU 800 exceeded)
     //   3. B sends MtuExceeded signal back to A
     //   4. A receives signal, updates PathMtuState for C
-    //   5. Next oversized packet → ICMPv6 PTB on TUN
+    //   5. Next oversized packet that cannot be fragmented → ICMPv6 PTB on TUN
     let mtus = [1400, 800, 800];
     let edges = vec![(0, 1), (1, 2)];
     let mut nodes = run_tree_test_with_mtus(&mtus, &edges).await;
@@ -4333,11 +4340,17 @@ async fn test_multihop_pmtud_heterogeneous_mtu() {
 
     // Now send ANOTHER oversized packet — this time handle_tun_outbound
     // should check PathMtuState and generate ICMPv6 PTB on TUN instead
-    // of forwarding.
+    // of forwarding. A Hop-by-Hop header keeps it from being fragmented for
+    // the path, which is under 1280. It is an 8-byte one in front of UDP, so
+    // the ICMPv6 builder finds an upper layer and answers.
     let (tun_tx2, tun_rx2) = std::sync::mpsc::channel();
     nodes[0].node.install_tun(tun_tx2);
 
-    nodes[0].node.handle_tun_outbound(ipv6_packet.clone()).await;
+    let mut unfragmentable = ipv6_packet.clone();
+    unfragmentable[6] = 0;
+    unfragmentable[40] = 17;
+    unfragmentable[41] = 0;
+    nodes[0].node.handle_tun_outbound(unfragmentable).await;
 
     let ptb_messages: Vec<Vec<u8>> = std::iter::from_fn(|| tun_rx2.try_recv().ok()).collect();
     assert_eq!(
@@ -11499,14 +11512,90 @@ fn path_state(nodes: &[TestNode]) -> (u16, Option<u16>) {
 }
 
 /// What one 1280-byte IPv6 packet from A's TUN to C produced: the packet
-/// sizes C's TUN received, A's ICMPv6 answers as (type, reported MTU), and
-/// A's path state and TCP clamp toward C afterwards.
+/// sizes C's TUN received, whether they reassemble to the packet sent, A's
+/// ICMPv6 answers as (type, reported MTU), and A's path state and TCP clamp
+/// toward C afterwards.
 #[derive(Debug, PartialEq)]
 struct Round {
     delivered: Vec<usize>,
+    intact: bool,
     answers: Vec<(u8, u32)>,
     path: (u16, Option<u16>),
     clamp: u16,
+}
+
+/// Receivers for what A's TUN (ICMPv6 answers) and C's TUN (deliveries) are
+/// handed.
+type TunTaps = (
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+);
+
+/// Install TUN receivers on A and C.
+fn tun_taps(nodes: &mut [TestNode]) -> TunTaps {
+    let (a_tx, a_rx) = std::sync::mpsc::channel();
+    nodes[0].node.install_tun(a_tx);
+    let (c_tx, c_rx) = std::sync::mpsc::channel();
+    nodes[2].node.install_tun(c_tx);
+    (a_rx, c_rx)
+}
+
+/// Send one packet from A's TUN, drain, and return the packets C's TUN
+/// received and A's ICMPv6 answers as (type, reported MTU).
+async fn send_one(
+    nodes: &mut [TestNode],
+    (a_rx, c_rx): &TunTaps,
+    packet: Vec<u8>,
+) -> (Vec<Vec<u8>>, Vec<(u8, u32)>) {
+    nodes[0].node.handle_tun_outbound(packet).await;
+    drain_to_quiescence(nodes).await;
+    (
+        std::iter::from_fn(|| c_rx.try_recv().ok()).collect(),
+        icmpv6_answers(a_rx),
+    )
+}
+
+/// The ICMPv6 answers a TUN receiver holds, as (type, reported MTU).
+fn icmpv6_answers(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<(u8, u32)> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|p| (p[40], u32::from_be_bytes([p[44], p[45], p[46], p[47]])))
+        .collect()
+}
+
+/// What a destination host reassembles from the packets its TUN received: a
+/// lone unfragmented packet as it is, or a complete set of IPv6 fragments
+/// (one identification, contiguous 8-byte-aligned offsets, M set on all but
+/// the last) as the original packet. `None` for anything else.
+fn reassemble_at_host(packets: &[Vec<u8>]) -> Option<Vec<u8>> {
+    const FRAG: u8 = 44;
+    let first = packets.first()?;
+    if packets.len() == 1 && first[6] != FRAG {
+        return Some(first.clone());
+    }
+    let mut data = Vec::new();
+    for (i, f) in packets.iter().enumerate() {
+        if f.len() < 48
+            || f[6] != FRAG
+            || f[8..40] != first[8..40]
+            || f[40] != first[40]
+            || f[44..48] != first[44..48]
+            || u16::from_be_bytes([f[4], f[5]]) as usize + 40 != f.len()
+        {
+            return None;
+        }
+        let offset_m = u16::from_be_bytes([f[42], f[43]]);
+        if (offset_m & 0xfff8) as usize != data.len()
+            || (offset_m & 1 == 1) != (i + 1 < packets.len())
+        {
+            return None;
+        }
+        data.extend_from_slice(&f[48..]);
+    }
+    let mut packet = first[..40].to_vec();
+    packet[4..6].copy_from_slice(&(data.len() as u16).to_be_bytes());
+    packet[6] = first[40];
+    packet.extend_from_slice(&data);
+    Some(packet)
 }
 
 /// Send `rounds` 1280-byte IPv6 packets from A's TUN toward C, spaced past
@@ -11516,10 +11605,7 @@ async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>)
     let a_fips = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
     let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
     let c_bytes = c_fips.to_ipv6().octets();
-    let (a_tx, a_rx) = std::sync::mpsc::channel();
-    nodes[0].node.install_tun(a_tx);
-    let (c_tx, c_rx) = std::sync::mpsc::channel();
-    nodes[2].node.install_tun(c_tx);
+    let taps = tun_taps(nodes);
     let global = crate::ipv6tun::icmp::mss_ceiling(nodes[0].node.transport_mtu());
     let clamp = |nodes: &[TestNode]| {
         crate::ipv6tun::mss::per_flow_max_mss(&nodes[0].node.test_replica(), &c_bytes, global)
@@ -11530,15 +11616,11 @@ async fn send_rounds(nodes: &mut [TestNode], rounds: usize) -> (u16, Vec<Round>)
     for _ in 0..rounds {
         let pkt = build_ipv6_packet(&a_fips, &c_fips, &[0xAB; 1240]);
         assert_eq!(pkt.len(), 1280);
-        nodes[0].node.handle_tun_outbound(pkt).await;
-        drain_to_quiescence(nodes).await;
+        let (delivered, answers) = send_one(nodes, &taps, pkt.clone()).await;
         out.push(Round {
-            delivered: std::iter::from_fn(|| c_rx.try_recv().ok())
-                .map(|p| p.len())
-                .collect(),
-            answers: std::iter::from_fn(|| a_rx.try_recv().ok())
-                .map(|p| (p[40], u32::from_be_bytes([p[44], p[45], p[46], p[47]])))
-                .collect(),
+            delivered: delivered.iter().map(Vec::len).collect(),
+            intact: reassemble_at_host(&delivered).as_ref() == Some(&pkt),
+            answers,
             path: path_state(nodes),
             clamp: clamp(nodes),
         });
@@ -11561,24 +11643,26 @@ async fn test_a_chain_of_default_udp_mtu_nodes_delivers_1280_byte_ipv6_packets_e
     cleanup_nodes(&mut nodes).await;
 }
 
-/// Characterization, not a requirement: records what a default node does
-/// toward a destination behind a forwarder whose transport MTU is 1280 (one
-/// still at the old default, or set by hand). Every packet between 1204 and
-/// 1280 bytes is lost on that path, as it is today: the first silently at the
-/// forwarder, whose `MtuExceeded` tightens the sender's path MTU to 1280; each
-/// later one answered with a Packet Too Big reporting 1203, which a host
-/// ignores (RFC 8201). The TCP clamp shows which flows that reaches: a cold
-/// destination clamps to 1143 and its segments fit the forwarder; one whose
-/// path MTU was learned at 1357 over an all-default path clamps to 1220, so
-/// a flow opened before the path changed sends 1280-byte segments that are
-/// lost there, while flows opened after the `MtuExceeded` clamp to 1143.
+/// A default node toward a destination behind a forwarder whose transport
+/// MTU is 1280 (one still at the old default, or set by hand). The first
+/// packet between 1204 and 1280 bytes is lost silently at the forwarder,
+/// whose `MtuExceeded` tightens the sender's path MTU to 1280. Each later one
+/// is sent as two IPv6 fragments that fit the path, and the destination host
+/// reassembles them; before ingress fragmentation each was answered with a
+/// Packet Too Big reporting 1203, which a host ignores (RFC 8201). The TCP
+/// clamp shows which flows the first loss reaches: a cold destination clamps
+/// to 1143 and its segments fit the forwarder; one whose path MTU was learned
+/// at 1357 over an all-default path clamps to 1220, so a flow opened before
+/// the path changed loses its first 1280-byte segment there and has the rest
+/// fragmented, while flows opened after the `MtuExceeded` clamp to 1143.
 #[tokio::test]
-async fn characterize_a_default_node_behind_a_1280_byte_forwarder_loses_1280_byte_packets_and_answers_ptb_1203()
+async fn a_default_node_behind_a_1280_byte_forwarder_loses_the_first_1280_byte_packet_and_fragments_the_rest()
  {
     let default_mtu = crate::config::UdpConfig::default().mtu();
-    let narrowed = Round {
-        delivered: vec![],
-        answers: vec![(2, 1203)],
+    let fragmented = Round {
+        delivered: vec![1200, 136],
+        intact: true,
+        answers: vec![],
         path: (1280, Some(1280)),
         clamp: 1143,
     };
@@ -11609,14 +11693,15 @@ async fn characterize_a_default_node_behind_a_1280_byte_forwarder_loses_1280_byt
             rounds[0],
             Round {
                 delivered: vec![],
+                intact: false,
                 answers: vec![],
                 path: (1280, Some(1280)),
                 clamp: 1143,
             },
             "first packet, learned {learned:?}"
         );
-        assert_eq!(rounds[1], narrowed, "second packet, learned {learned:?}");
-        assert_eq!(rounds[2], narrowed, "third packet, learned {learned:?}");
+        assert_eq!(rounds[1], fragmented, "second packet, learned {learned:?}");
+        assert_eq!(rounds[2], fragmented, "third packet, learned {learned:?}");
 
         cleanup_nodes(&mut nodes).await;
     }
@@ -11792,6 +11877,370 @@ async fn a_tun_packet_held_behind_a_removed_peers_session_stays_held_while_anoth
         1,
         "the packet must stay held for the next session to the destination"
     );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_node_whose_own_transport_is_1280_fragments_a_1280_byte_packet_instead_of_answering_packet_too_big()
+ {
+    let mut nodes = session_chain([1280; 3]).await;
+
+    let (_, rounds) = send_rounds(&mut nodes, 1).await;
+    assert_eq!(rounds[0].delivered, vec![1200, 136], "{rounds:?}");
+    assert!(rounds[0].intact, "{rounds:?}");
+    assert!(rounds[0].answers.is_empty(), "{rounds:?}");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_packet_over_1280_on_a_path_under_1280_is_answered_with_packet_too_big_reporting_1280() {
+    let mut nodes = session_chain([1280; 3]).await;
+    let taps = tun_taps(&mut nodes);
+    let a_fips = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
+    let pkt = build_ipv6_packet(&a_fips, &c_fips, &[0xAB; 1260]);
+    assert_eq!(pkt.len(), 1300);
+
+    let (delivered, answers) = send_one(&mut nodes, &taps, pkt).await;
+    assert!(delivered.is_empty(), "{delivered:?}");
+    assert_eq!(answers, vec![(2, 1280)]);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_packet_over_1280_on_a_session_whose_path_mtu_is_under_1280_is_answered_with_packet_too_big_reporting_1280()
+ {
+    // Node 0's own transport carries a 1300-byte packet, so it passes the
+    // node-wide check and reaches the established session's, where the path
+    // MTU learned from the middle node decides.
+    let mut nodes = session_chain([1400, 1200, 1400]).await;
+    let a_fips = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
+    let pkt = build_ipv6_packet(&a_fips, &c_fips, &[0xAB; 1260]);
+    assert_eq!(pkt.len(), 1300);
+    assert!(
+        nodes[0].node.effective_ipv6_mtu() as usize >= pkt.len(),
+        "precondition: the packet fits node 0's own transport"
+    );
+    for _ in 0..10 {
+        if path_state(&nodes).0 == 1200 {
+            break;
+        }
+        nodes[0].node.handle_tun_outbound(pkt.clone()).await;
+        drain_to_quiescence(&mut nodes).await;
+    }
+    assert_eq!(
+        path_state(&nodes).0,
+        1200,
+        "precondition: the session has learned the narrow path"
+    );
+
+    let taps = tun_taps(&mut nodes);
+    let (delivered, answers) = send_one(&mut nodes, &taps, pkt).await;
+    assert!(delivered.is_empty(), "{delivered:?}");
+    assert_eq!(answers, vec![(2, 1280)]);
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_node_whose_own_transport_and_path_are_both_narrow_splits_once_at_the_smaller_mtu() {
+    let mut nodes = session_chain([1280, 1200, 1280]).await;
+    let a_fips = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
+    // Packets of node 0's own effective MTU fit its transport but not the
+    // middle link; the middle node's `MtuExceeded` teaches the session the
+    // narrow path, as the first oversized packet of any flow does.
+    for _ in 0..10 {
+        if path_state(&nodes).0 == 1200 {
+            break;
+        }
+        let warm = build_ipv6_packet(&a_fips, &c_fips, &[0u8; 1163]);
+        assert_eq!(warm.len(), 1203);
+        nodes[0].node.handle_tun_outbound(warm).await;
+        drain_to_quiescence(&mut nodes).await;
+    }
+    assert_eq!(
+        path_state(&nodes).0,
+        1200,
+        "precondition: the session has learned the narrow path"
+    );
+
+    let (_, rounds) = send_rounds(&mut nodes, 1).await;
+    assert_eq!(rounds[0].delivered, vec![1120, 216], "{rounds:?}");
+    assert!(rounds[0].intact, "{rounds:?}");
+    assert!(rounds[0].answers.is_empty(), "{rounds:?}");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+// ============================================================================
+// A TCP SYN held behind discovery is clamped again at release
+// ============================================================================
+
+/// Build a converged three-node chain with the given MTUs in which node 0
+/// knows node 2's identity, as DNS resolution would leave it, and nothing
+/// else: no coordinates and no session, so node 0's first packet to node 2
+/// waits for discovery and the handshake.
+async fn discovery_chain(mtus: [u16; 3]) -> Vec<TestNode> {
+    let mut nodes = run_tree_test_with_mtus(&mtus, &[(0, 1), (1, 2)]).await;
+    verify_tree_convergence(&nodes);
+    let c_addr = *nodes[2].node.node_addr();
+    let c_pubkey = nodes[2].node.identity().pubkey_full();
+    nodes[0].node.register_identity(c_addr, c_pubkey);
+    assert!(
+        nodes[0].node.coord_cache().get_entry(&c_addr).is_none(),
+        "setup: node 0 has no coordinates for node 2"
+    );
+    assert!(
+        nodes[0].node.get_session(&c_addr).is_none(),
+        "setup: no session from node 0 to node 2"
+    );
+    nodes
+}
+
+/// An IPv6 TCP segment from `src` to `dst` with the given flags and an MSS
+/// option of `mss`, carrying a valid checksum.
+fn build_tcp_segment(
+    src: &crate::Ipv6Address,
+    dst: &crate::Ipv6Address,
+    flags: u8,
+    mss: u16,
+) -> Vec<u8> {
+    let mut tcp = [0u8; 24];
+    tcp[0..2].copy_from_slice(&40000u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    tcp[4..8].copy_from_slice(&0x0102_0304u32.to_be_bytes());
+    tcp[12] = 6 << 4; // data offset: 24 bytes
+    tcp[13] = flags;
+    tcp[14..16].copy_from_slice(&64240u16.to_be_bytes());
+    tcp[20] = 2; // MSS option
+    tcp[21] = 4;
+    tcp[22..24].copy_from_slice(&mss.to_be_bytes());
+    let mut packet = build_ipv6_packet(src, dst, &tcp);
+    packet[6] = 6;
+    crate::ipv6tun::tcp_mss::recalculate_l4_checksum(&mut packet);
+    packet
+}
+
+/// An IPv6 TCP SYN from `src` to `dst` advertising MSS `mss`.
+fn build_tcp_syn(src: &crate::Ipv6Address, dst: &crate::Ipv6Address, mss: u16) -> Vec<u8> {
+    build_tcp_segment(src, dst, 0x02, mss)
+}
+
+/// The MSS option value of a segment built by `build_tcp_segment`.
+fn tcp_mss_of(packet: &[u8]) -> u16 {
+    assert_eq!(packet[60], 2, "MSS option kind");
+    u16::from_be_bytes([packet[62], packet[63]])
+}
+
+/// Whether a TCP or UDP packet's checksum is the one its contents give.
+fn l4_checksum_verifies(packet: &[u8]) -> bool {
+    let mut recomputed = packet.to_vec();
+    crate::ipv6tun::tcp_mss::recalculate_l4_checksum(&mut recomputed);
+    recomputed == packet
+}
+
+/// A lone node, its address, and a destination on the mesh with its key,
+/// for the re-clamp's unit tests.
+fn reclamp_node() -> (
+    Node,
+    crate::Ipv6Address,
+    crate::Ipv6Address,
+    crate::ipv6tun::link::PeerKey,
+) {
+    let node = make_node();
+    let src = crate::Ipv6Address::from_node_addr(node.node_addr());
+    let dst_identity = Identity::generate();
+    let peer = crate::ipv6tun::link::PeerKey::from_xonly(&dst_identity.pubkey());
+    let dst = crate::Ipv6Address::from_node_addr(dst_identity.node_addr());
+    assert_eq!(peer.address(), dst, "setup: the key names the destination");
+    (node, src, dst, peer)
+}
+
+/// Hold `packet` as the adapter hands it to the node (compressed), release
+/// it through `reclamp_held_syn`, and return what the re-clamp returned and
+/// the packet the held payload now rebuilds to.
+fn release_held(
+    node: &Node,
+    peer: &crate::ipv6tun::link::PeerKey,
+    src: &crate::Ipv6Address,
+    packet: &[u8],
+) -> (Option<u16>, Vec<u8>) {
+    let mut payload = crate::ipv6tun::ipv6_shim::compress_ipv6(packet).unwrap();
+    let mss = node.reclamp_held_syn(peer, &mut payload);
+    let rebuilt = crate::ipv6tun::ipv6_shim::decompress_ipv6(
+        &payload,
+        *src.as_bytes(),
+        *peer.address().as_bytes(),
+    )
+    .unwrap();
+    (mss, rebuilt)
+}
+
+#[test]
+fn a_held_syn_is_clamped_again_to_the_path_mtu_discovery_stored() {
+    let (mut node, src, dst, peer) = reclamp_node();
+    node.path_mtu_lookup_insert(dst, 1200);
+    let syn = build_tcp_syn(&src, &dst, 1143);
+
+    let (mss, released) = release_held(&node, &peer, &src, &syn);
+    assert_eq!(mss, Some(1063));
+    assert_eq!(tcp_mss_of(&released), 1063);
+    assert!(l4_checksum_verifies(&released), "checksum recomputed");
+}
+
+#[test]
+fn a_held_syn_keeps_its_mss_when_no_path_mtu_is_stored() {
+    let (node, src, dst, peer) = reclamp_node();
+    let syn = build_tcp_syn(&src, &dst, 1143);
+
+    let (mss, released) = release_held(&node, &peer, &src, &syn);
+    assert_eq!(mss, None);
+    assert_eq!(released, syn);
+}
+
+#[test]
+fn a_held_syn_above_the_conservative_ceiling_is_lowered_to_it_when_no_path_mtu_is_stored() {
+    // A SYN the reader never clamped, as on an app-owned TUN.
+    let (node, src, dst, peer) = reclamp_node();
+    let syn = build_tcp_syn(&src, &dst, 1440);
+
+    let (mss, released) = release_held(&node, &peer, &src, &syn);
+    assert_eq!(mss, Some(1143));
+    assert_eq!(tcp_mss_of(&released), 1143);
+    assert!(l4_checksum_verifies(&released), "checksum recomputed");
+}
+
+#[test]
+fn reclamping_never_raises_a_syn_mss() {
+    let (mut node, src, dst, peer) = reclamp_node();
+    node.path_mtu_lookup_insert(dst, 1500);
+    // The ceiling for this destination is 1143 (the node's own, under the
+    // 1363 the stored entry allows); a SYN below it would be raised by a
+    // clamp that writes whenever the values differ.
+    let syn = build_tcp_syn(&src, &dst, 1000);
+
+    let (mss, released) = release_held(&node, &peer, &src, &syn);
+    assert_eq!(mss, None);
+    assert_eq!(released, syn);
+}
+
+#[test]
+fn a_held_packet_that_is_not_a_tcp_syn_is_released_unchanged() {
+    let (mut node, src, dst, peer) = reclamp_node();
+    node.path_mtu_lookup_insert(dst, 1200);
+    let ack = build_tcp_segment(&src, &dst, 0x10, 1143);
+    let mut udp = build_ipv6_packet(&src, &dst, &[0u8; 64]);
+    udp[6] = 17;
+    udp[44..46].copy_from_slice(&64u16.to_be_bytes());
+    crate::ipv6tun::tcp_mss::recalculate_l4_checksum(&mut udp);
+
+    for packet in [ack, udp] {
+        let (mss, released) = release_held(&node, &peer, &src, &packet);
+        assert_eq!(mss, None);
+        assert_eq!(released, packet);
+    }
+
+    // A held payload shorter than a shim header and a whole TCP header: a
+    // SYN cut off after its flags.
+    let syn = build_tcp_syn(&src, &dst, 1143);
+    let held = crate::ipv6tun::ipv6_shim::compress_ipv6(&syn).unwrap();
+    let mut short = held[..7 + 14].to_vec();
+    assert!(short.len() < 27);
+    let before = short.clone();
+    assert_eq!(node.reclamp_held_syn(&peer, &mut short), None);
+    assert_eq!(short, before);
+}
+
+/// Drive the chain until node 2's host has received something, or a bounded
+/// number of quiet rounds have passed, and return what it received.
+async fn drive_until_delivered(
+    nodes: &mut [TestNode],
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+) -> Vec<Vec<u8>> {
+    let mut delivered = Vec::new();
+    for _ in 0..20 {
+        drain_to_quiescence(nodes).await;
+        delivered.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+        if !delivered.is_empty() {
+            break;
+        }
+    }
+    delivered
+}
+
+#[tokio::test]
+async fn the_first_syn_to_a_new_destination_across_a_narrow_transit_link_arrives_with_the_mss_discovery_learned()
+ {
+    let mut nodes = discovery_chain([1357, 1200, 1357]).await;
+    let a_fips = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::Ipv6Address::from_node_addr(nodes[2].node.node_addr());
+    let (c_tx, c_rx) = std::sync::mpsc::channel();
+    nodes[2].node.install_tun(c_tx);
+    let initiated = nodes[0].node.metrics().lookup.req_initiated.get();
+
+    // What the TUN reader leaves in a SYN to a destination it has no path
+    // MTU for.
+    let syn = build_tcp_syn(&a_fips, &c_fips, 1143);
+    nodes[0].node.handle_tun_outbound(syn).await;
+    assert_eq!(
+        nodes[0].node.pending_tun_total_packets(),
+        1,
+        "precondition: the SYN is held"
+    );
+
+    let delivered = drive_until_delivered(&mut nodes, &c_rx).await;
+    assert!(
+        nodes[0].node.metrics().lookup.req_initiated.get() > initiated,
+        "precondition: discovery ran"
+    );
+    assert_eq!(
+        nodes[0].node.path_mtu_lookup_get(&c_fips),
+        Some(1200),
+        "precondition: discovery stored the narrow path"
+    );
+    assert_eq!(delivered.len(), 1, "the SYN arrives");
+    assert_eq!(tcp_mss_of(&delivered[0]), 1063);
+    assert!(l4_checksum_verifies(&delivered[0]), "checksum recomputed");
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+#[tokio::test]
+async fn a_1280_byte_packet_held_behind_discovery_is_fragmented_when_the_session_is_established() {
+    let mut nodes = discovery_chain([1280; 3]).await;
+    let (a_rx, c_rx) = tun_taps(&mut nodes);
+    let c_addr = *nodes[2].node.node_addr();
+    let a_fips = crate::Ipv6Address::from_node_addr(nodes[0].node.node_addr());
+    let c_fips = crate::Ipv6Address::from_node_addr(&c_addr);
+    let mut udp = build_ipv6_packet(&a_fips, &c_fips, &[0xCD; 1240]);
+    udp[6] = 17;
+    udp[44..46].copy_from_slice(&1240u16.to_be_bytes());
+    crate::ipv6tun::tcp_mss::recalculate_l4_checksum(&mut udp);
+    assert_eq!(udp.len(), 1280);
+
+    nodes[0].node.handle_tun_outbound(udp.clone()).await;
+    let held: Vec<Vec<u8>> = nodes[0]
+        .node
+        .pending_tun_packets
+        .get(&c_addr)
+        .map(|q| q.payloads.iter().cloned().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        held,
+        vec![crate::ipv6tun::ipv6_shim::compress_ipv6(&udp).unwrap()],
+        "precondition: the original is held whole"
+    );
+
+    let delivered = drive_until_delivered(&mut nodes, &c_rx).await;
+    let sizes: Vec<usize> = delivered.iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![1200, 136]);
+    assert_eq!(reassemble_at_host(&delivered), Some(udp));
+    assert_eq!(icmpv6_answers(&a_rx), vec![], "node 0 answered nothing");
 
     cleanup_nodes(&mut nodes).await;
 }

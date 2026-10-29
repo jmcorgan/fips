@@ -9,7 +9,10 @@ use crate::NodeAddr;
 use crate::cache::Funding;
 use crate::ipv6tun::lifecycle::Delivery;
 use crate::ipv6tun::link::{Deliver, PeerKey, Refusal};
+use crate::ipv6tun::mtu::mss_ceiling;
+use crate::ipv6tun::outbound;
 use crate::node::handlers::mmp::format_throughput;
+use crate::node::path_mtu::payload_limit;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{
@@ -3101,7 +3104,11 @@ impl Node {
         // Check for established session
         if let Some(entry) = self.sessions.get(&dest_addr) {
             if entry.is_established() {
-                if let Err(e) = self.send_shim(&dest_addr, &payload).await {
+                let limit = self.tun_limit(&dest_addr);
+                if let Err(e) = self
+                    .send_tun_packet(&dest_addr, &peer, &payload, limit)
+                    .await
+                {
                     debug!(dest = %self.peer_display_name(&dest_addr), error = %e, "Failed to send TUN packet via session");
                     self.relookup_lost_route(&dest_addr).await;
                 }
@@ -3328,16 +3335,89 @@ impl Node {
 
     /// Flush pending packets for a destination whose session just reached Established.
     async fn flush_pending_packets(&mut self, dest_addr: &NodeAddr) {
-        let packets = match self.pending_tun_packets.remove(dest_addr) {
-            Some(q) => q.payloads,
-            None => return,
+        let Some(HeldTun { peer, payloads }) = self.pending_tun_packets.remove(dest_addr) else {
+            return;
         };
-        for packet in packets {
-            if let Err(e) = self.send_shim(dest_addr, &packet).await {
+        let limit = self.tun_limit(dest_addr);
+        for mut payload in payloads {
+            if let Some(mss) = self.reclamp_held_syn(&peer, &mut payload) {
+                debug!(dest = %self.peer_display_name(dest_addr), max_mss = mss, "Clamped held TCP SYN again at release");
+            }
+            if let Err(e) = self
+                .send_tun_packet(dest_addr, &peer, &payload, limit)
+                .await
+            {
                 debug!(dest = %self.peer_display_name(dest_addr), error = %e, "Failed to send queued TUN packet");
                 break;
             }
         }
+    }
+
+    /// The largest payload a host's datagram to `dest_addr` may be sent as:
+    /// the node's own payload limit, or the session's path MTU as a payload
+    /// limit when that is smaller.
+    fn tun_limit(&self, dest_addr: &NodeAddr) -> u16 {
+        let limit = self.native_max_payload();
+        self.sessions
+            .get(dest_addr)
+            .and_then(|entry| entry.mmp())
+            .map_or(limit, |mmp| {
+                limit.min(payload_limit(mmp.path_mtu.current_mtu()))
+            })
+    }
+
+    /// Send a host's datagram on an established session: as IPv6 fragments
+    /// when it is over `limit` and `outbound::split` splits it, otherwise
+    /// whole. Fragments are sent in order and the first failure stops the
+    /// rest, so there is one result per original datagram; a destination
+    /// left with part of a packet drops it at its reassembly timeout.
+    async fn send_tun_packet(
+        &mut self,
+        dest_addr: &NodeAddr,
+        peer: &PeerKey,
+        payload: &[u8],
+        limit: u16,
+    ) -> Result<(), NodeError> {
+        if payload.len() > usize::from(limit)
+            && let Some(fragments) =
+                outbound::split(payload, peer, self.mesh_addr(), limit, rand::random())
+        {
+            trace!(
+                dest = %self.peer_display_name(dest_addr),
+                len = payload.len(),
+                limit,
+                fragments = fragments.len(),
+                "Fragmenting TUN packet for a path under the IPv6 minimum"
+            );
+            for fragment in &fragments {
+                self.send_shim(dest_addr, fragment).await?;
+            }
+            return Ok(());
+        }
+        self.send_shim(dest_addr, payload).await
+    }
+
+    /// Clamp a held TCP SYN again with the path MTU known at release.
+    ///
+    /// The TUN reader clamps a SYN when it reads it, which for a new
+    /// destination is before discovery has returned the path MTU, so the SYN
+    /// carries the IPv6-minimum ceiling even when the path is narrower. The
+    /// SYN is then held until discovery and the session handshake finish, by
+    /// which time discovery's value is in `path_mtu_lookup`, which this reads
+    /// rather than the adapter's copy. The clamp only lowers, so applying it
+    /// again cannot loosen it. Returns the MSS written, or `None` when the
+    /// payload is not a SYN or already fits.
+    pub(in crate::node) fn reclamp_held_syn(
+        &self,
+        peer: &PeerKey,
+        payload: &mut Vec<u8>,
+    ) -> Option<u16> {
+        let ceiling = mss_ceiling(self.transport_mtu());
+        let path_limit = self
+            .path_mtu_lookup
+            .get(&peer.address())
+            .map(|entry| payload_limit(entry.mtu));
+        outbound::reclamp(payload, peer, self.mesh_addr(), ceiling, path_limit)
     }
 
     /// Retry session initiation after discovery provided coordinates.
