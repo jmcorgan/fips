@@ -29,6 +29,7 @@ const DECISIONS: &[(&str, &str)] = &[
     ("icmp.rs", include_str!("../icmp.rs")),
     ("icmp_rate_limit.rs", include_str!("../icmp_rate_limit.rs")),
     ("inbound.rs", include_str!("../inbound.rs")),
+    ("ipv6_frag.rs", include_str!("../ipv6_frag.rs")),
     ("ipv6_shim.rs", include_str!("../ipv6_shim.rs")),
     ("mss.rs", include_str!("../mss.rs")),
     ("mtu.rs", include_str!("../mtu.rs")),

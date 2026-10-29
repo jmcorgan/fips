@@ -7,8 +7,9 @@ the IPv6 header compression on the mesh's IPv6 port (FSP port 256), and the
 adapter's own status socket. At run time the node reaches it in two places:
 the link (`link.rs`) and the handles in `lifecycle.rs`. Other code in the
 tree also uses its types, constants and functions that hold no adapter
-state: the MTU arithmetic, the configuration sections, the status and
-listening reports, and the DNS responder's socket helpers. Relation to the
+state: the MTU arithmetic, the fragmentation and held-SYN clamp the node
+applies at the send, the configuration sections, the status and listening
+reports, and the DNS responder's socket helpers. Relation to the
 rest of the tree lists every caller from outside the module, and what the
 module uses in turn.
 
@@ -21,7 +22,9 @@ The adapter takes packets from the host in one of two ways:
 - **App-owned TUN** (`Node::enable_app_owned_tun`): an embedder that owns the
   device, such as an Android `VpnService`, pushes packets in and reads packets
   out over two channels. Its packets get only the shared checks: no
-  `fd00::/8` filter, no hairpin and no MSS clamp in either direction.
+  `fd00::/8` filter, no hairpin and no MSS clamp in either direction, except
+  that a SYN-flagged segment the node held while its session was set up is
+  clamped when the node releases it, as on a system TUN.
 
 Both share everything after that point: the decision functions, the link, the
 queue toward the host and the DNS responder.
@@ -53,16 +56,26 @@ Decision modules:
   outside the adapter and is the one clock read the guard allows.
 - `inbound.rs`: rebuilds a packet a peer delivered (`unpack`) and marks it
   Congestion Experienced when the datagram was (`mark_ce`).
+- `ipv6_frag.rs`: IPv6 fragmentation of a host's packet of at most 1280
+  bytes for a path under 1280 (`can_fragment`, `fragment_for_path`), and the
+  MTU a Packet Too Big reports (`packet_too_big_mtu`: 1280 for a packet over
+  1280 on such a path). It walks the extension headers itself rather than
+  through `exthdr.rs`, because it asks a different question (which headers
+  may go into fragments, and how long they are through the upper layer).
 - `ipv6_shim.rs`: IPv6 header compression and decompression for port 256.
 - `mss.rs`: the node-wide MSS ceiling the TUN threads share, the
-  per-destination ceiling, and the one clamp function both TUN writers and the
-  reader call.
+  per-destination ceiling (`flow_ceiling`, which the node's re-clamp of a held
+  SYN shares), and the one clamp function both TUN writers and the reader
+  call.
 - `mtu.rs`: the MTU arithmetic: the IPv6 MTU and TCP MSS a path carries, from
   a transport MTU or from the payload limit the node publishes.
 - `outbound.rs`: the host path's decisions. `from_tun` for a packet the system
   TUN reader read, `outbound` for the checks every packet gets, `answer` for a
   datagram the node refused. Each returns what to send (`FromTun`, `Host`,
-  `Owed`) rather than sending it.
+  `Owed`) rather than sending it. Three more work on a datagram the node
+  holds: `can_split` and `split` rebuild its packet, fragment it with
+  `ipv6_frag.rs` and compress each fragment, and `reclamp` clamps a held SYN
+  again by the path the node knows at release.
 - `tcp_mss.rs`: finds and rewrites the MSS option in a TCP SYN, behind any
   Hop-by-Hop, Routing and Destination Options headers, updating the checksum
   for the bytes it rewrites.
@@ -142,6 +155,16 @@ function that holds no adapter state, so it adds no run-time crossing:
   the node because it fires on every link seed and logs the raw link MTU,
   where the adapter is sent only a payload limit. `src/config/transport.rs`
   sets the default UDP MTU to `IPV6_MIN_MTU + FIPS_IPV6_OVERHEAD`.
+- **Fragmentation and the held-SYN clamp** (`outbound.rs`). The node judges
+  each datagram by its own limits and holds it while a session is set up, so
+  it applies these where it decides, passing the datagram's key and its own
+  address: `handlers/host_link.rs` calls `outbound::can_split` at its two
+  refusal sites (the node-wide limit and an established session's path MTU),
+  and `handlers/session.rs` calls `outbound::split` in `send_tun_packet`,
+  which sends a datagram whole or as fragments, and `outbound::reclamp` when
+  it flushes the datagrams held for a new session. All three hold no adapter
+  state; the re-clamp reads the node's own path MTU map, not the adapter's
+  copy, which can trail it.
 - **Configuration** (`config.rs`, `link.rs`). `src/config/mod.rs` embeds
   `TunConfig` and `DnsConfig` as the `tun` and `dns` sections, and
   `src/lib.rs` re-exports both at the crate root. `src/config/node.rs`
@@ -257,6 +280,13 @@ tests or compile-time checks.
   queue is up.
 - A SYN is clamped before the checks every packet gets, so a datagram carries
   the clamped segment and an ICMPv6 answer quotes it.
+- A SYN-flagged segment held while its session is set up is clamped again
+  when the node releases it, by the path MTU known then, on either path. The
+  clamp only lowers.
+- A packet of at most 1280 bytes over the IPv6 MTU of a path under 1280 is
+  sent as IPv6 fragments rather than answered with a Packet Too Big, which
+  the host would ignore; a packet over 1280 on such a path is answered with
+  a Packet Too Big reporting 1280.
 - The DNS responder hands a resolved identity to the node before it sends the
   reply, so the host's first packet to that name finds the key, and re-reads
   the hosts file only for a query that passes its screen. `tests/dns.rs` pins

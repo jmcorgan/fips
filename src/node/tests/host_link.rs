@@ -478,6 +478,17 @@ fn host_packet(node: &Node, dst: &crate::Ipv6Address, len: usize) -> Vec<u8> {
     p
 }
 
+/// `packet` with an 8-byte Hop-by-Hop header written over the first bytes of
+/// its payload, in front of its upper layer: the same length, but a packet the
+/// node never sends as IPv6 fragments, so one over a limit under 1280 is still
+/// refused with Packet Too Big.
+fn unsplittable(mut packet: Vec<u8>) -> Vec<u8> {
+    let upper = packet[6];
+    packet[40..48].copy_from_slice(&[upper, 0, 1, 4, 0, 0, 0, 0]);
+    packet[6] = 0;
+    packet
+}
+
 /// The keys the adapter holds once it has applied everything queued.
 fn adapter_keys(node: &mut Node) -> std::collections::BTreeSet<[u8; 32]> {
     node.supervisor.ipv6tun.settle();
@@ -674,10 +685,14 @@ async fn a_packet_to_a_key_the_node_has_forgotten_but_the_adapter_has_not_is_ans
     );
 
     // The node-wide size check still comes before the key is resolved, so
-    // an oversized packet to the same key gets Packet Too Big at the live
-    // limit, not no route.
+    // an oversized packet to the same key that cannot be fragmented gets
+    // Packet Too Big at the live limit, not no route.
     let ipv6_mtu = node.effective_ipv6_mtu();
-    let oversized = host_packet(&node, gone.address(), usize::from(ipv6_mtu) + 1);
+    let oversized = unsplittable(host_packet(
+        &node,
+        gone.address(),
+        usize::from(ipv6_mtu) + 1,
+    ));
     node.handle_tun_outbound(oversized.clone()).await;
     assert_eq!(
         super::discovery::drain_tun(&rx),
@@ -690,6 +705,22 @@ async fn a_packet_to_a_key_the_node_has_forgotten_but_the_adapter_has_not_is_ans
             .unwrap()
         ],
         "the size check comes first"
+    );
+
+    // One that can be fragmented carries on whole past the size check, so
+    // it is told no route, as a packet that fits is.
+    let fragmentable = host_packet(&node, gone.address(), usize::from(ipv6_mtu) + 1);
+    node.handle_tun_outbound(fragmentable.clone()).await;
+    let expected = crate::ipv6tun::icmp::build_dest_unreachable(
+        &fragmentable,
+        crate::ipv6tun::icmp::DestUnreachableCode::NoRoute,
+        node.identity().address().to_ipv6(),
+    )
+    .unwrap();
+    assert_eq!(
+        super::discovery::drain_tun(&rx),
+        vec![expected],
+        "a fragmentable packet is resolved before it is split"
     );
 }
 
@@ -777,7 +808,11 @@ async fn refusals_reach_the_host_byte_for_byte_as_the_tun_path_answered_them() {
 
     let (mut node, rx, narrow) = narrow_node();
     let ipv6_mtu = node.effective_ipv6_mtu();
-    let over_node = host_packet(&node, narrow.address(), usize::from(ipv6_mtu) + 1);
+    let over_node = unsplittable(host_packet(
+        &node,
+        narrow.address(),
+        usize::from(ipv6_mtu) + 1,
+    ));
     node.handle_tun_outbound(over_node.clone()).await;
     assert_eq!(
         super::discovery::drain_tun(&rx),
@@ -789,7 +824,7 @@ async fn refusals_reach_the_host_byte_for_byte_as_the_tun_path_answered_them() {
     );
 
     let (mut node, rx, narrow) = narrow_node();
-    let over_path = host_packet(&node, narrow.address(), 1000 - 77 + 1);
+    let over_path = unsplittable(host_packet(&node, narrow.address(), 1000 - 77 + 1));
     let fits_path = host_packet(&node, narrow.address(), 1000 - 77);
     node.handle_tun_outbound(fits_path).await;
     node.handle_tun_outbound(over_path.clone()).await;
@@ -1024,7 +1059,7 @@ async fn a_lower_limit_the_adapter_has_not_applied_is_enforced_by_the_node_at_th
         "precondition: stale"
     );
 
-    let packet = host_packet(&node, dest.address(), usize::from(live) + 1);
+    let packet = unsplittable(host_packet(&node, dest.address(), usize::from(live) + 1));
     let datagram = node
         .supervisor
         .ipv6tun
@@ -1383,6 +1418,8 @@ async fn a_delivery_and_then_a_refusal_reach_the_host_in_the_order_the_node_made
     let mut oversized = vec![0u8; mtu + 1];
     oversized[..40].copy_from_slice(&ect_packet(&node1, &node0)[..40]);
     oversized[4..6].copy_from_slice(&((mtu + 1 - 40) as u16).to_be_bytes());
+    // A Hop-by-Hop header keeps it from being sent as fragments instead.
+    let oversized = unsplittable(oversized);
     nodes[1].node.handle_tun_outbound(oversized).await;
     // Anything the node had left to run later gets its chance here.
     tokio::time::sleep(Duration::from_millis(200)).await;

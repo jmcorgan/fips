@@ -275,6 +275,208 @@ impl AdvertThrottle {
 }
 
 // ============================================================================
+// L2CAP listener bookkeeping
+// ============================================================================
+
+/// Consecutive failed publishes after which the peripheral manager is
+/// replaced, in the hope that a new one gets a fresh allocation from
+/// bluetoothd.
+pub const PUBLISH_RECREATE_AFTER: u32 = 6;
+
+/// Consecutive failed publishes between repeated warnings about them. At one
+/// retry per `PUBLISH_RETRY` (10 s), about every ten minutes.
+pub const PUBLISH_WARN_EVERY: u32 = 60;
+
+/// What became of a publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// The listener is up on `psm`, after `failures` failed attempts.
+    Up { psm: u16, failures: u32 },
+    /// It failed again, `failures` times in a row now. `warn` is whether to
+    /// say so loudly, and `recreate` whether to replace the peripheral
+    /// manager before trying again.
+    Failed {
+        failures: u32,
+        warn: bool,
+        recreate: bool,
+    },
+    /// The answer to a publish this side no longer awaits, from before a
+    /// power-off. A PSM it carries is now stale.
+    Stray,
+}
+
+/// The state of the L2CAP listener, apart from the CoreBluetooth calls that
+/// change it.
+///
+/// The one fact CoreBluetooth does not handle for us: a publication outlives
+/// the peripheral manager reporting powered off. Apple documents that power
+/// off stops advertising and clears the GATT database; it says nothing of L2CAP
+/// listeners, and bluetoothd keeps them. A Mac sleeping and waking reports
+/// off and on dozens of times a day, and each new publish was handed the next
+/// PSM up (194, 195, 198, … 212) until bluetoothd refused any more with "No
+/// resources available for L2CAP". So every PSM this side was given is kept
+/// until it has been unpublished, which needs the manager powered on.
+///
+/// CoreBluetooth's answer to a publish names no request, so answers are
+/// matched to publishes by order. A publish still unanswered at power-off is
+/// abandoned, and if the next power-on published at once, a late answer to
+/// the abandoned one would be taken for the new one's. So a power-on after
+/// an abandoned publish holds its own publish until that answer arrives,
+/// which is then stray and its PSM stale, or until `PUBLISH_RETRY` (10 s)
+/// passes, whichever is first. The radio stays down meanwhile, since it is up
+/// only with a published listener. The bound is per power-on: a power-off
+/// during the hold, with the answer still missing, means the next power-on
+/// holds again for the full time. An answer later than the hold is still
+/// matched by order.
+#[derive(Debug, Default)]
+pub struct Listener {
+    /// `None` until a publish completes after power-on; `Some(0)` if it
+    /// failed.
+    published: Option<u16>,
+    publishing: bool,
+    /// Publish once the (new) manager is powered on, although the last
+    /// attempt's failure is still what `published` holds.
+    publish_on_power_on: bool,
+    /// PSMs this side was given and has not unpublished.
+    stale: Vec<u16>,
+    /// Failed publishes in a row.
+    failures: u32,
+    /// A delayed retry is scheduled.
+    retry_pending: bool,
+    /// A publish was in flight at power-off and has not been answered.
+    abandoned: bool,
+    /// The hold this power-on began for the abandoned publish's answer.
+    hold: Option<u64>,
+    /// Holds begun so far, to number them.
+    holds: u64,
+}
+
+impl Listener {
+    /// The listener PSM, `Some(0)` if publishing failed, `None` if no
+    /// publish has completed since power-on.
+    pub fn published(&self) -> Option<u16> {
+        self.published
+    }
+
+    /// The live PSM, if there is a listener.
+    pub fn psm(&self) -> Option<u16> {
+        self.published.filter(|&p| p != 0)
+    }
+
+    /// The peripheral manager left powered-on. Its publication is kept as
+    /// stale, to be unpublished once it is back, and a publish in flight is
+    /// abandoned, its answer to be waited for after power-on.
+    pub fn power_off(&mut self) {
+        if let Some(psm) = self.psm() {
+            self.stale.push(psm);
+        }
+        self.published = None;
+        if std::mem::take(&mut self.publishing) {
+            self.abandoned = true;
+        }
+        self.hold = None;
+    }
+
+    /// The peripheral manager was replaced; publish again once the new one
+    /// is powered on.
+    pub fn manager_replaced(&mut self) {
+        self.publishing = false;
+        self.publish_on_power_on = true;
+    }
+
+    /// Whether a powered-on manager should publish now: not while an
+    /// abandoned publish's answer is awaited.
+    pub fn wants_publish(&self) -> bool {
+        !self.publishing
+            && !self.abandoned
+            && (self.published.is_none() || self.publish_on_power_on)
+    }
+
+    /// Whether a failed listener may be published again now.
+    pub fn may_republish(&self) -> bool {
+        self.published == Some(0) && !self.publishing
+    }
+
+    /// A publish is being issued. Returns the stale PSMs to unpublish first.
+    pub fn begin(&mut self) -> Vec<u16> {
+        self.publishing = true;
+        self.publish_on_power_on = false;
+        // A new publish ends any wait for an abandoned one's answer.
+        self.abandoned = false;
+        self.hold = None;
+        std::mem::take(&mut self.stale)
+    }
+
+    /// The stale PSMs, to unpublish now.
+    pub fn take_stale(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.stale)
+    }
+
+    /// CoreBluetooth answered a publish: `psm` on success, or an error.
+    pub fn on_published(&mut self, psm: u16, ok: bool) -> PublishOutcome {
+        if !self.publishing {
+            // The abandoned publish's answer: the hold for it is over.
+            self.abandoned = false;
+            self.hold = None;
+            if ok && psm != 0 {
+                self.stale.push(psm);
+            }
+            return PublishOutcome::Stray;
+        }
+        self.publishing = false;
+        if ok && psm != 0 {
+            if let Some(old) = self.psm() {
+                self.stale.push(old);
+            }
+            self.published = Some(psm);
+            let failures = std::mem::take(&mut self.failures);
+            return PublishOutcome::Up { psm, failures };
+        }
+        self.published = Some(0);
+        self.failures += 1;
+        PublishOutcome::Failed {
+            failures: self.failures,
+            warn: self.failures == 1 || self.failures.is_multiple_of(PUBLISH_WARN_EVERY),
+            recreate: self.failures.is_multiple_of(PUBLISH_RECREATE_AFTER),
+        }
+    }
+
+    /// Whether to schedule a delayed retry: `false` if one already is.
+    pub fn schedule_retry(&mut self) -> bool {
+        !std::mem::replace(&mut self.retry_pending, true)
+    }
+
+    /// The delayed retry ran.
+    pub fn retry_fired(&mut self) {
+        self.retry_pending = false;
+    }
+
+    /// A powered-on manager begins holding its publish for an abandoned
+    /// publish's answer. Returns the hold's number, for [`Self::end_hold`]
+    /// once the wait is up, if this began one: only while a publish is
+    /// abandoned, and once per power-on.
+    pub fn begin_hold(&mut self) -> Option<u64> {
+        if !self.abandoned || self.hold.is_some() {
+            return None;
+        }
+        self.holds += 1;
+        self.hold = Some(self.holds);
+        self.hold
+    }
+
+    /// The wait for hold `hold` is up. Returns whether that ended it: not if
+    /// the answer came first, or the hold is from an earlier power-on.
+    pub fn end_hold(&mut self, hold: u64) -> bool {
+        if self.hold != Some(hold) {
+            return false;
+        }
+        self.abandoned = false;
+        self.hold = None;
+        true
+    }
+}
+
+// ============================================================================
 // Stream pumps
 // ============================================================================
 
@@ -781,5 +983,286 @@ mod tests {
             write_all(&mut Stuck, b"x").unwrap_err().kind(),
             io::ErrorKind::WriteZero
         );
+    }
+
+    // --- L2CAP listener ----------------------------------------------------
+
+    /// A listener published and up.
+    fn listener_up(psm: u16) -> Listener {
+        let mut l = Listener::default();
+        assert!(l.wants_publish());
+        assert!(l.begin().is_empty());
+        assert_eq!(
+            l.on_published(psm, true),
+            PublishOutcome::Up { psm, failures: 0 }
+        );
+        l
+    }
+
+    /// The leak that exhausted bluetoothd: a power cycle must not forget a
+    /// PSM, but unpublish it before the next publish.
+    #[test]
+    fn a_power_cycle_unpublishes_the_old_psm_before_publishing_again() {
+        let mut l = listener_up(194);
+        l.power_off();
+        assert_eq!(l.published(), None);
+        assert!(l.wants_publish());
+        assert_eq!(l.begin(), vec![194]);
+        assert_eq!(
+            l.on_published(195, true),
+            PublishOutcome::Up {
+                psm: 195,
+                failures: 0
+            }
+        );
+        l.power_off();
+        assert_eq!(l.begin(), vec![195]);
+        // Each one is unpublished once.
+        assert!(l.take_stale().is_empty());
+    }
+
+    /// Power cycles with no publish in between keep every PSM.
+    #[test]
+    fn stale_psms_accumulate_until_a_publish() {
+        let mut l = listener_up(200);
+        l.power_off();
+        l.power_off();
+        assert_eq!(l.begin(), vec![200]);
+    }
+
+    /// A publish answered after the power-off that abandoned it: its PSM is
+    /// held by bluetoothd all the same.
+    #[test]
+    fn a_late_publish_answer_is_stale() {
+        let mut l = Listener::default();
+        l.begin();
+        l.power_off();
+        assert_eq!(l.on_published(201, true), PublishOutcome::Stray);
+        assert_eq!(l.published(), None);
+        assert!(l.wants_publish());
+        assert_eq!(l.begin(), vec![201]);
+    }
+
+    /// While a publish is in flight nothing publishes again.
+    #[test]
+    fn one_publish_at_a_time() {
+        let mut l = Listener::default();
+        l.begin();
+        assert!(!l.wants_publish());
+        assert!(!l.may_republish());
+    }
+
+    /// Failures warn once, then only every `PUBLISH_WARN_EVERY`, and ask for
+    /// a new manager every `PUBLISH_RECREATE_AFTER`.
+    #[test]
+    fn repeated_failures_are_rate_limited_and_recreate_the_manager() {
+        let mut l = Listener::default();
+        let mut warned = Vec::new();
+        let mut recreated = Vec::new();
+        for _ in 0..PUBLISH_WARN_EVERY {
+            if l.published().is_none() {
+                l.begin();
+            } else {
+                assert!(l.may_republish());
+                l.begin();
+            }
+            match l.on_published(0, false) {
+                PublishOutcome::Failed {
+                    failures,
+                    warn,
+                    recreate,
+                } => {
+                    if warn {
+                        warned.push(failures);
+                    }
+                    if recreate {
+                        recreated.push(failures);
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(l.published(), Some(0));
+            assert_eq!(l.psm(), None);
+        }
+        assert_eq!(warned, vec![1, PUBLISH_WARN_EVERY]);
+        assert_eq!(
+            recreated.len() as u32,
+            PUBLISH_WARN_EVERY / PUBLISH_RECREATE_AFTER
+        );
+        assert_eq!(recreated[0], PUBLISH_RECREATE_AFTER);
+
+        // Success reports how many failures it ended, and resets the count.
+        l.begin();
+        assert_eq!(
+            l.on_published(192, true),
+            PublishOutcome::Up {
+                psm: 192,
+                failures: PUBLISH_WARN_EVERY
+            }
+        );
+        l.power_off();
+        l.begin();
+        assert!(matches!(
+            l.on_published(0, false),
+            PublishOutcome::Failed {
+                failures: 1,
+                warn: true,
+                ..
+            }
+        ));
+    }
+
+    /// A replaced manager publishes again on power-on, while the failed
+    /// listener keeps the radio reported up meanwhile.
+    #[test]
+    fn a_replaced_manager_publishes_on_power_on() {
+        let mut l = Listener::default();
+        l.begin();
+        l.on_published(0, false);
+        assert!(!l.wants_publish());
+        l.manager_replaced();
+        assert_eq!(l.published(), Some(0));
+        assert!(l.wants_publish());
+        l.begin();
+        assert!(!l.wants_publish());
+        assert_eq!(
+            l.on_published(193, true),
+            PublishOutcome::Up {
+                psm: 193,
+                failures: 1
+            }
+        );
+    }
+
+    /// Only one delayed retry is outstanding at a time.
+    #[test]
+    fn retries_do_not_stack() {
+        let mut l = Listener::default();
+        assert!(l.schedule_retry());
+        assert!(!l.schedule_retry());
+        l.retry_fired();
+        assert!(l.schedule_retry());
+    }
+
+    /// A power-on after an abandoned publish waits for its answer; a
+    /// success's PSM is unpublished before the next publish, which is then
+    /// the one the next answer belongs to.
+    #[test]
+    fn an_abandoned_publish_answered_during_the_hold_is_unpublished_before_the_next() {
+        let mut l = Listener::default();
+        assert!(l.begin().is_empty());
+        l.power_off();
+        assert!(!l.wants_publish());
+        let hold = l.begin_hold().expect("a hold begins");
+        assert_eq!(l.begin_hold(), None);
+        assert!(!l.wants_publish());
+        assert_eq!(l.on_published(201, true), PublishOutcome::Stray);
+        assert!(l.wants_publish());
+        // The hold's timer firing after the answer changes nothing.
+        assert!(!l.end_hold(hold));
+        assert!(l.wants_publish());
+        assert_eq!(l.begin(), vec![201]);
+        assert_eq!(
+            l.on_published(202, true),
+            PublishOutcome::Up {
+                psm: 202,
+                failures: 0
+            }
+        );
+        assert!(!l.end_hold(hold));
+        assert_eq!(l.psm(), Some(202));
+        assert!(l.take_stale().is_empty());
+    }
+
+    /// An abandoned publish's error ends the hold and is not counted as a
+    /// failure of the publish after it.
+    #[test]
+    fn an_abandoned_publish_failing_during_the_hold_ends_it_without_a_failure() {
+        let mut l = Listener::default();
+        l.begin();
+        l.power_off();
+        assert!(l.begin_hold().is_some());
+        assert!(!l.wants_publish());
+        assert_eq!(l.on_published(0, false), PublishOutcome::Stray);
+        assert_eq!(l.published(), None);
+        assert!(l.wants_publish());
+        assert!(l.begin().is_empty());
+        assert_eq!(
+            l.on_published(202, true),
+            PublishOutcome::Up {
+                psm: 202,
+                failures: 0
+            }
+        );
+    }
+
+    /// With no answer, the hold ends when its time is up, and the publish
+    /// goes ahead.
+    #[test]
+    fn the_hold_ends_when_its_time_is_up_with_no_answer() {
+        let mut l = Listener::default();
+        l.begin();
+        l.power_off();
+        let hold = l.begin_hold().expect("a hold begins");
+        assert!(!l.wants_publish());
+        assert!(l.end_hold(hold));
+        assert!(l.wants_publish());
+        assert!(l.begin().is_empty());
+        assert_eq!(
+            l.on_published(203, true),
+            PublishOutcome::Up {
+                psm: 203,
+                failures: 0
+            }
+        );
+    }
+
+    /// A power-off during a hold, still unanswered, holds again at the next
+    /// power-on, and the earlier hold's timer does not end the new one.
+    #[test]
+    fn a_power_off_during_the_hold_starts_a_new_one() {
+        let mut l = Listener::default();
+        l.begin();
+        l.power_off();
+        let first = l.begin_hold().expect("a hold begins");
+        l.power_off();
+        assert!(!l.wants_publish());
+        assert!(!l.end_hold(first));
+        assert!(!l.wants_publish());
+        let second = l.begin_hold().expect("a new hold begins");
+        assert_ne!(first, second);
+        assert!(!l.end_hold(first));
+        assert!(!l.wants_publish());
+        assert!(l.end_hold(second));
+        assert!(l.wants_publish());
+    }
+
+    /// A power-off with nothing in flight publishes at once on power-on.
+    #[test]
+    fn a_power_off_with_no_publish_in_flight_does_not_hold() {
+        let mut l = listener_up(194);
+        l.power_off();
+        assert_eq!(l.begin_hold(), None);
+        assert!(l.wants_publish());
+    }
+
+    /// A publish begun while one is abandoned ends the wait, so a later
+    /// clean power-off does not hold.
+    #[test]
+    fn a_publish_begun_while_abandoned_leaves_no_hold_behind() {
+        let mut l = Listener::default();
+        l.begin();
+        l.power_off();
+        l.begin();
+        assert_eq!(
+            l.on_published(202, true),
+            PublishOutcome::Up {
+                psm: 202,
+                failures: 0
+            }
+        );
+        l.power_off();
+        assert!(l.wants_publish());
+        assert_eq!(l.begin_hold(), None);
     }
 }

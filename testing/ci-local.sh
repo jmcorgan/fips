@@ -27,6 +27,16 @@
 #                        by default: it needs zig. When asked for, a missing
 #                        zig or a Rust target rustup cannot install fails the
 #                        run.
+#   --root-tests         Also run the root-only namespace tests
+#                        (testing/root-tests.sh) in the unit-test stage, under
+#                        sudo -n, recorded as root-tests. Off by default: the
+#                        internal builder runs this script without sudo and is
+#                        to run root-tests.sh itself in a container, and
+#                        GitHub's Linux job runs it on every push. When asked
+#                        for, a run that cannot sudo, or cannot find the test
+#                        binary, fails. FIPS_CI_ROOT_TESTS=1 in the
+#                        environment turns it on too. Cannot be combined with
+#                        --build-only, which skips the unit-test stage.
 #   --with-tor           Include Tor harnesses (off by default — needs live Tor)
 #   --only <suite>       Run a single integration suite
 #   --rerun <suite>      Run one integration suite after only the release
@@ -35,8 +45,9 @@
 #                        already passed them; not a full local CI verdict.
 #                        Cannot be combined with --only, --build-only,
 #                        --test-only, --skip-integration, --cross-check,
-#                        --baremetal (or FIPS_CI_BAREMETAL=1) or --slow-tests
-#                        (or FIPS_CI_SLOW_TESTS=1).
+#                        --baremetal (or FIPS_CI_BAREMETAL=1), --slow-tests
+#                        (or FIPS_CI_SLOW_TESTS=1) or --root-tests (or
+#                        FIPS_CI_ROOT_TESTS=1).
 #   -j, --jobs <N>       Max parallel chaos scenarios (default: 4)
 #   --list               List available integration suites
 #   --check-parity       Verify this suite set matches ci.yml's integration
@@ -138,8 +149,9 @@
 # Exit codes:
 #   0   — all stages passed
 #   1   — one or more stages failed
-#   2   — usage error (unknown option, missing value, unknown --rerun suite or
-#         an option --rerun cannot be combined with); nothing ran
+#   2   — usage error (unknown option, missing value, unknown --rerun suite,
+#         an option --rerun cannot be combined with, or --build-only with
+#         --root-tests); nothing ran
 #   130 — interrupted by SIGINT  (128 + 2;  run was cancelled, not a failure)
 #   143 — terminated by SIGTERM  (128 + 15; run was cancelled, not a failure)
 #
@@ -202,6 +214,7 @@ SKIP_CHAOS=false
 BAREMETAL=false
 SLOW_TESTS=false
 CROSS_CHECK=false
+ROOT_TESTS=false
 WITH_TOR=false
 ONLY_SUITE=""
 RERUN=false
@@ -391,6 +404,9 @@ fi
 if [[ "${FIPS_CI_SLOW_TESTS:-}" == 1 ]]; then
     SLOW_TESTS=true
 fi
+if [[ "${FIPS_CI_ROOT_TESTS:-}" == 1 ]]; then
+    ROOT_TESTS=true
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -401,6 +417,7 @@ while [[ $# -gt 0 ]]; do
         --baremetal)        BAREMETAL=true; shift ;;
         --slow-tests)       SLOW_TESTS=true; shift ;;
         --cross-check)      CROSS_CHECK=true; shift ;;
+        --root-tests)       ROOT_TESTS=true; shift ;;
         --with-tor)         WITH_TOR=true; shift ;;
         --only)             need_value "$@"; ONLY_SUITE="$2"; ONLY_GIVEN=true; shift 2 ;;
         --rerun)            need_value "$@"; ONLY_SUITE="$2"; RERUN=true; shift 2 ;;
@@ -420,10 +437,15 @@ if [[ "$RERUN" == true ]]; then
     for _opt in only:"$ONLY_GIVEN" build-only:"$BUILD_ONLY" \
             test-only:"$TEST_ONLY" skip-integration:"$SKIP_INTEGRATION" \
             cross-check:"$CROSS_CHECK" baremetal:"$BAREMETAL" \
-            slow-tests:"$SLOW_TESTS"; do
+            slow-tests:"$SLOW_TESTS" root-tests:"$ROOT_TESTS"; do
         [[ "${_opt#*:}" == true ]] \
             && usage_error "--rerun cannot be combined with --${_opt%%:*}"
     done
+fi
+# The root-only tests run in the unit-test stage, which --build-only skips: a
+# run asked for both would otherwise exit 0 without having run them.
+if [[ "$BUILD_ONLY" == true && "$ROOT_TESTS" == true ]]; then
+    usage_error "--root-tests cannot be combined with --build-only"
 fi
 
 # ── Results tracking ──────────────────────────────────────────────────────
@@ -967,6 +989,45 @@ run_tests() {
         record "release-test-compile" 1
     fi
     rm -f "$release_log"
+
+    run_root_tests
+}
+
+# With --root-tests, run the root-only namespace tests through
+# testing/root-tests.sh, which holds the filters and counts GitHub's Linux job
+# runs too, and record one result, root-tests. The binary is built and located
+# as the runner user and only the script runs under sudo -n, as on GitHub, so
+# a run that cannot sudo without a password fails with sudo's own message
+# instead of waiting for one. Off by default, and then nothing is recorded.
+run_root_tests() {
+    local bin
+    [[ "$ROOT_TESTS" == true ]] || return 0
+    info "cargo test -p fips-mesh --lib --no-run (for testing/root-tests.sh)"
+    bin=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
+        | python3 -c '
+import json, sys
+exe = ""
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        continue
+    if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
+            and "lib" in msg["target"]["kind"] and msg["target"]["name"] == "fips":
+        exe = msg["executable"]
+print(exe)
+')
+    if [[ -z "$bin" || ! -x "$bin" ]]; then
+        fail "could not build or locate the fips-mesh library test binary"
+        record "root-tests" 1
+        return 1
+    fi
+    info "sudo -n bash testing/root-tests.sh $bin"
+    if sudo -n bash "$SCRIPT_DIR/root-tests.sh" "$bin" 2>&1; then
+        record "root-tests" 0
+    else
+        record "root-tests" 1
+    fi
 }
 
 # ── Stage 3: Integration Tests ─────────────────────────────────────────────

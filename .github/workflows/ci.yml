@@ -514,16 +514,21 @@ jobs:
       - name: Run unit tests
         run: cargo nextest run --all --profile ci
 
-      # Tests that build network namespaces, so they need root and are
-      # `#[ignore]`d, and the run above skips them: the start-up warning for
+      # The unit tests that need root and network namespaces, which are
+      # `#[ignore]`d so the run above skips them: the start-up warning for
       # transports too small for a 1280-byte IPv6 packet, on the path where
-      # the node opens its own TUN; and the DNS responder's and the gateway's
-      # tests that a reply to a forged mesh source does not leave by the mesh
-      # interface, which count packets with an nft counter. Built as the
-      # runner user and only executed under sudo, so that cargo does not run
-      # as root with root's CARGO_HOME. The grep fails the step unless every
-      # one ran and passed: a filter that matches nothing passes.
-      - name: Run the namespace tests as root
+      # the node opens its own TUN; the DNS responder's and the gateway's tests
+      # that a reply to a forged mesh source does not leave by the mesh
+      # interface, which count packets with an nft counter; and the Linux TUN
+      # tests in src/ipv6tun/tests/tun.rs that create namespaces (startup never
+      # takes over or deletes an interface that has the configured name, the
+      # fd00::/8 policy rule is added and removed as it should be, and create
+      # reports IPv6 disabled exactly when the kernel would refuse an address
+      # on the TUN). testing/root-tests.sh holds the filters and the number of
+      # tests each must pass, and fails unless every one ran and passed. Built
+      # as the runner user and only the script runs under sudo, so that cargo
+      # does not run as root with root's CARGO_HOME.
+      - name: Run the root-only namespace tests
         shell: bash
         run: |
           cargo test -p fips-mesh --lib --no-run
@@ -538,38 +543,7 @@ jobs:
             echo "could not locate the lib test binary" >&2
             exit 1
           fi
-          sudo "$BIN" --ignored node::tests::tun_warning:: ipv6tun::dns:: \
-            gateway::dns::mesh_tests:: --test-threads=1 \
-            2>&1 | tee "$RUNNER_TEMP/netns-tests.log"
-          grep -qE '^test result: ok\. 18 passed;' "$RUNNER_TEMP/netns-tests.log"
-
-      # The Linux TUN tests in src/ipv6tun/tests/tun.rs that create network
-      # namespaces: startup never takes over or deletes an interface that has
-      # the configured name, the fd00::/8 policy rule is added and removed as
-      # it should be, and create reports IPv6 disabled exactly when the kernel
-      # would refuse an address on the TUN. Creating namespaces needs root, so
-      # the tests are `#[ignore]`d and the run above skips them. Built as the
-      # runner user and only executed under sudo, as the privileged steps
-      # below are. The grep fails the step unless all thirteen ran and
-      # passed: a filter that matches fewer passes quietly.
-      - name: Run the Linux TUN namespace tests as root
-        shell: bash
-        run: |
-          cargo test -p fips-mesh --lib --no-run
-          BIN=$(cargo test -p fips-mesh --lib --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact")
-                     | select(.executable != null)
-                     | select(.target.kind[0] == "lib")
-                     | select(.target.name == "fips")
-                     | .executable' \
-            | tail -1)
-          if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
-            echo "could not locate the lib test binary" >&2
-            exit 1
-          fi
-          sudo "$BIN" --ignored ipv6tun::tun::name_tests:: --test-threads=1 \
-            2>&1 | tee "$RUNNER_TEMP/tun-namespace-tests.log"
-          grep -qE '^test result: ok\. 13 passed;' "$RUNNER_TEMP/tun-namespace-tests.log"
+          sudo bash testing/root-tests.sh "$BIN"
 
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run

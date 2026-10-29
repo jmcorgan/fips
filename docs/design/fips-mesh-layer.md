@@ -395,8 +395,22 @@ Additional protections:
 - **Handshake timeout**: Stale pending handshakes are cleaned up after a
   configurable timeout
 - **Peer ACL**: Optional allowlist / denylist filtering of peer npubs
-  before handshake processing (loaded from `/etc/fips/peers.allow` and
-  `/etc/fips/peers.deny`, mtime-watched and reloaded automatically)
+  (loaded from `/etc/fips/peers.allow` and `/etc/fips/peers.deny`,
+  mtime-watched and reloaded automatically). An outbound connection to a
+  peer already known to be refused is not attempted, and the responder is
+  checked when its msg2 reveals it. For an inbound connection the
+  initiator's static key arrives in msg3, so the lists are applied only
+  after the msg1 rate limiter has admitted the msg1 and the responder has
+  allocated a session index, registered the link and sent msg2, and once
+  msg3 has been read; they are applied before the link is promoted to an
+  active peer. A refused initiator is sent an encrypted Disconnect and its
+  link is dropped. The msg1 rate limiter bounds how many handshakes a
+  refused initiator can open, not the msg3s sent on each: msg3 is not rate
+  limited, and one that cannot be read leaves the handshake pending, for
+  the genuine msg3 or until it times out. `peers.allow` alone
+  refuses no one: an unlisted peer is admitted unless `peers.deny`
+  matches it, so a strict allowlist needs `ALL` in `peers.deny` (see
+  [Peer ACL](../reference/security.md#peer-acl)).
 
 ## Disconnect
 

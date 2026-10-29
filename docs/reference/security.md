@@ -265,9 +265,12 @@ that ACL semantics follow the `hosts`-file aliasing, not just
 the literal npubs visible in the file.
 
 Both files are reloaded automatically when their mtime changes
-— no daemon restart or signal is needed. ACL evaluation runs
-after msg1 decryption but before any further peer-state
-mutation; rate-limited msg1s never reach the ACL.
+— no daemon restart or signal is needed. For an inbound
+handshake the ACL is evaluated when msg3 reveals the initiator's
+static key: after the responder has allocated a session index,
+registered the link and sent msg2, and before the link is
+promoted to an active peer. A refused initiator is sent an
+encrypted Disconnect. Rate-limited msg1s never reach the ACL.
 
 ## Filesystem Permissions
 
@@ -398,7 +401,7 @@ the FMP design document:
 | Inbound exposure on `fips0` | Default-deny nftables baseline (operator opt-in) |
 | Sybil identities | Discretionary peering + handshake rate limiting + optional peer ACL |
 | Eclipse attack | Diverse peering across independent operators and transports |
-| Unauthorized peer admission | Optional `peers.allow` allowlist consulted before handshake |
+| Unauthorized peer admission | Optional `peers.allow` and `peers.deny` lists, applied to an inbound initiator once msg3 reveals it, after msg2 has been sent and a session index allocated, and before the link is promoted; a refused initiator is sent an encrypted Disconnect, and the msg1 rate limit bounds how many handshakes refused initiators can open, not the msg3s sent on each. `peers.allow` alone refuses no one: the strict posture needs `ALL` in `peers.deny` (see [Peer ACL](#peer-acl)) |
 | Local impersonation via the native datagram API | API disabled by default; when enabled, `fips` group membership is the only gate and must be treated as key access |
 
 See [../design/fips-mesh-layer.md](../design/fips-mesh-layer.md) for

@@ -97,6 +97,11 @@ include "/etc/fips/fips.nft"
 In that case do **not** enable `fips-firewall.service` — the host's main
 nftables setup owns the loading. The two paths are mutually exclusive.
 
+The packaged rules reassemble fragmented packets before a port rule sees
+them, because their `ct state` rule enables IPv6 defragmentation; a host
+that polices `fips0` with its own stateless rules (no `ct` expression)
+drops fragmented packets.
+
 ## Extend with per-host allowances via drop-ins
 
 The baseline drops everything inbound on `fips0` except conntrack

@@ -54,6 +54,20 @@ queues the publishers for outbound connection attempts.
 > - `open`: the daemon subscribes to every advert in the
 >   configured `app` namespace. Any publisher becomes a
 >   candidate peer, no `peers:` list entry needed.
+>
+> The policy governs adverts, not inbound traversal offers.
+> Under every policy, `configured_only` included, the daemon
+> answers a traversal offer from any npub while it is below
+> `max_peers`, sending the offerer its own addresses, and runs
+> the hole punch. If the punch succeeds, it dials the offerer,
+> subject to `max_peers` and the peer ACL.
+> `accept_connections: false` on the UDP transport does not
+> stop that link, because the dial is outbound. Of the settings
+> that refuse a given npub, only the peer ACL stops the link,
+> and the offer is still answered and punched whatever
+> `peers.deny` holds: list the npub in `peers.deny`, or put
+> `ALL` in `peers.deny` to admit only the peers in
+> `peers.allow`.
 
 Switching the policy doesn't disturb anything that was already
 working:

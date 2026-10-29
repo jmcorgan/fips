@@ -1027,6 +1027,23 @@ pub(super) async fn pinned_tree(
     converge_nodes(built, edges).await
 }
 
+/// Like `run_tree_test_with_configs` but with a caller-chosen transport MTU
+/// per node as well.
+///
+/// Used by tests that need a non-default setting on a node in a chain whose
+/// links differ in MTU.
+pub(super) async fn sized_tree(
+    nodes: Vec<(Config, u16)>,
+    edges: &[(usize, usize)],
+) -> Vec<TestNode> {
+    let mut built = Vec::new();
+    for (config, mtu) in nodes {
+        built.push(make_test_node_with_config(config, mtu).await);
+    }
+
+    converge_nodes(built, edges).await
+}
+
 /// Drive the given nodes to convergence over `edges` and assert every edge
 /// established a bidirectional peer.
 async fn converge_nodes(mut nodes: Vec<TestNode>, edges: &[(usize, usize)]) -> Vec<TestNode> {

@@ -6,13 +6,13 @@ declared from that file as
 `#[cfg(test)] #[path = "tests/<file>.rs"] mod <name>;`, so they can reach the
 source file's private items. Two are not:
 
-- `mod.rs` is the module for the adapter's directory tests, those of the
-  adapter as a whole rather than of one file, declared from `../mod.rs` as
-  `#[cfg(test)] mod tests;`. It declares `scan.rs`. It checks that the
-  adapter's decision modules (`config.rs`, `core.rs`, `exthdr.rs`, `icmp.rs`,
-  `icmp_rate_limit.rs`, `inbound.rs`, `ipv6_shim.rs`, `mss.rs`, `mtu.rs`,
-  `outbound.rs`, `tcp_mss.rs`) read no clock and reach no async runtime,
-  channel, thread, OS, I/O, socket or name lookup: a scan of each one's
+- `mod.rs` is the module for the adapter's directory tests, those of the adapter
+  as a whole rather than of one file, declared from `../mod.rs` as
+  `#[cfg(test)] mod tests;`. It declares `scan.rs`. It checks that the adapter's
+  decision modules (`config.rs`, `core.rs`, `exthdr.rs`, `icmp.rs`,
+  `icmp_rate_limit.rs`, `inbound.rs`, `ipv6_frag.rs`, `ipv6_shim.rs`, `mss.rs`,
+  `mtu.rs`, `outbound.rs`, `tcp_mss.rs`) read no clock and reach no async
+  runtime, channel, thread, OS, I/O, socket or name lookup: a scan of each one's
   source, without its comments, literals and test-only items, finds no async
   code, runtime, channel or link channel end, thread, clock read (called or
   passed as a function), OS call, path through `std::io` or `std::fs`, socket,
@@ -20,12 +20,11 @@ source file's private items. Two are not:
   modules, renamed or not. The limiter's public `should_send` is the one clock
   read allowed. Every module `../mod.rs` declares must be listed as a decision
   module or a driver, and only one; lines planted in a copy of `outbound.rs`
-  show the scan finds each kind of item, and ignores one in a comment, a
-  literal or a test-only item while still finding one a feature build
-  compiles. It is a check of names, not types: an item reached under a name
-  not on its lists passes. The DNS responder's query decisions are not
-  scanned, because they share `dns.rs` with its sockets, which makes it a
-  driver.
+  show the scan finds each kind of item, and ignores one in a comment, a literal
+  or a test-only item while still finding one a feature build compiles. It is a
+  check of names, not types: an item reached under a name not on its lists
+  passes. The DNS responder's query decisions are not scanned, because they
+  share `dns.rs` with its sockets, which makes it a driver.
 - `scan.rs` is its helper module (`tests::scan`) for the tests that read the
   adapter's own source as text: where an identifier, a string or char literal
   (raw strings included), or a bracketed group ends. It tests no file.
@@ -84,7 +83,10 @@ The others:
   the host and to its destination for one from it, leaves a packet too short
   to hold its source unclamped, and does not clamp a segment that is not a
   SYN; a SYN-ACK from the mesh behind a Hop-by-Hop header is clamped to the
-  ceiling a plain one gets.
+  ceiling a plain one gets. The ceiling itself (`flow_ceiling`), which the
+  node's re-clamp of a held SYN shares, is pinned by literal values: the
+  conservative ceiling with no entry or an entry that leaves no payload
+  byte, the path's MSS otherwise, each capped by the node-wide one.
 - `exthdr.rs` tests `../exthdr.rs`: the extension header walk finds the
   upper-layer header behind each header it steps over (Hop-by-Hop, Routing,
   Destination Options, Authentication, a first Fragment) and behind a chain
@@ -145,7 +147,26 @@ The others:
   as a plain one is, with its checksum still valid, and handed to the mesh
   clamped; a packet that is not IPv6 gets nothing on either path, even when
   its bytes read as our address or a held key's; and a refusal of several
-  payloads is owed one answer each, in order.
+  payloads is owed one answer each, in order. For a datagram the node holds:
+  a compressed 1280-byte payload splits (`split`) into compressed fragments
+  that each fit the payload limit and reassemble to the packet, and neither
+  `split` nor `can_split` splits one whose limit carries 1280 or whose packet
+  is over 1280; the held-SYN re-clamp (`reclamp`) clamps a SYN behind a
+  Destination Options header with its checksum valid and leaves one behind a
+  Fragment header byte for byte; and a refusal, or a packet to an unknown
+  destination, over 1280 on a limit under 1280 is told 1280.
+- `ipv6_frag.rs` tests `../ipv6_frag.rs` as module `tests`: which packets
+  the ingress node splits into IPv6 fragments for a path under 1280 and
+  which it leaves to a Packet Too Big (one that fits, one over 1280, a
+  malformed one, an MTU too small for ten fragments, a Hop-by-Hop or
+  Routing header, headers through the upper-layer one that would not fit
+  in the first fragment, a later host-made fragment whose inner header is
+  Hop-by-Hop, Routing or Fragment, a host-made fragment near the offset
+  limit), that the fragments fit the MTU and reassemble to the original,
+  how many fragments a 1280-byte packet becomes, that a host-made fragment
+  is split under its own identification, offset and final M flag, and the
+  MTU a Packet Too Big reports for a packet over 1280. Pure functions, no
+  I/O.
 - `tcp_mss.rs` tests `../tcp_mss.rs` as module `chain_tests`: a SYN behind
   Hop-by-Hop, Routing or Destination Options headers, alone or chained, is
   clamped to the same ceiling as a plain one (RFC 9293 Section 3.7.1) and
@@ -277,15 +298,15 @@ The others:
 - The network-namespace tests, and the macOS and FreeBSD tests that change
   routes or create a device, need root. They are `#[ignore]`d, so the normal
   test run skips them; build with `cargo test --lib --no-run` and run the test
-  binary under `sudo` with `--ignored`. The Linux unit-test job runs the
-  `tun.rs` namespace tests that way, and the `dns` ones in its namespace
-  step; the FreeBSD package workflow and the macOS unit-test job run the
-  `bsdnet` tests, with `--include-ignored`, and the Windows unit-test job,
-  whose runner is elevated, the `winnet` ones.
-  Local CI runs none of them. They share the namespace harness
-  (`ForgedSourceNetns`) with the inline tests in `../dns.rs`, which exposes it
-  as `pub(super)`. The generic parts, running a setup command
-  (`testutil::run_ok`) and running code inside a named namespace
+  binary under `sudo` with `--ignored`. `testing/root-tests.sh` runs the
+  Linux `tun.rs` and `dns` namespace tests that way, called under `sudo` by
+  the Linux unit-test job and by local CI with `--root-tests`; the FreeBSD
+  package workflow and the macOS unit-test job run the `bsdnet` tests, with
+  `--include-ignored`, and the Windows unit-test job, whose runner is
+  elevated, the `winnet` ones. Local CI runs no others. They share the
+  namespace harness (`ForgedSourceNetns`) with the inline tests in
+  `../dns.rs`, which exposes it as `pub(super)`. The generic parts, running a
+  setup command (`testutil::run_ok`) and running code inside a named namespace
   (`testutil::in_netns`), are crate-wide in `src/testutil.rs` for any
   namespace test.
 - `TunDevice::create` makes its device, and reads links, in the calling

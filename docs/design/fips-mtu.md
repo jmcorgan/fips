@@ -22,10 +22,11 @@ The minimum MTU along the path determines the largest datagram a
 session can deliver. Several properties make this harder than in
 classic IP networks:
 
-- **No fragmentation.** FIPS does not fragment at transit nodes (see
-  [No fragmentation policy](#no-fragmentation-policy)). A datagram
-  that exceeds the next-hop link MTU is dropped, and the source is
-  signaled.
+- **No fragmentation in transit.** FIPS does not fragment at transit
+  nodes (see [Fragmentation policy](#fragmentation-policy)). A
+  datagram that exceeds the next-hop link MTU is dropped, and the
+  source is signaled. Below 1280 the ingress node fragments for the
+  host (see [Fragmentation policy](#fragmentation-policy)).
 - **Forward/reverse path asymmetry.** After tree reconvergence the
   return path may diverge from the forward path, so the bottleneck
   on each direction can differ.
@@ -276,7 +277,10 @@ minimum). The fallback handles cold-flow first-SYN traffic — the very
 first SYN of a flow may arrive before the MMP path-MTU echo and any
 per-flow lookup has been populated, so the conservative ceiling
 prevents the SYN-ACK chain from negotiating a too-large MSS that
-would later drop.
+would later drop. A SYN-flagged segment held until its session is
+established is clamped again when it is released, with the path MTU
+discovery has just stored, so the first connection to a new
+destination gets the learned MSS rather than the fallback.
 
 The adapter integrates with the MTU subsystem rather than owning it.
 The "why we clamp and what `max_mss` means" lives here in the MTU
@@ -289,7 +293,10 @@ When an outbound packet at the TUN exceeds the effective IPv6 MTU,
 the adapter generates an ICMPv6 Packet Too Big message and delivers
 it back to the application via the TUN. This triggers the kernel's
 Path MTU Discovery mechanism for non-TCP traffic and for any TCP flow
-where MSS clamping was insufficient.
+where MSS clamping was insufficient. Below 1280 the ingress node
+fragments a packet of up to 1280 bytes instead of answering, since a host
+ignores a Packet Too Big that reports less than 1280 (see
+[Fragmentation policy](#fragmentation-policy)).
 
 ICMPv6 Packet Too Big generation is rate-limited per source address
 (100ms interval) to prevent storms from applications sending many
@@ -297,9 +304,10 @@ oversized packets. The ICMP response is delivered locally back
 through the TUN; no network traversal is needed, so delivery is
 reliable.
 
-## No Fragmentation Policy
+## Fragmentation Policy
 
-FIPS does not perform fragmentation at transit nodes:
+FIPS does not perform fragmentation at transit nodes, and fragments
+at the ingress node only what a host cannot size down itself:
 
 - **Why no transit fragmentation.** Session-layer encryption is
   end-to-end — the AEAD tag authenticates the entire plaintext.
@@ -307,12 +315,35 @@ FIPS does not perform fragmentation at transit nodes:
   exposing plaintext structure to transit nodes (unacceptable) or
   reassembling before decryption (opens an attack surface — a transit
   node could replay or withhold fragments to influence reassembly).
-- **Why no source-side fragmentation.** The source doesn't need
-  fragmentation because the proactive `path_mtu` field plus the
-  reactive MtuExceeded signal converge on a working size within the
-  first few packets. Applications that need oversized payloads run
-  TCP over the IPv6 adapter, which has its own segmentation under
-  MSS clamping.
+- **Fragmentation at the ingress node, below 1280 only.** A host
+  assumes every path carries a 1280-byte IPv6 packet and ignores a
+  Packet Too Big that reports less (RFC 8201, Section 4). When the
+  path to a destination cannot carry 1280 bytes after encapsulation,
+  because the node's own transport or a link on the route is under
+  1357 bytes, the node that reads a packet of up to 1280 bytes from
+  its TUN splits it into ordinary IPv6 fragments (a Fragment header,
+  next header 44) and the destination host reassembles them. The
+  fragments are IPv6 packets like any other, so no node on the route
+  and nothing on the wire changes. The node fragments for the smaller
+  of its own effective IPv6 MTU and the session's path MTU, so where
+  the narrow link is further along the route, oversized packets sent
+  before the narrow link's `MtuExceeded` (or the destination's
+  `PathMtuNotification`) arrives are still lost there, as before;
+  once it has lowered the session's path MTU, the packets after it
+  are fragmented. RFC 8200 reserves fragmentation to
+  the packet's source and asks a link that cannot carry 1280 bytes to
+  fragment below IPv6 (Section 5); the ingress node does this on the
+  link's behalf. Packets that fit, packets over 1280 bytes, packets
+  carrying a Hop-by-Hop or Routing header, packets whose headers
+  through the transport header would not fit in the first fragment,
+  and paths whose IPv6 MTU is under 176 bytes (more than ten
+  fragments) are not fragmented: they get a Packet Too Big as before,
+  reporting 1280 for a packet over 1280 on such a path. Each fragment
+  is a datagram with its own encapsulation: a 1280-byte packet becomes
+  two while the path's IPv6 MTU is at least 672 bytes, and ten at an
+  IPv6 MTU of 176 to 191, the smallest the node fragments for
+  (transports of 253 to 268 bytes). The TCP clamp keeps new
+  connections from needing it.
 
 Some transports may perform fragmentation and reassembly internally
 (e.g., BLE L2CAP) and can advertise a larger virtual MTU than the

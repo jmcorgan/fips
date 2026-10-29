@@ -259,6 +259,41 @@ since a defect can be a hang; a fixed test slower than the timeout would
 therefore not be noticed. Tests the host does not compile, such as the macOS
 hardware tests on Linux, are checked only by the static guard.
 
+### Root-only tests (`root-tests.sh`)
+
+The unit tests that need root and network namespaces are `#[ignore]`d, so the
+ordinary unit-test runs skip them; they are `environment` entries in
+`ignored-tests.txt`. [`root-tests.sh`](root-tests.sh) is the one place that
+lists the `--ignored` filters that run them and how many tests each filter must
+pass:
+
+```text
+testing/root-tests.sh <bin>
+```
+
+`<bin>` is the built `fips-mesh` library test executable (cargo's `fips` lib
+target). The script builds nothing and needs no cargo or git, and it never
+calls `sudo`: it must already run as root. GitHub's Linux job builds the binary
+as the runner user and runs the script under `sudo`; `ci-local.sh
+--root-tests` (or `FIPS_CI_ROOT_TESTS=1`) does the same under `sudo -n`,
+recorded as `root-tests`, and is off by default because the internal builder
+runs `ci-local.sh` without `sudo` and is to run the script itself in a
+container.
+
+Each filter group passes only when the binary exits 0 and libtest reports
+exactly the group's count passed, since a filter that matches nothing still
+reports `ok`. Every group runs, and the last line is the verdict: `PASS`
+(exit 0), `FAIL` with the number of failed groups (exit 1: a test failed, or a
+count did not match), or `ERROR` with the reason (exit 2: it could not run).
+
+In a container the script needs uid 0, the `NET_ADMIN` and `SYS_ADMIN`
+capabilities, `/dev/net/tun`, an AppArmor profile that allows the namespace
+mount (Docker's default refuses it; `--security-opt apparmor=unconfined`), and
+a writable `/proc/sys` (`--security-opt systempaths=unconfined`). Before any
+test runs it creates a probe namespace, writes a sysctl inside it and deletes
+it, and checks `/dev/net/tun`, so a missing permission is an `ERROR` naming it
+rather than a run of failing tests.
+
 ### Cross-target compile check
 
 `--cross-check` adds a stage to the build that compiles the crate and all its
