@@ -1021,7 +1021,12 @@ pub(crate) fn adapter_settings(config: &Config) -> crate::ipv6tun::config::Setti
 
 impl Node {
     /// Create a new node from configuration.
-    pub fn new(config: Config) -> Result<Self, NodeError> {
+    ///
+    /// Values outside their protocol bounds are brought to them first, with
+    /// a warning, so validation sees the values the node runs with; see
+    /// `Config::apply_floors`.
+    pub fn new(mut config: Config) -> Result<Self, NodeError> {
+        config.apply_floors();
         config.validate()?;
         let identity = config.create_identity()?;
         let node_addr = *identity.node_addr();
@@ -1208,9 +1213,11 @@ impl Node {
 
     /// Create a node with a specific identity.
     ///
-    /// This constructor validates cross-field config invariants before
-    /// constructing the node, same as [`Node::new`].
-    pub fn with_identity(identity: Identity, config: Config) -> Result<Self, NodeError> {
+    /// This constructor brings values to their protocol bounds and then
+    /// validates cross-field config invariants before constructing the node,
+    /// same as [`Node::new`].
+    pub fn with_identity(identity: Identity, mut config: Config) -> Result<Self, NodeError> {
+        config.apply_floors();
         config.validate()?;
         let node_addr = *identity.node_addr();
 

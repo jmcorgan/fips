@@ -1448,7 +1448,8 @@ pub struct NodeConfig {
     pub heartbeat_interval_secs: u64,
 
     /// Link dead timeout in seconds (`node.link_dead_timeout_secs`).
-    /// Peers silent for this duration are removed.
+    /// Peers silent for this duration are removed. A value below 30 runs as
+    /// 30, with a warning.
     #[serde(default = "NodeConfig::default_link_dead_timeout_secs")]
     pub link_dead_timeout_secs: u64,
 

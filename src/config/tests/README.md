@@ -37,8 +37,15 @@ that file and can reach its private items.
   which has only parsed values, the TUN turns on but not off and
   `dns.enabled` is always taken. Each optional field is replaced only when a
   later file sets one.
+- `floors.rs`: tests for `Config::apply_floors` (`floors.rs`): a value
+  outside its protocol bound runs at the bound with one warning, target
+  `fips::config`, naming the key, the configured value and the value used; a
+  value inside it, and every shipped default, is kept without a warning; a
+  second call changes nothing; and `Node::with_identity` applies the bounds
+  as `Node::new` does. `floors.rs` has no inline test block, so it declares
+  this file as its `mod tests`, and the tests are `floors::tests`.
 
-`mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`,
+`mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
 `mod buffers`, `mod grants`, `mod sockets` and `mod merge`, not as
 `mod tests`, because `mod.rs` still carries an inline `mod tests` block of
 that name. That block, and the inline blocks in the other files here,

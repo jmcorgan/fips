@@ -164,7 +164,7 @@ ephemeral mode a `fips.key` found at startup is moved aside to
 | `node.tick_interval_secs` | u64 | `1` | Periodic maintenance tick interval (retry checks, timeout cleanup, tree refresh) |
 | `node.base_rtt_ms` | u64 | `100` | Initial RTT estimate for new links before measurements converge |
 | `node.heartbeat_interval_secs` | u64 | `10` | Heartbeat send interval per peer for liveness detection |
-| `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed |
+| `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed. At least 30: a smaller value is raised to 30, with a warning at start naming the key, the configured value and the value used |
 | `node.drain_timeout_secs` | u64 | `2` | Upper bound in seconds on the `Draining` shutdown phase. On shutdown the node broadcasts Disconnect to its peers and then waits up to this long for the links to clear, exiting as soon as the last peer is gone. `0` skips the wait. The key is absent from a default config file rather than written with its default value, so an unset key and the 2-second default are the same thing |
 | `node.log_level` | string | `"info"` | Tracing filter default. Case-insensitive; one of `trace`, `debug`, `info`, `warn`, `error`. Overridden by the `RUST_LOG` environment variable when set |
 | `node.log_file` | string | unset | Log to this file instead of to stdout, rolled by the daemon at `node.log_max_size_mb`. Leave unset wherever the platform already rotates the captured stream — journald and syslog both do, and logging to a file there would only duplicate what they hold. Set it where nothing rotates: launchd redirects stdout to a plain file and never truncates it, and gives the daemon no way to reopen one rotated out from under it, so the daemon has to own the file. The live file keeps this name, so `tail -F` follows it across a roll; rolled files are `<name>.1` (newest) to `<name>.<log_max_files>`, and no other file in the directory is touched. The `--log-file` flag overrides this key; the macOS package passes it from the launchd plist, so an upgraded config needs no edit. The Windows service always logs to `fips.log` in its config directory and ignores this key |
@@ -266,10 +266,11 @@ of `debounce_ms` each before a change is reported. If that worst case reaches
 `node.link_dead_timeout_secs`, the liveness reaper tears the peering down before
 the detector ever reports, so the machinery runs and cannot help — the node
 refuses to start rather than run in that shape. At the shipped defaults the
-margin is wide (8 × 250 ms = 2 s against 30 s), but the constraint couples two
-keys in different blocks: **shortening `link_dead_timeout_secs` for fast
-failover can make an untouched `debounce_ms` illegal.** The refusal names both
-values and the multiplier.
+margin is wide (8 × 250 ms = 2 s against 30 s), and since
+`link_dead_timeout_secs` never runs below 30 s (a smaller value is raised to 30
+before this check), the refusal needs a `debounce_ms` of 3750 or more. It
+couples two keys in different blocks; the refusal names both values and the
+multiplier.
 
 Established UDP peers use a per-peer `connect()`-ed socket for the send fast
 path. `connect(2)` makes the kernel resolve the route once and pin the local

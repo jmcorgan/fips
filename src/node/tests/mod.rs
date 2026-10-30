@@ -36,6 +36,7 @@ mod handshake_lines;
 mod heartbeat;
 mod host_link;
 mod lan_label;
+mod link_dead_floor;
 mod link_index_audit;
 mod link_session_diag;
 mod link_setup_diag;
