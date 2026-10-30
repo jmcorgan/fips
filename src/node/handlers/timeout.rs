@@ -263,7 +263,10 @@ impl Node {
     /// connection, the pure core computes the backoff schedule, and — matching the
     /// old shell exactly — the count and reschedule advance only on a successful
     /// send; a failed send neither advances the count nor marks the connection
-    /// failed, it just retries next tick.
+    /// failed, it just retries next tick. A leg an mDNS advert directed at a
+    /// node this node is not configured to dial stops at the discovery cap
+    /// ([`DialOrigin::resend_limit`](crate::peer::machine::DialOrigin::resend_limit)),
+    /// whatever the configured count.
     async fn drive_handshake_retransmits(&mut self, now_ms: u64) {
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
@@ -295,7 +298,8 @@ impl Node {
             let armed = match self.peer_machines.get(&link) {
                 Some(machine)
                     if machine.is_handshaking_sent_msg1()
-                        && machine.resend_count() < max_resends =>
+                        && machine.resend_count()
+                            < machine.dial_origin().resend_limit(max_resends) =>
                 {
                     machine.resend_count()
                 }

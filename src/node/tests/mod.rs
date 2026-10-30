@@ -27,6 +27,7 @@ mod decrypt_failure;
 mod decrypt_forged;
 mod disconnect;
 mod discovery;
+mod discovery_msg1_cap;
 mod dns_mesh;
 mod establish_chartests;
 mod forged_initial_msg2;

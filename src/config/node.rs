@@ -95,6 +95,9 @@ pub struct RateLimitConfig {
     #[serde(default = "RateLimitConfig::default_handshake_resend_backoff")]
     pub handshake_resend_backoff: f64,
     /// Max handshake resends per attempt (`node.rate_limit.handshake_max_resends`).
+    /// A handshake an mDNS advert directs at a node this node is not
+    /// configured to dial resends at most 5 times whatever this says; above
+    /// 5 a warning at start says so.
     #[serde(default = "RateLimitConfig::default_handshake_max_resends")]
     pub handshake_max_resends: u32,
     /// Burst capacity of the established-link msg1 bucket

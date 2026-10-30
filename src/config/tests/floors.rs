@@ -1,7 +1,8 @@
 //! Tests for `Config::apply_floors` (`floors.rs`): a value outside its bound
 //! runs at the bound with one warning naming the key, the configured value
-//! and the value used; a value inside it, and the shipped defaults, are kept
-//! without a warning.
+//! and the value used; a value bounded only for some uses is kept, with the
+//! same warning naming the value used there; a value inside its bound, and
+//! the shipped defaults, are kept without a warning.
 
 use super::*;
 use crate::testutil::{capture_logs, log_field};
@@ -12,9 +13,10 @@ struct Case {
     key: &'static str,
     /// The warning's message.
     message: &'static str,
-    /// The value a node runs with when the configured one is outside.
+    /// The value used where the bound applies, when the configured one is
+    /// outside it.
     used: u64,
-    /// Configured values the node does not run with.
+    /// Configured values outside the bound.
     outside: &'static [u64],
     /// Configured values the node runs with as given.
     inside: &'static [u64],
@@ -34,6 +36,48 @@ const CASES: &[Case] = &[Case {
     set: |c, v| c.node.link_dead_timeout_secs = v,
     get: |c| c.node.link_dead_timeout_secs,
 }];
+
+/// Every key `apply_floors` keeps and warns about, its bound applying only
+/// where it is used.
+const CAPPED: &[Case] = &[Case {
+    key: "node.rate_limit.handshake_max_resends",
+    message: "configured value is above the 5 msg1 resends allowed to a handshake an mDNS advert directs at a node not configured to dial; those handshakes resend at most 5 times",
+    used: 5,
+    outside: &[6, 10],
+    inside: &[0, 5],
+    set: |c, v| c.node.rate_limit.handshake_max_resends = v as u32,
+    get: |c| u64::from(c.node.rate_limit.handshake_max_resends),
+}];
+
+/// Assert that `logs` holds exactly one warning, `case`'s, with target
+/// `fips::config` and fields naming the key, `configured` and the value used.
+fn assert_one_warning(case: &Case, configured: u64, logs: &crate::testutil::LogCapture) {
+    assert_eq!(
+        logs.warnings().len(),
+        1,
+        "{} = {configured}: one warning, got {:?}",
+        case.key,
+        logs.lines()
+    );
+    assert_eq!(
+        logs.targets(case.message),
+        vec!["fips::config"],
+        "{} = {configured}: the warning's message and target, got {:?}",
+        case.key,
+        logs.lines()
+    );
+    let line = logs.line(case.message).unwrap();
+    let key = format!("{:?}", case.key);
+    assert_eq!(log_field(&line, "key"), Some(key.as_str()), "{line}");
+    let configured = configured.to_string();
+    assert_eq!(
+        log_field(&line, "configured"),
+        Some(configured.as_str()),
+        "{line}"
+    );
+    let used = case.used.to_string();
+    assert_eq!(log_field(&line, "used"), Some(used.as_str()), "{line}");
+}
 
 /// The default configuration with `case`'s key set to `value`, after
 /// `apply_floors`, and the log it wrote.
@@ -58,38 +102,31 @@ fn a_value_outside_its_bound_runs_at_the_bound_with_one_warning_naming_the_key_t
                 "{} = {value} was kept",
                 case.key
             );
+            assert_one_warning(case, value, &logs);
+        }
+    }
+}
+
+#[test]
+fn a_value_above_a_bound_that_applies_only_to_some_uses_is_kept_with_one_warning_naming_the_value_used_there()
+ {
+    for case in CAPPED {
+        for &value in case.outside {
+            let (config, logs) = floored(case, value);
             assert_eq!(
-                logs.warnings().len(),
-                1,
-                "{} = {value}: one warning, got {:?}",
-                case.key,
-                logs.lines()
+                (case.get)(&config),
+                value,
+                "{} = {value} was changed",
+                case.key
             );
-            assert_eq!(
-                logs.targets(case.message),
-                vec!["fips::config"],
-                "{} = {value}: the warning's message and target, got {:?}",
-                case.key,
-                logs.lines()
-            );
-            let line = logs.line(case.message).unwrap();
-            let key = format!("{:?}", case.key);
-            assert_eq!(log_field(&line, "key"), Some(key.as_str()), "{line}");
-            let configured = value.to_string();
-            assert_eq!(
-                log_field(&line, "configured"),
-                Some(configured.as_str()),
-                "{line}"
-            );
-            let used = case.used.to_string();
-            assert_eq!(log_field(&line, "used"), Some(used.as_str()), "{line}");
+            assert_one_warning(case, value, &logs);
         }
     }
 }
 
 #[test]
 fn a_value_inside_its_bound_is_kept_without_a_warning() {
-    for case in CASES {
+    for case in CASES.iter().chain(CAPPED) {
         for &value in case.inside {
             let (config, logs) = floored(case, value);
             assert_eq!((case.get)(&config), value, "{} = {value}", case.key);

@@ -217,7 +217,9 @@ Configuration (under `node.rate_limit.*`):
 
 - `handshake_resend_interval_ms` (default 1000): initial resend interval
 - `handshake_resend_backoff` (default 2.0): backoff multiplier per resend
-- `handshake_max_resends` (default 5): max resends per handshake attempt
+- `handshake_max_resends` (default 5): max resends per handshake attempt;
+  a handshake an mDNS advert directs at a node this node is not configured
+  to dial resends at most 5 times whatever this says
 
 A link rekey's msg1 is resent at 1, 3, 7 and 15 s after the first copy (as
 many of those as `handshake_max_resends` allows), whatever the interval and
