@@ -460,6 +460,9 @@ pub(crate) struct PeerMachine {
     /// (reaping) and the displayed handshake state (`"failed"`), reproducing the
     /// pre-collapse leg `is_failed`/display signal byte-for-byte.
     send_failed: bool,
+    /// The framed msg1 an inbound leg was set up by, kept until the work that
+    /// follows its promotion records it on the peer.
+    held_msg1: Option<Vec<u8>>,
 
     // --- timing (control tier) ---
     last_heartbeat_sent_ms: u64,
@@ -480,6 +483,7 @@ impl PeerMachine {
             conn: ConnectionState::outbound(link, identity, now),
             pending_msg2_payload: None,
             send_failed: false,
+            held_msg1: None,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
         }
@@ -498,9 +502,21 @@ impl PeerMachine {
             conn: ConnectionState::inbound(link, now),
             pending_msg2_payload: None,
             send_failed: false,
+            held_msg1: None,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
         }
+    }
+
+    /// Keep `msg1`, the framed msg1 this inbound leg is being set up by, for
+    /// the work that follows its promotion.
+    pub(crate) fn hold_msg1(&mut self, msg1: Vec<u8>) {
+        self.held_msg1 = Some(msg1);
+    }
+
+    /// Take the framed msg1 this inbound leg was set up by, if one is held.
+    pub(crate) fn take_msg1(&mut self) -> Option<Vec<u8>> {
+        self.held_msg1.take()
     }
 
     /// Current lifecycle state.

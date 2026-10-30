@@ -873,6 +873,9 @@ impl Node {
         };
         // The promotion line reads the msg1's digest from the carrier.
         machine.set_conn_msg1_digest(wire.msg1_digest);
+        // The work that follows a promotion records the msg1 on the peer, and
+        // runs where the packet is no longer at hand.
+        machine.hold_msg1(packet.data.clone());
 
         // === PHASE C input ===
         // Snapshot the registry state the inbound classification reads about
@@ -1266,8 +1269,9 @@ impl Node {
                 // `PromoteToActive` ran and deliberately left the half-built leg in
                 // place, so the machine is still registered at
                 // `Handshaking{ReceivedMsg1}` (`peer_actions.rs`, the
-                // `is_transient` branch); or promotion succeeded. The tail below is
-                // gated on `Established`, so only the third runs it.
+                // `is_transient` branch); or promotion succeeded. The tail
+                // (`finish_inbound`) is gated on `Established`, so only the
+                // third runs it.
                 //
                 // DEFENSIVE CROSS-CONNECTION: the machine's
                 // `PromotionResolved{CrossConnectionWon/Lost}` follow-ups run the
@@ -1288,27 +1292,8 @@ impl Node {
                         })
                         | None
                 ));
-                if matches!(
-                    self.peer_machines.get(&link_id).map(|m| m.state()),
-                    Some(PeerState::Established { .. })
-                ) {
-                    // Store msg2 on peer for resend on duplicate msg1, and
-                    // record the msg1 itself: a copy of it after the session
-                    // can rekey is not a rekey, and must not arm a pending.
-                    if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                        peer.set_handshake_msg2(wire_msg2.clone());
-                        peer.note_setup(&packet.data, &wire_msg2);
-                        peer.note_setup_ephemeral(ephemeral);
-                    }
-                    self.note_unheard_promotion(&peer_node_addr, ephemeral, packet.timestamp_ms);
-                    // Send initial tree announce to new peer
-                    if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
-                        debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                    }
-                    // Schedule filter announce (sent on a tick once the peer has sent a frame)
-                    self.bloom_state.mark_update_needed(peer_node_addr);
-                    self.reset_lookup_backoff();
-                }
+                self.finish_inbound(link_id, peer_node_addr, &wire_msg2, packet.timestamp_ms)
+                    .await;
             }
             InboundDecision::Promote => {
                 // === Net-new inbound establish, driven by the machine. ===
@@ -1410,7 +1395,7 @@ impl Node {
                 // send-failure arm aborts the queue before `PromoteToActive` and
                 // leaves the machine registered at `Handshaking{ReceivedMsg1}` for
                 // the initiator's msg1 resend to land on. The `Established` gate
-                // below covers all three.
+                // in `finish_inbound` covers all three.
                 let ambient = PeerActionCtx {
                     verified_identity: peer_identity,
                     transport_id: packet.transport_id,
@@ -1423,35 +1408,58 @@ impl Node {
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
                     .await;
 
-                // Post-`Promoted` shell tail (byte-identical to the pre-refactor
-                // Promoted arm), reached only when promotion succeeded (the machine
-                // is now Established); a terminal send failure or a promote failure
-                // removed the machine and already cleaned up, and a transient send
-                // failure left it registered at `Handshaking{ReceivedMsg1}` — which
-                // is what the gate below is for.
-                if matches!(
-                    self.peer_machines.get(&link_id).map(|m| m.state()),
-                    Some(PeerState::Established { .. })
-                ) {
-                    // Store msg2 on peer for resend on duplicate msg1, and
-                    // record the msg1 itself: a copy of it after the session
-                    // can rekey is not a rekey, and must not arm a pending.
-                    if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
-                        peer.set_handshake_msg2(wire_msg2.clone());
-                        peer.note_setup(&packet.data, &wire_msg2);
-                        peer.note_setup_ephemeral(ephemeral);
-                    }
-                    self.note_unheard_promotion(&peer_node_addr, ephemeral, packet.timestamp_ms);
-                    // Send initial tree announce to new peer
-                    if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
-                        debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
-                    }
-                    // Schedule filter announce (sent on a tick once the peer has sent a frame)
-                    self.bloom_state.mark_update_needed(peer_node_addr);
-                    self.reset_lookup_backoff();
-                }
+                // Post-`Promoted` shell tail, run only when promotion succeeded
+                // (the machine is now Established); a terminal send failure or a
+                // promote failure removed the machine and already cleaned up, and
+                // a transient send failure left it registered at
+                // `Handshaking{ReceivedMsg1}`, which is what the gate in
+                // `finish_inbound` is for.
+                self.finish_inbound(link_id, peer_node_addr, &wire_msg2, packet.timestamp_ms)
+                    .await;
             }
         }
+    }
+
+    /// Finish a responder's promotion of `link` to the peer `peer`: store
+    /// `msg2`, the msg2 that answered the link's setup msg1, on the peer,
+    /// record that msg1, remember an unheard peering's ephemeral, send the
+    /// initial tree announce and schedule the filter announce. Does nothing
+    /// unless the promotion left the link's machine established; returns
+    /// whether it ran.
+    async fn finish_inbound(
+        &mut self,
+        link: LinkId,
+        peer: NodeAddr,
+        msg2: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        let Some(machine) = self
+            .peer_machines
+            .get_mut(&link)
+            .filter(|m| matches!(m.state(), PeerState::Established { .. }))
+        else {
+            return false;
+        };
+        let msg1 = machine.take_msg1().unwrap_or_default();
+        let ephemeral = Msg1Header::parse(&msg1)
+            .and_then(|h| EphemeralDigest::of_noise_msg1(msg1.get(h.noise_msg1_offset..)?));
+        // Store msg2 on peer for resend on duplicate msg1, and record the
+        // msg1 itself: a copy of it after the session can rekey is not a
+        // rekey, and must not arm a pending.
+        if let Some(p) = self.peers.get_mut(&peer) {
+            p.set_handshake_msg2(msg2.to_vec());
+            p.note_setup(&msg1, msg2);
+            p.note_setup_ephemeral(ephemeral);
+        }
+        self.note_unheard_promotion(&peer, ephemeral, now_ms);
+        // Send initial tree announce to new peer
+        if let Err(e) = self.send_tree_announce_to_peer(&peer).await {
+            debug!(peer = %self.peer_display_name(&peer), error = %e, "Failed to send initial TreeAnnounce");
+        }
+        // Schedule filter announce (sent on a tick once the peer has sent a frame)
+        self.bloom_state.mark_update_needed(peer);
+        self.reset_lookup_backoff();
+        true
     }
 
     /// Remember the ephemeral of a msg1 that promoted `peer` here, if the
