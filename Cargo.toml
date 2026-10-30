@@ -48,6 +48,13 @@ default-members = [".", "core"]
 [profile.dev.package.fips-core]
 opt-level = 2
 
+# The integration test images' binaries: the release settings, built in
+# target/integration with the test-overrides feature (testing/scripts/build.sh,
+# testing/ci-local.sh, GitHub CI's build job). Its own directory keeps a
+# test-overrides binary out of target/release, which the packaging scripts read.
+[profile.integration]
+inherits = "release"
+
 [features]
 default = []
 # Tick-body profiler (`src/instr`). Off by default: enabling it edits 26 call
@@ -56,8 +63,9 @@ default = []
 # runtime check. Build with `--features profiling` for a measurement run.
 profiling = []
 # Test-only configuration keys (`node.cache.test_coord_ttl_secs`). Only the
-# integration test images' build enables it; no package build may. A build
-# without it ignores those keys with a warning.
+# integration test images' build enables it, under `[profile.integration]`
+# above; no package build may. A build without it ignores those keys with a
+# warning.
 test-overrides = []
 
 [dependencies]
