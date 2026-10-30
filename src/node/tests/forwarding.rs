@@ -378,6 +378,87 @@ async fn warming_counts_but_still_caches_a_coordinate_that_does_not_name_its_own
     );
 }
 
+/// A `SessionSetup` or `SessionAck` addressed to this node: its destination
+/// coordinates are this node's, and no node files a coordinate under its own
+/// address. The source is still warmed.
+#[tokio::test]
+async fn a_session_setup_or_ack_addressed_to_this_node_writes_nothing_under_its_own_address() {
+    for ack in [false, true] {
+        let mut node = make_node();
+        let from = make_node_addr(0xAA);
+        let my_addr = *node.node_addr();
+        let src_addr = make_node_addr(0x01);
+        // A fresh node is its own root.
+        let root_addr = *node.tree_state.my_coords().root_id();
+        let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
+        let dest_coords = node.tree_state.my_coords().clone();
+        let payload = if ack {
+            SessionAck::new(src_coords, dest_coords).encode()
+        } else {
+            SessionSetup::new(src_coords, dest_coords).encode()
+        };
+        let encoded = SessionDatagram::new(src_addr, my_addr, payload).encode();
+
+        node.handle_session_datagram(&from, &encoded[1..], false)
+            .await;
+
+        let kind = if ack { "SessionAck" } else { "SessionSetup" };
+        assert!(
+            node.coord_cache().get(&src_addr, wall_ms()).is_some(),
+            "{kind}: the source coordinates must still be warmed"
+        );
+        assert!(
+            node.coord_cache().get_entry(&my_addr).is_none(),
+            "{kind}: a node must not file a coordinate under its own address"
+        );
+    }
+}
+
+/// A coordinate filed under this node's own address that names another
+/// node is counted as it was before, and not written; one under a foreign
+/// root is counted as a foreign-root refusal, not a key mismatch.
+#[tokio::test]
+async fn a_misfiled_coordinate_addressed_to_this_node_is_counted_and_not_written() {
+    let mut node = make_node();
+    let from = make_node_addr(0xAA);
+    let my_addr = *node.node_addr();
+    let src_addr = make_node_addr(0x01);
+    let root_addr = *node.tree_state.my_coords().root_id();
+    let foreign_root = make_node_addr(0xF0);
+    assert_ne!(foreign_root, root_addr, "fixture: the root must be foreign");
+    let src_coords = TreeCoordinate::from_addrs(vec![src_addr, root_addr]).unwrap();
+
+    for (dest_root, mismatches, foreign) in [(root_addr, 1, 0), (foreign_root, 0, 1)] {
+        let dest_coords =
+            TreeCoordinate::from_addrs(vec![make_node_addr(0x09), dest_root]).unwrap();
+        let payload = SessionSetup::new(src_coords.clone(), dest_coords).encode();
+        let encoded = SessionDatagram::new(src_addr, my_addr, payload).encode();
+        let fwd = &node.metrics().forwarding;
+        let before = (
+            fwd.coord_warm_key_mismatch.get(),
+            fwd.coord_warm_foreign_root.get(),
+        );
+
+        node.handle_session_datagram(&from, &encoded[1..], false)
+            .await;
+
+        let fwd = &node.metrics().forwarding;
+        assert_eq!(
+            (
+                fwd.coord_warm_key_mismatch.get() - before.0,
+                fwd.coord_warm_foreign_root.get() - before.1,
+            ),
+            (mismatches, foreign),
+            "a misfiled coordinate under root {dest_root} must be counted once, \
+             as (key mismatch, foreign root)"
+        );
+        assert!(
+            node.coord_cache().get_entry(&my_addr).is_none(),
+            "a misfiled coordinate under root {dest_root} must not be written under this node's address"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_coord_cache_warming_session_setup() {
     let mut node = make_node();
@@ -1839,9 +1920,12 @@ async fn an_established_frame_with_foreign_root_source_coords_caches_nothing() {
         delivered + 1,
         "must reach local delivery"
     );
-    assert!(
-        fwd.coord_warm_foreign_root.get() > refused,
-        "the warm path must have seen and refused the foreign root"
+    // The destination reads an established message's coordinates only once
+    // the message authenticates, and this one cannot: there is no session.
+    assert_eq!(
+        fwd.coord_warm_foreign_root.get(),
+        refused,
+        "the destination must not read the coordinates before authentication"
     );
 
     assert!(
@@ -1850,8 +1934,13 @@ async fn an_established_frame_with_foreign_root_source_coords_caches_nothing() {
     );
 }
 
+/// An established message addressed to this node writes nothing before it
+/// authenticates: the destination writes the source coordinates only after
+/// a key of the session has opened the message, and never the destination
+/// coordinates, which are its own.
 #[tokio::test]
-async fn an_established_frame_to_this_node_with_same_root_source_coords_is_cached() {
+async fn an_established_message_addressed_to_this_node_writes_no_coordinates_before_it_authenticates()
+ {
     let mut node = make_node();
     let from = make_node_addr(0xAA);
     let my_addr = *node.node_addr();
@@ -1868,10 +1957,18 @@ async fn an_established_frame_to_this_node_with_same_root_source_coords_is_cache
 
     node.handle_session_datagram(&from, &encoded[1..], false)
         .await;
+    assert!(
+        node.coord_cache().get_entry(&src_addr).is_none(),
+        "a CP frame to this node with no session must not write its source coordinates"
+    );
+    assert!(
+        node.coord_cache().get_entry(&my_addr).is_none(),
+        "nor its destination coordinates, under this node's own address"
+    );
     assert_eq!(
-        node.coord_cache().get(&src_addr, wall_ms()),
-        Some(&src_coords),
-        "a same-root source coordinate on a CP frame to this node must be cached"
+        node.metrics().forwarding.warm_malformed_packets.get(),
+        0,
+        "a well-formed CP frame must not be counted as malformed"
     );
 }
 

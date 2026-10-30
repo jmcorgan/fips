@@ -53,6 +53,9 @@ impl Node {
         // coords a peer put on the wire are equally valid whichever way those
         // go, and the only arrivals this newly warms from are those with an
         // exhausted TTL, whose every insert is already achievable at TTL 1.
+        // At the destination it writes nothing under this node's address and
+        // leaves an established message's coordinates to the session layer,
+        // which writes them once the message authenticates.
         self.try_warm_coord_cache_ref(from, &datagram_ref, payload.len());
 
         // Pre-resolve the next hop only for datagrams the core can actually
@@ -234,8 +237,21 @@ impl Node {
     /// not established, so this counts and does not refuse. It is **not** a
     /// security check either way — an attacker satisfies it by naming the
     /// victim as its own child, which is the forgery worth making.
+    ///
+    /// **This node's own address: never written.** No node files a coordinate
+    /// under its own address. Such a write is still counted as it would have
+    /// been, as a foreign-root refusal or a key mismatch, since the
+    /// destination is where a sender's misfiled coordinate shows.
     fn warm_coord(&mut self, from: &NodeAddr, key: NodeAddr, coords: TreeCoordinate, now_ms: u64) {
         let mismatch = *coords.node_addr() != key;
+        if key == *self.node_addr() {
+            if coords.root_id() != self.tree_state.my_coords().root_id() {
+                self.metrics().forwarding.record_warm_foreign_root();
+            } else if mismatch {
+                self.metrics().forwarding.record_warm_key_mismatch();
+            }
+            return;
+        }
         let now = Instant::now();
         let peers = &self.peers;
         self.coord_hint_budget
@@ -277,6 +293,11 @@ impl Node {
     ///
     /// Decode failures are logged and silently ignored — they don't block
     /// forwarding.
+    ///
+    /// At the destination, the coordinates of an established message are not
+    /// written here: the message has not yet been authenticated, and the
+    /// session layer writes its source coordinates once it has. Nothing is
+    /// written under this node's own address (see `warm_coord`).
     ///
     /// `outer_len` is the length of the msg_type-stripped `SessionDatagram`
     /// buffer this view was decoded from. It is carried in rather than
@@ -349,6 +370,11 @@ impl Node {
                         flags = prefix.flags,
                         "Not a well-formed encrypted FSP message; not warming coords"
                     );
+                    return;
+                }
+                // The destination writes from this block only once the
+                // message authenticates (`handle_encrypted_session_msg`).
+                if datagram.dest_addr == *self.node_addr() {
                     return;
                 }
                 let coord_data = &datagram.payload[FSP_HEADER_SIZE..];

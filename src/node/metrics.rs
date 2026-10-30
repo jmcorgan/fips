@@ -83,6 +83,8 @@ pub struct ForwardingMetrics {
     /// signal**: an attacker forges a passing coordinate by naming the victim
     /// as its own child. It counts a defect honest nodes make, where a sender
     /// whose own cache missed sends its own coordinates as the destination's.
+    /// It also counts such a coordinate filed under this node's own address,
+    /// which is never written.
     pub coord_warm_key_mismatch: Counter,
     /// Hint writes that replaced an existing entry with a different value.
     /// A destination moving in the tree produces this, and so does a
