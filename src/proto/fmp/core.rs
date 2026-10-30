@@ -393,9 +393,6 @@ pub(crate) struct EstablishSnapshot {
     /// Admitting this peer as a net-new identity would exceed `max_peers`
     /// (pre-evaluated `max_peers > 0 && peers.len() >= max_peers`).
     pub at_max_peers: bool,
-    /// A pending outbound connection to this same peer identity already exists
-    /// (a cross-connection in progress); bypasses the max-peers cap.
-    pub has_pending_outbound_to_peer: bool,
     /// Whether the local rekey trigger is enabled in config (gates treating a
     /// same-epoch msg1 from an established peer as a rekey rather than a
     /// duplicate).
@@ -574,8 +571,8 @@ pub(crate) enum InboundDecision {
 /// complete, the local not-yet-registered connection dropped).
 #[derive(Debug)]
 pub(crate) enum InboundReject {
-    /// At `max_peers` and this is a net-new identity with no pending outbound to
-    /// bypass the cap: silent-drop before any msg2 build/send.
+    /// At `max_peers` and the sender is not a held peer: silent-drop before any
+    /// msg2 build/send, whatever dials of this node's own are in flight.
     AtMaxPeers,
     /// The peer already holds a pending post-rekey session awaiting K-bit
     /// cutover, and this msg1 is not the one that armed it; a second rekey
@@ -832,9 +829,12 @@ impl Fmp {
         snap: &EstablishSnapshot,
         wire: &WireOutcome,
     ) -> InboundDecision {
-        // Early cap gate: at capacity and a net-new identity (no existing peer,
-        // no pending outbound to bypass) → silent-drop before any msg2.
-        if snap.at_max_peers && !snap.has_existing_peer && !snap.has_pending_outbound_to_peer {
+        // Early cap gate: at capacity, a msg1 from an identity this node does
+        // not hold is dropped silently before any msg2, even while this node's
+        // own dial to that identity is in flight. The promotion would be
+        // refused at the cap whatever the dial, so a msg2 would only hand the
+        // sender a link whose frames go unanswered.
+        if snap.at_max_peers && !snap.has_existing_peer {
             return InboundDecision::Reject {
                 reason: InboundReject::AtMaxPeers,
             };

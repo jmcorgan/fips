@@ -258,12 +258,6 @@ impl EstablishView for Node {
             setup_match: existing.is_some_and(|p| p.is_setup(msg1)),
             existing_msg2: existing.and_then(|p| p.handshake_msg2().map(|m| m.to_vec())),
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
-            has_pending_outbound_to_peer: self.connections().any(|(_, machine)| {
-                machine
-                    .conn_expected_identity()
-                    .map(|id| id.node_addr() == peer_addr)
-                    .unwrap_or(false)
-            }),
             rekey_enabled: self.config().node.rekey.enabled,
             our_node_addr: *self.identity().node_addr(),
         }

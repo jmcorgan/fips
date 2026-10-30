@@ -13,7 +13,8 @@
 //!   * duplicate (pre-crypto)     → `chartest_msg1_duplicate_pending_resends_stored_msg2`
 //!   * setup resend (post-crypto) → `chartest_msg1_duplicate_active_same_epoch_resends_stored_msg2`
 //!   * cross-connection precedence→ `chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity`
-//!   * max-peers cap (bypass)     → `chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate`
+//!   * max-peers cap (crossed)    → `chartest_msg1_at_cap_with_pending_outbound_is_dropped_without_a_msg2`
+//!   * max-peers cap (same addr)  → `chartest_msg1_at_cap_from_the_address_we_are_dialing_leaves_our_dial_intact`
 //!   * tie-break (winner+loser)   → `chartest_cross_connection_tiebreak_winner_and_loser`
 //!   * rekey-responder            → `chartest_msg1_rekey_responder_stores_pending_session`
 //!   * rekey dual-init (we win)   → `chartest_msg1_rekey_dual_init_we_win_drops_their_msg1`
@@ -389,37 +390,24 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
     );
 }
 
-/// Max-peers cap, pending-outbound bypass: at saturation, a msg1 from a NEW
-/// identity that already has a pending outbound to it is NOT silent-dropped by
-/// the early cap gate — it proceeds far enough to emit a msg2, then the late gate
-/// inside `promote_connection` rejects it (peer table is full).
-///
-/// Oracle discriminator vs. the plain new-peer silent-drop: a msg2 IS observed
-/// on the wire (the early gate was bypassed), yet the peer is NOT promoted (the
-/// late gate rejects). This locks in the asymmetry between the two cap gates.
-#[tokio::test]
-async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
-    let mut node = make_node_with_max_peers(2);
-    let transport_id = TransportId::new(1);
-    let (peer_sock, peer_addr) = register_udp_with_peer_socket(&mut node, transport_id).await;
-
-    inject_dummy_peers(&mut node, 2);
-    assert_eq!(node.peer_count(), 2, "precondition: at cap");
-
-    let sender = Identity::generate();
-    let sender_pid = PeerIdentity::from_pubkey_full(sender.pubkey_full());
-    let sender_addr = *sender_pid.node_addr();
-
-    // A pending outbound to the (new) sender identity — this sets
-    // `has_pending_outbound_to_peer`, which turns off the early silent-drop.
+/// Seed a pending outbound dial from `node` to `peer`, started at `addr` on
+/// `transport_id`, as a dial begun before the node reached its peer cap. With
+/// `register` the dial's link and address mapping are installed too, as a real
+/// dial to that address would leave them. Returns the dial's link and index.
+fn seed_dial(
+    node: &mut Node,
+    peer: PeerIdentity,
+    transport_id: TransportId,
+    addr: &TransportAddr,
+    register: bool,
+) -> (LinkId, SessionIndex) {
     let out_link = node.allocate_link_id();
-    let out_addr = TransportAddr::from_string("10.0.0.9:2121");
     let out_index = node.index_allocator.allocate().unwrap();
     node.seed_handshake_machine(
-        HandshakeSeed::outbound(out_link, sender_pid, 1000)
+        HandshakeSeed::outbound(out_link, peer, 1000)
             .with_our_index(out_index)
             .with_transport_id(transport_id)
-            .with_source_addr(out_addr.clone()),
+            .with_source_addr(addr.clone()),
     )
     .unwrap();
     let our_keypair = node.identity().keypair();
@@ -430,9 +418,49 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
         .unwrap()
         .start_handshake(our_keypair, startup_epoch, 1000)
         .unwrap();
+    if register {
+        let link = Link::connectionless(
+            out_link,
+            transport_id,
+            addr.clone(),
+            LinkDirection::Outbound,
+            Duration::from_millis(100),
+        );
+        node.links.insert(out_link, link);
+        node.addr_to_link
+            .insert((transport_id, addr.clone()), out_link);
+    }
     node.pending_outbound
         .insert((transport_id, out_index.as_u32()), out_link);
+    (out_link, out_index)
+}
 
+/// Max-peers cap with the node's own dial to the sender in flight: the cap is
+/// absolute, so a msg1 from an identity the node does not hold is discarded
+/// silently whatever dials are in flight. No msg2 goes back (a msg2 here would
+/// leave the sender a link whose frames go unanswered, since the promotion is
+/// refused at the cap), no peer is adopted, and the node's own dial is left
+/// pending.
+///
+/// Discriminator: the msg2 on the wire. With the pending-dial exception in the
+/// early gate, a msg2 is sent before the late gate refuses the promotion.
+#[tokio::test]
+async fn chartest_msg1_at_cap_with_pending_outbound_is_dropped_without_a_msg2() {
+    let mut node = make_node_with_max_peers(2);
+    let transport_id = TransportId::new(1);
+    let (peer_sock, peer_addr) = register_udp_with_peer_socket(&mut node, transport_id).await;
+
+    inject_dummy_peers(&mut node, 2);
+    assert_eq!(node.peer_count(), 2, "precondition: at cap");
+
+    let sender = Identity::generate();
+    let sender_pid = PeerIdentity::from_pubkey_full(sender.pubkey_full());
+    let sender_addr = *sender_pid.node_addr();
+    let out_addr = TransportAddr::from_string("10.0.0.9:2121");
+    let (out_link, out_index) = seed_dial(&mut node, sender_pid, transport_id, &out_addr, false);
+
+    let rejects_before = node.stats().handshake.bad_state;
+    let links_before = node.link_count();
     let data = craft_msg1_wire(&node, &sender, [4u8; 8], SessionIndex::new(0x44), 2000);
     let packet = ReceivedPacket {
         transport_id,
@@ -442,25 +470,89 @@ async fn chartest_msg1_at_cap_with_pending_outbound_bypasses_early_gate() {
     };
     node.handle_msg1(packet).await;
 
-    // Late gate rejects: still at cap, sender not promoted.
-    assert_eq!(
-        node.peer_count(),
-        2,
-        "late cap gate rejects the new identity"
-    );
-    assert!(
-        !node.peers.contains_key(&sender_addr),
-        "new identity is not adopted at capacity"
-    );
-
-    // But the early gate was bypassed: a msg2 WAS put on the wire before the
-    // late-gate rejection (the discriminator against the plain silent-drop).
     let mut buf = [0u8; 2048];
     let got = timeout(Duration::from_millis(500), peer_sock.recv_from(&mut buf)).await;
+    let answered = got.ok().and_then(|r| r.ok()).map(|(n, _)| n);
     assert!(
-        got.is_ok() && got.unwrap().is_ok(),
-        "pending-outbound identity bypasses the early silent-drop, so a msg2 \
-         is emitted before the late cap gate rejects"
+        answered.is_none(),
+        "a msg1 at the cap must be dropped without a msg2 even while our own dial \
+         to the sender is in flight; observed a {answered:?}-byte reply"
+    );
+    assert_eq!(node.peer_count(), 2, "no peer adopted at the cap");
+    assert!(!node.peers.contains_key(&sender_addr));
+    assert_eq!(
+        node.link_count(),
+        links_before,
+        "no inbound link left behind"
+    );
+    assert_eq!(
+        node.stats().handshake.bad_state - rejects_before,
+        1,
+        "the drop is counted once"
+    );
+    assert!(
+        node.has_pending_leg(&out_link),
+        "our own dial to the sender is left pending"
+    );
+    assert!(
+        node.pending_outbound
+            .contains_key(&(transport_id, out_index.as_u32())),
+        "our own dial keeps its index entry for its msg2"
+    );
+}
+
+/// The crossed dial in its common form: the sender's msg1 arrives from the
+/// very address the node is dialing it at, so the node's own pending dial
+/// holds that address's mapping. At the cap the msg1 is dropped without a
+/// msg2, and the dial keeps its link and address mapping.
+///
+/// Discriminators: the msg2 on the wire, and the mapping. With the pending-dial
+/// exception, the inbound leg is registered under the shared address, then torn
+/// down when the promotion is refused at the cap, taking the dial's mapping
+/// with it.
+#[tokio::test]
+async fn chartest_msg1_at_cap_from_the_address_we_are_dialing_leaves_our_dial_intact() {
+    let mut node = make_node_with_max_peers(2);
+    let transport_id = TransportId::new(1);
+    let (peer_sock, peer_addr) = register_udp_with_peer_socket(&mut node, transport_id).await;
+
+    inject_dummy_peers(&mut node, 2);
+    assert_eq!(node.peer_count(), 2, "precondition: at cap");
+
+    let sender = Identity::generate();
+    let sender_pid = PeerIdentity::from_pubkey_full(sender.pubkey_full());
+    let (out_link, out_index) = seed_dial(&mut node, sender_pid, transport_id, &peer_addr, true);
+
+    let data = craft_msg1_wire(&node, &sender, [5u8; 8], SessionIndex::new(0x55), 2000);
+    let packet = ReceivedPacket {
+        transport_id,
+        remote_addr: peer_addr.clone(),
+        data,
+        timestamp_ms: 2000,
+    };
+    node.handle_msg1(packet).await;
+
+    let mut buf = [0u8; 2048];
+    let got = timeout(Duration::from_millis(500), peer_sock.recv_from(&mut buf)).await;
+    let answered = got.ok().and_then(|r| r.ok()).map(|(n, _)| n);
+    assert!(
+        answered.is_none(),
+        "a msg1 at the cap must be dropped without a msg2; observed a {answered:?}-byte reply"
+    );
+    assert_eq!(node.peer_count(), 2, "no peer adopted at the cap");
+    assert_eq!(
+        node.addr_to_link.get(&(transport_id, peer_addr.clone())),
+        Some(&out_link),
+        "our own dial keeps the address mapping it was registered under"
+    );
+    assert!(
+        node.links.contains_key(&out_link),
+        "our own dial keeps its link"
+    );
+    assert!(node.has_pending_leg(&out_link));
+    assert!(
+        node.pending_outbound
+            .contains_key(&(transport_id, out_index.as_u32()))
     );
 }
 

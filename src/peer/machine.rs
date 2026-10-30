@@ -1987,7 +1987,6 @@ mod tests {
             setup_match: false,
             existing_msg2: None,
             at_max_peers: false,
-            has_pending_outbound_to_peer: false,
             rekey_enabled: true,
             our_node_addr: our,
         }
