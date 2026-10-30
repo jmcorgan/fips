@@ -13,6 +13,10 @@ use std::fmt::Display;
 /// (FRC-1201 Section 6.4).
 const DEAD_FLOOR: u64 = 30;
 
+/// Least lifetime in seconds of a coordinate cache entry since it was last
+/// written or read (FRC-1404 Section 4.5.1).
+const COORD_FLOOR: u64 = 300;
+
 /// Least lifetime in seconds of a Nostr traversal signal (FRC-1601 Section
 /// 3.4, as are the three below).
 const SIGNAL_FLOOR: u64 = 120;
@@ -36,6 +40,7 @@ impl Config {
         self.floor_linkdead();
         self.warn_resends();
         self.warn_rekey();
+        self.floor_coord();
         self.floor_signal();
         self.floor_attempt();
         self.floor_offers();
@@ -83,6 +88,16 @@ impl Config {
                 "configured value is above the 30 s a link rekey attempt may run; link rekey attempts end within 30 s",
             );
         }
+    }
+
+    /// Raise `node.cache.coord_ttl_secs` to 300 s.
+    fn floor_coord(&mut self) {
+        raise(
+            "node.cache.coord_ttl_secs",
+            &mut self.node.cache.coord_ttl_secs,
+            COORD_FLOOR,
+            "configured value is below the 300 s least lifetime of a coordinate cache entry; running at 300 s",
+        );
     }
 
     /// Raise `node.rendezvous.nostr.signal_ttl_secs` to 120 s.

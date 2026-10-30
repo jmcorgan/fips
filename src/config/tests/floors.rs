@@ -38,6 +38,15 @@ const CASES: &[Case] = &[
         get: |c| c.node.link_dead_timeout_secs,
     },
     Case {
+        key: "node.cache.coord_ttl_secs",
+        message: "configured value is below the 300 s least lifetime of a coordinate cache entry; running at 300 s",
+        used: 300,
+        outside: &[0, 10, 299],
+        inside: &[300, 301, 3_600],
+        set: |c, v| c.node.cache.coord_ttl_secs = v,
+        get: |c| c.node.cache.coord_ttl_secs,
+    },
+    Case {
         key: "node.rendezvous.nostr.signal_ttl_secs",
         message: "configured value is below the 120 s least lifetime of a traversal signal; running at 120 s",
         used: 120,

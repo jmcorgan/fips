@@ -48,13 +48,16 @@ below are defaults rather than fixed sizes.
   thresholds are calibrated for.
 - **maelstrom**: The same stressors plus peer-level topology mutation
   (connect/disconnect every 8-12s) and ephemeral identities on half the
-  nodes, with `coord_ttl_secs: 10` so coordinate cache entries expire during
-  the run. Tests re-convergence when the peer set and the identities behind
-  it both move.
+  nodes. It sets `coord_ttl_secs: 10` so coordinate cache entries would
+  expire during the run, but a node raises any lifetime below 300 s to 300 s
+  (with a warning in its log), so until the scenario has a test-only way to
+  keep the short lifetime its entries live 300 s. Tests re-convergence when
+  the peer set and the identities behind it both move.
 - **maelstrom-sparse**: 50-node sparse random geometric graph (radius 0.20,
   roughly 3-4 peers per node), which forces multi-hop routing and heavy
-  discovery use. The short coordinate TTL expires transit-warmed entries, so
-  nodes must rediscover rather than coast on the cache.
+  discovery use. It sets the same short coordinate TTL, meant to expire
+  transit-warmed entries so nodes rediscover rather than coast on the cache;
+  it is raised to 300 s like maelstrom's.
 
 ### Spanning-tree and bloom propagation
 

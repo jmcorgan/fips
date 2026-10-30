@@ -289,7 +289,8 @@ pub struct CacheConfig {
     /// Max entries in coord cache (`node.cache.coord_size`).
     #[serde(default = "CacheConfig::default_coord_size")]
     pub coord_size: usize,
-    /// Coord cache entry TTL in seconds (`node.cache.coord_ttl_secs`).
+    /// Coord cache entry TTL in seconds (`node.cache.coord_ttl_secs`). A
+    /// value below 300 runs as 300, with a warning.
     #[serde(default = "CacheConfig::default_coord_ttl_secs")]
     pub coord_ttl_secs: u64,
     /// Max entries in identity cache (`node.cache.identity_size`).
