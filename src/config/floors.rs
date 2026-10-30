@@ -5,6 +5,7 @@
 //! so a deployed config that sets it keeps starting.
 
 use super::Config;
+use crate::node::REKEY_HANDSHAKE;
 use crate::peer::machine::DISCOVERY_RESENDS;
 use std::fmt::Display;
 
@@ -21,6 +22,7 @@ impl Config {
     pub(crate) fn apply_floors(&mut self) {
         self.floor_linkdead();
         self.warn_resends();
+        self.warn_rekey();
     }
 
     /// Raise `node.link_dead_timeout_secs` to 30 s.
@@ -46,6 +48,23 @@ impl Config {
                 configured,
                 DISCOVERY_RESENDS,
                 "configured value is above the 5 msg1 resends allowed to a handshake an mDNS advert directs at a node not configured to dial; those handshakes resend at most 5 times",
+            );
+        }
+    }
+
+    /// Warn when `node.rate_limit.handshake_timeout_secs` is above the 30 s
+    /// term of a link rekey attempt.
+    ///
+    /// The value is kept: initial link handshakes and session handshakes
+    /// use it as given, and the link rekey parameters cap it.
+    fn warn_rekey(&self) {
+        let configured = self.node.rate_limit.handshake_timeout_secs;
+        if configured > REKEY_HANDSHAKE {
+            clamped(
+                "node.rate_limit.handshake_timeout_secs",
+                configured,
+                REKEY_HANDSHAKE,
+                "configured value is above the 30 s a link rekey attempt may run; link rekey attempts end within 30 s",
             );
         }
     }

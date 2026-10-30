@@ -85,6 +85,8 @@ pub struct RateLimitConfig {
     #[serde(default = "RateLimitConfig::default_handshake_rate")]
     pub handshake_rate: f64,
     /// Stale handshake cleanup timeout in seconds (`node.rate_limit.handshake_timeout_secs`).
+    /// A link rekey attempt caps it at 30 s; above 30 a warning at start says
+    /// so. Initial link handshakes and session handshakes use it as given.
     #[serde(default = "RateLimitConfig::default_handshake_timeout_secs")]
     pub handshake_timeout_secs: u64,
     /// Initial handshake resend interval in ms (`node.rate_limit.handshake_resend_interval_ms`).

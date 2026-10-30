@@ -39,15 +39,26 @@ const CASES: &[Case] = &[Case {
 
 /// Every key `apply_floors` keeps and warns about, its bound applying only
 /// where it is used.
-const CAPPED: &[Case] = &[Case {
-    key: "node.rate_limit.handshake_max_resends",
-    message: "configured value is above the 5 msg1 resends allowed to a handshake an mDNS advert directs at a node not configured to dial; those handshakes resend at most 5 times",
-    used: 5,
-    outside: &[6, 10],
-    inside: &[0, 5],
-    set: |c, v| c.node.rate_limit.handshake_max_resends = v as u32,
-    get: |c| u64::from(c.node.rate_limit.handshake_max_resends),
-}];
+const CAPPED: &[Case] = &[
+    Case {
+        key: "node.rate_limit.handshake_max_resends",
+        message: "configured value is above the 5 msg1 resends allowed to a handshake an mDNS advert directs at a node not configured to dial; those handshakes resend at most 5 times",
+        used: 5,
+        outside: &[6, 10],
+        inside: &[0, 5],
+        set: |c, v| c.node.rate_limit.handshake_max_resends = v as u32,
+        get: |c| u64::from(c.node.rate_limit.handshake_max_resends),
+    },
+    Case {
+        key: "node.rate_limit.handshake_timeout_secs",
+        message: "configured value is above the 30 s a link rekey attempt may run; link rekey attempts end within 30 s",
+        used: 30,
+        outside: &[31, 60],
+        inside: &[10, 30],
+        set: |c, v| c.node.rate_limit.handshake_timeout_secs = v,
+        get: |c| c.node.rate_limit.handshake_timeout_secs,
+    },
+];
 
 /// Assert that `logs` holds exactly one warning, `case`'s, with target
 /// `fips::config` and fields naming the key, `configured` and the value used.

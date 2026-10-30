@@ -71,6 +71,12 @@ pub(in crate::node) fn inbound_idle_timeout(
     std::time::Duration::from_millis(link_silence_ms(node))
 }
 
+/// The most seconds a link rekey attempt's handshake term may run, whatever
+/// `node.rate_limit.handshake_timeout_secs` says: a peer holding a pending
+/// rekey assumes an unanswered attempt is given up within one check of this
+/// (FRC-1201 Section 5.8).
+pub(crate) const REKEY_HANDSHAKE: u64 = 30;
+
 /// The parameters each link's rekey machine is built with, from the node's
 /// configuration.
 ///
@@ -82,11 +88,12 @@ pub(in crate::node) fn inbound_idle_timeout(
 /// (`node.rate_limit.handshake_max_resends`) sets the rungs its msg1 may be
 /// resent at, 1, 3, 7, 15 and 31 s at the defaults, of which only those
 /// before the attempt's end are sent: the attempt ends at the smaller of
-/// one tick after the last rung and the handshake timeout, 30 s at the
-/// defaults, and the next waits a back-off; the tick and the handshake
-/// timeout bound the timers; the pending hold outlasts the drain ceiling, a
-/// peer's retry after a lost answer and the link-silence bound
-/// ([`Config::with_hold`]). The resend interval and backoff do not shape a
+/// one tick after the last rung and the handshake timeout capped at
+/// [`REKEY_HANDSHAKE`], 30 s at the defaults, and the next waits a
+/// back-off; the tick and the capped handshake timeout bound every timer;
+/// the pending hold outlasts the drain ceiling, a peer's retry after a lost
+/// answer and the link-silence bound ([`Config::with_hold`]), and is the
+/// one value computed from the uncapped timeout. The resend interval and backoff do not shape a
 /// link rekey's msg1 ladder. A time trigger below the jitter plus the 30 s
 /// link age at which a peer answers a msg1 as a rekey is raised to that
 /// sum, and timers the machine refuses fall back to the link defaults,
@@ -102,6 +109,16 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
         ..base
     }
     .with_hold(Duration::from_millis(link_silence_ms(node)));
+    // The hold is computed from the configured timeout before the cap: a
+    // peer's retry after a lost answer can run to its own configured
+    // timeout, which a peer on an older release does not cap, and holding
+    // longer is always allowed.
+    let configured = Config {
+        handshake: configured
+            .handshake
+            .min(Duration::from_secs(REKEY_HANDSHAKE)),
+        ..configured
+    };
     let timers = match Params::new(configured) {
         Ok(_) => configured,
         Err(e) => {

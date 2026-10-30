@@ -29,6 +29,7 @@ pub(crate) mod reject;
 mod reloadable;
 pub(crate) mod session;
 pub(crate) use handlers::probe::ProbeJob;
+pub(crate) use handlers::rekey::REKEY_HANDSHAKE;
 
 pub(crate) mod stats;
 pub(crate) mod stats_history;
