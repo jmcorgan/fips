@@ -205,6 +205,7 @@ impl NewFmp {
             link_since: TestInstant(now),
             started: TestInstant(now),
             peer_k: None,
+            last_rx: None,
             record,
         };
         let me = n.local_addr();
@@ -640,6 +641,7 @@ impl NewFsp {
             link_since: TestInstant(now),
             started: TestInstant(now),
             peer_k: None,
+            last_rx: None,
             record: crate::proto::rekey::Record::new(),
         };
         let me = n.local_addr();

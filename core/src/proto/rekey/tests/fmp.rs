@@ -1429,3 +1429,22 @@ fn close_in_every_state_retires_abandons_unbinds_and_releases_everything_held() 
     assert!(a.m().view().previous.is_some());
     a.close(T + 50, why);
 }
+
+/// A cross-connection move keeps the time the peer was last heard: the new
+/// machine starts from the closed one's last authenticated frame, so the
+/// link's liveness carries on across the move.
+#[test]
+fn cross_connection_move_keeps_the_time_the_peer_was_last_heard() {
+    let (mut a, mut b) = link();
+    cycle(&mut a, &mut b, T);
+    let heard = a.m().view().last_rx;
+    assert!(heard.is_some(), "precondition: the peer was heard");
+    let (_, carry) = a.close(T + 100, Close::CrossConnectionMove);
+    let carry = carry.expect("an established machine hands back its anchors");
+    super::stub::rebuild(&mut a, &b.local, carry, T + 101, fmp());
+    assert_eq!(
+        a.m().view().last_rx,
+        heard,
+        "the last-heard time is inherited"
+    );
+}

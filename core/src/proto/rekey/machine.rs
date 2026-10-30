@@ -346,6 +346,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let mut mem = Memory::new(facts.link_since);
         mem.peer_epoch = facts.peer_epoch;
         mem.peer_k = facts.peer_k;
+        mem.last_rx = facts.last_rx;
         mem.jitter = jitter(env, params.cfg.jitter);
         let _ = now;
         let mut machine = Self {
@@ -2869,6 +2870,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 started: cur.started,
                 link_since: self.mem.link_since,
                 peer_k: self.mem.peer_k,
+                last_rx: self.mem.last_rx,
                 record,
             };
             retire(cur, &mut out);

@@ -114,6 +114,7 @@ fn setup_facts(peer_epoch: Option<[u8; 8]>, record: Record) -> SetupFacts<PeerIn
         link_since: now,
         started: now,
         peer_k: None,
+        last_rx: None,
         record,
     }
 }
@@ -676,11 +677,11 @@ impl ActivePeer {
     /// every index they held, and a new one is built on `session` from what
     /// the closed one hands back: the moved session keeps the replaced one's
     /// key-epoch bit and start (so its rekey age and inner-header timestamps
-    /// carry on), the link's age, the key-epoch bit last seen from the peer
-    /// and the replay record. `caps` lends the index allocator and keys, the
-    /// parameters the new machine is built with and whether a decrypt-worker
-    /// pool runs, to which the new session is offered at once; its record is
-    /// not read.
+    /// carry on), the link's age, the time the peer was last heard, the
+    /// key-epoch bit last seen from the peer and the replay record. `caps`
+    /// lends the index allocator and keys, the parameters the new machine is
+    /// built with and whether a decrypt-worker pool runs, to which the new
+    /// session is offered at once; its record is not read.
     ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session. Hands `ours` back

@@ -225,6 +225,7 @@ pub(crate) fn keyed(
         link_since: now,
         started: now,
         peer_k: None,
+        last_rx: None,
         record: Record::new(),
     };
     // An unindexed profile with no decrypt workers makes no binding and no

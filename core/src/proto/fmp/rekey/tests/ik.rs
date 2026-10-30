@@ -253,6 +253,7 @@ fn ik_replay_record_tells_setup_copies_rewritten_copies_and_fresh_msg1s_apart() 
         link_since: TestInstant(0),
         started: TestInstant(0),
         peer_k: None,
+        last_rx: None,
         record,
     };
     let mut tags = TagSource::new();

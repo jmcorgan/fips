@@ -399,6 +399,10 @@ pub struct SetupFacts<I> {
     pub started: I,
     /// The key-epoch bit last seen on the peer's frames, if any.
     pub peer_k: Option<bool>,
+    /// The last authenticated frame from the peer under any epoch, if any:
+    /// `None` for a new link, the closed machine's for a cross-connection
+    /// move.
+    pub last_rx: Option<I>,
     /// The replay record.
     pub record: Record,
 }
@@ -417,6 +421,8 @@ pub struct Carry<I> {
     pub link_since: I,
     /// The key-epoch bit last seen on the peer's frames, if any.
     pub peer_k: Option<bool>,
+    /// The last authenticated frame from the peer under any epoch, if any.
+    pub last_rx: Option<I>,
     /// The replay record.
     pub record: Record,
 }
@@ -426,7 +432,8 @@ impl<I> From<Carry<I>> for SetupFacts<I> {
     /// from: everything the closed machine handed back, so the moved
     /// session keeps the replaced one's key-epoch bit and start (its rekey
     /// age and timestamp base), the link's age, the peer's startup epoch,
-    /// the key-epoch bit last seen from the peer and the replay record.
+    /// the key-epoch bit last seen from the peer, the time the peer was last
+    /// heard and the replay record.
     fn from(carry: Carry<I>) -> Self {
         Self {
             peer_epoch: carry.peer_epoch,
@@ -434,6 +441,7 @@ impl<I> From<Carry<I>> for SetupFacts<I> {
             link_since: carry.link_since,
             started: carry.started,
             peer_k: carry.peer_k,
+            last_rx: carry.last_rx,
             record: carry.record,
         }
     }
