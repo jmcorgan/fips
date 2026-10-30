@@ -613,7 +613,9 @@ impl ActivePeer {
     /// This replaces the entire session so both nodes use matching keys.
     ///
     /// Returns the old our_index so the caller can update peers_by_index.
-    /// Also resets the replay suppression counter since the session changed.
+    /// Also resets the replay suppression counter and the link's
+    /// counter-derived MMP state, because the new session's frame counter
+    /// starts again at 0 as at a rekey cutover (FRC-1202 Section 4.7).
     pub fn replace_session(
         &mut self,
         new_session: NoiseSession,
@@ -625,6 +627,9 @@ impl ActivePeer {
         self.send.noise_session = Some(new_session);
         self.send.our_index = Some(new_our_index);
         self.send.their_index = Some(new_their_index);
+        if let Some(mmp) = &mut self.send.mmp {
+            mmp.reset_for_rekey(crate::time::mono_ms());
+        }
         old_our_index
     }
 
@@ -1619,6 +1624,10 @@ impl ActivePeer {
         self.rekey_msg1_next_resend = next_ms;
     }
 }
+
+#[cfg(test)]
+#[path = "tests/active.rs"]
+mod cross_connection_tests;
 
 #[cfg(test)]
 mod tests {

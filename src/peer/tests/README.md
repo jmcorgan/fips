@@ -9,6 +9,11 @@ Unit tests for the modules in `src/peer/`, kept out of the source files.
   machine refuses it and keeps the handshake, so the genuine msg2 still
   completes the session.
 
-`machine.rs` and `mod.rs` also carry older inline `mod tests` blocks. New tests
-go here rather than into those blocks; the inline blocks are not converted in
-passing.
+- `active.rs`: tests for `ActivePeer` (`src/peer/active.rs`), declared from
+  that file as `#[cfg(test)] #[path = "tests/active.rs"] mod
+  cross_connection_tests;`. They cover what a cross-connection swap
+  (`replace_session`) does to the link's MMP state.
+
+`active.rs`, `machine.rs` and `mod.rs` also carry older inline `mod tests`
+blocks. New tests go here rather than into those blocks; the inline blocks are
+not converted in passing.
