@@ -854,192 +854,193 @@ impl NostrRendezvous {
                 }
                 if let RelayPoolNotification::Event { event, .. } = notification {
                     if event.kind == Kind::Custom(ADVERT_KIND) {
-                        let author_npub = event.pubkey.to_bech32().expect("infallible");
-                        if let Some(valid_until_ms) = self.event_valid_until_ms(&event)
-                            && let Ok(advert) =
-                                Self::parse_overlay_advert_event(&event, &self.config.app)
-                        {
-                            let endpoints = endpoint_summary(&advert.endpoints);
-                            // Clamped forward to the signal path's skew
-                            // tolerance: an unbounded future `created_at` would
-                            // win every replacement comparison in
-                            // `observe_advert` and buy a proportionally distant
-                            // validity horizon.
-                            let created_at = Self::effective_created_at_secs(
-                                event.created_at.as_secs(),
-                                now_ms(),
-                            );
-                            match self.advert.observe_advert(
-                                &author_npub,
-                                advert,
-                                created_at,
-                                valid_until_ms,
-                                now_ms(),
-                            ) {
-                                AdvertAdmission::Admitted | AdvertAdmission::Updated
-                                    if author_npub != self.npub =>
-                                {
-                                    debug!(
-                                        peer = %short_npub(&author_npub),
-                                        endpoints = %endpoints,
-                                        event = %short_id(&event.id.to_string()),
-                                        "advert: peer cached"
-                                    );
-                                }
-                                AdvertAdmission::Refused { first_at_bound } => {
-                                    self.log_advert_cache_full(first_at_bound);
-                                    debug!(
-                                        peer = %short_npub(&author_npub),
-                                        reason = "cache-full",
-                                        "advert cache full; advert not cached"
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                        self.prune_advert_cache();
-                        continue;
-                    }
-
-                    if event.kind != Kind::Custom(SIGNAL_KIND) {
-                        continue;
-                    }
-
-                    // Ahead of the unwrap, which is two NIP-44 decrypts and a
-                    // signature verify run inline on the single task that also
-                    // routes answers and processes adverts. Nothing about the
-                    // sender is known yet — the outer event is signed by a key
-                    // generated per event — so the allowance is necessarily
-                    // shared and indiscriminate, and the reserve is what keeps
-                    // a flood from also shedding the answers to traversals
-                    // this node started.
-                    let awaiting_answers = match self.pending_answers.try_lock() {
-                        Ok(pending) => !pending.is_empty(),
-                        // Contended rather than known empty, so treat it as
-                        // outstanding: the fail-open direction here spends the
-                        // reserve, it does not shed.
-                        Err(_) => true,
-                    };
-                    if let Err(shed) = self.signal_gate.admit(awaiting_answers, Instant::now()) {
-                        let total = self.shed_signals.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Debug, not warn, per event: the party that trips this
-                        // is by definition sending faster than the node wants,
-                        // so a record per drop turns the flood into log volume.
-                        // The doubling summary below is the operator's signal.
-                        debug!(
-                            reason = ?shed,
-                            total,
-                            "shed inbound traversal signal before decrypt"
-                        );
-                        if total.is_power_of_two() {
-                            warn!(
-                                shed = total,
-                                "inbound traversal signals shed before decrypt"
-                            );
-                        }
-                        continue;
-                    }
-
-                    let unwrapped = match unwrap_signal_event(&self.keys, &event).await {
-                        Ok(unwrapped) => unwrapped,
-                        Err(err) => {
-                            trace!(error = %err, "failed to unwrap traversal signal");
-                            continue;
-                        }
-                    };
-                    let sender_npub = match unwrapped.sender.to_bech32() {
-                        Ok(npub) => npub,
-                        Err(err) => {
-                            debug!(error = %err, "failed to encode traversal sender npub");
-                            continue;
-                        }
-                    };
-
-                    if let Ok(answer) =
-                        serde_json::from_str::<TraversalAnswer>(&unwrapped.rumor.content)
-                        && answer.message_type == "answer"
-                        && answer.recipient_npub == self.npub
-                    {
-                        if let Some(tx) = self
-                            .pending_answers
-                            .lock()
-                            .await
-                            .remove(&answer.in_reply_to)
-                        {
-                            let _ = tx.send(SignalEnvelope {
-                                payload: answer,
-                                sender_npub: sender_npub.clone(),
-                            });
-                        }
-                        continue;
-                    }
-
-                    if let Ok(offer) =
-                        serde_json::from_str::<TraversalOffer>(&unwrapped.rumor.content)
-                        && offer.message_type == "offer"
-                        && offer.recipient_npub == self.npub
-                    {
-                        let permit = match self.admission.try_admit(&sender_npub) {
-                            Ok(permit) => permit,
-                            Err(AdmissionReject::GlobalFull) => {
-                                warn!(
-                                    sender_npub = %sender_npub,
-                                    limit = self.config.max_concurrent_incoming_offers,
-                                    "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
-                                );
-                                continue;
-                            }
-                            // Debug, not warn: the party that trips this is by
-                            // definition sending faster than the node wants, so
-                            // a record per rejection turns the spam into log
-                            // volume. The global-full arm above stays at warn
-                            // and remains the operator's signal that the node
-                            // is actually saturated.
-                            Err(AdmissionReject::SenderFull) => {
-                                debug!(
-                                    sender_npub = %sender_npub,
-                                    limit = self.config.max_concurrent_offers_per_npub,
-                                    "inbound traversal offer refused: sender is at its per-npub offer allowance"
-                                );
-                                continue;
-                            }
-                        };
-                        let runtime = Arc::clone(&self);
-                        let peer_short = short_npub(&sender_npub);
-                        let session_short = short_id(&offer.session_id);
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            if let Err(err) = runtime
-                                .handle_incoming_offer(offer, unwrapped.sender, sender_npub)
-                                .await
-                            {
-                                // An offer arriving stale is the expected
-                                // consequence of relay lag and stays at debug.
-                                // The remaining classes cannot arise from lag,
-                                // so they are the operator's only evidence that
-                                // a node is being fed malformed or forged
-                                // signals, and must clear the default level.
-                                if adversarial_offer_reject(&err) {
-                                    warn!(
-                                        peer = %peer_short,
-                                        session = %session_short,
-                                        error = %err,
-                                        "rejected traversal offer"
-                                    );
-                                } else {
-                                    debug!(
-                                        peer = %peer_short,
-                                        session = %session_short,
-                                        error = %err,
-                                        "failed to handle traversal offer"
-                                    );
-                                }
-                            }
-                        });
+                        self.handle_advert(&event);
+                    } else if event.kind == Kind::Custom(SIGNAL_KIND) {
+                        self.handle_signal(event).await;
                     }
                 }
             }
         })
+    }
+
+    /// Cache an advert a relay delivered, if it is valid and current, then
+    /// prune the cache.
+    fn handle_advert(&self, event: &Event) {
+        let author_npub = event.pubkey.to_bech32().expect("infallible");
+        if let Some(valid_until_ms) = self.event_valid_until_ms(event)
+            && let Ok(advert) = Self::parse_overlay_advert_event(event, &self.config.app)
+        {
+            let endpoints = endpoint_summary(&advert.endpoints);
+            // Clamped forward to the signal path's skew
+            // tolerance: an unbounded future `created_at` would
+            // win every replacement comparison in
+            // `observe_advert` and buy a proportionally distant
+            // validity horizon.
+            let created_at = Self::effective_created_at_secs(event.created_at.as_secs(), now_ms());
+            match self.advert.observe_advert(
+                &author_npub,
+                advert,
+                created_at,
+                valid_until_ms,
+                now_ms(),
+            ) {
+                AdvertAdmission::Admitted | AdvertAdmission::Updated
+                    if author_npub != self.npub =>
+                {
+                    debug!(
+                        peer = %short_npub(&author_npub),
+                        endpoints = %endpoints,
+                        event = %short_id(&event.id.to_string()),
+                        "advert: peer cached"
+                    );
+                }
+                AdvertAdmission::Refused { first_at_bound } => {
+                    self.log_advert_cache_full(first_at_bound);
+                    debug!(
+                        peer = %short_npub(&author_npub),
+                        reason = "cache-full",
+                        "advert cache full; advert not cached"
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.prune_advert_cache();
+    }
+
+    /// Open an inbound traversal signal, unless the signal gate sheds it, and
+    /// hand an answer to the traversal waiting for it or admit an offer.
+    async fn handle_signal(self: &Arc<Self>, event: Box<Event>) {
+        // Ahead of the unwrap, which is two NIP-44 decrypts and a
+        // signature verify run inline on the single task that also
+        // routes answers and processes adverts. Nothing about the
+        // sender is known yet — the outer event is signed by a key
+        // generated per event — so the allowance is necessarily
+        // shared and indiscriminate, and the reserve is what keeps
+        // a flood from also shedding the answers to traversals
+        // this node started.
+        let awaiting_answers = match self.pending_answers.try_lock() {
+            Ok(pending) => !pending.is_empty(),
+            // Contended rather than known empty, so treat it as
+            // outstanding: the fail-open direction here spends the
+            // reserve, it does not shed.
+            Err(_) => true,
+        };
+        if let Err(shed) = self.signal_gate.admit(awaiting_answers, Instant::now()) {
+            let total = self.shed_signals.fetch_add(1, Ordering::Relaxed) + 1;
+            // Debug, not warn, per event: the party that trips this
+            // is by definition sending faster than the node wants,
+            // so a record per drop turns the flood into log volume.
+            // The doubling summary below is the operator's signal.
+            debug!(
+                reason = ?shed,
+                total,
+                "shed inbound traversal signal before decrypt"
+            );
+            if total.is_power_of_two() {
+                warn!(
+                    shed = total,
+                    "inbound traversal signals shed before decrypt"
+                );
+            }
+            return;
+        }
+
+        let unwrapped = match unwrap_signal_event(&self.keys, &event).await {
+            Ok(unwrapped) => unwrapped,
+            Err(err) => {
+                trace!(error = %err, "failed to unwrap traversal signal");
+                return;
+            }
+        };
+        let sender_npub = match unwrapped.sender.to_bech32() {
+            Ok(npub) => npub,
+            Err(err) => {
+                debug!(error = %err, "failed to encode traversal sender npub");
+                return;
+            }
+        };
+
+        if let Ok(answer) = serde_json::from_str::<TraversalAnswer>(&unwrapped.rumor.content)
+            && answer.message_type == "answer"
+            && answer.recipient_npub == self.npub
+        {
+            if let Some(tx) = self
+                .pending_answers
+                .lock()
+                .await
+                .remove(&answer.in_reply_to)
+            {
+                let _ = tx.send(SignalEnvelope {
+                    payload: answer,
+                    sender_npub: sender_npub.clone(),
+                });
+            }
+            return;
+        }
+
+        if let Ok(offer) = serde_json::from_str::<TraversalOffer>(&unwrapped.rumor.content)
+            && offer.message_type == "offer"
+            && offer.recipient_npub == self.npub
+        {
+            let permit = match self.admission.try_admit(&sender_npub) {
+                Ok(permit) => permit,
+                Err(AdmissionReject::GlobalFull) => {
+                    warn!(
+                        sender_npub = %sender_npub,
+                        limit = self.config.max_concurrent_incoming_offers,
+                        "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
+                    );
+                    return;
+                }
+                // Debug, not warn: the party that trips this is by
+                // definition sending faster than the node wants, so
+                // a record per rejection turns the spam into log
+                // volume. The global-full arm above stays at warn
+                // and remains the operator's signal that the node
+                // is actually saturated.
+                Err(AdmissionReject::SenderFull) => {
+                    debug!(
+                        sender_npub = %sender_npub,
+                        limit = self.config.max_concurrent_offers_per_npub,
+                        "inbound traversal offer refused: sender is at its per-npub offer allowance"
+                    );
+                    return;
+                }
+            };
+            let runtime = Arc::clone(self);
+            let peer_short = short_npub(&sender_npub);
+            let session_short = short_id(&offer.session_id);
+            tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(err) = runtime
+                    .handle_incoming_offer(offer, unwrapped.sender, sender_npub)
+                    .await
+                {
+                    // An offer arriving stale is the expected
+                    // consequence of relay lag and stays at debug.
+                    // The remaining classes cannot arise from lag,
+                    // so they are the operator's only evidence that
+                    // a node is being fed malformed or forged
+                    // signals, and must clear the default level.
+                    if adversarial_offer_reject(&err) {
+                        warn!(
+                            peer = %peer_short,
+                            session = %session_short,
+                            error = %err,
+                            "rejected traversal offer"
+                        );
+                    } else {
+                        debug!(
+                            peer = %peer_short,
+                            session = %session_short,
+                            error = %err,
+                            "failed to handle traversal offer"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     fn spawn_advertise_loop(self: Arc<Self>) -> JoinHandle<()> {
