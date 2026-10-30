@@ -4,21 +4,25 @@
 //! sooner than 10 s after it starts, and the socket can still receive.
 //!
 //! Windows reports a port-unreachable as `WSAECONNRESET` on the socket's next
-//! `recv_from` unless `SIO_UDP_CONNRESET` is turned off, which the traversal
-//! socket does not do. Linux reports it only on a socket with `IP_RECVERR`
-//! set, so the Linux tests set that option to produce the same receive error.
+//! `recv_from` unless `SIO_UDP_CONNRESET` is turned off. The traversal socket
+//! turns it off, and the attempt also keeps listening through the error, so
+//! each guards the attempt without the other. Linux reports it only on a
+//! socket with `IP_RECVERR` set, so the Linux tests set that option to
+//! produce the same receive error.
 //!
 //! - On every platform, an attempt whose only target is a closed port runs
 //!   to its timeout on the socket as the runtime makes it.
 //! - On Linux, the same attempt runs to its timeout when the
 //!   port-unreachable is reported, and a peer's probe arriving after the
 //!   reports is still adopted.
+//! - On Windows, a port-unreachable does not fail a receive on the traversal
+//!   socket at all.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use super::super::PunchHint;
-use super::super::traversal::run_punch_attempt;
+use super::super::traversal::{bind_traversal, run_punch_attempt};
 use super::super::types::BootstrapError;
 
 /// How long each attempt here is given before it may end.
@@ -28,14 +32,10 @@ const ATTEMPT: Duration = Duration::from_secs(2);
 /// timeout, for timer and scheduling slack.
 const SLACK: Duration = Duration::from_millis(150);
 
-/// A non-blocking UDP socket on 127.0.0.1, as the runtime makes the
-/// traversal socket.
+/// A traversal socket on 127.0.0.1, made by the runtime's own
+/// `bind_traversal`, so the tests run on the socket production makes.
 fn traversal_socket() -> std::net::UdpSocket {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a loopback socket");
-    socket
-        .set_nonblocking(true)
-        .expect("the punch socket must be non-blocking");
-    socket
+    bind_traversal("127.0.0.1:0".parse().unwrap()).expect("bind a loopback traversal socket")
 }
 
 /// A loopback address with no socket bound to it: bind one, note its
@@ -180,4 +180,33 @@ async fn a_peer_probe_after_a_reported_port_unreachable_is_still_adopted() {
         "the peer's probe should be adopted after the port-unreachable reports, got {result:?} \
          after {elapsed:?}"
     );
+}
+
+/// The traversal socket on Windows: after a datagram to a closed port has
+/// drawn an ICMP port-unreachable, the next receive returns the peer's
+/// datagram rather than failing.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_port_unreachable_is_not_a_receive_error_on_the_traversal_socket_on_windows() {
+    let socket = traversal_socket();
+    let addr = socket.local_addr().expect("traversal socket address");
+    let socket = tokio::net::UdpSocket::from_std(socket).expect("register the traversal socket");
+
+    socket
+        .send_to(b"nobody", closed_port())
+        .await
+        .expect("send to the closed port");
+    // Let the port-unreachable arrive before the datagram that follows.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind the peer");
+    peer.send_to(b"peer", addr).expect("peer send");
+
+    let mut buf = [0u8; 16];
+    let (len, from) = tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
+        .await
+        .expect("nothing received")
+        .unwrap_or_else(|err| panic!("the receive failed: {err}"));
+    assert_eq!(&buf[..len], b"peer");
+    assert_eq!(from, peer.local_addr().expect("peer address"));
 }

@@ -11,6 +11,8 @@
 //! - `windows` is a separate backend over `tokio::net::UdpSocket`. It
 //!   shares no implementation with the Unix side — there is no fd, no
 //!   `AsyncFd`, no drop counting and no batching — only the type names.
+//!   It also exports `ignore_port_unreachable`, which the Nostr traversal
+//!   socket uses before the transport adopts it.
 //!
 //! `connected` holds the per-peer connected-socket fast path — the fd
 //! construction, the owning handle and its drain thread — which exists on
@@ -39,6 +41,8 @@ mod connected;
 
 #[cfg(unix)]
 pub use unix::{AsyncUdpSocket, UdpRawSocket};
+#[cfg(windows)]
+pub(crate) use windows::ignore_port_unreachable;
 #[cfg(windows)]
 pub use windows::{AsyncUdpSocket, UdpRawSocket};
 

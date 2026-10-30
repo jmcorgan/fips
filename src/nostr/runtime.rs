@@ -29,8 +29,8 @@ use super::signal::{
 use super::signal_gate::SignalGate;
 use super::stun::observe_traversal_addresses;
 use super::traversal::{
-    PunchTargetTally, RefusalWarnGate, is_doc_ip, is_never_punchable_ip, is_private_ip, nonce,
-    now_ms, planned_remote_endpoints, run_punch_attempt,
+    PunchTargetTally, RefusalWarnGate, bind_traversal, is_doc_ip, is_never_punchable_ip,
+    is_private_ip, nonce, now_ms, planned_remote_endpoints, run_punch_attempt,
 };
 use super::traversal_machine::{OfferDisposition, SeenDecision, TraversalMachine};
 use super::types::{
@@ -1270,8 +1270,7 @@ impl NostrRendezvous {
             return Err(BootstrapError::MissingRelays(peer_config.npub));
         }
 
-        let base_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))?;
-        base_socket.set_nonblocking(true)?;
+        let base_socket = bind_traversal(SocketAddr::from(([0, 0, 0, 0], 0)))?;
 
         // This drains every datagram on the traversal socket until the STUN
         // deadline, so it must complete before any punch can be in flight: a
@@ -1608,8 +1607,7 @@ impl NostrRendezvous {
             return Err(BootstrapError::MissingRelays(offer.sender_npub.clone()));
         }
 
-        let base_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))?;
-        base_socket.set_nonblocking(true)?;
+        let base_socket = bind_traversal(SocketAddr::from(([0, 0, 0, 0], 0)))?;
         // This drains every datagram on the traversal socket until the STUN
         // deadline, so it must complete before any punch can be in flight: a
         // retry or re-observation once punching has started would swallow the

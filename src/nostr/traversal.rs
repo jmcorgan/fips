@@ -573,6 +573,20 @@ fn hold_remapped(
     });
 }
 
+/// Bind a traversal socket on `addr`, non-blocking as STUN and
+/// `run_punch_attempt` need it.
+///
+/// On Windows an ICMP port-unreachable answering one of its datagrams is not
+/// reported as a receive error, as on the UDP transport's sockets, so a closed
+/// punch target cannot fail the receives the peer's probe arrives on.
+pub(super) fn bind_traversal(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = std::net::UdpSocket::bind(addr)?;
+    socket.set_nonblocking(true)?;
+    #[cfg(windows)]
+    crate::transport::udp::io::ignore_port_unreachable(&socket);
+    Ok(socket)
+}
+
 /// Probe `targets` from `socket` per `punch`, and return the address whose
 /// probe or ack arrives first from a planned target, or a remapped-port
 /// candidate once its settle window passes. Ends with `PunchTimeout` when

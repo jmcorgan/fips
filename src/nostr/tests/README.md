@@ -12,4 +12,6 @@ itself; the files here each hold one behaviour's tests.
   socket as the runtime makes it and, on Linux, on a socket with
   `IP_RECVERR` set, where the port-unreachable is reported to `recv_from` as
   Windows reports it by default; on that Linux socket a peer's probe
-  arriving after the reports is still adopted.
+  arriving after the reports is still adopted. A Windows-only test checks
+  that a port-unreachable does not fail a receive on the traversal socket
+  at all.
