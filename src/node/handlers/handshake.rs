@@ -1394,7 +1394,7 @@ impl Node {
                     if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
                         debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
                     }
-                    // Schedule filter announce (sent on next tick via debounce)
+                    // Schedule filter announce (sent on a tick once the peer has sent a frame)
                     self.bloom_state.mark_update_needed(peer_node_addr);
                     self.reset_lookup_backoff();
                 }
@@ -1528,7 +1528,7 @@ impl Node {
                     if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
                         debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send initial TreeAnnounce");
                     }
-                    // Schedule filter announce (sent on next tick via debounce)
+                    // Schedule filter announce (sent on a tick once the peer has sent a frame)
                     self.bloom_state.mark_update_needed(peer_node_addr);
                     self.reset_lookup_backoff();
                 }
@@ -2046,7 +2046,7 @@ impl Node {
             if let Err(e) = self.send_tree_announce_to_peer(&peer_node_addr).await {
                 debug!(peer = %self.peer_display_name(&peer_node_addr), error = %e, "Failed to send TreeAnnounce after cross-connection resolution");
             }
-            // Schedule filter announce (sent on next tick via debounce)
+            // Schedule filter announce (sent on a tick once the peer has sent a frame)
             self.bloom_state.mark_update_needed(peer_node_addr);
             self.reset_lookup_backoff();
             return;

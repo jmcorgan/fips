@@ -190,6 +190,15 @@ impl Node {
     }
 
     /// Send pending rate-limited filter announces whose debounce has expired.
+    ///
+    /// A peer this node has not heard from is skipped, and its update stays
+    /// pending for the first tick after its first authenticated frame. A peer
+    /// promoted on a received msg1 has shown nothing about the address that
+    /// msg1 came from, which may be forged, so an announce and its resends to
+    /// it could be aimed at a third party. A peering this node set up by
+    /// dialling counts as heard once its handshake completes, and the dialling
+    /// side sends its TreeAnnounce at once, so the responder's filter waits
+    /// about one round trip.
     pub(super) async fn send_pending_filter_announces(&mut self) {
         self.flush_inbound_changes();
 
@@ -199,9 +208,11 @@ impl Node {
 
         let ready: Vec<NodeAddr> = self
             .peers
-            .keys()
-            .filter(|addr| self.bloom_state.should_send_update(addr, now_ms))
-            .copied()
+            .iter()
+            .filter(|(addr, peer)| {
+                peer.is_heard() && self.bloom_state.should_send_update(addr, now_ms)
+            })
+            .map(|(addr, _)| *addr)
             .collect();
 
         if ready.is_empty() {

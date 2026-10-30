@@ -211,6 +211,15 @@ New filter content is sent only on these events, never periodically:
   root, or a peer starts or stops naming it as parent, which changes
   the set of tree peers whose filters are merged
 
+An announce to a peer waits until this node has heard from it: until an
+authenticated frame from the peer arrives, or, for a peering this node set
+up by dialling, until its handshake completes. A peer promoted on a
+received first handshake message, which may be a replay under a forged
+source address, gets no filter and no resends until it sends a frame. The
+dialling side sends its TreeAnnounce as soon as it promotes, so the wait is
+about one round trip; tree announces do not wait for this, so two nodes
+cannot wait on each other.
+
 The one timed send is the resend of an announce that was not confirmed
 delivered. The transport accepting a FilterAnnounce does not mean the peer
 received it: a datagram can be lost, or a link can go down for less than
