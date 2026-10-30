@@ -27,15 +27,53 @@ struct Case {
 }
 
 /// Every key `apply_floors` changes.
-const CASES: &[Case] = &[Case {
-    key: "node.link_dead_timeout_secs",
-    message: "configured value is below the 30 s a link must stay silent before it is declared dead; running at 30 s",
-    used: 30,
-    outside: &[0, 3, 29],
-    inside: &[30, 31, 300],
-    set: |c, v| c.node.link_dead_timeout_secs = v,
-    get: |c| c.node.link_dead_timeout_secs,
-}];
+const CASES: &[Case] = &[
+    Case {
+        key: "node.link_dead_timeout_secs",
+        message: "configured value is below the 30 s a link must stay silent before it is declared dead; running at 30 s",
+        used: 30,
+        outside: &[0, 3, 29],
+        inside: &[30, 31, 300],
+        set: |c, v| c.node.link_dead_timeout_secs = v,
+        get: |c| c.node.link_dead_timeout_secs,
+    },
+    Case {
+        key: "node.rendezvous.nostr.signal_ttl_secs",
+        message: "configured value is below the 120 s least lifetime of a traversal signal; running at 120 s",
+        used: 120,
+        outside: &[0, 45, 119],
+        inside: &[120, 179],
+        set: |c, v| c.node.rendezvous.nostr.signal_ttl_secs = v,
+        get: |c| c.node.rendezvous.nostr.signal_ttl_secs,
+    },
+    Case {
+        key: "node.rendezvous.nostr.attempt_timeout_secs",
+        message: "configured value is below the 10 s least punch attempt timeout; running at 10 s",
+        used: 10,
+        outside: &[0, 6, 9],
+        inside: &[10, 11],
+        set: |c, v| c.node.rendezvous.nostr.attempt_timeout_secs = v,
+        get: |c| c.node.rendezvous.nostr.attempt_timeout_secs,
+    },
+    Case {
+        key: "node.rendezvous.nostr.max_concurrent_incoming_offers",
+        message: "configured value is below the 16 traversal offers a node must handle at once; running at 16",
+        used: 16,
+        outside: &[0, 15],
+        inside: &[16, 17],
+        set: |c, v| c.node.rendezvous.nostr.max_concurrent_incoming_offers = v as usize,
+        get: |c| c.node.rendezvous.nostr.max_concurrent_incoming_offers as u64,
+    },
+    Case {
+        key: "node.rendezvous.nostr.max_concurrent_offers_per_npub",
+        message: "configured value is below the 4 traversal offers a node must handle at once from one sender; running at 4",
+        used: 4,
+        outside: &[0, 1, 3],
+        inside: &[4, 5],
+        set: |c, v| c.node.rendezvous.nostr.max_concurrent_offers_per_npub = v as usize,
+        get: |c| c.node.rendezvous.nostr.max_concurrent_offers_per_npub as u64,
+    },
+];
 
 /// Every key `apply_floors` keeps and warns about, its bound applying only
 /// where it is used.

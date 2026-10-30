@@ -13,6 +13,19 @@ use std::fmt::Display;
 /// (FRC-1201 Section 6.4).
 const DEAD_FLOOR: u64 = 30;
 
+/// Least lifetime in seconds of a Nostr traversal signal (FRC-1601 Section
+/// 3.4, as are the three below).
+const SIGNAL_FLOOR: u64 = 120;
+
+/// Least time in seconds a punch attempt runs before it is given up.
+const ATTEMPT_FLOOR: u64 = 10;
+
+/// Least number of traversal offers a node handles at once.
+const OFFERS_FLOOR: usize = 16;
+
+/// Least number of traversal offers a node handles at once from one sender.
+const SENDER_FLOOR: usize = 4;
+
 impl Config {
     /// Bring every value a protocol bound covers inside its bound, warning
     /// once for each one changed. A value bounded only for some uses is
@@ -23,6 +36,9 @@ impl Config {
         self.floor_linkdead();
         self.warn_resends();
         self.warn_rekey();
+        self.floor_signal();
+        self.floor_attempt();
+        self.floor_offers();
     }
 
     /// Raise `node.link_dead_timeout_secs` to 30 s.
@@ -67,6 +83,47 @@ impl Config {
                 "configured value is above the 30 s a link rekey attempt may run; link rekey attempts end within 30 s",
             );
         }
+    }
+
+    /// Raise `node.rendezvous.nostr.signal_ttl_secs` to 120 s.
+    ///
+    /// Applied before validation, so the replay-window check sees the
+    /// lifetime the node runs with.
+    fn floor_signal(&mut self) {
+        raise(
+            "node.rendezvous.nostr.signal_ttl_secs",
+            &mut self.node.rendezvous.nostr.signal_ttl_secs,
+            SIGNAL_FLOOR,
+            "configured value is below the 120 s least lifetime of a traversal signal; running at 120 s",
+        );
+    }
+
+    /// Raise `node.rendezvous.nostr.attempt_timeout_secs` to 10 s.
+    fn floor_attempt(&mut self) {
+        raise(
+            "node.rendezvous.nostr.attempt_timeout_secs",
+            &mut self.node.rendezvous.nostr.attempt_timeout_secs,
+            ATTEMPT_FLOOR,
+            "configured value is below the 10 s least punch attempt timeout; running at 10 s",
+        );
+    }
+
+    /// Raise the two inbound traversal offer limits to 16 at once and 4 from
+    /// one sender, 0 included.
+    fn floor_offers(&mut self) {
+        let nostr = &mut self.node.rendezvous.nostr;
+        raise(
+            "node.rendezvous.nostr.max_concurrent_incoming_offers",
+            &mut nostr.max_concurrent_incoming_offers,
+            OFFERS_FLOOR,
+            "configured value is below the 16 traversal offers a node must handle at once; running at 16",
+        );
+        raise(
+            "node.rendezvous.nostr.max_concurrent_offers_per_npub",
+            &mut nostr.max_concurrent_offers_per_npub,
+            SENDER_FLOOR,
+            "configured value is below the 4 traversal offers a node must handle at once from one sender; running at 4",
+        );
     }
 }
 

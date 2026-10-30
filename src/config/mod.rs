@@ -2476,14 +2476,16 @@ impl Config {
                 "`node.rendezvous.nostr.signal_ttl_secs` is {}, which with {skew_secs}s of clock-skew grace on each side makes a traversal signal acceptable over a {freshness_window_secs}s window, \
                  but `node.rendezvous.nostr.replay_window_secs` is {}. \
                  The freshness window must be strictly narrower than the replay window, or a session id evicted from the replay cache is still fresh enough to be accepted a second time. \
-                 Raise `replay_window_secs` above {freshness_window_secs}, or lower `signal_ttl_secs`.",
+                 Raise `replay_window_secs` above {freshness_window_secs}; `signal_ttl_secs` runs at no less than 120 whatever is configured, so lowering it below 120 does not help.",
                 nostr.signal_ttl_secs, nostr.replay_window_secs
             )));
         }
 
         // Zero here is the same trap as `established_handshake_burst`: it
-        // reads as "no limit" and in fact refuses every inbound offer. The
-        // upper bound exists because the per-npub semaphore is built lazily
+        // reads as "no limit" and in fact refuses every inbound offer. A node
+        // raises any value below 4 before this check runs
+        // (`Config::apply_floors`), so only a direct caller of `validate`
+        // meets the zero refusal. The upper bound exists because the per-npub semaphore is built lazily
         // inside the intake path rather than at startup, so an oversized
         // value would panic there instead of failing loudly at load.
         if nostr.max_concurrent_offers_per_npub == 0 {
@@ -2612,6 +2614,18 @@ mod grants;
 #[cfg(test)]
 #[path = "tests/merge.rs"]
 mod merge;
+
+#[cfg(test)]
+#[path = "tests/signal_ttl_floor.rs"]
+mod signal_ttl_floor;
+
+#[cfg(test)]
+#[path = "tests/attempt_timeout_floor.rs"]
+mod attempt_timeout_floor;
+
+#[cfg(test)]
+#[path = "tests/offer_limit_floors.rs"]
+mod offer_limit_floors;
 
 #[cfg(test)]
 mod tests {
@@ -5386,16 +5400,6 @@ node:
             err.to_string().contains("max_concurrent_offers_per_npub"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn test_validate_per_npub_offer_allowance_of_one_accepted() {
-        let mut config = Config::default();
-        config.node.rendezvous.nostr.max_concurrent_offers_per_npub = 1;
-
-        config
-            .validate()
-            .expect("an allowance of one offer per sender is restrictive but well defined");
     }
 
     #[test]

@@ -37,6 +37,14 @@ that file and can reach its private items.
   which has only parsed values, the TUN turns on but not off and
   `dns.enabled` is always taken. Each optional field is replaced only when a
   later file sets one.
+- `signal_ttl_floor.rs`, `attempt_timeout_floor.rs` and
+  `offer_limit_floors.rs`: tests that a node built from a configuration
+  with a Nostr rendezvous setting below its protocol floor runs at the
+  floor: `signal_ttl_secs` at 120 s, `attempt_timeout_secs` at 10 s,
+  `max_concurrent_incoming_offers` at 16 and `max_concurrent_offers_per_npub`
+  at 4, a per-sender limit of 0 included; that each at or above its floor is
+  kept; and that a signal lifetime raised to 120 s is refused by the
+  replay-window check when `replay_window_secs` is not above 240 s.
 - `floors.rs`: tests for `Config::apply_floors` (`floors.rs`): a value
   outside its protocol bound runs at the bound with one warning, target
   `fips::config`, naming the key, the configured value and the value used; a
@@ -46,7 +54,9 @@ that file and can reach its private items.
   this file as its `mod tests`, and the tests are `floors::tests`.
 
 `mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
-`mod buffers`, `mod grants`, `mod sockets` and `mod merge`, not as
+`mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
+`mod signal_ttl_floor`, `mod attempt_timeout_floor` and
+`mod offer_limit_floors`, not as
 `mod tests`, because `mod.rs` still carries an inline `mod tests` block of
 that name. That block, and the inline blocks in the other files here,
 predate the rule that unit tests live in this directory; moving them is a

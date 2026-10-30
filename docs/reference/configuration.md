@@ -418,8 +418,8 @@ inert otherwise.
 | `node.rendezvous.nostr.enabled` | bool | `false` | Enable Nostr-mediated overlay discovery |
 | `node.rendezvous.nostr.policy` | string | `"configured_only"` | Advert discovery policy: `disabled`, `configured_only`, `open`. It governs how adverts are used, not inbound traversal offers: under every policy, while Nostr is enabled and the node is below `node.limits.max_peers`, the node answers a traversal offer from any npub and, if the hole punch succeeds, dials the offerer over the punched socket, subject to `max_peers` again and the peer ACL (see `transports.udp.accept_connections`) |
 | `node.rendezvous.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
-| `node.rendezvous.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
-| `node.rendezvous.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. Zero is rejected, since it refuses every inbound offer rather than disabling the limit |
+| `node.rendezvous.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam). At least 16: a smaller value is raised to 16, with a warning at start |
+| `node.rendezvous.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. At least 4: a smaller value, 0 included, is raised to 4, with a warning at start |
 | `node.rendezvous.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic. When the cache is full, an advert from a new author that is neither a configured peer nor linked to this node is refused until an entry expires; configured and linked authors are always cached |
 | `node.rendezvous.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
 | `node.rendezvous.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
@@ -428,9 +428,9 @@ inert otherwise.
 | `node.rendezvous.nostr.stun_servers` | list[string] | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used for local reflexive address discovery |
 | `node.rendezvous.nostr.share_local_candidates` | bool | `false` | Whether to advertise local (RFC 1918 / ULA) interface addresses as host candidates in the traversal offer. Off by default: in most deployments peers aren't on the same broadcast domain, and sharing private host candidates causes misleading punch successes when an asymmetric L3 path (VPN, Tailscale subnet route, overlapping address space) makes a peer's private IP one-way reachable. Enable only when peers are on the same physical LAN |
 | `node.rendezvous.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace, published in the advert's `protocol` tag (the `d` tag itself is hardcoded to `fips-overlay-v1`) |
-| `node.rendezvous.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds |
-| `node.rendezvous.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds |
-| `node.rendezvous.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds |
+| `node.rendezvous.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds. At least 120: a smaller value is raised to 120, with a warning at start |
+| `node.rendezvous.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds. At least 10: a smaller value is raised to 10, with a warning at start |
+| `node.rendezvous.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds. Must exceed `signal_ttl_secs` plus 60 s of clock-skew grace on each side, or the node refuses to start; the check uses the signal lifetime the node runs with, at least 120, so the window must exceed 240 |
 | `node.rendezvous.nostr.punch_start_delay_ms` | u64 | `2000` | Delay before punch traffic starts |
 | `node.rendezvous.nostr.punch_interval_ms` | u64 | `200` | Interval between punch packets |
 | `node.rendezvous.nostr.punch_duration_ms` | u64 | `10000` | How long to keep punching before failure |

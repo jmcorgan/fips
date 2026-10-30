@@ -478,7 +478,8 @@ pub struct NostrRendezvousConfig {
     /// Traversal application namespace and advert identifier suffix.
     #[serde(default = "NostrRendezvousConfig::default_app")]
     pub app: String,
-    /// Signaling TTL in seconds.
+    /// Signaling TTL in seconds. A value below 120 runs as 120, with a
+    /// warning, before the replay-window check sees it.
     #[serde(default = "NostrRendezvousConfig::default_signal_ttl_secs")]
     pub signal_ttl_secs: u64,
     /// Policy for advert-derived endpoint discovery.
@@ -489,12 +490,13 @@ pub struct NostrRendezvousConfig {
     #[serde(default = "NostrRendezvousConfig::default_open_discovery_max_pending")]
     pub open_discovery_max_pending: usize,
     /// Max concurrent inbound traversal offers processed at once.
-    /// Acts as a rate limit against offer spam from relays.
+    /// Acts as a rate limit against offer spam from relays. A value below 16
+    /// runs as 16, with a warning.
     #[serde(default = "NostrRendezvousConfig::default_max_concurrent_incoming_offers")]
     pub max_concurrent_incoming_offers: usize,
     /// Max concurrent inbound traversal offers accepted from any one sender
     /// npub. Sits inside `max_concurrent_incoming_offers`, which remains the
-    /// outer bound.
+    /// outer bound. A value below 4, 0 included, runs as 4, with a warning.
     #[serde(default = "NostrRendezvousConfig::default_max_concurrent_offers_per_npub")]
     pub max_concurrent_offers_per_npub: usize,
     /// Max cached overlay adverts retained from relay traffic.
@@ -505,10 +507,13 @@ pub struct NostrRendezvousConfig {
     /// Oldest entries are evicted when the cap is exceeded.
     #[serde(default = "NostrRendezvousConfig::default_seen_sessions_max_entries")]
     pub seen_sessions_max_entries: usize,
-    /// Overall punch attempt timeout in seconds.
+    /// Overall punch attempt timeout in seconds. A value below 10 runs as 10,
+    /// with a warning.
     #[serde(default = "NostrRendezvousConfig::default_attempt_timeout_secs")]
     pub attempt_timeout_secs: u64,
-    /// Replay tracking retention window in seconds.
+    /// Replay tracking retention window in seconds. Must exceed
+    /// `signal_ttl_secs`, as the node runs it, plus the clock-skew grace on
+    /// each side: above 240 at the 120 s floor.
     #[serde(default = "NostrRendezvousConfig::default_replay_window_secs")]
     pub replay_window_secs: u64,
     /// Delay before punch traffic starts.
