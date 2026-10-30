@@ -48,6 +48,7 @@ mod rekey_answer;
 mod rekey_clock;
 mod rekey_cutover_index;
 mod rekey_parity;
+mod restart_dial;
 mod routing;
 mod rx_stall;
 mod second_path_msg1;
