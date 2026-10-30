@@ -819,3 +819,120 @@ fn a_peer_is_unheard_until_its_first_frame_and_stays_heard_across_both_cutovers(
         assert!(end.peer.heard(), "{name}: the drain keeps the peer heard");
     }
 }
+
+/// Record `frames` link frames at counters `from..from + frames` on `peer`'s
+/// receiver-side MMP observer.
+fn record_frames(peer: &mut ActivePeer, from: u64, frames: u64) {
+    let now = crate::time::mono_ms();
+    let mmp = peer.mmp_mut().expect("the test peer holds link MMP state");
+    for counter in from..from + frames {
+        mmp.receiver
+            .record_recv(counter, counter as u32, 100, false, now);
+    }
+}
+
+/// Move `end`'s link onto a fresh session under our index 7 and the peer's
+/// index 8, as the node does when crossed dials resolve onto the other
+/// dial's session, and check that the link moved.
+fn cross_move(end: &mut End) {
+    let (_s, next_recv) = ik_session_pair();
+    let mut caps = crate::peer::LinkCaps {
+        indices: &mut end.alloc,
+        local: &end.keys,
+        me: *PeerIdentity::from_pubkey_full(PAIR.1.pubkey_full()).node_addr(),
+        params: crate::peer::test_link_params(),
+        record: Record::new(),
+        workers: false,
+    };
+    let out = end
+        .peer
+        .move_session(next_recv, lease(7), SessionIndex::new(8), &mut caps);
+    end.carry(&out);
+    assert_eq!(
+        end.peer.our_index(),
+        Some(SessionIndex::new(7)),
+        "precondition: the link moved onto the new session: {out:?}"
+    );
+}
+
+/// The peer's receiver report on our link frames: `highest` the highest
+/// counter it has seen, `packets` the frames of 100 bytes it has received in
+/// all, none reordered and no timestamp echoed.
+fn peer_report(highest: u64, packets: u64) -> crate::proto::mmp::ReceiverReport {
+    crate::proto::mmp::ReceiverReport {
+        highest_counter: highest,
+        cumulative_packets_recv: packets,
+        cumulative_bytes_recv: packets * 100,
+        timestamp_echo: 0,
+        dwell_time: 0,
+        max_burst_loss: 0,
+        mean_burst_loss: 0,
+        jitter: 0,
+        ecn_ce_count: 0,
+        owd_trend: 0,
+        burst_loss_count: 0,
+        cumulative_reorder_count: 0,
+        interval_packets_recv: 5,
+        interval_bytes_recv: 500,
+    }
+}
+
+/// When crossed dials are resolved by moving the link onto another session,
+/// the node resets the link's counter-derived MMP receive state as at a
+/// cutover. The new session's counter starts at 0, so a report built after
+/// the move counts from the new session alone.
+#[test]
+fn a_cross_connection_move_resets_the_link_mmp_observer_as_a_cutover_does() {
+    let (_a, mut b) = ends();
+    record_frames(&mut b.peer, 0, 200);
+
+    cross_move(&mut b);
+
+    record_frames(&mut b.peer, 0, 5);
+    let report = b
+        .peer
+        .mmp_mut()
+        .expect("link MMP state")
+        .receiver
+        .build_report(crate::time::mono_ms())
+        .expect("frames were recorded");
+    assert_eq!(
+        report.highest_counter, 4,
+        "highest_counter counts from the new session"
+    );
+    assert_eq!(
+        report.cumulative_reorder_count, 0,
+        "the new session's frames are not counted as reordered"
+    );
+}
+
+/// When crossed dials move the link onto another session, the node forgets
+/// the last receiver report the peer sent on the replaced session, as at a
+/// cutover. The peer's reports on the new session count our frames from 0,
+/// so the node accepts them rather than dropping them as stale until our
+/// new counter passes the old one.
+#[test]
+fn a_cross_connection_move_accepts_the_peers_receiver_reports_on_the_new_session() {
+    let (_a, mut b) = ends();
+    let metrics = &mut b.peer.mmp_mut().expect("link MMP state").metrics;
+    let _ = metrics.process_receiver_report(&peer_report(199, 200), 0, 1_000);
+    assert_eq!(
+        metrics.rr_counters(),
+        Some((199, 200, 0)),
+        "precondition: the report on the replaced session is accepted"
+    );
+
+    cross_move(&mut b);
+
+    let metrics = &mut b.peer.mmp_mut().expect("link MMP state").metrics;
+    let (_, log) = metrics.process_receiver_report(&peer_report(4, 205), 0, 2_000);
+    assert!(
+        !matches!(log, crate::proto::mmp::RrLog::Stale { .. }),
+        "the peer's first report on the new session is not dropped as stale"
+    );
+    assert_eq!(
+        metrics.rr_counters(),
+        Some((4, 205, 0)),
+        "the peer's first report on the new session is accepted"
+    );
+}

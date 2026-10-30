@@ -18,8 +18,10 @@ Unit tests for the modules in `src/peer/`, kept out of the source files.
   machine, so every session a test peer holds authenticates one peer key,
   and its indices are leased outside any allocator), the replay window and
   the inner-header timestamp each cutover restarts, the withheld handshake
-  diagnostics, and that the rekey dampening, the pending hold and the drain
-  run on the peer clock, which `crate::time::advance` moves.
+  diagnostics, the link MMP receive state and last accepted receiver report
+  that a cross-connection move resets as a cutover does, and that the rekey
+  dampening, the pending hold and the drain run on the peer clock, which
+  `crate::time::advance` moves.
 
 `machine.rs` and `mod.rs` also carry older inline `mod tests` blocks. New tests
 go here rather than into those blocks; the inline blocks are not converted in

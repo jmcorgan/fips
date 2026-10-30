@@ -687,7 +687,9 @@ impl ActivePeer {
     /// machine held and bind (and offer) the new session. Hands `ours` back
     /// in a release, changing nothing, when `session` authenticated another
     /// key than the peer's. Also resets the replay suppression counter and
-    /// the repeated handshake line counts since the session changed.
+    /// the repeated handshake line counts since the session changed, and,
+    /// once the link has moved, the link's counter-derived MMP state, as a
+    /// cutover does, since the new session's frame counter starts again at 0.
     pub(crate) fn move_session(
         &mut self,
         session: NoiseSession,
@@ -720,6 +722,7 @@ impl ActivePeer {
             Ok((rekey, built)) => {
                 out.extend(built);
                 self.rekey = Some(rekey);
+                self.reset_mmp();
             }
             Err(lease) => out.push(LinkOutput::Release(lease)),
         }
@@ -1544,11 +1547,15 @@ impl ActivePeer {
         self.send.prev_frames = 0;
         self.reset_replay_suppressed();
         self.hs_lines.roll();
+        self.reset_mmp();
+    }
 
-        // Reset MMP counters to avoid metric discontinuity
-        let now_ms = crate::time::mono_ms();
+    /// Reset the link's counter-derived MMP state for a session whose frame
+    /// counter starts again at 0, as at a cutover or a cross-connection
+    /// move.
+    fn reset_mmp(&mut self) {
         if let Some(mmp) = &mut self.send.mmp {
-            mmp.reset_for_rekey(now_ms);
+            mmp.reset_for_rekey(crate::time::mono_ms());
         }
     }
 
