@@ -18,7 +18,6 @@ use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
 use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
 use crate::proto::stp::{TreeCoordinate, coords_wire_size, encode_coords};
-use crate::transport::TransportId;
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{
     Abandon, Config, DEPLOYED_SESSION_FLOOR, EpochTag, Input, MAX_AFTER, MsgKind, NodeKeys, Params,
@@ -523,8 +522,7 @@ impl Node {
 
     /// Carry out the outputs of `node_addr`'s link rekey machine that change
     /// the node's index maps and worker registrations, front to back: bind
-    /// and unbind its indices in `peers_by_index` by the transport recorded
-    /// at the binding, offer receive halves to the decrypt workers and tell
+    /// and unbind its indices in `peers_by_index` by index alone, offer receive halves to the decrypt workers and tell
     /// the machine which ones a worker accepted, revoke them, and free
     /// released indices. The one place a link's index maps and worker
     /// registrations change. The outputs of a `close`, a link's promotion
@@ -532,27 +530,20 @@ impl Node {
     pub(in crate::node) fn run_link_outputs(&mut self, node_addr: &NodeAddr, out: LinkOutputs) {
         for output in out {
             match output {
-                LinkOutput::Bind {
-                    transport, index, ..
-                } => {
-                    self.peers_by_index.insert((transport, index), *node_addr);
+                LinkOutput::Bind { index, .. } => {
+                    self.peers_by_index.insert(index, *node_addr);
                 }
-                LinkOutput::Unbind { transport, index } => {
-                    self.peers_by_index.remove(&(transport, index));
+                LinkOutput::Unbind { index, .. } => {
+                    self.peers_by_index.remove(&index);
                 }
                 LinkOutput::Delegate {
-                    tag,
-                    transport,
-                    index,
-                    recv,
-                } => self.delegate_link_epoch(node_addr, tag, (transport, index), recv),
-                LinkOutput::Revoke {
-                    transport, index, ..
-                } => {
+                    tag, index, recv, ..
+                } => self.delegate_link_epoch(node_addr, tag, index, recv),
+                LinkOutput::Revoke { index, .. } => {
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((transport, index));
+                    self.unregister_decrypt_worker_session(index);
                     #[cfg(not(unix))]
-                    let _ = (transport, index);
+                    let _ = index;
                 }
                 LinkOutput::Release(lease) => {
                     let _ = self
@@ -588,7 +579,7 @@ impl Node {
         &mut self,
         node_addr: &NodeAddr,
         tag: EpochTag,
-        cache_key: (TransportId, u32),
+        cache_key: u32,
         recv: RecvCopy,
     ) {
         #[cfg(unix)]
