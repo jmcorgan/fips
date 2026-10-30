@@ -75,7 +75,9 @@ logging:
   rust_log: "debug"
   output_dir: "./sim-results"
 
+# Test-only key: the integration build (testing/scripts/build.sh) honours it;
+# a daemon built otherwise ignores it with a warning and keeps entries 300 s.
 fips_overrides:
   node:
     cache:
-      coord_ttl_secs: 10
+      test_coord_ttl_secs: 10
