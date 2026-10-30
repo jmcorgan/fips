@@ -6,6 +6,12 @@
 //! [`PeerMachine::complete_handshake`] directly because the wire parser drops a
 //! msg2 of the wrong length before it reaches the machine, so a short one
 //! cannot be delivered from the node.
+//!
+//! An inbound leg whose first msg2 send failed transiently stays at
+//! `ReceivedMsg1` with its index allocated. When a later send of its stored
+//! msg2 succeeds the machine asks for the promotion a first send would have
+//! asked for, unless the leg was never authorized, is already established,
+//! or its identity is held on another link.
 
 use super::*;
 use crate::noise::HANDSHAKE_MSG2_SIZE;
@@ -109,4 +115,123 @@ fn several_forged_msg2s_in_a_row_still_leave_the_genuine_one_readable() {
     ini.complete_handshake(&genuine, 1400)
         .expect("the genuine msg2 must still complete the handshake");
     assert!(ini.has_session());
+}
+
+/// The inbound msg1 outcome of a fresh identity, as the shell's wire step
+/// builds it.
+fn wire_outcome(peer: PeerIdentity) -> WireOutcome {
+    WireOutcome {
+        peer_identity: peer,
+        remote_epoch: Some([4; 8]),
+        their_index: SessionIndex::new(0x77),
+        msg2_payload: vec![0xAB; 8],
+        msg1_digest: Msg1Digest::of(&[0xCD; 8]),
+    }
+}
+
+/// The registry snapshot for an identity the node holds nothing for.
+fn est_new_peer() -> EstablishSnapshot {
+    EstablishSnapshot {
+        has_existing_peer: false,
+        existing_peer_epoch: None,
+        replace: false,
+        at_max_peers: false,
+        has_pending_outbound_to_peer: false,
+        silent_backoff: None,
+    }
+}
+
+/// An inbound leg that has read a fresh identity's msg1, and that identity's
+/// node address. With `authorize`, the late-ACL gate also passed, so the leg
+/// holds its index and has asked for its first msg2 send.
+fn inbound_leg(alloc: &mut IndexAllocator, authorize: bool) -> (PeerMachine, NodeAddr) {
+    let peer = PeerIdentity::from_pubkey(Identity::generate().pubkey());
+    let addr = *peer.node_addr();
+    let link = LinkId::new(1);
+    let mut m = PeerMachine::new_inbound(link, 0);
+    let classified = m.step(
+        PeerEvent::InboundMsg1 {
+            link,
+            wire: wire_outcome(peer),
+            est: est_new_peer(),
+        },
+        100,
+        alloc,
+    );
+    assert!(classified.is_empty(), "precondition: a new peer classifies");
+    if authorize {
+        let first = m.step(PeerEvent::Authorized, 100, alloc);
+        assert_eq!(
+            first.last(),
+            Some(&PeerAction::PromoteToActive { link }),
+            "precondition: the first send asks for promotion"
+        );
+    }
+    (m, addr)
+}
+
+/// The state an inbound leg waits in for its msg2 to be sent.
+fn received_msg1() -> PeerState {
+    PeerState::Handshaking {
+        link: LinkId::new(1),
+        phase: HandshakePhase::ReceivedMsg1,
+    }
+}
+
+#[test]
+fn an_authorized_inbound_leg_asks_for_promotion_when_its_stored_msg2_is_resent() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, _) = inbound_leg(&mut alloc, true);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 200, &mut alloc);
+    assert_eq!(
+        actions,
+        [PeerAction::PromoteToActive {
+            link: LinkId::new(1)
+        }]
+    );
+    assert_eq!(
+        m.state(),
+        received_msg1(),
+        "the promotion feedback, not the resend, moves the state"
+    );
+}
+
+#[test]
+fn a_resent_msg2_does_not_promote_a_leg_that_holds_no_index() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, _) = inbound_leg(&mut alloc, false);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 200, &mut alloc);
+    assert!(actions.is_empty(), "an unauthorized leg has sent nothing");
+    assert_eq!(m.state(), received_msg1());
+}
+
+#[test]
+fn a_resent_msg2_does_not_promote_while_the_peer_is_held_on_another_link() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, _) = inbound_leg(&mut alloc, true);
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: true }, 200, &mut alloc);
+    assert!(
+        actions.is_empty(),
+        "a held peer would turn the promotion into a cross-connection"
+    );
+    assert_eq!(m.state(), received_msg1());
+}
+
+#[test]
+fn a_resent_msg2_does_not_promote_an_established_machine() {
+    let mut alloc = IndexAllocator::new();
+    let (mut m, addr) = inbound_leg(&mut alloc, true);
+    m.step(
+        PeerEvent::PromotionResolved {
+            result: PromotionResult::Promoted(addr),
+        },
+        200,
+        &mut alloc,
+    );
+    assert_eq!(m.state(), PeerState::Established { addr });
+    let actions = m.step(PeerEvent::Msg2Resent { peer_held: false }, 300, &mut alloc);
+    assert!(
+        actions.is_empty(),
+        "an established machine is not promoted again"
+    );
 }

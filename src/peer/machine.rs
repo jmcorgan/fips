@@ -277,6 +277,10 @@ pub(crate) enum PeerEvent {
     /// action shell-side; the machine consumes the outcome (it does not
     /// re-decide the tie-break).
     PromotionResolved { result: PromotionResult },
+    /// A send of the stored msg2, in answer to a later msg1 from the
+    /// initiator's address, succeeded. `peer_held`: the node already holds a
+    /// peer for this leg's identity on another link.
+    Msg2Resent { peer_held: bool },
     /// OBSERVATION: the shell resolved an outbound cross-connection inline (a
     /// session swap or keep, with the registry and index surgery already
     /// applied). Reconciles the control shadow's peer index with reality on a
@@ -1043,6 +1047,7 @@ impl PeerMachine {
             PeerEvent::Authorized => self.on_authorized(now, index_allocator),
             PeerEvent::Rejected => self.fail(FailReason::AclRejected),
             PeerEvent::PromotionResolved { result } => self.on_promotion_resolved(result, now),
+            PeerEvent::Msg2Resent { peer_held } => self.on_resend(peer_held),
             PeerEvent::CrossConnResolved { outcome } => self.on_cross_conn_resolved(outcome),
             PeerEvent::FilterAnnounce => vec![PeerAction::SendLinkMessage {
                 // Filter-announce payload is data-plane-owned; threaded in
@@ -1341,6 +1346,27 @@ impl PeerMachine {
             PeerAction::SendHandshake { bytes },
             PeerAction::PromoteToActive { link },
         ]
+    }
+
+    /// The stored msg2 of an authorized inbound leg was sent in answer to a
+    /// later msg1: promote the leg as a first successful send would have. A
+    /// leg not yet authorized holds no index and has sent nothing, and a leg
+    /// whose identity is already held on another link would promote into a
+    /// cross-connection, which this path does not resolve; both stay as they
+    /// are. The state is left to the `PromotionResolved` feedback, as on the
+    /// first send.
+    fn on_resend(&self, peer_held: bool) -> Vec<PeerAction> {
+        let pending = matches!(
+            self.state,
+            PeerState::Handshaking {
+                phase: HandshakePhase::ReceivedMsg1,
+                ..
+            }
+        );
+        if peer_held || !pending || self.conn.our_index().is_none() {
+            return Vec::new();
+        }
+        vec![PeerAction::PromoteToActive { link: self.link }]
     }
 
     // ------------------------------------------------------------------

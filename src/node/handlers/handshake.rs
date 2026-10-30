@@ -711,12 +711,14 @@ impl Node {
 
         // Pre-crypto duplicate short-circuit. An *inbound* link from this
         // address that is not (yet) a promoted peer means our earlier msg2 was
-        // lost: resend the stored msg2 without paying the crypto cost and
-        // return. An inbound link that DOES belong to an active peer (a possible
-        // restart/rekey) or an *outbound* link (a cross-connection) falls
-        // through to the wire step and the structured classification below —
-        // the pre-refactor `possible_restart` flag is no longer needed because
-        // that classification now gates on `has_existing_peer` (identity), which
+        // lost or never sent: resend the stored msg2 without paying the crypto
+        // cost and return. A leg whose first send failed transiently was never
+        // promoted, so a successful resend promotes it here. An inbound link
+        // that DOES belong to an active peer (a possible restart/rekey) or an
+        // *outbound* link (a cross-connection) falls through to the wire step
+        // and the structured classification below — the pre-refactor
+        // `possible_restart` flag is no longer needed because that
+        // classification now gates on `has_existing_peer` (identity), which
         // subsumes it.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
         if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key)
@@ -730,12 +732,15 @@ impl Node {
                     if let Some(msg2) = msg2_bytes {
                         if let Some(transport) = self.transports.get(&packet.transport_id) {
                             match transport.send_existing(&packet.remote_addr, &msg2).await {
-                                Ok(_) => debug!(
-                                    remote_addr = %packet.remote_addr,
-                                    transport_id = %packet.transport_id,
-                                    link_id = %existing_link_id,
-                                    "Resent msg2 for duplicate msg1"
-                                ),
+                                Ok(_) => {
+                                    debug!(
+                                        remote_addr = %packet.remote_addr,
+                                        transport_id = %packet.transport_id,
+                                        link_id = %existing_link_id,
+                                        "Resent msg2 for duplicate msg1"
+                                    );
+                                    self.promote_resent(existing_link_id, &packet, &msg2).await;
+                                }
                                 Err(e) => debug!(
                                     remote_addr = %packet.remote_addr,
                                     error = %e,
@@ -1269,7 +1274,8 @@ impl Node {
                 // `PromoteToActive` ran and deliberately left the half-built leg in
                 // place, so the machine is still registered at
                 // `Handshaking{ReceivedMsg1}` (`peer_actions.rs`, the
-                // `is_transient` branch); or promotion succeeded. The tail
+                // `is_transient` branch) until a resend of the stored msg2
+                // promotes it (`promote_resent`); or promotion succeeded. The tail
                 // (`finish_inbound`) is gated on `Established`, so only the
                 // third runs it.
                 //
@@ -1394,8 +1400,9 @@ impl Node {
                 // machine, leaving it absent (not Established); its TRANSIENT
                 // send-failure arm aborts the queue before `PromoteToActive` and
                 // leaves the machine registered at `Handshaking{ReceivedMsg1}` for
-                // the initiator's msg1 resend to land on. The `Established` gate
-                // in `finish_inbound` covers all three.
+                // the initiator's msg1 resend to land on, which promotes it once
+                // the stored msg2 is sent (`promote_resent`). The `Established`
+                // gate in `finish_inbound` covers all three.
                 let ambient = PeerActionCtx {
                     verified_identity: peer_identity,
                     transport_id: packet.transport_id,
@@ -1460,6 +1467,56 @@ impl Node {
         self.bloom_state.mark_update_needed(peer);
         self.reset_lookup_backoff();
         true
+    }
+
+    /// Promote the pending inbound leg on `link` after its stored msg2, `msg2`,
+    /// was sent in answer to `packet`, and finish the promotion as a first
+    /// successful send would. A leg that has learned no identity or holds no
+    /// indices is left alone.
+    async fn promote_resent(&mut self, link: LinkId, packet: &ReceivedPacket, msg2: &[u8]) {
+        let Some((identity, ours, theirs)) = self.peer_machines.get(&link).and_then(|m| {
+            Some((
+                *m.conn_expected_identity()?,
+                m.our_index()?,
+                m.conn_their_index()?,
+            ))
+        }) else {
+            return;
+        };
+        let peer = *identity.node_addr();
+        let peer_held = self.peers.contains_key(&peer);
+        let ambient = PeerActionCtx {
+            verified_identity: identity,
+            transport_id: packet.transport_id,
+            remote_addr: packet.remote_addr.clone(),
+            our_index: Some(ours),
+            their_index: Some(theirs),
+            now_ms: packet.timestamp_ms,
+            is_outbound: false,
+        };
+        self.advance_peer_machine(
+            link,
+            PeerEvent::Msg2Resent { peer_held },
+            packet.timestamp_ms,
+            &ambient,
+        )
+        .await;
+        if self
+            .finish_inbound(link, peer, msg2, packet.timestamp_ms)
+            .await
+        {
+            debug!(
+                link_id = %link,
+                peer = %self.peer_display_name(&peer),
+                "Promoted a pending inbound link after resending its msg2"
+            );
+        } else if peer_held {
+            debug!(
+                link_id = %link,
+                peer = %self.peer_display_name(&peer),
+                "Resent msg2 for a pending link whose peer is held on another link, not promoting"
+            );
+        }
     }
 
     /// Remember the ephemeral of a msg1 that promoted `peer` here, if the

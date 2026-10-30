@@ -179,9 +179,10 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
 /// already has a genuinely-pending (not yet promoted) inbound link resends the
 /// stored msg2 without paying the crypto cost or touching registry state.
 ///
-/// Oracle: the exact stored msg2 bytes are resent verbatim, nothing is
-/// promoted, the pending connection is left intact, and the msg1 rate limiter
-/// rebalances (start then complete) to baseline.
+/// Oracle: the exact stored msg2 bytes are resent verbatim, a pending leg that
+/// has learned no identity is not promoted, the pending connection is left
+/// intact, and the msg1 rate limiter rebalances (start then complete) to
+/// baseline.
 #[tokio::test]
 async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
     let mut node = make_node();
@@ -240,7 +241,11 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
         &stored_msg2[..],
         "the exact stored msg2 is resent for a duplicate msg1"
     );
-    assert_eq!(node.peer_count(), 0, "duplicate msg1 promotes nothing");
+    assert_eq!(
+        node.peer_count(),
+        0,
+        "a resend for a pending leg that has learned no identity promotes nothing"
+    );
     assert!(
         node.has_pending_leg(&link_id),
         "pending connection is left intact"

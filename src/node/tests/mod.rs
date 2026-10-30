@@ -59,6 +59,7 @@ mod spanning_tree;
 #[cfg(unix)]
 mod status;
 mod stored_msg2;
+mod stored_msg2_install;
 mod survivors;
 mod tcp;
 mod traffic_diag;

@@ -214,7 +214,9 @@ impl Node {
                             // different thing entirely and one an operator reads
                             // as the peer's fault.
                             //
-                            // Nothing leaks by staying. An initiator that never
+                            // The initiator's resend draws the stored msg2, and
+                            // the leg is promoted once that send succeeds.
+                            // Nothing leaks by staying: an initiator that never
                             // resends leaves a stale connection, which
                             // `check_timeouts` reaps at `handshake_timeout_secs`
                             // exactly as it reaps every other abandoned handshake.
