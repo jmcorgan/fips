@@ -749,8 +749,7 @@ pub struct BloomConfig {
     /// legitimately near their operating ceiling are not rejected before
     /// the network reaches the fixed-filter capacity limit; conceptually
     /// distinct from future autoscaling hysteresis setpoints — same unit,
-    /// different knobs. Raising it does not admit filters above 0.20 from
-    /// senders that hold outgoing filters at the v1 cap.
+    /// different knobs.
     #[serde(default = "BloomConfig::default_max_inbound_fpr")]
     pub max_inbound_fpr: f64,
 }

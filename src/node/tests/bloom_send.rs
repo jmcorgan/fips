@@ -178,11 +178,6 @@ fn parent_holds(fx: &FlipFixture) -> (Option<BloomFilter>, u64) {
     (peer.inbound_filter().cloned(), peer.filter_sequence())
 }
 
-/// Outgoing announces M has held above the v1 cap.
-fn held_count(fx: &FlipFixture) -> u64 {
-    fx.nodes[M].node.metrics().bloom.held_over_cap.get()
-}
-
 /// Configs for P, M and C with the given `max_inbound_fpr` at P and at M.
 fn caps(parent: f64, middle: f64) -> Vec<crate::config::Config> {
     [parent, middle, V1_CAP]
@@ -195,186 +190,83 @@ fn caps(parent: f64, middle: f64) -> Vec<crate::config::Config> {
         .collect()
 }
 
-/// An outgoing filter above the v1 cap is not sent: the update stays pending,
-/// the last-sent record keeps what the peer holds, and the peer sees nothing.
+/// A node sends a peer its outgoing filter whatever the filter's fill:
+/// toward a receiver whose own cap admits the filter, the filter arrives
+/// and is stored.
 #[tokio::test]
-async fn test_bloom_outgoing_filter_above_the_fpr_cap_is_held_unsent_and_left_pending() {
-    let mut fx = flip_fixture(true).await;
+async fn test_bloom_outgoing_filter_above_the_v1_cap_is_sent_and_stored_by_a_receiver_whose_cap_admits_it()
+ {
+    let mut fx = flip_fixture_with_configs(true, caps(0.30, V1_CAP)).await;
     let p = fx.p;
     let dense = dense_filter(&fx, 5937);
+    deliver_over_cap(&mut fx, &dense).await;
+    let union = union_to_parent(&fx);
     assert!(
-        dense.fpr() <= V1_CAP,
-        "setup: C's filter ({}) must pass M's cap",
-        dense.fpr()
+        union.fpr() <= 0.30,
+        "setup: P's own cap ({}) would accept the union",
+        union.fpr()
     );
-    let last_before = fx.nodes[M].node.bloom_state.last_sent_filter(&p).cloned();
 
-    deliver_over_cap(&mut fx, &dense).await;
+    let (_, seq_before) = parent_holds(&fx);
     let sent_before = sent_count(&fx);
-    let held_before = held_count(&fx);
-    let rejected_before = fx.nodes[P].node.metrics().bloom.fill_exceeded.get();
-    send_and_deliver(&mut fx).await;
-
-    assert_eq!(
-        sent_count(&fx),
-        sent_before,
-        "M must not send a filter above the cap"
-    );
-    assert_eq!(
-        held_count(&fx),
-        held_before + 1,
-        "M must count the held announce once"
-    );
-    let bloom = &fx.nodes[M].node.bloom_state;
-    assert!(bloom.needs_update(&p), "the update to P must stay pending");
-    assert_eq!(
-        bloom.last_sent_filter(&p).cloned(),
-        last_before,
-        "the last-sent record must keep what P holds"
-    );
-    assert_eq!(
-        fx.nodes[P].node.metrics().bloom.fill_exceeded.get(),
-        rejected_before,
-        "P must not be sent a filter it rejects"
-    );
-    cleanup_nodes(&mut fx.nodes).await;
-}
-
-/// A held announce is retried at the debounce pace, not on every tick.
-#[tokio::test]
-async fn test_bloom_held_over_cap_announce_is_not_retried_before_the_debounce() {
-    let mut fx = flip_fixture(true).await;
-    let p = fx.p;
-    fx.nodes[M].node.bloom_state.set_update_debounce_ms(500);
-    let dense = dense_filter(&fx, 5937);
-    deliver_over_cap(&mut fx, &dense).await;
-    // Let the fixture's last send to P leave the debounce window.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    let sent_before = sent_count(&fx);
-    let held_before = held_count(&fx);
-    for _ in 0..3 {
-        fx.nodes[M].node.check_bloom_state().await;
-        process_available_packets(&mut fx.nodes).await;
-    }
-
-    assert_eq!(
-        sent_count(&fx),
-        sent_before,
-        "M must not send a filter above the cap"
-    );
-    assert_eq!(
-        held_count(&fx),
-        held_before + 1,
-        "only the first tick may attempt the held announce; the others wait out the debounce"
-    );
-    assert!(
-        fx.nodes[M].node.bloom_state.needs_update(&p),
-        "the update to P must stay pending"
-    );
-    cleanup_nodes(&mut fx.nodes).await;
-}
-
-/// Once the union falls back under the cap, the next change reaches the peer.
-#[tokio::test]
-async fn test_bloom_held_over_cap_filter_is_sent_once_the_union_falls_back_under_the_cap() {
-    let mut fx = flip_fixture(true).await;
-    let c = fx.c;
-    let dense = dense_filter(&fx, 5937);
-    deliver_over_cap(&mut fx, &dense).await;
-    send_and_deliver(&mut fx).await;
-    assert_eq!(held_count(&fx), 1, "control: the dense union must be held");
-
-    deliver_filter(&mut fx, &[c, marker()]).await;
-    let sent_before = sent_count(&fx);
-    let held_before = held_count(&fx);
     send_and_deliver(&mut fx).await;
 
     assert_eq!(
         sent_count(&fx),
         sent_before + 1,
-        "M must send P the filter once it is under the cap"
+        "M must send P its outgoing filter above the v1 cap"
     );
-    assert_eq!(
-        held_count(&fx),
-        held_before,
-        "a filter under the cap must not be held"
-    );
-    let (held, _) = parent_holds(&fx);
+    let (held, seq) = parent_holds(&fx);
+    assert_eq!(held, Some(union), "P must store the filter M sent");
+    assert!(seq > seq_before, "P must store a new sequence for M");
     assert!(
-        held.is_some_and(|filter| filter.contains(&marker())),
-        "P must store the filter carrying C's new marker"
+        !fx.nodes[M].node.bloom_state.needs_update(&p),
+        "the update to P must no longer be pending"
     );
     cleanup_nodes(&mut fx.nodes).await;
 }
 
-/// The hold applies at the v1 cap even toward a receiver configured to
-/// accept more.
+/// An outgoing filter above a receiver's cap is still sent and recorded as
+/// the last filter sent; the receiver discards it and keeps the filter and
+/// sequence it last accepted.
 #[tokio::test]
-async fn test_bloom_outgoing_filter_above_the_v1_cap_is_held_from_a_receiver_whose_own_cap_is_higher()
+async fn test_bloom_outgoing_filter_above_the_v1_cap_is_sent_and_recorded_while_a_default_cap_receiver_keeps_its_last_filter()
  {
-    let mut fx = flip_fixture_with_configs(true, caps(0.30, V1_CAP)).await;
+    let mut fx = flip_fixture(true).await;
+    let p = fx.p;
     let dense = dense_filter(&fx, 5937);
     deliver_over_cap(&mut fx, &dense).await;
-    assert!(
-        union_to_parent(&fx).fpr() <= 0.30,
-        "setup: P's own cap would accept the union"
-    );
+    let union = union_to_parent(&fx);
 
     let holds_before = parent_holds(&fx);
     let sent_before = sent_count(&fx);
-    let held_before = held_count(&fx);
+    let rejected_before = fx.nodes[P].node.metrics().bloom.fill_exceeded.get();
     send_and_deliver(&mut fx).await;
 
     assert_eq!(
         sent_count(&fx),
-        sent_before,
-        "M must not send a filter above the v1 cap"
+        sent_before + 1,
+        "M must send P its outgoing filter whatever its fill"
     );
+    let bloom = &fx.nodes[M].node.bloom_state;
     assert_eq!(
-        held_count(&fx),
-        held_before + 1,
-        "M must count the held announce once"
+        bloom.last_sent_filter(&p),
+        Some(&union),
+        "M must record the filter it sent as the last sent to P"
     );
-    assert_eq!(
-        parent_holds(&fx),
-        holds_before,
-        "P must keep its filter and sequence for M"
-    );
-    cleanup_nodes(&mut fx.nodes).await;
-}
-
-/// The hold threshold is the v1 cap, not the sender's own inbound cap.
-#[tokio::test]
-async fn test_bloom_outgoing_filter_hold_uses_the_v1_cap_whatever_the_senders_own_cap() {
-    let mut fx = flip_fixture_with_configs(true, caps(0.30, 0.30)).await;
-    let dense = dense_filter(&fx, 6100);
     assert!(
-        dense.fpr() > V1_CAP && dense.fpr() <= 0.30,
-        "setup: C's filter ({}) must be above the v1 cap and under M's own",
-        dense.fpr()
-    );
-    deliver_over_cap(&mut fx, &dense).await;
-
-    let holds_before = parent_holds(&fx);
-    let sent_before = sent_count(&fx);
-    let held_before = held_count(&fx);
-    send_and_deliver(&mut fx).await;
-
-    assert_eq!(
-        sent_count(&fx),
-        sent_before,
-        "M must not send a filter above the v1 cap"
+        !bloom.needs_update(&p),
+        "the update to P must no longer be pending"
     );
     assert_eq!(
-        held_count(&fx),
-        held_before + 1,
-        "M must count the held announce once"
+        fx.nodes[P].node.metrics().bloom.fill_exceeded.get(),
+        rejected_before + 1,
+        "P, at the default cap, must discard the filter"
     );
     assert_eq!(
         parent_holds(&fx),
         holds_before,
-        "P must keep its filter and sequence for M"
+        "P must keep the filter and sequence it last accepted from M"
     );
     cleanup_nodes(&mut fx.nodes).await;
 }

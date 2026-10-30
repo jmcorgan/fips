@@ -418,8 +418,6 @@ pub struct BloomStatsSnapshot {
     pub sent: u64,
     pub debounce_suppressed: u64,
     pub send_failed: u64,
-    /// Outgoing announces held because the filter was above the v1 cap.
-    pub held_over_cap: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

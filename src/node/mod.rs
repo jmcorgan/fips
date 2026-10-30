@@ -797,12 +797,6 @@ pub struct Node {
     /// Timestamp of last mesh size log emission.
     last_mesh_size_log: Option<std::time::Instant>,
 
-    // === Bloom Self-Plausibility ===
-    /// Rate-limit state for the held-filter WARN. Fires at most once per
-    /// 60s globally when an outgoing FilterAnnounce is held because its
-    /// FPR is above the v1 acceptance cap.
-    last_self_warn: Option<std::time::Instant>,
-
     // === FilterAnnounce sequence ===
     /// Random offset and start instant from which a new peer's first
     /// FilterAnnounce sequence is derived (`seq_floor`).
@@ -1052,7 +1046,6 @@ impl Node {
             last_congestion_log: None,
             estimated_mesh_size: None,
             last_mesh_size_log: None,
-            last_self_warn: None,
             seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
@@ -1218,7 +1211,6 @@ impl Node {
             last_congestion_log: None,
             estimated_mesh_size: None,
             last_mesh_size_log: None,
-            last_self_warn: None,
             seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
@@ -2254,9 +2246,10 @@ impl Node {
             })
             .collect();
         // Uptree filter metrics: the last filter actually sent to the tree
-        // parent (`record_sent_filter`), which is what the parent currently
-        // holds for us. `None` for a root node (nothing sent uptree) or before
-        // the first announce. The estimate is this node's whole subtree
+        // parent (`record_sent_filter`). A parent whose cap that filter
+        // exceeds discards it and keeps the one it accepted before. `None`
+        // for a root node (nothing sent uptree) or before the first
+        // announce. The estimate is this node's whole subtree
         // (split-horizon), not the mesh.
         let (uptree_fill_ratio, uptree_estimated_count) = if tree.is_root() {
             (None, None)

@@ -4,8 +4,8 @@
 //! including debounced propagation to peers.
 
 use crate::NodeAddr;
+use crate::proto::bloom::BloomFilter;
 use crate::proto::bloom::FilterAnnounce;
-use crate::proto::bloom::{ACCEPT_FPR_CAP, BloomFilter};
 use crate::proto::mmp::delivery::{LinkEvidence, RrCounters};
 
 use super::reject::BloomReject;
@@ -65,10 +65,10 @@ impl Node {
     /// only through them).
     ///
     /// If the peer is rate-limited, the update stays pending for
-    /// delivery on the next tick cycle. A filter whose FPR is above the v1
-    /// acceptance cap is held the same way: a v1 receiver would reject it,
-    /// so nothing is sent, no sequence is taken, and the update stays
-    /// pending until the debounce allows another attempt.
+    /// delivery on the next tick cycle.
+    ///
+    /// The filter is sent whatever its false-positive rate: the receiver's
+    /// own cap decides whether it is kept.
     pub(super) async fn send_filter_announce_to_peer(
         &mut self,
         peer_addr: &NodeAddr,
@@ -82,17 +82,6 @@ impl Node {
         if !self.bloom_state.should_send_update(peer_addr, now_ms) {
             self.metrics().bloom.debounce_suppressed.inc();
             // Either not pending or rate-limited; will retry on tick
-            return Ok(());
-        }
-
-        // Hold a filter a v1 receiver would reject. The threshold is the v1
-        // cap, not this node's own inbound cap, so the hold is the same on
-        // every sender. The peer keeps the last filter it accepted, and the
-        // last-sent record keeps matching it.
-        if filter.fpr() > ACCEPT_FPR_CAP {
-            self.metrics().bloom.held_over_cap.inc();
-            self.warn_held(peer_addr, &filter);
-            self.bloom_state.defer_update(*peer_addr, now_ms);
             return Ok(());
         }
 
@@ -164,29 +153,6 @@ impl Node {
         let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();
         let peer_filters = self.peer_inbound_filters();
         self.bloom_state.mark_changed(&peer_addrs, &peer_filters);
-    }
-
-    /// WARN that an outgoing filter to `peer_addr` is held above the v1 cap.
-    ///
-    /// Rate-limited to once per 60s globally: a held update is retried at
-    /// the debounce pace, and the operator needs one clear message, not one
-    /// per attempt.
-    fn warn_held(&mut self, peer_addr: &NodeAddr, filter: &BloomFilter) {
-        let now = std::time::Instant::now();
-        let should_warn = self
-            .last_self_warn
-            .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(60));
-        if !should_warn {
-            return;
-        }
-        self.last_self_warn = Some(now);
-        warn!(
-            to = %self.peer_display_name(peer_addr),
-            fill = format_args!("{:.3}", filter.fill_ratio()),
-            fpr = format_args!("{:.4}", filter.fpr()),
-            cap = format_args!("{:.4}", ACCEPT_FPR_CAP),
-            "Outgoing filter above the v1 FPR cap — held, not sent"
-        );
     }
 
     /// Send pending rate-limited filter announces whose debounce has expired.
