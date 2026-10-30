@@ -16,12 +16,14 @@
 //! session messages state where it now is. The pair fixture is two linked
 //! nodes, the initiator `A` at the root and the peer `B` under it. `B`'s
 //! former position is under a node `X` that is not in the mesh, below the
-//! same root.
+//! same root. The last test runs the move in a mesh of four nodes and
+//! measures where the next datagram goes.
 
 use super::*;
+use crate::node::tests::session::pump_until_quiet;
 use crate::node::tests::spanning_tree::{
-    TestNode, cleanup_nodes, populate_all_coord_caches, process_available_packets, run_tree_test,
-    verify_tree_convergence,
+    TestNode, cleanup_nodes, converge_nodes, drain_all_packets, initiate_handshake, make_test_node,
+    populate_all_coord_caches, process_available_packets, run_tree_test, verify_tree_convergence,
 };
 use crate::proto::fsp::SessionMessageType;
 use crate::proto::fsp::wire::{FSP_FLAG_CP, build_fsp_header};
@@ -73,6 +75,16 @@ impl Pair {
             .get_entry(&self.addr(self.b))
             .expect("A holds an entry for B");
         (entry.coords().clone(), entry.is_verified(wall_ms()))
+    }
+
+    /// Hint writes `A` refused.
+    fn refused_at_a(&self) -> u64 {
+        self.nodes[self.a]
+            .node
+            .metrics()
+            .forwarding
+            .coord_hint_rejected
+            .get()
     }
 
     /// Frames `A` has authenticated on its session with `B`.
@@ -192,6 +204,58 @@ async fn pair() -> Pair {
 }
 
 #[tokio::test]
+async fn an_authenticated_coords_warmup_from_the_session_peer_replaces_its_verified_former_coordinates()
+ {
+    let mut p = pair().await;
+    p.establish().await;
+    p.verify_former_position();
+    let (refused, authenticated) = (p.refused_at_a(), p.authenticated_at_a());
+
+    let a = p.addr(p.a);
+    p.nodes[p.b]
+        .node
+        .send_coords_warmup(&a)
+        .await
+        .expect("B sends a CoordsWarmup");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    process_available_packets(&mut p.nodes).await;
+
+    assert!(
+        p.authenticated_at_a() > authenticated,
+        "precondition: the CoordsWarmup authenticated at A"
+    );
+    let (held, _) = p.held_at_a();
+    assert_eq!(
+        path(&held),
+        p.b_now(),
+        "A must take the coordinates B states for itself in an authenticated message \
+         (hint writes refused during delivery: {})",
+        p.refused_at_a() - refused
+    );
+    cleanup_nodes(&mut p.nodes).await;
+}
+
+#[tokio::test]
+async fn an_authenticated_session_ack_replaces_the_peers_verified_former_coordinates_at_the_initiator()
+ {
+    let mut p = pair().await;
+    p.verify_former_position();
+    let refused = p.refused_at_a();
+
+    p.establish().await;
+
+    let (held, _) = p.held_at_a();
+    assert_eq!(
+        path(&held),
+        p.b_now(),
+        "the initiator must take the coordinates B states in its authenticated SessionAck \
+         (hint writes refused during the handshake: {})",
+        p.refused_at_a() - refused
+    );
+    cleanup_nodes(&mut p.nodes).await;
+}
+
+#[tokio::test]
 async fn a_hint_from_anyone_but_the_session_peer_still_leaves_a_verified_entry_in_place() {
     // Healthy half: precedence keeps its defence against every other writer.
     let mut p = pair().await;
@@ -291,4 +355,184 @@ async fn an_authenticated_message_whose_source_coordinates_are_under_another_roo
         "a foreign-root coordinate must not be written"
     );
     cleanup_nodes(&mut p.nodes).await;
+}
+
+#[tokio::test]
+async fn an_authenticated_message_whose_source_coordinates_do_not_name_the_peer_leaves_a_verified_entry_in_place()
+ {
+    let mut p = pair().await;
+    p.establish().await;
+    p.verify_former_position();
+    let authenticated = p.authenticated_at_a();
+
+    // Coordinates that begin with X, not B, in an authenticated message
+    // from B: not B's statement about itself.
+    let elsewhere = TreeCoordinate::from_addrs(vec![make_node_addr(0x77), p.addr(p.a)]).unwrap();
+    let payload = p.warmup_stating(&elsewhere);
+    p.deliver(payload).await;
+
+    assert!(
+        p.authenticated_at_a() > authenticated,
+        "precondition: the CoordsWarmup authenticated at A"
+    );
+    assert_eq!(
+        p.held_at_a(),
+        (p.b_before(), true),
+        "coordinates that do not begin with the peer's address must yield to a verified entry"
+    );
+    cleanup_nodes(&mut p.nodes).await;
+}
+
+/// The path of `node`'s own coordinates.
+fn own_path(node: &TestNode) -> Vec<NodeAddr> {
+    path(node.node.tree_state().my_coords())
+}
+
+/// Frames `nodes[at]` has authenticated on its session with `peer`.
+fn authenticated(nodes: &[TestNode], at: usize, peer: &NodeAddr) -> u64 {
+    nodes[at]
+        .node
+        .get_session(peer)
+        .and_then(|s| s.mmp())
+        .map_or(0, |m| m.receiver.cumulative_packets_recv())
+}
+
+/// Whether `nodes[at]` holds an established session with `peer`.
+fn established(nodes: &[TestNode], at: usize, peer: &NodeAddr) -> bool {
+    nodes[at]
+        .node
+        .get_session(peer)
+        .is_some_and(|s| s.is_established())
+}
+
+/// Four nodes: `A` the root, `P1` and `P2` under it, and the destination `D`
+/// under `P1`. `A` looked `D` up, so it holds `D`'s position verified, and
+/// has a session with it. `D` then moves under `P2` and sends `A` a
+/// `CoordsWarmup`. The measured effect is `A`'s next hop for `D` and whether
+/// `A`'s next datagram reaches `D`. Before the fix `A` keeps routing by the
+/// verified former position, toward `P1`, which no longer reaches `D`.
+#[tokio::test]
+async fn after_the_destination_moves_under_another_parent_its_authenticated_warmup_moves_the_route_and_the_next_datagram_arrives()
+ {
+    let mut nodes = Vec::new();
+    for _ in 0..4 {
+        nodes.push(make_test_node().await);
+    }
+    // The smallest address is the root, so A is the root and D never is.
+    nodes.sort_by_key(|tn| *tn.node.node_addr());
+    let (a, p1, p2, d) = (0, 1, 2, 3);
+    let mut nodes = converge_nodes(nodes, &[(a, p1), (a, p2), (p1, d)]).await;
+    verify_tree_convergence(&nodes);
+    populate_all_coord_caches(&mut nodes);
+    let [a_addr, p1_addr, p2_addr, d_addr] = [a, p1, p2, d].map(|i| *nodes[i].node.node_addr());
+    assert_eq!(
+        own_path(&nodes[d]),
+        vec![d_addr, p1_addr, a_addr],
+        "precondition: D is under P1"
+    );
+
+    // A opens a session with D, routed through P1.
+    let d_key = nodes[d].node.identity().pubkey_full();
+    nodes[a]
+        .node
+        .initiate_session(d_addr, d_key)
+        .await
+        .expect("A starts a session with D");
+    for _ in 0..50 {
+        if established(&nodes, a, &d_addr) && established(&nodes, d, &a_addr) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        process_available_packets(&mut nodes).await;
+    }
+    assert!(
+        established(&nodes, a, &d_addr) && established(&nodes, d, &a_addr),
+        "precondition: the session is established at both ends"
+    );
+
+    // A's lookup proved D under P1. A lookup carries addresses only, as
+    // session headers do, so the entry is built from D's path.
+    let former = TreeCoordinate::from_addrs(own_path(&nodes[d])).unwrap();
+    nodes[a]
+        .node
+        .coord_cache_mut()
+        .insert_verified(d_addr, former, wall_ms());
+
+    // D moves: it links to P2, then drops P1.
+    initiate_handshake(&mut nodes, d, p2).await;
+    drain_all_packets(&mut nodes, false).await;
+    let p1_npub = nodes[p1].node.npub();
+    nodes[d]
+        .node
+        .api_disconnect(&p1_npub)
+        .await
+        .expect("D drops P1");
+    drain_all_packets(&mut nodes, false).await;
+
+    assert!(
+        nodes[d].node.get_peer(&p1_addr).is_none() && nodes[p1].node.get_peer(&d_addr).is_none(),
+        "precondition: D and P1 are no longer peers"
+    );
+    assert_eq!(
+        own_path(&nodes[d]),
+        vec![d_addr, p2_addr, a_addr],
+        "precondition: D is under P2"
+    );
+    assert!(
+        established(&nodes, a, &d_addr) && established(&nodes, d, &a_addr),
+        "precondition: the session survived the move"
+    );
+    let held = nodes[a]
+        .node
+        .coord_cache()
+        .get_entry(&d_addr)
+        .map(|e| (path(e.coords()), e.is_verified(wall_ms())));
+    assert_eq!(
+        held,
+        Some((vec![d_addr, p1_addr, a_addr], true)),
+        "precondition: A still holds D's former position, verified"
+    );
+    assert_eq!(
+        nodes[a].node.find_next_hop(&d_addr).map(|p| *p.node_addr()),
+        Some(p1_addr),
+        "precondition: A routes D by its former position"
+    );
+
+    // D states its new position in an authenticated message.
+    let heard = authenticated(&nodes, a, &d_addr);
+    nodes[d]
+        .node
+        .send_coords_warmup(&a_addr)
+        .await
+        .expect("D sends a CoordsWarmup");
+    pump_until_quiet(&mut nodes).await;
+    assert!(
+        authenticated(&nodes, a, &d_addr) > heard,
+        "precondition: D's CoordsWarmup authenticated at A"
+    );
+
+    let hop = nodes[a].node.find_next_hop(&d_addr).map(|p| *p.node_addr());
+    let received = |nodes: &[TestNode]| {
+        nodes[d]
+            .node
+            .get_session(&a_addr)
+            .map_or(0, |s| s.traffic_counters().1)
+    };
+    let before = received(&nodes);
+    let _ = nodes[a]
+        .node
+        .send_session_data(&d_addr, 0, 0, b"after the move")
+        .await;
+    pump_until_quiet(&mut nodes).await;
+    let arrived = received(&nodes) > before;
+
+    let refused = nodes[a].node.metrics().forwarding.coord_hint_rejected.get();
+    assert_eq!(
+        (hop, arrived),
+        (Some(p2_addr), true),
+        "after D moved under P2 and said so, A must route D through P2 and the next \
+         datagram must arrive (P1 is {p1_addr}, P2 is {p2_addr}; hint writes refused at A: \
+         {refused})"
+    );
+    cleanup_nodes(&mut nodes).await;
 }

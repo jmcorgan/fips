@@ -126,9 +126,12 @@ pub enum HintOutcome {
     /// An entry existed and the hint carried the same value.
     Unchanged,
     /// The hint was refused and the cache left as it was: the entry was
-    /// verified and still within its verification window, or no room could be
-    /// made in main because only live-verified entries remain (a new key from
-    /// [`CoordCache::insert_funded`] goes to probation instead), or (from
+    /// verified and still within its verification window (for
+    /// [`CoordCache::insert_stated`], only when the coordinates are the same
+    /// or do not name the key), or no room could be made in main because only
+    /// live-verified entries remain (a new key from
+    /// [`CoordCache::insert_funded`] goes to probation instead, and an update
+    /// from [`CoordCache::insert_stated`] is stored regardless), or (from
     /// [`CoordCache::insert_funded`]) the writer could not pay for an update
     /// that deepens a main entry.
     Rejected,
@@ -265,12 +268,14 @@ impl<E: EntropySource> CoordCache<E> {
 
     /// Insert or update a cache entry from an unauthenticated hint.
     ///
-    /// **This and [`CoordCache::insert_funded`] are the only ways to write a
-    /// coordinate learned off the wire, and this is deliberately the obvious
-    /// name.** A hint never displaces an entry
+    /// **This, [`CoordCache::insert_funded`] and [`CoordCache::insert_stated`]
+    /// are the only ways to write a coordinate learned off the wire, and this
+    /// is deliberately the obvious name.** A hint never displaces an entry
     /// that a verified lookup established and whose verification has not yet
-    /// aged out; see [`CacheEntry::is_verified`]. Conferring trust requires
-    /// asking for it by name, with [`CoordCache::insert_verified`].
+    /// aged out (see [`CacheEntry::is_verified`]), except a node's statement
+    /// of its own coordinates through [`CoordCache::insert_stated`].
+    /// Conferring trust requires asking for it by name, with
+    /// [`CoordCache::insert_verified`].
     ///
     /// The write is not charged ([`Funding::Uncharged`]); a write a link peer
     /// must pay for goes through [`CoordCache::insert_funded`].
@@ -281,8 +286,15 @@ impl<E: EntropySource> CoordCache<E> {
         current_time_ms: u64,
     ) -> HintOutcome {
         let ttl_ms = self.default_ttl_ms;
-        self.place_hint(addr, coords, current_time_ms, ttl_ms, Funding::Uncharged)
-            .outcome
+        self.place_hint(
+            addr,
+            coords,
+            current_time_ms,
+            ttl_ms,
+            Funding::Uncharged,
+            false,
+        )
+        .outcome
     }
 
     /// Insert or update a cache entry from a hint its writer pays for.
@@ -316,10 +328,41 @@ impl<E: EntropySource> CoordCache<E> {
         funding: Funding,
     ) -> Placed {
         let ttl_ms = self.default_ttl_ms;
-        self.place_hint(addr, coords, current_time_ms, ttl_ms, funding)
+        self.place_hint(addr, coords, current_time_ms, ttl_ms, funding, false)
+    }
+
+    /// Write the coordinates a node states for itself, filed under its
+    /// address, from an authenticated message of a session with this node.
+    ///
+    /// Placed as [`CoordCache::insert_funded`] places a hint, with two
+    /// differences, both for a node that has moved in the tree, where its
+    /// own statement is newer than this node's lookup:
+    ///
+    /// - it replaces a live verified entry whose coordinates differ, making
+    ///   it a hint and ending its verification window; equal coordinates
+    ///   leave a verified entry as it is;
+    /// - an update that deepens a main entry is stored even when the only
+    ///   entries left to evict are live-verified, so the cache can then hold
+    ///   more weight than its address bound, by at most one entry per
+    ///   session.
+    ///
+    /// Coordinates that do not begin with `addr` are not the node's statement
+    /// about itself, and are written as an ordinary hint, which yields to a
+    /// verified entry.
+    pub fn insert_stated(
+        &mut self,
+        addr: NodeAddr,
+        coords: TreeCoordinate,
+        current_time_ms: u64,
+        funding: Funding,
+    ) -> Placed {
+        let ttl_ms = self.default_ttl_ms;
+        let stated = *coords.node_addr() == addr;
+        self.place_hint(addr, coords, current_time_ms, ttl_ms, funding, stated)
     }
 
     /// Place a hint with an explicit TTL; see [`CoordCache::insert_funded`].
+    /// `stated` places it as [`CoordCache::insert_stated`] describes.
     fn place_hint(
         &mut self,
         addr: NodeAddr,
@@ -327,6 +370,7 @@ impl<E: EntropySource> CoordCache<E> {
         current_time_ms: u64,
         ttl_ms: u64,
         funding: Funding,
+        stated: bool,
     ) -> Placed {
         let weight = weight_of(&coords);
         let placed = |outcome, added_weight, segment, unfunded| Placed {
@@ -372,10 +416,11 @@ impl<E: EntropySource> CoordCache<E> {
             return placed(HintOutcome::Inserted, weight, Segment::Main, false);
         };
 
-        if slot.entry.is_verified(current_time_ms) {
+        let differs = slot.entry.coords() != &coords;
+        if slot.entry.is_verified(current_time_ms) && !(stated && differs) {
             return placed(HintOutcome::Rejected, 0, slot.place.segment(), false);
         }
-        let outcome = if slot.entry.coords() != &coords {
+        let outcome = if differs {
             HintOutcome::Changed
         } else {
             HintOutcome::Unchanged
@@ -416,11 +461,13 @@ impl<E: EntropySource> CoordCache<E> {
             Segment::Main => {
                 // A growing update makes room like a new key does. The entry
                 // is taken out first so it cannot be its own victim, and goes
-                // back unchanged if no room can be made.
+                // back unchanged if no room can be made, unless it is a
+                // node's statement of its own coordinates, which is stored
+                // regardless.
                 let Some(mut slot) = self.remove_slot(&addr) else {
                     return placed(HintOutcome::Rejected, 0, segment, false);
                 };
-                if !self.make_room(weight, current_time_ms) {
+                if !self.make_room(weight, current_time_ms) && !stated {
                     self.file_new(addr, slot.entry, old_weight, Segment::Main);
                     return placed(HintOutcome::Rejected, 0, Segment::Main, false);
                 }
@@ -509,8 +556,15 @@ impl<E: EntropySource> CoordCache<E> {
         current_time_ms: u64,
         ttl_ms: u64,
     ) -> HintOutcome {
-        self.place_hint(addr, coords, current_time_ms, ttl_ms, Funding::Uncharged)
-            .outcome
+        self.place_hint(
+            addr,
+            coords,
+            current_time_ms,
+            ttl_ms,
+            Funding::Uncharged,
+            false,
+        )
+        .outcome
     }
 
     /// Look up coordinates for an address (without touching).

@@ -884,7 +884,10 @@ pub(super) async fn run_tree_test_with_configs(
 
 /// Drive the given nodes to convergence over `edges` and assert every edge
 /// established a bidirectional peer.
-async fn converge_nodes(mut nodes: Vec<TestNode>, edges: &[(usize, usize)]) -> Vec<TestNode> {
+pub(super) async fn converge_nodes(
+    mut nodes: Vec<TestNode>,
+    edges: &[(usize, usize)],
+) -> Vec<TestNode> {
     for &(i, j) in edges {
         initiate_handshake(&mut nodes, i, j).await;
     }

@@ -3922,10 +3922,13 @@ impl Node {
 
     /// Write one unauthenticated coordinate hint, counting the outcome.
     ///
-    /// Every production hint write goes through here, so the precedence rule
-    /// has exactly one enforcement point and the counters have exactly one
-    /// increment site. The verified path is deliberately not routed through
-    /// this: a caller that has checked a proof calls
+    /// Every production hint write goes through here or through
+    /// [`Node::insert_stated`], and both through `write_hint`, so the
+    /// foreign-root refusal has exactly one enforcement point and the
+    /// counters have exactly one increment site. A hint written here never
+    /// displaces a live verified entry; only `insert_stated` asks the cache
+    /// for the exemption. The verified path is deliberately not routed
+    /// through this: a caller that has checked a proof calls
     /// `CoordCache::insert_verified` directly and says so.
     ///
     /// **Foreign root: refused.** A coordinate under a root other than ours
@@ -3953,13 +3956,54 @@ impl Node {
         now_ms: u64,
         funding: Funding,
     ) -> Option<Placed> {
+        self.write_hint(addr, coords, now_ms, funding, false)
+    }
+
+    /// Write the coordinates a session peer states for itself, under its
+    /// address `peer`, from a message of the session that has authenticated:
+    /// the `SessionAck` that completes this node's first handshake, or an
+    /// established message.
+    ///
+    /// Unlike [`Node::insert_coord_hint`], the write replaces a live verified
+    /// entry whose coordinates differ (`CoordCache::insert_stated`): when the
+    /// peer has moved in the tree, its own statement is newer than this
+    /// node's lookup. Coordinates that do not begin with `peer` yield to a
+    /// verified entry as any hint does.
+    ///
+    /// Not charged to a link peer: the key is the session's peer, so a
+    /// session's writes touch one entry, and sessions are bounded by
+    /// admission.
+    pub(in crate::node) fn insert_stated(
+        &mut self,
+        peer: NodeAddr,
+        coords: TreeCoordinate,
+        now_ms: u64,
+    ) -> Option<Placed> {
+        self.write_hint(peer, coords, now_ms, Funding::Uncharged, true)
+    }
+
+    /// The one write path for hints: the foreign-root refusal, the cache
+    /// write (`stated` choosing `CoordCache::insert_stated` over
+    /// `CoordCache::insert_funded`) and the counters.
+    fn write_hint(
+        &mut self,
+        addr: NodeAddr,
+        coords: TreeCoordinate,
+        now_ms: u64,
+        funding: Funding,
+        stated: bool,
+    ) -> Option<Placed> {
         if coords.root_id() != self.tree_state.my_coords().root_id() {
             self.metrics().forwarding.record_warm_foreign_root();
             return None;
         }
-        let placed = self
-            .coord_cache
-            .insert_funded(addr, coords, now_ms, funding);
+        let placed = if stated {
+            self.coord_cache
+                .insert_stated(addr, coords, now_ms, funding)
+        } else {
+            self.coord_cache
+                .insert_funded(addr, coords, now_ms, funding)
+        };
         if placed.unfunded {
             self.metrics().forwarding.record_hint_unfunded();
         } else {

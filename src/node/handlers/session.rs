@@ -6,7 +6,6 @@
 //! encrypted data, and error signals (CoordsRequired, PathBroken).
 
 use crate::NodeAddr;
-use crate::cache::Funding;
 use crate::ipv6tun::lifecycle::Delivery;
 use crate::ipv6tun::link::{Deliver, PeerKey, Refusal};
 use crate::ipv6tun::mtu::mss_ceiling;
@@ -1091,9 +1090,9 @@ impl Node {
         }
         // msg2 has authenticated and completed the first handshake, so the
         // peer's statement of its own coordinates is written once per
-        // session. It goes in before the msg3 goes out, so that the msg3 and
-        // what follows are routed by it rather than by a position the peer
-        // has left.
+        // session, replacing a verified entry that differs. It goes in before
+        // the msg3 goes out, so that the msg3 and what follows are routed by
+        // it rather than by a position the peer has left.
         if established {
             self.write_stated(src_addr, ack.src_coords.clone());
         }
@@ -1111,16 +1110,10 @@ impl Node {
     }
 
     /// Write the coordinates the session peer `peer` states for itself in a
-    /// message of the session that has authenticated, under its address.
-    ///
-    /// Not charged to a link peer: the key is the session's peer, so a
-    /// session's writes touch one entry, and sessions are bounded by
-    /// admission.
+    /// message of the session that has authenticated, under its address
+    /// ([`Node::insert_stated`]), logging a foreign-root refusal.
     fn write_stated(&mut self, peer: &NodeAddr, coords: TreeCoordinate) {
-        if self
-            .insert_coord_hint(*peer, coords, Self::now_ms(), Funding::Uncharged)
-            .is_none()
-        {
+        if self.insert_stated(*peer, coords, Self::now_ms()).is_none() {
             debug!(
                 src = %self.peer_display_name(peer),
                 reason = "foreign root",

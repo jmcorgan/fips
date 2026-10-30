@@ -465,6 +465,143 @@ fn a_cache_full_of_verified_entries_refuses_a_hint_rather_than_evicting_one() {
 }
 
 #[test]
+fn a_stated_write_replaces_a_live_verified_entry_whose_coordinates_differ() {
+    let mut cache = CoordCache::new(100, 1000);
+    let addr = make_node_addr(1);
+    let moved = make_coords(&[1, 2, 0]);
+
+    cache.insert_verified(addr, make_coords(&[1, 0]), 0);
+    let placed = cache.insert_stated(addr, moved.clone(), 10, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Changed);
+    let entry = cache.get_entry(&addr).unwrap();
+    assert_eq!(
+        entry.coords(),
+        &moved,
+        "the node's own statement must replace the lookup's"
+    );
+    assert!(
+        !entry.is_verified(10),
+        "the replacement is a hint and ends the verification window"
+    );
+}
+
+#[test]
+fn a_stated_write_that_does_not_name_its_key_yields_to_a_live_verified_entry() {
+    let mut cache = CoordCache::new(100, 1000);
+    let addr = make_node_addr(1);
+    let good = make_coords(&[1, 0]);
+
+    cache.insert_verified(addr, good.clone(), 0);
+    let placed = cache.insert_stated(addr, make_coords(&[2, 0]), 10, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Rejected);
+    let entry = cache.get_entry(&addr).unwrap();
+    assert_eq!(entry.coords(), &good);
+    assert!(
+        entry.is_verified(10),
+        "the verified entry must keep its window"
+    );
+}
+
+#[test]
+fn a_stated_write_of_the_verified_coordinates_leaves_the_entry_verified() {
+    let mut cache = CoordCache::new(100, 1000);
+    let addr = make_node_addr(1);
+    let good = make_coords(&[1, 0]);
+
+    cache.insert_verified(addr, good.clone(), 0);
+    let placed = cache.insert_stated(addr, good.clone(), 10, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Rejected);
+    assert!(cache.get_entry(&addr).unwrap().is_verified(10));
+}
+
+#[test]
+fn a_stated_write_after_the_verification_lapses_is_an_ordinary_hint_write() {
+    let mut cache = CoordCache::new(100, u64::MAX / 4);
+    let addr = make_node_addr(1);
+    cache.insert_verified(addr, make_coords(&[1, 0]), 0);
+
+    let moved = make_coords(&[1, 3, 0]);
+    let placed = cache.insert_stated(addr, moved.clone(), VERIFIED_TTL_MS + 1, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Changed);
+    assert_eq!(cache.get(&addr, VERIFIED_TTL_MS + 1), Some(&moved));
+}
+
+#[test]
+fn a_stated_write_deeper_than_the_entry_charge_replaces_a_verified_entry_through_eviction() {
+    // Every coordinate of up to ADDRS_PER_ENTRY addresses is charged that
+    // many, so only one deeper than that takes the growing update's path
+    // through eviction rather than an update in place.
+    let root = make_node_addr(0);
+    let mut cache = CoordCache::new(100, 1000);
+    let addr = make_node_addr(1);
+    cache.insert_verified(addr, make_coords(&[1, 0]), 0);
+    let deep = coords_of_len(addr, root, ADDRS_PER_ENTRY + 4);
+
+    let placed = cache.insert_stated(addr, deep.clone(), 10, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Changed);
+    assert_eq!(placed.added_weight, 4, "the growth beyond the old charge");
+    let entry = cache.get_entry(&addr).unwrap();
+    assert_eq!(entry.coords(), &deep);
+    assert!(!entry.is_verified(10));
+    assert_index_matches_map(&cache, "stated growing update with room");
+}
+
+#[test]
+fn a_stated_write_that_finds_no_room_is_stored_and_leaves_the_other_verified_entry() {
+    // Two entries fill both the entry bound and the address bound
+    // (2 * ADDRS_PER_ENTRY), and the other entry is live-verified, so an
+    // update deeper than ADDRS_PER_ENTRY finds nothing to evict.
+    let root = make_node_addr(0);
+    let (addr, other) = (make_node_addr(1), make_node_addr(2));
+    let deep = coords_of_len(addr, root, ADDRS_PER_ENTRY + 4);
+
+    // The fixture reaches the no-room branch: an ordinary hint is refused
+    // there even over a hint, and a stated write is stored.
+    let mut cache = CoordCache::new(2, 1_000_000);
+    assert_eq!(
+        cache.insert(addr, make_coords(&[1, 0]), 0),
+        HintOutcome::Inserted
+    );
+    cache.insert_verified(other, make_coords(&[2, 0]), 0);
+    assert_eq!(
+        cache.insert(addr, deep.clone(), 10),
+        HintOutcome::Rejected,
+        "precondition: no room can be made"
+    );
+    let placed = cache.insert_stated(addr, deep.clone(), 10, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Changed);
+    assert_eq!(cache.get(&addr, 10), Some(&deep));
+    assert_index_matches_map(&cache, "stated growing update over a hint, no room");
+
+    // Over a verified entry.
+    let mut cache = CoordCache::new(2, 1_000_000);
+    cache.insert_verified(addr, make_coords(&[1, 0]), 0);
+    cache.insert_verified(other, make_coords(&[2, 0]), 0);
+    let placed = cache.insert_stated(addr, deep.clone(), 10, Funding::Uncharged);
+    assert_eq!(placed.outcome, HintOutcome::Changed);
+    let entry = cache.get_entry(&addr).unwrap();
+    assert_eq!(
+        entry.coords(),
+        &deep,
+        "the statement must not be refused for room"
+    );
+    assert!(!entry.is_verified(10));
+    assert!(
+        cache.get_entry(&other).is_some_and(|e| e.is_verified(10)),
+        "the other verified entry must stay, verified"
+    );
+    assert_eq!(
+        cache.stored_weight,
+        2 * ADDRS_PER_ENTRY as u64 + 4,
+        "the statement is stored past the address bound"
+    );
+    assert_index_matches_map(
+        &cache,
+        "stated growing update over a verified entry, no room",
+    );
+}
+
+#[test]
 fn demote_keeps_the_value_and_lets_a_hint_replace_it() {
     let mut cache = CoordCache::new(100, 1000);
     let addr = make_node_addr(1);
@@ -842,6 +979,17 @@ fn the_eviction_index_matches_the_map_after_every_mutation() {
     assert_eq!(cache.parked.len(), 2, "both verified entries were parked");
     assert!(cache.demote(&minted_addr(3, 0)));
     assert_index_matches_map(&cache, "demote of a parked entry");
+    // A stated write deeper than the entry's charge over the still-parked
+    // verified entry: it leaves `parked` through the growing update's path.
+    let stated = minted_addr(3, 1);
+    let placed = cache.insert_stated(
+        stated,
+        coords_of_len(stated, root, ADDRS_PER_ENTRY + 4),
+        now + 1,
+        Funding::Uncharged,
+    );
+    assert_eq!(placed.outcome, HintOutcome::Changed);
+    assert_index_matches_map(&cache, "stated write over a parked entry");
     let lapsed = now + VERIFIED_TTL_MS + 1;
     let addr = minted_addr(5, 0);
     let _ = cache.insert(addr, coords_of_len(addr, root, 2), lapsed);
