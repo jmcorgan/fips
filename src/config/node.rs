@@ -739,11 +739,14 @@ impl TreeConfig {
 /// Bloom filter (`node.bloom.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BloomConfig {
-    /// Debounce interval for filter updates in ms (`node.bloom.update_debounce_ms`).
+    /// Least interval between two filter announcements to one peer, in ms
+    /// (`node.bloom.update_debounce_ms`). A value below 500 runs as 500,
+    /// with a warning.
     #[serde(default = "BloomConfig::default_update_debounce_ms")]
     pub update_debounce_ms: u64,
     /// Antipoison cap: reject inbound FilterAnnounce whose FPR exceeds
-    /// this value (`node.bloom.max_inbound_fpr`). Valid range `(0.0, 1.0)`.
+    /// this value (`node.bloom.max_inbound_fpr`). A value below 0.20, at or
+    /// above 1.0, or NaN runs as 0.20, with a warning.
     /// Default `0.20` ≈ fill 0.7248 at k=5 ≈ ~2,114 entries on the 1 KB
     /// filter (Swamidass–Baldi). Raised from 0.10 so aggregates that are
     /// legitimately near their operating ceiling are not rejected before

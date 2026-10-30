@@ -2171,3 +2171,33 @@ async fn filter_announce_debounce_stamps_the_monotonic_clock() {
 
     cleanup_nodes(&mut nodes).await;
 }
+
+#[test]
+fn a_node_built_from_bloom_settings_below_their_floors_runs_at_the_floors() {
+    let mut config = Config::new();
+    config.node.bloom.update_debounce_ms = 0;
+    config.node.bloom.max_inbound_fpr = 0.0;
+    let node = make_node_with(config);
+    assert_eq!(
+        (
+            node.bloom_state.update_debounce_ms(),
+            node.config().node.bloom.max_inbound_fpr
+        ),
+        (500, crate::proto::bloom::ACCEPT_FPR_CAP)
+    );
+}
+
+#[test]
+fn a_node_built_with_an_identity_and_a_bloom_cap_that_turns_the_cap_off_runs_at_0_20() {
+    let mut config = Config::new();
+    config.node.bloom.update_debounce_ms = 100;
+    config.node.bloom.max_inbound_fpr = 1.0;
+    let node = Node::with_identity(Identity::generate(), config).unwrap();
+    assert_eq!(
+        (
+            node.bloom_state.update_debounce_ms(),
+            node.config().node.bloom.max_inbound_fpr
+        ),
+        (500, crate::proto::bloom::ACCEPT_FPR_CAP)
+    );
+}

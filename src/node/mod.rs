@@ -888,7 +888,11 @@ fn build_setup_rate_limiter(config: &Config) -> SessionSetupRateLimiter {
 
 impl Node {
     /// Create a new node from configuration.
-    pub fn new(config: Config) -> Result<Self, NodeError> {
+    ///
+    /// Values outside their bounds are replaced first, with a warning; see
+    /// `Config::apply_floors`.
+    pub fn new(mut config: Config) -> Result<Self, NodeError> {
+        config.apply_floors();
         config.validate()?;
         let identity = config.create_identity()?;
         let node_addr = *identity.node_addr();
@@ -1063,9 +1067,12 @@ impl Node {
 
     /// Create a node with a specific identity.
     ///
-    /// This constructor validates cross-field config invariants before
-    /// constructing the node, same as [`Node::new`].
-    pub fn with_identity(identity: Identity, config: Config) -> Result<Self, NodeError> {
+    /// This constructor replaces values outside their bounds, with a
+    /// warning, and validates cross-field config invariants before
+    /// constructing the node, same as [`Node::new`]; see
+    /// `Config::apply_floors`.
+    pub fn with_identity(identity: Identity, mut config: Config) -> Result<Self, NodeError> {
+        config.apply_floors();
         config.validate()?;
         let node_addr = *identity.node_addr();
 

@@ -384,8 +384,8 @@ Controls tree construction and parent selection.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.bloom.update_debounce_ms` | u64 | `500` | Debounce interval for filter update propagation |
-| `node.bloom.max_inbound_fpr` | f64 | `0.20` | Antipoison cap: reject inbound `FilterAnnounce` frames whose advertised false-positive rate exceeds this value. Valid range `(0.0, 1.0)`. The default `0.20` corresponds to fill 0.7248 at k=5 (≈2,114 entries on the 1 KB filter); a saturated/poisoned filter is still ~100% FPR and rejected. Senders send their outgoing filter whatever its false-positive rate, so this cap alone decides whether a filter is kept |
+| `node.bloom.update_debounce_ms` | u64 | `500` | Least interval between two filter updates to one peer. A value below `500` runs as `500`, with a warning at startup |
+| `node.bloom.max_inbound_fpr` | f64 | `0.20` | Antipoison cap: reject inbound `FilterAnnounce` frames whose advertised false-positive rate exceeds this value. A value below `0.20`, at or above `1.0`, or NaN runs as `0.20`, with a warning at startup. The default `0.20` corresponds to fill 0.7248 at k=5 (≈2,114 entries on the 1 KB filter); a saturated/poisoned filter is still ~100% FPR and rejected. Senders send their outgoing filter whatever its false-positive rate, so this cap alone decides whether a filter is kept |
 
 Bloom filter size (1 KB), hash count (5), and size classes are protocol
 constants and not configurable.

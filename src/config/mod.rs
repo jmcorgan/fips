@@ -19,6 +19,7 @@
 //!     nsec: "nsec1..."
 //! ```
 
+mod floors;
 #[cfg(target_os = "linux")]
 mod gateway;
 mod node;
