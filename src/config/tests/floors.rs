@@ -232,3 +232,77 @@ fn a_node_built_with_a_given_identity_runs_with_the_floors_applied() {
         assert_eq!((case.get)(node.config()), case.used, "{}", case.key);
     }
 }
+
+#[test]
+fn the_test_only_coord_ttl_key_is_written_back_only_when_set() {
+    let yaml = Config::default().to_yaml().unwrap();
+    assert!(
+        !yaml.contains("test_coord_ttl_secs"),
+        "the default configuration names the test-only key: {yaml}"
+    );
+    let mut config = Config::default();
+    config.node.cache.test_ttl = Some(10);
+    let yaml = config.to_yaml().unwrap();
+    let back: Config = serde_yaml::from_str(&yaml).unwrap();
+    assert_eq!(back.node.cache.test_ttl, Some(10), "{yaml}");
+}
+
+#[test]
+fn a_test_only_coord_ttl_key_survives_layering_through_load_from_paths_and_load_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let first = dir.path().join("0.yaml");
+    let second = dir.path().join("1.yaml");
+    std::fs::write(
+        &first,
+        "transports:\n  udp: {}\nnode:\n  cache:\n    test_coord_ttl_secs: 10\n",
+    )
+    .unwrap();
+    std::fs::write(&second, "node:\n  cache:\n    coord_size: 1000\n").unwrap();
+
+    let (layered, _) = Config::load_from_paths(&[first.clone(), second]).expect("the files load");
+    assert_eq!(layered.node.cache.test_ttl, Some(10));
+    assert_eq!(layered.node.cache.coord_size, 1000);
+
+    let single = Config::load_file(&first).expect("the file loads");
+    assert_eq!(single.node.cache.test_ttl, Some(10));
+}
+
+#[test]
+fn a_test_only_coord_ttl_key_is_used_by_coord_ttl_only_in_a_test_overrides_build() {
+    let mut cache = crate::config::CacheConfig::default();
+    assert_eq!(cache.coord_ttl(), cache.coord_ttl_secs, "unset");
+    cache.test_ttl = Some(10);
+    let expected = if cfg!(feature = "test-overrides") {
+        10
+    } else {
+        300
+    };
+    assert_eq!(cache.coord_ttl(), expected, "test_coord_ttl_secs: 10");
+}
+
+#[test]
+fn applying_the_floors_with_the_test_only_coord_ttl_key_set_keeps_it_and_warns_on_every_call() {
+    let mut config = Config::default();
+    config.node.cache.test_ttl = Some(10);
+    let message = if cfg!(feature = "test-overrides") {
+        "test-only key honoured by this test-overrides build; coordinate cache entries expire at this lifetime, whatever the 300 s floor"
+    } else {
+        "test-only key, honoured only by a build with the test-overrides feature; ignored"
+    };
+    for call in 0..2 {
+        let (again, logs) = capture_logs(|| {
+            config.apply_floors();
+            config
+        });
+        config = again;
+        assert_eq!(config.node.cache.test_ttl, Some(10), "call {call}");
+        assert_eq!(config.node.cache.coord_ttl_secs, 300, "call {call}");
+        assert_eq!(
+            logs.targets(message),
+            vec!["fips::config"],
+            "call {call}: {:?}",
+            logs.lines()
+        );
+        assert_eq!(logs.warnings().len(), 1, "call {call}: {:?}", logs.lines());
+    }
+}

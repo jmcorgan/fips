@@ -536,13 +536,13 @@ impl Node {
     ///
     /// The deadline is the coordinate cache's own TTL, because the same
     /// `LookupResponse` writes both stores: the clamp cannot outlive the
-    /// route it was learned with, and shortening `node.cache.coord_ttl_secs`
-    /// shortens this with it. A TTL of zero disables the pass, matching
-    /// `purge_idle_sessions`.
+    /// route it was learned with, and shortening the coordinate cache's
+    /// lifetime (`CacheConfig::coord_ttl`) shortens this with it. A TTL of
+    /// zero disables the pass, matching `purge_idle_sessions`.
     pub(in crate::node) fn purge_expired_path_mtu(&mut self, now_ms: u64) {
         use crate::node::path_mtu::PathMtuEntry;
 
-        let ttl_ms = self.config().node.cache.coord_ttl_secs * 1000;
+        let ttl_ms = self.config().node.cache.coord_ttl() * 1000;
         if ttl_ms == 0 {
             return; // disabled
         }

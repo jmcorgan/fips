@@ -940,16 +940,18 @@ run_tests() {
         record "known-defect" 1
     fi
 
-    # The `profiling` feature adds a module, a recorder and a writer thread that
-    # the default-feature run above never compiles. Run the library tests once
-    # more with it on so its own tests execute at all. Only the root package
-    # has the feature: fips-core's lib test binary is the same with or without
-    # it, and the run above already ran it. Where that run used nextest, this
-    # stage is also the only run of the root lib suite as threads in one
-    # process, a mode the code relies on, so it keeps the whole root suite.
-    # Mirrored in .github/workflows/ci.yml.
-    info "cargo test -p fips-mesh --lib --features profiling"
-    if cargo test -p fips-mesh --lib --features profiling 2>&1; then
+    # The root crate's optional features add code the default-feature run
+    # above never compiles: `profiling` a module, a recorder and a writer
+    # thread, `test-overrides` the honoured test-only configuration keys and
+    # the tests that only a build with it runs. Run the library tests once
+    # more with both on so their own tests execute at all. Only the root
+    # package has these features: fips-core's lib test binary is the same with
+    # or without them, and the run above already ran it. Where that run used
+    # nextest, this stage is also the only run of the root lib suite as
+    # threads in one process, a mode the code relies on, so it keeps the whole
+    # root suite. Mirrored in .github/workflows/ci.yml.
+    info "cargo test -p fips-mesh --lib --features profiling,test-overrides"
+    if cargo test -p fips-mesh --lib --features profiling,test-overrides 2>&1; then
         record "unit-tests-profiling" 0
     else
         record "unit-tests-profiling" 1

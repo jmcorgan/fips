@@ -293,6 +293,18 @@ pub struct CacheConfig {
     /// value below 300 runs as 300, with a warning.
     #[serde(default = "CacheConfig::default_coord_ttl_secs")]
     pub coord_ttl_secs: u64,
+    /// Test-only coordinate cache entry lifetime in seconds
+    /// (`node.cache.test_coord_ttl_secs`), for test harnesses that need
+    /// entries to expire within a run. Only a build with the `test-overrides`
+    /// feature runs the cache at it, in place of `coord_ttl_secs` and below
+    /// the 300 s floor; any other build ignores it with a warning. Kept in
+    /// every build so that build can see the key and say so.
+    #[serde(
+        default,
+        rename = "test_coord_ttl_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub test_ttl: Option<u64>,
     /// Max entries in identity cache (`node.cache.identity_size`).
     #[serde(default = "CacheConfig::default_identity_size")]
     pub identity_size: usize,
@@ -303,12 +315,22 @@ impl Default for CacheConfig {
         Self {
             coord_size: 50_000,
             coord_ttl_secs: 300,
+            test_ttl: None,
             identity_size: 10_000,
         }
     }
 }
 
 impl CacheConfig {
+    /// Lifetime in seconds the coordinate cache runs with:
+    /// `test_coord_ttl_secs` when set in a build with the `test-overrides`
+    /// feature, otherwise `coord_ttl_secs`.
+    pub fn coord_ttl(&self) -> u64 {
+        self.test_ttl
+            .filter(|_| cfg!(feature = "test-overrides"))
+            .unwrap_or(self.coord_ttl_secs)
+    }
+
     fn default_coord_size() -> usize {
         50_000
     }

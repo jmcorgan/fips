@@ -55,6 +55,10 @@ default = []
 # default build's neutrality a property of the generated code rather than of a
 # runtime check. Build with `--features profiling` for a measurement run.
 profiling = []
+# Test-only configuration keys (`node.cache.test_coord_ttl_secs`). Only the
+# integration test images' build enables it; no package build may. A build
+# without it ignores those keys with a warning.
+test-overrides = []
 
 [dependencies]
 ratatui = "0.30"

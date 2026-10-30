@@ -627,13 +627,15 @@ jobs:
           check_name: Unit Tests Summary
           fail_on_failure: false
 
-      # The `profiling` feature adds a module, a recorder and a writer thread
-      # that the default-feature run above never compiles, so its own tests do
-      # not execute there. Only the root package has the feature: fips-core's
-      # lib test binary is the same with or without it, and the run above
-      # already ran it. Mirrored in testing/ci-local.sh.
-      - name: Run library tests with the tick-body profiler enabled
-        run: cargo test -p fips-mesh --lib --features profiling
+      # The root crate's optional features add code the default-feature run
+      # above never compiles: `profiling` a module, a recorder and a writer
+      # thread, `test-overrides` the honoured test-only configuration keys
+      # and the tests that only a build with it runs. Only the root package
+      # has these features: fips-core's lib test binary is the same with or
+      # without them, and the run above already ran it. Mirrored in
+      # testing/ci-local.sh.
+      - name: Run library tests with the optional root features enabled
+        run: cargo test -p fips-mesh --lib --features profiling,test-overrides
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 2a – Library tests in release mode

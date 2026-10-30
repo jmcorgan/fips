@@ -33,7 +33,8 @@ const SENDER_FLOOR: usize = 4;
 impl Config {
     /// Bring every value a protocol bound covers inside its bound, warning
     /// once for each one changed. A value bounded only for some uses is
-    /// kept, and capped where it is used; a warning says so.
+    /// kept, and capped where it is used; a warning says so. Also warns
+    /// when a test-only key is set.
     ///
     /// A second call changes nothing.
     pub(crate) fn apply_floors(&mut self) {
@@ -41,6 +42,7 @@ impl Config {
         self.warn_resends();
         self.warn_rekey();
         self.floor_coord();
+        self.warn_testttl();
         self.floor_signal();
         self.floor_attempt();
         self.floor_offers();
@@ -97,6 +99,29 @@ impl Config {
             &mut self.node.cache.coord_ttl_secs,
             COORD_FLOOR,
             "configured value is below the 300 s least lifetime of a coordinate cache entry; running at 300 s",
+        );
+    }
+
+    /// Warn when the test-only `node.cache.test_coord_ttl_secs` is set: a
+    /// build with the `test-overrides` feature runs the coordinate cache at
+    /// it, and any other build ignores it.
+    ///
+    /// Runs after `floor_coord`, so the value reported as used by a build
+    /// without the feature is the floored one.
+    fn warn_testttl(&self) {
+        let Some(configured) = self.node.cache.test_ttl else {
+            return;
+        };
+        let why = if cfg!(feature = "test-overrides") {
+            "test-only key honoured by this test-overrides build; coordinate cache entries expire at this lifetime, whatever the 300 s floor"
+        } else {
+            "test-only key, honoured only by a build with the test-overrides feature; ignored"
+        };
+        clamped(
+            "node.cache.test_coord_ttl_secs",
+            configured,
+            self.node.cache.coord_ttl(),
+            why,
         );
     }
 

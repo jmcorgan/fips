@@ -214,11 +214,12 @@ alone (see [check-ci-parity.sh](check-ci-parity.sh)).
 
 Note that `ci-local.sh` covers the integration suites and the glibc unit
 tests. GitHub additionally runs the library tests on macOS, Windows and
-**musl** (built for the musl target and run natively), and a `--features
-profiling` pass; the musl
+**musl** (built for the musl target and run natively); the musl
 leg exists because interface presence is built on `getifaddrs`/`ifa_flags`,
 which musl reimplements independently, and OpenWrt is a musl target. A local
-green run does not certify those four.
+green run does not certify those three. Both runners also run the root
+library tests once more with the root crate's optional features
+(`--features profiling,test-overrides`) enabled.
 GitHub's `core-baremetal` job also builds the `no_std` core for two
 bare-metal targets on every push; a local run does that only with
 `--baremetal` or `FIPS_CI_BAREMETAL=1`.

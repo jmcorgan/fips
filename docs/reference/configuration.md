@@ -367,7 +367,7 @@ Controls caching of tree coordinates and identity mappings.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.cache.coord_size` | usize | `50000` | Max entries in the coordinate cache's main segment, which also stores at most `16 × coord_size` coordinate addresses in total (a deeper entry is stored and counts its depth against that total). Hints a link peer's budget cannot pay for go to a probation segment of `max(1, coord_size / 32)` further entries, so the cache can hold up to `coord_size + max(1, coord_size / 32)` entries |
-| `node.cache.coord_ttl_secs` | u64 | `300` | Coordinate cache entry TTL (5 minutes). At least 300: a smaller value is raised to 300, with a warning at start naming the key, the configured value and the value used |
+| `node.cache.coord_ttl_secs` | u64 | `300` | Coordinate cache entry TTL (5 minutes). At least 300: a smaller value is raised to 300, with a warning at start naming the key, the configured value and the value used. `node.cache.test_coord_ttl_secs` is a test-only key that only a build with the `test-overrides` cargo feature honours, below the floor; any other build, every release package included, ignores it with a warning |
 | `node.cache.identity_size` | usize | `10000` | Max entries in identity cache (LRU, no TTL) |
 
 ### Mesh Lookup (`node.lookup.*`)

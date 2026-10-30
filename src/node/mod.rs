@@ -1061,7 +1061,7 @@ impl Node {
 
         let coord_cache = CoordCache::new(
             config.node.cache.coord_size,
-            config.node.cache.coord_ttl_secs * 1000,
+            config.node.cache.coord_ttl() * 1000,
         );
         let msg1_rate_limiter = build_msg1_rate_limiter(&config);
         let setup_rate_limiter = build_setup_rate_limiter(&config);
@@ -1246,7 +1246,7 @@ impl Node {
 
         let coord_cache = CoordCache::new(
             config.node.cache.coord_size,
-            config.node.cache.coord_ttl_secs * 1000,
+            config.node.cache.coord_ttl() * 1000,
         );
         let msg1_rate_limiter = build_msg1_rate_limiter(&config);
         let setup_rate_limiter = build_setup_rate_limiter(&config);

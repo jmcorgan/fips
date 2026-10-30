@@ -50,8 +50,13 @@ that file and can reach its private items.
   `fips::config`, naming the key, the configured value and the value used; a
   value inside it, and every shipped default, is kept without a warning; a
   second call changes nothing; and `Node::with_identity` applies the bounds
-  as `Node::new` does. `floors.rs` has no inline test block, so it declares
-  this file as its `mod tests`, and the tests are `floors::tests`.
+  as `Node::new` does. Also the test-only `node.cache.test_coord_ttl_secs`:
+  it is written back only when set, survives layering through
+  `load_from_paths` and loads through `load_file`, is used by
+  `CacheConfig::coord_ttl` only in a `test-overrides` build, and is kept with
+  its warning on every `apply_floors` call. `floors.rs` has no inline test
+  block, so it declares this file as its `mod tests`, and the tests are
+  `floors::tests`.
 
 `mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
 `mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
