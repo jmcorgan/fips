@@ -286,9 +286,9 @@ When two partitions rejoin:
 3. The globally-smaller root wins; the other segment's nodes switch parents
 4. Switching nodes drop cached coordinates that route through them or sit
    under the losing root (stale cross-partition coordinates)
-5. Bloom filters update within about one `node.tick_interval_secs` per
-   hop (1 s at the default; the 500 ms debounce is a floor, the tick sets
-   the cadence), restoring reachability information
+5. Bloom filters update within about one tick, 1 s, per hop (the 500 ms
+   debounce is a floor, the tick sets the cadence), restoring reachability
+   information
 
 ## Bounded State
 

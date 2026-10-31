@@ -123,7 +123,7 @@
 //! read side, republished from the tick. The detector is deliberately a
 //! detached task holding no node state and taking no node lock, so it reads
 //! the peer table the same way the off-loop `show_peers` renderer does. The
-//! view is at most one `node.tick_interval_secs` stale, which does not matter:
+//! view is at most one tick (1 s) stale, which does not matter:
 //! a peer that has just appeared is absorbed on the next sample (see below),
 //! and one that has just left is dropped from the comparison rather than
 //! reported.
@@ -356,7 +356,7 @@ impl NetFingerprint {
     /// tick N+1. A peer that joins and has its socket installed, and whose path
     /// then moves before that next publish, is first seen with `bound` still
     /// `None` and is skipped — and it *does* hold a pinned socket. The window
-    /// in which it can be missed is about one `tick_interval_secs` per join,
+    /// in which it can be missed is about one tick (1 s) per join,
     /// against a `poll_interval_secs` five times longer, but the *consequence*
     /// is not so short: the ordinary diff does not recover the peer. Once it is
     /// in both samples it is judged on its probe answer alone, and `bound` is

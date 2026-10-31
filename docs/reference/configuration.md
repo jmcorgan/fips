@@ -161,7 +161,6 @@ ephemeral mode a `fips.key` found at startup is moved aside to
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.leaf_only` | bool | `false` | Leaf-only mode: node does not forward traffic or participate in routing |
-| `node.tick_interval_secs` | u64 | `1` | Periodic maintenance tick interval (retry checks, timeout cleanup, tree refresh) |
 | `node.base_rtt_ms` | u64 | `100` | Initial RTT estimate for new links before measurements converge |
 | `node.heartbeat_interval_secs` | u64 | `10` | Heartbeat send interval per peer for liveness detection |
 | `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed. At least 30: a smaller value is raised to 30, with a warning at start naming the key, the configured value and the value used |
@@ -170,6 +169,11 @@ ephemeral mode a `fips.key` found at startup is moved aside to
 | `node.log_file` | string | unset | Log to this file instead of to stdout, rolled by the daemon at `node.log_max_size_mb`. Leave unset wherever the platform already rotates the captured stream — journald and syslog both do, and logging to a file there would only duplicate what they hold. Set it where nothing rotates: launchd redirects stdout to a plain file and never truncates it, and gives the daemon no way to reopen one rotated out from under it, so the daemon has to own the file. The live file keeps this name, so `tail -F` follows it across a roll; rolled files are `<name>.1` (newest) to `<name>.<log_max_files>`, and no other file in the directory is touched. The `--log-file` flag overrides this key; the macOS package passes it from the launchd plist, so an upgraded config needs no edit. The Windows service always logs to `fips.log` in its config directory and ignores this key |
 | `node.log_max_size_mb` | u64 | `10` | Size in MiB at which an owned log file is rolled. Applies to `--log-file`, `node.log_file` and the Windows service log. `0` is raised to `1` |
 | `node.log_max_files` | u32 | `4` | How many rolled log files to keep beside the live one; the oldest is deleted as a new roll is made, as are any left numbered past this count after it is lowered. The live file is never deleted. `0` is raised to `1`, and anything above `100` lowered to `100`. With the defaults an owned log takes at most about 50 MiB |
+
+The maintenance tick (retry checks, timeout cleanup, tree refresh) runs once
+a second and is not configurable. The `node.tick_interval_secs` key was
+removed in v0.6.0; a config that still sets it loads, the key is ignored, and
+the daemon logs a warning naming it.
 
 ### Resource Limits (`node.limits.*`)
 
@@ -190,7 +194,7 @@ Handshake rate limiting protects against DoS on the Noise IK handshake path.
 |-----------|------|---------|-------------|
 | `node.rate_limit.handshake_burst` | u32 | `100` | Token bucket burst capacity |
 | `node.rate_limit.handshake_rate` | f64 | `10.0` | Tokens per second refill rate |
-| `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout, and how long a session's first SessionSetup is resent before the attempt is given up. Plus one tick (`node.tick_interval_secs`), it is also how long the node that started a session rekey waits to hear the peer under the new keys before deciding without it (31 s at the defaults). A link rekey attempt is given up within 30 s whatever this says: above 30, every link rekey timer derived from it runs at its 30 s value (the pending hold kept for a peer's rekey still uses the configured value), and a warning at start names the key, the configured value and the 30 used there. Initial link handshakes and session handshakes use the configured value |
+| `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout, and how long a session's first SessionSetup is resent before the attempt is given up. Plus one tick (1 s), it is also how long the node that started a session rekey waits to hear the peer under the new keys before deciding without it (31 s at the defaults). A link rekey attempt is given up within 30 s whatever this says: above 30, every link rekey timer derived from it runs at its 30 s value (the pending hold kept for a peer's rekey still uses the configured value), and a warning at start names the key, the configured value and the 30 used there. Initial link handshakes and session handshakes use the configured value |
 | `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial resend interval of a link setup handshake message. Not used for a link rekey, whose msg1 is resent at 1, 3, 7 and 15 s (as many of those as `handshake_max_resends` allows, and only those that fall before the rekey is given up, at the earlier of one tick after the last and `handshake_timeout_secs`, which a link rekey caps at 30 s); nor for session handshakes: a session's first SessionSetup and its first SessionMsg3 are resent at 1, 3, 7, 15 and 31 s (the SessionSetup only while `handshake_timeout_secs` lasts), the last message of a session rekey at 1, 3, 7 and 15 s, and the first message of a session rekey first after twice the measured round trip (at least 1 s, and at most `handshake_timeout_secs` less one tick, divided by three: 9 s at the defaults) and then at doubling intervals until `handshake_timeout_secs` |
 | `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Link setup handshake resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults). Not used for link rekeys or session handshakes |
 | `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt: of a link handshake message, a link rekey msg1 included, and of a session's first SessionSetup and first SessionMsg3. Does not limit the first message of a session rekey, which is resent until `handshake_timeout_secs`. For the last message of a session rekey, resends due at or after the wait above are not sent. A handshake to a node this node is not configured to dial, at an address an mDNS advert gave, resends at most 5 times (six msg1 in all) whatever this says; above 5 a warning at start says so |
@@ -1444,7 +1448,6 @@ node:
     nsec: null                       # secret key in nsec or hex (null = depends on persistent)
     persistent: false                # true = load/save fips.key; false = ephemeral each start
   leaf_only: false
-  tick_interval_secs: 1
   base_rtt_ms: 100
   heartbeat_interval_secs: 10
   link_dead_timeout_secs: 30

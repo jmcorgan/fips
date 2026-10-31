@@ -1750,6 +1750,21 @@ fn warn_rekeyswitch(enabled: bool) {
     }
 }
 
+/// Warn that a config file set the removed `node.tick_interval_secs`
+/// setting.
+///
+/// The key is ignored rather than refused, because a file written for an
+/// older release, or one shared with nodes still running one, must keep
+/// loading. One text for every value, 1 included: the key is gone whatever
+/// it says.
+fn warn_tick(secs: u64) {
+    tracing::warn!(
+        target: "fips::config",
+        "`node.tick_interval_secs: {secs}` is removed and ignored: the \
+         maintenance tick runs once a second. Delete the key from the config."
+    );
+}
+
 impl Config {
     /// Create a new empty configuration.
     pub fn new() -> Self {
@@ -1902,9 +1917,16 @@ impl Config {
     /// that `load_from_paths` assembles from several files is built from
     /// values each file already folded, and carries no `discovery` key, so it
     /// is not folded again.
+    ///
+    /// It also takes the removed `node.rekey.enabled` and
+    /// `node.tick_interval_secs` keys, which apply nothing, and warns that
+    /// each is ignored.
     pub(crate) fn normalize_deprecated_keys(&mut self) {
         if let Some(enabled) = self.node.rekey.legacy_enabled.take() {
             warn_rekeyswitch(enabled);
+        }
+        if let Some(secs) = self.node.legacy_tick.take() {
+            warn_tick(secs);
         }
         let Some(compat) = self.node.discovery.take() else {
             return;
@@ -2556,6 +2578,10 @@ mod udp_interface_tests;
 #[cfg(test)]
 #[path = "tests/rekey_switch.rs"]
 mod rekey_switch;
+
+#[cfg(test)]
+#[path = "tests/tick_setting.rs"]
+mod tick_setting;
 
 /// Refuse a `node.native_api.grants` list that names no single principal
 /// for an entry, grants nothing in one, grants a port outside 256 to 1023,

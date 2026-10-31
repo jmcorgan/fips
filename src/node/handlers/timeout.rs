@@ -468,17 +468,13 @@ impl Node {
     pub(in crate::node) fn pending_tun_max_age(&self) -> std::time::Duration {
         let node = &self.config().node;
         let ladder = &node.lookup.attempt_timeouts_secs;
-        let rungs = ladder.len() as u64;
+        let rungs = u32::try_from(ladder.len()).unwrap_or(u32::MAX);
         let secs = ladder
             .iter()
             .fold(0u64, |sum, s| sum.saturating_add(*s))
-            .saturating_add(node.rate_limit.handshake_timeout_secs)
-            .saturating_add(
-                rungs
-                    .saturating_add(1)
-                    .saturating_mul(node.tick_interval_secs),
-            );
+            .saturating_add(node.rate_limit.handshake_timeout_secs);
         std::time::Duration::from_secs(secs)
+            .saturating_add(crate::node::TICK.saturating_mul(rungs.saturating_add(1)))
     }
 
     /// Remove established sessions that have been idle too long.

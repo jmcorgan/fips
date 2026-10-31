@@ -1468,9 +1468,13 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leaf_only: bool,
 
-    /// RX loop maintenance tick period in seconds (`node.tick_interval_secs`).
-    #[serde(default = "NodeConfig::default_tick_interval_secs")]
-    pub tick_interval_secs: u64,
+    /// COMPAT (drop at the v2 cutover): the removed `node.tick_interval_secs`
+    /// setting, read only so that [`Config::normalize_deprecated_keys`] can
+    /// warn that it is ignored; the maintenance tick is fixed at one second.
+    /// Never re-serialized. An explicit null loads as `None` and is not
+    /// warned about, since it sets nothing.
+    #[serde(default, rename = "tick_interval_secs", skip_serializing)]
+    pub(crate) legacy_tick: Option<u64>,
 
     /// Initial RTT estimate for new links in ms (`node.base_rtt_ms`).
     #[serde(default = "NodeConfig::default_base_rtt_ms")]
@@ -1616,7 +1620,7 @@ impl Default for NodeConfig {
         Self {
             identity: IdentityConfig::default(),
             leaf_only: false,
-            tick_interval_secs: 1,
+            legacy_tick: None,
             base_rtt_ms: 100,
             heartbeat_interval_secs: 10,
             link_dead_timeout_secs: 30,
@@ -1686,9 +1690,6 @@ impl NodeConfig {
             .clamp(1, 100)
     }
 
-    fn default_tick_interval_secs() -> u64 {
-        1
-    }
     fn default_base_rtt_ms() -> u64 {
         100
     }

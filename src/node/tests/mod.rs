@@ -50,6 +50,7 @@ mod probe;
 mod rekey_answer;
 mod rekey_attempt_ceiling;
 mod rekey_clock;
+mod rekey_cutover_ceiling;
 mod rekey_cutover_index;
 mod rekey_parity;
 mod restart_dial;

@@ -49,6 +49,18 @@ use self::reloadable::Reloadable;
 /// dual-initiation in symmetric-start meshes; the configured
 /// `node.rekey.after_secs` remains the nominal interval (mean preserved).
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
+
+/// The maintenance tick: once per tick the receive loop runs its periodic
+/// work, polls every link and session rekey machine and advances probes.
+///
+/// Fixed, not configured: a link rekey initiator cuts over on the first tick
+/// after its rekey completes, and the protocol requires that within one
+/// second (FRC-1201 Section 7.4); a zero period is also not one the loop's
+/// timer accepts. It lives at the root of the node module because every
+/// reader is below it (the receive loop, the rekey and session parameter
+/// builders, the timeout and probe handlers), and the control read handle
+/// reaches it as `crate::node::TICK`.
+pub(crate) const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 use crate::cache::{CoordCache, Funding, Placed};
 use crate::hosts::HostMap;
 use crate::ipv6tun::tun::{TunError, TunOutboundTx, TunState, TunTx};
@@ -833,6 +845,12 @@ pub struct Node {
     /// test can drive the setup limiter's refill.
     #[cfg(test)]
     setup_clock: Option<fn() -> crate::time::HostInstant>,
+    /// The tick period [`Self::tick_period`] returns instead of [`TICK`],
+    /// so a test can stop the receive loop ticking again after its first
+    /// tick. Only the loop's interval reads it; the rekey, probe and timeout
+    /// bounds derived from the tick stay at [`TICK`].
+    #[cfg(test)]
+    test_tick: Option<std::time::Duration>,
     /// Budget bounding the routing errors one authenticated link peer can
     /// induce this node to emit. Keyed on the link peer because that is the
     /// only value at the emission point a sender cannot mint; the
@@ -1165,6 +1183,8 @@ impl Node {
             setup_rate_limiter,
             #[cfg(test)]
             setup_clock: None,
+            #[cfg(test)]
+            test_tick: None,
             peer_error_budget: PeerBudget::new(),
             coord_hint_budget: PeerBudget::coord_hints(),
             routing: Router::new(),
@@ -1347,6 +1367,8 @@ impl Node {
             setup_rate_limiter,
             #[cfg(test)]
             setup_clock: None,
+            #[cfg(test)]
+            test_tick: None,
             peer_error_budget: PeerBudget::new(),
             coord_hint_budget: PeerBudget::coord_hints(),
             routing: Router::new(),
@@ -1833,6 +1855,16 @@ impl Node {
     /// Get the configuration.
     pub fn config(&self) -> &Config {
         self.context.config.as_ref()
+    }
+
+    /// The receive loop's tick period: [`TICK`], or in tests the period a
+    /// test set in `test_tick`.
+    fn tick_period(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(period) = self.test_tick {
+            return period;
+        }
+        TICK
     }
 
     /// Mutate the shared immutable context by building a fresh

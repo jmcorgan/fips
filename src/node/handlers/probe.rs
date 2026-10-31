@@ -149,7 +149,7 @@ impl Node {
 
         let wall_ms = Self::now_ms();
         let now_ms = crate::time::mono_ms();
-        let tick_ms = self.config().node.tick_interval_secs * 1000;
+        let tick_ms = u64::try_from(crate::node::TICK.as_millis()).unwrap_or(u64::MAX);
         let ladder = self.config().node.lookup.attempt_timeouts_secs.clone();
         let budgets = Budgets::derive(tick_ms, &ladder);
         let budget_ms = budgets.total_ms();

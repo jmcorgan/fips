@@ -4367,24 +4367,22 @@ fn the_inbound_idle_deadline_is_the_link_silence_bound_and_tracks_the_link_dead_
             ..Default::default()
         },
         crate::config::NodeConfig {
-            tick_interval_secs: 5,
             link_dead_timeout_secs: 10,
             ..Default::default()
         },
     ] {
         let floor = Duration::from_secs(
             node.link_dead_timeout_secs
-                .max(node.heartbeat_interval_secs)
-                + node.tick_interval_secs,
-        );
+                .max(node.heartbeat_interval_secs),
+        ) + crate::node::TICK;
         assert!(
             inbound_idle_timeout(&node) > floor,
-            "idle deadline {:?} must exceed {:?} for heartbeat {} s, link-dead {} s, tick {} s",
+            "idle deadline {:?} must exceed {:?} for heartbeat {} s, link-dead {} s, tick {:?}",
             inbound_idle_timeout(&node),
             floor,
             node.heartbeat_interval_secs,
             node.link_dead_timeout_secs,
-            node.tick_interval_secs,
+            crate::node::TICK,
         );
     }
 }
@@ -5537,7 +5535,7 @@ mod worker_liveness {
 }
 
 /// Each link's rekey machine is built with the node's rekey thresholds, its
-/// resend count, tick and handshake timeout and the pending hold; a time
+/// resend count and handshake timeout, the fixed tick and the pending hold; a time
 /// trigger below the jitter plus the link age at which a peer answers a
 /// rekey is raised to that sum, and timers the machine refuses fall back
 /// to the link defaults.
@@ -5564,7 +5562,6 @@ fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_shor
     node.rekey.after_messages = 7;
     node.rate_limit.handshake_max_resends = 3;
     node.rate_limit.handshake_timeout_secs = 20;
-    node.tick_interval_secs = 2;
     let config = *link_params(&node).config();
     assert_eq!(
         (
@@ -5579,13 +5576,13 @@ fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_shor
             7,
             3,
             Duration::from_secs(20),
-            Duration::from_secs(2)
+            crate::node::TICK
         ),
-        "the configured thresholds and timers reach the machine"
+        "the configured thresholds and timers, and the fixed tick, reach the machine"
     );
     assert_eq!(
         (config.floor_link, config.floor_session),
-        (Duration::from_secs(32), Duration::from_secs(32)),
+        (Duration::from_secs(31), Duration::from_secs(31)),
         "own rekeys wait one tick past the 30 s link age and the 30 s after a cutover"
     );
 

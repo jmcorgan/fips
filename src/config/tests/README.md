@@ -14,6 +14,12 @@ that file and can reach its private items.
   under `LoadLog::hold` (`loadlog.rs`), as the daemon's does, so the test
   also checks that the warning is held during the load and arrives when the
   held log is replayed.
+- `tick_setting.rs`: tests for the removed `node.tick_interval_secs` key,
+  in the same shape as `rekey_switch.rs`, whose `load_capturing` helper it
+  uses: a file that still sets it loads, any value is ignored and never
+  written back, and one warning names it and says the tick runs once a
+  second. A layered load whose first file sets it also loads, and the later
+  file's values apply.
 - `buffers.rs`: tests for the internal buffer sizes in `Config::validate`
   (`mod.rs`): the floor of 1 on `node.buffers.host_channel`, and its default
   for a file that does not name it.
@@ -59,7 +65,7 @@ that file and can reach its private items.
   `floors::tests`.
 
 `mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
-`mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
+`mod tick_setting`, `mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
 `mod signal_ttl_floor`, `mod attempt_timeout_floor` and
 `mod offer_limit_floors`, not as
 `mod tests`, because `mod.rs` still carries an inline `mod tests` block of

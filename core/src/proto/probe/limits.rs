@@ -3,8 +3,9 @@
 //! Every value here is either derived from a protocol constant or from the
 //! rx-loop tick period. Budgets are **monotonic** (never wall-clock) and
 //! tick-quantized: the shell computes each stage budget as
-//! `max(floor, N * tick_ms)` so a node with a long `tick_interval_secs` does
-//! not expire a stage between two consecutive observations.
+//! `max(floor, N * tick_ms)` so no stage expires between two consecutive
+//! observations at whatever tick the shell runs (the node runs a fixed 1 s
+//! tick).
 
 /// Floor for the session (handshake) stage. `handshake_resend_interval_ms`
 /// is 1000 with `handshake_resend_backoff` 2.0, putting resends at t=1s and

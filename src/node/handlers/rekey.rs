@@ -10,10 +10,10 @@
 //! from a session handshake message or frame are carried out here.
 
 use crate::NodeAddr;
-use crate::node::Node;
 use crate::node::diag::{self, OrNone};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{SessionInstant, SessionOutput, SessionOutputs};
+use crate::node::{Node, TICK};
 use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
 use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
@@ -54,7 +54,7 @@ pub(in crate::node) fn link_silence_ms(node: &crate::config::NodeConfig) -> u64 
         .max(node.link_dead_timeout_secs)
         .saturating_mul(1000);
     ladder_ms(&node.rate_limit)
-        .saturating_add(node.tick_interval_secs.saturating_mul(3000))
+        .saturating_add(u64::try_from(TICK.saturating_mul(3).as_millis()).unwrap_or(u64::MAX))
         .saturating_add(after_ms)
 }
 
@@ -63,8 +63,8 @@ pub(in crate::node) fn link_silence_ms(node: &crate::config::NodeConfig) -> u64 
 /// delivered one.
 ///
 /// Set to `link_silence_ms`, so a connection carrying a link the node would
-/// keep is never dropped by it, whatever the heartbeat, link-dead, tick and
-/// resend settings are; a connection carrying no live link is reclaimed.
+/// keep is never dropped by it, whatever the heartbeat, link-dead and resend
+/// settings are; a connection carrying no live link is reclaimed.
 pub(in crate::node) fn inbound_idle_timeout(
     node: &crate::config::NodeConfig,
 ) -> std::time::Duration {
@@ -104,7 +104,7 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
     let base = Config::fmp();
     let configured = Config {
         handshake: Duration::from_secs(node.rate_limit.handshake_timeout_secs),
-        check: Duration::from_secs(node.tick_interval_secs),
+        check: TICK,
         resends: u8::try_from(node.rate_limit.handshake_max_resends).unwrap_or(u8::MAX),
         ..base
     }
@@ -126,8 +126,7 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
                 warn!(
                     error = %e,
                     handshake_timeout_secs = node.rate_limit.handshake_timeout_secs,
-                    tick_interval_secs = node.tick_interval_secs,
-                    "Link rekey timers use the defaults: the configured handshake timeout and tick do not fit"
+                    "Link rekey timers use the defaults: the configured handshake timeout does not fit the 1 s tick"
                 );
             }
             base

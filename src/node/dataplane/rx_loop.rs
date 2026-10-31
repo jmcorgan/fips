@@ -11,7 +11,7 @@ use crate::proto::fmp::wire::{
 };
 use crate::transport::ReceivedPacket;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Inside the packet_rx burst drain, run a fallback drain every
@@ -144,8 +144,7 @@ impl Node {
             }
         };
 
-        let tick_period = Duration::from_secs(self.config().node.tick_interval_secs);
-        let mut tick = tokio::time::interval(tick_period);
+        let mut tick = tokio::time::interval(self.tick_period());
 
         // Set up control socket channel
         let (control_tx, mut control_rx) =
