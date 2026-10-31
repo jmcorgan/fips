@@ -14,7 +14,6 @@
       "deltas_sent": 0,
       "fill_exceeded": 0,
       "full_sends": 0,
-      "held_over_cap": 0,
       "invalid": 0,
       "nacks_received": 0,
       "nacks_sent": 0,

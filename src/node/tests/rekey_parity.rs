@@ -13,7 +13,7 @@
 use super::*;
 use crate::node::tests::spanning_tree::{
     TestNode, add_loopback_alias, cleanup_nodes, drain_all_packets, initiate_handshake,
-    make_test_node_with_config, process_available_packets, restarted_node,
+    make_test_node_with_config, process_available_packets, restarted_node, run_tree_test,
 };
 use crate::proto::fmp::wire::{
     CommonPrefix, FLAG_KEY_EPOCH, PHASE_ESTABLISHED, PHASE_MSG2, PHASE_MSG3,
@@ -664,6 +664,70 @@ async fn a_k_flipped_frame_on_the_current_index_that_fails_the_trial_still_decry
         peer.link_stats().packets_recv,
         recv_before + 1,
         "A receives B's frame on its current session"
+    );
+
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A cross-connection move resets the link's MMP receive state but keeps
+/// the replaced session's start, so the moved link's silence must be
+/// bounded by the peer's last frame and not by the session's age. The
+/// smaller node dials the larger one on a second address over a link older
+/// than the dead timeout, and completes the dial as a move before the
+/// larger node has sent anything on the new session; a link-dead check at
+/// that moment keeps the peer.
+#[tokio::test]
+async fn a_cross_connection_move_on_an_aged_session_keeps_the_link_alive_until_the_peers_first_frame()
+ {
+    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let l_addr = *nodes[l].node.node_addr();
+    age_link(&mut nodes, s, l, Duration::from_secs(31));
+    super::control::quieten(&mut nodes[s], &l_addr);
+    let s_index_before = nodes[s].node.get_peer(&l_addr).unwrap().our_index();
+
+    let alias = add_loopback_alias(&nodes[l].addr);
+    let l_npub = nodes[l].node.npub();
+    nodes[s]
+        .node
+        .api_connect(&l_npub, &alias.to_string(), "loopback")
+        .await
+        .expect("precondition: api_connect on an alternate path succeeds");
+    assert_eq!(
+        deliver(&mut nodes[l]).await,
+        1,
+        "precondition: only the smaller node's msg1 is queued at the larger node"
+    );
+    assert_eq!(
+        deliver(&mut nodes[s]).await,
+        1,
+        "precondition: only the larger node's msg2 is queued at the smaller node"
+    );
+    {
+        let peer = nodes[s].node.get_peer(&l_addr).unwrap();
+        assert_ne!(
+            peer.our_index(),
+            s_index_before,
+            "precondition: S moved the link onto the alternate-path session"
+        );
+        assert!(
+            peer.mmp().unwrap().receiver.last_recv_ms().is_none(),
+            "precondition: the move reset S's MMP receive state"
+        );
+        assert!(
+            peer.session_age() >= Duration::from_secs(30),
+            "precondition: the moved session keeps the replaced one's start"
+        );
+    }
+
+    nodes[s].node.check_link_heartbeats().await;
+    assert!(
+        nodes[s].node.get_peer(&l_addr).is_some(),
+        "S keeps L until L's first frame on the moved session"
     );
 
     cleanup_nodes(&mut nodes).await;

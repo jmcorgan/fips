@@ -214,11 +214,12 @@ alone (see [check-ci-parity.sh](check-ci-parity.sh)).
 
 Note that `ci-local.sh` covers the integration suites and the glibc unit
 tests. GitHub additionally runs the library tests on macOS, Windows and
-**musl** (built for the musl target and run natively), and a `--features
-profiling` pass; the musl
+**musl** (built for the musl target and run natively); the musl
 leg exists because interface presence is built on `getifaddrs`/`ifa_flags`,
 which musl reimplements independently, and OpenWrt is a musl target. A local
-green run does not certify those four.
+green run does not certify those three. Both runners also run the root
+library tests once more with the root crate's optional features
+(`--features profiling,test-overrides`) enabled.
 GitHub's `core-baremetal` job also builds the `no_std` core for two
 bare-metal targets on every push; a local run does that only with
 `--baremetal` or `FIPS_CI_BAREMETAL=1`.
@@ -345,6 +346,14 @@ flight) never collide:
   a CI run does not write to it. Without this, two runs race on the contents
   of one directory and either can build a correctly-per-run-tagged image
   from the other's binaries.
+- **The image's binaries** come from the integration build, which
+  `testing/scripts/build.sh`, local CI and GitHub CI's build job all run:
+  `cargo build --profile integration`, with `--features test-overrides`
+  and `--bins --examples`. The `test-overrides` feature honours test-only
+  configuration keys such as the maelstrom scenarios'
+  `node.cache.test_coord_ttl_secs`, and the `integration` profile builds in
+  `target/integration`, so no package script, which reads `target/release`,
+  can pick one up. `build.sh` no longer refreshes `target/release`.
 - Each parallel chaos child gets a unique, non-overlapping `/24` in
   `10.30.x` (via the sim `--subnet` override). `10.30.x` sits outside
   Docker's default address pool and the fixed-subnet suites' `172.x`
@@ -361,7 +370,7 @@ FIPS_CI_RUN_ID=mydebug ./ci-local.sh --only static-mesh
 # containers are named fipsci_mydebug_static_fips-node-a, etc.
 ```
 
-`--rerun <suite>` is the fast path for the same debugging: the release
+`--rerun <suite>` is the fast path for the same debugging: the integration
 build and that one suite, with no guards, lints or unit tests. It prints
 a banner saying it is not a full local CI verdict.
 

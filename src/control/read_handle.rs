@@ -164,7 +164,7 @@ pub(crate) fn snapshot_dispatch(request: &Request, handle: &ControlReadHandle) -
                 .and_then(|v| v.as_str());
             let context = handle.context();
             let npub = context.identity.npub();
-            let period = context.config.node.tick_interval_secs;
+            let period = crate::node::TICK.as_secs();
             Some(match crate::instr::capture::start(dir, &npub, period) {
                 Ok(value) => Response::ok(value),
                 Err(e) => Response::error(e),

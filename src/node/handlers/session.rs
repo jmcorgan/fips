@@ -6,7 +6,6 @@
 //! encrypted data, and error signals (CoordsRequired, PathBroken).
 
 use crate::NodeAddr;
-use crate::cache::Funding;
 use crate::ipv6tun::lifecycle::Delivery;
 use crate::ipv6tun::link::{Deliver, PeerKey, Refusal};
 use crate::ipv6tun::mtu::mss_ceiling;
@@ -44,7 +43,7 @@ use crate::proto::mmp::{
 use crate::proto::mmp::{MAX_SESSION_REPORT_INTERVAL_MS, MIN_SESSION_REPORT_INTERVAL_MS};
 use crate::proto::probe::LookupOutcomeKind;
 use crate::proto::routing::{CoordsRequired, MtuExceeded, PathBroken, RoutingSignalType};
-use crate::proto::stp::{coords_wire_size, encode_coords};
+use crate::proto::stp::{TreeCoordinate, coords_wire_size, encode_coords};
 #[cfg(unix)]
 use crate::transport::TransportHandle;
 use fips_core::proto::rekey::{EpochTag, NodeKeys, Output, Params, Reason, Role};
@@ -536,11 +535,13 @@ impl Node {
     ///
     /// Full FSP receive pipeline:
     /// 1. Parse FspEncryptedHeader (12 bytes) → counter, flags, header_bytes
-    /// 2. If CP flag: parse past the cleartext coords
+    /// 2. If CP flag: parse the cleartext coords, keeping the source's
     /// 3. Session lookup (must be Established)
     /// 4. AEAD decrypt with AAD = header_bytes
-    /// 5. Strip FSP inner header → timestamp, msg_type, inner_flags
-    /// 6. Dispatch by msg_type
+    /// 5. Once a key of the session has authenticated the message, write the
+    ///    source coordinates under the peer's address
+    /// 6. Strip FSP inner header → timestamp, msg_type, inner_flags
+    /// 7. Dispatch by msg_type
     async fn handle_encrypted_session_msg(
         &mut self,
         src_addr: &NodeAddr,
@@ -563,14 +564,15 @@ impl Node {
         // Determine where ciphertext starts (after header, optionally after coords)
         let mut ciphertext_offset = FSP_HEADER_SIZE;
 
-        // If CP flag set, parse cleartext coords between header and ciphertext
+        // If CP flag set, parse cleartext coords between header and ciphertext.
+        // The source's are written only once the message authenticates; the
+        // destination's are this node's own and are never written.
+        let mut stated = None;
         if header.has_coords() {
             let coord_data = &payload[FSP_HEADER_SIZE..];
             match parse_encrypted_coords(coord_data) {
-                // Not cached here: the forwarding path's warm write has
-                // already offered these coordinates to the cache, from this
-                // same datagram and through the same checks.
-                Ok((_, _, bytes_consumed)) => {
+                Ok((src_coords, _, bytes_consumed)) => {
+                    stated = src_coords;
                     ciphertext_offset += bytes_consumed;
                 }
                 Err(e) => {
@@ -658,6 +660,9 @@ impl Node {
         let Some((range, tag)) = delivered else {
             return;
         };
+        if let Some(coords) = stated {
+            self.write_stated(src_addr, coords);
+        }
         let Some(plaintext) = frame.get(range) else {
             return;
         };
@@ -1100,6 +1105,14 @@ impl Node {
                 entry.establish(warmup, &mmp, now);
             }
         }
+        // msg2 has authenticated and completed the first handshake, so the
+        // peer's statement of its own coordinates is written once per
+        // session, replacing a verified entry that differs. It goes in before
+        // the msg3 goes out, so that the msg3 and what follows are routed by
+        // it rather than by a position the peer has left.
+        if established {
+            self.write_stated(src_addr, ack.src_coords.clone());
+        }
         // The msg3 goes out before the packets held for the session: the
         // machine retains it and resends it until any frame from the peer
         // authenticates, since the responder is established only once it
@@ -1108,26 +1121,22 @@ impl Node {
         if !established {
             return;
         }
-        // Not charged to a link peer: this node started the handshake, and
-        // msg2 has authenticated, so the write happens once per session.
-        if self
-            .insert_coord_hint(
-                *src_addr,
-                ack.src_coords.clone(),
-                Self::now_ms(),
-                Funding::Uncharged,
-            )
-            .is_none()
-        {
-            debug!(
-                src = %self.peer_display_name(src_addr),
-                reason = "foreign root",
-                "SessionAck coordinate hint refused"
-            );
-        }
         self.flush_pending_packets(src_addr).await;
         self.flush_pending_native(src_addr).await;
         info!(src = %self.peer_display_name(src_addr), "Session established (initiator, XX)");
+    }
+
+    /// Write the coordinates the session peer `peer` states for itself in a
+    /// message of the session that has authenticated, under its address
+    /// ([`Node::insert_stated`]), logging a foreign-root refusal.
+    fn write_stated(&mut self, peer: &NodeAddr, coords: TreeCoordinate) {
+        if self.insert_stated(*peer, coords, Self::now_ms()).is_none() {
+            debug!(
+                src = %self.peer_display_name(peer),
+                reason = "foreign root",
+                "Session peer's coordinate hint refused"
+            );
+        }
     }
 
     /// Handle an incoming SessionMsg3 (Noise XX msg3).

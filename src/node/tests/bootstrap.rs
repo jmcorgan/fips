@@ -643,7 +643,12 @@ async fn a_restarted_nostr_engine_receives_the_configured_set_before_any_tick() 
 /// A running node with one started UDP transport on loopback, for driving
 /// LAN discovery through the real dial path.
 pub(super) async fn lan_node() -> Node {
-    let mut node = make_node();
+    lan_node_with(Config::new()).await
+}
+
+/// [`lan_node`] built from `config`.
+pub(super) async fn lan_node_with(config: Config) -> Node {
+    let mut node = make_node_with(config);
     let transport_id = TransportId::new(1);
     let (packet_tx, packet_rx) = packet_channel(1024);
     node.supervisor.packet_tx = Some(packet_tx.clone());

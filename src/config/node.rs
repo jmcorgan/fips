@@ -85,6 +85,8 @@ pub struct RateLimitConfig {
     #[serde(default = "RateLimitConfig::default_handshake_rate")]
     pub handshake_rate: f64,
     /// Stale handshake cleanup timeout in seconds (`node.rate_limit.handshake_timeout_secs`).
+    /// A link rekey attempt caps it at 30 s; above 30 a warning at start says
+    /// so. Initial link handshakes and session handshakes use it as given.
     #[serde(default = "RateLimitConfig::default_handshake_timeout_secs")]
     pub handshake_timeout_secs: u64,
     /// Initial handshake resend interval in ms (`node.rate_limit.handshake_resend_interval_ms`).
@@ -95,6 +97,9 @@ pub struct RateLimitConfig {
     #[serde(default = "RateLimitConfig::default_handshake_resend_backoff")]
     pub handshake_resend_backoff: f64,
     /// Max handshake resends per attempt (`node.rate_limit.handshake_max_resends`).
+    /// A handshake an mDNS advert directs at a node this node is not
+    /// configured to dial resends at most 5 times whatever this says; above
+    /// 5 a warning at start says so.
     #[serde(default = "RateLimitConfig::default_handshake_max_resends")]
     pub handshake_max_resends: u32,
     /// Burst capacity of the established-link msg1 bucket
@@ -284,9 +289,22 @@ pub struct CacheConfig {
     /// Max entries in coord cache (`node.cache.coord_size`).
     #[serde(default = "CacheConfig::default_coord_size")]
     pub coord_size: usize,
-    /// Coord cache entry TTL in seconds (`node.cache.coord_ttl_secs`).
+    /// Coord cache entry TTL in seconds (`node.cache.coord_ttl_secs`). A
+    /// value below 300 runs as 300, with a warning.
     #[serde(default = "CacheConfig::default_coord_ttl_secs")]
     pub coord_ttl_secs: u64,
+    /// Test-only coordinate cache entry lifetime in seconds
+    /// (`node.cache.test_coord_ttl_secs`), for test harnesses that need
+    /// entries to expire within a run. Only a build with the `test-overrides`
+    /// feature runs the cache at it, in place of `coord_ttl_secs` and below
+    /// the 300 s floor; any other build ignores it with a warning. Kept in
+    /// every build so that build can see the key and say so.
+    #[serde(
+        default,
+        rename = "test_coord_ttl_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub test_ttl: Option<u64>,
     /// Max entries in identity cache (`node.cache.identity_size`).
     #[serde(default = "CacheConfig::default_identity_size")]
     pub identity_size: usize,
@@ -297,12 +315,22 @@ impl Default for CacheConfig {
         Self {
             coord_size: 50_000,
             coord_ttl_secs: 300,
+            test_ttl: None,
             identity_size: 10_000,
         }
     }
 }
 
 impl CacheConfig {
+    /// Lifetime in seconds the coordinate cache runs with:
+    /// `test_coord_ttl_secs` when set in a build with the `test-overrides`
+    /// feature, otherwise `coord_ttl_secs`.
+    pub fn coord_ttl(&self) -> u64 {
+        self.test_ttl
+            .filter(|_| cfg!(feature = "test-overrides"))
+            .unwrap_or(self.coord_ttl_secs)
+    }
+
     fn default_coord_size() -> usize {
         50_000
     }
@@ -473,7 +501,8 @@ pub struct NostrRendezvousConfig {
     /// Traversal application namespace and advert identifier suffix.
     #[serde(default = "NostrRendezvousConfig::default_app")]
     pub app: String,
-    /// Signaling TTL in seconds.
+    /// Signaling TTL in seconds. A value below 120 runs as 120, with a
+    /// warning, before the replay-window check sees it.
     #[serde(default = "NostrRendezvousConfig::default_signal_ttl_secs")]
     pub signal_ttl_secs: u64,
     /// Policy for advert-derived endpoint discovery.
@@ -484,12 +513,13 @@ pub struct NostrRendezvousConfig {
     #[serde(default = "NostrRendezvousConfig::default_open_discovery_max_pending")]
     pub open_discovery_max_pending: usize,
     /// Max concurrent inbound traversal offers processed at once.
-    /// Acts as a rate limit against offer spam from relays.
+    /// Acts as a rate limit against offer spam from relays. A value below 16
+    /// runs as 16, with a warning.
     #[serde(default = "NostrRendezvousConfig::default_max_concurrent_incoming_offers")]
     pub max_concurrent_incoming_offers: usize,
     /// Max concurrent inbound traversal offers accepted from any one sender
     /// npub. Sits inside `max_concurrent_incoming_offers`, which remains the
-    /// outer bound.
+    /// outer bound. A value below 4, 0 included, runs as 4, with a warning.
     #[serde(default = "NostrRendezvousConfig::default_max_concurrent_offers_per_npub")]
     pub max_concurrent_offers_per_npub: usize,
     /// Max cached overlay adverts retained from relay traffic.
@@ -500,10 +530,13 @@ pub struct NostrRendezvousConfig {
     /// Oldest entries are evicted when the cap is exceeded.
     #[serde(default = "NostrRendezvousConfig::default_seen_sessions_max_entries")]
     pub seen_sessions_max_entries: usize,
-    /// Overall punch attempt timeout in seconds.
+    /// Overall punch attempt timeout in seconds. A value below 10 runs as 10,
+    /// with a warning.
     #[serde(default = "NostrRendezvousConfig::default_attempt_timeout_secs")]
     pub attempt_timeout_secs: u64,
-    /// Replay tracking retention window in seconds.
+    /// Replay tracking retention window in seconds. Must exceed
+    /// `signal_ttl_secs`, as the node runs it, plus the clock-skew grace on
+    /// each side: above 240 at the 120 s floor.
     #[serde(default = "NostrRendezvousConfig::default_replay_window_secs")]
     pub replay_window_secs: u64,
     /// Delay before punch traffic starts.
@@ -808,18 +841,20 @@ impl TreeConfig {
 /// Bloom filter (`node.bloom.*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BloomConfig {
-    /// Debounce interval for filter updates in ms (`node.bloom.update_debounce_ms`).
+    /// Least interval between two filter announcements to one peer, in ms
+    /// (`node.bloom.update_debounce_ms`). A value below 500 runs as 500,
+    /// with a warning.
     #[serde(default = "BloomConfig::default_update_debounce_ms")]
     pub update_debounce_ms: u64,
     /// Antipoison cap: reject inbound FilterAnnounce whose FPR exceeds
-    /// this value (`node.bloom.max_inbound_fpr`). Valid range `(0.0, 1.0)`.
+    /// this value (`node.bloom.max_inbound_fpr`). A value below 0.20, at or
+    /// above 1.0, or NaN runs as 0.20, with a warning.
     /// Default `0.20` ≈ fill 0.7248 at k=5 ≈ ~2,114 entries on the 1 KB
     /// filter (Swamidass–Baldi). Raised from 0.10 so aggregates that are
     /// legitimately near their operating ceiling are not rejected before
     /// the network reaches the fixed-filter capacity limit; conceptually
     /// distinct from future autoscaling hysteresis setpoints — same unit,
-    /// different knobs. Raising it does not admit filters above 0.20 from
-    /// senders that hold outgoing filters at the v1 cap.
+    /// different knobs.
     #[serde(default = "BloomConfig::default_max_inbound_fpr")]
     pub max_inbound_fpr: f64,
     /// Child echo guard (`node.bloom.child_echo_threshold`): a tree child's
@@ -1450,9 +1485,13 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leaf_only: bool,
 
-    /// RX loop maintenance tick period in seconds (`node.tick_interval_secs`).
-    #[serde(default = "NodeConfig::default_tick_interval_secs")]
-    pub tick_interval_secs: u64,
+    /// COMPAT (drop at the v2 cutover): the removed `node.tick_interval_secs`
+    /// setting, read only so that [`Config::normalize_deprecated_keys`] can
+    /// warn that it is ignored; the maintenance tick is fixed at one second.
+    /// Never re-serialized. An explicit null loads as `None` and is not
+    /// warned about, since it sets nothing.
+    #[serde(default, rename = "tick_interval_secs", skip_serializing)]
+    pub(crate) legacy_tick: Option<u64>,
 
     /// Initial RTT estimate for new links in ms (`node.base_rtt_ms`).
     #[serde(default = "NodeConfig::default_base_rtt_ms")]
@@ -1463,7 +1502,8 @@ pub struct NodeConfig {
     pub heartbeat_interval_secs: u64,
 
     /// Link dead timeout in seconds (`node.link_dead_timeout_secs`).
-    /// Peers silent for this duration are removed.
+    /// Peers silent for this duration are removed. A value below 30 runs as
+    /// 30, with a warning.
     #[serde(default = "NodeConfig::default_link_dead_timeout_secs")]
     pub link_dead_timeout_secs: u64,
 
@@ -1598,7 +1638,7 @@ impl Default for NodeConfig {
             identity: IdentityConfig::default(),
             disable_routing: false,
             leaf_only: false,
-            tick_interval_secs: 1,
+            legacy_tick: None,
             base_rtt_ms: 100,
             heartbeat_interval_secs: 10,
             link_dead_timeout_secs: 30,
@@ -1668,9 +1708,6 @@ impl NodeConfig {
             .clamp(1, 100)
     }
 
-    fn default_tick_interval_secs() -> u64 {
-        1
-    }
     fn default_base_rtt_ms() -> u64 {
         100
     }

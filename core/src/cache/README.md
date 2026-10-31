@@ -17,7 +17,8 @@ its callers name it as before.
   `CacheError` and `CacheStats`.
 - `coord_cache.rs`: `CoordCache`: insertion from hints, from hints a
   link peer pays for (`insert_funded`, with `Funding` and the `Placed`
-  result) and from verified lookups, lookup with and without refreshing
+  result), from the coordinates a session peer states for itself
+  (`insert_stated`) and from verified lookups, lookup with and without refreshing
   an entry, invalidation, expiry and eviction; the default size (50,000
   entries) and TTL; the address bound (`ADDRS_PER_ENTRY`) and the
   probation segment (`PROBATION_SHARE_DIVISOR`, `Segment`);
@@ -52,7 +53,13 @@ its callers name it as before.
   extended by traffic, so if verification shared it a once-verified
   entry would refuse every hint forever, including the ones that carry a
   destination's real move. After the window the entry stays usable but
-  a hint may replace it.
+  a hint may replace it. The one exception is `insert_stated`, the write
+  of coordinates a node states for itself in an authenticated message of
+  a session with this node: when they begin with the address they are
+  filed under and differ from the entry's, they replace a live verified
+  entry, because a node that has moved knows its position better than a
+  lookup made before the move. Coordinates that name another node yield
+  as any hint does.
 - **Eviction never makes room for a hint at a verified entry's
   expense.** When the main segment is full, eviction removes the least
   recently used entry that is not live-verified. If every entry is
@@ -63,7 +70,10 @@ its callers name it as before.
   left. The refusal is for hints only: a verified write is stored even
   when every entry is live-verified, because `insert_verified` does not
   check whether `make_room` made room, so verified entries can take the
-  main segment past its cap. Eviction orders by last use, not by expiry;
+  main segment past its cap. A stated write (`insert_stated`) that
+  deepens an existing entry is likewise stored when no room can be made,
+  so it can take the main segment past its address bound, by at most one
+  entry per session. Eviction orders by last use, not by expiry;
   an expired entry is removed when its key is written, when
   `get_and_touch` reads it, or by `purge_expired`.
 - **Eviction finds its victim through ordered indexes, not a scan.**

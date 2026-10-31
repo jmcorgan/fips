@@ -8,7 +8,8 @@ tests are named after it.
   there as `#[cfg(test)] mod tests;`; names `cache::tests::...`.
 - `coord_cache.rs`: tests for `coord_cache.rs` (`CoordCache` insertion,
   lookup, expiry, eviction, invalidation, and the hint and verification
-  rules; the eviction indexes and their consistency after every
+  rules, including the stated write that a verified entry does not
+  refuse (`insert_stated`); the eviction indexes and their consistency after every
   operation, the address bound, the probation segment and funded
   writes; and that the map's hasher is keyed from the cache's entropy
   source, `coord_cache_keys_its_map_from_its_entropy_source`), attached

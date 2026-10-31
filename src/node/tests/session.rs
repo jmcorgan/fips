@@ -7041,15 +7041,18 @@ async fn deliver_path_broken(
 /// cached must not carry this node's own coordinates in their place.
 ///
 /// The shape reached in practice: a direct peer whose cache entry is gone,
-/// here removed by a PathBroken from a third address. The destination warms
-/// its cache from every coordinate-bearing frame, so a frame carrying the
-/// sender's coordinates as the destination's leaves the destination holding
-/// its own address under the sender's coordinates. Once the coordinates are
-/// known again, the warmup budget the miss did not spend is spent on frames
-/// that carry them.
+/// here removed by a PathBroken from a third address. Every node on the path
+/// files a frame's destination coordinates under the destination's address,
+/// so a frame carrying the sender's coordinates as the destination's would
+/// misdirect them; the frame must go without coordinates. Once the
+/// coordinates are known again, the warmup budget the miss did not spend is
+/// spent on frames that carry them, and the destination learns the sender's
+/// coordinates from the first, once it authenticates.
 #[tokio::test]
 async fn test_a_data_frame_to_a_destination_with_no_cached_coordinates_carries_none_and_keeps_the_warmup()
  {
+    use crate::proto::fsp::wire::{FSP_PHASE_ESTABLISHED, FspEncryptedHeader};
+
     let mut nodes = make_warmup_pair(1).await;
     let node0_addr = *nodes[0].node.node_addr();
     let node1_addr = *nodes[1].node.node_addr();
@@ -7077,18 +7080,20 @@ async fn test_a_data_frame_to_a_destination_with_no_cached_coordinates_carries_n
     };
     assert_eq!(warmup(&nodes), 1, "PathBroken resets the warmup budget");
 
-    let mismatch_before = nodes[1]
-        .node
-        .metrics()
-        .forwarding
-        .coord_warm_key_mismatch
-        .get();
     let recv_before = nodes[1]
         .node
         .get_session(&node0_addr)
         .unwrap()
         .traffic_counters()
         .1;
+    // Frames node 0 sealed before this one, such as its first CoordsWarmup,
+    // may still be queued at node 1; the frame sent here is the one sealed
+    // on the next counter.
+    let counter = nodes[0]
+        .node
+        .get_session(&node1_addr)
+        .unwrap()
+        .send_counter();
     nodes[0]
         .node
         .send_session_data(&node1_addr, 0, 0, b"after the cache miss")
@@ -7098,23 +7103,22 @@ async fn test_a_data_frame_to_a_destination_with_no_cached_coordinates_carries_n
     // back. That includes the answer to the lookup the PathBroken started,
     // which would both refill the cache and reset the warmup budget, and so
     // hide whether the miss spent it.
-    process_available_packets(&mut nodes[1..]).await;
+    let frames = deliver_keeping_phase(&mut nodes, 1, &node0_addr, FSP_PHASE_ESTABLISHED).await;
     while nodes[0].packet_rx.try_recv().is_ok() {}
 
+    let sent: Vec<FspEncryptedHeader> = frames
+        .iter()
+        .filter_map(|frame| FspEncryptedHeader::parse(frame))
+        .filter(|header| header.counter == counter)
+        .collect();
     assert_eq!(
-        nodes[1]
-            .node
-            .metrics()
-            .forwarding
-            .coord_warm_key_mismatch
-            .get(),
-        mismatch_before,
-        "node 1 must not be sent node 0's coordinates as its own"
+        sent.len(),
+        1,
+        "precondition: node 0's frame must have been captured on its way to node 1"
     );
-    assert_ne!(
-        cached_path(&nodes[1], &node1_addr),
-        Some(addr_path(&node0_coords)),
-        "node 1 must not hold its own address under node 0's coordinates"
+    assert!(
+        !sent[0].has_coords(),
+        "a frame to a destination with no cached coordinates must carry none"
     );
     assert_eq!(
         nodes[1]
@@ -7214,6 +7218,9 @@ async fn test_a_coords_warmup_to_a_destination_with_no_cached_coordinates_sends_
 #[tokio::test]
 async fn test_a_rekey_setup_to_a_peer_with_no_cached_coordinates_carries_the_peers_announced_ones()
 {
+    use crate::proto::fsp::SessionSetup;
+    use crate::proto::fsp::wire::FSP_COMMON_PREFIX_SIZE;
+
     // node 0 rekeys after one message; node 1 never initiates.
     let mut cfg0 = Config::new();
     cfg0.node.rekey.after_messages = 1;
@@ -7243,10 +7250,7 @@ async fn test_a_rekey_setup_to_a_peer_with_no_cached_coordinates_carries_the_pee
         .expect("send_session_data failed");
     pump_until_quiet(&mut nodes).await;
 
-    // node 1's entry for its own address goes too, so what it holds after
-    // the rekey can only have come from the setup.
     nodes[0].node.coord_cache.remove(&node1_addr);
-    nodes[1].node.coord_cache.remove(&node1_addr);
     let mismatch_before = nodes[1]
         .node
         .metrics()
@@ -7255,11 +7259,19 @@ async fn test_a_rekey_setup_to_a_peer_with_no_cached_coordinates_carries_the_pee
         .get();
 
     nodes[0].node.poll_session_rekeys(Node::session_now()).await;
+    let setups = deliver_keeping_setups(&mut nodes, 1, &node0_addr).await;
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         process_available_packets(&mut nodes).await;
     }
 
+    assert_eq!(setups.len(), 1, "node 0's rekey setup must reach node 1");
+    let setup = SessionSetup::decode(&setups[0][FSP_COMMON_PREFIX_SIZE..]).expect("a SessionSetup");
+    assert_eq!(
+        addr_path(&setup.dest_coords),
+        addr_path(&node1_coords),
+        "the setup's destination coordinates must be node 1's own"
+    );
     assert_eq!(
         nodes[1]
             .node
@@ -7269,11 +7281,6 @@ async fn test_a_rekey_setup_to_a_peer_with_no_cached_coordinates_carries_the_pee
             .get(),
         mismatch_before,
         "the rekey setup must not name node 0's coordinates as node 1's"
-    );
-    assert_eq!(
-        cached_path(&nodes[1], &node1_addr),
-        Some(addr_path(&node1_coords)),
-        "the setup's destination coordinates must be node 1's own"
     );
     assert!(
         holds_new_keys(&nodes[0], &node1_addr),

@@ -361,6 +361,7 @@ impl Node {
             link_since: TestInstant(0),
             started: TestInstant(0),
             peer_k: None,
+            last_rx: None,
             record: Record::new(),
         };
         let me = n.addr();

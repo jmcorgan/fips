@@ -39,7 +39,7 @@
 #                        --build-only, which skips the unit-test stage.
 #   --with-tor           Include Tor harnesses (off by default — needs live Tor)
 #   --only <suite>       Run a single integration suite
-#   --rerun <suite>      Run one integration suite after only the release
+#   --rerun <suite>      Run one integration suite after only the integration
 #                        build: no guards, lints, unit tests or other build
 #                        stages. For rerunning a suite on a tree whose full run
 #                        already passed them; not a full local CI verdict.
@@ -712,8 +712,8 @@ fi
 
 # ── Stage 1: Build ─────────────────────────────────────────────────────────
 
-# The release build every integration suite's image is made from. Shared by the
-# build stage and by --rerun, which runs it alone.
+# The plain release build, as GitHub CI's build job makes it. The integration
+# suites' image is made from run_testbuild's binaries, not these.
 run_release() {
     info "cargo build --release --bins --examples"
     # --bins --examples rather than the bare default: the native datagram API's
@@ -725,6 +725,22 @@ run_release() {
         return 0
     fi
     record "build" 1
+    return 1
+}
+
+# The integration build every integration suite's image is made from: the
+# release settings under the `integration` profile with the `test-overrides`
+# feature, so the chaos scenarios' test-only configuration keys are honoured.
+# It builds in target/integration, so no packaging script, which reads
+# target/release, can pick up a test-overrides binary. Mirrors
+# testing/scripts/build.sh and GitHub CI's build job.
+run_testbuild() {
+    info "cargo build --profile integration --features test-overrides --bins --examples"
+    if cargo build --profile integration --features test-overrides --bins --examples 2>&1; then
+        record "build-integration" 0
+        return 0
+    fi
+    record "build-integration" 1
     return 1
 }
 
@@ -953,16 +969,18 @@ run_tests() {
         record "known-defect" 1
     fi
 
-    # The `profiling` feature adds a module, a recorder and a writer thread that
-    # the default-feature run above never compiles. Run the library tests once
-    # more with it on so its own tests execute at all. Only the root package
-    # has the feature: fips-core's lib test binary is the same with or without
-    # it, and the run above already ran it. Where that run used nextest, this
-    # stage is also the only run of the root lib suite as threads in one
-    # process, a mode the code relies on, so it keeps the whole root suite.
-    # Mirrored in .github/workflows/ci.yml.
-    info "cargo test -p fips-mesh --lib --features profiling"
-    if cargo test -p fips-mesh --lib --features profiling 2>&1; then
+    # The root crate's optional features add code the default-feature run
+    # above never compiles: `profiling` a module, a recorder and a writer
+    # thread, `test-overrides` the honoured test-only configuration keys and
+    # the tests that only a build with it runs. Run the library tests once
+    # more with both on so their own tests execute at all. Only the root
+    # package has these features: fips-core's lib test binary is the same with
+    # or without them, and the run above already ran it. Where that run used
+    # nextest, this stage is also the only run of the root lib suite as
+    # threads in one process, a mode the code relies on, so it keeps the whole
+    # root suite. Mirrored in .github/workflows/ci.yml.
+    info "cargo test -p fips-mesh --lib --features profiling,test-overrides"
+    if cargo test -p fips-mesh --lib --features profiling,test-overrides 2>&1; then
         record "unit-tests-profiling" 0
     else
         record "unit-tests-profiling" 1
@@ -1032,19 +1050,19 @@ print(exe)
 
 # ── Stage 3: Integration Tests ─────────────────────────────────────────────
 
-# Copy release binaries into a testing subdirectory
+# Copy the integration binaries (run_testbuild) into a testing subdirectory
 install_binaries() {
     local dest="$1"
-    cp target/release/fips "$dest/fips"
-    cp target/release/fipsctl "$dest/fipsctl"
-    [[ -f target/release/fipstop ]] && cp target/release/fipstop "$dest/fipstop" || true
-    [[ -f target/release/fips-gateway ]] && cp target/release/fips-gateway "$dest/fips-gateway" || true
+    cp target/integration/fips "$dest/fips"
+    cp target/integration/fipsctl "$dest/fipsctl"
+    [[ -f target/integration/fipstop ]] && cp target/integration/fipstop "$dest/fipstop" || true
+    [[ -f target/integration/fips-gateway ]] && cp target/integration/fips-gateway "$dest/fips-gateway" || true
     # Not optional: the native-api harness runs native-echo as one end of its
     # echo check and native-surface as its surface walk, so a missing one must
     # fail the image build rather than fail a check later with the container
     # exiting on a missing entrypoint.
-    cp target/release/examples/native-echo "$dest/native-echo"
-    cp target/release/examples/native-surface "$dest/native-surface"
+    cp target/integration/examples/native-echo "$dest/native-echo"
+    cp target/integration/examples/native-surface "$dest/native-surface"
     chmod +x "$dest/fips" "$dest/fipsctl" "$dest/native-echo" "$dest/native-surface"
     [[ -f "$dest/fipstop" ]] && chmod +x "$dest/fipstop" || true
     [[ -f "$dest/fips-gateway" ]] && chmod +x "$dest/fips-gateway" || true
@@ -1802,7 +1820,8 @@ run_integration() {
         cp -a "$_f" "$CI_BUILD_CONTEXT/" || { record "docker-build" 1; return; }
     done
 
-    info "Installing release binaries"
+    run_testbuild || return
+    info "Installing integration binaries"
     install_binaries "$CI_BUILD_CONTEXT"
 
     # Build unified test image once (used by all harnesses). Tag per-run
@@ -2367,15 +2386,12 @@ run_guards() {
     return 0
 }
 
-# --rerun: the release build, then the one suite, then a banner saying what
-# did not run. The summary lists only the build and the suite.
+# --rerun: the one suite, after the integration build run_integration makes
+# for it, then a banner saying what did not run. The summary lists only the
+# integration build and the suite.
 run_rerun() {
-    stage "Stage 1: Release build (rerun of $ONLY_SUITE)"
-    if run_release; then
-        run_integration
-    else
-        fail "Build failed, skipping $ONLY_SUITE"
-    fi
+    stage "Stage 1: integration build and rerun of $ONLY_SUITE"
+    run_integration
     stage "Rerun"
     echo -e "  ${YELLOW}${BOLD}RERUN of $ONLY_SUITE only:${RESET} guards, lints, unit tests and build-stage"
     echo "  extras (cross-check, bare-metal) did not run; this is not a full local CI"

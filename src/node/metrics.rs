@@ -83,6 +83,8 @@ pub struct ForwardingMetrics {
     /// signal**: an attacker forges a passing coordinate by naming the victim
     /// as its own child. It counts a defect honest nodes make, where a sender
     /// whose own cache missed sends its own coordinates as the destination's.
+    /// It also counts such a coordinate filed under this node's own address,
+    /// which is never written.
     pub coord_warm_key_mismatch: Counter,
     /// Hint writes that replaced an existing entry with a different value.
     /// A destination moving in the tree produces this, and so does a
@@ -452,8 +454,6 @@ pub struct BloomMetrics {
     // Compression tracking
     pub total_compressed_bytes: Counter,
     pub total_raw_bytes: Counter,
-    /// Outgoing announces held because the filter was above the v1 cap.
-    pub held_over_cap: Counter,
 }
 
 impl BloomMetrics {
@@ -494,7 +494,6 @@ impl BloomMetrics {
             size_changes: self.size_changes.get(),
             total_compressed_bytes: self.total_compressed_bytes.get(),
             total_raw_bytes: self.total_raw_bytes.get(),
-            held_over_cap: self.held_over_cap.get(),
         }
     }
 }

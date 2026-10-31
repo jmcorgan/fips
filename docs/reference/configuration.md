@@ -162,15 +162,19 @@ ephemeral mode a `fips.key` found at startup is moved aside to
 |-----------|------|---------|-------------|
 | `node.disable_routing` | bool | `false` | Non-routing mode: participates in spanning tree but does not forward transit traffic or send bloom filters |
 | `node.leaf_only` | bool | `false` | Leaf mode: single upstream peer, no tree/bloom/transit participation. Implies `disable_routing: true` |
-| `node.tick_interval_secs` | u64 | `1` | Periodic maintenance tick interval (retry checks, timeout cleanup, tree refresh) |
 | `node.base_rtt_ms` | u64 | `100` | Initial RTT estimate for new links before measurements converge |
 | `node.heartbeat_interval_secs` | u64 | `10` | Heartbeat send interval per peer for liveness detection |
-| `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed |
+| `node.link_dead_timeout_secs` | u64 | `30` | No-traffic timeout before a peer is declared dead and removed. At least 30: a smaller value is raised to 30, with a warning at start naming the key, the configured value and the value used |
 | `node.drain_timeout_secs` | u64 | `2` | Upper bound in seconds on the `Draining` shutdown phase. On shutdown the node broadcasts Disconnect to its peers and then waits up to this long for the links to clear, exiting as soon as the last peer is gone. `0` skips the wait. The key is absent from a default config file rather than written with its default value, so an unset key and the 2-second default are the same thing |
 | `node.log_level` | string | `"info"` | Tracing filter default. Case-insensitive; one of `trace`, `debug`, `info`, `warn`, `error`. Overridden by the `RUST_LOG` environment variable when set |
 | `node.log_file` | string | unset | Log to this file instead of to stdout, rolled by the daemon at `node.log_max_size_mb`. Leave unset wherever the platform already rotates the captured stream — journald and syslog both do, and logging to a file there would only duplicate what they hold. Set it where nothing rotates: launchd redirects stdout to a plain file and never truncates it, and gives the daemon no way to reopen one rotated out from under it, so the daemon has to own the file. The live file keeps this name, so `tail -F` follows it across a roll; rolled files are `<name>.1` (newest) to `<name>.<log_max_files>`, and no other file in the directory is touched. The `--log-file` flag overrides this key; the macOS package passes it from the launchd plist, so an upgraded config needs no edit. The Windows service always logs to `fips.log` in its config directory and ignores this key |
 | `node.log_max_size_mb` | u64 | `10` | Size in MiB at which an owned log file is rolled. Applies to `--log-file`, `node.log_file` and the Windows service log. `0` is raised to `1` |
 | `node.log_max_files` | u32 | `4` | How many rolled log files to keep beside the live one; the oldest is deleted as a new roll is made, as are any left numbered past this count after it is lowered. The live file is never deleted. `0` is raised to `1`, and anything above `100` lowered to `100`. With the defaults an owned log takes at most about 50 MiB |
+
+The maintenance tick (retry checks, timeout cleanup, tree refresh) runs once
+a second and is not configurable. The `node.tick_interval_secs` key was
+removed in v0.6.0; a config that still sets it loads, the key is ignored, and
+the daemon logs a warning naming it.
 
 ### Resource Limits (`node.limits.*`)
 
@@ -191,10 +195,10 @@ Handshake rate limiting protects against DoS on the Noise XX handshake path.
 |-----------|------|---------|-------------|
 | `node.rate_limit.handshake_burst` | u32 | `100` | Token bucket burst capacity |
 | `node.rate_limit.handshake_rate` | f64 | `10.0` | Tokens per second refill rate |
-| `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout, and how long a session's first SessionSetup is resent before the attempt is given up. Plus one tick (`node.tick_interval_secs`), it is also how long the node that started a session rekey waits to hear the peer under the new keys before deciding without it (31 s at the defaults) |
-| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial resend interval of a link setup handshake message. Not used for a link rekey, whose msg1 is resent at 1, 3, 7 and 15 s (as many of those as `handshake_max_resends` allows, and only those that fall before the rekey is given up, at the earlier of one tick after the last and `handshake_timeout_secs`); nor for session handshakes: a session's first SessionSetup and its first SessionMsg3 are resent at 1, 3, 7, 15 and 31 s (the SessionSetup only while `handshake_timeout_secs` lasts), the last message of a session rekey at 1, 3, 7 and 15 s, and the first message of a session rekey first after twice the measured round trip (at least 1 s, and at most `handshake_timeout_secs` less one tick, divided by three: 9 s at the defaults) and then at doubling intervals until `handshake_timeout_secs` |
+| `node.rate_limit.handshake_timeout_secs` | u64 | `30` | Stale handshake cleanup timeout, and how long a session's first SessionSetup is resent before the attempt is given up. Plus one tick (1 s), it is also how long the node that started a session rekey waits to hear the peer under the new keys before deciding without it (31 s at the defaults). A link rekey attempt is given up within 30 s whatever this says: above 30, every link rekey timer derived from it runs at its 30 s value (the pending hold kept for a peer's rekey still uses the configured value), and a warning at start names the key, the configured value and the 30 used there. Initial link handshakes and session handshakes use the configured value |
+| `node.rate_limit.handshake_resend_interval_ms` | u64 | `1000` | Initial resend interval of a link setup handshake message. Not used for a link rekey, whose msg1 is resent at 1, 3, 7 and 15 s (as many of those as `handshake_max_resends` allows, and only those that fall before the rekey is given up, at the earlier of one tick after the last and `handshake_timeout_secs`, which a link rekey caps at 30 s); nor for session handshakes: a session's first SessionSetup and its first SessionMsg3 are resent at 1, 3, 7, 15 and 31 s (the SessionSetup only while `handshake_timeout_secs` lasts), the last message of a session rekey at 1, 3, 7 and 15 s, and the first message of a session rekey first after twice the measured round trip (at least 1 s, and at most `handshake_timeout_secs` less one tick, divided by three: 9 s at the defaults) and then at doubling intervals until `handshake_timeout_secs` |
 | `node.rate_limit.handshake_resend_backoff` | f64 | `2.0` | Link setup handshake resend backoff multiplier (1s, 2s, 4s, 8s, 16s with defaults). Not used for link rekeys or session handshakes |
-| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt: of a link handshake message, a link rekey msg1 included, and of a session's first SessionSetup and first SessionMsg3. Does not limit the first message of a session rekey, which is resent until `handshake_timeout_secs`. For the last message of a session rekey, resends due at or after the wait above are not sent |
+| `node.rate_limit.handshake_max_resends` | u32 | `5` | Max resends per handshake attempt: of a link handshake message, a link rekey msg1 included, and of a session's first SessionSetup and first SessionMsg3. Does not limit the first message of a session rekey, which is resent until `handshake_timeout_secs`. For the last message of a session rekey, resends due at or after the wait above are not sent. A handshake to a node this node is not configured to dial, at an address an mDNS advert gave, resends at most 5 times (six msg1 in all) whatever this says; above 5 a warning at start says so |
 | `node.rate_limit.established_handshake_burst` | u32 | derived | Burst capacity of the established-link bucket. Derived default is `node.limits.max_peers` (128) |
 | `node.rate_limit.established_handshake_rate` | f64 | derived | Refill rate of that bucket. Derived default is `(max_peers / max(node.rekey.after_secs, 1)) * (1 + handshake_max_resends)`, floored at 1.0/s — 6.4/s at shipped defaults |
 | `node.rate_limit.session_setup_burst` | u32 | `64` | Per-link-peer burst for inbound session-setup messages that would open a new session |
@@ -274,10 +278,11 @@ of `debounce_ms` each before a change is reported. If that worst case reaches
 `node.link_dead_timeout_secs`, the liveness reaper tears the peering down before
 the detector ever reports, so the machinery runs and cannot help — the node
 refuses to start rather than run in that shape. At the shipped defaults the
-margin is wide (8 × 250 ms = 2 s against 30 s), but the constraint couples two
-keys in different blocks: **shortening `link_dead_timeout_secs` for fast
-failover can make an untouched `debounce_ms` illegal.** The refusal names both
-values and the multiplier.
+margin is wide (8 × 250 ms = 2 s against 30 s), and since
+`link_dead_timeout_secs` never runs below 30 s (a smaller value is raised to 30
+before this check), the refusal needs a `debounce_ms` of 3750 or more. It
+couples two keys in different blocks; the refusal names both values and the
+multiplier.
 
 Established UDP peers use a per-peer `connect()`-ed socket for the send fast
 path. `connect(2)` makes the kernel resolve the route once and pin the local
@@ -374,7 +379,7 @@ Controls caching of tree coordinates and identity mappings.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `node.cache.coord_size` | usize | `50000` | Max entries in the coordinate cache's main segment, which also stores at most `16 × coord_size` coordinate addresses in total (a deeper entry is stored and counts its depth against that total). Hints a link peer's budget cannot pay for go to a probation segment of `max(1, coord_size / 32)` further entries, so the cache can hold up to `coord_size + max(1, coord_size / 32)` entries |
-| `node.cache.coord_ttl_secs` | u64 | `300` | Coordinate cache entry TTL (5 minutes) |
+| `node.cache.coord_ttl_secs` | u64 | `300` | Coordinate cache entry TTL (5 minutes). At least 300: a smaller value is raised to 300, with a warning at start naming the key, the configured value and the value used. `node.cache.test_coord_ttl_secs` is a test-only key that only a build with the `test-overrides` cargo feature honours, below the floor; any other build, every release package included, ignores it with a warning |
 | `node.cache.identity_size` | usize | `10000` | Max entries in identity cache (LRU, no TTL) |
 
 ### Mesh Lookup (`node.lookup.*`)
@@ -425,8 +430,8 @@ inert otherwise.
 | `node.rendezvous.nostr.enabled` | bool | `false` | Enable Nostr-mediated overlay discovery |
 | `node.rendezvous.nostr.policy` | string | `"configured_only"` | Advert discovery policy: `disabled`, `configured_only`, `open`. It governs how adverts are used, not inbound traversal offers: under every policy, while Nostr is enabled and the node is below `node.limits.max_peers`, the node answers a traversal offer from any npub and, if the hole punch succeeds, dials the offerer over the punched socket, subject to `max_peers` again and the peer ACL (see `transports.udp.accept_connections`) |
 | `node.rendezvous.nostr.open_discovery_max_pending` | usize | `64` | Max open-discovery peers queued in outbound retry/connection state at once |
-| `node.rendezvous.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam) |
-| `node.rendezvous.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. Zero is rejected, since it refuses every inbound offer rather than disabling the limit |
+| `node.rendezvous.nostr.max_concurrent_incoming_offers` | usize | `16` | Max concurrent inbound traversal offers processed at once (rate limit against offer spam). At least 16: a smaller value is raised to 16, with a warning at start |
+| `node.rendezvous.nostr.max_concurrent_offers_per_npub` | usize | `4` | Max concurrent inbound traversal offers accepted from any one sender npub, so a single identity cannot hold the whole pool. Sits inside `max_concurrent_incoming_offers`, which stays the outer bound; a larger value is inert. At least 4: a smaller value, 0 included, is raised to 4, with a warning at start |
 | `node.rendezvous.nostr.advert_cache_max_entries` | usize | `2048` | Max cached overlay adverts retained from relay traffic. When the cache is full, an advert from a new author that is neither a configured peer nor linked to this node is refused until an entry expires; configured and linked authors are always cached |
 | `node.rendezvous.nostr.seen_sessions_max_entries` | usize | `2048` | Max seen-session IDs retained for replay detection |
 | `node.rendezvous.nostr.advertise` | bool | `true` | Publish local endpoint adverts |
@@ -435,9 +440,9 @@ inert otherwise.
 | `node.rendezvous.nostr.stun_servers` | list[string] | `["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478", "stun:global.stun.twilio.com:3478"]` | STUN servers used for local reflexive address discovery |
 | `node.rendezvous.nostr.share_local_candidates` | bool | `false` | Whether to advertise local (RFC 1918 / ULA) interface addresses as host candidates in the traversal offer. Off by default: in most deployments peers aren't on the same broadcast domain, and sharing private host candidates causes misleading punch successes when an asymmetric L3 path (VPN, Tailscale subnet route, overlapping address space) makes a peer's private IP one-way reachable. Enable only when peers are on the same physical LAN |
 | `node.rendezvous.nostr.app` | string | `"fips-overlay-v1"` | Traversal application namespace, published in the advert's `protocol` tag (the `d` tag itself is hardcoded to `fips-overlay-v1`) |
-| `node.rendezvous.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds |
-| `node.rendezvous.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds |
-| `node.rendezvous.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds |
+| `node.rendezvous.nostr.signal_ttl_secs` | u64 | `120` | Signaling TTL in seconds. At least 120: a smaller value is raised to 120, with a warning at start |
+| `node.rendezvous.nostr.attempt_timeout_secs` | u64 | `10` | Overall traversal attempt timeout in seconds. At least 10: a smaller value is raised to 10, with a warning at start |
+| `node.rendezvous.nostr.replay_window_secs` | u64 | `300` | Replay tracking retention window in seconds. Must exceed `signal_ttl_secs` plus 60 s of clock-skew grace on each side, or the node refuses to start; the check uses the signal lifetime the node runs with, at least 120, so the window must exceed 240 |
 | `node.rendezvous.nostr.punch_start_delay_ms` | u64 | `2000` | Delay before punch traffic starts |
 | `node.rendezvous.nostr.punch_interval_ms` | u64 | `200` | Interval between punch packets |
 | `node.rendezvous.nostr.punch_duration_ms` | u64 | `10000` | How long to keep punching before failure |
@@ -516,8 +521,8 @@ Controls tree construction and parent selection.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.bloom.update_debounce_ms` | u64 | `500` | Debounce interval for filter update propagation |
-| `node.bloom.max_inbound_fpr` | f64 | `0.20` | Antipoison cap: reject inbound `FilterAnnounce` frames whose advertised false-positive rate exceeds this value. Valid range `(0.0, 1.0)`. The default `0.20` corresponds to fill 0.7248 at k=5 (≈2,114 entries on the 1 KB filter); a saturated/poisoned filter is still ~100% FPR and rejected. Senders hold any outgoing filter above `0.20` (the v1 acceptance cap) whatever their own setting, so raising this value does not admit filters above `0.20` from nodes running v0.5.4 or later |
+| `node.bloom.update_debounce_ms` | u64 | `500` | Least interval between two filter updates to one peer. At least 500: a smaller value is raised to 500, with a warning at start naming the key, the configured value and the value used |
+| `node.bloom.max_inbound_fpr` | f64 | `0.20` | Antipoison cap: reject inbound `FilterAnnounce` frames whose advertised false-positive rate exceeds this value. A value below `0.20`, at or above `1.0`, or NaN runs as `0.20`, with a warning at start naming the key, the configured value and the value used. The default `0.20` corresponds to fill 0.7248 at k=5 (≈2,114 entries on the 1 KB filter); a saturated/poisoned filter is still ~100% FPR and rejected. Senders send their outgoing filter whatever its false-positive rate, so this cap alone decides whether a filter is kept |
 | `node.bloom.child_echo_threshold` | f64 | `0.8` | Child echo guard: reject a `FilterAnnounce` from a tree child, keeping its previous filter, when the filter contains more than this share of the filter last sent to that child beyond what its own fill explains by chance (overlap above `fill + threshold × (1 − fill)`). Applies only when the child already has a stored filter and the filter last sent to it has at least 128 set bits. Meaningful in `[0.0, 1.0)`: `1.0` or above disables the guard, a value below `0.0` rejects any child filter overlapping what was sent above chance, and NaN never rejects. Rejections are counted in `bloom.child_role_rejected` |
 
 Bloom filter size (1 KB), hash count (5), and size classes are protocol
@@ -571,7 +576,8 @@ restarted or dropped the session.
 A link resends a rekey msg1 that has had no answer at 1, 3, 7 and 15
 seconds and gives the rekey up 30 seconds after the first copy (the earlier
 of one tick after the last resend `node.rate_limit.handshake_max_resends`
-allows and the handshake timeout); the next waits a backoff of one tick,
+allows and the handshake timeout, at most 30 s whatever the configured
+timeout); the next waits a backoff of one tick,
 doubled for each rekey given up in a row (at most 120 seconds at the
 defaults), plus up to 15 seconds. A msg1 or msg2 the transport fails to
 send counts as lost and does not end the rekey. The node that started a link
@@ -1449,7 +1455,6 @@ node:
     persistent: false                # true = load/save fips.key; false = ephemeral each start
   disable_routing: false
   leaf_only: false
-  tick_interval_secs: 1
   base_rtt_ms: 100
   heartbeat_interval_secs: 10
   link_dead_timeout_secs: 30

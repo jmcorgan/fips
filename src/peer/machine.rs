@@ -542,12 +542,36 @@ impl std::fmt::Debug for HandshakeCrypto {
 /// from, though it claims no identity until its msg2.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DialOrigin {
-    /// The address was held for the peer: configuration, a LAN or overlay
-    /// advert, a retry, a traversal handoff. Also every inbound machine.
+    /// The address was held for the peer: configuration, a LAN advert for a
+    /// configured peer, an overlay advert, a retry, a traversal handoff.
+    /// Also every inbound machine.
     #[default]
     Addressed,
+    /// An mDNS advert named the address, for a node this node is not
+    /// configured to dial. Counted as addressed by the claim gates; its msg1
+    /// is resent at most [`DISCOVERY_RESENDS`] times.
+    MdnsAdvert,
     /// A transport neighbour claimed the peer's key.
     NeighbourClaim,
+}
+
+/// The most msg1 resends of a handshake an mDNS advert directs at a node
+/// this node is not configured to dial: six msg1 in all with the first
+/// (FRC-1201 Section 3.1). An advert can name any address, so this bounds
+/// what one advert can make the node send there.
+pub(crate) const DISCOVERY_RESENDS: u32 = 5;
+
+impl DialOrigin {
+    /// The msg1 resends a dial of this origin may make when the node is
+    /// configured for `configured`: capped at [`DISCOVERY_RESENDS`] for a
+    /// dial an mDNS advert directs at an unconfigured node, `configured`
+    /// for every other dial.
+    pub(crate) fn resend_limit(self, configured: u32) -> u32 {
+        match self {
+            Self::MdnsAdvert => configured.min(DISCOVERY_RESENDS),
+            Self::Addressed | Self::NeighbourClaim => configured,
+        }
+    }
 }
 
 /// Per-peer control FSM. Holds control-tier lifecycle state only; the

@@ -1,6 +1,7 @@
 use portable_atomic::AtomicU64;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -10,7 +11,12 @@ use nostr::prelude::{
     Alphabet, Event, EventBuilder, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Tag,
     TagKind, TagStandard, Timestamp,
 };
-use nostr_sdk::{Client, ClientOptions, prelude::RelayPoolNotification};
+#[cfg(test)]
+use nostr_sdk::prelude::AdmitStatus;
+use nostr_sdk::{
+    Client, ClientOptions,
+    prelude::{AdmitPolicy, RelayPoolNotification},
+};
 use serde::Serialize;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -27,10 +33,11 @@ use super::signal::{
     validate_offer_freshness, validate_traversal_answer_for_offer,
 };
 use super::signal_gate::SignalGate;
+use super::signal_route::SignalRouter;
 use super::stun::observe_traversal_addresses;
 use super::traversal::{
-    PunchTargetTally, RefusalWarnGate, is_doc_ip, is_never_punchable_ip, is_private_ip, nonce,
-    now_ms, planned_remote_endpoints, run_punch_attempt,
+    PunchTargetTally, RefusalWarnGate, bind_traversal, is_doc_ip, is_never_punchable_ip,
+    is_private_ip, nonce, now_ms, planned_remote_endpoints, run_punch_attempt,
 };
 use super::traversal_machine::{OfferDisposition, SeenDecision, TraversalMachine};
 use super::types::{
@@ -64,6 +71,68 @@ fn short_npub(npub: &str) -> String {
         .filter(|s| s.len() >= 8)
         .map(|s| format!("npub1{}..{}", &s[..4], &s[s.len() - 4..]))
         .unwrap_or_else(|| npub.to_string())
+}
+
+/// The relay client signing with `keys`, with inbound traversal signals taken
+/// off the relay pool's notification channel onto their own; the admission
+/// policy that does so, as the client holds it; and the receiver of the
+/// signals' channel. One client serves signals and adverts alike, so the
+/// signals' channel adds no relay connection.
+fn relay_client(
+    keys: &nostr::Keys,
+) -> (
+    Client,
+    Option<Arc<dyn AdmitPolicy>>,
+    broadcast::Receiver<RelayPoolNotification>,
+) {
+    let (router, signals) = SignalRouter::new();
+    let builder = Client::builder()
+        .signer(keys.clone())
+        .admit_policy(router)
+        .opts(ClientOptions::new().autoconnect(false));
+    let policy = builder.admit_policy.clone();
+    (builder.build(), policy, signals)
+}
+
+/// Which of its two channels the notify loop read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Feed {
+    /// The relay pool's notification channel: adverts, and every other event
+    /// but a traversal signal.
+    Pool,
+    /// The channel only traversal signals are put on.
+    Signals,
+}
+
+/// What the notify loop does with one read of `feed`: `Continue(Some(_))`
+/// hands the notification on, `Continue(None)` reads on past a lag it has
+/// logged, and `Break(())` ends the loop because the channel has closed. A
+/// lag does not end the loop, which would lose every later advert and signal
+/// along with those already overwritten.
+pub(super) fn received(
+    result: Result<RelayPoolNotification, broadcast::error::RecvError>,
+    feed: Feed,
+) -> ControlFlow<(), Option<RelayPoolNotification>> {
+    match result {
+        Ok(notification) => ControlFlow::Continue(Some(notification)),
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            match feed {
+                Feed::Pool => warn!(
+                    skipped,
+                    "nostr notification channel lagged; advert events dropped"
+                ),
+                Feed::Signals => warn!(
+                    skipped,
+                    "nostr signal channel lagged; traversal signals dropped"
+                ),
+            }
+            ControlFlow::Continue(None)
+        }
+        Err(broadcast::error::RecvError::Closed) => {
+            warn!(channel = ?feed, "nostr notification channel closed; notify loop exiting");
+            ControlFlow::Break(())
+        }
+    }
 }
 
 /// An offer we sent and are still waiting on, with what is needed to send it
@@ -265,6 +334,14 @@ pub struct NostrRendezvous {
     /// it was sent, so unit tests can observe when it is published.
     #[cfg(test)]
     inbox_sent: std::sync::Mutex<Vec<(tokio::time::Instant, Event)>>,
+    /// The admission policy the relay client was built with, so unit tests
+    /// can deliver events through it as a relay connection does.
+    #[cfg(test)]
+    policy: Option<Arc<dyn AdmitPolicy>>,
+    /// The signal channel's receiver until a unit test starts the notify loop
+    /// on it; `None` from `start`, which hands it to the loop.
+    #[cfg(test)]
+    signal_rx: std::sync::Mutex<Option<broadcast::Receiver<RelayPoolNotification>>>,
     admission: OfferAdmission,
     signal_gate: SignalGate,
     /// Limits the suspicious-offer warning to one a minute.
@@ -307,8 +384,8 @@ impl NostrRendezvous {
     /// - `advertise_task` — the refresh ticker that drives the publisher.
     ///
     /// Each of these is an unconditional `loop` (the notify loop's only `break`
-    /// is the relay-pool broadcast channel closing, i.e. the pool itself is
-    /// gone), so a finished handle means the task panicked or was aborted:
+    /// is either of its two channels closing, i.e. the client is gone), so a
+    /// finished handle means the task panicked or was aborted:
     /// unrecoverable, which matches the one-way `ChildExited` → `Degraded`
     /// latch in the supervisor FSM.
     ///
@@ -362,10 +439,10 @@ impl NostrRendezvous {
         our_keypair.non_secure_erase();
         let keys = nostr::Keys::parse(secret_hex.as_str())
             .map_err(|e| BootstrapError::Nostr(e.to_string()))?;
-        let client = Client::builder()
-            .signer(keys.clone())
-            .opts(ClientOptions::new().autoconnect(false))
-            .build();
+        let (client, policy, signals) = relay_client(&keys);
+        // Only the test hooks read the policy; the client keeps its own copy.
+        #[cfg(not(test))]
+        drop(policy);
 
         let mut relay_union = HashSet::new();
         relay_union.extend(config.advert_relays.iter().cloned());
@@ -410,6 +487,10 @@ impl NostrRendezvous {
             sent_signals: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             inbox_sent: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            policy,
+            #[cfg(test)]
+            signal_rx: std::sync::Mutex::new(None),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
@@ -435,13 +516,15 @@ impl NostrRendezvous {
         // `Err(SendError)` when no subscriber exists yet. Without this,
         // freshly-restarted nodes with `policy: open` waited up to one
         // `advert_refresh_secs` interval (default 30 min) for non-configured
-        // peers to re-publish before discovering them.
+        // peers to re-publish before discovering them. The signals' own
+        // channel needs no such care: its receiver was made with it.
         let notifications = runtime.client.notifications();
         *runtime.publish_task.lock().await = Some(runtime.clone().spawn_publish_loop());
         *runtime.connect_task.lock().await = Some(runtime.clone().spawn_connect_loop());
         *runtime.relay_startup_task.lock().await = Some(runtime.clone().spawn_relay_startup_loop());
         *runtime.advertise_task.lock().await = Some(runtime.clone().spawn_advertise_loop());
-        *runtime.notify_task.lock().await = Some(runtime.clone().spawn_notify_loop(notifications));
+        *runtime.notify_task.lock().await =
+            Some(runtime.clone().spawn_notify_loop(notifications, signals));
 
         Ok(runtime)
     }
@@ -820,28 +903,28 @@ impl NostrRendezvous {
         Ok(())
     }
 
+    /// Spawn the task that reads the relay pool's notification channel and the
+    /// signals' own channel, and hands each advert and traversal signal on.
     fn spawn_notify_loop(
         self: Arc<Self>,
         mut notifications: broadcast::Receiver<RelayPoolNotification>,
+        mut signals: broadcast::Receiver<RelayPoolNotification>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let started_at = Instant::now();
             let mut first_event_seen = false;
             info!("nostr notify loop entered");
             loop {
-                let notification = match notifications.recv().await {
-                    Ok(notification) => notification,
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(
-                            skipped,
-                            "nostr notification channel lagged; advert/signal events dropped"
-                        );
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        warn!("nostr notification channel closed; notify loop exiting");
-                        break;
-                    }
+                // Neither channel is preferred, so a flood on one cannot
+                // starve the other.
+                let (result, feed) = tokio::select! {
+                    result = notifications.recv() => (result, Feed::Pool),
+                    result = signals.recv() => (result, Feed::Signals),
+                };
+                let notification = match received(result, feed) {
+                    ControlFlow::Continue(Some(notification)) => notification,
+                    ControlFlow::Continue(None) => continue,
+                    ControlFlow::Break(()) => break,
                 };
                 if !first_event_seen {
                     first_event_seen = true;
@@ -850,194 +933,197 @@ impl NostrRendezvous {
                         "nostr notify loop received first event"
                     );
                 }
+                // By kind rather than by channel, so a signal that ever reached
+                // the pool's channel would still be opened rather than lost.
                 if let RelayPoolNotification::Event { event, .. } = notification {
                     if event.kind == Kind::Custom(ADVERT_KIND) {
-                        let author_npub = event.pubkey.to_bech32().expect("infallible");
-                        if let Some(valid_until_ms) = self.event_valid_until_ms(&event)
-                            && let Ok(advert) =
-                                Self::parse_overlay_advert_event(&event, &self.config.app)
-                        {
-                            let endpoints = endpoint_summary(&advert.endpoints);
-                            // Clamped forward to the signal path's skew
-                            // tolerance: an unbounded future `created_at` would
-                            // win every replacement comparison in
-                            // `observe_advert` and buy a proportionally distant
-                            // validity horizon.
-                            let created_at = Self::effective_created_at_secs(
-                                event.created_at.as_secs(),
-                                now_ms(),
-                            );
-                            match self.advert.observe_advert(
-                                &author_npub,
-                                advert,
-                                created_at,
-                                valid_until_ms,
-                                now_ms(),
-                            ) {
-                                AdvertAdmission::Admitted | AdvertAdmission::Updated
-                                    if author_npub != self.npub =>
-                                {
-                                    debug!(
-                                        peer = %short_npub(&author_npub),
-                                        endpoints = %endpoints,
-                                        event = %short_id(&event.id.to_string()),
-                                        "advert: peer cached"
-                                    );
-                                }
-                                AdvertAdmission::Refused { first_at_bound } => {
-                                    self.log_advert_cache_full(first_at_bound);
-                                    debug!(
-                                        peer = %short_npub(&author_npub),
-                                        reason = "cache-full",
-                                        "advert cache full; advert not cached"
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                        self.prune_advert_cache();
-                        continue;
-                    }
-
-                    if event.kind != Kind::Custom(SIGNAL_KIND) {
-                        continue;
-                    }
-
-                    // Ahead of the unwrap, which is two NIP-44 decrypts and a
-                    // signature verify run inline on the single task that also
-                    // routes answers and processes adverts. Nothing about the
-                    // sender is known yet — the outer event is signed by a key
-                    // generated per event — so the allowance is necessarily
-                    // shared and indiscriminate, and the reserve is what keeps
-                    // a flood from also shedding the answers to traversals
-                    // this node started.
-                    let awaiting_answers = match self.pending_answers.try_lock() {
-                        Ok(pending) => !pending.is_empty(),
-                        // Contended rather than known empty, so treat it as
-                        // outstanding: the fail-open direction here spends the
-                        // reserve, it does not shed.
-                        Err(_) => true,
-                    };
-                    if let Err(shed) = self.signal_gate.admit(awaiting_answers, Instant::now()) {
-                        let total = self.shed_signals.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Debug, not warn, per event: the party that trips this
-                        // is by definition sending faster than the node wants,
-                        // so a record per drop turns the flood into log volume.
-                        // The doubling summary below is the operator's signal.
-                        debug!(
-                            reason = ?shed,
-                            total,
-                            "shed inbound traversal signal before decrypt"
-                        );
-                        if total.is_power_of_two() {
-                            warn!(
-                                shed = total,
-                                "inbound traversal signals shed before decrypt"
-                            );
-                        }
-                        continue;
-                    }
-
-                    let unwrapped = match unwrap_signal_event(&self.keys, &event).await {
-                        Ok(unwrapped) => unwrapped,
-                        Err(err) => {
-                            trace!(error = %err, "failed to unwrap traversal signal");
-                            continue;
-                        }
-                    };
-                    let sender_npub = match unwrapped.sender.to_bech32() {
-                        Ok(npub) => npub,
-                        Err(err) => {
-                            debug!(error = %err, "failed to encode traversal sender npub");
-                            continue;
-                        }
-                    };
-
-                    if let Ok(answer) =
-                        serde_json::from_str::<TraversalAnswer>(&unwrapped.rumor.content)
-                        && answer.message_type == "answer"
-                        && answer.recipient_npub == self.npub
-                    {
-                        if let Some(tx) = self
-                            .pending_answers
-                            .lock()
-                            .await
-                            .remove(&answer.in_reply_to)
-                        {
-                            let _ = tx.send(SignalEnvelope {
-                                payload: answer,
-                                sender_npub: sender_npub.clone(),
-                            });
-                        }
-                        continue;
-                    }
-
-                    if let Ok(offer) =
-                        serde_json::from_str::<TraversalOffer>(&unwrapped.rumor.content)
-                        && offer.message_type == "offer"
-                        && offer.recipient_npub == self.npub
-                    {
-                        let permit = match self.admission.try_admit(&sender_npub) {
-                            Ok(permit) => permit,
-                            Err(AdmissionReject::GlobalFull) => {
-                                warn!(
-                                    sender_npub = %sender_npub,
-                                    limit = self.config.max_concurrent_incoming_offers,
-                                    "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
-                                );
-                                continue;
-                            }
-                            // Debug, not warn: the party that trips this is by
-                            // definition sending faster than the node wants, so
-                            // a record per rejection turns the spam into log
-                            // volume. The global-full arm above stays at warn
-                            // and remains the operator's signal that the node
-                            // is actually saturated.
-                            Err(AdmissionReject::SenderFull) => {
-                                debug!(
-                                    sender_npub = %sender_npub,
-                                    limit = self.config.max_concurrent_offers_per_npub,
-                                    "inbound traversal offer refused: sender is at its per-npub offer allowance"
-                                );
-                                continue;
-                            }
-                        };
-                        let runtime = Arc::clone(&self);
-                        let peer_short = short_npub(&sender_npub);
-                        let session_short = short_id(&offer.session_id);
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            if let Err(err) = runtime
-                                .handle_incoming_offer(offer, unwrapped.sender, sender_npub)
-                                .await
-                            {
-                                // An offer arriving stale is the expected
-                                // consequence of relay lag and stays at debug.
-                                // The remaining classes cannot arise from lag,
-                                // so they are the operator's only evidence that
-                                // a node is being fed malformed or forged
-                                // signals, and must clear the default level.
-                                if adversarial_offer_reject(&err) {
-                                    warn!(
-                                        peer = %peer_short,
-                                        session = %session_short,
-                                        error = %err,
-                                        "rejected traversal offer"
-                                    );
-                                } else {
-                                    debug!(
-                                        peer = %peer_short,
-                                        session = %session_short,
-                                        error = %err,
-                                        "failed to handle traversal offer"
-                                    );
-                                }
-                            }
-                        });
+                        self.handle_advert(&event);
+                    } else if event.kind == Kind::Custom(SIGNAL_KIND) {
+                        self.handle_signal(event).await;
                     }
                 }
             }
         })
+    }
+
+    /// Cache an advert a relay delivered, if it is valid and current, then
+    /// prune the cache.
+    fn handle_advert(&self, event: &Event) {
+        let author_npub = event.pubkey.to_bech32().expect("infallible");
+        if let Some(valid_until_ms) = self.event_valid_until_ms(event)
+            && let Ok(advert) = Self::parse_overlay_advert_event(event, &self.config.app)
+        {
+            let endpoints = endpoint_summary(&advert.endpoints);
+            // Clamped forward to the signal path's skew
+            // tolerance: an unbounded future `created_at` would
+            // win every replacement comparison in
+            // `observe_advert` and buy a proportionally distant
+            // validity horizon.
+            let created_at = Self::effective_created_at_secs(event.created_at.as_secs(), now_ms());
+            match self.advert.observe_advert(
+                &author_npub,
+                advert,
+                created_at,
+                valid_until_ms,
+                now_ms(),
+            ) {
+                AdvertAdmission::Admitted | AdvertAdmission::Updated
+                    if author_npub != self.npub =>
+                {
+                    debug!(
+                        peer = %short_npub(&author_npub),
+                        endpoints = %endpoints,
+                        event = %short_id(&event.id.to_string()),
+                        "advert: peer cached"
+                    );
+                }
+                AdvertAdmission::Refused { first_at_bound } => {
+                    self.log_advert_cache_full(first_at_bound);
+                    debug!(
+                        peer = %short_npub(&author_npub),
+                        reason = "cache-full",
+                        "advert cache full; advert not cached"
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.prune_advert_cache();
+    }
+
+    /// Open an inbound traversal signal, unless the signal gate sheds it, and
+    /// hand an answer to the traversal waiting for it or admit an offer.
+    async fn handle_signal(self: &Arc<Self>, event: Box<Event>) {
+        // Ahead of the unwrap, which is two NIP-44 decrypts and a
+        // signature verify run inline on the single task that also
+        // routes answers and processes adverts. Nothing about the
+        // sender is known yet — the outer event is signed by a key
+        // generated per event — so the allowance is necessarily
+        // shared and indiscriminate, and the reserve is what keeps
+        // a flood from also shedding the answers to traversals
+        // this node started.
+        let awaiting_answers = match self.pending_answers.try_lock() {
+            Ok(pending) => !pending.is_empty(),
+            // Contended rather than known empty, so treat it as
+            // outstanding: the fail-open direction here spends the
+            // reserve, it does not shed.
+            Err(_) => true,
+        };
+        if let Err(shed) = self.signal_gate.admit(awaiting_answers, Instant::now()) {
+            let total = self.shed_signals.fetch_add(1, Ordering::Relaxed) + 1;
+            // Debug, not warn, per event: the party that trips this
+            // is by definition sending faster than the node wants,
+            // so a record per drop turns the flood into log volume.
+            // The doubling summary below is the operator's signal.
+            debug!(
+                reason = ?shed,
+                total,
+                "shed inbound traversal signal before decrypt"
+            );
+            if total.is_power_of_two() {
+                warn!(
+                    shed = total,
+                    "inbound traversal signals shed before decrypt"
+                );
+            }
+            return;
+        }
+
+        let unwrapped = match unwrap_signal_event(&self.keys, &event).await {
+            Ok(unwrapped) => unwrapped,
+            Err(err) => {
+                trace!(error = %err, "failed to unwrap traversal signal");
+                return;
+            }
+        };
+        let sender_npub = match unwrapped.sender.to_bech32() {
+            Ok(npub) => npub,
+            Err(err) => {
+                debug!(error = %err, "failed to encode traversal sender npub");
+                return;
+            }
+        };
+
+        if let Ok(answer) = serde_json::from_str::<TraversalAnswer>(&unwrapped.rumor.content)
+            && answer.message_type == "answer"
+            && answer.recipient_npub == self.npub
+        {
+            if let Some(tx) = self
+                .pending_answers
+                .lock()
+                .await
+                .remove(&answer.in_reply_to)
+            {
+                let _ = tx.send(SignalEnvelope {
+                    payload: answer,
+                    sender_npub: sender_npub.clone(),
+                });
+            }
+            return;
+        }
+
+        if let Ok(offer) = serde_json::from_str::<TraversalOffer>(&unwrapped.rumor.content)
+            && offer.message_type == "offer"
+            && offer.recipient_npub == self.npub
+        {
+            let permit = match self.admission.try_admit(&sender_npub) {
+                Ok(permit) => permit,
+                Err(AdmissionReject::GlobalFull) => {
+                    warn!(
+                        sender_npub = %sender_npub,
+                        limit = self.config.max_concurrent_incoming_offers,
+                        "rate-limited inbound traversal offer (max_concurrent_incoming_offers reached); offer dropped"
+                    );
+                    return;
+                }
+                // Debug, not warn: the party that trips this is by
+                // definition sending faster than the node wants, so
+                // a record per rejection turns the spam into log
+                // volume. The global-full arm above stays at warn
+                // and remains the operator's signal that the node
+                // is actually saturated.
+                Err(AdmissionReject::SenderFull) => {
+                    debug!(
+                        sender_npub = %sender_npub,
+                        limit = self.config.max_concurrent_offers_per_npub,
+                        "inbound traversal offer refused: sender is at its per-npub offer allowance"
+                    );
+                    return;
+                }
+            };
+            let runtime = Arc::clone(self);
+            let peer_short = short_npub(&sender_npub);
+            let session_short = short_id(&offer.session_id);
+            tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(err) = runtime
+                    .handle_incoming_offer(offer, unwrapped.sender, sender_npub)
+                    .await
+                {
+                    // An offer arriving stale is the expected
+                    // consequence of relay lag and stays at debug.
+                    // The remaining classes cannot arise from lag,
+                    // so they are the operator's only evidence that
+                    // a node is being fed malformed or forged
+                    // signals, and must clear the default level.
+                    if adversarial_offer_reject(&err) {
+                        warn!(
+                            peer = %peer_short,
+                            session = %session_short,
+                            error = %err,
+                            "rejected traversal offer"
+                        );
+                    } else {
+                        debug!(
+                            peer = %peer_short,
+                            session = %session_short,
+                            error = %err,
+                            "failed to handle traversal offer"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     fn spawn_advertise_loop(self: Arc<Self>) -> JoinHandle<()> {
@@ -1261,8 +1347,7 @@ impl NostrRendezvous {
             return Err(BootstrapError::MissingRelays(peer_config.npub));
         }
 
-        let base_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))?;
-        base_socket.set_nonblocking(true)?;
+        let base_socket = bind_traversal(SocketAddr::from(([0, 0, 0, 0], 0)))?;
 
         // This drains every datagram on the traversal socket until the STUN
         // deadline, so it must complete before any punch can be in flight: a
@@ -1599,8 +1684,7 @@ impl NostrRendezvous {
             return Err(BootstrapError::MissingRelays(offer.sender_npub.clone()));
         }
 
-        let base_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))?;
-        base_socket.set_nonblocking(true)?;
+        let base_socket = bind_traversal(SocketAddr::from(([0, 0, 0, 0], 0)))?;
         // This drains every datagram on the traversal socket until the STUN
         // deadline, so it must complete before any punch can be in flight: a
         // retry or re-observation once punching has started would swallow the
@@ -2159,10 +2243,7 @@ impl NostrRendezvous {
         let keys = nostr::Keys::generate();
         let pubkey = keys.public_key();
         let npub = pubkey.to_bech32().expect("bech32 encode");
-        let client = Client::builder()
-            .signer(keys.clone())
-            .opts(ClientOptions::new().autoconnect(false))
-            .build();
+        let (client, policy, signals) = relay_client(&keys);
         let admission = OfferAdmission::new(
             config.max_concurrent_incoming_offers,
             config.max_concurrent_offers_per_npub,
@@ -2191,6 +2272,8 @@ impl NostrRendezvous {
             inflight_offers: Mutex::new(HashMap::new()),
             sent_signals: std::sync::Mutex::new(Vec::new()),
             inbox_sent: std::sync::Mutex::new(Vec::new()),
+            policy,
+            signal_rx: std::sync::Mutex::new(Some(signals)),
             admission,
             signal_gate: SignalGate::new(Instant::now()),
             refusal_warn: std::sync::Mutex::new(RefusalWarnGate::default()),
@@ -2262,6 +2345,66 @@ impl NostrRendezvous {
     /// Spawn the relay-startup task as `start` does, and return its handle.
     pub(crate) fn spawn_relay_startup_loop_for_test(self: Arc<Self>) -> JoinHandle<()> {
         self.spawn_relay_startup_loop()
+    }
+
+    /// Spawn the notify loop as `start` does, on `notifications`, the test's
+    /// stand-in for the pool's notification channel, and on the signals' own
+    /// channel, and return its handle.
+    pub(super) fn spawn_notify_loop_for_test(
+        self: Arc<Self>,
+        notifications: broadcast::Receiver<RelayPoolNotification>,
+    ) -> JoinHandle<()> {
+        let signals = self
+            .signal_rx
+            .lock()
+            .expect("signal_rx lock")
+            .take()
+            .expect("the signal channel's receiver is taken once");
+        self.spawn_notify_loop(notifications, signals)
+    }
+
+    /// Deliver `notification` as the relay pool does with an event a relay
+    /// sent: through the admission policy the client was built with, if it
+    /// has one, and if admitted onto `pool`, the test's stand-in for the
+    /// pool's notification channel (`nostr-relay-pool` 0.44.3,
+    /// `src/relay/inner.rs`, `handle_event_msg`). Each admitted delivery takes
+    /// one slot of `pool`. The pool's step that records an event as seen is
+    /// not modelled; a repeat delivery costs the real channel a slot all the
+    /// same, as a relay message rather than an event.
+    pub(super) async fn deliver_for_test(
+        &self,
+        pool: &broadcast::Sender<RelayPoolNotification>,
+        notification: RelayPoolNotification,
+    ) {
+        if let RelayPoolNotification::Event {
+            relay_url,
+            subscription_id,
+            event,
+        } = &notification
+            && let Some(policy) = &self.policy
+            && let AdmitStatus::Rejected { .. } = policy
+                .admit_event(relay_url, subscription_id, event)
+                .await
+                .expect("admission policy")
+        {
+            return;
+        }
+        let _ = pool.send(notification);
+    }
+
+    /// Register a traversal waiting for the answer to our offer whose nonce is
+    /// `nonce`, as `connect_peer` does once the offer is sent, and return the
+    /// receiver the notify loop hands that answer to.
+    pub(super) async fn await_answer_for_test(
+        &self,
+        nonce: &str,
+    ) -> oneshot::Receiver<SignalEnvelope<TraversalAnswer>> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_answers
+            .lock()
+            .await
+            .insert(nonce.to_string(), tx);
+        rx
     }
 
     /// Publish our inbox relay list once.

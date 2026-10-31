@@ -1,6 +1,11 @@
 #!/bin/bash
 # Build FIPS binaries and the unified test Docker image.
 #
+# The binaries are the integration build: the release settings under the
+# `integration` cargo profile, with the `test-overrides` feature that honours
+# test-only configuration keys, built in target/integration rather than
+# target/release so that no package script can pick one up.
+#
 # Supports cross-compilation from macOS to Linux using cargo-zigbuild.
 #
 # Usage: ./build.sh [--no-docker]
@@ -19,9 +24,10 @@ if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
 fi
 
 BUILD_DOCKER=true
-# Default flags for the container-image cargo build. Empty by default;
-# every subsystem is governed by platform cfg gates with no feature
-# flags required.
+# Extra flags for the container-image cargo build. Empty by default: every
+# subsystem is governed by platform cfg gates, and the profile and the
+# `test-overrides` feature are fixed on the cargo command lines below, so
+# FIPS_CARGO_BUILD_ARGS adds to them rather than replacing them.
 DEFAULT_CARGO_BUILD_ARGS=()
 if [ -n "${FIPS_CARGO_BUILD_ARGS:-}" ]; then
     # shellcheck disable=SC2206
@@ -96,15 +102,15 @@ if [ "$UNAME_S" = "Darwin" ]; then
         rustup target add "$CARGO_TARGET"
     fi
 
-    echo "Building FIPS for Linux (release) using cargo-zigbuild..."
-    cargo zigbuild --release --bins --examples --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
+    echo "Building FIPS for Linux (integration build) using cargo-zigbuild..."
+    cargo zigbuild --profile integration --features test-overrides --bins --examples --target "$CARGO_TARGET" --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
-    TARGET_DIR="$TARGET_ROOT/$CARGO_TARGET/release"
+    TARGET_DIR="$TARGET_ROOT/$CARGO_TARGET/integration"
 else
-    echo "Building FIPS (release)..."
-    cargo build --release --bins --examples --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
+    echo "Building FIPS (integration build)..."
+    cargo build --profile integration --features test-overrides --bins --examples --manifest-path="$PROJECT_ROOT/Cargo.toml" "${CARGO_BUILD_ARGS[@]}"
 
-    TARGET_DIR="$TARGET_ROOT/release"
+    TARGET_DIR="$TARGET_ROOT/integration"
 fi
 
 # --bins --examples above rather than the bare default: the native datagram

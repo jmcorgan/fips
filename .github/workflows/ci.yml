@@ -387,9 +387,10 @@ jobs:
 
       - name: Build
         # --bins --examples rather than the bare default: the native datagram
-        # API's echo server is a cargo example, and the integration image needs
-        # it. Naming --bins keeps the daemon and its tools in the build, which
-        # --examples alone would drop. Mirrors testing/ci-local.sh.
+        # API's example programs must compile in release on every OS. Naming
+        # --bins keeps the daemon and its tools in the build, which --examples
+        # alone would drop. The integration image's binaries come from the
+        # integration build below, not this one. Mirrors testing/ci-local.sh.
         run: cargo build --release --bins --examples
 
       - name: SHA-256 hashes (Linux)
@@ -405,14 +406,26 @@ jobs:
         shell: pwsh
         run: Get-FileHash target\release\fips.exe, target\release\fipsctl.exe, target\release\fipstop.exe -Algorithm SHA256
 
-      # Cargo puts an example under target/release/examples. Staging them
-      # beside the bins keeps the artifact's common root at target/release, so
-      # every existing consumer still finds its file at _bin/<name>.
-      - name: Stage the native API examples beside the release binaries
+      # The integration image's binaries: the release settings under the
+      # `integration` profile with the `test-overrides` feature, so the chaos
+      # scenarios' test-only configuration keys are honoured. They build in
+      # target/integration, so no packaging step, which reads target/release,
+      # can pick one up; the hashes above stay those of the plain release
+      # build. Mirrors testing/scripts/build.sh and testing/ci-local.sh.
+      - name: Build the integration binaries
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cp target/release/examples/native-echo target/release/native-echo
-          cp target/release/examples/native-surface target/release/native-surface
+          cargo build --profile integration --features test-overrides --bins --examples
+          sha256sum target/integration/fips target/integration/fipsctl target/integration/fipstop target/integration/fips-gateway
+
+      # Cargo puts an example under target/integration/examples. Staging them
+      # beside the bins keeps the artifact's common root at target/integration,
+      # so every existing consumer still finds its file at _bin/<name>.
+      - name: Stage the native API examples beside the integration binaries
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cp target/integration/examples/native-echo target/integration/native-echo
+          cp target/integration/examples/native-surface target/integration/native-surface
 
       # Upload the Linux binary so integration jobs can use it without rebuilding
       - name: Upload Linux binary
@@ -421,12 +434,12 @@ jobs:
         with:
           name: fips-linux
           path: |
-            target/release/fips
-            target/release/fipsctl
-            target/release/fipstop
-            target/release/fips-gateway
-            target/release/native-echo
-            target/release/native-surface
+            target/integration/fips
+            target/integration/fipsctl
+            target/integration/fipstop
+            target/integration/fips-gateway
+            target/integration/native-echo
+            target/integration/native-surface
           retention-days: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -627,13 +640,15 @@ jobs:
           check_name: Unit Tests Summary
           fail_on_failure: false
 
-      # The `profiling` feature adds a module, a recorder and a writer thread
-      # that the default-feature run above never compiles, so its own tests do
-      # not execute there. Only the root package has the feature: fips-core's
-      # lib test binary is the same with or without it, and the run above
-      # already ran it. Mirrored in testing/ci-local.sh.
-      - name: Run library tests with the tick-body profiler enabled
-        run: cargo test -p fips-mesh --lib --features profiling
+      # The root crate's optional features add code the default-feature run
+      # above never compiles: `profiling` a module, a recorder and a writer
+      # thread, `test-overrides` the honoured test-only configuration keys
+      # and the tests that only a build with it runs. Only the root package
+      # has these features: fips-core's lib test binary is the same with or
+      # without them, and the run above already ran it. Mirrored in
+      # testing/ci-local.sh.
+      - name: Run library tests with the optional root features enabled
+        run: cargo test -p fips-mesh --lib --features profiling,test-overrides
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 2a – Library tests in release mode

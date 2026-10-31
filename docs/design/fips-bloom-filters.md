@@ -279,7 +279,7 @@ Filters propagate transitively through tree edges only. Since the spanning
 tree is a connected subgraph covering all nodes, every reachable
 destination still appears in at least one tree peer's filter at steady
 state. New nodes propagate through the tree within
-O(depth × `node.tick_interval_secs`), about 1 s per hop at the default,
+O(depth) ticks, about 1 s per hop,
 where depth is the tree depth: announces leave only on the node's
 maintenance tick, so the 500 ms debounce is a floor and the tick sets the
 cadence.

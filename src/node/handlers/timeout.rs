@@ -268,7 +268,10 @@ impl Node {
     /// connection, the pure core computes the backoff schedule, and — matching the
     /// old shell exactly — the count and reschedule advance only on a successful
     /// send; a failed send neither advances the count nor marks the connection
-    /// failed, it just retries next tick.
+    /// failed, it just retries next tick. A leg an mDNS advert directed at a
+    /// node this node is not configured to dial stops at the discovery cap
+    /// ([`DialOrigin::resend_limit`](crate::peer::machine::DialOrigin::resend_limit)),
+    /// whatever the configured count.
     async fn drive_handshake_retransmits(&mut self, now_ms: u64) {
         let max_resends = self.config().node.rate_limit.handshake_max_resends;
         let interval_ms = self.config().node.rate_limit.handshake_resend_interval_ms;
@@ -313,7 +316,8 @@ impl Node {
             let armed = match self.peer_machines.get(&link) {
                 Some(machine)
                     if machine.is_handshaking_sent_msg1()
-                        && machine.resend_count() < max_resends =>
+                        && machine.resend_count()
+                            < machine.dial_origin().resend_limit(max_resends) =>
                 {
                     machine.resend_count()
                 }
@@ -482,17 +486,13 @@ impl Node {
     pub(in crate::node) fn pending_tun_max_age(&self) -> std::time::Duration {
         let node = &self.config().node;
         let ladder = &node.lookup.attempt_timeouts_secs;
-        let rungs = ladder.len() as u64;
+        let rungs = u32::try_from(ladder.len()).unwrap_or(u32::MAX);
         let secs = ladder
             .iter()
             .fold(0u64, |sum, s| sum.saturating_add(*s))
-            .saturating_add(node.rate_limit.handshake_timeout_secs)
-            .saturating_add(
-                rungs
-                    .saturating_add(1)
-                    .saturating_mul(node.tick_interval_secs),
-            );
+            .saturating_add(node.rate_limit.handshake_timeout_secs);
         std::time::Duration::from_secs(secs)
+            .saturating_add(crate::node::TICK.saturating_mul(rungs.saturating_add(1)))
     }
 
     /// Remove established sessions that have been idle too long.
@@ -550,13 +550,13 @@ impl Node {
     ///
     /// The deadline is the coordinate cache's own TTL, because the same
     /// `LookupResponse` writes both stores: the clamp cannot outlive the
-    /// route it was learned with, and shortening `node.cache.coord_ttl_secs`
-    /// shortens this with it. A TTL of zero disables the pass, matching
-    /// `purge_idle_sessions`.
+    /// route it was learned with, and shortening the coordinate cache's
+    /// lifetime (`CacheConfig::coord_ttl`) shortens this with it. A TTL of
+    /// zero disables the pass, matching `purge_idle_sessions`.
     pub(in crate::node) fn purge_expired_path_mtu(&mut self, now_ms: u64) {
         use crate::node::path_mtu::PathMtuEntry;
 
-        let ttl_ms = self.config().node.cache.coord_ttl_secs * 1000;
+        let ttl_ms = self.config().node.cache.coord_ttl() * 1000;
         if ttl_ms == 0 {
             return; // disabled
         }

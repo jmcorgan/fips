@@ -228,12 +228,15 @@ Configuration (under `node.rate_limit.*`):
 
 - `handshake_resend_interval_ms` (default 1000): initial resend interval
 - `handshake_resend_backoff` (default 2.0): backoff multiplier per resend
-- `handshake_max_resends` (default 5): max resends per handshake attempt
+- `handshake_max_resends` (default 5): max resends per handshake attempt;
+  a handshake an mDNS advert directs at a node this node is not configured
+  to dial resends at most 5 times whatever this says
 
 A link rekey's msg1 is resent at 1, 3, 7 and 15 s after the first copy (as
 many of those as `handshake_max_resends` allows), whatever the interval and
 backoff say, and the rekey is given up at the earlier of one tick after the
-last resend and the handshake timeout: 30 s at the defaults, so the fifth
+last resend and the handshake timeout, which a link rekey caps at 30 s
+whatever the configured value: 30 s at the defaults, so the fifth
 resend, at 31 s, is never sent. The next rekey waits a backoff of one tick,
 doubled for each rekey given up in a row (at most 120 s at the defaults),
 plus up to 15 s. A copy the transport fails to send counts as lost.

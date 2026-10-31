@@ -1786,9 +1786,12 @@ impl Node {
                 continue;
             };
             self.peering.lan.take(&node, addr);
-            if !configured.contains(&node) {
+            let origin = if configured.contains(&node) {
+                DialOrigin::Addressed
+            } else {
                 self.peering.lan.note_dialed(node, addr);
-            }
+                DialOrigin::MdnsAdvert
+            };
             let local_addr = self
                 .transports
                 .get(&candidate.transport_id)
@@ -1800,10 +1803,11 @@ impl Node {
                 "lan: initiating handshake to discovered peer"
             );
             if let Err(err) = self
-                .initiate_connection(
+                .initiate_connection_from(
                     candidate.transport_id,
                     candidate.remote_addr,
                     Some(identity),
+                    origin,
                 )
                 .await
             {

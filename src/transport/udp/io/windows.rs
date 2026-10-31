@@ -149,12 +149,15 @@ impl UdpRawSocket {
 /// Stop an ICMP port-unreachable from failing the socket's next receive.
 ///
 /// By default Windows reports a port-unreachable answering any datagram the
-/// socket sent as `WSAECONNRESET` on its next `recv_from`. The socket is shared
-/// by every peer, so one unreachable address would put errors into the receive
-/// loop that all the other peers' traffic arrives through. `SIO_UDP_CONNRESET`
-/// set to false turns the report off. A socket that refuses it still works and
-/// still sees the errors, so a failure is logged rather than returned.
-fn ignore_port_unreachable(sock: &Socket) {
+/// socket sent as `WSAECONNRESET` on its next `recv_from`. The transport's
+/// socket is shared by every peer, so one unreachable address would put errors
+/// into the receive loop that all the other peers' traffic arrives through; the
+/// Nostr traversal socket probes several candidate addresses, so one closed
+/// target would fail the receives the peer's probe arrives on.
+/// `SIO_UDP_CONNRESET` set to false turns the report off. A socket that refuses
+/// it still works and still sees the errors, so a failure is logged rather than
+/// returned.
+pub(crate) fn ignore_port_unreachable(sock: &impl AsRawSocket) {
     let report: u32 = 0;
     let mut returned: u32 = 0;
     // SAFETY: the socket is open for the duration of the call, the input

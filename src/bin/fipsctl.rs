@@ -89,7 +89,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Client-side ceiling in seconds. Defaults to the daemon's own
-        /// computed budget, which scales with its tick interval.
+        /// computed budget.
         #[arg(long)]
         timeout: Option<u64>,
     },
@@ -858,7 +858,7 @@ fn sparkline(values: &[f64], min: f64, max: f64) -> String {
 ///
 /// Every control round-trip returns immediately; the stages run daemon-side on
 /// its tick. The client ceiling is sized from the budget the daemon computed,
-/// rather than hard-coded, so a node with a long tick still works.
+/// rather than hard-coded, so it follows the daemon's lookup ladder.
 ///
 /// Each poll carries the whole report as it stands, stages included, so the
 /// stage block is drawn from the first response rather than withheld until the

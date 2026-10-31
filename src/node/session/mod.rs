@@ -119,9 +119,9 @@ impl JitterSource for ThreadJitter {
 /// holds no pending epoch, so the pending hold is read only as the cap on
 /// the abandon backoff; it is raised above the confirmation window when a
 /// long handshake timeout would otherwise put it below, which the machine
-/// refuses. Timers the machine still refuses (a tick of zero, or a
-/// handshake timeout under the tick plus 3 s) fall back to the session
-/// defaults, with a warning the first time.
+/// refuses. Timers the machine still refuses (a handshake timeout under
+/// 4 s, the tick plus 3 s) fall back to the session defaults, with a
+/// warning the first time.
 pub(crate) fn session_params(node: &crate::config::NodeConfig) -> Params {
     static TIMERS_WARNED: AtomicBool = AtomicBool::new(false);
     let base = Config {
@@ -129,7 +129,7 @@ pub(crate) fn session_params(node: &crate::config::NodeConfig) -> Params {
         ..Config::fsp()
     };
     let handshake = Duration::from_secs(node.rate_limit.handshake_timeout_secs);
-    let check = Duration::from_secs(node.tick_interval_secs);
+    let check = crate::node::TICK;
     let confirm = handshake.saturating_add(check);
     let configured = Config {
         handshake,
@@ -147,8 +147,7 @@ pub(crate) fn session_params(node: &crate::config::NodeConfig) -> Params {
                 tracing::warn!(
                     error = %e,
                     handshake_timeout_secs = node.rate_limit.handshake_timeout_secs,
-                    tick_interval_secs = node.tick_interval_secs,
-                    "Session rekey timers use the defaults: the configured handshake timeout and tick do not fit"
+                    "Session rekey timers use the defaults: the configured handshake timeout does not fit the 1 s tick"
                 );
             }
             base
@@ -228,6 +227,7 @@ pub(crate) fn keyed(
         link_since: now,
         started: now,
         peer_k: None,
+        last_rx: None,
         record: Record::new(),
     };
     // An unindexed profile with no decrypt workers makes no binding and no

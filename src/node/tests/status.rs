@@ -128,15 +128,16 @@ async fn no_adapter_socket_is_bound_while_the_control_socket_is_off() {
 async fn the_composed_mtu_follows_a_transport_no_site_publishes_within_the_first_tick() {
     // An app-owned TUN starts no TUN child, so nothing publishes the bound
     // transport's MTU at start and only the tick moves the adapter off the
-    // IPv6 minimum it starts at. At a 3600 s tick the only tick that runs
-    // here is the one the loop's interval completes at once on entering
-    // the loop, so a value that moves at all moved within that tick.
+    // IPv6 minimum it starts at. With the loop's tick set to 3600 s the
+    // only tick that runs here is the one the loop's interval completes at
+    // once on entering the loop, so a value that moves at all moved within
+    // that tick.
     let dir = tempfile::tempdir().unwrap();
     let control = dir.path().join("control.sock");
     let mut config = config_at(&control, 1400);
     config.tun.enabled = true;
-    config.node.tick_interval_secs = 3600;
     let mut node = make_node_with(config);
+    node.test_tick = Some(Duration::from_secs(3600));
     let (_outbound, _inbound) = node.enable_app_owned_tun();
     node.start().await.unwrap();
     assert_eq!(node.ipv6tun_status().effective_ipv6_mtu, 1203);

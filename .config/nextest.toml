@@ -85,7 +85,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
@@ -93,14 +93,16 @@ filter = 'package(fips-mesh) & test(/^node::tests::(bloom::test_bloom_filter_con
 test-group = 'node-large'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|claim_dials|claim_slots|connected_udp|control|decrypt_forged|dial_origin|discovery_msg1_cap|establish_chartests|handshake|handshake_lines|host_link|lan_label|link_setup_diag|netmon|rx_stall|second_path_msg1|session|silent_backoff|silent_replay|status|stored_msg2_install|tcp|tun_warning|udp_dns|unit|update_peers)::/)'
 test-group = 'node-synthetic'
 
 # The known-slow tests get 480 s instead of 300: the six 100-node tests (the
 # node-large group; test_discovery_100_nodes is ignored by default and takes
-# about two minutes), the routing map bound, and the rekey interleaving
-# explorer in fips-core. The slowest of them took 57 s on core-vm. Add a test
-# here when it needs more than 300 s on a slow runner.
+# about two minutes), the routing map bound, the rekey interleaving explorer in
+# fips-core, and the restart test that crosses two dials in 32 orders, whose
+# time is mostly the real sleeps of draining each pair it sets up and grows
+# with load. The slowest of them is that restart test, 92 s alone on core-vm.
+# Add a test here when it needs more than 300 s on a slow runner.
 #
 # Unlike the group filters, this one is not package-scoped. fips-core exists
 # only on master and next, and package() naming a package the workspace lacks
@@ -108,9 +110,9 @@ test-group = 'node-synthetic'
 # filter therefore serves every branch. testing/check-node-test-groups.py reads
 # only overrides that set a test-group, so it does not check this one.
 [[profile.default.overrides]]
-filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
+filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
 [[profile.ci.overrides]]
-filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
+filter = 'test(/^(node::tests::(bloom::test_bloom_filter_convergence_100_nodes|discovery::test_discovery_100_nodes|restart_dial::both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either_message_order|routing::test_routing_reachability_100_nodes|routing::test_routing_source_only_coords_100_nodes|session::test_session_100_nodes|spanning_tree::test_spanning_tree_convergence_100_nodes)|proto::routing::tests::limits::the_map_stays_bounded_when_a_sender_mints_distinct_destination_keys|proto::rekey::tests::explore::every_explored_interleaving_keeps_the_invariants_and_heals)$/)'
 slow-timeout = { period = "60s", terminate-after = 8 }

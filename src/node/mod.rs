@@ -29,6 +29,7 @@ pub(crate) mod reject;
 mod reloadable;
 pub(crate) mod session;
 pub(crate) use handlers::probe::ProbeJob;
+pub(crate) use handlers::rekey::REKEY_HANDSHAKE;
 
 pub(crate) mod stats;
 pub(crate) mod stats_history;
@@ -63,6 +64,18 @@ use self::reloadable::Reloadable;
 /// declares it there (`TLV_REKEY_OF`), which no amount of jitter on the
 /// session-age clock can perturb. See CHANGELOG.
 pub(crate) const REKEY_JITTER_SECS: i64 = 15;
+
+/// The maintenance tick: once per tick the receive loop runs its periodic
+/// work, polls every link and session rekey machine and advances probes.
+///
+/// Fixed, not configured: a link rekey initiator cuts over on the first tick
+/// after its rekey completes, and the protocol requires that within one
+/// second (FRC-1201 Section 7.4); a zero period is also not one the loop's
+/// timer accepts. It lives at the root of the node module because every
+/// reader is below it (the receive loop, the rekey and session parameter
+/// builders, the timeout and probe handlers), and the control read handle
+/// reaches it as `crate::node::TICK`.
+pub(crate) const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 use crate::cache::{CoordCache, Funding, Placed};
 use crate::hosts::HostMap;
 use crate::ipv6tun::tun::{TunError, TunOutboundTx, TunState, TunTx};
@@ -849,6 +862,12 @@ pub struct Node {
     /// test can drive the setup limiter's refill.
     #[cfg(test)]
     setup_clock: Option<fn() -> crate::time::HostInstant>,
+    /// The tick period [`Self::tick_period`] returns instead of [`TICK`],
+    /// so a test can stop the receive loop ticking again after its first
+    /// tick. Only the loop's interval reads it; the rekey, probe and timeout
+    /// bounds derived from the tick stay at [`TICK`].
+    #[cfg(test)]
+    test_tick: Option<std::time::Duration>,
     /// Budget bounding the routing errors one authenticated link peer can
     /// induce this node to emit. Keyed on the link peer because that is the
     /// only value at the emission point a sender cannot mint; the
@@ -910,12 +929,6 @@ pub struct Node {
     estimated_mesh_size: Option<u64>,
     /// Timestamp of last mesh size log emission.
     last_mesh_size_log: Option<std::time::Instant>,
-
-    // === Bloom Self-Plausibility ===
-    /// Rate-limit state for the held-filter WARN. Fires at most once per
-    /// 60s globally when an outgoing FilterAnnounce is held because its
-    /// FPR is above the v1 acceptance cap.
-    last_self_warn: Option<std::time::Instant>,
 
     // === FilterAnnounce sequence ===
     /// Random offset and start instant from which a new peer's first
@@ -1038,7 +1051,12 @@ pub(crate) fn adapter_settings(config: &Config) -> crate::ipv6tun::config::Setti
 
 impl Node {
     /// Create a new node from configuration.
-    pub fn new(config: Config) -> Result<Self, NodeError> {
+    ///
+    /// Values outside their protocol bounds are brought to them first, with
+    /// a warning, so validation sees the values the node runs with; see
+    /// `Config::apply_floors`.
+    pub fn new(mut config: Config) -> Result<Self, NodeError> {
+        config.apply_floors();
         config.validate()?;
         let identity = config.create_identity()?;
         let node_addr = *identity.node_addr();
@@ -1074,7 +1092,7 @@ impl Node {
 
         let coord_cache = CoordCache::new(
             config.node.cache.coord_size,
-            config.node.cache.coord_ttl_secs * 1000,
+            config.node.cache.coord_ttl() * 1000,
         );
         let msg1_rate_limiter = build_msg1_rate_limiter(&config);
         let setup_rate_limiter = build_setup_rate_limiter(&config);
@@ -1178,6 +1196,8 @@ impl Node {
             setup_rate_limiter,
             #[cfg(test)]
             setup_clock: None,
+            #[cfg(test)]
+            test_tick: None,
             peer_error_budget: PeerBudget::new(),
             coord_hint_budget: PeerBudget::coord_hints(),
             routing: Router::new(),
@@ -1204,7 +1224,6 @@ impl Node {
             last_congestion_log: None,
             estimated_mesh_size: None,
             last_mesh_size_log: None,
-            last_self_warn: None,
             seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
@@ -1227,9 +1246,12 @@ impl Node {
 
     /// Create a node with a specific identity.
     ///
-    /// This constructor validates cross-field config invariants before
-    /// constructing the node, same as [`Node::new`].
-    pub fn with_identity(identity: Identity, config: Config) -> Result<Self, NodeError> {
+    /// This constructor brings values to their protocol bounds, with a
+    /// warning, and then validates cross-field config invariants before
+    /// constructing the node, same as [`Node::new`]; see
+    /// `Config::apply_floors`.
+    pub fn with_identity(identity: Identity, mut config: Config) -> Result<Self, NodeError> {
+        config.apply_floors();
         config.validate()?;
         let node_addr = *identity.node_addr();
 
@@ -1262,7 +1284,7 @@ impl Node {
 
         let coord_cache = CoordCache::new(
             config.node.cache.coord_size,
-            config.node.cache.coord_ttl_secs * 1000,
+            config.node.cache.coord_ttl() * 1000,
         );
         let msg1_rate_limiter = build_msg1_rate_limiter(&config);
         let setup_rate_limiter = build_setup_rate_limiter(&config);
@@ -1363,6 +1385,8 @@ impl Node {
             setup_rate_limiter,
             #[cfg(test)]
             setup_clock: None,
+            #[cfg(test)]
+            test_tick: None,
             peer_error_budget: PeerBudget::new(),
             coord_hint_budget: PeerBudget::coord_hints(),
             routing: Router::new(),
@@ -1386,7 +1410,6 @@ impl Node {
             last_congestion_log: None,
             estimated_mesh_size: None,
             last_mesh_size_log: None,
-            last_self_warn: None,
             seq_origin: bloom::new_seq_origin(),
             peer_aliases: HashMap::new(),
             peer_acl,
@@ -1849,6 +1872,16 @@ impl Node {
     /// Get the configuration.
     pub fn config(&self) -> &Config {
         self.context.config.as_ref()
+    }
+
+    /// The receive loop's tick period: [`TICK`], or in tests the period a
+    /// test set in `test_tick`.
+    fn tick_period(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(period) = self.test_tick {
+            return period;
+        }
+        TICK
     }
 
     /// Mutate the shared immutable context by building a fresh
@@ -2544,9 +2577,10 @@ impl Node {
             })
             .collect();
         // Uptree filter metrics: the last filter actually sent to the tree
-        // parent (`record_sent_filter`), which is what the parent currently
-        // holds for us. `None` for a root node (nothing sent uptree) or before
-        // the first announce. The estimate is this node's whole subtree
+        // parent (`record_sent_filter`). A parent whose cap that filter
+        // exceeds discards it and keeps the one it accepted before. `None`
+        // for a root node (nothing sent uptree) or before the first
+        // announce. The estimate is this node's whole subtree
         // (split-horizon), not the mesh.
         let (uptree_fill_ratio, uptree_estimated_count) = if tree.is_root() {
             (None, None)
@@ -3990,10 +4024,13 @@ impl Node {
 
     /// Write one unauthenticated coordinate hint, counting the outcome.
     ///
-    /// Every production hint write goes through here, so the precedence rule
-    /// has exactly one enforcement point and the counters have exactly one
-    /// increment site. The verified path is deliberately not routed through
-    /// this: a caller that has checked a proof calls
+    /// Every production hint write goes through here or through
+    /// [`Node::insert_stated`], and both through `write_hint`, so the
+    /// foreign-root refusal has exactly one enforcement point and the
+    /// counters have exactly one increment site. A hint written here never
+    /// displaces a live verified entry; only `insert_stated` asks the cache
+    /// for the exemption. The verified path is deliberately not routed
+    /// through this: a caller that has checked a proof calls
     /// `CoordCache::insert_verified` directly and says so.
     ///
     /// **Foreign root: refused.** A coordinate under a root other than ours
@@ -4021,13 +4058,54 @@ impl Node {
         now_ms: u64,
         funding: Funding,
     ) -> Option<Placed> {
+        self.write_hint(addr, coords, now_ms, funding, false)
+    }
+
+    /// Write the coordinates a session peer states for itself, under its
+    /// address `peer`, from a message of the session that has authenticated:
+    /// the `SessionAck` that completes this node's first handshake, or an
+    /// established message.
+    ///
+    /// Unlike [`Node::insert_coord_hint`], the write replaces a live verified
+    /// entry whose coordinates differ (`CoordCache::insert_stated`): when the
+    /// peer has moved in the tree, its own statement is newer than this
+    /// node's lookup. Coordinates that do not begin with `peer` yield to a
+    /// verified entry as any hint does.
+    ///
+    /// Not charged to a link peer: the key is the session's peer, so a
+    /// session's writes touch one entry, and sessions are bounded by
+    /// admission.
+    pub(in crate::node) fn insert_stated(
+        &mut self,
+        peer: NodeAddr,
+        coords: TreeCoordinate,
+        now_ms: u64,
+    ) -> Option<Placed> {
+        self.write_hint(peer, coords, now_ms, Funding::Uncharged, true)
+    }
+
+    /// The one write path for hints: the foreign-root refusal, the cache
+    /// write (`stated` choosing `CoordCache::insert_stated` over
+    /// `CoordCache::insert_funded`) and the counters.
+    fn write_hint(
+        &mut self,
+        addr: NodeAddr,
+        coords: TreeCoordinate,
+        now_ms: u64,
+        funding: Funding,
+        stated: bool,
+    ) -> Option<Placed> {
         if coords.root_id() != self.tree_state.my_coords().root_id() {
             self.metrics().forwarding.record_warm_foreign_root();
             return None;
         }
-        let placed = self
-            .coord_cache
-            .insert_funded(addr, coords, now_ms, funding);
+        let placed = if stated {
+            self.coord_cache
+                .insert_stated(addr, coords, now_ms, funding)
+        } else {
+            self.coord_cache
+                .insert_funded(addr, coords, now_ms, funding)
+        };
         if placed.unfunded {
             self.metrics().forwarding.record_hint_unfunded();
         } else {

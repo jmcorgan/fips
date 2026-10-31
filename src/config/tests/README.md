@@ -14,6 +14,12 @@ that file and can reach its private items.
   under `LoadLog::hold` (`loadlog.rs`), as the daemon's does, so the test
   also checks that the warning is held during the load and arrives when the
   held log is replayed.
+- `tick_setting.rs`: tests for the removed `node.tick_interval_secs` key,
+  in the same shape as `rekey_switch.rs`, whose `load_capturing` helper it
+  uses: a file that still sets it loads, any value is ignored and never
+  written back, and one warning names it and says the tick runs once a
+  second. A layered load whose first file sets it also loads, and the later
+  file's values apply.
 - `buffers.rs`: tests for the internal buffer sizes in `Config::validate`
   (`mod.rs`): the floor of 1 on `node.buffers.host_channel`, and its default
   for a file that does not name it.
@@ -37,9 +43,34 @@ that file and can reach its private items.
   which has only parsed values, the TUN turns on but not off and
   `dns.enabled` is always taken. Each optional field is replaced only when a
   later file sets one.
+- `signal_ttl_floor.rs`, `attempt_timeout_floor.rs` and
+  `offer_limit_floors.rs`: tests that a node built from a configuration
+  with a Nostr rendezvous setting below its protocol floor runs at the
+  floor: `signal_ttl_secs` at 120 s, `attempt_timeout_secs` at 10 s,
+  `max_concurrent_incoming_offers` at 16 and `max_concurrent_offers_per_npub`
+  at 4, a per-sender limit of 0 included; that each at or above its floor is
+  kept; and that a signal lifetime raised to 120 s is refused by the
+  replay-window check when `replay_window_secs` is not above 240 s.
+- `floors.rs`: tests for `Config::apply_floors` (`floors.rs`): a value
+  outside its protocol bound runs at the bound with one warning, target
+  `fips::config`, naming the key, the configured value and the value used; a
+  value inside it, and every shipped default, is kept without a warning; a
+  second call changes nothing; and `Node::with_identity` applies the bounds
+  as `Node::new` does. The bloom acceptance cap, a float, has its own tests:
+  a cap outside `[0.20, 1.0)` (below 0.20, 1.0 or more, or NaN) runs at
+  0.20 with one warning, and a cap inside it is left alone with none. Also
+  the test-only `node.cache.test_coord_ttl_secs`:
+  it is written back only when set, survives layering through
+  `load_from_paths` and loads through `load_file`, is used by
+  `CacheConfig::coord_ttl` only in a `test-overrides` build, and is kept with
+  its warning on every `apply_floors` call. `floors.rs` has no inline test
+  block, so it declares this file as its `mod tests`, and the tests are
+  `floors::tests`.
 
-`mod.rs` declares these as `mod udp_interface_tests`, `mod rekey_switch`,
-`mod buffers`, `mod grants`, `mod sockets` and `mod merge`, not as
+`mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
+`mod tick_setting`, `mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
+`mod signal_ttl_floor`, `mod attempt_timeout_floor` and
+`mod offer_limit_floors`, not as
 `mod tests`, because `mod.rs` still carries an inline `mod tests` block of
 that name. That block, and the inline blocks in the other files here,
 predate the rule that unit tests live in this directory; moving them is a

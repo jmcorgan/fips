@@ -1830,9 +1830,10 @@ async fn signal_events_use_current_timestamps() {
 /// make every source rank `RemappedPort` and the tests would stop testing what
 /// they are for.
 ///
-/// **Coverage gap**: on macOS and Windows nothing exercises `run_punch_attempt`
-/// end to end. The ranking decision itself is covered on every platform by the
-/// `rank_punch_source_*` unit tests above, which take no sockets.
+/// **Coverage gap**: on macOS and Windows the only end-to-end exercise of
+/// `run_punch_attempt` is the closed-target test in
+/// `tests/punch_recv_error.rs`; the source-ranking paths are covered there
+/// only by the `rank_punch_source_*` unit tests above, which take no sockets.
 /// A loopback socket bound on `host`, non-blocking as both production call
 /// sites leave it, since `run_punch_attempt` hands it straight to
 /// `UdpSocket::from_std`.
@@ -2958,3 +2959,7 @@ fn an_event_of_another_kind_is_not_read_as_an_inbox_relay_list() {
         .unwrap();
     assert!(inbox_relays(&event).is_empty());
 }
+
+mod notify_channels;
+mod punch_recv_error;
+mod signal_lag;

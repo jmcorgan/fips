@@ -475,8 +475,6 @@ pub struct BloomStatsSnapshot {
     pub size_changes: u64,
     pub total_compressed_bytes: u64,
     pub total_raw_bytes: u64,
-    /// Outgoing announces held because the filter was above the v1 cap.
-    pub held_over_cap: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

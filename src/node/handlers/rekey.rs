@@ -12,10 +12,10 @@
 //! from a session handshake message or frame are carried out here.
 
 use crate::NodeAddr;
-use crate::node::Node;
 use crate::node::diag::{self, OrNone};
 use crate::node::reject::{RejectReason, SessionReject};
 use crate::node::session::{SessionInstant, SessionOutput, SessionOutputs};
+use crate::node::{Node, TICK};
 use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
 use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
@@ -56,7 +56,7 @@ pub(in crate::node) fn link_silence_ms(node: &crate::config::NodeConfig) -> u64 
         .max(node.link_dead_timeout_secs)
         .saturating_mul(1000);
     ladder_ms(&node.rate_limit)
-        .saturating_add(node.tick_interval_secs.saturating_mul(3000))
+        .saturating_add(u64::try_from(TICK.saturating_mul(3).as_millis()).unwrap_or(u64::MAX))
         .saturating_add(after_ms)
 }
 
@@ -65,13 +65,19 @@ pub(in crate::node) fn link_silence_ms(node: &crate::config::NodeConfig) -> u64 
 /// delivered one.
 ///
 /// Set to `link_silence_ms`, so a connection carrying a link the node would
-/// keep is never dropped by it, whatever the heartbeat, link-dead, tick and
-/// resend settings are; a connection carrying no live link is reclaimed.
+/// keep is never dropped by it, whatever the heartbeat, link-dead and resend
+/// settings are; a connection carrying no live link is reclaimed.
 pub(in crate::node) fn inbound_idle_timeout(
     node: &crate::config::NodeConfig,
 ) -> std::time::Duration {
     std::time::Duration::from_millis(link_silence_ms(node))
 }
+
+/// The most seconds a link rekey attempt's handshake term may run, whatever
+/// `node.rate_limit.handshake_timeout_secs` says: a peer holding a pending
+/// rekey assumes an unanswered attempt is given up within one check of this
+/// (FRC-1201 Section 5.8).
+pub(crate) const REKEY_HANDSHAKE: u64 = 30;
 
 /// The parameters each link's rekey machine is built with, from the node's
 /// configuration.
@@ -84,11 +90,12 @@ pub(in crate::node) fn inbound_idle_timeout(
 /// (`node.rate_limit.handshake_max_resends`) sets the rungs its msg1 may be
 /// resent at, 1, 3, 7, 15 and 31 s at the defaults, of which only those
 /// before the attempt's end are sent: the attempt ends at the smaller of
-/// one tick after the last rung and the handshake timeout, 30 s at the
-/// defaults, and the next waits a back-off; the tick and the handshake
-/// timeout bound the timers; the pending hold outlasts the drain ceiling, a
-/// peer's retry after a lost answer and the link-silence bound
-/// ([`Config::with_hold`]). The resend interval and backoff do not shape a
+/// one tick after the last rung and the handshake timeout capped at
+/// [`REKEY_HANDSHAKE`], 30 s at the defaults, and the next waits a
+/// back-off; the tick and the capped handshake timeout bound every timer;
+/// the pending hold outlasts the drain ceiling, a peer's retry after a lost
+/// answer and the link-silence bound ([`Config::with_hold`]), and is the
+/// one value computed from the uncapped timeout. The resend interval and backoff do not shape a
 /// link rekey's msg1 ladder. A time trigger below the jitter plus the 30 s
 /// link age at which a peer answers a msg1 as a rekey is raised to that
 /// sum, and timers the machine refuses fall back to the link defaults,
@@ -99,11 +106,21 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
     let base = Config::fmp();
     let configured = Config {
         handshake: Duration::from_secs(node.rate_limit.handshake_timeout_secs),
-        check: Duration::from_secs(node.tick_interval_secs),
+        check: TICK,
         resends: u8::try_from(node.rate_limit.handshake_max_resends).unwrap_or(u8::MAX),
         ..base
     }
     .with_hold(Duration::from_millis(link_silence_ms(node)));
+    // The hold is computed from the configured timeout before the cap: a
+    // peer's retry after a lost answer can run to its own configured
+    // timeout, which a peer on an older release does not cap, and holding
+    // longer is always allowed.
+    let configured = Config {
+        handshake: configured
+            .handshake
+            .min(Duration::from_secs(REKEY_HANDSHAKE)),
+        ..configured
+    };
     let timers = match Params::new(configured) {
         Ok(_) => configured,
         Err(e) => {
@@ -111,8 +128,7 @@ pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
                 warn!(
                     error = %e,
                     handshake_timeout_secs = node.rate_limit.handshake_timeout_secs,
-                    tick_interval_secs = node.tick_interval_secs,
-                    "Link rekey timers use the defaults: the configured handshake timeout and tick do not fit"
+                    "Link rekey timers use the defaults: the configured handshake timeout does not fit the 1 s tick"
                 );
             }
             base

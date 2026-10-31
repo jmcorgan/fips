@@ -793,9 +793,12 @@ impl Silence {
 /// without MMP state, which is never declared dead on time.
 ///
 /// The MMP receiver counts only frames under the current session, and a
-/// cutover resets it. Frames the peer still seals under the previous
-/// session while the drain holds it count for liveness too, so the link
-/// machine's last frame under any held session bounds the silence as well.
+/// cutover or a cross-connection move resets it. Frames the peer still
+/// seals under the previous session while the drain holds it count for
+/// liveness too, so the link machine's last frame under any held session
+/// bounds the silence as well. A move keeps the replaced session's start
+/// and carries that last frame into the new machine, so a moved link is not
+/// taken for silent before the peer's first frame on the new session.
 fn silence(peer: &ActivePeer, now_ms: u64) -> Option<Silence> {
     let mmp = peer.mmp()?;
     let own = match mmp.receiver.last_recv_ms() {

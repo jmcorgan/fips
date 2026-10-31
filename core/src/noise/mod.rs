@@ -33,6 +33,9 @@ pub use cipher::{
 pub use cipher::{clear_slot, take_cleared};
 pub use fork::{Fork, ForkRead};
 pub use handshake::HandshakeState;
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub use handshake::dh_ops;
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;
 

@@ -14,6 +14,9 @@ Unit tests for `core/src/noise`.
   the original, and an un-keyed state hands out none), and
   `test_cipher_state_output_is_pinned`, which pins `CipherState`'s
   transport bytes and so checks whichever AEAD backend the build uses.
+  The tests under "Cost of reading an XX msg2" count DHs with `dh_ops`:
+  a msg2 refused at its encrypted static key's AEAD costs one DH (`ee`),
+  a genuine msg2 two (`ee` and `es`), and an invalid ephemeral none.
   `HandshakeState` is named through `crate::testutil::TestEntropy`;
   `test_handshake_ephemeral_draws_from_the_entropy_source` uses
   `FixedEntropy` instead, to show the ephemeral key comes from the

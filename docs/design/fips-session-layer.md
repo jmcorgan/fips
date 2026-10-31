@@ -516,8 +516,14 @@ transit, CP-flagged data packets, LookupResponse — write to the same cache.
   and one that is not paid for keeps the old coordinates; making an entry
   shallower does not lower its charge, so a forged shallow rewrite
   does not make the honest correction cost anything. Writes this node's own
-  handshakes make (the SessionAck's source coordinates) and verified lookup
-  results are not charged. The `coord_hint_unfunded` counter counts unpaid
+  handshakes make (the SessionAck's source coordinates), the endpoint's
+  write of an established message's source coordinates once the message
+  authenticates, and verified lookup results are not charged. Those two
+  endpoint writes are the session peer's statement of its own coordinates:
+  when the coordinates begin with the peer's address and differ from a live
+  verified entry, they replace it, since a peer that has moved knows its
+  position better than a lookup made before the move; every other hint
+  yields to a verified entry. The `coord_hint_unfunded` counter counts unpaid
   writes
 - **Invalidation on parent change**: When the local node's tree position
   changes, it drops cached coordinates that route through this node (parent

@@ -19,6 +19,7 @@
 //!     nsec: "nsec1..."
 //! ```
 
+mod floors;
 #[cfg(target_os = "linux")]
 mod gateway;
 mod loadlog;
@@ -1749,6 +1750,21 @@ fn warn_rekeyswitch(enabled: bool) {
     }
 }
 
+/// Warn that a config file set the removed `node.tick_interval_secs`
+/// setting.
+///
+/// The key is ignored rather than refused, because a file written for an
+/// older release, or one shared with nodes still running one, must keep
+/// loading. One text for every value, 1 included: the key is gone whatever
+/// it says.
+fn warn_tick(secs: u64) {
+    tracing::warn!(
+        target: "fips::config",
+        "`node.tick_interval_secs: {secs}` is removed and ignored: the \
+         maintenance tick runs once a second. Delete the key from the config."
+    );
+}
+
 impl Config {
     /// Create a new empty configuration.
     pub fn new() -> Self {
@@ -1901,9 +1917,16 @@ impl Config {
     /// that `load_from_paths` assembles from several files is built from
     /// values each file already folded, and carries no `discovery` key, so it
     /// is not folded again.
+    ///
+    /// It also takes the removed `node.rekey.enabled` and
+    /// `node.tick_interval_secs` keys, which apply nothing, and warns that
+    /// each is ignored.
     pub(crate) fn normalize_deprecated_keys(&mut self) {
         if let Some(enabled) = self.node.rekey.legacy_enabled.take() {
             warn_rekeyswitch(enabled);
+        }
+        if let Some(secs) = self.node.legacy_tick.take() {
+            warn_tick(secs);
         }
         let Some(compat) = self.node.discovery.take() else {
             return;
@@ -2490,14 +2513,16 @@ impl Config {
                 "`node.rendezvous.nostr.signal_ttl_secs` is {}, which with {skew_secs}s of clock-skew grace on each side makes a traversal signal acceptable over a {freshness_window_secs}s window, \
                  but `node.rendezvous.nostr.replay_window_secs` is {}. \
                  The freshness window must be strictly narrower than the replay window, or a session id evicted from the replay cache is still fresh enough to be accepted a second time. \
-                 Raise `replay_window_secs` above {freshness_window_secs}, or lower `signal_ttl_secs`.",
+                 Raise `replay_window_secs` above {freshness_window_secs}; `signal_ttl_secs` runs at no less than 120 whatever is configured, so lowering it below 120 does not help.",
                 nostr.signal_ttl_secs, nostr.replay_window_secs
             )));
         }
 
         // Zero here is the same trap as `established_handshake_burst`: it
-        // reads as "no limit" and in fact refuses every inbound offer. The
-        // upper bound exists because the per-npub semaphore is built lazily
+        // reads as "no limit" and in fact refuses every inbound offer. A node
+        // raises any value below 4 before this check runs
+        // (`Config::apply_floors`), so only a direct caller of `validate`
+        // meets the zero refusal. The upper bound exists because the per-npub semaphore is built lazily
         // inside the intake path rather than at startup, so an oversized
         // value would panic there instead of failing loudly at load.
         if nostr.max_concurrent_offers_per_npub == 0 {
@@ -2569,6 +2594,10 @@ mod udp_interface_tests;
 #[path = "tests/rekey_switch.rs"]
 mod rekey_switch;
 
+#[cfg(test)]
+#[path = "tests/tick_setting.rs"]
+mod tick_setting;
+
 /// Refuse a `node.native_api.grants` list that names no single principal
 /// for an entry, grants nothing in one, grants a port outside 256 to 1023,
 /// grants a port twice, or, while the TUN is enabled, grants port 256,
@@ -2626,6 +2655,18 @@ mod grants;
 #[cfg(test)]
 #[path = "tests/merge.rs"]
 mod merge;
+
+#[cfg(test)]
+#[path = "tests/signal_ttl_floor.rs"]
+mod signal_ttl_floor;
+
+#[cfg(test)]
+#[path = "tests/attempt_timeout_floor.rs"]
+mod attempt_timeout_floor;
+
+#[cfg(test)]
+#[path = "tests/offer_limit_floors.rs"]
+mod offer_limit_floors;
 
 #[cfg(test)]
 mod tests {
@@ -5416,16 +5457,6 @@ node:
             err.to_string().contains("max_concurrent_offers_per_npub"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn test_validate_per_npub_offer_allowance_of_one_accepted() {
-        let mut config = Config::default();
-        config.node.rendezvous.nostr.max_concurrent_offers_per_npub = 1;
-
-        config
-            .validate()
-            .expect("an allowance of one offer per sender is restrictive but well defined");
     }
 
     #[test]

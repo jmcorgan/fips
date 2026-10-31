@@ -149,7 +149,7 @@ report a per-stage verdict so a partial failure localizes itself.
 | -------- | ----------- |
 | `target` | npub (bech32) or hostname from `/etc/fips/hosts`. |
 | `--json` | Emit the report as JSON instead of human-readable text. |
-| `--timeout <secs>` | Client-side ceiling. Defaults to the budget the daemon computed, which scales with its tick interval. |
+| `--timeout <secs>` | Client-side ceiling. Defaults to the budget the daemon computed. |
 
 The stages are:
 
@@ -296,7 +296,7 @@ with `-1`, `-2` and so on appended if a capture in the same second
 already claimed the name. The capture file is created private to its
 owner and is never written over an existing file.
 It opens with a `#`-prefixed header block (node npub, build version,
-platform, configured tick period, flush interval, byte cap, start
+platform, tick period, flush interval, byte cap, start
 time), then a tab-separated column header, then one row per measured
 step per flush interval:
 

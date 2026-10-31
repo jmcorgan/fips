@@ -882,15 +882,54 @@ with v0.5.x or earlier peers.
   is still the oldest Debian-family distribution, which is no longer the oldest
   distribution outright.
 
+#### Identity and config
+
+- A configuration value below a protocol floor now runs at the floor, with
+  a warning at start naming the key, the configured value and the value
+  used: `node.link_dead_timeout_secs` at least 30,
+  `node.cache.coord_ttl_secs` at least 300, and under
+  `node.rendezvous.nostr`, `signal_ttl_secs` at least 120,
+  `attempt_timeout_secs` at least 10, `max_concurrent_incoming_offers` at
+  least 16 and `max_concurrent_offers_per_npub` at least 4. Before, each
+  was used as configured, and a `max_concurrent_offers_per_npub` of 0
+  stopped the node starting. The start-up check that
+  `node.rendezvous.nostr.replay_window_secs` exceeds the signal lifetime
+  plus 60 s of clock-skew grace on each side now uses the lifetime the node
+  runs with, so a configuration that passed it only because its
+  `signal_ttl_secs` was below 120 is now refused: set `replay_window_secs`
+  above 240.
+- A handshake to a node this node is not configured to dial, at an address
+  an mDNS advert gave, now resends its msg1 at most 5 times, six msg1 in
+  all, whatever `node.rate_limit.handshake_max_resends` says, and a value
+  above 5 logs a warning at start. Dials to configured peers keep the
+  configured count. A link rekey attempt now ends within 30 s: above 30,
+  every link rekey timer derived from
+  `node.rate_limit.handshake_timeout_secs` runs at its 30 s value, except
+  the hold kept for a peer's pending rekey, and a warning at start says so.
+  Initial link handshakes and session handshakes still use the configured
+  timeout. Before, a node configured with more resends or a longer timeout
+  went past the limits the protocol sets for both.
+- `node.bloom.update_debounce_ms` below 500 now runs as 500, and
+  `node.bloom.max_inbound_fpr` below 0.20, at or above 1.0, or NaN now runs
+  as 0.20, the default. Each replacement logs a warning at startup naming
+  the key, the configured value and the value used. Before, both were used
+  as configured: a debounce under 500 ms could send a peer two filter
+  updates closer together than the protocol allows, a cap under 0.20
+  discarded conformant peers' filters, and a cap of 1.0 or more turned the
+  filter-poisoning check off. A config that still pins the cap at `0.05` or
+  `0.10`, as earlier release notes suggested for rolling upgrades, now runs
+  at `0.20`.
+
 #### Routing and discovery
 
-- A node no longer sends an outgoing bloom filter whose false-positive rate
-  is above 0.20, the cap every v1 receiver applies. It holds the filter,
-  retries at the debounce pace and counts each hold in the bloom stats'
-  `held_over_cap`. Before, it sent the filter, the receiver rejected it, and
-  the sender's record of what the peer held was wrong from then on. A
-  receiver whose `node.bloom.max_inbound_fpr` is set above 0.20 no longer
-  receives filters between 0.20 and its own cap.
+- A node sends a peer its outgoing bloom filter whatever its false-positive
+  rate, as 0.5.3 did, and the receiver's `node.bloom.max_inbound_fpr` alone
+  decides whether the filter is kept. The node no longer logs a warning
+  when its own outgoing filter is above its cap. Earlier 0.5.4 development
+  builds held a filter above 0.20 instead, so a peer whose cap was set
+  above 0.20 stopped receiving their reachability changes; that hold is
+  removed, with the `held_over_cap` key they added under `stats` in
+  `fipsctl show bloom` and the control socket's `show_bloom` response.
 
 #### Transports
 
@@ -939,6 +978,14 @@ with v0.5.x or earlier peers.
   key is ignored and the daemon logs a warning naming it at each start, so
   delete it from the config. Nothing on the wire changes. **Source-breaking
   for consumers of the library crate**: `RekeyConfig::enabled` is gone.
+
+- The `node.tick_interval_secs` setting. The maintenance tick now runs
+  once a second on every node. A longer tick made a link rekey initiator
+  cut over later than the protocol allows, and 0 made the receive loop
+  panic as it started. A config that still sets the key loads: the key is
+  ignored and the daemon logs a warning naming it at each start, so delete
+  it from the config. **Source-breaking for consumers of the library
+  crate**: `NodeConfig::tick_interval_secs` is gone.
 
 - **Source-breaking for consumers of the library crate**: `ActivePeer`'s
   session-slot and rekey methods are no longer public. The methods that read
@@ -1144,11 +1191,10 @@ with v0.5.x or earlier peers.
   the old keys no longer extend that, so `show_sessions` reports a session
   as draining for longer on the node that answered a rekey and for a fixed
   10 seconds on the one that started it. The handshake timeout and resend
-  count settings (`node.rate_limit.handshake_timeout_secs`,
-  `handshake_max_resends`, and `node.tick_interval_secs`) shape these
-  times, and the resend interval and backoff no longer apply to that
-  message; a setting under which the timeout is less than 3 seconds above
-  the tick leaves them at their defaults, with a warning in the log. No
+  count settings (`node.rate_limit.handshake_timeout_secs` and
+  `handshake_max_resends`) shape these times, and the resend interval and
+  backoff no longer apply to that message; a handshake timeout under 4
+  seconds leaves them at their defaults, with a warning in the log. No
   message format changes.
 
 - An end-to-end session's metrics no longer go stale after it rekeys.
@@ -1532,6 +1578,13 @@ with v0.5.x or earlier peers.
   folder's `fips.exe` after an install. The service commands it, the script
   and the ZIP README print are now `sc.exe`: in PowerShell a bare `sc` is the
   Set-Content alias.
+- A Nostr NAT traversal no longer gives up within milliseconds when one of
+  its punch targets answers with an ICMP port-unreachable. The punch attempt
+  keeps listening through a failed receive until it adopts an address or
+  its timeout passes, and the traversal socket no longer reports a
+  port-unreachable as a failed receive. A STUN server whose port is closed
+  is now waited out for its timeout before the next one is tried, as on
+  other platforms.
 
 #### OpenWrt
 
@@ -1576,8 +1629,27 @@ with v0.5.x or earlier peers.
   reply to a LAN query with a forged mesh (`fd00::/8`) source into the mesh.
   LAN clients with ULA addresses are still answered.
 
+#### Peer and link state
+
+- When crossed dials move a link onto the other session, the link's MMP
+  receive state starts again with the new session, as at a rekey. Before,
+  until the new session's frame counter passed the old one, receiver
+  reports sent to the peer carried the replaced session's highest counter
+  and counted every new frame as reordered, and the peer's receiver reports
+  on the new session were dropped as stale, so the link's round-trip, loss
+  and ETX estimates stopped updating.
+
 #### Sessions and rekey
 
+- A node now follows a session peer that moves in the tree: the
+  coordinates the peer states for itself, in its SessionAck or in an
+  authenticated message of the session, replace the ones the node's own
+  lookup verified. Before, for up to five minutes after a lookup, datagrams
+  to a destination that had moved went toward its former position and were
+  lost. The destination of a session message also caches the message's
+  coordinates only once it authenticates, and never under its own address.
+  Before, any datagram naming a source could place coordinates for that
+  source in the destination's cache without a session or a key.
 - After a path MTU decrease, a destination's later report of the value it
   had been raising towards is accepted again after the usual three reports.
   Before, the estimate stayed at the lowered value.
@@ -1929,6 +2001,11 @@ with v0.5.x or earlier peers.
   `policy`, `configured_only` included, and dials the offerer when the hole
   punch succeeds. `accept_connections: false` does not stop that link; only
   the peer ACL does, and the offer is still answered and punched.
+- With Nostr rendezvous enabled, inbound traversal offers and answers have
+  a notification channel of their own. Anyone may publish adverts to the
+  advert relays, and a burst of about 2,048 arriving faster than the node
+  read them pushed a queued offer or answer out unread, so its traversal
+  waited out its timeout.
 
 #### OpenWrt
 

@@ -53,7 +53,7 @@ pub(super) struct HeldMsg2Pair {
 /// queue. Node 0 rekeys on time and node 1 only ever responds. Neither holds
 /// a pending session when this returns: on the XX rekey node 0 holds one once
 /// it reads the msg2, and node 1 once it reads node 0's msg3.
-async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
+pub(super) async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
     use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG2};
 
     const REKEY_AFTER_SECS: u64 = 60;
@@ -109,7 +109,7 @@ async fn rekey_pair_with_held_msg2() -> HeldMsg2Pair {
 /// Complete the held rekey without a cutover: node 0 reads the msg2, holds
 /// its pending session and sends the msg3, and node 1 reads the msg3 and
 /// holds its own.
-async fn complete_held(nodes: &mut [TestNode], held_msg2: ReceivedPacket) {
+pub(super) async fn complete_held(nodes: &mut [TestNode], held_msg2: ReceivedPacket) {
     nodes[0].node.handle_msg2(held_msg2).await;
     assert_eq!(
         process_available_packets(&mut nodes[1..]).await,

@@ -1,4 +1,4 @@
-# Staged binaries (copied from target/release/ for test runs)
+# Staged binaries (copied from target/integration/ for test runs)
 fips
 fipsctl
 fipstop

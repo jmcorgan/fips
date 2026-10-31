@@ -180,13 +180,6 @@ impl BloomState {
         self.pending_updates.remove(&peer_id);
     }
 
-    /// Defer a pending update to a peer without sending it: stamp the
-    /// attempt so the next one waits out the debounce, and keep the peer
-    /// pending.
-    pub fn defer_update(&mut self, peer_id: NodeAddr, current_time_ms: u64) {
-        self.last_update_sent.insert(peer_id, current_time_ms);
-    }
-
     /// Read back the time of the last update sent to a peer, if any.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn last_update_sent(&self, peer_id: &NodeAddr) -> Option<u64> {
@@ -224,10 +217,11 @@ impl BloomState {
 
     /// Read back the last outgoing filter actually sent to a peer, if any.
     ///
-    /// Returns the filter recorded by [`record_sent_filter`](Self::record_sent_filter)
-    /// — i.e. what the peer currently holds for us — or `None` when no announce
-    /// has been sent to that peer yet (or the node is root, with no parent to
-    /// send to).
+    /// Returns the filter recorded by [`record_sent_filter`](Self::record_sent_filter),
+    /// or `None` when no announce has been sent to that peer yet (or the node
+    /// is root, with no parent to send to). A peer whose cap the filter
+    /// exceeds discards it and keeps the one it accepted before, so this is
+    /// not always what the peer holds.
     pub fn last_sent_filter(&self, peer_id: &NodeAddr) -> Option<&BloomFilter> {
         self.last_sent_filters.get(peer_id)
     }

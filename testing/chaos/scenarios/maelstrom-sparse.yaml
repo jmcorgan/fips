@@ -2,8 +2,8 @@
 #
 # Uses random geometric graph with low radius to produce sparse connectivity
 # (~3-4 peers per node), forcing multi-hop routing and heavy discovery usage.
-# The short coord cache TTL (10s) ensures transit-warmed entries expire
-# quickly, requiring rediscovery.
+# The short coord cache TTL (10s, the test-only test_coord_ttl_secs) ensures
+# transit-warmed entries expire quickly, requiring rediscovery.
 #
 # Default: 50 nodes. Override with --nodes flag.
 
@@ -76,7 +76,9 @@ logging:
   rust_log: "debug"
   output_dir: "./sim-results"
 
+# Test-only key: the integration build (testing/scripts/build.sh) honours it;
+# a daemon built otherwise ignores it with a warning and keeps entries 300 s.
 fips_overrides:
   node:
     cache:
-      coord_ttl_secs: 10
+      test_coord_ttl_secs: 10

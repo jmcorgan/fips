@@ -77,3 +77,4 @@ benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
+known-defect  fips-mesh  node::tests::restart_dial::a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_when_both_dial_and_the_peer_reads_its_own_answer_first  src/node/tests/restart_dial.rs

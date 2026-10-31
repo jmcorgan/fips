@@ -18,8 +18,8 @@ root fixes it with the alias
 callers are unchanged. The root also reaches `take_cleared` and
 `clear_slot` (hidden from the docs here), `seal`, with which its session
 send paths seal a frame on a counter and key the session's rekey machine
-reserved, and, from its tests only, `open`, which is behind the
-`test-hooks` feature.
+reserved, and, from its tests only, `open` and `dh_ops`, which are
+behind the `test-hooks` feature.
 
 ## Files
 
@@ -39,7 +39,8 @@ reserved, and, from its tests only, `open`, which is behind the
 - `handshake.rs`: `HandshakeState<E>`, the XX state machine, and the
   symmetric state under it; `into_session` turns a completed handshake
   into a `NoiseSession`. The reads here run in place; a caller that may
-  be handed a forgery reads on a fork (`fork.rs`).
+  be handed a forgery reads on a fork (`fork.rs`). `dh_ops` counts the
+  DHs run on the calling thread, for tests only.
 - `fork.rs`: the `Fork` trait, a copy of a handshake made for one read,
   its implementation for `HandshakeState`, and the read-on-fork methods
   `fork_msg2` (XX msg2 at the initiator) and `fork_msg3` (XX msg3 at the

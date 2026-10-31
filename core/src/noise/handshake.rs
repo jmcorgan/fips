@@ -13,6 +13,24 @@ use secp256k1::{Keypair, PublicKey, SecretKey, ecdh::shared_secret_point};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+#[cfg(any(test, feature = "test-hooks"))]
+std::thread_local! {
+    /// DH operations run on this thread, counted by `ecdh`.
+    static DH_OPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of DH operations `HandshakeState` has run on the calling thread.
+///
+/// Tests read it before and after a handshake step to pin how many DHs the
+/// step costs. It is per thread so that tests running in parallel do not see
+/// each other's operations. The root crate's node tests read it too, through
+/// `test-hooks`.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn dh_ops() -> u64 {
+    DH_OPS.with(std::cell::Cell::get)
+}
+
 /// Symmetric state during handshake.
 ///
 /// Maintains the chaining key (ck), handshake hash (h), and current cipher.
@@ -284,6 +302,8 @@ impl<E: EntropySource> HandshakeState<E> {
     /// optimiser keeps, but a copy the compiler made before it runs, in a
     /// register or a stack slot, is not reached.
     fn ecdh(&self, our_secret: &SecretKey, their_public: &PublicKey) -> [u8; 32] {
+        #[cfg(any(test, feature = "test-hooks"))]
+        DH_OPS.with(|ops| ops.set(ops.get() + 1));
         // Get raw (x, y) coordinates (64 bytes) without any hashing
         let mut point = shared_secret_point(their_public, our_secret);
         // Hash only the x-coordinate (first 32 bytes), ignoring y/parity

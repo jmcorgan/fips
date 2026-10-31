@@ -12,7 +12,7 @@ use tempfile::TempDir;
 ///
 /// Panics if anything reaches a subscriber during the load itself: in the
 /// daemon nothing is listening then, so such an event would be lost.
-fn load_capturing(text: &str) -> (Config, crate::testutil::LogCapture) {
+pub(super) fn load_capturing(text: &str) -> (Config, crate::testutil::LogCapture) {
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().join("fips.yaml");
     fs::write(&path, text).unwrap();

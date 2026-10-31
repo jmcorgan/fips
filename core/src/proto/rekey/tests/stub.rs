@@ -1585,6 +1585,7 @@ pub(crate) fn pair_jittered<P: Stub>(
             link_since: TestInstant(now),
             started: TestInstant(now),
             peer_k: None,
+            last_rx: None,
             record: record(responder),
         };
         let me = node.local.addr();

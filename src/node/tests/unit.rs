@@ -3985,24 +3985,22 @@ fn the_inbound_idle_deadline_is_the_link_silence_bound_and_tracks_the_link_dead_
             ..Default::default()
         },
         crate::config::NodeConfig {
-            tick_interval_secs: 5,
             link_dead_timeout_secs: 10,
             ..Default::default()
         },
     ] {
         let floor = Duration::from_secs(
             node.link_dead_timeout_secs
-                .max(node.heartbeat_interval_secs)
-                + node.tick_interval_secs,
-        );
+                .max(node.heartbeat_interval_secs),
+        ) + crate::node::TICK;
         assert!(
             inbound_idle_timeout(&node) > floor,
-            "idle deadline {:?} must exceed {:?} for heartbeat {} s, link-dead {} s, tick {} s",
+            "idle deadline {:?} must exceed {:?} for heartbeat {} s, link-dead {} s, tick {:?}",
             inbound_idle_timeout(&node),
             floor,
             node.heartbeat_interval_secs,
             node.link_dead_timeout_secs,
-            node.tick_interval_secs,
+            crate::node::TICK,
         );
     }
 }
@@ -5793,7 +5791,7 @@ mod worker_liveness {
 }
 
 /// Each link's rekey machine is built with the node's rekey thresholds, its
-/// resend count, tick and handshake timeout and the pending hold; a time
+/// resend count and handshake timeout, the fixed tick and the pending hold; a time
 /// trigger below the jitter plus the link age at which a peer answers a
 /// rekey is raised to that sum, and timers the machine refuses fall back
 /// to the link defaults.
@@ -5819,8 +5817,7 @@ fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_shor
     node.rekey.after_secs = 300;
     node.rekey.after_messages = 7;
     node.rate_limit.handshake_max_resends = 3;
-    node.rate_limit.handshake_timeout_secs = 60;
-    node.tick_interval_secs = 2;
+    node.rate_limit.handshake_timeout_secs = 20;
     let config = *link_params(&node).config();
     assert_eq!(
         (
@@ -5834,14 +5831,14 @@ fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_shor
             Duration::from_secs(300),
             7,
             3,
-            Duration::from_secs(60),
-            Duration::from_secs(2)
+            Duration::from_secs(20),
+            crate::node::TICK
         ),
-        "the configured thresholds and timers reach the machine"
+        "the configured thresholds and timers, and the fixed tick, reach the machine"
     );
     assert_eq!(
         (config.floor_link, config.floor_session),
-        (Duration::from_secs(32), Duration::from_secs(32)),
+        (Duration::from_secs(31), Duration::from_secs(31)),
         "own rekeys wait one tick past the 30 s link age and the 30 s after a cutover"
     );
 
@@ -5862,6 +5859,52 @@ fn link_params_take_the_configured_thresholds_timers_and_age_floors_raise_a_shor
             Config::fmp().resends
         ),
         "timers the machine refuses fall back to the link defaults"
+    );
+}
+
+/// A link rekey attempt ends within 30 s whatever the handshake timeout: with
+/// 60 s configured, every link rekey parameter is the one 30 s gives except
+/// the pending hold, which keeps the longer term a peer's own retry may run
+/// to.
+#[test]
+fn link_params_cap_the_rekey_handshake_term_at_30_s_and_keep_only_the_pending_hold_from_a_longer_timeout()
+ {
+    use crate::node::handlers::rekey::{link_params, link_silence_ms};
+    use fips_core::proto::rekey::{Config, Params};
+
+    let with_timeout = |secs: u64| {
+        let mut node = crate::config::NodeConfig::default();
+        node.rate_limit.handshake_timeout_secs = secs;
+        node
+    };
+    let long = with_timeout(60);
+    let capped = link_params(&long);
+    let stock = link_params(&with_timeout(30));
+    assert_eq!(
+        capped.config().handshake,
+        Duration::from_secs(30),
+        "a 60 s handshake timeout reached the link rekey machine, so an unanswered attempt \
+         runs past 31 s"
+    );
+    let hold = Config {
+        handshake: Duration::from_secs(60),
+        ..*stock.config()
+    }
+    .with_hold(Duration::from_millis(link_silence_ms(&long)))
+    .hold;
+    assert_eq!(
+        capped.config().hold,
+        hold,
+        "the pending hold is computed from the configured 60 s"
+    );
+    assert_eq!(
+        capped,
+        Params::new(Config {
+            hold,
+            ..*stock.config()
+        })
+        .unwrap(),
+        "apart from the hold, 60 s configured gives exactly the parameters 30 s does"
     );
 }
 
