@@ -1730,7 +1730,16 @@ run_deb_install() {
 # and dns-resolver, with build-rpm-container.sh --no-build -- the path only the
 # release workflow takes, and the one a defect once shipped on because nothing
 # else reached it. Bounded for the same reason deb-install is.
+#
+# RPM_INSTALL_BUDGET is the harness's network budget (DNF_BUDGET in
+# testing/rpm-install/test.sh), which bounds every setup step that reaches a
+# mirror, across all four scenarios. It must stay below RPM_INSTALL_TIMEOUT by
+# the time the checks need, so a setup that runs out fails inside the harness,
+# naming the step, rather than being killed here with no verdict. It covers the
+# setup of all four scenarios and the checks of the first three, which run
+# between them; the last scenario's checks get the 600 s left.
 RPM_INSTALL_TIMEOUT=${RPM_INSTALL_TIMEOUT:-1800}
+RPM_INSTALL_BUDGET=${RPM_INSTALL_BUDGET:-1200}
 run_rpm_install() {
     if ! build_ci_deb rpm-install; then
         record "rpm-install" "$CI_DEB_RC"
@@ -1738,7 +1747,8 @@ run_rpm_install() {
     fi
     local deb="$CI_DEB_PATH" rc=0
     info "[rpm-install] Running RPM install test over the binaries in $deb"
-    timeout "$RPM_INSTALL_TIMEOUT" bash testing/rpm-install/test.sh --deb "$deb" 2>&1 || rc=$?
+    DNF_BUDGET="$RPM_INSTALL_BUDGET" timeout "$RPM_INSTALL_TIMEOUT" \
+        bash testing/rpm-install/test.sh --deb "$deb" 2>&1 || rc=$?
     if [[ $rc -eq 124 ]]; then
         echo "  ERROR: rpm-install exceeded ${RPM_INSTALL_TIMEOUT}s and was killed;" >&2
         echo "         no verdict was reached, so this is not an assertion failure." >&2
@@ -2254,6 +2264,18 @@ run_relay_verdict_test() {
     return 0
 }
 
+# Unit tests for the RPM install suite's network budget: dnf-bounded.sh's
+# deadline and retry_build's refusal of a late retry. Hermetic: dnf and the
+# build are stubbed, no containers, about ten seconds. Kept in step with the
+# ci.yml step of the same name by hand, like run_relay_verdict_test.
+run_rpm_budget_test() {
+    local rc=0
+    info "[rpm-budget] Running the RPM install network budget unit tests"
+    bash "$SCRIPT_DIR/rpm-install/budget-test.sh" || rc=$?
+    record "rpm-budget" $rc
+    return 0
+}
+
 # The package versions the packaging workflows derive for a release tag, a
 # candidate tag and a branch. A candidate must sort below its release under the
 # package manager, which the tag's -rcN does not, so the workflows map it to
@@ -2363,6 +2385,7 @@ run_guards() {
     run_shellcheck
     run_wait_converge
     run_relay_verdict_test
+    run_rpm_budget_test
     run_package_versions
     run_nextest_flaky
     run_node_test_groups

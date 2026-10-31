@@ -198,10 +198,23 @@ fi
 
 # The bound on each attempt to install the packaging tools, which is mostly the
 # download of the repository metadata. Set from the slow jobs that still passed
-# on GitHub, where this step took up to 9.5 minutes, so those stay green; and
-# low enough that after a stall the second attempt and the rest of an RPM
-# install job still fit inside the job's 25 minutes.
+# on GitHub, where this step took up to 9.5 minutes, so those stay green. It
+# bounds one attempt of this one call, and says nothing about a job that runs
+# several such calls: testing/rpm-install/test.sh runs this twice and builds
+# images that download the same metadata, and slow mirrors have taken that sum
+# past GitHub's step limit with no bound firing. So a caller with a limit of
+# its own sets FIPS_CI_DEADLINE, the epoch at which its network budget ends,
+# and every attempt here is bounded by the time left as well. Unset, as in the
+# release workflow and `make rpm`, only the per-attempt bound applies.
 DNF_BOUND=${DNF_BOUND:-720}
+budget_args=""
+if [ -n "${FIPS_CI_DEADLINE:-}" ]; then
+    [[ "$FIPS_CI_DEADLINE" =~ ^[0-9]+$ ]] || {
+        echo "build-rpm-container: FIPS_CI_DEADLINE is not an integer ('$FIPS_CI_DEADLINE')" >&2
+        exit 2
+    }
+    budget_args="--deadline $FIPS_CI_DEADLINE"
+fi
 
 rpm_args=(--no-build --bin-dir /bins --version "$VERSION" --output-dir /out --name-file /name/rpm)
 
@@ -220,7 +233,8 @@ docker run --rm "${CI_LABELS[@]}" \
         # builder image gets the same treatment one layer up, in
         # testing/lib/image-build.sh. Bounded per attempt, because a stalled
         # mirror does not fail: it holds the step until the job's own limit.
-        bash packaging/rpm/dnf-bounded.sh --attempts 3 --bound $DNF_BOUND -- \\
+        bash packaging/rpm/dnf-bounded.sh --attempts 3 --bound $DNF_BOUND \\
+            $budget_args --label 'packaging tools' -- \\
             install -y --setopt=install_weak_deps=False rpm-build systemd-rpm-macros || {
             echo 'could not install rpm-build and systemd-rpm-macros' >&2
             exit 1

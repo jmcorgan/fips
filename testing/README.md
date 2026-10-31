@@ -180,6 +180,18 @@ through `packaging/rpm/dnf-bounded.sh`, which bounds each attempt and prints
 its time and mirrors. The image keeps its repository metadata, and the
 install, erase and upgrade read it rather than fetching it again.
 
+Those per-attempt bounds do not add up to anything a CI step can hold, so the
+whole setup also runs inside one network budget, `DNF_BUDGET` (1800 s by
+default; the GitHub job sets 1800 s under a 40-minute step, `ci-local.sh` 1200
+s under its 1800 s limit). The clock starts at the first step that reaches a
+mirror and is handed down as `FIPS_CI_DEADLINE`: every attempt is bounded by
+the time left, no retry starts that cannot finish, and a setup that runs out
+fails with a line naming the step and the budget, above dnf-bounded's report
+of the mirrors, while the CI step still has time to report it. The image
+build receives the deadline as a build secret, so it does not change the
+image's cache key. `budget-test.sh` tests that logic with dnf stubbed, in about
+ten seconds, and both CI runners run it.
+
 ### [boringtun/](boringtun/) -- WireGuard Throughput Baseline
 
 Two userspace WireGuard peers running Cloudflare BoringTun, measured

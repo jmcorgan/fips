@@ -141,6 +141,11 @@ jobs:
       # reason as the convergence-gate step above.
       - name: Run NAT lab relay start and guard unit tests
         run: bash testing/lib/relay-verdict-test.sh
+      # Hermetic: dnf and the image build stubbed, no containers, about ten
+      # seconds. Kept in step with ci-local.sh's run_rpm_budget_test by hand,
+      # for the same reason as the convergence-gate step above.
+      - name: Run RPM install network budget unit tests
+        run: bash testing/rpm-install/budget-test.sh
       # Runs the packaging workflows' own version derivations on a release
       # tag, a candidate tag and a branch. Not a matrix suite either, so it is
       # kept in step with ci-local.sh's run_package_versions by hand.
@@ -1782,8 +1787,17 @@ jobs:
           name: fips-deb-amd64
           path: _deb
 
+      # The scenario's setup downloads the AlmaLinux metadata through several
+      # dnf steps, each bounded per attempt, and slow mirrors have taken their
+      # sum past this step's limit with no bound firing. DNF_BUDGET bounds the
+      # whole setup instead (testing/rpm-install/test.sh): it must stay below
+      # the limit by the time the checks need, here 600 s against the one to
+      # two minutes they take, so a setup that runs out fails inside the
+      # harness, naming the step, before GitHub ends the job.
       - name: Run rpm-install scenario
-        timeout-minutes: 25
+        timeout-minutes: 40
+        env:
+          DNF_BUDGET: 1800
         run: |
           deb=$(find _deb -maxdepth 1 -type f -name 'fips_*.deb' | sort | head -1)
           [ -n "$deb" ] || { echo "no .deb in the downloaded artifact" >&2; exit 1; }

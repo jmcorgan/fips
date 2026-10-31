@@ -153,7 +153,10 @@ ship scriptlets that quietly do nothing. Docker is the only host prerequisite.
 Installing those two downloads the whole AlmaLinux repository metadata, so it
 runs through [rpm/dnf-bounded.sh](rpm/dnf-bounded.sh): each of three attempts
 is bounded (`DNF_BOUND`, 720 s), and each prints its time, transfer rates and
-mirrors.
+mirrors. A caller with a time limit of its own, such as the RPM install suite
+under CI, also sets `FIPS_CI_DEADLINE`, the end of its network budget in epoch
+seconds; every attempt is then bounded by the time left as well, and no retry
+starts that cannot finish. The release workflow and `make rpm` set none.
 
 `make rpm-host` packages whatever the host toolchain built. Like `deb-host` it
 is for local iteration and not for anything anyone else installs; nothing

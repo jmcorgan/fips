@@ -2,7 +2,8 @@
 # Shared helpers for building test images and starting test containers.
 #
 # Source this file to get dump_output(), run_quiet(), build_inline(),
-# retry_build() and shared_tmpdir(), and the CI_LABELS array:
+# retry_build(), budget_allows_retry() and shared_tmpdir(), and the CI_LABELS
+# array:
 #   source "$SCRIPT_DIR/../lib/image-build.sh"
 #   echo "$dockerfile" | run_quiet "docker build -t $tag" \
 #       docker build -t "$tag" -f - "$REPO_ROOT"
@@ -92,6 +93,11 @@ build_inline() {
 # after a failure says so, and on GitHub Actions also raises a warning on the
 # run summary, so a recovered failure is still counted. Returns the last
 # attempt's exit status.
+#
+# When FIPS_CI_DEADLINE is set (epoch seconds; testing/rpm-install/test.sh is
+# the only harness that sets it), it is the end of the run's network budget:
+# the first attempt always runs, and a retry that would start with under 30 s
+# left is not started. Unset, nothing here changes.
 retry_build() {
     local label="$1"
     shift
@@ -114,10 +120,31 @@ retry_build() {
             return "$rc"
         fi
         wait=$((attempt * 10))
+        if [ -n "${FIPS_CI_DEADLINE:-}" ] && ! budget_allows_retry "$label" "$wait"; then
+            return "$rc"
+        fi
         echo "image-build: $label failed on attempt $attempt of $attempts (exit $rc); retrying in ${wait}s" >&2
         sleep "$wait"
         attempt=$((attempt + 1))
     done
+}
+
+# Whether retry_build may start another attempt of LABEL after a pause of WAIT
+# seconds, given FIPS_CI_DEADLINE, and why not when it may not. A deadline that
+# is not an integer refuses the retry too: it can only be a broken hand-off,
+# and retrying would run past whatever budget was meant.
+budget_allows_retry() {
+    local label="$1" wait="$2" left
+    if ! [[ "$FIPS_CI_DEADLINE" =~ ^[0-9]+$ ]]; then
+        echo "image-build: $label not retried: FIPS_CI_DEADLINE is not an integer ('$FIPS_CI_DEADLINE')" >&2
+        return 1
+    fi
+    left=$((FIPS_CI_DEADLINE - $(date +%s)))
+    if [ $((left - wait)) -lt 30 ]; then
+        echo "image-build: $label not retried: the run's budget ends in ${left}s" >&2
+        return 1
+    fi
+    return 0
 }
 
 # Create a temporary directory that can be a bind-mount source, and print its
