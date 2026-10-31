@@ -41,6 +41,7 @@ fn fingerprint(hs: &Hs) -> Vec<u8> {
         entropy: _,
         local_epoch,
         remote_epoch,
+        es,
     } = hs;
     let SymmetricState { ck, h, cipher } = symmetric;
     let mut out = format!("{pattern:?} {role:?} {progress:?}").into_bytes();
@@ -55,6 +56,7 @@ fn fingerprint(hs: &Hs) -> Vec<u8> {
         remote_ephemeral.map(|k| k.serialize().to_vec()),
         local_epoch.map(|e| e.to_vec()),
         remote_epoch.map(|e| e.to_vec()),
+        es.map(|e| e.to_vec()),
     ];
     for key in keys {
         match key {

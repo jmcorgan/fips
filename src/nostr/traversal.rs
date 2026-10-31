@@ -573,6 +573,24 @@ fn hold_remapped(
     });
 }
 
+/// Bind a traversal socket on `addr`, non-blocking as STUN and
+/// `run_punch_attempt` need it.
+///
+/// On Windows an ICMP port-unreachable answering one of its datagrams is not
+/// reported as a receive error, as on the UDP transport's sockets, so a closed
+/// punch target cannot fail the receives the peer's probe arrives on.
+pub(super) fn bind_traversal(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = std::net::UdpSocket::bind(addr)?;
+    socket.set_nonblocking(true)?;
+    #[cfg(windows)]
+    crate::transport::udp::io::ignore_port_unreachable(&socket);
+    Ok(socket)
+}
+
+/// Probe `targets` from `socket` per `punch`, and return the address whose
+/// probe or ack arrives first from a planned target, or a remapped-port
+/// candidate once its settle window passes. Ends with `PunchTimeout` when
+/// `timeout` passes with nothing to adopt; a failed receive does not end it.
 pub(super) async fn run_punch_attempt(
     socket: &std::net::UdpSocket,
     session_id: &str,
@@ -612,16 +630,32 @@ pub(super) async fn run_punch_attempt(
     // log volume. One record at the end of the attempt instead.
     let mut unplanned = 0usize;
     let mut superseded = 0usize;
+    // Counted for the same reason: the peer or a third party sets how many
+    // receives fail.
+    let mut recv_errors = 0usize;
+    let mut last_error: Option<std::io::Error> = None;
     let mut candidate: Option<SocketAddr> = None;
     let mut settle_at: Option<tokio::time::Instant> = None;
     let result = loop {
         let deadline = settle_at.map_or(finish_at, |settle| settle.min(finish_at));
         let recv = tokio::time::timeout_at(deadline, udp.recv_from(&mut buf)).await;
-        let Ok(Ok((len, remote))) = recv else {
-            break match candidate {
-                Some(remote) => Ok(remote),
-                None => Err(BootstrapError::PunchTimeout(session_id.to_string())),
-            };
+        let (len, remote) = match recv {
+            Ok(Ok(received)) => received,
+            // A failed receive reports something about a datagram sent
+            // earlier, such as an ICMP error answering a probe to a closed
+            // port or an oversized datagram, not that the socket is unusable.
+            // The peer's probe can still arrive after it.
+            Ok(Err(err)) => {
+                recv_errors += 1;
+                last_error = Some(err);
+                continue;
+            }
+            Err(_) => {
+                break match candidate {
+                    Some(remote) => Ok(remote),
+                    None => Err(BootstrapError::PunchTimeout(session_id.to_string())),
+                };
+            }
         };
         // Ranked ahead of the ack, not only ahead of the adoption: acking a
         // source we never planned to probe is a reflection this node controls,
@@ -658,6 +692,14 @@ pub(super) async fn run_punch_attempt(
             unplanned,
             superseded,
             "traversal: punch packets refused on their source address"
+        );
+    }
+    if recv_errors > 0 {
+        debug!(
+            session = %super::runtime::short_id(session_id),
+            recv_errors,
+            last_error = ?last_error,
+            "traversal: receive errors on the punch socket"
         );
     }
     result

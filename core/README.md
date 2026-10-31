@@ -127,7 +127,14 @@ observability and I/O belong to the host.
 **Avoid global state.** `std::sync::LazyLock`, `Mutex` and
 `thread_local!` do not exist here. Prefer passing state in. Where a
 shared, lazily built value is unavoidable, `once_cell::race::OnceBox`
-works without `std`.
+works without `std`. Test builds are the exception, where `std` is
+linked (see Tests): code compiled only for tests keeps such state in
+several places, with `thread_local!` and one `OnceLock`. Among them,
+`noise/handshake.rs` keeps a `thread_local!` DH counter that tests
+read through `noise::dh_ops`. It is the only such state also compiled
+under `feature = "test-hooks"`, so the root crate's tests can read it,
+and it is per thread so that tests running in parallel do not count
+each other's DHs.
 
 **No 64-bit std atomics.** `AtomicU64` and `AtomicI64` from
 `core::sync::atomic` do not exist on the 32-bit MIPS targets the
@@ -184,7 +191,11 @@ own with `--lib`.
 ## Tests
 
 Tests run on the host and may use `std`: `lib.rs` declares
-`#[cfg(test)] extern crate std;`. That does not bring `std`'s prelude
+`#[cfg(any(test, feature = "test-hooks"))] extern crate std;`. The
+`test-hooks` half covers the root crate's tests, the only builds that
+enable that feature; the bare-metal build never does, so it still links
+no `std`. Code under that gate may name `std::` paths, and nothing
+outside it may. Declaring the crate does not bring `std`'s prelude
 macros into scope, so a test module that uses `format!` or `vec!` needs
 `use alloc::format;` or `use alloc::vec;`.
 

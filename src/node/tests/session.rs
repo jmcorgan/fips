@@ -935,7 +935,7 @@ async fn test_session_100_nodes() {
 // ============================================================================
 
 /// Build a minimal valid IPv6 packet with given source and destination addresses.
-fn build_ipv6_packet(
+pub(super) fn build_ipv6_packet(
     src: &crate::Ipv6Address,
     dst: &crate::Ipv6Address,
     payload: &[u8],

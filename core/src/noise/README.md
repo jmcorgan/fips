@@ -18,8 +18,8 @@ root fixes it with the alias
 callers are unchanged. The root also reaches `take_cleared` and
 `clear_slot` (hidden from the docs here), `seal`, with which its session
 send paths seal a frame on a counter and key the session's rekey machine
-reserved, and, from its tests only, `open`, which is behind the
-`test-hooks` feature.
+reserved, and, from its tests only, `open` and `dh_ops`, which are
+behind the `test-hooks` feature.
 
 ## Files
 
@@ -37,8 +37,11 @@ reserved, and, from its tests only, `open`, which is behind the
   clear the bytes a moved-out secret leaves in its slot.
 - `handshake.rs`: `HandshakeState<E>`, the IK and XK state machines,
   and the symmetric state under them; `into_session` turns a completed
-  handshake into a `NoiseSession`. Its fields are visible to the rest of
-  the module only for `fork.rs` and that file's tests.
+  handshake into a `NoiseSession`. The IK initiator keeps msg1's `es`
+  DH output and mixes it again when it reads msg2, so a msg2 that fails
+  to authenticate costs one DH rather than two; `dh_ops` counts the DHs
+  run on the calling thread, for tests only. Its fields are visible to
+  the rest of the module only for `fork.rs` and that file's tests.
 - `fork.rs`: the `Fork` trait, a copy of a handshake made for one read,
   its implementation for `HandshakeState`, and the read-on-fork methods
   `fork_msg2` (IK msg2 at the initiator), `fork_xk2` (XK msg2 at the

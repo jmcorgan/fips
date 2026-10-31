@@ -2,7 +2,8 @@
 //! runs at the bound with one warning naming the key, the configured value
 //! and the value used; a value bounded only for some uses is kept, with the
 //! same warning naming the value used there; a value inside its bound, and
-//! the shipped defaults, are kept without a warning.
+//! the shipped defaults, are kept without a warning. The bloom filter cap,
+//! a float, has its own tests at the end.
 
 use super::*;
 use crate::testutil::{capture_logs, log_field};
@@ -45,6 +46,15 @@ const CASES: &[Case] = &[
         inside: &[300, 301, 3_600],
         set: |c, v| c.node.cache.coord_ttl_secs = v,
         get: |c| c.node.cache.coord_ttl_secs,
+    },
+    Case {
+        key: "node.bloom.update_debounce_ms",
+        message: "configured value is below the 500 ms send interval; running at 500 ms",
+        used: 500,
+        outside: &[0, 100, 499],
+        inside: &[500, 501, 60_000],
+        set: |c, v| c.node.bloom.update_debounce_ms = v,
+        get: |c| c.node.bloom.update_debounce_ms,
     },
     Case {
         key: "node.rendezvous.nostr.signal_ttl_secs",
@@ -304,5 +314,99 @@ fn applying_the_floors_with_the_test_only_coord_ttl_key_set_keeps_it_and_warns_o
             logs.lines()
         );
         assert_eq!(logs.warnings().len(), 1, "call {call}: {:?}", logs.lines());
+    }
+}
+
+/// The warning `apply_floors` logs when it replaces `node.bloom.max_inbound_fpr`.
+const FPR_MESSAGE: &str =
+    "configured value is outside the [0.20, 1.0) range of an inbound filter cap; running at 0.20";
+
+/// Assert that a configured `node.bloom.max_inbound_fpr` of `cap` runs as
+/// 0.20 with one warning naming the key, `cap` and 0.20.
+fn assert_cap_floored(cap: f64) {
+    let mut config = Config::default();
+    config.node.bloom.max_inbound_fpr = cap;
+    let (config, logs) = capture_logs(|| {
+        config.apply_floors();
+        config
+    });
+    assert_eq!(config.node.bloom.max_inbound_fpr, ACCEPT_FPR_CAP, "{cap}");
+    assert_eq!(logs.warnings().len(), 1, "{cap}: {:?}", logs.lines());
+    assert_eq!(
+        logs.targets(FPR_MESSAGE),
+        vec!["fips::config"],
+        "{cap}: the warning's message and target, got {:?}",
+        logs.lines()
+    );
+    let line = logs.line(FPR_MESSAGE).unwrap();
+    assert_eq!(
+        log_field(&line, "key"),
+        Some("\"node.bloom.max_inbound_fpr\""),
+        "{line}"
+    );
+    let configured = cap.to_string();
+    assert_eq!(
+        log_field(&line, "configured"),
+        Some(configured.as_str()),
+        "{line}"
+    );
+    assert_eq!(log_field(&line, "used"), Some("0.2"), "{line}");
+}
+
+#[test]
+fn a_bloom_max_inbound_fpr_below_the_0_20_floor_runs_at_0_20_with_one_warning_naming_the_key() {
+    // A cap below 0.20 discards the filters of conformant peers; 0 or a
+    // negative cap discards every filter (FRC-1402 Section 4.7.1).
+    for cap in [0.10, 0.0, 0.199, -0.1, f64::NEG_INFINITY] {
+        assert_cap_floored(cap);
+    }
+}
+
+#[test]
+fn a_bloom_max_inbound_fpr_that_turns_the_cap_off_falls_back_to_the_0_20_default_with_one_warning()
+{
+    // At 1.0 or above, or NaN, the cap never fires and the poisoning check
+    // is off.
+    assert_eq!(
+        Config::default().node.bloom.max_inbound_fpr,
+        ACCEPT_FPR_CAP,
+        "the fallback is the default"
+    );
+    for cap in [1.0, 1.5, f64::INFINITY, f64::NAN] {
+        assert_cap_floored(cap);
+    }
+}
+
+#[test]
+fn a_bloom_max_inbound_fpr_at_or_above_0_20_and_below_1_0_is_left_alone_without_a_warning() {
+    for cap in [0.20, 0.30, 0.99] {
+        let mut config = Config::default();
+        config.node.bloom.max_inbound_fpr = cap;
+        let (config, logs) = capture_logs(|| {
+            config.apply_floors();
+            config
+        });
+        assert_eq!(config.node.bloom.max_inbound_fpr.to_bits(), cap.to_bits());
+        assert!(logs.warnings().is_empty(), "{cap}: {:?}", logs.lines());
+    }
+}
+
+#[test]
+fn both_bloom_settings_below_their_floors_give_one_warning_each() {
+    let mut config = Config::default();
+    config.node.bloom.update_debounce_ms = 0;
+    config.node.bloom.max_inbound_fpr = 0.0;
+    let ((), logs) = capture_logs(|| config.apply_floors());
+    assert_eq!(logs.warnings().len(), 2, "{:?}", logs.lines());
+    for message in [
+        "configured value is below the 500 ms send interval; running at 500 ms",
+        FPR_MESSAGE,
+    ] {
+        assert_eq!(
+            logs.targets(message),
+            vec!["fips::config"],
+            "{message}: {:?}",
+            logs.lines()
+        );
     }
 }

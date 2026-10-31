@@ -56,7 +56,10 @@ that file and can reach its private items.
   `fips::config`, naming the key, the configured value and the value used; a
   value inside it, and every shipped default, is kept without a warning; a
   second call changes nothing; and `Node::with_identity` applies the bounds
-  as `Node::new` does. Also the test-only `node.cache.test_coord_ttl_secs`:
+  as `Node::new` does. The bloom acceptance cap, a float, has its own tests:
+  a cap outside `[0.20, 1.0)` (below 0.20, 1.0 or more, or NaN) runs at
+  0.20 with one warning, and a cap inside it is left alone with none. Also
+  the test-only `node.cache.test_coord_ttl_secs`:
   it is written back only when set, survives layering through
   `load_from_paths` and loads through `load_file`, is used by
   `CacheConfig::coord_ttl` only in a `test-overrides` build, and is kept with

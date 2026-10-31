@@ -7,6 +7,7 @@
 use super::Config;
 use crate::node::REKEY_HANDSHAKE;
 use crate::peer::machine::DISCOVERY_RESENDS;
+use crate::proto::bloom::ACCEPT_FPR_CAP;
 use std::fmt::Display;
 
 /// Least time in seconds a link must stay silent before it is declared dead
@@ -16,6 +17,10 @@ const DEAD_FLOOR: u64 = 30;
 /// Least lifetime in seconds of a coordinate cache entry since it was last
 /// written or read (FRC-1404 Section 4.5.1).
 const COORD_FLOOR: u64 = 300;
+
+/// Least interval in ms between two filter announcements to one peer
+/// (FRC-1402 Section 4.5.2).
+const DEBOUNCE_FLOOR: u64 = 500;
 
 /// Least lifetime in seconds of a Nostr traversal signal (FRC-1601 Section
 /// 3.4, as are the three below).
@@ -43,6 +48,8 @@ impl Config {
         self.warn_rekey();
         self.floor_coord();
         self.warn_testttl();
+        self.floor_debounce();
+        self.floor_fpr();
         self.floor_signal();
         self.floor_attempt();
         self.floor_offers();
@@ -123,6 +130,35 @@ impl Config {
             self.node.cache.coord_ttl(),
             why,
         );
+    }
+
+    /// Raise `node.bloom.update_debounce_ms` to the 500 ms send interval.
+    fn floor_debounce(&mut self) {
+        raise(
+            "node.bloom.update_debounce_ms",
+            &mut self.node.bloom.update_debounce_ms,
+            DEBOUNCE_FLOOR,
+            "configured value is below the 500 ms send interval; running at 500 ms",
+        );
+    }
+
+    /// Bring `node.bloom.max_inbound_fpr` into `[0.20, 1.0)`.
+    ///
+    /// Below 0.20 the cap discards conformant peers' filters (FRC-1402
+    /// Section 4.7.1); at 1.0 and above, or NaN, it never fires and the
+    /// poisoning check is off. Both run as 0.20, which is the floor and also
+    /// the default, so one branch serves both.
+    fn floor_fpr(&mut self) {
+        let configured = self.node.bloom.max_inbound_fpr;
+        if !(ACCEPT_FPR_CAP..1.0).contains(&configured) {
+            clamped(
+                "node.bloom.max_inbound_fpr",
+                configured,
+                ACCEPT_FPR_CAP,
+                "configured value is outside the [0.20, 1.0) range of an inbound filter cap; running at 0.20",
+            );
+            self.node.bloom.max_inbound_fpr = ACCEPT_FPR_CAP;
+        }
     }
 
     /// Raise `node.rendezvous.nostr.signal_ttl_secs` to 120 s.

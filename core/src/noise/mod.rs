@@ -30,6 +30,9 @@ pub(crate) use cipher::{PROTOCOL_NAME_IK, PROTOCOL_NAME_XK};
 pub use cipher::{clear_slot, take_cleared};
 pub use fork::Fork;
 pub use handshake::HandshakeState;
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub use handshake::dh_ops;
 pub use replay::ReplayWindow;
 pub use session::NoiseSession;
 

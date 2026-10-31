@@ -773,16 +773,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Initial link handshakes and session handshakes still use the configured
   timeout. Before, a node configured with more resends or a longer timeout
   went past the limits the protocol sets for both.
+- `node.bloom.update_debounce_ms` below 500 now runs as 500, and
+  `node.bloom.max_inbound_fpr` below 0.20, at or above 1.0, or NaN now runs
+  as 0.20, the default. Each replacement logs a warning at startup naming
+  the key, the configured value and the value used. Before, both were used
+  as configured: a debounce under 500 ms could send a peer two filter
+  updates closer together than the protocol allows, a cap under 0.20
+  discarded conformant peers' filters, and a cap of 1.0 or more turned the
+  filter-poisoning check off. A config that still pins the cap at `0.05` or
+  `0.10`, as earlier release notes suggested for rolling upgrades, now runs
+  at `0.20`.
 
 #### Routing and discovery
 
-- A node no longer sends an outgoing bloom filter whose false-positive rate
-  is above 0.20, the cap every v1 receiver applies. It holds the filter,
-  retries at the debounce pace and counts each hold in the bloom stats'
-  `held_over_cap`. Before, it sent the filter, the receiver rejected it, and
-  the sender's record of what the peer held was wrong from then on. A
-  receiver whose `node.bloom.max_inbound_fpr` is set above 0.20 no longer
-  receives filters between 0.20 and its own cap.
+- A node sends a peer its outgoing bloom filter whatever its false-positive
+  rate, as 0.5.3 did, and the receiver's `node.bloom.max_inbound_fpr` alone
+  decides whether the filter is kept. The node no longer logs a warning
+  when its own outgoing filter is above its cap. Earlier 0.5.4 development
+  builds held a filter above 0.20 instead, so a peer whose cap was set
+  above 0.20 stopped receiving their reachability changes; that hold is
+  removed, with the `held_over_cap` key they added under `stats` in
+  `fipsctl show bloom` and the control socket's `show_bloom` response.
 
 #### Transports
 
@@ -1328,6 +1339,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder's `fips.exe` after an install. The service commands it, the script
   and the ZIP README print are now `sc.exe`: in PowerShell a bare `sc` is the
   Set-Content alias.
+- A Nostr NAT traversal no longer gives up within milliseconds when one of
+  its punch targets answers with an ICMP port-unreachable. The punch attempt
+  keeps listening through a failed receive until it adopts an address or
+  its timeout passes, and the traversal socket no longer reports a
+  port-unreachable as a failed receive. A STUN server whose port is closed
+  is now waited out for its timeout before the next one is tried, as on
+  other platforms.
 
 #### OpenWrt
 
@@ -1374,6 +1392,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Peer and link state
 
+- At `max_peers`, a msg1 from a node this node is itself dialing is dropped,
+  as from any other node it does not hold. Before, the node answered it with
+  a msg2 and then refused the peer, and the dialer's link went unanswered
+  until its link-dead timeout. When the msg1 came from the address being
+  dialed, the dial also lost its address mapping.
 - When crossed dials move a link onto the other session, the link's MMP
   receive state starts again with the new session, as at a rekey. Before,
   until the new session's frame counter passed the old one, receiver
@@ -1718,6 +1741,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `policy`, `configured_only` included, and dials the offerer when the hole
   punch succeeds. `accept_connections: false` does not stop that link; only
   the peer ACL does, and the offer is still answered and punched.
+- A node sends a newly accepted peer its first `FilterAnnounce` only after
+  that peer has sent an authenticated frame. A msg1 under a forged UDP
+  source address, replayed or made under a fresh key, made the node send a
+  1 KB filter, and possibly a resend of it, to that address, several times
+  the size of the msg1. A working peer's filter now waits about one round
+  trip.
+- With Nostr rendezvous enabled, inbound traversal offers and answers have
+  a notification channel of their own. Anyone may publish adverts to the
+  advert relays, and a burst of about 2,048 arriving faster than the node
+  read them pushed a queued offer or answer out unread, so its traversal
+  waited out its timeout.
 
 #### OpenWrt
 

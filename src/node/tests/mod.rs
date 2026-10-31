@@ -44,6 +44,7 @@ mod link_session_diag;
 mod link_setup_diag;
 mod lookup_echo;
 mod mmp_chartests;
+mod msg2_refused_reads;
 mod netmon;
 mod peer_restart;
 mod probe;

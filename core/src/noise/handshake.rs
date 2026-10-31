@@ -14,6 +14,24 @@ use secp256k1::{Keypair, PublicKey, SecretKey, ecdh::shared_secret_point};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+#[cfg(any(test, feature = "test-hooks"))]
+std::thread_local! {
+    /// DH operations run on this thread, counted by `ecdh`.
+    static DH_OPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of DH operations `HandshakeState` has run on the calling thread.
+///
+/// Tests read it before and after a handshake step to pin how many DHs the
+/// step costs. It is per thread so that tests running in parallel do not see
+/// each other's operations. The root crate's node tests read it too, through
+/// `test-hooks`.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn dh_ops() -> u64 {
+    DH_OPS.with(std::cell::Cell::get)
+}
+
 /// Symmetric state during handshake.
 ///
 /// Maintains the chaining key (ck), handshake hash (h), and current cipher.
@@ -166,6 +184,12 @@ pub struct HandshakeState<E> {
     pub(super) local_epoch: Option<[u8; 8]>,
     /// Remote peer's startup epoch (learned during handshake).
     pub(super) remote_epoch: Option<[u8; 8]>,
+    /// msg1's `es` DH output, kept by the IK initiator so `read_message_2`
+    /// mixes it again without running the DH a second time.
+    ///
+    /// It is no more secret than the ephemeral key it was made from, which
+    /// this state holds for the same time, and it is cleared on drop with it.
+    pub(super) es: Option<[u8; 32]>,
 }
 
 impl<E: EntropySource> HandshakeState<E> {
@@ -202,6 +226,7 @@ impl<E: EntropySource> HandshakeState<E> {
             entropy: PhantomData,
             local_epoch: None,
             remote_epoch: None,
+            es: None,
         };
 
         // Mix in pre-message: <- s (responder's static is known)
@@ -234,6 +259,7 @@ impl<E: EntropySource> HandshakeState<E> {
             entropy: PhantomData,
             local_epoch: None,
             remote_epoch: None,
+            es: None,
         };
 
         // Mix in pre-message: <- s (our static, since we're responder)
@@ -265,6 +291,7 @@ impl<E: EntropySource> HandshakeState<E> {
             entropy: PhantomData,
             local_epoch: None,
             remote_epoch: None,
+            es: None,
         };
 
         // Mix in pre-message: <- s (responder's static is known)
@@ -295,6 +322,7 @@ impl<E: EntropySource> HandshakeState<E> {
             entropy: PhantomData,
             local_epoch: None,
             remote_epoch: None,
+            es: None,
         };
 
         // Mix in pre-message: <- s (our static, since we're responder)
@@ -374,6 +402,8 @@ impl<E: EntropySource> HandshakeState<E> {
     /// optimiser keeps, but a copy the compiler made before it runs, in a
     /// register or a stack slot, is not reached.
     fn ecdh(&self, our_secret: &SecretKey, their_public: &PublicKey) -> [u8; 32] {
+        #[cfg(any(test, feature = "test-hooks"))]
+        DH_OPS.with(|ops| ops.set(ops.get() + 1));
         // Get raw (x, y) coordinates (64 bytes) without any hashing
         let mut point = shared_secret_point(their_public, our_secret);
         // Hash only the x-coordinate (first 32 bytes), ignoring y/parity
@@ -428,10 +458,12 @@ impl<E: EntropySource> HandshakeState<E> {
         message.extend_from_slice(&e_pub);
         self.symmetric.mix_hash(&e_pub);
 
-        // -> es: DH(e, rs), mix into key
+        // -> es: DH(e, rs), mix into key. read_message_2 mixes the same
+        // value again, so keep a copy for it.
         let mut sk = ephemeral.secret_key();
         let mut es = self.ecdh(&sk, &remote_static);
         self.symmetric.mix_key(&es);
+        self.es = Some(es);
         es.zeroize();
         sk.non_secure_erase();
 
@@ -628,17 +660,16 @@ impl<E: EntropySource> HandshakeState<E> {
         ee.zeroize();
         sk.non_secure_erase();
 
-        // <- es again: DH(e, rs), mix into key
+        // <- es again: msg1's es value, mixed into the key a second time
         // The initiator's ephemeral with the responder's static is msg1's es
-        // pairing, so this mixes the msg1 es value a second time. It is not
-        // Noise IK's se; see write_message_2 for why the FMP v1 wire format
-        // keeps it.
-        let rs = self.remote_static.expect("initiator has remote static");
-        let mut sk = ephemeral.secret_key();
-        let mut es2 = self.ecdh(&sk, &rs);
+        // pairing, so the value is the one write_message_1 computed and kept.
+        // It is reused rather than recomputed, so a msg2 that fails to
+        // authenticate below has cost one DH, not two. The FMP v1 wire format
+        // still mixes it twice. It is not Noise IK's se; see write_message_2
+        // for why the wire format keeps it.
+        let mut es2 = self.es.expect("IK initiator stored es in write_message_1");
         self.symmetric.mix_key(&es2);
         es2.zeroize();
-        sk.non_secure_erase();
 
         // <- epoch: decrypt responder's startup epoch
         let encrypted_epoch = &message[PUBKEY_SIZE..];
@@ -1004,13 +1035,15 @@ impl<E: EntropySource> HandshakeState<E> {
 }
 
 impl<E> Drop for HandshakeState<E> {
-    /// Erase the two private keys this state holds.
+    /// Erase the two private keys this state holds, and the `es` DH output
+    /// kept from msg1.
     ///
     /// `static_keypair` is the node's long-term private key and
     /// `ephemeral_keypair` is the handshake's own. Both live here for the
     /// whole handshake, which is longer than in any other frame, so this is
     /// where clearing them matters most. `Keypair` is `Copy` and so cannot
     /// clear itself on drop; `HandshakeState` is not, so it does it for both.
+    /// `es` is derived from the ephemeral key and is cleared with it.
     ///
     /// This clears the copy being dropped, not every copy that ever existed.
     /// Each erase is a volatile write, so the optimiser keeps it, but a
@@ -1026,6 +1059,9 @@ impl<E> Drop for HandshakeState<E> {
         if let Some(ephemeral) = self.ephemeral_keypair.as_mut() {
             ephemeral.non_secure_erase();
         }
+        if let Some(es) = self.es.as_mut() {
+            es.zeroize();
+        }
     }
 }
 
@@ -1040,6 +1076,7 @@ impl<E> fmt::Debug for HandshakeState<E> {
             .field("has_remote_ephemeral", &self.remote_ephemeral.is_some())
             .field("has_local_epoch", &self.local_epoch.is_some())
             .field("has_remote_epoch", &self.remote_epoch.is_some())
+            .field("has_es", &self.es.is_some())
             .finish()
     }
 }

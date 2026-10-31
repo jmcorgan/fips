@@ -232,9 +232,6 @@ pub struct EstablishSnapshot {
     /// Admitting this peer as a net-new identity would exceed `max_peers`
     /// (pre-evaluated `max_peers > 0 && peers.len() >= max_peers`).
     pub at_max_peers: bool,
-    /// A pending outbound connection to this same peer identity already exists
-    /// (a cross-connection in progress); bypasses the max-peers cap.
-    pub has_pending_outbound_to_peer: bool,
     /// The refusal in force for this identity after its sessions ended
     /// without an authenticated frame, read shell-side from its
     /// [`SilentSessions`](super::SilentSessions) record. `None` when none is.
@@ -355,8 +352,8 @@ pub enum InboundDecision {
 /// own, so no two of them share a counter.
 #[derive(Debug)]
 pub enum InboundReject {
-    /// At `max_peers` and this is a net-new identity with no pending outbound to
-    /// bypass the cap: silent-drop before any msg2 build/send.
+    /// At `max_peers` and the sender is not a held peer: silent-drop before any
+    /// msg2 build/send, whatever dials of this node's own are in flight.
     AtMaxPeers,
     /// The identity's last sessions at this msg1's epoch, at least
     /// `SILENT_SESSION_LIMIT` in a
@@ -483,9 +480,12 @@ impl Fmp {
         snap: &EstablishSnapshot,
         wire: &WireOutcome,
     ) -> InboundDecision {
-        // Early cap gate: at capacity and a net-new identity (no existing peer,
-        // no pending outbound to bypass) → silent-drop before any msg2.
-        if snap.at_max_peers && !snap.has_existing_peer && !snap.has_pending_outbound_to_peer {
+        // Early cap gate: at capacity, a msg1 from an identity this node does
+        // not hold is dropped silently before any msg2, even while this node's
+        // own dial to that identity is in flight. The promotion would be
+        // refused at the cap whatever the dial, so a msg2 would only hand the
+        // sender a link whose frames go unanswered.
+        if snap.at_max_peers && !snap.has_existing_peer {
             return InboundDecision::Reject {
                 reason: InboundReject::AtMaxPeers,
             };

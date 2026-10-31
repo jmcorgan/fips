@@ -136,7 +136,6 @@ fn est_new_peer() -> EstablishSnapshot {
         existing_peer_epoch: None,
         replace: false,
         at_max_peers: false,
-        has_pending_outbound_to_peer: false,
         silent_backoff: None,
     }
 }

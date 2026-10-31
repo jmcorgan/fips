@@ -132,19 +132,6 @@ fn establish_inbound_at_cap_net_new_rejects() {
 }
 
 #[test]
-fn establish_inbound_at_cap_with_pending_outbound_bypasses_and_promotes() {
-    let fmp = Fmp::new();
-    let mut snap = establish_snapshot();
-    snap.at_max_peers = true;
-    snap.has_pending_outbound_to_peer = true;
-    let wire = wire_outcome(Some([1u8; 8]));
-    assert!(matches!(
-        fmp.establish_inbound(&snap, &wire),
-        InboundDecision::Promote
-    ));
-}
-
-#[test]
 fn establish_inbound_at_cap_existing_peer_not_capped() {
     // At cap but the identity is already a peer → the cap gate is bypassed and
     // the same-epoch msg1 goes to the peer's link machine.

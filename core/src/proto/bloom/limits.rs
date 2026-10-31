@@ -20,9 +20,9 @@ pub const DEFAULT_HASH_COUNT: u8 = 5;
 
 /// The v1 acceptance cap on a filter's false-positive rate.
 ///
-/// The default for `node.bloom.max_inbound_fpr`, and the threshold above
-/// which an outgoing filter is held rather than sent, whatever this node's
-/// own inbound cap. 0.20 is fill 0.7248 at k=5, about 2,114 entries.
+/// The default for `node.bloom.max_inbound_fpr`. Only a receiver applies a
+/// cap: a sender sends its outgoing filter whatever its fill. 0.20 is fill
+/// 0.7248 at k=5, about 2,114 entries.
 pub const ACCEPT_FPR_CAP: f64 = 0.20;
 
 /// Size class for v1 protocol (1 KB filters).

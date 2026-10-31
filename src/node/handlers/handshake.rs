@@ -248,12 +248,6 @@ impl EstablishView for Node {
             existing_peer_epoch: existing.and_then(|p| p.remote_epoch()),
             replace: false,
             at_max_peers: max_peers > 0 && self.peers.len() >= max_peers,
-            has_pending_outbound_to_peer: self.connections().any(|(_, machine)| {
-                machine
-                    .conn_expected_identity()
-                    .map(|id| id.node_addr() == peer_addr)
-                    .unwrap_or(false)
-            }),
             silent_backoff: self
                 .silent_sessions
                 .refusing(peer_addr, crate::time::mono_ms()),

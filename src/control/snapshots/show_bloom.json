@@ -12,7 +12,6 @@
       "debounce_suppressed": 0,
       "decode_error": 0,
       "fill_exceeded": 0,
-      "held_over_cap": 0,
       "invalid": 0,
       "non_v1": 0,
       "received": 0,

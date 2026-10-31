@@ -46,8 +46,8 @@ impl<E> Fork for HandshakeState<E> {
     /// `HandshakeState` fails to compile here until the fork copies it; no
     /// list of fields is maintained by hand. Both copies clear their secrets
     /// when dropped: `Drop for HandshakeState` erases the two private keys
-    /// in each, and the symmetric state's chaining key and hash clear
-    /// themselves.
+    /// and msg1's `es` output in each, and the symmetric state's chaining
+    /// key and hash clear themselves.
     fn fork(&self) -> Self {
         Self {
             pattern: self.pattern,
@@ -61,6 +61,7 @@ impl<E> Fork for HandshakeState<E> {
             entropy: PhantomData,
             local_epoch: self.local_epoch,
             remote_epoch: self.remote_epoch,
+            es: self.es,
         }
     }
 }
