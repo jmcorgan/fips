@@ -4,12 +4,16 @@
 //! A msg2 names the dialling node's pending attempt by the index that travels
 //! in cleartext in msg1, so anyone who saw the msg1 can send msg2s under it.
 //! Nothing short of reading a msg2 tells the responder's from a forgery, and a
-//! forgery must not end the attempt, so every one is read. A msg2 that does
-//! not come from the responder's ephemeral fails at its encrypted static key,
-//! after one DH, `ee`; the `es` DH that follows needs the static that failed
-//! to decrypt. These tests count the DHs across the refused reads, then
-//! deliver the genuine msg2 and check that it completes the first dial or the
-//! rekey.
+//! forgery must not end the attempt, so every one is read. A msg2 whose
+//! encrypted static key does not authenticate, garbage or a msg2 taken from
+//! another handshake, fails there, after one DH, `ee`; the `es` DH that
+//! follows needs the static that failed to decrypt. The XX msg1 carries only
+//! the dialling node's ephemeral, so anyone who saw it can also build a msg2
+//! that authenticates under their own static key. Reading one of those costs
+//! two DHs, `ee` and `es`, as a genuine msg2 does, and the static check after
+//! the read refuses it; these tests do not send that kind. They count the DHs
+//! across the refused reads, then deliver the genuine msg2 and check that it
+//! completes the first dial or the rekey.
 
 use super::*;
 use crate::node::tests::link_session_diag::{
