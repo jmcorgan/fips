@@ -123,7 +123,8 @@ testing/static/
 ├── .env                                # Default compose profile
 ├── configs/
 │   ├── node.template.yaml              # Template for all node configs
-│   ├── gateway-resolv.conf             # LAN client resolver config
+│   ├── gateway-node-resolv.conf        # Gateway node's resolver (Docker DNS)
+│   ├── gateway-resolv.conf             # Unused (LAN client: generated)
 │   └── topologies/
 │       ├── mesh.yaml                   # Mesh topology definition
 │       ├── chain.yaml                  # Chain topology definition
