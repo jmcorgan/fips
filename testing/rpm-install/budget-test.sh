@@ -1,7 +1,8 @@
 #!/bin/bash
 # Unit tests for the RPM install suite's network budget: the --deadline and
 # --label handling in packaging/rpm/dnf-bounded.sh, and retry_build's refusal
-# of a late retry in testing/lib/image-build.sh.
+# of a late retry and its messages with no deadline, off and on GitHub
+# Actions, in testing/lib/image-build.sh.
 #
 # dnf is a stand-in script on PATH that writes the librepo log lines the
 # report reads (DNF_BOUNDED_LOG points the script at it) and then sleeps and
@@ -107,7 +108,10 @@ expect_calls() {
 expect_has() {
     local name="$1" text="$2"
     [[ "$OUT" == *"$text"* ]]
-    check "$name: says '$text'" $? "$(tail -n 3 <<<"$OUT" | tr '\n' '|')"
+    # A multi-line expectation is shown on one line, so that an expected
+    # "::warning::" line cannot start a line of this test's output, where
+    # GitHub Actions would read it as a workflow command.
+    check "$name: says '${text//$'\n'/|}'" $? "$(tail -n 3 <<<"$OUT" | tr '\n' '|')"
 }
 
 expect_lacks() {
@@ -234,6 +238,9 @@ unset FIPS_CI_DEADLINE
 
 echo
 echo "== Case 9: with no deadline, retry_build says what it always said =="
+# Off GitHub Actions, so these lines are the same wherever the suite runs;
+# case 10 covers the annotation GitHub Actions adds.
+unset GITHUB_ACTIONS
 run_retry 1 0
 expect_rc "unset, recovered" 0
 expect_has "unset, recovered" "image-build: docker build -t x failed on attempt 1 of 3 (exit 1); retrying in 10s
@@ -245,6 +252,14 @@ expect_has "unset, all failed" "image-build: docker build -t x failed on attempt
 image-build: docker build -t x failed on attempt 2 of 3 (exit 1); retrying in 20s
 image-build: docker build -t x failed on all 3 attempts (last exit 1)
 rc=1 builds=3"
+
+echo
+echo "== Case 10: on GitHub Actions, a recovery is also raised as a warning =="
+GITHUB_ACTIONS=true run_retry 1 0
+expect_rc "actions, recovered" 0
+expect_has "actions, recovered" "image-build: docker build -t x recovered on attempt 2 of 3
+::warning::image-build: docker build -t x recovered on attempt 2 of 3
+rc=0 builds=2"
 
 # --- Summary ----------------------------------------------------------
 echo
