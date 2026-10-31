@@ -47,6 +47,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$REPO_ROOT/packaging/build-floor.env"
 
 CACHE_DIR="$SCRIPT_DIR/.cache"
+# The AlmaLinux metadata, downloaded once per run and shared by every EL9 step
+# after the first: both packaging calls and the cpio install mount DNF_CACHE
+# (build-rpm-container.sh --dnf-cache, dnf-bounded.sh --cache), and each EL9
+# runtime image starts from DNF_SEED, the metadata files alone. Without it each
+# fresh container downloaded the same 80 MB again, which is where most of the
+# time went on the slow GitHub runs. Only this run's: cleared when it starts
+# and when it ends, so nothing is reused across runs.
+DNF_CACHE="$CACHE_DIR/dnf"
+DNF_SEED="$CACHE_DIR/dnf-seed"
 RPM_PATH=""
 DEB_PATH=""
 
@@ -74,6 +83,28 @@ UPGRADE_TRANSACTION_CEILING=${UPGRADE_TRANSACTION_CEILING:-45}
 IMAGE_TIMEOUT=${IMAGE_TIMEOUT:-420}
 DNF_BOUND=${DNF_BOUND:-720}
 
+# The network budget: one deadline for every setup step that reaches a mirror.
+# The bounds above are per attempt, and the setup runs several such steps one
+# after another, so their sum can pass a CI step's limit with none of them
+# firing; slow mirrors did that on GitHub, and the job ended with no check run
+# and nothing to say why. The deadline is set once, when the first such step
+# starts, and exported as FIPS_CI_DEADLINE (epoch seconds) to dnf-bounded.sh,
+# build-rpm-container.sh and retry_build, which bound every attempt by the time
+# left and start no retry that cannot finish. A step that runs out fails here,
+# naming itself, while the CI step still has time to report it.
+#
+# A caller with a limit of its own sets DNF_BUDGET below that limit by at
+# least the time the checks need (about two minutes when healthy; the GitHub
+# job and ci-local.sh leave ten). The default suits a hand run.
+DNF_BUDGET=${DNF_BUDGET:-1800}
+if ! [[ "$DNF_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
+    echo "DNF_BUDGET must be a positive number of seconds, not '$DNF_BUDGET'" >&2
+    exit 2
+fi
+# Only start_budget sets it: one inherited from an outer run would bound this
+# run by somebody else's clock.
+unset FIPS_CI_DEADLINE
+
 # The test-time dnf calls resolve against the metadata the runtime image kept,
 # however old it is, and go to a mirror only to download a package the image
 # does not already hold. Without this every install, erase and upgrade
@@ -99,6 +130,60 @@ log()  { echo "=== $*"; }
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
+
+# Remove the shared dnf cache and the image seed. Everything in them is written
+# as the user running this (dnf-bounded.sh --cache), so a plain removal
+# suffices; returns 1 if anything is left anyway.
+clear_dnf_cache() {
+    rm -rf "$DNF_CACHE" "$DNF_SEED" 2>/dev/null
+    [ ! -e "$DNF_CACHE" ] && [ ! -e "$DNF_SEED" ]
+}
+
+# Rebuild DNF_SEED from DNF_CACHE: each repository's repodata/ directory,
+# which holds only what dnf downloaded (repomd.xml and the content-addressed
+# metadata files), so the seed, and with it the image layer's cache key,
+# changes only when a repository's metadata does. The .solv files dnf derives,
+# the mirror lists and the packages stay out. Prints each repository's
+# repomd.xml checksum, which says why a local layer was rebuilt.
+seed_dnf_cache() {
+    rm -rf "$DNF_SEED"
+    mkdir -p "$DNF_SEED" || return 1
+    local repos=() r
+    mapfile -t repos < <(cd "$DNF_CACHE" && compgen -G '*/repodata')
+    if [ ${#repos[@]} -eq 0 ]; then
+        echo "  no shared dnf metadata to seed the image with; it downloads its own"
+        return 0
+    fi
+    tar -C "$DNF_CACHE" -cf - "${repos[@]}" | tar -C "$DNF_SEED" -xf - || return 1
+    for r in "${repos[@]}"; do
+        echo "  seed ${r%%-*}: repomd.xml $(sha256sum "$DNF_SEED/$r/repomd.xml" 2>/dev/null | cut -c1-12)"
+    done
+    return 0
+}
+
+# Start the network budget's clock, once; see DNF_BUDGET.
+start_budget() {
+    [ -n "${FIPS_CI_DEADLINE:-}" ] && return 0
+    FIPS_CI_DEADLINE=$(($(date +%s) + DNF_BUDGET))
+    export FIPS_CI_DEADLINE
+    log "Network budget: ${DNF_BUDGET} s, until $(date -u -d "@$FIPS_CI_DEADLINE" +%FT%TZ)"
+    return 0
+}
+
+# Record a setup step's failure. When the budget is spent, or too nearly spent
+# for a retry, that is the cause, and the FAIL line says so and names the
+# step; dnf-bounded's own report, printed above it, names the mirrors.
+#
+# Args: <step> <message>
+setup_fail() {
+    local step="$1" message="$2"
+    if [ -n "${FIPS_CI_DEADLINE:-}" ] && [ $((FIPS_CI_DEADLINE - $(date +%s))) -lt 30 ]; then
+        fail "${step}: the suite's ${DNF_BUDGET} s network budget ran out; dnf-bounded's report above names the mirrors (${message})"
+    else
+        fail "$message"
+    fi
+    return 0
+}
 
 # The bounds testing/lib/systemd-scenario.sh reads, with deb-install's values,
 # so the two suites boot, start and time out the same way. EXEC_TIMEOUT is set
@@ -176,12 +261,13 @@ build_rpm() {
         return 1
     fi
 
+    start_budget
     log "Packaging them with --no-build, the path the release workflow takes"
     local rc=0 out
     out=$("$REPO_ROOT/packaging/rpm/build-rpm-container.sh" \
-        --no-build --bin-dir "$bin_dir" --output-dir "$rpm_dir") || rc=$?
+        --no-build --bin-dir "$bin_dir" --output-dir "$rpm_dir" --dnf-cache "$DNF_CACHE") || rc=$?
     if [ "$rc" -ne 0 ]; then
-        fail "build-rpm-container.sh --no-build exited $rc"
+        setup_fail "packaging tools" "build-rpm-container.sh --no-build exited $rc"
         return 1
     fi
     pass "build-rpm-container.sh --no-build exited 0"
@@ -247,6 +333,13 @@ check_absent() {
 # DNF_REPORT, so a scenario can say what the build's download took even when
 # the build's own output is discarded. Under local CI the image carries the
 # run's label, so the end-of-run reap removes it if the scenario never does.
+#
+# The network budget's deadline reaches the RUN as a build secret, not a build
+# argument: a secret's value is not part of the layer's cache key, so the RUN
+# text stays the same from run to run and a cached layer is still reused.
+# required=true makes a build that was not given the secret an error, and an
+# empty one (the variable unset) is dnf-bounded's usage error, so a broken
+# hand-off fails the build rather than running it unbounded.
 DNF_REPORT=/var/log/fips-ci-image-dnf.txt
 build_runtime_image() {
     local image="$1" base_image="$2" with_resolver="$3"
@@ -259,6 +352,14 @@ build_runtime_image() {
         enable_resolved="systemctl enable systemd-resolved && \\"
     fi
 
+    # EL9 images start from this run's metadata and download only packages.
+    # Fedora is another distribution, with its own.
+    local seed=""
+    if [ "$base_image" = "$EL9_IMAGE" ]; then
+        seed_dnf_cache || return 1
+        seed="COPY testing/rpm-install/.cache/dnf-seed/ /var/cache/dnf/"
+    fi
+
     local run_label=""
     if [ -n "${FIPS_CI_RUN_ID:-}" ]; then
         run_label="LABEL com.corganlabs.fips-ci=1 com.corganlabs.fips-ci.run=${FIPS_CI_RUN_ID}"
@@ -269,9 +370,14 @@ build_runtime_image() {
     build_image "$image" "$(cat <<DOCKERFILE
 FROM ${base_image}
 COPY packaging/rpm/dnf-bounded.sh /usr/local/libexec/dnf-bounded.sh
-RUN /usr/local/libexec/dnf-bounded.sh --bound ${IMAGE_TIMEOUT} --record ${DNF_REPORT} -- \\
+${seed}
+RUN --mount=type=secret,id=ci-deadline,required=true \\
+    /usr/local/libexec/dnf-bounded.sh --bound ${IMAGE_TIMEOUT} --record ${DNF_REPORT} \\
+        --deadline @/run/secrets/ci-deadline --label "runtime image ${base_image}" -- \\
         install -y --setopt=install_weak_deps=False ${packages} && \\
-    /usr/local/libexec/dnf-bounded.sh --bound ${IMAGE_TIMEOUT} -- makecache && \\
+    /usr/local/libexec/dnf-bounded.sh --bound ${IMAGE_TIMEOUT} \\
+        --deadline @/run/secrets/ci-deadline --label "runtime image ${base_image} makecache" -- \\
+        makecache && \\
     rm /usr/local/libexec/dnf-bounded.sh && \\
     ${enable_resolved}
     mkdir -p /opt/fips-rpm
@@ -279,7 +385,7 @@ COPY testing/rpm-install/.cache/rpm-for-image /opt/fips-rpm/${rpm_basename}
 ${run_label}
 CMD ["/usr/sbin/init"]
 DOCKERFILE
-    )"
+    )" --secret id=ci-deadline,env=FIPS_CI_DEADLINE
     local rc=$?
     rm -f "$CACHE_DIR/rpm-for-image"
     return $rc
@@ -291,7 +397,7 @@ boot_scenario() {
 
     log "Building ${base_image} runtime image"
     if ! build_runtime_image "$image" "$base_image" "$with_resolver"; then
-        fail "runtime image build failed for $base_image"
+        setup_fail "runtime image ${base_image}" "runtime image build failed for $base_image"
         return 1
     fi
 
@@ -711,9 +817,11 @@ make_next_package() {
         if ! docker run --rm "${CI_LABELS[@]}" \
             -v "$(dirname "$RPM_PATH")":/rpm:ro -v "$bin_dir":/bin-out \
             -v "$REPO_ROOT/packaging/rpm/dnf-bounded.sh":/dnf-bounded.sh:ro \
+            -v "$DNF_CACHE":/dnf-cache \
             -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
             "$FIPS_RPM_BUILD_IMAGE" bash -euo pipefail -c "
-                bash /dnf-bounded.sh --attempts 3 --bound $DNF_BOUND -- \\
+                bash /dnf-bounded.sh --attempts 3 --bound $DNF_BOUND \\
+                    --deadline $FIPS_CI_DEADLINE --cache /dnf-cache --label 'cpio for the upgrade' -- \\
                     install -y --setopt=install_weak_deps=False cpio
                 cd \$(mktemp -d) # mount-tmpdir: runs inside the container, never mounted
                 rpm2cpio /rpm/$(basename "$RPM_PATH") | cpio -idm --quiet
@@ -722,6 +830,7 @@ make_next_package() {
                 done
                 chown \"\$HOST_UID:\$HOST_GID\" /bin-out/*
             " >&2; then
+            setup_fail "cpio for the upgrade" "could not recover the binaries from $(basename "$RPM_PATH")"
             return 1
         fi
     fi
@@ -730,10 +839,17 @@ make_next_package() {
     local version
     version=$(rpm -qp --queryformat '%{VERSION}' "$RPM_PATH" 2>/dev/null \
         || awk -F'"' '/^version = /{print $2; exit}' "$REPO_ROOT/Cargo.toml" | sed 's/-dev$//')
+    local rc=0
     NEXT_RPM=$("$REPO_ROOT/packaging/rpm/build-rpm-container.sh" \
         --no-build --bin-dir "$bin_dir" --version "${version}-999" \
-        --output-dir "$next_dir" | tail -n 1)
-    [ -n "$NEXT_RPM" ] && [ -f "$NEXT_RPM" ]
+        --output-dir "$next_dir" --dnf-cache "$DNF_CACHE") || rc=$?
+    NEXT_RPM=$(tail -n 1 <<<"$NEXT_RPM")
+    if [ "$rc" -ne 0 ] || [ -z "$NEXT_RPM" ] || [ ! -f "$NEXT_RPM" ]; then
+        setup_fail "packaging tools for the Release-999 package" \
+            "could not build the higher-Release package for the upgrade (exit $rc)"
+        return 1
+    fi
+    return 0
 }
 
 # A running daemon upgraded in place. %postun of the *old* package is what
@@ -744,10 +860,7 @@ test_upgrade() {
     local image="fips-rpm-test:upgrade${FIPS_CI_NAME_SUFFIX:-}"
 
     log "RPM upgrade: ${EL9_IMAGE}"
-    if ! make_next_package; then
-        fail "could not build the higher-Release package for the upgrade"
-        return
-    fi
+    make_next_package || return
     boot_scenario "$name" "$image" "$EL9_IMAGE" resolver \
         || { end_scenario "$name" "$image"; return; }
     install_package "$name" || { end_scenario "$name" "$image"; return; }
@@ -861,7 +974,19 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SCENARIOS[@]} -eq 0 ] && read -ra SCENARIOS <<<"$ALL_SCENARIOS"
 
+# A cache left by an earlier run, killed before its own cleanup, is never
+# reused: its metadata may be days old.
+if ! clear_dnf_cache; then
+    fail "could not clear $DNF_CACHE, left by an earlier run"
+    echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
+    exit 1
+fi
+mkdir -p "$DNF_CACHE" "$DNF_SEED"
+trap 'clear_dnf_cache || echo "WARNING: could not remove $DNF_CACHE" >&2' EXIT
+
 build_rpm || { echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"; exit 1; }
+# Under --rpm nothing above reached a mirror, and the clock starts here.
+start_budget
 
 for scenario in "${SCENARIOS[@]}"; do
     case "$scenario" in
