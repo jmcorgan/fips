@@ -390,7 +390,12 @@ services:
       - net.ipv6.conf.all.forwarding=1
       - net.ipv6.conf.all.proxy_ndp=1
     volumes:
-      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      # Not the shared ../docker/resolv.conf: that points at 127.0.0.1, and in
+      # gateway mode no dnsmasq runs there. Port 53 belongs to fips-gateway,
+      # which refuses every name outside .fips, and before it starts nothing
+      # listens. The node dials its static peers by docker hostname, so its
+      # lookups go straight to Docker's resolver instead.
+      - ./configs/gateway-node-resolv.conf:/etc/resolv.conf:ro
       - ./generated-configs${FIPS_CI_NAME_SUFFIX:-}/gateway/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
