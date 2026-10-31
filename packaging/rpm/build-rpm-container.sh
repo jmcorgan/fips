@@ -17,7 +17,7 @@
 # nothing.
 #
 # Usage: build-rpm-container.sh [--output-dir DIR] [--version V] [--features L]
-#                               [--no-build] [--bin-dir DIR]
+#                               [--no-build] [--bin-dir DIR] [--dnf-cache DIR]
 #
 # --no-build packages the binaries already under target/release instead of
 # building any, for a caller that has them: the release workflow recovers them
@@ -27,6 +27,11 @@
 # --features reaches cargo through the Debian container build and then marks
 # the Release, so a feature build of a commit is a different package from the
 # default build of the same commit.
+#
+# --dnf-cache shares dnf's cache with DIR, so a caller that packages more than
+# once, or builds AlmaLinux images after packaging, downloads the repository
+# metadata once instead of each time (see dnf-bounded.sh --cache). DIR must
+# exist; it stays owned by the user running this.
 #
 # Requires docker. Nothing else: no rust toolchain, no rpmbuild, no dpkg.
 
@@ -45,6 +50,7 @@ VERSION=""
 FEATURES=""
 NO_BUILD=0
 BIN_DIR=""
+DNF_CACHE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -53,7 +59,8 @@ while [[ $# -gt 0 ]]; do
         --features)   FEATURES="${2:?missing value for --features}"; shift 2 ;;
         --no-build)   NO_BUILD=1; shift ;;
         --bin-dir)    BIN_DIR="${2:?missing value for --bin-dir}"; NO_BUILD=1; shift 2 ;;
-        -h | --help)  sed -n '2,28p' "$0"; exit 0 ;;
+        --dnf-cache)  DNF_CACHE="${2:?missing value for --dnf-cache}"; shift 2 ;;
+        -h | --help)  sed -n '2,34p' "$0"; exit 0 ;;
         *)            echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -218,11 +225,23 @@ fi
 
 rpm_args=(--no-build --bin-dir /bins --version "$VERSION" --output-dir /out --name-file /name/rpm)
 
+cache_mount=()
+cache_args=""
+if [ -n "$DNF_CACHE" ]; then
+    [ -d "$DNF_CACHE" ] || {
+        echo "build-rpm-container: --dnf-cache $DNF_CACHE is not a directory" >&2
+        exit 2
+    }
+    cache_mount=(-v "$(cd "$DNF_CACHE" && pwd)":/dnf-cache)
+    cache_args="--cache /dnf-cache"
+fi
+
 docker run --rm "${CI_LABELS[@]}" \
     -v "$REPO_ROOT":/src:ro \
     -v "$BIN_DIR":/bins:ro \
     -v "$DEST_ABS":/out \
     -v "$NAME_DIR":/name \
+    "${cache_mount[@]}" \
     -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
     -w /src \
@@ -234,7 +253,7 @@ docker run --rm "${CI_LABELS[@]}" \
         # testing/lib/image-build.sh. Bounded per attempt, because a stalled
         # mirror does not fail: it holds the step until the job's own limit.
         bash packaging/rpm/dnf-bounded.sh --attempts 3 --bound $DNF_BOUND \\
-            $budget_args --label 'packaging tools' -- \\
+            $budget_args $cache_args --label 'packaging tools' -- \\
             install -y --setopt=install_weak_deps=False rpm-build systemd-rpm-macros || {
             echo 'could not install rpm-build and systemd-rpm-macros' >&2
             exit 1

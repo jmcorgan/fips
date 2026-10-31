@@ -4,7 +4,8 @@
 # fetched from.
 #
 # Usage: dnf-bounded.sh --bound SECONDS [--attempts N] [--record FILE]
-#                       [--deadline EPOCH|@FILE] [--label TEXT] -- DNF-ARGS...
+#                       [--deadline EPOCH|@FILE] [--label TEXT] [--cache DIR]
+#                       -- DNF-ARGS...
 #
 #   --bound     seconds one attempt may run before it is killed (required)
 #   --attempts  attempts before giving up, default 1; 5 s, then 10 s, ... between
@@ -12,6 +13,10 @@
 #   --deadline  the caller's network budget ends at EPOCH (seconds since 1970),
 #               or at the epoch read from FILE: no attempt runs past it
 #   --label     what the budget messages call this call, default "dnf <command>"
+#   --cache     share dnf's cache with DIR, a bind-mounted directory the host
+#               user owns: copied in before the first attempt, and copied back
+#               after the attempt that succeeds, written as DIR's owner, with
+#               keepcache on so the packages are kept too (dnf 4 only)
 #
 # Exit status: 0 once an attempt succeeds, otherwise the last attempt's status
 # (124 when the bound ended it). 124 also when the deadline ended an attempt or
@@ -36,7 +41,15 @@
 # killed again. A deadline that cannot be read is an error rather than no
 # deadline, so a broken hand-off fails loudly instead of running unbounded.
 #
-# Runs inside the container, so it needs only bash, coreutils and dnf. It
+# --cache lets the calls of one run share a single download of the metadata,
+# each in its own fresh container. dnf writes only to the container's own
+# cache, and the copy back is written by DIR's owner, never by root, so a
+# container killed from outside at any point leaves nothing in DIR that its
+# owner cannot remove; a partial copy is removed and reported, and the next
+# call downloads what it needs.
+#
+# Runs inside the container, so it needs only bash, coreutils and dnf (and
+# tar and setpriv for --cache). It
 # handles both dnf 4 (EL9, which takes -v) and dnf5 (Fedora, which does not and
 # logs to a different file). DNF_BOUNDED_LOG overrides the librepo log it reads
 # the mirrors from, for testing/rpm-install/budget-test.sh.
@@ -48,6 +61,7 @@ attempts=1
 record=""
 deadline=""
 label=""
+cache=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bound) bound="${2:?missing value for --bound}"; shift 2 ;;
@@ -55,13 +69,14 @@ while [ $# -gt 0 ]; do
         --record) record="${2:?missing value for --record}"; shift 2 ;;
         --deadline) deadline="${2:?missing value for --deadline}"; shift 2 ;;
         --label) label="${2:?missing value for --label}"; shift 2 ;;
+        --cache) cache="${2:?missing value for --cache}"; shift 2 ;;
         --) shift; break ;;
         *) echo "dnf-bounded: unknown option $1" >&2; exit 2 ;;
     esac
 done
 if ! [[ "$bound" =~ ^[1-9][0-9]*$ && "$attempts" =~ ^[1-9][0-9]*$ ]] || [ $# -eq 0 ]; then
     echo "dnf-bounded: usage: dnf-bounded.sh --bound SECONDS [--attempts N] [--record FILE]" >&2
-    echo "                    [--deadline EPOCH|@FILE] [--label TEXT] -- DNF-ARGS..." >&2
+    echo "                    [--deadline EPOCH|@FILE] [--label TEXT] [--cache DIR] -- DNF-ARGS..." >&2
     exit 2
 fi
 : "${label:=dnf $1}"
@@ -104,6 +119,36 @@ fi
 
 out=$(mktemp) || exit 1
 trap 'rm -f "$out"' EXIT
+
+# dnf's own cache, inside the container.
+dnf_cache=/var/cache/dnf
+keep=()
+owner=""
+if [ -n "$cache" ]; then
+    if [ ! -d "$cache" ]; then
+        echo "dnf-bounded: --cache: $cache is not a directory" >&2
+        exit 2
+    fi
+    owner=$(stat -c %u:%g "$cache")
+    mkdir -p "$dnf_cache"
+    cp -a "$cache/." "$dnf_cache/" || {
+        echo "dnf-bounded: could not copy $cache into $dnf_cache" >&2
+        exit 1
+    }
+    keep=(--setopt=keepcache=True)
+fi
+
+# Copy dnf's cache back into the shared directory as its owner. On failure,
+# remove the partial copy, so a later call downloads afresh rather than reading
+# half a repository, and say so; the call itself has still succeeded.
+export_cache() {
+    local as=(setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups)
+    if ! tar -C "$dnf_cache" -cf - . | "${as[@]}" tar -C "$cache" -xf -; then
+        "${as[@]}" find "$cache" -mindepth 1 -delete 2>/dev/null
+        report "dnf-bounded: $label: could not copy the cache back to $cache; the next call downloads afresh"
+    fi
+    return 0
+}
 # Print to stderr, and to the record file when one was asked for.
 report() {
     echo "$*" >&2
@@ -159,7 +204,7 @@ while true; do
     start=$SECONDS
     rc=0
     timeout -k 10 "$limit" dnf "${verbose[@]}" \
-        --setopt=timeout=20 --setopt=minrate=50k "$@" >"$out" 2>&1 || rc=$?
+        --setopt=timeout=20 --setopt=minrate=50k "${keep[@]}" "$@" >"$out" 2>&1 || rc=$?
     took=$((SECONDS - start))
 
     urls=""
@@ -188,6 +233,7 @@ while true; do
         | sed 's/[[:space:]]\+$//')
 
     if [ "$rc" -eq 0 ]; then
+        [ -n "$cache" ] && export_cache
         exit 0
     fi
     if [ -n "$urls" ]; then

@@ -177,8 +177,12 @@ the container names do, and the scenario removes it when it ends;
 `check-image-scoping.sh` fails on an unsuffixed `fips-rpm-test` tag. The dnf
 steps that set a scenario up, the packaging tools and the image's packages, go
 through `packaging/rpm/dnf-bounded.sh`, which bounds each attempt and prints
-its time and mirrors. The image keeps its repository metadata, and the
-install, erase and upgrade read it rather than fetching it again.
+its time and mirrors. The AlmaLinux metadata is downloaded once per run: the
+packaging steps share one dnf cache under `.cache/dnf`, always written as the
+user running the suite and never reused across runs, and each EL9 image starts
+from its metadata files and downloads only packages. The image keeps its
+repository metadata, and the install, erase and upgrade read it rather than
+fetching it again.
 
 Those per-attempt bounds do not add up to anything a CI step can hold, so the
 whole setup also runs inside one network budget, `DNF_BUDGET` (1800 s by
