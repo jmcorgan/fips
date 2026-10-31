@@ -26,7 +26,11 @@ RUN mkdir -p /var/run/sshd && \
     sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config && \
     passwd -d root
 
-# dnsmasq: forward .fips to FIPS daemon, everything else to Docker DNS
+# dnsmasq: forward .fips to FIPS daemon, everything else to Docker DNS.
+# no-negcache: a node that looks up a peer's hostname before Docker has
+# registered it gets the host's upstream answer. Where that is an NXDOMAIN
+# carrying an SOA, as public resolvers send, dnsmasq would cache it for the
+# SOA's negative TTL and keep answering NXDOMAIN long after the peer is up.
 RUN printf '%s\n' \
     'port=53' \
     'listen-address=127.0.0.1' \
@@ -34,6 +38,7 @@ RUN printf '%s\n' \
     'server=/fips/::1#5354' \
     'server=127.0.0.11' \
     'no-resolv' \
+    'no-negcache' \
     >> /etc/dnsmasq.conf
 
 # native-echo and native-surface are the native datagram API's example
