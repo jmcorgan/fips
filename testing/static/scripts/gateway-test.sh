@@ -2571,6 +2571,50 @@ fi
 
 # ── Long-lived gateway restart, shared by phases 11 and 12 ───────────────
 
+# Wait until the restarted gateway node reaches both servers over the mesh,
+# recording the result under the label prefix $1; returns 1 if it does not
+# within the bound.
+#
+# The gateway's own peer count is not this condition. Phase 11 ends with a
+# container stop that kills the daemon with no disconnect notification, so at
+# phase 12's start each server still holds the old peering, heard from less
+# than a second earlier. Under XX the gateway promotes its link once it sends
+# msg3, and the server may then refuse the restart while the old peering is
+# that fresh (FRC-2201, Section 5.6, restart gates). That refusal is silent:
+# the gateway counts both peers, but nothing it sends is accepted until both
+# ends declare the link dead (30 s) and it dials again, about 36 s after the
+# start. A ping from the gateway node does not pass through the pool, so it
+# allocates no mapping and marks none used.
+gw_mesh_ready() {
+    local prefix="$1" npub addr addrs="" t0 i ok
+    t0=$(date -u +%s)
+    for npub in "$NPUB_B" "$NPUB_C"; do
+        addr=$(docker exec "$GATEWAY" dig +short AAAA "${npub}.fips" @::1 -p 5354 2>/dev/null \
+            | grep -m1 '^fd' || true)
+        if [ -z "$addr" ]; then
+            check "$prefix: daemon DNS gives the mesh address of ${npub:0:20}..." 1
+            return 1
+        fi
+        addrs="$addrs $addr"
+    done
+    i=0
+    while [ $(($(date -u +%s) - t0)) -lt 90 ]; do
+        i=$((i + 1))
+        ok=0
+        for addr in $addrs; do
+            docker exec "$GATEWAY" ping6 -c 1 -W 1 "$addr" >/dev/null 2>&1 || ok=1
+        done
+        if [ "$ok" -eq 0 ]; then
+            echo "  gateway reaches both servers over the mesh $(($(date -u +%s) - t0))s after its peers ($i tries)"
+            check "$prefix: gateway reaches both servers over the mesh after restart" 0
+            return 0
+        fi
+        sleep 1
+    done
+    check "$prefix: gateway reaches both servers over the mesh after restart" 1
+    return 1
+}
+
 # Start the stopped gateway with mappings that outlive the phase, and gate on
 # its readiness. A failure is recorded through check under the label prefix
 # $1 and returns 1, and the caller ends its phase. On success it sets:
@@ -2621,6 +2665,7 @@ PYEOF
         check "$prefix: gateway peers after restart" 1
         return 1
     fi
+    gw_mesh_ready "$prefix" || return 1
     local probe
     GW_PROBE=""
     for _ in $(seq 1 60); do
