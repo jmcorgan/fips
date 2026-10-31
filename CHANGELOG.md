@@ -1911,6 +1911,13 @@ with v0.5.x or earlier peers.
   each.
   Both now also say that `peers.allow` alone refuses no one: only the listed
   peers are admitted when `peers.deny` holds `ALL`.
+- A forged msg2 now costs a dialling node one Diffie-Hellman operation
+  instead of two. Anyone who sees the node's msg1 can send msg2s naming its
+  handshake, on a first dial and at each link rekey, and the node reads every
+  one, because dropping the attempt on a refused msg2 would let a forger end
+  the genuine handshake. The wire format and the session keys are unchanged.
+  The number of forged msg2s a node reads during one handshake is still not
+  limited.
 
 #### Sessions
 

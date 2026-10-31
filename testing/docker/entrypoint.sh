@@ -280,7 +280,10 @@ case "$MODE" in
         exec fips --config "$CONFIG"
         ;;
     gateway)
-        # No dnsmasq — gateway DNS replaces it on port 53
+        # No dnsmasq — gateway DNS replaces it on port 53. That resolver
+        # answers only .fips names, so the container's own resolv.conf,
+        # set in compose, points at Docker's resolver, where the node looks
+        # up its peers' hostnames.
         start_services
 
         # The LAN interface is the one holding the gateway's LAN address,
