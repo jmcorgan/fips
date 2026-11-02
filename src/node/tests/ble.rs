@@ -6,13 +6,15 @@
 
 use super::*;
 use crate::config::BleConfig;
+use crate::proto::fmp::wire::{PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
 use crate::transport::ble::BleTransport;
 use crate::transport::ble::addr::BleAddr;
 use crate::transport::ble::io::{MockBleIo, MockBleStream};
 use crate::transport::{Transport, TransportHandle, TransportId, packet_channel};
+use crossed_dial::{hand, phase};
 use spanning_tree::{
-    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, process_available_packets,
-    verify_tree_convergence,
+    TestNode, cleanup_nodes, dial_at, drain_all_packets, initiate_handshake,
+    process_available_packets, verify_tree_convergence,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -1016,6 +1018,192 @@ async fn a_peer_roaming_onto_a_second_link_moves_the_verification_with_it() {
         Some(false),
         "the link it left is not"
     );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The next packet `tn` receives. Under a paused clock the timeout fires
+/// as soon as every task is idle, so a packet that never comes fails the
+/// test at once instead of hanging it, and no wall-clock time passes.
+async fn next_packet(tn: &mut TestNode) -> ReceivedPacket {
+    tokio::time::timeout(std::time::Duration::from_secs(5), tn.packet_rx.recv())
+        .await
+        .expect("a packet arrives")
+        .expect("the receive channel stays open")
+}
+
+/// Order two nodes so that node 0 holds the smaller node address, the one
+/// whose outbound handshake wins a crossed dial.
+fn smaller_first(nodes: &mut [TestNode]) {
+    if nodes[0].node.node_addr() > nodes[1].node.node_addr() {
+        nodes.swap(0, 1);
+    }
+}
+
+/// Take packets from `tn` until one of handshake phase `want` arrives,
+/// keeping any established frame that comes first in `held`, unhanded: one
+/// would mark the link it arrived on as the sender's.
+async fn next_phase(tn: &mut TestNode, want: u8, held: &mut Vec<ReceivedPacket>) -> ReceivedPacket {
+    loop {
+        let packet = next_packet(tn).await;
+        match phase(&packet) {
+            Some(p) if p == want => return packet,
+            Some(PHASE_ESTABLISHED) => held.push(packet),
+            other => panic!("precondition: an unexpected packet ({other:?}) before phase {want}"),
+        }
+    }
+}
+
+/// Crossed dials on two links between one pair: node 0, the smaller, dials
+/// over L2 and node 1 over L1. Node 1's msg3 over L1 completes node 0's
+/// inbound half first, so node 0 settles the crossing on node 1's msg2,
+/// which comes over L2: it keeps its outbound handshake, holds node 1 on
+/// L2, keeps L2 pooled, and moves node 1's verification there from L1.
+/// Node 1 settles it on node 0's msg3, which comes over L2 too, and moves
+/// node 0 and its verification there in the same way.
+#[tokio::test(start_paused = true)]
+async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link() {
+    let mut nodes = vec![make_test_node_ble(1).await, make_test_node_ble(2).await];
+    smaller_first(&mut nodes);
+    let (a0, a1, a0x, a1x) = two_links(&nodes).await;
+    let (a0, a1, a0x, a1x) = (
+        a0.to_transport_addr(),
+        a1.to_transport_addr(),
+        a0x.to_transport_addr(),
+        a1x.to_transport_addr(),
+    );
+    let t = nodes[0].transport_id;
+    let n0 = *nodes[0].node.node_addr();
+    let n1 = *nodes[1].node.node_addr();
+    let mut held = Vec::new();
+
+    // Node 0's msg1 goes out on L2, node 1's on L1.
+    dial_at(&mut nodes, 0, 1, a1x.clone()).await;
+    initiate_handshake(&mut nodes, 1, 0).await;
+    let outbound = {
+        let keys: Vec<_> = nodes[0].node.pending_outbound.keys().copied().collect();
+        assert_eq!(keys.len(), 1, "precondition: node 0 has one dial pending");
+        SessionIndex::new(keys[0].1)
+    };
+
+    let msg1 = next_packet(&mut nodes[1]).await;
+    assert_eq!(
+        (phase(&msg1), msg1.transport_id, &msg1.remote_addr),
+        (Some(PHASE_MSG1), t, &a0x),
+        "precondition: node 0's msg1 reaches node 1 over L2"
+    );
+    hand(&mut nodes[1].node, msg1).await;
+
+    // Node 1's msg1 comes over L1 and its msg2 over L2, each link read by
+    // its own task, so their order is not assumed.
+    let (mut msg1, mut msg2) = (None, None);
+    while msg1.is_none() || msg2.is_none() {
+        let packet = next_packet(&mut nodes[0]).await;
+        match phase(&packet) {
+            Some(PHASE_MSG1) if msg1.is_none() => msg1 = Some(packet),
+            Some(PHASE_MSG2) if msg2.is_none() => msg2 = Some(packet),
+            other => panic!("precondition: an unexpected packet at node 0 ({other:?})"),
+        }
+    }
+    let (msg1, msg2) = (msg1.unwrap(), msg2.unwrap());
+    assert_eq!(
+        (msg1.transport_id, &msg1.remote_addr),
+        (t, &a1),
+        "precondition: node 1's msg1 reaches node 0 over L1"
+    );
+    assert_eq!(
+        (msg2.transport_id, &msg2.remote_addr),
+        (t, &a1x),
+        "precondition: node 1's msg2 reaches node 0 over L2"
+    );
+
+    // Node 0 answers node 1's msg1 over L1; node 1 completes its own dial on
+    // that msg2 and installs node 0 on L1.
+    hand(&mut nodes[0].node, msg1).await;
+    let answer = next_phase(&mut nodes[1], PHASE_MSG2, &mut held).await;
+    assert_eq!(
+        (answer.transport_id, &answer.remote_addr),
+        (t, &a0),
+        "precondition: node 0's msg2 reaches node 1 over L1"
+    );
+    hand(&mut nodes[1].node, answer).await;
+    let pair = |tn: &TestNode, peer: &NodeAddr| {
+        let peer = tn.node.get_peer(peer).expect("the node holds its peer");
+        (peer.transport_id(), peer.current_addr().cloned())
+    };
+    assert_eq!(
+        pair(&nodes[1], &n0),
+        (Some(t), Some(a0.clone())),
+        "precondition: node 1 installed node 0 on L1"
+    );
+
+    // Node 1's msg3 over L1 completes node 0's inbound half first.
+    let msg3 = next_phase(&mut nodes[0], PHASE_MSG3, &mut held).await;
+    assert_eq!(
+        (msg3.transport_id, &msg3.remote_addr),
+        (t, &a1),
+        "precondition: node 1's msg3 reaches node 0 over L1"
+    );
+    hand(&mut nodes[0].node, msg3).await;
+    assert_eq!(
+        pair(&nodes[0], &n1),
+        (Some(t), Some(a1.clone())),
+        "precondition: node 0 installed node 1 on its msg3, holding it on L1"
+    );
+
+    hand(&mut nodes[0].node, msg2).await;
+    assert_eq!(
+        nodes[0].node.get_peer(&n1).and_then(|p| p.our_index()),
+        Some(outbound),
+        "precondition: node 0 swapped to its outbound session"
+    );
+    assert!(
+        verified_at(&nodes[0], &a1x).await.is_some(),
+        "node 0 keeps L2, the link its winning handshake ran on, pooled"
+    );
+    assert_eq!(
+        pair(&nodes[0], &n1),
+        (Some(t), Some(a1x.clone())),
+        "node 0 holds node 1 on L2, where the msg2 came from"
+    );
+    assert_eq!(
+        verified_at(&nodes[0], &a1x).await,
+        Some(true),
+        "node 0 verifies L2 as node 1's link"
+    );
+    assert_eq!(
+        verified_at(&nodes[0], &a1).await,
+        Some(false),
+        "node 0's L1 is no longer node 1's link"
+    );
+
+    // Node 0's msg3 over L2 completes node 1's inbound half second.
+    let msg3 = next_phase(&mut nodes[1], PHASE_MSG3, &mut held).await;
+    assert_eq!(
+        (msg3.transport_id, &msg3.remote_addr),
+        (t, &a0x),
+        "precondition: node 0's msg3 reaches node 1 over L2"
+    );
+    hand(&mut nodes[1].node, msg3).await;
+    assert!(
+        verified_at(&nodes[1], &a0x).await.is_some(),
+        "node 1 keeps L2, the link the winning handshake ran on, pooled"
+    );
+    assert_eq!(
+        pair(&nodes[1], &n0),
+        (Some(t), Some(a0x.clone())),
+        "node 1 holds node 0 on L2, where the msg3 came from"
+    );
+    assert_eq!(
+        verified_at(&nodes[1], &a0x).await,
+        Some(true),
+        "node 1 verifies L2 as node 0's link"
+    );
+    assert_eq!(
+        verified_at(&nodes[1], &a0).await,
+        Some(false),
+        "node 1's L1 is no longer node 0's link"
+    );
+    drop(held);
     cleanup_nodes(&mut nodes).await;
 }
 

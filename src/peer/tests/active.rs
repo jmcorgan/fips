@@ -582,6 +582,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
 
     count_resend_lines(&mut b.peer, 6);
     let (_s, next_recv) = xx_session_pair();
+    let to = here(&b.peer);
     let mut caps = crate::peer::LinkCaps {
         indices: &mut b.alloc,
         local: &b.keys,
@@ -593,7 +594,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
     };
     let _ = b
         .peer
-        .move_session(next_recv, lease(7), SessionIndex::new(8), &mut caps);
+        .move_session(next_recv, lease(7), SessionIndex::new(8), to, &mut caps);
 
     // 2 from the first session, 1 from the second, 3 from the third.
     let carried = b
@@ -877,11 +878,28 @@ fn record_frames(peer: &mut ActivePeer, from: u64, frames: u64) {
     }
 }
 
+/// The transport and address `peer` is held at, which a move that keeps the
+/// peer where it is passes as the pair it moves to.
+fn here(
+    peer: &ActivePeer,
+) -> (
+    crate::transport::TransportId,
+    crate::transport::TransportAddr,
+) {
+    (
+        peer.transport_id().expect("the peer has a transport"),
+        peer.current_addr()
+            .cloned()
+            .expect("the peer has an address"),
+    )
+}
+
 /// Move `end`'s link onto a fresh session under our index 7 and the peer's
 /// index 8, as the node does when crossed dials resolve onto the other
 /// dial's session, and check that the link moved.
 fn cross_move(end: &mut End) {
     let (_s, next_recv) = xx_session_pair();
+    let to = here(&end.peer);
     let mut caps = crate::peer::LinkCaps {
         indices: &mut end.alloc,
         local: &end.keys,
@@ -893,7 +911,7 @@ fn cross_move(end: &mut End) {
     };
     let out = end
         .peer
-        .move_session(next_recv, lease(7), SessionIndex::new(8), &mut caps);
+        .move_session(next_recv, lease(7), SessionIndex::new(8), to, &mut caps);
     end.carry(&out);
     assert_eq!(
         end.peer.our_index(),

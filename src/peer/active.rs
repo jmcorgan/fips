@@ -685,39 +685,46 @@ impl ActivePeer {
     }
 
     /// Move this peer onto `session`, the winning handshake of a crossed
-    /// dial, under this node's `ours` and the peer's `theirs`.
+    /// dial, under this node's `ours` and the peer's `theirs`, at `to`, the
+    /// transport and source address of the message that completed that
+    /// handshake.
     ///
-    /// When both nodes dial each other at once, each promotes the handshake
-    /// the other started; the smaller node's outbound handshake wins, and it
-    /// moves to that session when the peer's msg2 arrives. The link's rekey
-    /// machine is closed, which abandons its own rekey in flight, ends a
-    /// responder pending and the drain of the previous session, and releases
-    /// every index they held, and a new one is built on `session` from what
-    /// the closed one hands back: the moved session keeps the replaced one's
-    /// key-epoch bit and start (so its rekey age and inner-header timestamps
-    /// carry on), the link's age, the time the peer was last heard, the
-    /// key-epoch bit last seen from the peer and the replay record. `caps`
-    /// lends the index allocator and keys, the parameters the new machine is
-    /// built with and whether a decrypt-worker pool runs, to which the new
-    /// session is offered at once; its record is not read.
+    /// When both nodes dial each other at once, each completes both an outbound
+    /// and an inbound handshake; the smaller node's outbound handshake wins,
+    /// and both ends converge on the link it dialled (FRC-2201, Section 5.7).
+    /// The smaller node moves to that session when the peer's msg2 completes it
+    /// second, the larger node when the peer's msg3 does, and each takes that
+    /// message's transport and source address as the peer's: the moved session
+    /// is bound on `to`'s transport, where the peer's frames on it arrive, and
+    /// the peer is held at `to`. The link's rekey machine is closed, which
+    /// abandons its own rekey in flight, ends a responder pending and the drain
+    /// of the previous session, and releases every index they held, and a new
+    /// one is built on `session` from what the closed one hands back: the moved
+    /// session keeps the replaced one's key-epoch bit and start (so its rekey
+    /// age and inner-header timestamps carry on), the link's age, the time the
+    /// peer was last heard, the key-epoch bit last seen from the peer and the
+    /// replay record. `caps` lends the index allocator and keys, the parameters
+    /// the new machine is built with and whether a decrypt-worker pool runs, to
+    /// which the new session is offered at once; its record is not read.
     ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session. Hands `ours` back
-    /// in a release, changing nothing, when `session` authenticated another
-    /// key than the peer's. Also resets the replay suppression counter and
-    /// the repeated handshake line counts since the session changed, and,
-    /// once the link has moved, the link's counter-derived MMP state, as a
-    /// cutover does, since the new session's frame counter starts again at 0.
+    /// in a release, changing nothing (the peer's pair included), when
+    /// `session` authenticated another key than the peer's. Also resets the
+    /// replay suppression counter and the repeated handshake line counts
+    /// since the session changed, and, once the link has moved, the link's
+    /// counter-derived MMP state, as a cutover does, since the new session's
+    /// frame counter starts again at 0.
     pub(crate) fn move_session(
         &mut self,
         session: NoiseSession,
         ours: IndexLease,
         theirs: SessionIndex,
+        to: (TransportId, TransportAddr),
         caps: &mut LinkCaps<'_>,
     ) -> LinkOutputs {
         self.reset_replay_suppressed();
         self.hs_lines.roll();
-        let transport = self.bound_transport();
         let Some(old) = self.rekey.take() else {
             return vec![LinkOutput::Release(ours)];
         };
@@ -736,11 +743,12 @@ impl ActivePeer {
             out.push(LinkOutput::Release(ours));
             return out;
         };
-        match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
+        match link_machine(bond, session, ours, theirs, to.0, carry.into(), caps) {
             Ok((rekey, built)) => {
                 out.extend(built);
                 self.rekey = Some(rekey);
                 self.reset_mmp();
+                self.set_current_addr(to.0, to.1);
             }
             Err(lease) => out.push(LinkOutput::Release(lease)),
         }

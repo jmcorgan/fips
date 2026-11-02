@@ -19,7 +19,7 @@ static LARGE_NETWORK_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 /// address. Each node gets a unique synthetic address (`loopback:{n}`) from
 /// `LOOPBACK_ADDR_COUNTER`, so addresses never collide across concurrently
 /// running tests and stale entries from finished tests are harmless.
-static LOOPBACK_REGISTRY: std::sync::LazyLock<LoopbackRegistry> =
+pub(super) static LOOPBACK_REGISTRY: std::sync::LazyLock<LoopbackRegistry> =
     std::sync::LazyLock::new(new_registry);
 
 static LOOPBACK_ADDR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -74,6 +74,22 @@ pub(super) fn add_loopback_alias(existing: &TransportAddr) -> TransportAddr {
     let alias = next_loopback_addr();
     LOOPBACK_REGISTRY.lock().unwrap().insert(alias.clone(), tx);
     alias
+}
+
+/// Register a new loopback address whose packets land in the returned
+/// channel rather than in any node's.
+///
+/// A test that hands what arrives there to a node on its own sees which of
+/// the node's addresses a peer sent each packet to, which the node's own
+/// receive channel does not record.
+pub(super) fn loopback_tap() -> (
+    TransportAddr,
+    tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
+    let addr = next_loopback_addr();
+    LOOPBACK_REGISTRY.lock().unwrap().insert(addr.clone(), tx);
+    (addr, rx)
 }
 
 /// Hold back every packet sent to `node` from now on by `delay`, or discard
@@ -250,10 +266,24 @@ pub(super) async fn make_test_node_with_config(config: Config, mtu: u16) -> Test
 /// Sends msg1 over UDP. The drain loop will handle msg1 processing,
 /// msg2 response, and subsequent TreeAnnounce exchange.
 pub(super) async fn initiate_handshake(nodes: &mut [TestNode], i: usize, j: usize) {
+    let responder_addr = nodes[j].addr.clone();
+    dial_at(nodes, i, j, responder_addr).await;
+}
+
+/// Initiate a Noise handshake from nodes[i] to nodes[j] at `responder_addr`,
+/// one of nodes[j]'s addresses on nodes[i]'s transport.
+///
+/// As [`initiate_handshake`], which dials nodes[j]'s own address, for a
+/// test whose nodes reach each other at more than one address.
+pub(super) async fn dial_at(
+    nodes: &mut [TestNode],
+    i: usize,
+    j: usize,
+    responder_addr: TransportAddr,
+) {
     use crate::proto::fmp::wire::build_msg1;
 
     // Extract responder info before mutably borrowing initiator
-    let responder_addr = nodes[j].addr.clone();
     let responder_pubkey_full = nodes[j].node.identity().pubkey_full();
     let peer_identity = PeerIdentity::from_pubkey_full(responder_pubkey_full);
 

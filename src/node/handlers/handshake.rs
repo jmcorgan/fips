@@ -1245,13 +1245,18 @@ impl Node {
                 let params = crate::node::handlers::rekey::link_params(&self.config().node);
                 let workers = self.link_workers();
                 let profile = self.node_profile();
+                let prior = self.peer_link(&peer_node_addr);
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
                     let epoch = diag::epoch_tag(&outbound_session);
                     // The peer's link machine is closed and rebuilt on the
-                    // outbound session: what it held is unbound and freed,
-                    // the outbound index bound on the peer's transport.
+                    // outbound session: what it held is unbound and freed.
+                    // The peer is taken at the msg2's transport and source
+                    // address (FRC-2201, Section 5.7), and the outbound
+                    // index is bound on the transport the msg2 came on,
+                    // which is where the peer's frames on that session
+                    // arrive and are looked up.
                     let mut caps = LinkCaps {
                         indices: &mut self.index_allocator,
                         local: &local,
@@ -1265,9 +1270,11 @@ impl Node {
                         outbound_session,
                         outbound_lease,
                         header.sender_idx,
+                        (packet.transport_id, packet.remote_addr.clone()),
                         &mut caps,
                     );
                     self.run_link_outputs(&peer_node_addr, out);
+                    self.follow_move(&peer_identity, prior).await;
 
                     if suppressed > 0 {
                         debug!(

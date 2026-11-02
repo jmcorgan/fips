@@ -544,8 +544,14 @@ impl Node {
                             // pairs with the peer's kept outbound session. The
                             // peer's link machine is closed and rebuilt on it,
                             // which abandons any rekey of ours in flight and
-                            // releases every index the old machine held; the
-                            // leg's lease is bound on the peer's transport.
+                            // releases every index the old machine held. Both
+                            // ends converge on the link the smaller node dialed
+                            // (FRC-2201, Section 5.7), which this msg3 came over,
+                            // so the peer is taken at the msg3's transport and
+                            // source address and the leg's lease is bound on that
+                            // transport, where the peer's frames on the session
+                            // arrive and are looked up.
+                            let prior = self.peer_link(&peer);
                             let local = self.session_node_keys();
                             let me = *self.identity().node_addr();
                             let params =
@@ -563,11 +569,18 @@ impl Node {
                                         workers,
                                         profile,
                                     };
-                                    peer_ref.move_session(session, lease, their_index, &mut caps)
+                                    peer_ref.move_session(
+                                        session,
+                                        lease,
+                                        their_index,
+                                        (ambient.transport_id, ambient.remote_addr.clone()),
+                                        &mut caps,
+                                    )
                                 }
                                 None => vec![crate::peer::LinkOutput::Release(lease)],
                             };
                             self.run_link_outputs(&peer, out);
+                            self.follow_move(&ambient.verified_identity, prior).await;
                             debug!(
                                 peer = %self.peer_display_name(&peer),
                                 new_our_index = %our_index,
@@ -716,6 +729,35 @@ impl Node {
         {
             transport.clear_verified(addr, node, new.is_none()).await;
         }
+    }
+
+    /// Follow a crossed dial's move of the active peer `identity` off
+    /// `prior`, the pair it was held at before the move, as a roam is
+    /// followed, when the move changed that pair.
+    ///
+    /// The connected UDP socket pinned to the old 5-tuple would keep sending
+    /// where the peer no longer is, and a transport that tracks peers (BLE)
+    /// must learn which link now carries this one, so that link is held as
+    /// the peer's and the one it left is not. The path MTU was seeded from
+    /// the link the peer was promoted on and describes that link, so it is
+    /// seeded again from the one the peer moved to, as promotion does.
+    pub(in crate::node) async fn follow_move(
+        &mut self,
+        identity: &PeerIdentity,
+        prior: Option<(TransportId, TransportAddr)>,
+    ) {
+        let node = *identity.node_addr();
+        let moved = self.peer_link(&node);
+        if moved == prior {
+            return;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.clear_connected_udp_for_peer(&node);
+        if let Some((tid, addr)) = &moved {
+            let key = crate::ipv6tun::link::PeerKey::from_xonly(&identity.pubkey());
+            self.seed_path_mtu_for_link_peer(&node, key, *tid, addr);
+        }
+        self.relink(&node, prior, moved).await;
     }
 
     /// Whether `transport` needs to hear of every authenticated frame's link.
