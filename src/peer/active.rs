@@ -667,11 +667,16 @@ impl ActivePeer {
     }
 
     /// Move this peer onto `session`, the winning handshake of a crossed
-    /// dial, under this node's `ours` and the peer's `theirs`.
+    /// dial, under this node's `ours` and the peer's `theirs`, at `to`, the
+    /// transport and source address of the winning msg2.
     ///
     /// When both nodes dial each other at once, each promotes the handshake
     /// the other started; the smaller node's outbound handshake wins, and it
-    /// moves to that session when the peer's msg2 arrives. The link's rekey
+    /// moves to that session when the peer's msg2 arrives. The node that
+    /// keeps its outbound handshake takes the msg2's transport and source
+    /// address as the peer's (FRC-1201, Sections 5.3 and 5.6): the moved
+    /// session is bound on `to`'s transport, where the peer's frames on it
+    /// arrive, and the peer is held at `to`. The link's rekey
     /// machine is closed, which abandons its own rekey in flight, ends a
     /// responder pending and the drain of the previous session, and releases
     /// every index they held, and a new one is built on `session` from what
@@ -685,21 +690,22 @@ impl ActivePeer {
     ///
     /// Returns the outputs that unbind, revoke and release what the closed
     /// machine held and bind (and offer) the new session. Hands `ours` back
-    /// in a release, changing nothing, when `session` authenticated another
-    /// key than the peer's. Also resets the replay suppression counter and
-    /// the repeated handshake line counts since the session changed, and,
-    /// once the link has moved, the link's counter-derived MMP state, as a
-    /// cutover does, since the new session's frame counter starts again at 0.
+    /// in a release, changing nothing (the peer's pair included), when
+    /// `session` authenticated another key than the peer's. Also resets the
+    /// replay suppression counter and the repeated handshake line counts
+    /// since the session changed, and, once the link has moved, the link's
+    /// counter-derived MMP state, as a cutover does, since the new session's
+    /// frame counter starts again at 0.
     pub(crate) fn move_session(
         &mut self,
         session: NoiseSession,
         ours: IndexLease,
         theirs: SessionIndex,
+        to: (TransportId, TransportAddr),
         caps: &mut LinkCaps<'_>,
     ) -> LinkOutputs {
         self.reset_replay_suppressed();
         self.hs_lines.roll();
-        let transport = self.bound_transport();
         let Some(old) = self.rekey.take() else {
             return vec![LinkOutput::Release(ours)];
         };
@@ -718,11 +724,12 @@ impl ActivePeer {
             out.push(LinkOutput::Release(ours));
             return out;
         };
-        match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
+        match link_machine(bond, session, ours, theirs, to.0, carry.into(), caps) {
             Ok((rekey, built)) => {
                 out.extend(built);
                 self.rekey = Some(rekey);
                 self.reset_mmp();
+                self.set_current_addr(to.0, to.1);
             }
             Err(lease) => out.push(LinkOutput::Release(lease)),
         }

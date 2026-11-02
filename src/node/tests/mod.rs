@@ -24,6 +24,7 @@ mod connected_udp;
 mod control;
 mod coord_forgery;
 mod coord_ttl_floor;
+mod crossed_dial;
 mod decrypt_failure;
 mod decrypt_forged;
 mod disconnect;

@@ -9,7 +9,10 @@
 //! that return: the decrypt-worker completion path
 //! (`process_authentic_fmp_plaintext`) and the in-line one
 //! (`handle_encrypted_frame`). These tests cover the in-line path,
-//! which is the one the worker path's own coverage does not reach.
+//! which is the one the worker path's own coverage does not reach. A
+//! crossed dial's move to the pair its winning msg2 came from drops the
+//! socket the same way; the two tests after the roaming ones cover it,
+//! reusing `crossed_dial`'s driver.
 //!
 //! `bool` carries no `#[must_use]`, so discarding the return here is
 //! silent under `-D warnings`; the assertions below are what makes the
@@ -21,6 +24,10 @@
 //! and that the encrypt-worker path refuses a frame over the UDP MTU as the
 //! inline path does.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::crossed_dial::{Crossed, Dial, cross_dials, hand};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::spanning_tree::cleanup_nodes;
 use super::*;
 use crate::noise::NoiseSession;
 use crate::proto::fmp::wire::{build_encrypted, build_established_header, prepend_inner_header};
@@ -191,6 +198,69 @@ async fn a_frame_from_the_address_the_peer_is_already_on_keeps_the_connected_soc
     assert!(
         peer.connected_udp().is_some(),
         "a frame from the address already in use must leave the socket alone"
+    );
+}
+
+/// Cross two nodes' dials as `dial` says, install a connected socket on the
+/// smaller node's peer while its link is on the pair the peer's msg1 came
+/// from, hand it the msg2 that wins, and return whether the socket is still
+/// installed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn connected_socket_after_the_move(dial: Dial) -> bool {
+    let Crossed {
+        mut nodes,
+        s,
+        l,
+        outbound,
+        msg2,
+        ..
+    } = cross_dials(dial).await;
+    let peer = *nodes[l].node.node_addr();
+    let transport = nodes[s].transport_id;
+    install_connected_udp(&mut nodes[s].node, &peer, transport);
+    assert!(
+        nodes[s]
+            .node
+            .get_peer(&peer)
+            .unwrap()
+            .connected_udp()
+            .is_some(),
+        "precondition: the peer holds a connected socket before the msg2"
+    );
+    hand(&mut nodes[s].node, msg2).await;
+    let peer = nodes[s].node.get_peer(&peer).expect("s keeps l");
+    assert_eq!(
+        peer.our_index(),
+        Some(outbound),
+        "precondition: s swapped to its outbound session"
+    );
+    let kept = peer.connected_udp().is_some();
+    cleanup_nodes(&mut nodes).await;
+    kept
+}
+
+/// A crossed dial whose winning msg2 comes from another address than the
+/// one the link was on moves the peer there, so the socket pinned to the
+/// old address must go, as it does on a roam.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_crossed_dial_moved_to_another_address_drops_the_connected_socket_pinned_to_the_old_one()
+{
+    assert!(
+        !connected_socket_after_the_move(Dial::OtherAddress).await,
+        "a socket pinned to the address the peer has left must not survive the move"
+    );
+}
+
+/// **The healthy path.** A crossed dial whose winning msg2 comes from the
+/// pair the link is already on leaves the peer where it is, so the socket
+/// stays.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_crossed_dial_whose_msg2_comes_from_the_pair_the_link_is_on_keeps_the_connected_socket() {
+    assert!(
+        connected_socket_after_the_move(Dial::AnsweredFromFirst).await,
+        "a move that leaves the peer's address alone must leave the socket alone"
     );
 }
 

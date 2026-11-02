@@ -2158,13 +2158,18 @@ impl Node {
                 let me = *self.identity().node_addr();
                 let params = crate::node::handlers::rekey::link_params(&self.config().node);
                 let workers = self.link_workers();
+                let prior = self.peer_link(&peer_node_addr);
 
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     let suppressed = peer.replay_suppressed_count();
                     let epoch = diag::epoch_tag(&outbound_session);
                     // The peer's link machine is closed and rebuilt on the
-                    // outbound session: what it held is unbound and freed,
-                    // the outbound index bound on the peer's transport.
+                    // outbound session: what it held is unbound and freed.
+                    // The peer is taken at the msg2's transport and source
+                    // address (FRC-1201, Section 5.6), and the outbound
+                    // index is bound on the transport the msg2 came on,
+                    // which is where the peer's frames on that session
+                    // arrive and are looked up.
                     let mut caps = LinkCaps {
                         indices: &mut self.index_allocator,
                         local: &local,
@@ -2177,9 +2182,31 @@ impl Node {
                         outbound_session,
                         outbound_lease,
                         header.sender_idx,
+                        (packet.transport_id, packet.remote_addr.clone()),
                         &mut caps,
                     );
                     self.run_link_outputs(&peer_node_addr, out);
+
+                    // A move to another pair is followed as a roam is: the
+                    // connected UDP socket pinned to the old 5-tuple would
+                    // keep sending where the peer no longer is, and a
+                    // transport that tracks peers (BLE) must learn which
+                    // link now carries this one, so that link is held as the
+                    // peer's and the one it left is not. The path
+                    // MTU was seeded from the link the peer was promoted on
+                    // and describes that link, so it is seeded again from the
+                    // one the peer moved to, as promotion does.
+                    let moved = self.peer_link(&peer_node_addr);
+                    if moved != prior {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        self.clear_connected_udp_for_peer(&peer_node_addr);
+                        if let Some((tid, addr)) = &moved {
+                            let key =
+                                crate::ipv6tun::link::PeerKey::from_xonly(&peer_identity.pubkey());
+                            self.seed_path_mtu_for_link_peer(&peer_node_addr, key, *tid, addr);
+                        }
+                        self.relink(&peer_node_addr, prior, moved).await;
+                    }
 
                     if suppressed > 0 {
                         debug!(
