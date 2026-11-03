@@ -1,0 +1,42 @@
+# The mutation lane's manifest: one line per test, tab-separated.
+#   <patch> <red|pass> <crate> <test path> [<anchor>]
+# <patch> names <patch>.patch in this directory; a patch's lines are
+# consecutive. A red line with no anchor needs the test's own `defect:`
+# assertion; an anchor (a substring of the first panic message line, or the
+# file:line the panic must be at) is for a test that predates the marker, or
+# picks one `defect:` assertion of a test that has more than one. See run.sh.
+move-keeps-old-pair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	s takes the msg2's transport and source address as l's
+move-keeps-old-pair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	s takes the msg2's transport and source address as l's
+move-keeps-old-pair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	src/node/tests/ble.rs:994
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first	defect: crossed TCP dials lost the peering
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first	defect: crossed TCP dials lost the peering
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_from_another_address_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer	defect: Err(
+ignore-own-dial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering	the responder must have decrypted the dialer's frames on the peering that replaced the first
+ignore-own-dial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer	defect: Err(
+ignore-own-dial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
+ignore-own-dial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer
+ignore-own-dial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer
+forget-dial-on-refused-msg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
+forget-dial-on-refused-msg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
+now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
+now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early
+now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now
+now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now
+yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
+yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
+yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
+yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::sim::clean_runs_rotate_on_cadence_with_no_reject_abandon_revert_or_assumed_cutover	reported FinalNoAttempt
+yield-keeps-own-attempt	red	fips-mesh	node::tests::session::simultaneous_initiation_converges_with_no_rekey_armed	no setup may reach an established end
+responder-cutover-skips-filter-mark	red	fips-mesh	node::tests::bloom::redial_answered_as_a_rekey_resends_the_filter	A must hold B's filter after B answered its redial as a rekey
+responder-cutover-skips-filter-mark	red	fips-mesh	node::tests::settle::carry::redial_from_the_smaller_node_answered_as_a_rekey_resends_the_filter
+responder-cutover-skips-filter-mark	red	fips-mesh	node::tests::settle::carry::redial_from_the_larger_node_answered_as_a_rekey_resends_the_filter
+clamp-entry-kept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_clamp_entry_the_probes_session_tightened	must not outlive the session
+clamp-entry-kept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
+restart-keeps-clamp	red	fips-mesh	node::tests::settle::carry::a_restart_msg1_releases_the_clamp_entry_of_the_session_it_clears
+session-spin-kept	red	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
+link-spin-restarted	pass	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
+tree-carry-across-restart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
+drop-initiator-mark	red	fips-mesh	node::tests::settle::carry::the_ble_initiators_link_is_verified_before_any_responder_frame

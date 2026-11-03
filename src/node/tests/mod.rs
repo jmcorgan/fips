@@ -62,6 +62,7 @@ mod rx_stall;
 mod second_path_msg1;
 mod session;
 mod session_peer_coords;
+mod settle;
 mod silent_backoff;
 mod silent_replay;
 mod spanning_tree;

@@ -39,6 +39,18 @@ check).
   breaks; `expect exit N` is the status the guard must return, and each
   `expect <text>` or `expect-absent <text>` is a string its output must or must
   not contain, so a case that fails for the wrong reason fails the runner.
+- The three `nested-*.case` files cover a directory module (`nested/mod.rs`
+  declaring `nested/inner.rs`), whose tests are named
+  `node::tests::nested::inner::<fn>` and which belongs to the group under its
+  top-level name `nested`:
+  - `nested-module-listed.case`: the nested file opens a socket and holds the
+    large lock, the module is listed in both groups, and the guard passes.
+  - `nested-socket-module-outside.case`: the nested file opens a socket itself
+    and the module is outside node-synthetic.
+  - `nested-helper-socket-module-outside.case`: the nested file reaches a
+    socket only through another top-level module's helper, by
+    `super::super::helpers::bound_transport`, and the module is outside
+    node-synthetic.
 
 ## Rules for changing it
 

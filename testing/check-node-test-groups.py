@@ -38,10 +38,14 @@ removed) uses a primitive, or calls a flagged function, computed to a fixpoint:
               call.
 
 The scanned files are the modules src/node/tests/mod.rs declares (names come
-from the `mod` items, `#[path]` honoured, never from file names) and
-src/testutil.rs, the crate's shared test helpers. A test's name is
-node::tests::<module>[::<inline mod>...]::<fn>. node-large holds the tests
-that call `lock_large_network_test(` directly or through a flagged helper.
+from the `mod` items, `#[path]` honoured, never from file names), the file
+modules those declare in turn, to any depth, and src/testutil.rs, the crate's
+shared test helpers. A test's name is
+node::tests::<module>[::<file mod>...][::<inline mod>...]::<fn>. A nested file
+module belongs to its top-level module for group membership: the group filter
+names `<module>`, and one flagged function anywhere under it flags the whole
+module. node-large holds the tests that call `lock_large_network_test(`
+directly or through a flagged helper.
 
 Each profile's test-group overrides are checked in order, as nextest applies
 them (the first matching override sets the group). The filters must have one
@@ -230,7 +234,8 @@ def line_of(text: str, pos: int) -> int:
 class Func:
     """A function item in a scanned file."""
 
-    module: str          # top-level test module name, "" for mod.rs, "testutil"
+    module: str          # module path under node::tests ("a" or "a::b"),
+                         # "" for mod.rs, "testutil"
     name: str
     start: int
     end: int
@@ -419,7 +424,8 @@ class Tree:
     def module_for(self, base: str, depth: int, path: list[str]) -> str | None:
         """The scanned module a path names from inside `base`, or None.
 
-        `base` is a top-level test module, "" for mod.rs (node::tests itself)
+        `base` is a test module's path under node::tests ("a", or "a::b" for
+        a file module that "a" declares), "" for mod.rs (node::tests itself)
         or "testutil"; `depth` is how many inline `mod` blocks deep the path
         is written, so `super` first climbs out of those.
         """
@@ -439,9 +445,10 @@ class Tree:
                 return self.module_for(base, depth - 1, rest)
             if base in ("", "testutil"):
                 return None
-            return self.module_for("", 0, rest)
-        if base == "" and depth == 0 and head in self.modules and head != "testutil":
-            return self.module_for(head, 0, rest)
+            return self.module_for(parent_of(base), 0, rest)
+        child = f"{base}::{head}" if base else head
+        if depth == 0 and base != "testutil" and child in self.modules and child != "testutil":
+            return self.module_for(child, 0, rest)
         return None
 
     def lookup(self, mod_name: str, name: str, seen: set[tuple[str, str]]) -> list[Func]:
@@ -508,29 +515,54 @@ MOD_DECL_RE = re.compile(
 PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"([^"]*)"\s*\]')
 
 
+def parent_of(name: str) -> str:
+    """The module path one level up: "a::b" -> "a", "a" -> "" (mod.rs)."""
+    return name.rsplit("::", 1)[0] if "::" in name else ""
+
+
+def top_of(name: str) -> str:
+    """The top-level test module a module path belongs to: "a::b" -> "a"."""
+    return name.split("::", 1)[0]
+
+
+def load_children(modules: dict[str, Module], parent: str, path: Path, raw: str) -> None:
+    """Add the file modules declared in `path` (module `parent`), recursively.
+
+    Rust resolves a declaration in `x/mod.rs` (or mod.rs itself) under `x/`,
+    and one in a plain file `x/y.rs` under `x/y/`; a `#[path]` is relative to
+    the declaring file's directory either way.
+    """
+    here = path.parent
+    under = here if path.name == "mod.rs" else here / path.stem
+    for m in MOD_DECL_RE.finditer(strip_rust(raw)):
+        attrs_raw = raw[m.start(1):m.end(1)]
+        name = m.group(2)
+        path_m = PATH_ATTR_RE.search(attrs_raw)
+        if path_m:
+            candidates = [here / path_m.group(1)]
+        else:
+            candidates = [under / f"{name}.rs", under / name / "mod.rs"]
+        found = next((p for p in candidates if p.is_file()), None)
+        if found is None:
+            raise CannotCheck(f"{path.name} declares `mod {name};` but none of "
+                              f"{', '.join(str(p) for p in candidates)} exists")
+        key = f"{parent}::{name}" if parent else name
+        child_raw = found.read_text()
+        modules[key] = Module(key, found, strip_rust(child_raw))
+        load_children(modules, key, found, child_raw)
+
+
 def load_tree(root: Path) -> Tree:
-    """Read src/node/tests/mod.rs, the modules it declares, and src/testutil.rs."""
+    """Read src/node/tests/mod.rs, the modules it declares (nested file modules
+    included), and src/testutil.rs."""
     tests_dir = root / "src" / "node" / "tests"
     mod_rs = tests_dir / "mod.rs"
     try:
         raw = mod_rs.read_text()
     except OSError as e:
         raise CannotCheck(f"cannot read {mod_rs}: {e}") from e
-    stripped = strip_rust(raw)
-    modules: dict[str, Module] = {"": Module("", mod_rs, stripped)}
-    for m in MOD_DECL_RE.finditer(stripped):
-        attrs_raw = raw[m.start(1):m.end(1)]
-        name = m.group(2)
-        path_m = PATH_ATTR_RE.search(attrs_raw)
-        if path_m:
-            candidates = [tests_dir / path_m.group(1)]
-        else:
-            candidates = [tests_dir / f"{name}.rs", tests_dir / name / "mod.rs"]
-        found = next((p for p in candidates if p.is_file()), None)
-        if found is None:
-            raise CannotCheck(f"mod.rs declares `mod {name};` but none of "
-                              f"{', '.join(str(p) for p in candidates)} exists")
-        modules[name] = Module(name, found, strip_rust(found.read_text()))
+    modules: dict[str, Module] = {"": Module("", mod_rs, strip_rust(raw))}
+    load_children(modules, "", mod_rs, raw)
     if len(modules) == 1:
         raise CannotCheck(f"{mod_rs} declares no test modules")
     testutil = root / "src" / "testutil.rs"
@@ -706,7 +738,7 @@ def package_name(root: Path) -> str:
 
 def survey(tree: Tree, flagged_mods: dict[str, Func], holders: list[Func]) -> None:
     """Print the membership and the reason each module is in it."""
-    test_mods = [m for m in tree.modules if m not in ("", "testutil")]
+    test_mods = [m for m in tree.modules if m not in ("", "testutil") and "::" not in m]
     print(f"test modules declared: {len(test_mods)}")
     print(f"node-synthetic ({len(flagged_mods)}):")
     for name in sorted(flagged_mods):
@@ -734,11 +766,15 @@ def run(root: Path, exemptions_path: Path, show_survey: bool) -> int:
     notes = [f"note: exemption for {e.key} matches no function in this tree"
              for e in exemptions if e.key not in keys]
 
-    flagged_mods: dict[str, Func] = {}
+    # Each top-level test module with the functions of every file under it.
+    by_top: dict[str, list[Func]] = {}
     for name, mod in tree.modules.items():
         if name in ("", "testutil"):
             continue
-        hit = next((f for f in mod.funcs if f.flagged), None)
+        by_top.setdefault(top_of(name), []).extend(mod.funcs)
+    flagged_mods: dict[str, Func] = {}
+    for name, funcs in by_top.items():
+        hit = next((f for f in funcs if f.flagged), None)
         if hit:
             flagged_mods[name] = hit
     holders = [f for mod in tree.modules.values() for f in mod.funcs
@@ -762,10 +798,8 @@ def run(root: Path, exemptions_path: Path, show_survey: bool) -> int:
 
     for p, overrides in profiles.items():
         listed = {n for o in overrides if o.group == GROUP_SOCKET for n in o.names}
-        for name, mod in tree.modules.items():
-            if name in ("", "testutil"):
-                continue
-            tests = [f for f in mod.funcs if f.is_test]
+        for name, funcs in by_top.items():
+            tests = [f for f in funcs if f.is_test]
             if name in flagged_mods:
                 why = flagged_mods[name]
                 for f in tests:
@@ -779,7 +813,7 @@ def run(root: Path, exemptions_path: Path, show_survey: bool) -> int:
                 notes.append(f"note: {name} is named in {GROUP_SOCKET} but not flagged "
                              "in this tree (another trunk may flag it)")
         for f in holders:
-            if f.module in flagged_mods:
+            if top_of(f.module) in flagged_mods:
                 continue  # checked above
             got = first_group(overrides, pkg, f.test_name)
             if got != GROUP_LARGE:
@@ -788,7 +822,7 @@ def run(root: Path, exemptions_path: Path, show_survey: bool) -> int:
 
     for n in notes:
         print(n)
-    tests_in = sum(1 for m in flagged_mods for f in tree.modules[m].funcs if f.is_test)
+    tests_in = sum(1 for m in flagged_mods for f in by_top[m] if f.is_test)
     if problems:
         for msg in problems:
             print(f"FAIL {msg}")

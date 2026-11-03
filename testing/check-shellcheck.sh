@@ -9,8 +9,10 @@
 # over the crate publication check that crate.yml runs
 # (testing/check-crate.sh), over the FreeBSD package's upgrade test
 # (packaging/freebsd/test-upgrade.sh), which the FreeBSD Package workflow runs
-# in its VM, and over the root-only test runner that ci.yml and ci-local.sh
-# run and the internal builder is to run (testing/root-tests.sh).
+# in its VM, over the root-only test runner that ci.yml and ci-local.sh
+# run and the internal builder is to run (testing/root-tests.sh), and over
+# the single-test classifier the known-defect lane sources and its fixture
+# test (testing/lib/test-verdict.sh, test-verdict-test.sh).
 #
 # This is the one copy of that lint. The OpenWrt Package workflow calls it
 # after building each .ipk, and ci.yml and ci-local.sh call it too, because
@@ -29,8 +31,9 @@
 #     exclusions; it runs under FreeBSD's sh, which supports `local` too.
 #   * install-nak.sh, blossom-upload.sh, test-blossom-upload.sh,
 #     keep-pinned-toolchain.sh, build-core-baremetal.sh, the three
-#     testing/cross-check/ scripts, testing/check-crate.sh and
-#     testing/root-tests.sh as bash, with
+#     testing/cross-check/ scripts, testing/check-crate.sh,
+#     testing/root-tests.sh and the two testing/lib/test-verdict scripts as
+#     bash, with
 #     no exclusions. They are CI scripts, not shipped ones, and the sh
 #     exclusion set below misfires on bash.
 #
@@ -80,6 +83,9 @@ BASH_TARGETS=(
     "testing/cross-check/check.sh"
     "testing/check-crate.sh"
     "testing/root-tests.sh"
+    "testing/lib/test-verdict.sh"
+    "testing/lib/test-verdict-test.sh"
+    "testing/mutations/run.sh"
     "testing/cross-check/zig-cc"
     "testing/cross-check/zig-ar"
 )

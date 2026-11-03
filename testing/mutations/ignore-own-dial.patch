@@ -1,0 +1,13 @@
+diff --git a/core/src/proto/fmp/core.rs b/core/src/proto/fmp/core.rs
+index 36e0c21f..0173a77a 100644
+--- a/core/src/proto/fmp/core.rs
++++ b/core/src/proto/fmp/core.rs
+@@ -546,7 +546,7 @@ impl Fmp {
+         if epochs_differ(snap.existing_peer_epoch, epoch) {
+             return OutboundDecision::RestartThenPromote;
+         }
+-        if snap.own_dial || snap.our_outbound_wins {
++        if snap.our_outbound_wins {
+             OutboundDecision::CrossConnectionSwap
+         } else {
+             OutboundDecision::CrossConnectionKeep
