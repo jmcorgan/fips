@@ -18,7 +18,6 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
-known-defect  fips-core  proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again  core/src/proto/mmp/tests/spin_rekey.rs
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs

@@ -36,5 +36,5 @@ and receive the reports and hold the configuration.
 - **The report formats are wire format** and do not change on the
   deployed lines.
 - **A session's rekey reset restarts its spin bit state** (keeping the
-  role), because the new session's counters start again at zero; the
-  link's reset leaves the link spin bit state as it is.
+  role), because the new session's counters start again at zero; a
+  link's rekey reset restarts the link's spin bit state the same way.

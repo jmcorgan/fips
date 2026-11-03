@@ -1,7 +1,7 @@
 diff --git a/core/src/proto/mmp/state.rs b/core/src/proto/mmp/state.rs
 --- a/core/src/proto/mmp/state.rs
 +++ b/core/src/proto/mmp/state.rs
-@@ -177,7 +177,6 @@
+@@ -183,7 +183,6 @@
      pub fn reset_for_rekey(&mut self, now_ms: u64) {
          self.receiver.reset_for_rekey(now_ms);
          self.metrics.reset_for_rekey();
