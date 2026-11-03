@@ -1,0 +1,13 @@
+diff --git a/src/node/handlers/session.rs b/src/node/handlers/session.rs
+index df4d063d..32f900c2 100644
+--- a/src/node/handlers/session.rs
++++ b/src/node/handlers/session.rs
+@@ -3060,7 +3060,7 @@ impl Node {
+ 
+     /// Current Unix time in milliseconds.
+     pub(in crate::node) fn now_ms() -> u64 {
+-        crate::time::wall_ms()
++        crate::time::mono_ms()
+     }
+ 
+     /// Now on the session table's clock, [`SessionClock`].

@@ -18,6 +18,7 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
+known-defect  fips-core  proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again  core/src/proto/mmp/tests/spin_rekey.rs
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
@@ -81,4 +82,24 @@ long-running  fips-mesh  node::tests::discovery::test_discovery_100_nodes  src/n
 benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_two_nodes  src/node/tests/app_tun.rs
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_precondition  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_bare_unwrap  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_plain_expect_in_a_setup_helper  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_defect_assertion  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_test_that_passes  src/node/tests/settle/lane.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
+known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial  src/node/tests/settle/clock.rs
+known-defect  fips-mesh  node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early  src/node/tests/settle/clock.rs
+known-defect  fips-mesh  node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now  src/node/tests/settle/clock.rs
+known-defect  fips-mesh  node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now  src/node/tests/settle/clock.rs
+known-defect  fips-mesh  node::tests::settle::fsp::a_restarted_larger_responder_carries_data_within_one_exchange  src/node/tests/settle/fsp.rs

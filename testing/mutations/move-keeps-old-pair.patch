@@ -1,0 +1,27 @@
+diff --git a/src/peer/active.rs b/src/peer/active.rs
+index 48a20b17..85c384ef 100644
+--- a/src/peer/active.rs
++++ b/src/peer/active.rs
+@@ -706,6 +706,8 @@ impl ActivePeer {
+     ) -> LinkOutputs {
+         self.reset_replay_suppressed();
+         self.hs_lines.roll();
++        let transport = self.bound_transport();
++        let _ = &to;
+         let Some(old) = self.rekey.take() else {
+             return vec![LinkOutput::Release(ours)];
+         };
+@@ -724,12 +726,11 @@ impl ActivePeer {
+             out.push(LinkOutput::Release(ours));
+             return out;
+         };
+-        match link_machine(bond, session, ours, theirs, to.0, carry.into(), caps) {
++        match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
+             Ok((rekey, built)) => {
+                 out.extend(built);
+                 self.rekey = Some(rekey);
+                 self.reset_mmp();
+-                self.set_current_addr(to.0, to.1);
+             }
+             Err(lease) => out.push(LinkOutput::Release(lease)),
+         }

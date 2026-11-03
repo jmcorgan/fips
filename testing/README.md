@@ -276,15 +276,59 @@ entry that names no ignored test. It reads the sources, so it sees tests every
 platform compiles, but it cannot resolve module paths.
 
 [`known-defect-lane.sh`](known-defect-lane.sh) runs in the unit-test stage,
-here and on GitHub. It runs each `known-defect` test and expects it to fail:
-one that passes reds the lane, so the change that fixes a defect also removes
-its ignore and its inventory line, and the test gates from then on. It also
-lists the ignored tests of each library test binary and reds on one the
-inventory does not name under its full path. Each test runs under a timeout
-(`FIPS_KNOWN_DEFECT_TIMEOUT`, default 120 s) that counts as still failing,
-since a defect can be a hang; a fixed test slower than the timeout would
-therefore not be noticed. Tests the host does not compile, such as the macOS
-hardware tests on Linux, are checked only by the static guard.
+here and on GitHub. It runs each `known-defect` test and expects it to fail
+at its own assertion of the defect: one that passes reds the lane, so the
+change that fixes a defect also removes its ignore and its inventory line,
+and the test gates from then on. It also lists the ignored tests of each
+library test binary and reds on one the inventory does not name under its
+full path. Tests the host does not compile, such as the macOS hardware tests
+on Linux, are checked only by the static guard.
+
+A failing run counts as the defect only when the test's own first panic
+message line starts with `defect:`. A test marks the assertion that states
+the behaviour under test that way, and its setup checks with
+`precondition:`. A known-defect test that fails at a `precondition:` check,
+or at anything unmarked (a bare `unwrap()`, a shared helper's plain
+`expect`, an overflow), reds the lane: it has stopped showing its defect.
+The classifier is [`lib/test-verdict.sh`](lib/test-verdict.sh), shared with
+the mutation lane. Before any inventory entry, the lane checks itself: it
+runs the classifier's fixture test,
+[`lib/test-verdict-test.sh`](lib/test-verdict-test.sh), and five planted
+`helper` tests in `node::tests::settle::lane`, and exits 1 with `lane
+self-check:` if any is classified other than its name says.
+
+A known-defect test that predates the marker and lives in a file the change
+adding it could not edit (inline tests in a production source file) is
+pinned instead: the lane's `PINNED` list names it with the `file:line` of its
+own defect assertion, and an unmarked failure at that line counts as still
+failing. An unmarked failure at any other line is still a problem, and the
+self-check shows both outcomes on a planted test. Giving such a test's
+message the `defect:` prefix removes its pin.
+
+Each test runs under a timeout (`FIPS_KNOWN_DEFECT_TIMEOUT`, default 120 s).
+A test the timeout kills is a problem, not a test that still fails: it never
+reached an assertion, so a known-defect test that hangs in its setup is not
+taken for one failing at its defect. No current entry is a hang; a defect
+whose only symptom is a hang would need its own explicit allowance in the
+lane, as `PINNED` allows an unmarked line. `FIPS_KNOWN_DEFECT_INVENTORY`
+points the lane at another inventory file, for trying it against an edited
+copy.
+
+### The mutation lane (`mutations/run.sh`)
+
+[`mutations/`](mutations/) holds patches that each put back the shape a
+real defect took, or make the smallest change that fixes a known defect,
+and [`mutations/run.sh`](mutations/run.sh), which applies each to a clean
+tree, runs the tests [`mutations/manifest.txt`](mutations/manifest.txt)
+names for it one per process, classifies each run with
+[`lib/test-verdict.sh`](lib/test-verdict.sh), and reverts the patch. A
+`red` line holds only at the test's assertion of the behaviour the patch
+breaks (its `defect:` assertion, or an anchor for a test that predates the
+marker); a `pass` line holds when the test passes. A patch that no longer
+applies reds the lane. It is a named gate run by hand at the finished tip
+of each settlement increment, not a CI stage, because a refactor of the
+patched code stops the patches applying. It prints each patch's wall time
+and the total.
 
 ### Root-only tests (`root-tests.sh`)
 
