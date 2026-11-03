@@ -32,7 +32,8 @@ written down and run.
   behaviour, one from the audit), where the anchor picks the one the patch
   should reach.
 - `pass`: the test must pass. A `pass` line under a fix shows a known-defect
-  test's assertion can pass, so the lane would report its fix.
+  test's assertion can pass, so the lane would report its fix. A `pass` line
+  under a break shows the break left another test, usually a twin, untouched.
 - `precondition`, `timeout` and `norun` never hold: a test that broke in its
   setup or hung has not shown the patch's effect.
 
@@ -49,6 +50,10 @@ skipping. `FIPS_MUTATION_ONLY=<patch>` runs one patch.
 
 - A patch that stops applying is rewritten against the current tree in the
   change that moved the code, never deleted to make the lane pass.
+- A fix probe (a `pass` patch that puts a missing fix in) is retired by the
+  change that lands the fix, and replaced in that change by the inverse
+  break, which takes the fix out again and is `red` for the tests the probe
+  passed.
 - A new test line needs the patch's red (or pass) shown in that change's
   record. Write a `red` anchor before the patch is first run, from the
   test's own assertion, so the run checks the anchor rather than supplying

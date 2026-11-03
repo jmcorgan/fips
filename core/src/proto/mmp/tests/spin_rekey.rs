@@ -7,9 +7,8 @@
 //! its counters pass every counter the new session reaches in the window
 //! checked, which is the real case: a session's counters restart near 0 at
 //! a cutover (the Noise nonce starts again), and both reset hooks
-//! (`reset_for_rekey`) are what the cutover calls. The link state's bit does
-//! not restart at the reset and freezes (a known defect); the session
-//! state's does.
+//! (`reset_for_rekey`) are what the cutover calls. Both resets restart the
+//! spin bit state, keeping its role, so the bit spins on the new session.
 
 use crate::proto::mmp::{DEFAULT_LOG_INTERVAL_SECS, DEFAULT_OWD_WINDOW_SIZE, MmpMode};
 use crate::proto::mmp::{MmpPeerState, MmpSessionState};
@@ -96,7 +95,6 @@ macro_rules! check_pair {
 }
 
 #[test]
-#[ignore = "known defect: the link's spin bit is not restarted at a rekey cutover, so it stops spinning once the new session's counters start again"]
 fn link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again() {
     check_pair!(MmpPeerState, "link (MmpPeerState, the FMP SP flag)");
 }

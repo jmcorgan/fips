@@ -37,6 +37,16 @@ clamp-entry-kept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_c
 clamp-entry-kept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
 restart-keeps-clamp	red	fips-mesh	node::tests::settle::carry::a_restart_msg1_releases_the_clamp_entry_of_the_session_it_clears
 session-spin-kept	red	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
-link-spin-restarted	pass	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
+session-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+session-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_session_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+session-spin-kept	pass	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
+session-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_link_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+session-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_link_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+link-spin-kept	red	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
+link-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_link_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+link-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_link_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+link-spin-kept	pass	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
+link-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
+link-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
 tree-carry-across-restart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
 drop-initiator-mark	red	fips-mesh	node::tests::settle::carry::the_ble_initiators_link_is_verified_before_any_responder_frame
