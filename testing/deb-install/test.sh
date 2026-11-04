@@ -36,6 +36,12 @@
 # testing/lib/systemd-container.sh), /dev/net/tun on the host (standard).
 
 set -uo pipefail
+# No check pipes into grep -q or another reader that can stop early. Under
+# pipefail, the reader exiting at its match kills a writer that still has
+# output to write with SIGPIPE, and the pipeline fails although the text
+# matched. bash's echo and printf write a multi-line string a line or two
+# at a time, so one line of output after the match is enough to lose it.
+# Checks match on a here-string, or on output captured first.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=SCRIPTDIR/../lib/systemd-container.sh
@@ -344,7 +350,8 @@ check_gateway_default_listener() {
         journal=$(docker exec "$name" journalctl -u fips-gateway.service --no-pager 2>/dev/null) || journal=""
         # Matched on a here-string, not a pipe from printf: under pipefail,
         # grep -q exiting at its match can kill the writer with SIGPIPE and
-        # turn the match into a miss once the journal is over 4 KB.
+        # turn the match into a miss whenever any of the journal follows the
+        # matched line.
         grep -q "fips-gateway running" <<<"$journal" && break
         sleep 1
     done
@@ -355,9 +362,10 @@ check_gateway_default_listener() {
         return
     fi
 
-    local sockets
+    local sockets listener
     sockets=$(docker exec "$name" ss -Hulnp 'sport = :5365' 2>/dev/null) || sockets=""
-    if printf '%s\n' "$sockets" | grep -F '[::1]:5365' | grep -q 'fips-gateway'; then
+    listener=$(grep -F '[::1]:5365' <<<"$sockets")
+    if grep -q 'fips-gateway' <<<"$listener"; then
         pass "fips-gateway listens on its default [::1]:5365"
     else
         fail "no fips-gateway socket on [::1]:5365: '$sockets'"
@@ -365,7 +373,7 @@ check_gateway_default_listener() {
 
     local answer
     answer=$(docker exec "$name" dig +short +tries=1 +time=3 @::1 -p 5365 AAAA "${npub}.fips" 2>&1)
-    if printf '%s\n' "$answer" | grep -qE '^fd01::[0-9a-f]{1,4}$'; then
+    if grep -qE '^fd01::[0-9a-f]{1,4}$' <<<"$answer"; then
         pass "the gateway answers ${npub}.fips on [::1]:5365 from its fd01::/112 pool"
     else
         fail "the gateway did not answer ${npub}.fips on [::1]:5365 from its pool: '$answer'"
@@ -690,7 +698,8 @@ DOCKERFILE
         return
     fi
     # Matched on a here-string, as in check_gateway_default_listener: a pipe
-    # from echo can lose the match to SIGPIPE once the transcript is long.
+    # from echo can lose the match to SIGPIPE whenever any of the transcript
+    # follows the matched line.
     if grep -qE "^E:|errors? were encountered" <<<"$install_output"; then
         fail "apt install reported errors"
         echo "$install_output" | tail -20
@@ -750,8 +759,8 @@ DOCKERFILE
         fail "fips-firewall.service unexpected state: '$fw_state' (expected 'disabled')"
     fi
     if docker exec "$name" test -f /etc/fips/fips.nft && \
-       docker exec "$name" dpkg-query -W -f='${Conffiles}\n' fips 2>/dev/null \
-            | grep -q '/etc/fips/fips.nft'; then
+       grep -q '/etc/fips/fips.nft' \
+            <<<"$(docker exec "$name" dpkg-query -W -f='${Conffiles}\n' fips 2>/dev/null)"; then
         pass "/etc/fips/fips.nft installed and registered as dpkg conffile"
     else
         fail "/etc/fips/fips.nft missing or not a registered conffile"
@@ -792,7 +801,7 @@ DOCKERFILE
     # Wait for the DNS responder to bind on the daemon's [::1]:5354.
     local ready=0
     for _i in $(seq 1 "$DAEMON_TIMEOUT"); do
-        if docker exec "$name" ss -uln 2>/dev/null | grep -q ':5354'; then
+        if grep -q ':5354' <<<"$(docker exec "$name" ss -uln 2>/dev/null)"; then
             ready=1
             break
         fi
@@ -859,7 +868,7 @@ DOCKERFILE
     sleep 1
     local stub_output
     stub_output=$(docker exec "$name" dig +tries=1 +time=3 @127.0.0.53 AAAA "${npub}.fips" 2>&1)
-    if echo "$stub_output" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+    if grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+' <<<"$stub_output"; then
         pass "end-to-end dig @127.0.0.53 returns AAAA on stock .deb install"
     else
         fail "end-to-end dig @127.0.0.53 did not return AAAA"

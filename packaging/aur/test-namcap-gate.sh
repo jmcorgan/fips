@@ -57,7 +57,7 @@ check() {
      { [ "$expect" = nonzero ] && [ "$rc" -ne 0 ]; }; then
     # Matched on a here-string, not a pipe from printf: under pipefail,
     # grep -q exiting at its match can kill the writer with SIGPIPE and turn
-    # the match into a miss once the output is over 4 KB (two cases are).
+    # the match into a miss whenever any output follows the matched line.
     if grep -qE -- "$pattern" <<<"$LAST_OUT"; then
       echo "PASS $name (exit $rc)"
       return 0
