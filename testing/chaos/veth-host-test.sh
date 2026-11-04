@@ -20,8 +20,8 @@
 #                         removed by name, and attempt 2 moves the link
 #   effect-before-timeout the move lands, then the helper hangs past the bound;
 #                         the move is found in place and not repeated
-#   late-start            the helper does not exist until after `docker rm -f`;
-#                         attempt 2 moves the link, and the late helper's move
+#   late-start            the helper does not exist until after `docker rm -f`
+#                         and attempt 2's move; the late helper's move then
 #                         fails harmlessly instead of undoing it
 #   late-lands-first      as late-start, but the late helper moves the link
 #                         while attempt 2 is starting; attempt 2's move then
@@ -74,9 +74,10 @@ done
 
 WORK="$(mktemp -d)"
 cleanup() {
-    # Kill any helper a case left behind before removing its state.
+    # Kill any helper a case left behind before removing its state, including
+    # a late-start helper still waiting to appear (its .wait file).
     local f
-    for f in "$WORK"/state-*/helpers/*.pid; do
+    for f in "$WORK"/state-*/helpers/*.pid "$WORK"/state-*/helpers/*.wait; do
         [ -f "$f" ] && kill -9 "$(cat "$f")" 2>/dev/null
     done
     rm -rf "$WORK"
@@ -230,8 +231,14 @@ case_effect_before_timeout() {
 }
 
 case_late_start() {
-    drive late-start "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"late-start\", \"secs\": 4}]" 2 \
-        pair "$SIM_PARENT"
+    # Attempt 1's helper appears only after its removal was tried and attempt 2
+    # has moved the link, so a slow runner cannot let it move the link first.
+    # Attempt 2 is an ordinary helper, and its move must still finish inside
+    # the 2 s bound.
+    local gate="[[\"helpers.log\", \"^rm {self} \"],
+        [\"effects.log\", \"^move vh0102b host->fips-node-n02 by=(?!{self}$)\"]]"
+    drive late-start "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"late-start\", \"secs\": 0,
+        \"after\": $gate}]" 2 pair "$SIM_PARENT"
     local first
     first=$(helper_name "$MOVE_B" 1)
     check "late-start: helper absent at removal" \
@@ -245,11 +252,15 @@ case_late_start() {
 }
 
 case_late_lands_first() {
-    # Bound 3 s. Attempt 1's helper appears 5 s in, after the bound, the
-    # removal and the check; attempt 2's waits 2.5 s before its move, so the
-    # late helper moves the link first.
-    local plan="[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"late-start\", \"secs\": 5},
-        {\"match\": \"$MOVE_B\", \"attempts\": [2], \"mode\": \"stall-before\", \"secs\": 2.5}]"
+    # Bound 3 s. Attempt 1's helper appears after its removal and once attempt
+    # 2's helper is running, so after the check; attempt 2's waits for that late
+    # move before making its own, so the late helper moves the link first.
+    local late="[[\"helpers.log\", \"^rm {self} \"],
+        [\"helpers.log\", \"^run [^\\\\n]*cmd=$MOVE_B.*^run [^\\\\n]*cmd=$MOVE_B\"]]"
+    local plan="[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"late-start\", \"secs\": 0,
+            \"after\": $late},
+        {\"match\": \"$MOVE_B\", \"attempts\": [2], \"mode\": \"stall-before\", \"secs\": 0,
+            \"after\": [[\"effects.log\", \"^move vh0102b host->fips-node-n02 by=\"]]}]"
     drive late-lands-first "$plan" 3 pair "$SIM_PARENT"
     check_pair_done late-lands-first
     local first
