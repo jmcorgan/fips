@@ -66,6 +66,14 @@ test-hooks = []
 # Linux job and local CI with --slow-tests turn it on, and the core's clippy
 # passes lint the code it gates either way.
 slow-tests = []
+# The settlement explorers run against the models of the deployed nodes
+# (`proto/settle/tests/legacy/explore.rs`) and of the candidate rules (the
+# explored runs in `proto/settle/tests/candidates.rs`), which take tens of
+# minutes on a two-core runner. Turning it on turns `slow-tests` on too.
+# Local CI with --slow-tests, and so the internal builder, turns it on;
+# GitHub CI runs the other slow suites without it. The root crate's clippy
+# pass with --all-features lints the code it gates.
+slow-explorers = ["slow-tests"]
 
 [dev-dependencies]
 # Host-only test dependencies; tests may use `std`.

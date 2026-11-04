@@ -21,12 +21,28 @@
 //! - **Late second dial**: where the model moves and keeps the old session
 //!   as a fallback, the node moves and keeps nothing. The shadow's
 //!   fallback is cleared, and [`resync_close`] gives the close the node is
-//!   expected to make by the close rule.
+//!   expected to make by the close rule. A node whose log opens with
+//!   [`Entry::Fallback`] keeps the session as the model does (the
+//!   dialer's candidate rule), and is compared with no resync there.
 //! - **Replay memory**: the node refuses a msg1 the model accepts. The
 //!   comparison of that peer is pruned there.
 //! - **Silent sessions**: the node's back-off for a peer whose sessions
 //!   end without a frame refuses a msg1 the model accepts, pruned the same
 //!   way. The model of `master` does not transcribe it; the core does.
+//! - **A refused ephemeral recorded**: the rekey machine records every
+//!   fresh ephemeral it refuses or discards, where the model records only
+//!   the ones it answers or refuses as a replacement, so a later copy the
+//!   machine names a copy or recorded, and leaves silent, the model names
+//!   otherwise. Where the model stays silent too the comparison goes on;
+//!   where it answers (a copy of the larger node's rekey msg1 that the
+//!   smaller node discarded, taken as a replacement once its own rekey has
+//!   cut over) the comparison of that peer is pruned.
+//! - **A cutover at the peer's frame**: the rekey machine cuts its own
+//!   answered rekey over at the peer's first frame under it, where the
+//!   model waits for its check. The shadow cuts over at that frame.
+//! - Where the node's replay memory or silent-session back-off refuses a
+//!   msg1 the model refuses too, the node asked those first; both refuse,
+//!   and the comparison goes on.
 //! - **The derived index** is the core's own and has no shadow step.
 
 use alloc::format;
@@ -34,7 +50,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::super::model::history::{Addr, Binding, Event, Ms, Node};
-use super::super::model::judge::{Class, Gate, Judge, LocalRule, Params, Transition};
+use super::super::model::judge::{Class, Gate, Judge, LocalRule, Params, Reply, Transition};
 
 /// A refusal of a restart or replacement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +106,10 @@ pub enum Entry {
     },
     /// The node restarted.
     Restart,
+    /// The node keeps the session a late second dial moved off, as the
+    /// model keeps its fallback (the dialer's candidate rule), so the
+    /// late second dial is no named difference for it.
+    Fallback,
 }
 
 /// A named difference from the model.
@@ -103,6 +123,22 @@ pub enum Named {
     Replay,
     /// The silent-session back-off refused a msg1 the model accepts.
     Silent,
+    /// The rekey side named a silent msg1 a copy or recorded, since it
+    /// recorded the ephemeral when it refused it.
+    RecordedRefusal,
+    /// The rekey side cut its own rekey over at the peer's frame.
+    FrameCutover,
+    /// The larger node's own rekey ended when it answered the smaller
+    /// node's at a simultaneous rekey, which the model leaves open.
+    Yielded,
+    /// This node's own rekey ended with the peering it rekeyed, at its
+    /// removal or replacement, where the model keeps it for the next.
+    RekeyWithPeering,
+    /// A frame under the session a rekey cut over from, still held for its
+    /// drain, counted as heard, as the node touches the peer at a frame of
+    /// either slot (`src/node/dataplane/encrypted.rs:263-280` at
+    /// `2ba790b2`); the model ignores it.
+    HeardByPrevious,
 }
 
 /// One difference from the shadow.
@@ -130,8 +166,10 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
     let mut judges: Vec<(Node, Judge, bool)> = Vec::new();
     let mut found = Found::default();
     let mut now: Ms = 0;
+    let mut fallback = false;
     for e in log {
         match *e {
+            Entry::Fallback => fallback = true,
             Entry::Restart => {
                 for (_, j, _) in judges.iter_mut() {
                     j.step(Event::Restart);
@@ -166,11 +204,100 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                     let gap = at - j.now;
                     j.step(Event::Advance(gap));
                 }
-                let s = j.step(ev);
+                let pending = j
+                    .peering
+                    .as_ref()
+                    .and_then(|p| p.pending)
+                    .filter(|pd| pd.initiator);
+                let previous = match ev {
+                    Event::Frame { hs, .. } => j.peering.as_ref().is_some_and(|p| {
+                        p.hs != hs
+                            && p.pending.is_none_or(|pd| pd.hs != hs)
+                            && p.fallback.is_none_or(|f| f.hs != hs)
+                    }),
+                    Event::Advance(_)
+                    | Event::Dial { .. }
+                    | Event::Msg1 { .. }
+                    | Event::Msg2Sent { .. }
+                    | Event::Msg2 { .. }
+                    | Event::Timeout { .. }
+                    | Event::RekeyStart { .. }
+                    | Event::RekeyMsg2 { .. }
+                    | Event::RekeyCutover
+                    | Event::Close { .. }
+                    | Event::Lost
+                    | Event::Restart => false,
+                };
+                let mut s = j.step(ev);
                 if *pruned {
                     continue;
                 }
-                if s.rule == Some(LocalRule::LateSecondDial)
+                if previous
+                    && !fault!(PreviousUnheard)
+                    && let Some(p) = j.peering.as_mut()
+                {
+                    // Only a frame the node could open reaches the log, so
+                    // this is the drained session.
+                    p.heard = true;
+                    p.last = Some(j.now);
+                    found.named.push((peer, Named::HeardByPrevious));
+                }
+                if let Event::Frame { hs, .. } = ev
+                    && matches!(
+                        rec.change,
+                        Some(Transition::RekeyCutover | Transition::Restarted)
+                    )
+                    && s.change.is_none()
+                    && pending.is_some_and(|pd| pd.hs == hs)
+                    && !fault!(FrameCutoverMissed)
+                {
+                    // Cut over, then take the frame under the session it
+                    // is now on, as the node does.
+                    s = j.step(Event::RekeyCutover);
+                    j.step(ev);
+                    found.named.push((peer, Named::FrameCutover));
+                }
+                if matches!(s.change, Some(Transition::Remove | Transition::Replace))
+                    && rec.change == s.change
+                    && j.rekey.is_some()
+                    && !fault!(RekeyOutlivesPeer)
+                {
+                    // The rekey machine is the peering's and is dropped
+                    // with it; the model's own rekey is the judge's.
+                    j.rekey = None;
+                    found.named.push((peer, Named::RekeyWithPeering));
+                }
+                if matches!(ev, Event::Msg1 { .. })
+                    && s.class == Some(Class::Simultaneous)
+                    && rec.class == s.class
+                    && me > peer
+                    && j.rekey.is_some()
+                    && !fault!(YieldKept)
+                {
+                    // The rekey machine yields the larger node's own
+                    // attempt when it answers the smaller node's; the
+                    // model leaves whether it goes on open.
+                    j.rekey = None;
+                    found.named.push((peer, Named::Yielded));
+                }
+                if matches!(ev, Event::Msg1 { .. })
+                    && matches!(rec.class, Some(Class::Copy | Class::Recorded))
+                    && rec.refused.is_none()
+                    && rec.change.is_none()
+                    && s.class != rec.class
+                    && !fault!(RecordedCompared)
+                {
+                    // Both silent, the comparison goes on; where the model
+                    // answered or replaced instead, the two hold different
+                    // state from here.
+                    found.named.push((peer, Named::RecordedRefusal));
+                    if s.reply != Some(Reply::Silent) || s.change.is_some() {
+                        *pruned = true;
+                    }
+                    continue;
+                }
+                if !fallback
+                    && s.rule == Some(LocalRule::LateSecondDial)
                     && s.change == Some(Transition::Move)
                     && rec.change == s.change
                     && let Some(p) = j.peering.as_mut()
@@ -193,11 +320,11 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                     Some(Refusal::Silent) => Some(Named::Silent),
                     Some(Refusal::Gate(_) | Refusal::Full) | None => None,
                 };
-                if let Some(named) = named
-                    && model_refused.is_none()
-                {
+                if let Some(named) = named {
                     found.named.push((peer, named));
-                    *pruned = true;
+                    if model_refused.is_none() {
+                        *pruned = true;
+                    }
                     continue;
                 }
                 let refusal_differs = !fault!(ClassifiedNoRefusal) && rec.refused != model_refused;

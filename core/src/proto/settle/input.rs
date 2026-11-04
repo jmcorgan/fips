@@ -185,4 +185,21 @@ pub enum Input {
         /// Its state now.
         proven: Proven,
     },
+    /// Test-only, for a candidate rule: a frame of `peer` authenticated
+    /// under the session an [`Output::Hold`](super::output::Output::Hold)
+    /// kept.
+    #[cfg(test)]
+    HeldFrame {
+        /// The peer.
+        peer: NodeAddr,
+        /// Its source.
+        from: Pair,
+    },
+    /// Test-only, for a candidate rule: the connection of the link whose
+    /// session is kept for `peer` is gone.
+    #[cfg(test)]
+    HoldLost {
+        /// The peer.
+        peer: NodeAddr,
+    },
 }

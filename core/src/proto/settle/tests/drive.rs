@@ -62,7 +62,22 @@ pub fn epoch(e: Epoch) -> [u8; 8] {
     b
 }
 
-fn bytes(b: Bytes) -> Vec<u8> {
+/// The model address of pair `p`, the inverse of [`pair`].
+pub fn addr(p: &Pair) -> Addr {
+    let at = p
+        .addr
+        .as_str()
+        .and_then(|s| s.rsplit(':').next())
+        .and_then(|s| s.parse().ok())
+        .expect("a pair made by `pair`");
+    Addr {
+        transport: p.transport.as_u32() as u8,
+        at,
+    }
+}
+
+/// The exact bytes of model msg1 bytes `b`.
+pub fn bytes(b: Bytes) -> Vec<u8> {
     b.0.to_be_bytes().to_vec()
 }
 
@@ -353,7 +368,9 @@ impl Drive {
                 | Output::Release { .. }
                 | Output::Close { .. }
                 | Output::Free { .. }
-                | Output::Retry { .. } => {}
+                | Output::Retry { .. }
+                | Output::Hold { .. }
+                | Output::Settle { .. } => {}
             }
         }
         self.effects(out, did);
@@ -446,7 +463,9 @@ impl Drive {
                 | Output::Rekey { .. }
                 | Output::Reset { .. }
                 | Output::Retry { .. }
-                | Output::Reject { .. } => {}
+                | Output::Reject { .. }
+                | Output::Hold { .. }
+                | Output::Settle { .. } => {}
             }
         }
         if let Some(t) = reset {
@@ -484,7 +503,8 @@ impl Drive {
     }
 }
 
-fn change(t: Transition) -> M {
+/// The model's name for the core's transition `t`.
+pub fn change(t: Transition) -> M {
     match t {
         Transition::Promote => M::Promote,
         Transition::Replace => M::Replace,
@@ -495,7 +515,8 @@ fn change(t: Transition) -> M {
     }
 }
 
-fn class(s: Source) -> Option<Class> {
+/// The model's class for the gate source `s`, where it has one.
+pub fn class(s: Source) -> Option<Class> {
     match s {
         Source::NotHeld => Some(Class::NotHeld),
         Source::Restart => Some(Class::Restart),
@@ -504,7 +525,8 @@ fn class(s: Source) -> Option<Class> {
     }
 }
 
-fn refusal(d: Denial) -> Refusal {
+/// The shadow's refusal for the core's denial `d`.
+pub fn refusal(d: Denial) -> Refusal {
     match d {
         Denial::Gate(Gated::Unheard) => Refusal::Gate(Gate::Unheard),
         Denial::Gate(Gated::Heard) => Refusal::Gate(Gate::Heard),

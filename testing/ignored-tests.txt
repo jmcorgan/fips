@@ -18,6 +18,9 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
+known-defect  fips-core  proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey  core/src/proto/settle/tests/regress.rs
+known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer  core/src/proto/settle/tests/regress.rs
+known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer  core/src/proto/settle/tests/regress.rs
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs

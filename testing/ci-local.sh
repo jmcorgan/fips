@@ -21,8 +21,11 @@
 #                        the deployed releases and the guard-switch
 #                        meta-test) in the core's own test run. Off by
 #                        default: they take minutes, and GitHub CI's Linux job
-#                        runs them on every push. FIPS_CI_SLOW_TESTS=1 in the
-#                        environment turns it on too.
+#                        runs them on every push. The settlement explorers
+#                        against the deployed models and the candidate rules
+#                        run with them here and nowhere else.
+#                        FIPS_CI_SLOW_TESTS=1 in the environment turns it on
+#                        too.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -933,10 +936,14 @@ run_tests() {
     # The no_std core's tests under the core's own feature resolution, so a
     # test whose result depends on a feature only the root crate enables runs
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
-    # always runs the slow suites here; locally they need --slow-tests.
+    # always runs the slow suites here; locally they need --slow-tests. The
+    # settlement explorers against the deployed models and the candidate
+    # rules (`slow-explorers`, which turns `slow-tests` on too) run only
+    # here, under --slow-tests or FIPS_CI_SLOW_TESTS=1, which the internal
+    # builder sets.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
-        core_test+=(--features slow-tests)
+        core_test+=(--features slow-explorers)
     fi
     info "${core_test[*]}"
     if "${core_test[@]}" 2>&1; then

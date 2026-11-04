@@ -6,9 +6,11 @@
 //! heals, and asserts that the world saw the shape and that the two ends
 //! split; then it replays the same schedule with the model of `master` at
 //! both ends and asserts that they do not split, which is where the FRC's
-//! rules and the current node differ. A further test shows that no
-//! start's own script shows any shape, so the exemption is spent on the
-//! shapes alone.
+//! rules and the current node differ. A further test shows that each
+//! start's own script shows only the shape that start carries by design,
+//! so an exemption is spent on its shape alone, and another that the two
+//! defects left for later show their shapes in the models of the current
+//! and the deployed node.
 //!
 //! - [`Shape::StaleFrame`]: a counterexample to the operator's late-dial
 //!   rule, as the model encodes it. The responder replaces the first
@@ -24,14 +26,19 @@
 //! - [`Shape::RekeyInstall`]: an observation against FRC-1201, a restarted
 //!   node installed from the peer's rekey msg1 and then parted from it by
 //!   the peer's late crossing dial.
+//! - [`Shape::LaterDialFirst`] and [`Shape::DialAsRekey`]: the late second
+//!   dial answered in the other order and the dial on the peer's aged
+//!   link, the two defects left for later, which only the runs against
+//!   the models of deployed nodes exempt (`legacy/explore.rs`).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::explore::{Act, apply};
+use super::legacy::maint::maint;
 use super::legacy::master::master;
 use super::oracle::{Oracle, every_step, heal, healed};
-use super::starts::{Maker, model, starts};
+use super::starts::{Maker, Start, model, starts};
 use super::world::{Shape, World};
 
 /// Start `number`'s variant named with `name`, with nodes made by `mk`,
@@ -125,17 +132,59 @@ fn observed_a_restarted_node_installed_from_the_peers_rekey_is_parted_by_its_lat
     observe(9, "drain", &path, false, Shape::RekeyInstall);
 }
 
+/// The shapes start `st`'s own script shows, healed, with nodes made by
+/// `mk`.
+fn scripted(st: &Start, mk: Maker) -> Vec<Shape> {
+    let mut w = (st.build)(mk);
+    (st.script)(&mut w);
+    heal(&mut w);
+    w.shapes
+}
+
+/// The shape a start carries by design: the late second dial answered in
+/// the other order, and the dial on the peer's aged link.
+fn carried(number: u8) -> Vec<Shape> {
+    match number {
+        6 => alloc::vec![Shape::LaterDialFirst],
+        7 => alloc::vec![Shape::DialAsRekey],
+        _ => Vec::new(),
+    }
+}
+
 #[test]
-fn no_starts_own_script_shows_a_known_shape() {
-    for st in starts().into_iter().filter(|s| !matches!(s.number, 7 | 12)) {
-        let mut w = (st.build)(st.maker);
-        (st.script)(&mut w);
-        heal(&mut w);
-        assert!(
-            w.shapes.is_empty(),
-            "{}: its script shows {:?}",
-            st.name,
-            w.shapes
+fn each_starts_own_script_shows_only_the_shape_it_carries() {
+    for st in starts().into_iter().filter(|s| s.number != 12) {
+        assert_eq!(
+            scripted(&st, st.maker),
+            carried(st.number),
+            "{}: its script's shapes",
+            st.name
         );
     }
+}
+
+#[test]
+fn the_two_defects_left_for_later_show_their_shapes_in_the_current_and_deployed_node() {
+    // The late second dial (both dialer orders) and the dial on the aged
+    // link, each on its start's own script with the model of `master` at
+    // both ends; the late dial also with the model of `maint`, whose
+    // smaller dialer swaps onto its earlier dial as `master` does.
+    for st in starts().into_iter().filter(|s| matches!(s.number, 6 | 7)) {
+        assert_eq!(
+            scripted(&st, master),
+            carried(st.number),
+            "{} with master",
+            st.name
+        );
+    }
+    let smaller = starts()
+        .into_iter()
+        .find(|s| s.number == 6 && s.name.contains("smaller dialer"))
+        .expect("the start exists");
+    assert_eq!(
+        scripted(&smaller, maint),
+        [Shape::LaterDialFirst],
+        "{} with maint",
+        smaller.name
+    );
 }

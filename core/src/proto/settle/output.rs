@@ -178,4 +178,26 @@ pub enum Output {
         /// Why.
         why: Denial,
     },
+    /// Test-only, for a candidate rule: keep the session of `link`, the
+    /// one the peer held until now, decryptable beside the one it holds
+    /// next, until an [`Output::Settle`] ends it.
+    #[cfg(test)]
+    Hold {
+        /// The peer.
+        peer: NodeAddr,
+        /// The link whose session is kept.
+        link: LinkNo,
+    },
+    /// Test-only, for a candidate rule: the session kept for `link` is
+    /// held no longer. With `back` the peer is on that session again and
+    /// the one it held is dropped; otherwise the kept one is dropped.
+    #[cfg(test)]
+    Settle {
+        /// The peer.
+        peer: NodeAddr,
+        /// The link whose session was kept.
+        link: LinkNo,
+        /// The peer is back on the kept session.
+        back: bool,
+    },
 }

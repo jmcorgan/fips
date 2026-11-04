@@ -1,0 +1,420 @@
+# The candidate rules' runs (candidates.rs), one line per breach: the
+# candidate, the run, the property, the node, and "new" for a breach the
+# same pairing with the core's own rules in the candidate's place does not
+# show, "kept" for one it shows too, or "gone" for a pairing of the core's
+# own rules with a deployed model listed in legacy/not-converging.txt that
+# the candidate no longer breaks. Separated by tabs. Each is a finding
+# reported with its schedule, not a defect fixed here. The runs fail on a
+# line this file does not hold, and on a line that no longer shows.
+AgedMove	crossing during a rekey's drain: AgedMove at n0 against maint, flipped	OneSession	1	kept
+AgedMove	crossing during a rekey's drain: AgedMove at n1 against maint, flipped	OneSession	0	kept
+AgedMove	crossing during a rekey's drain: AgedMove at n1 against maint, flipped	OneSession	1	kept
+AgedMove	crossing during a rekey: AgedMove at n0 against maint, flipped	OneSession	0	kept
+AgedMove	crossing during a rekey: AgedMove at n0 against maint, flipped	OneSession	1	kept
+AgedMove	crossing during a rekey: AgedMove at n0 against master, as written	OneSession	0	kept
+AgedMove	crossing during a rekey: AgedMove at n0 against master, as written	OneSession	1	kept
+AgedMove	crossing during a rekey: AgedMove at n0 against master, flipped	OneSession	0	kept
+AgedMove	crossing during a rekey: AgedMove at n0 against master, flipped	OneSession	1	kept
+AgedMove	crossing during a rekey: AgedMove at n1 against maint, flipped	OneSession	0	kept
+AgedMove	crossing during a rekey: AgedMove at n1 against maint, flipped	OneSession	1	kept
+AgedMove	crossing during a rekey: AgedMove at n1 against master, as written	OneSession	0	kept
+AgedMove	crossing during a rekey: AgedMove at n1 against master, as written	OneSession	1	kept
+AgedMove	crossing during a rekey: AgedMove at n1 against master, flipped	OneSession	0	kept
+AgedMove	crossing during a rekey: AgedMove at n1 against master, flipped	OneSession	1	kept
+AgedMove	crossing, BLE: AgedMove at n0 against maint, as written	OneSession	0	kept
+AgedMove	crossing, BLE: AgedMove at n0 against maint, as written	OneSession	1	kept
+AgedMove	crossing, BLE: AgedMove at n0 against master, as written	OneSession	0	kept
+AgedMove	crossing, BLE: AgedMove at n0 against master, as written	OneSession	1	kept
+AgedMove	crossing, BLE: AgedMove at n1 against maint, flipped	OneSession	0	kept
+AgedMove	crossing, BLE: AgedMove at n1 against maint, flipped	OneSession	1	kept
+AgedMove	crossing, BLE: AgedMove at n1 against master, flipped	OneSession	0	kept
+AgedMove	crossing, BLE: AgedMove at n1 against master, flipped	OneSession	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, as written	ConnectionsInUse	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, as written	OneSession	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, flipped	OneSession	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against maint, flipped	OneSession	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against master, as written	ConnectionsInUse	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against master, as written	OneSession	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against master, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against master, flipped	OneSession	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n0 against master, flipped	OneSession	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, as written	ConnectionsInUse	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, as written	OneSession	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, as written	OneSession	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, flipped	ConnectionsInUse	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against maint, flipped	OneSession	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against master, as written	ConnectionsInUse	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against master, as written	OneSession	0	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against master, as written	OneSession	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against master, flipped	ConnectionsInUse	1	kept
+AgedMove	crossing, connection-oriented: AgedMove at n1 against master, flipped	OneSession	1	kept
+AgedMove	crossing, connectionless: AgedMove at n0 against maint, flipped	OneSession	0	kept
+AgedMove	crossing, connectionless: AgedMove at n0 against maint, flipped	OneSession	1	kept
+AgedMove	crossing, connectionless: AgedMove at n1 against maint, as written	OneSession	0	kept
+AgedMove	crossing, connectionless: AgedMove at n1 against maint, as written	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at every node, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at every node, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n0 against core, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against core, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n0 against maint, as written	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against maint, as written	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against maint, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against maint, flipped	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against maint, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n0 against master, as written	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against master, as written	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against master, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against master, flipped	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against master, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n0 against model, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n0 against model, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n1 against core, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n1 against core, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n1 against maint, as written	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n1 against maint, as written	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n1 against maint, flipped	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n1 against maint, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n1 against master, as written	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n1 against master, as written	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n1 against master, flipped	OneSession	0	kept
+AgedMove	crossing, two transports: AgedMove at n1 against master, flipped	OneSession	1	kept
+AgedMove	crossing, two transports: AgedMove at n1 against model, flipped	ConnectionsInUse	0	kept
+AgedMove	crossing, two transports: AgedMove at n1 against model, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at every node, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against core, as written	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against core, flipped	Classified	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against core, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against maint, as written	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against maint, as written	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against maint, flipped	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against maint, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against master, as written	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against master, as written	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against master, flipped	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against master, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against model, as written	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n0 against model, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against core, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against maint, flipped	Classified	1	gone
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against maint, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against master, flipped	Classified	1	gone
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against master, flipped	OneSession	1	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against model, as written	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against model, as written	OneSession	1	new
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against model, flipped	OneSession	0	kept
+AgedMove	dial on the peer's aged link, then own rekey: AgedMove at n1 against model, flipped	OneSession	1	kept
+AgedMove	late second dial in order, larger dialer: AgedMove at n1 against maint, as written	OneSession	0	kept
+AgedMove	late second dial in order, larger dialer: AgedMove at n1 against maint, as written	OneSession	1	kept
+AgedMove	three nodes: AgedMove at n1 against maint, as written	OneSession	0	kept
+AgedMove	three nodes: AgedMove at n1 against maint, as written	OneSession	1	kept
+AgedMove	wall step inside the heard floor: AgedMove at n1 against maint, flipped	OneSession	0	kept
+AgedMove	wall step inside the heard floor: AgedMove at n1 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing during a rekey's drain: DialerSettle at n0 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing during a rekey's drain: DialerSettle at n1 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing during a rekey's drain: DialerSettle at n1 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing during a rekey: DialerSettle at n0 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing during a rekey: DialerSettle at n0 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing during a rekey: DialerSettle at n0 against master, as written	OneSession	0	kept
+DialerSettle	crossing during a rekey: DialerSettle at n0 against master, as written	OneSession	1	kept
+DialerSettle	crossing during a rekey: DialerSettle at n0 against master, flipped	OneSession	0	kept
+DialerSettle	crossing during a rekey: DialerSettle at n0 against master, flipped	OneSession	1	kept
+DialerSettle	crossing during a rekey: DialerSettle at n1 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing during a rekey: DialerSettle at n1 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing during a rekey: DialerSettle at n1 against master, as written	OneSession	0	kept
+DialerSettle	crossing during a rekey: DialerSettle at n1 against master, as written	OneSession	1	kept
+DialerSettle	crossing during a rekey: DialerSettle at n1 against master, flipped	OneSession	0	kept
+DialerSettle	crossing during a rekey: DialerSettle at n1 against master, flipped	OneSession	1	kept
+DialerSettle	crossing, BLE: DialerSettle at n0 against maint, as written	OneSession	0	kept
+DialerSettle	crossing, BLE: DialerSettle at n0 against maint, as written	OneSession	1	kept
+DialerSettle	crossing, BLE: DialerSettle at n0 against master, as written	OneSession	0	kept
+DialerSettle	crossing, BLE: DialerSettle at n0 against master, as written	OneSession	1	kept
+DialerSettle	crossing, BLE: DialerSettle at n1 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing, BLE: DialerSettle at n1 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing, BLE: DialerSettle at n1 against master, flipped	OneSession	0	kept
+DialerSettle	crossing, BLE: DialerSettle at n1 against master, flipped	OneSession	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, as written	ConnectionsInUse	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, as written	OneSession	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master, as written	ConnectionsInUse	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master, as written	OneSession	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master, flipped	OneSession	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n0 against master, flipped	OneSession	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, as written	ConnectionsInUse	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, flipped	ConnectionsInUse	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master, as written	ConnectionsInUse	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master, as written	OneSession	0	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master, as written	OneSession	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master, flipped	ConnectionsInUse	1	kept
+DialerSettle	crossing, connection-oriented: DialerSettle at n1 against master, flipped	OneSession	1	kept
+DialerSettle	crossing, connectionless: DialerSettle at n0 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing, connectionless: DialerSettle at n0 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing, connectionless: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	crossing, connectionless: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at every node, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at every node, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against core, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against core, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against maint, as written	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against maint, as written	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against maint, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against master, as written	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against master, as written	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against master, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against master, flipped	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against master, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against model, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n0 against model, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against core, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against core, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against maint, flipped	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against maint, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against master, as written	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against master, as written	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against master, flipped	OneSession	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against master, flipped	OneSession	1	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against model, flipped	ConnectionsInUse	0	kept
+DialerSettle	crossing, two transports: DialerSettle at n1 against model, flipped	OneSession	1	kept
+DialerSettle	late second dial in order, larger dialer: DialerSettle at every node, as written	OneSession	0	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at every node, as written	OneSession	1	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against core, as written	OneSession	0	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against core, as written	OneSession	1	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against maint, as written	OneSession	0	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against maint, as written	OneSession	1	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against master, as written	OneSession	0	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against master, as written	OneSession	1	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against model, as written	OneSession	0	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n0 against model, as written	OneSession	1	new
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n1 against model, as written	OneSession	0	kept
+DialerSettle	late second dial in order, larger dialer: DialerSettle at n1 against model, as written	OneSession	1	kept
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at every node, as written	OneSession	0	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at every node, as written	OneSession	1	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against core, as written	OneSession	0	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against core, as written	OneSession	1	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against maint, as written	OneSession	0	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against maint, as written	OneSession	1	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against master, as written	OneSession	0	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against master, as written	OneSession	1	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against model, as written	OneSession	0	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n0 against model, as written	OneSession	1	new
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n1 against model, as written	OneSession	0	kept
+DialerSettle	late second dial in order, smaller dialer: DialerSettle at n1 against model, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at every node, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at every node, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against core, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against core, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against maint, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against maint, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against master, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against master, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against model, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n0 against model, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against core, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against core, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against master, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against master, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against model, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, larger dialer: DialerSettle at n1 against model, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at every node, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at every node, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against core, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against core, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against maint, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against maint, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against master, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against master, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against model, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n0 against model, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against core, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against core, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against master, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against master, as written	OneSession	1	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against model, as written	OneSession	0	kept
+DialerSettle	late second dial, second msg2 first, smaller dialer: DialerSettle at n1 against model, as written	OneSession	1	kept
+DialerSettle	three nodes: DialerSettle at n1 against maint, as written	OneSession	0	kept
+DialerSettle	three nodes: DialerSettle at n1 against maint, as written	OneSession	1	kept
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against maint, as written	OneSession	0	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against maint, as written	OneSession	1	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against maint, flipped	OneSession	0	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against maint, flipped	OneSession	1	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against master, as written	OneSession	0	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against master, as written	OneSession	1	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against master, flipped	OneSession	0	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n0 against master, flipped	OneSession	1	new
+DialerSettle	wall step inside the heard floor: DialerSettle at n1 against maint, flipped	OneSession	0	kept
+DialerSettle	wall step inside the heard floor: DialerSettle at n1 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing during a rekey's drain: ResponderHold at n0 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing during a rekey's drain: ResponderHold at n1 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing during a rekey's drain: ResponderHold at n1 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing during a rekey: ResponderHold at n0 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing during a rekey: ResponderHold at n0 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing during a rekey: ResponderHold at n0 against master, as written	OneSession	0	gone
+ResponderHold	crossing during a rekey: ResponderHold at n0 against master, as written	OneSession	1	gone
+ResponderHold	crossing during a rekey: ResponderHold at n0 against master, flipped	OneSession	0	gone
+ResponderHold	crossing during a rekey: ResponderHold at n0 against master, flipped	OneSession	1	gone
+ResponderHold	crossing during a rekey: ResponderHold at n1 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing during a rekey: ResponderHold at n1 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing during a rekey: ResponderHold at n1 against master, as written	OneSession	0	gone
+ResponderHold	crossing during a rekey: ResponderHold at n1 against master, as written	OneSession	1	gone
+ResponderHold	crossing during a rekey: ResponderHold at n1 against master, flipped	OneSession	0	gone
+ResponderHold	crossing during a rekey: ResponderHold at n1 against master, flipped	OneSession	1	gone
+ResponderHold	crossing, BLE: ResponderHold at n0 against maint, as written	OneSession	0	kept
+ResponderHold	crossing, BLE: ResponderHold at n0 against maint, as written	OneSession	1	kept
+ResponderHold	crossing, BLE: ResponderHold at n0 against master, as written	OneSession	0	kept
+ResponderHold	crossing, BLE: ResponderHold at n0 against master, as written	OneSession	1	kept
+ResponderHold	crossing, BLE: ResponderHold at n1 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing, BLE: ResponderHold at n1 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing, BLE: ResponderHold at n1 against master, flipped	OneSession	0	kept
+ResponderHold	crossing, BLE: ResponderHold at n1 against master, flipped	OneSession	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, as written	ConnectionsInUse	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, as written	OneSession	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master, as written	ConnectionsInUse	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master, as written	OneSession	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master, flipped	OneSession	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n0 against master, flipped	OneSession	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, as written	ConnectionsInUse	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, flipped	ConnectionsInUse	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master, as written	ConnectionsInUse	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master, as written	OneSession	0	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master, as written	OneSession	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master, flipped	ConnectionsInUse	1	kept
+ResponderHold	crossing, connection-oriented: ResponderHold at n1 against master, flipped	OneSession	1	kept
+ResponderHold	crossing, connectionless: ResponderHold at n0 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing, connectionless: ResponderHold at n0 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing, connectionless: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	crossing, connectionless: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at every node, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at every node, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against core, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against core, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against maint, as written	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against maint, as written	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against maint, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against master, as written	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against master, as written	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against master, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against master, flipped	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against master, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against model, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n0 against model, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against core, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against core, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against maint, flipped	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against maint, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against master, as written	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against master, as written	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against master, flipped	OneSession	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against master, flipped	OneSession	1	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against model, flipped	ConnectionsInUse	0	kept
+ResponderHold	crossing, two transports: ResponderHold at n1 against model, flipped	OneSession	1	kept
+ResponderHold	late second dial in order, larger dialer: ResponderHold at every node, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at every node, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against core, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against core, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against maint, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against maint, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against master, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against master, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against model, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n0 against model, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against core, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against core, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against master, as written	OneSession	0	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against master, as written	OneSession	1	new
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against model, as written	OneSession	0	kept
+ResponderHold	late second dial in order, larger dialer: ResponderHold at n1 against model, as written	OneSession	1	kept
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at every node, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at every node, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against core, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against core, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against maint, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against maint, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against master, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against master, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against model, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n0 against model, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against core, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against core, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against maint, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against maint, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against master, as written	OneSession	0	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against master, as written	OneSession	1	new
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against model, as written	OneSession	0	kept
+ResponderHold	late second dial in order, smaller dialer: ResponderHold at n1 against model, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at every node, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at every node, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against core, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against core, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against maint, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against maint, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against master, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against master, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against model, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n0 against model, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against core, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against core, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against master, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against master, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against model, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, larger dialer: ResponderHold at n1 against model, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at every node, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at every node, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against core, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against core, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against maint, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against maint, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against master, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against master, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against model, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n0 against model, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against core, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against core, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against master, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against master, as written	OneSession	1	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against model, as written	OneSession	0	kept
+ResponderHold	late second dial, second msg2 first, smaller dialer: ResponderHold at n1 against model, as written	OneSession	1	kept
+ResponderHold	three nodes: ResponderHold at n1 against maint, as written	OneSession	0	kept
+ResponderHold	three nodes: ResponderHold at n1 against maint, as written	OneSession	1	kept
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against maint, as written	OneSession	0	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against maint, as written	OneSession	1	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against maint, flipped	OneSession	0	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against maint, flipped	OneSession	1	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against master, as written	OneSession	0	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against master, as written	OneSession	1	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against master, flipped	OneSession	0	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n0 against master, flipped	OneSession	1	new
+ResponderHold	wall step inside the heard floor: ResponderHold at n1 against maint, flipped	OneSession	0	kept
+ResponderHold	wall step inside the heard floor: ResponderHold at n1 against maint, flipped	OneSession	1	kept
