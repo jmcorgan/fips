@@ -496,8 +496,8 @@ pub(super) async fn second_msg1_late(dialer_larger: bool, second: Second) -> Lat
         );
     }
 
-    let now = Node::now_ms();
-    first.timestamp_ms = now - (UNHEARD_PEERING_MIN_AGE_MS + 500);
+    // The second msg1 arrives 1.5 s after the first.
+    first.timestamp_ms = Node::now_ms();
     nodes[r].node.handle_msg1(first).await;
     let first_link = nodes[r]
         .node
@@ -514,11 +514,13 @@ pub(super) async fn second_msg1_late(dialer_larger: bool, second: Second) -> Lat
                 .get_peer(&r_addr)
                 .map(|p| p.link_stats().packets_recv)
                 .expect("precondition: the dialer promoted the responder on the first msg2");
-            second_msg1.timestamp_ms = now;
+            crate::time::advance(Duration::from_millis(UNHEARD_PEERING_MIN_AGE_MS + 500));
+            second_msg1.timestamp_ms = Node::now_ms();
             nodes[r].node.handle_msg1(second_msg1).await;
         }
         Second::Reordered => {
-            second_msg1.timestamp_ms = now;
+            crate::time::advance(Duration::from_millis(UNHEARD_PEERING_MIN_AGE_MS + 500));
+            second_msg1.timestamp_ms = Node::now_ms();
             nodes[r].node.handle_msg1(second_msg1).await;
             // Everything the responder sent is at the dialer: msg2(first),
             // frames, msg2(second), frames. Hand the second msg2 first.

@@ -76,20 +76,25 @@ fn promoted_peer_with_the_far_side_session(
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, 1_000)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(1_000))
         .unwrap();
 
     let mut responder = inbound_leg(LinkId::new(999), 1_000);
     let mut responder_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut responder_epoch);
     let msg2 = responder
-        .receive_handshake_init(peer_identity_full.keypair(), responder_epoch, &msg1, 1_000)
+        .receive_handshake_init(
+            peer_identity_full.keypair(),
+            responder_epoch,
+            &msg1,
+            LegStamp::at(1_000),
+        )
         .unwrap();
 
     node.peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .complete_handshake(&msg2, 1_000)
+        .complete_handshake(&msg2, LegStamp::at(1_000))
         .unwrap();
 
     let far_side_session = responder

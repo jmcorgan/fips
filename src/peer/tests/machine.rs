@@ -24,16 +24,16 @@ fn dial_with_genuine_msg2() -> (PeerMachine, Vec<u8>) {
     let responder = Identity::generate();
     let responder_id = PeerIdentity::from_pubkey_full(responder.pubkey_full());
 
-    let mut ini = PeerMachine::new_outbound(LinkId::new(1), responder_id, 1000);
+    let mut ini = PeerMachine::new_outbound(LinkId::new(1), responder_id, LegStamp::at(1000));
     ini.set_leg(HandshakeCrypto::new());
-    let mut res = PeerMachine::new_inbound(LinkId::new(2), 1000);
+    let mut res = PeerMachine::new_inbound(LinkId::new(2), LegStamp::at(1000));
     res.set_leg(HandshakeCrypto::new());
 
     let msg1 = ini
-        .start_handshake(initiator.keypair(), [1; 8], 1100)
+        .start_handshake(initiator.keypair(), [1; 8], LegStamp::at(1100))
         .expect("msg1 is written");
     let msg2 = res
-        .receive_handshake_init(responder.keypair(), [2; 8], &msg1, 1200)
+        .receive_handshake_init(responder.keypair(), [2; 8], &msg1, LegStamp::at(1200))
         .expect("the responder answers msg1");
     (ini, msg2)
 }
@@ -53,7 +53,7 @@ fn forged_then_genuine(forged: &[u8]) {
     let activity = ini.conn_last_activity();
 
     assert!(
-        ini.complete_handshake(forged, 1300).is_err(),
+        ini.complete_handshake(forged, LegStamp::at(1300)).is_err(),
         "a msg2 that does not authenticate must be refused"
     );
     assert!(
@@ -72,7 +72,7 @@ fn forged_then_genuine(forged: &[u8]) {
         "a refused msg2 must not count as activity on the attempt"
     );
 
-    ini.complete_handshake(&genuine, 1400)
+    ini.complete_handshake(&genuine, LegStamp::at(1400))
         .expect("the genuine msg2 must still complete the handshake");
     assert!(ini.has_session(), "the genuine msg2 makes the session");
     assert_eq!(ini.conn_remote_epoch(), Some([2; 8]));
@@ -109,10 +109,10 @@ fn several_forged_msg2s_in_a_row_still_leave_the_genuine_one_readable() {
         &[0xFF; HANDSHAKE_MSG2_SIZE][..],
         &[0u8; 3][..],
     ] {
-        assert!(ini.complete_handshake(forged, 1300).is_err());
+        assert!(ini.complete_handshake(forged, LegStamp::at(1300)).is_err());
         assert!(handle_kept(&ini));
     }
-    ini.complete_handshake(&genuine, 1400)
+    ini.complete_handshake(&genuine, LegStamp::at(1400))
         .expect("the genuine msg2 must still complete the handshake");
     assert!(ini.has_session());
 }
@@ -147,7 +147,7 @@ fn inbound_leg(alloc: &mut IndexAllocator, authorize: bool) -> (PeerMachine, Nod
     let peer = PeerIdentity::from_pubkey(Identity::generate().pubkey());
     let addr = *peer.node_addr();
     let link = LinkId::new(1);
-    let mut m = PeerMachine::new_inbound(link, 0);
+    let mut m = PeerMachine::new_inbound(link, LegStamp::at(0));
     let classified = m.step(
         PeerEvent::InboundMsg1 {
             link,

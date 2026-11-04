@@ -271,8 +271,9 @@ pub struct ActivePeer {
     // === Tree Announce Rate Limiting ===
     /// Minimum interval between TreeAnnounce messages (milliseconds).
     tree_announce_min_interval_ms: u64,
-    /// Last time we sent a TreeAnnounce to this peer (Unix milliseconds).
-    last_tree_announce_sent_ms: u64,
+    /// When we last sent a TreeAnnounce to this peer, in milliseconds of the
+    /// monotonic clock (`crate::time::mono_ms`); `None` if we never have.
+    last_tree_announce_sent_ms: Option<u64>,
     /// Whether a tree announce is pending (deferred due to rate limit).
     pending_tree_announce: bool,
 
@@ -287,8 +288,16 @@ pub struct ActivePeer {
     pending_filter_update: bool,
 
     // === Statistics ===
-    /// When this peer was authenticated (Unix milliseconds).
+    /// When this peer was authenticated (Unix milliseconds), as shown to
+    /// operators.
     authenticated_at: u64,
+    /// When this peer was promoted, on the peer clock. The restart gate ages
+    /// a peering not yet heard from by it.
+    promoted_at: PeerInstant,
+    /// When an authenticated frame from this peer last arrived, on the peer
+    /// clock, or the promotion instant before the first. The restart gate
+    /// measures a heard peering's quiet time by it.
+    heard_at: PeerInstant,
 
     // === Heartbeat ===
     /// When a heartbeat to this peer last *succeeded*. A send that failed does
@@ -341,6 +350,7 @@ impl ActivePeer {
     /// Called after successful authentication handshake.
     /// For peers with Noise sessions, use `with_session` instead.
     pub fn new(identity: PeerIdentity, link_id: LinkId, authenticated_at: u64) -> Self {
+        let now = peer_now();
         Self {
             npub: identity.npub(),
             short_npub: identity.short_npub(),
@@ -348,13 +358,15 @@ impl ActivePeer {
             declaration: None,
             ancestry: None,
             tree_announce_min_interval_ms: 500,
-            last_tree_announce_sent_ms: 0,
+            last_tree_announce_sent_ms: None,
             pending_tree_announce: false,
             inbound_filter: None,
             filter_sequence: 0,
             filter_received_at: 0,
             pending_filter_update: true, // Send filter on new connection
             authenticated_at,
+            promoted_at: now,
+            heard_at: now,
             last_heartbeat_sent: None,
             last_heartbeat_attempt: None,
             handshake_msg2: None,
@@ -428,6 +440,7 @@ impl ActivePeer {
             mmp_config.owd_window_size,
             is_initiator,
         ));
+        let now = peer_now();
         let peer = Self {
             npub: identity.npub(),
             short_npub: identity.short_npub(),
@@ -435,13 +448,15 @@ impl ActivePeer {
             declaration: None,
             ancestry: None,
             tree_announce_min_interval_ms: 500,
-            last_tree_announce_sent_ms: 0,
+            last_tree_announce_sent_ms: None,
             pending_tree_announce: false,
             inbound_filter: None,
             filter_sequence: 0,
             filter_received_at: 0,
             pending_filter_update: true,
             authenticated_at,
+            promoted_at: now,
+            heard_at: now,
             last_heartbeat_sent: None,
             last_heartbeat_attempt: None,
             handshake_msg2: None,
@@ -966,6 +981,17 @@ impl ActivePeer {
         self.authenticated_at
     }
 
+    /// When this peer was promoted, on the peer clock.
+    pub(crate) fn promoted_at(&self) -> PeerInstant {
+        self.promoted_at
+    }
+
+    /// When an authenticated frame from this peer last arrived, on the peer
+    /// clock; the promotion instant before the first.
+    pub(crate) fn heard_at(&self) -> PeerInstant {
+        self.heard_at
+    }
+
     /// When this peer was last seen.
     pub fn last_seen(&self) -> u64 {
         self.send.last_seen
@@ -1060,6 +1086,7 @@ impl ActivePeer {
     /// Record an authenticated frame from this peer: refresh the last-seen
     /// time and mark the peer, and the peering, heard.
     pub fn touch(&mut self, current_time_ms: u64) {
+        self.heard_at = peer_now();
         self.heard = true;
         self.send.last_seen = current_time_ms;
         self.send.heard = true;
@@ -1079,6 +1106,23 @@ impl ActivePeer {
     #[cfg(test)]
     pub(crate) fn test_set_authenticated_at(&mut self, authenticated_at: u64) {
         self.authenticated_at = authenticated_at;
+    }
+
+    /// Step the instant this peer was last heard back by `age`, as for a
+    /// peering quiet that long. The wall-clock `last_seen` is not moved.
+    #[cfg(test)]
+    pub(crate) fn test_backdate_heard(&mut self, age: Duration) {
+        self.heard_at = fips_core::time::Instant::checked_sub(self.heard_at, age)
+            .expect("the peer clock reaches back past the backdate");
+    }
+
+    /// Step the instant this peer was promoted back by `age`, as for a
+    /// peering promoted that long ago. The wall-clock `authenticated_at` is
+    /// not moved.
+    #[cfg(test)]
+    pub(crate) fn test_backdate_promoted(&mut self, age: Duration) {
+        self.promoted_at = fips_core::time::Instant::checked_sub(self.promoted_at, age)
+            .expect("the peer clock reaches back past the backdate");
     }
 
     /// Update the link ID (e.g., on reconnect).
@@ -1113,24 +1157,31 @@ impl ActivePeer {
         self.tree_announce_min_interval_ms = ms;
     }
 
-    /// Get the last tree announce send timestamp (for carrying across reconnection).
-    pub fn last_tree_announce_sent_ms(&self) -> u64 {
+    /// When this peer was last sent a TreeAnnounce, in the monotonic
+    /// milliseconds (`crate::time::mono_ms`) `can_send_tree_announce`
+    /// compares; `None` if it never was.
+    pub fn last_tree_announce_sent_ms(&self) -> Option<u64> {
         self.last_tree_announce_sent_ms
     }
 
-    /// Set the last tree announce send timestamp (to preserve rate limit across reconnection).
-    pub fn set_last_tree_announce_sent_ms(&mut self, ms: u64) {
+    /// Set when this peer was last sent a TreeAnnounce, in monotonic
+    /// milliseconds or `None` for never, leaving a pending one pending.
+    pub fn set_last_tree_announce_sent_ms(&mut self, ms: Option<u64>) {
         self.last_tree_announce_sent_ms = ms;
     }
 
-    /// Check if we can send a TreeAnnounce now (rate limiting).
+    /// Whether the rate limit lets a TreeAnnounce go to this peer at
+    /// `now_ms`, a monotonic reading: always for a peer never sent one,
+    /// otherwise once the interval has passed since the last.
     pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.last_tree_announce_sent_ms) >= self.tree_announce_min_interval_ms
+        self.last_tree_announce_sent_ms
+            .is_none_or(|t| now_ms.saturating_sub(t) >= self.tree_announce_min_interval_ms)
     }
 
-    /// Record that we sent a TreeAnnounce to this peer.
+    /// Record that we sent a TreeAnnounce to this peer at `now_ms`, a
+    /// monotonic reading.
     pub fn record_tree_announce_sent(&mut self, now_ms: u64) {
-        self.last_tree_announce_sent_ms = now_ms;
+        self.last_tree_announce_sent_ms = Some(now_ms);
         self.pending_tree_announce = false;
     }
 

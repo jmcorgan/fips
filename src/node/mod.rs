@@ -3460,8 +3460,15 @@ impl Node {
             self.peer_machines
                 .entry(link_id)
                 .or_insert_with(|| match expected_identity {
-                    Some(identity) => PeerMachine::new_outbound(link_id, identity, started_at_ms),
-                    None => PeerMachine::new_inbound(link_id, started_at_ms),
+                    Some(identity) => PeerMachine::new_outbound(
+                        link_id,
+                        identity,
+                        crate::proto::fmp::LegStamp::at(started_at_ms),
+                    ),
+                    None => PeerMachine::new_inbound(
+                        link_id,
+                        crate::proto::fmp::LegStamp::at(started_at_ms),
+                    ),
                 });
         if let Some(index) = seed.our_index {
             let _ = machine.set_conn_our_index(index);

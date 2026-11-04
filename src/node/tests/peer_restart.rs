@@ -43,19 +43,46 @@ fn clamp(node: &Node, peer: &NodeAddr) -> Option<u16> {
     node.path_mtu_lookup_get(&crate::Ipv6Address::from_node_addr(peer))
 }
 
+/// How many pairs [`ordered_pair`] builds, at most, before it gives up. Each
+/// pair has the wanted order with probability one half.
+const ORDER_ATTEMPTS: usize = 32;
+
+/// A linked pair, node 0 having dialled node 1, with node 0 at the larger
+/// address if `zero_larger` and at the smaller otherwise. The identities are
+/// random, so pairs are built, and the rejected ones cleaned up, until one
+/// has the order.
+async fn ordered_pair(zero_larger: bool) -> Vec<TestNode> {
+    for _ in 0..ORDER_ATTEMPTS {
+        let mut nodes = linked_pair(
+            rekey_config(REKEY_AFTER_SECS),
+            rekey_config(REKEY_AFTER_SECS),
+        )
+        .await;
+        if (nodes[0].node.node_addr() > nodes[1].node.node_addr()) == zero_larger {
+            return nodes;
+        }
+        cleanup_nodes(&mut nodes).await;
+    }
+    panic!("precondition: no pair in {ORDER_ATTEMPTS} had node 0 larger: {zero_larger}");
+}
+
 /// Our rekey msg2 reveals that B restarted. At the cutover A resets what it
 /// held for B's previous run (its tree declaration, its filter, the
 /// end-to-end session and the clamp entry that session tightened) and
 /// announces its tree and filter again under the new session, which B
 /// decrypts; B's own announces, whose sequence numbers began again, are
-/// then accepted.
+/// then accepted. Run with A at the smaller address and at the larger.
 #[tokio::test]
 async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
-    let mut nodes = linked_pair(
-        rekey_config(REKEY_AFTER_SECS),
-        rekey_config(REKEY_AFTER_SECS),
-    )
-    .await;
+    for a_larger in [false, true] {
+        restart_seen_in_a_rekey_msg2(a_larger).await;
+    }
+}
+
+/// [`restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions`] with A at
+/// the larger address if `a_larger`.
+async fn restart_seen_in_a_rekey_msg2(a_larger: bool) {
+    let mut nodes = ordered_pair(a_larger).await;
     let a_addr = *nodes[0].node.node_addr();
     let b_addr = *nodes[1].node.node_addr();
     exchange_filters(&mut nodes).await;
@@ -64,7 +91,7 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         assert!(
             a.tree_state().peer_declaration(&b_addr).is_some()
                 && a.get_peer(&b_addr).unwrap().filter_sequence() > 0,
-            "precondition: A holds B's tree declaration and filter"
+            "precondition: A holds B's tree declaration and filter (A larger: {a_larger})"
         );
     }
     stale_session(&mut nodes[0].node, b_addr);
@@ -75,7 +102,7 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         .node
         .get_peer_mut(&b_addr)
         .unwrap()
-        .set_last_tree_announce_sent_ms(0);
+        .set_last_tree_announce_sent_ms(None);
 
     let mut r = reveal_restart(nodes).await;
     cutover(&mut r.nodes[0], &b_addr).await;
@@ -84,25 +111,25 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         let a = &r.nodes[0].node;
         assert!(
             a.tree_state().peer_declaration(&b_addr).is_none(),
-            "the cutover a revealed restart caused drops B's previous tree declaration"
+            "the cutover a revealed restart caused drops B's previous tree declaration (A larger: {a_larger})"
         );
         assert_eq!(
             a.get_peer(&b_addr).unwrap().filter_sequence(),
             0,
-            "the cutover a revealed restart caused drops B's previous filter"
+            "the cutover a revealed restart caused drops B's previous filter (A larger: {a_larger})"
         );
         assert!(
             a.bloom_state().last_sent_filter(&b_addr).is_none(),
-            "the cutover a revealed restart caused forgets the filter A last sent B's previous run"
+            "the cutover a revealed restart caused forgets the filter A last sent B's previous run (A larger: {a_larger})"
         );
         assert!(
             a.get_session(&b_addr).is_none(),
-            "the cutover a revealed restart caused ends the end-to-end session B lost"
+            "the cutover a revealed restart caused ends the end-to-end session B lost (A larger: {a_larger})"
         );
         assert_eq!(
             clamp(a, &b_addr),
             seed,
-            "the clamp entry the ended session tightened goes with it, back to the link seed"
+            "the clamp entry the ended session tightened goes with it, back to the link seed (A larger: {a_larger})"
         );
     }
 
@@ -117,36 +144,42 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         assert_eq!(
             peer.consecutive_decrypt_failures(),
             0,
-            "B decrypts everything A sent after its cutover"
+            "B decrypts everything A sent after its cutover (A larger: {a_larger})"
         );
         assert!(
             b.tree_state().peer_declaration(&a_addr).is_some(),
-            "B accepts the tree announce A sent again under the new session"
+            "B accepts the tree announce A sent again under the new session (A larger: {a_larger})"
         );
         assert!(
             peer.filter_sequence() > 0,
-            "B accepts the filter A announced again under the new session"
+            "B accepts the filter A announced again under the new session (A larger: {a_larger})"
         );
     }
 
-    // B's announces, sequenced from its restart, are accepted at A.
-    let (tree_stale, bloom_stale) = {
-        let m = r.nodes[0].node.metrics();
-        (m.tree.stale.get(), m.bloom.stale.get())
-    };
+    // B's announces, sequenced from its restart, are accepted at A: A ends
+    // holding B's current declaration. A count of stale tree announces
+    // cannot show this, since B may echo a declaration A already holds,
+    // which A counts stale without refusing anything of B's new run.
+    let bloom_stale = r.nodes[0].node.metrics().bloom.stale.get();
     deliver_held(&mut r).await;
     r.nodes[1].node.check_bloom_state().await;
     deliver(&mut r.nodes[0]).await;
     let a = &r.nodes[0].node;
+    let declared = |d: &crate::ParentDeclaration| (*d.parent_id(), d.sequence(), d.timestamp());
+    let own = declared(r.nodes[1].node.tree_state().my_declaration());
     assert_eq!(
-        (a.metrics().tree.stale.get(), a.metrics().bloom.stale.get()),
-        (tree_stale, bloom_stale),
-        "A refuses none of the restarted B's tree or filter announces as stale"
+        a.tree_state().peer_declaration(&b_addr).map(declared),
+        Some(own),
+        "A holds the restarted B's current tree declaration (A larger: {a_larger})"
+    );
+    assert_eq!(
+        a.metrics().bloom.stale.get(),
+        bloom_stale,
+        "A refuses none of the restarted B's filter announces as stale (A larger: {a_larger})"
     );
     assert!(
-        a.tree_state().peer_declaration(&b_addr).is_some()
-            && a.get_peer(&b_addr).unwrap().filter_sequence() > 0,
-        "A holds the restarted B's tree declaration and filter"
+        a.get_peer(&b_addr).unwrap().filter_sequence() > 0,
+        "A holds the restarted B's filter (A larger: {a_larger})"
     );
 
     cleanup_nodes(&mut r.nodes).await;

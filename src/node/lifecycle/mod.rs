@@ -632,7 +632,7 @@ impl Node {
         // unregister path in production. It is removed on every failure path in
         // the dial window (below and in `prepare_outbound_msg1` /
         // `poll_pending_connects`), mirroring the connection's own lifetime.
-        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, Self::now_ms());
+        let mut machine = PeerMachine::new_outbound(link_id, peer_identity, Self::leg_stamp());
         machine.set_dial_origin(origin);
         self.peer_machines.insert(link_id, machine);
 
@@ -644,14 +644,15 @@ impl Node {
             // that is deferred to `prepare_outbound_msg1` at connect-resolution
             // time (`poll_pending_connects`), so `our_index` stays `None` on both
             // the (not-yet-built) connection and the machine.
-            let now = Self::now_ms();
+            let interval_ms = Self::interval_ms();
             let ambient = PeerActionCtx {
                 verified_identity: peer_identity,
                 transport_id,
                 remote_addr: remote_addr.clone(),
                 our_index: None,
                 their_index: None,
-                now_ms: now,
+                now_ms: Self::now_ms(),
+                interval_ms,
                 is_outbound: true,
             };
             self.advance_peer_machine(
@@ -662,7 +663,7 @@ impl Node {
                     peer_identity,
                     connection_oriented: true,
                 },
-                now,
+                interval_ms,
                 &ambient,
             )
             .await;
@@ -676,14 +677,15 @@ impl Node {
             // branch sends the wire `prepare_outbound_msg1` armed on the
             // connection.
             self.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)?;
-            let now = Self::now_ms();
+            let interval_ms = Self::interval_ms();
             let ambient = PeerActionCtx {
                 verified_identity: peer_identity,
                 transport_id,
                 remote_addr: remote_addr.clone(),
                 our_index: None,
                 their_index: None,
-                now_ms: now,
+                now_ms: Self::now_ms(),
+                interval_ms,
                 is_outbound: true,
             };
             self.advance_peer_machine(
@@ -694,7 +696,7 @@ impl Node {
                     peer_identity,
                     connection_oriented: false,
                 },
-                now,
+                interval_ms,
                 &ambient,
             )
             .await;
@@ -721,7 +723,7 @@ impl Node {
     ) -> Result<(), NodeError> {
         let peer_node_addr = *peer_identity.node_addr();
 
-        let current_time_ms = Self::now_ms();
+        let at = Self::leg_stamp();
 
         // The control machine drives the handshake, so it takes the crypto
         // carrier before the crypto runs. The machine was born at dial and
@@ -733,7 +735,7 @@ impl Node {
         );
         self.peer_machines
             .entry(link_id)
-            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, current_time_ms))
+            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, at))
             .set_leg(HandshakeCrypto::new());
 
         // Allocate a session index for this handshake, as the lease the
@@ -762,7 +764,7 @@ impl Node {
             .peer_machines
             .get_mut(&link_id)
             .expect("dial-time machine carries the connection")
-            .start_handshake(our_keypair, startup_epoch, current_time_ms);
+            .start_handshake(our_keypair, startup_epoch, at);
         our_keypair.non_secure_erase();
         let noise_msg1 = match start_result {
             Ok(msg) => msg,
@@ -800,7 +802,7 @@ impl Node {
         // Schedule the first msg1 resend; the wire itself is stored on the
         // surviving carrier once the machine is in hand below.
         let resend_interval = self.config().node.rate_limit.handshake_resend_interval_ms;
-        let first_resend_at_ms = current_time_ms + resend_interval;
+        let first_resend_at_ms = at.interval_ms + resend_interval;
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
@@ -814,8 +816,8 @@ impl Node {
         // msg1-prep clock so the surviving `started_at`/`last_activity` carry
         // the preparation's provenance. The two clocks differ when a connect
         // round-trip separates dial from msg1 preparation.
-        machine.set_conn_started_at(current_time_ms);
-        machine.touch_conn(current_time_ms);
+        machine.set_conn_started_at(at.wall_ms);
+        machine.touch_conn(at);
         // Record the transport ID on the surviving carrier (the leg no longer
         // projects it to the promotion hand-off); holds even if a direct caller
         // reached here without the dial-time `on_dial` write.
@@ -839,13 +841,14 @@ impl Node {
     /// retries); a missing wire or transport is a no-op. This is the body of the
     /// executor's `SendHandshake` msg1 action — reached on both the
     /// connectionless dial and the connection-oriented connect-resolution path,
-    /// after `prepare_outbound_msg1` has armed the wire.
+    /// after `prepare_outbound_msg1` has armed the wire. `interval_now` is the
+    /// interval-clock reading (`Node::interval_ms`) the failure step takes.
     pub(in crate::node) async fn send_stored_msg1(
         &mut self,
         link_id: LinkId,
         transport_id: TransportId,
         remote_addr: &TransportAddr,
-        now_ms: u64,
+        interval_now: u64,
     ) {
         let wire_msg1 = match self
             .peer_machines
@@ -892,7 +895,7 @@ impl Node {
                     if let Some(machine) = self.peer_machines.get_mut(&link_id) {
                         let actions = machine.step(
                             PeerEvent::HandshakeSendFailed,
-                            now_ms,
+                            interval_now,
                             &mut self.index_allocator,
                         );
                         debug_assert!(
@@ -1693,20 +1696,21 @@ impl Node {
                     // emitting `SendHandshake` (msg1) whose executor arm sends the
                     // wire just armed. `our_index`/`their_index` stay `None` so the
                     // executor takes the `their_index == None` msg1 branch.
-                    let now = Self::now_ms();
+                    let interval_ms = Self::interval_ms();
                     let ambient = PeerActionCtx {
                         verified_identity: pending.peer_identity,
                         transport_id: pending.transport_id,
                         remote_addr: pending.remote_addr.clone(),
                         our_index: None,
                         their_index: None,
-                        now_ms: now,
+                        now_ms: Self::now_ms(),
+                        interval_ms,
                         is_outbound: true,
                     };
                     self.advance_peer_machine(
                         pending.link_id,
                         PeerEvent::TransportConnected,
-                        now,
+                        interval_ms,
                         &ambient,
                     )
                     .await;

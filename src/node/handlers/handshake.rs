@@ -17,8 +17,8 @@ use crate::peer::{ActivePeer, LinkCaps, LinkOutputs};
 use crate::proto::fmp::rekey::ik::read_msg1;
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
-    EphemeralDigest, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, Msg1Digest,
-    OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
+    EphemeralDigest, EstablishSnapshot, EstablishView, InboundDecision, InboundReject, LegStamp,
+    Msg1Digest, OutboundSnapshot, PromotionResult, WireOutcome, cross_connection_winner,
 };
 use crate::time::HostClock;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
@@ -144,7 +144,9 @@ pub(in crate::node) enum ReplayVerdict {
 }
 
 /// Per peer, the ephemerals of the msg1s that promoted an unheard responder
-/// peering in the last `EPOCH_RESTART_MIN_INTERVAL_SECS`.
+/// peering in the last `EPOCH_RESTART_MIN_INTERVAL_SECS`, each with the
+/// interval-clock reading (`Node::interval_ms`) it was noted at, so a step
+/// of the system clock neither ages an entry out nor keeps it.
 ///
 /// Held on the node rather than on `ActivePeer`, because a replacement tears
 /// the peer entry down and the memory has to outlive it. A peer's entries are
@@ -357,7 +359,7 @@ impl Node {
         if let Some(machine) = self.peer_machines.get_mut(&link) {
             let acts = machine.step(
                 PeerEvent::CrossConnResolved { outcome },
-                Self::now_ms(),
+                Self::interval_ms(),
                 &mut self.index_allocator,
             );
             debug_assert!(
@@ -773,12 +775,20 @@ impl Node {
 
         // === CRYPTO COST PAID HERE ===
         let link_id = self.allocate_link_id();
+        // The packet's wall stamp for what operators are shown, and the
+        // interval clock, read once here, for the handshake's timers and
+        // timeout.
+        let interval_ms = Self::interval_ms();
+        let leg_at = LegStamp {
+            wall_ms: packet.timestamp_ms,
+            interval_ms,
+        };
 
         // The control machine drives the handshake, so it is built here, above
         // the crypto. It stays a local: it enters `peer_machines` only at the
         // promote tails, so a rejected msg1 still leaves no registry trace and
         // allocates no index.
-        let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+        let mut machine = PeerMachine::new_inbound(link_id, leg_at);
         // Seed the carrier with the transport and address msg1 arrived on, so
         // the promotion hand-off reads them from it.
         machine.set_conn_transport_id(packet.transport_id);
@@ -790,12 +800,8 @@ impl Node {
         let mut our_keypair = self.identity().keypair();
         let noise_msg1 = &packet.data[header.noise_msg1_offset..];
         let ephemeral = EphemeralDigest::of_noise_msg1(noise_msg1);
-        let init_result = machine.receive_handshake_init(
-            our_keypair,
-            self.startup_epoch(),
-            noise_msg1,
-            packet.timestamp_ms,
-        );
+        let init_result =
+            machine.receive_handshake_init(our_keypair, self.startup_epoch(), noise_msg1, leg_at);
         our_keypair.non_secure_erase();
         let msg2_response = match init_result {
             Ok(m) => m,
@@ -1011,8 +1017,8 @@ impl Node {
                 // The peering's own promotion is not evidence that it is
                 // alive: a responder promotion came from a msg1, which may be
                 // a capture. Until its first authenticated frame it counts as
-                // idle once `UNHEARD_PEERING_MIN_AGE_MS` old (by the msg1
-                // clock it was promoted on), so the genuine peer's msg1 can
+                // idle once `UNHEARD_PEERING_MIN_AGE_MS` old (on the peer
+                // clock, from its promotion), so the genuine peer's msg1 can
                 // replace it, while the second msg1 of a dialer opening two
                 // paths at once cannot replace the first. What bounds
                 // that churn instead is the replay memory: an ephemeral that
@@ -1029,7 +1035,7 @@ impl Node {
                 {
                     let verdict =
                         self.replayed_msg1s
-                            .verdict(&peer, ephemeral, packet.timestamp_ms);
+                            .verdict(&peer, ephemeral, Self::interval_ms());
                     if verdict != ReplayVerdict::Fresh {
                         debug!(
                             peer = %self.peer_display_name(&peer),
@@ -1045,20 +1051,29 @@ impl Node {
                         return;
                     }
                 }
-                let (peering_idle_ms, min_idle_ms) = self
+                // The gate measures on the peer clock, which a step of the
+                // system clock does not move. The logs below report the idle
+                // time from the wall-clock stamps operators are shown, as
+                // they always have.
+                let (peering_idle_ms, shown_idle_ms, min_idle_ms) = self
                     .peers
                     .get(&peer)
                     .map(|p| {
                         if p.is_heard() {
-                            (p.idle_time(now_ms), EPOCH_RESTART_MIN_INTERVAL_SECS * 1000)
+                            (
+                                crate::peer::since(p.heard_at()).as_millis() as u64,
+                                p.idle_time(now_ms),
+                                EPOCH_RESTART_MIN_INTERVAL_SECS * 1000,
+                            )
                         } else {
                             (
+                                crate::peer::since(p.promoted_at()).as_millis() as u64,
                                 packet.timestamp_ms.saturating_sub(p.authenticated_at()),
                                 UNHEARD_PEERING_MIN_AGE_MS,
                             )
                         }
                     })
-                    .unwrap_or((u64::MAX, 0));
+                    .unwrap_or((u64::MAX, u64::MAX, 0));
                 let dampened = self
                     .restart_dampener
                     .get(&peer)
@@ -1078,7 +1093,7 @@ impl Node {
                             debug!(
                                 peer = %self.peer_display_name(&peer),
                                 remote_addr = %packet.remote_addr,
-                                idle_ms = peering_idle_ms,
+                                idle_ms = shown_idle_ms,
                                 dampened,
                                 reason,
                                 "Same-epoch msg1 inside the peering's replacement interval, dropping"
@@ -1088,7 +1103,7 @@ impl Node {
                         debug!(
                             peer = %self.peer_display_name(&peer),
                             remote_addr = %packet.remote_addr,
-                            idle_ms = peering_idle_ms,
+                            idle_ms = shown_idle_ms,
                             dampened,
                             reason,
                             "Epoch mismatch inside the peering's restart interval, dropping msg1"
@@ -1159,12 +1174,10 @@ impl Node {
 
                 // Execute the Phase-1 teardown, in emitted order
                 // (InvalidateSendState before ReportLost, both before
-                // authorize/alloc). CLOCK NOTE — INTENTIONAL DIVERGENCE: the
-                // pre-refactor arm timestamped `note_link_dead` with
-                // `SystemTime::now()` wall-clock; routing `ReportLost` through the
-                // executor uses `ambient.now_ms == packet.timestamp_ms`. This is an
-                // accepted sub-millisecond reconnect-backoff timing shift — NOT
-                // on-wire, NOT index/metrics. The machine is not yet in
+                // authorize/alloc). `ReportLost` schedules the reconnect on the
+                // peering clock (`note_link_dead` at `Self::peering_now()`), a
+                // monotonic one, and reads neither of the ambient's stamps. The
+                // machine is not yet in
                 // `peer_machines`, but these two
                 // actions do not touch the map, so executing them here is safe.
                 let teardown_ctx = PeerActionCtx {
@@ -1174,6 +1187,7 @@ impl Node {
                     our_index: None,
                     their_index: Some(their_index),
                     now_ms: packet.timestamp_ms,
+                    interval_ms,
                     is_outbound: false,
                 };
                 self.execute_peer_actions(link_id, &teardown_ctx, actions)
@@ -1189,11 +1203,8 @@ impl Node {
                     )
                     .is_err()
                 {
-                    let _ = machine.step(
-                        PeerEvent::Rejected,
-                        packet.timestamp_ms,
-                        &mut self.index_allocator,
-                    );
+                    let _ =
+                        machine.step(PeerEvent::Rejected, interval_ms, &mut self.index_allocator);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -1202,7 +1213,7 @@ impl Node {
                 // Phase 2: allocate our index + emit [SendHandshake, PromoteToActive].
                 let promote_actions = machine.step(
                     PeerEvent::Authorized,
-                    packet.timestamp_ms,
+                    interval_ms,
                     &mut self.index_allocator,
                 );
                 let our_index = match machine.our_index() {
@@ -1255,6 +1266,7 @@ impl Node {
                     our_index: Some(our_index),
                     their_index: Some(their_index),
                     now_ms: packet.timestamp_ms,
+                    interval_ms,
                     is_outbound: false,
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
@@ -1292,7 +1304,7 @@ impl Node {
                         })
                         | None
                 ));
-                self.finish_inbound(link_id, peer_node_addr, &wire_msg2, packet.timestamp_ms)
+                self.finish_inbound(link_id, peer_node_addr, &wire_msg2)
                     .await;
             }
             InboundDecision::Promote => {
@@ -1333,11 +1345,8 @@ impl Node {
                     )
                     .is_err()
                 {
-                    let _ = machine.step(
-                        PeerEvent::Rejected,
-                        packet.timestamp_ms,
-                        &mut self.index_allocator,
-                    );
+                    let _ =
+                        machine.step(PeerEvent::Rejected, interval_ms, &mut self.index_allocator);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -1346,7 +1355,7 @@ impl Node {
                 // Phase 2: allocate our index + emit [SendHandshake, PromoteToActive].
                 let promote_actions = machine.step(
                     PeerEvent::Authorized,
-                    packet.timestamp_ms,
+                    interval_ms,
                     &mut self.index_allocator,
                 );
                 let our_index = match machine.our_index() {
@@ -1404,6 +1413,7 @@ impl Node {
                     our_index: Some(our_index),
                     their_index: Some(their_index),
                     now_ms: packet.timestamp_ms,
+                    interval_ms,
                     is_outbound: false,
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
@@ -1415,7 +1425,7 @@ impl Node {
                 // a transient send failure left it registered at
                 // `Handshaking{ReceivedMsg1}`, which is what the gate in
                 // `finish_inbound` is for.
-                self.finish_inbound(link_id, peer_node_addr, &wire_msg2, packet.timestamp_ms)
+                self.finish_inbound(link_id, peer_node_addr, &wire_msg2)
                     .await;
             }
         }
@@ -1427,13 +1437,7 @@ impl Node {
     /// initial tree announce and schedule the filter announce. Does nothing
     /// unless the promotion left the link's machine established; returns
     /// whether it ran.
-    async fn finish_inbound(
-        &mut self,
-        link: LinkId,
-        peer: NodeAddr,
-        msg2: &[u8],
-        now_ms: u64,
-    ) -> bool {
+    async fn finish_inbound(&mut self, link: LinkId, peer: NodeAddr, msg2: &[u8]) -> bool {
         let Some(machine) = self
             .peer_machines
             .get_mut(&link)
@@ -1452,7 +1456,7 @@ impl Node {
             p.note_setup(&msg1, msg2);
             p.note_setup_ephemeral(ephemeral);
         }
-        self.note_unheard_promotion(&peer, ephemeral, now_ms);
+        self.note_unheard_promotion(&peer, ephemeral);
         // Send initial tree announce to new peer
         if let Err(e) = self.send_tree_announce_to_peer(&peer).await {
             debug!(peer = %self.peer_display_name(&peer), error = %e, "Failed to send initial TreeAnnounce");
@@ -1479,6 +1483,7 @@ impl Node {
         };
         let peer = *identity.node_addr();
         let peer_held = self.peers.contains_key(&peer);
+        let interval_ms = Self::interval_ms();
         let ambient = PeerActionCtx {
             verified_identity: identity,
             transport_id: packet.transport_id,
@@ -1486,19 +1491,17 @@ impl Node {
             our_index: Some(ours),
             their_index: Some(theirs),
             now_ms: packet.timestamp_ms,
+            interval_ms,
             is_outbound: false,
         };
         self.advance_peer_machine(
             link,
             PeerEvent::Msg2Resent { peer_held },
-            packet.timestamp_ms,
+            interval_ms,
             &ambient,
         )
         .await;
-        if self
-            .finish_inbound(link, peer, msg2, packet.timestamp_ms)
-            .await
-        {
+        if self.finish_inbound(link, peer, msg2).await {
             debug!(
                 link_id = %link,
                 peer = %self.peer_display_name(&peer),
@@ -1516,15 +1519,11 @@ impl Node {
     /// Remember the ephemeral of a msg1 that promoted `peer` here, if the
     /// peering it left is unheard (a cross-connection may have kept a peering
     /// this node initiated instead).
-    fn note_unheard_promotion(
-        &mut self,
-        peer: &NodeAddr,
-        ephemeral: Option<EphemeralDigest>,
-        now_ms: u64,
-    ) {
+    fn note_unheard_promotion(&mut self, peer: &NodeAddr, ephemeral: Option<EphemeralDigest>) {
         let unheard = self.peers.get(peer).is_some_and(|p| !p.is_heard());
         if unheard && let Some(ephemeral) = ephemeral {
-            self.replayed_msg1s.note(*peer, ephemeral, now_ms);
+            self.replayed_msg1s
+                .note(*peer, ephemeral, Self::interval_ms());
         }
     }
 
@@ -1923,11 +1922,20 @@ impl Node {
             }
         };
 
+        // The leg is stamped on the interval clock from here, beside the
+        // wall stamp it keeps.
+        let interval_ms = Self::interval_ms();
         let (peer_identity, our_index) = {
             let machine = self.peer_machines.get_mut(&link_id).unwrap();
 
             let noise_msg2 = &packet.data[header.noise_msg2_offset..];
-            if let Err(e) = machine.complete_handshake(noise_msg2, packet.timestamp_ms) {
+            if let Err(e) = machine.complete_handshake(
+                noise_msg2,
+                LegStamp {
+                    wall_ms: packet.timestamp_ms,
+                    interval_ms,
+                },
+            ) {
                 // Nothing authenticated this msg2 before the read, and the
                 // index it names travels in cleartext in our msg1, so it may
                 // be a forgery. Ending the attempt here would let anyone who
@@ -2073,7 +2081,7 @@ impl Node {
                     their_index: header.sender_idx,
                     out: out_snap,
                 },
-                packet.timestamp_ms,
+                interval_ms,
                 &mut self.index_allocator,
             ),
             None => {
@@ -2081,14 +2089,20 @@ impl Node {
                 // `connections`/`pending_outbound` directly, or any path that
                 // reaches msg2 without `start_handshake`): reproduce the
                 // pre-persistence transient exactly.
-                let mut machine =
-                    PeerMachine::new_outbound(link_id, peer_identity, packet.timestamp_ms);
+                let mut machine = PeerMachine::new_outbound(
+                    link_id,
+                    peer_identity,
+                    LegStamp {
+                        wall_ms: packet.timestamp_ms,
+                        interval_ms,
+                    },
+                );
                 let actions = machine.step(
                     PeerEvent::Msg2 {
                         their_index: header.sender_idx,
                         out: out_snap,
                     },
-                    packet.timestamp_ms,
+                    interval_ms,
                     &mut self.index_allocator,
                 );
                 self.peer_machines.insert(link_id, machine);
@@ -2349,6 +2363,7 @@ impl Node {
             our_index,
             their_index: Some(header.sender_idx),
             now_ms: packet.timestamp_ms,
+            interval_ms,
             is_outbound: true,
         };
         self.execute_peer_actions(link_id, &ambient, actions).await;
@@ -2616,14 +2631,6 @@ impl Node {
                 });
             }
 
-            // Preserve tree announce rate-limit state from old peer (if reconnecting).
-            // Without this, reconnection resets the rate limit window to zero,
-            // allowing an immediate announce that can feed an announce loop.
-            let old_announce_ts = self
-                .peers
-                .get(&peer_node_addr)
-                .map(|p| p.last_tree_announce_sent_ms());
-
             self.seed_path_mtu_for_link_peer(
                 &peer_node_addr,
                 peer_key,
@@ -2652,9 +2659,6 @@ impl Node {
             new_peer.set_tree_announce_min_interval_ms(
                 self.config().node.tree.announce_min_interval_ms,
             );
-            if let Some(ts) = old_announce_ts {
-                new_peer.set_last_tree_announce_sent_ms(ts);
-            }
 
             self.peers.insert(peer_node_addr, new_peer);
             self.run_link_outputs(&peer_node_addr, out);

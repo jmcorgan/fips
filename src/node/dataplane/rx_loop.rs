@@ -589,7 +589,7 @@ impl Node {
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollLanRendezvous,
                         self.poll_lan_rendezvous().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DrivePeerTimers,
-                        self.drive_peer_timers(now_ms).await);
+                        self.drive_peer_timers(Self::interval_ms()).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollSessionRekeys,
                         self.poll_session_rekeys(session_now).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeIdleSessions,

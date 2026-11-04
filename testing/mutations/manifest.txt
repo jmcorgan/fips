@@ -21,10 +21,6 @@ ignore-own-dial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more
 ignore-own-dial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer
 forget-dial-on-refused-msg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
 forget-dial-on-refused-msg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
-now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
-now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early
-now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now
-now-ms-monotonic	pass	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now
 yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
 yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
 yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
@@ -49,4 +45,20 @@ link-spin-kept	pass	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_ke
 link-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
 link-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
 tree-carry-across-restart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
+new-peer-starts-rate-limited	red	fips-mesh	node::tests::settle::carry::a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_announce_at_once
+new-peer-starts-rate-limited	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
 drop-initiator-mark	red	fips-mesh	node::tests::settle::carry::the_ble_initiators_link_is_verified_before_any_responder_frame
+tree-on-wall	red	fips-mesh	node::tests::settle::clock::a_backward_wall_step_does_not_hold_a_tree_announce_past_its_interval
+tree-none-as-zero	red	fips-mesh	node::tests::settle::clock::a_peer_never_sent_a_tree_announce_may_be_sent_one_at_the_clocks_first_instants
+interval-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
+interval-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early
+gate-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now
+gate-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now
+gate-on-wall	red	fips-mesh	node::tests::settle::clock::a_heard_peering_quiet_past_the_restart_interval_is_replaced_by_a_restart_msg1
+unheard-age-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_an_unheard_peering_promoted_just_now
+touch-keeps-heard-instant	red	fips-mesh	node::tests::settle::clock::a_peering_heard_just_now_after_an_old_promotion_is_not_replaced_by_a_restart_msg1
+memory-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
+memory-on-wall	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
+memory-verdict-on-packet-stamp	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
+memory-verdict-on-packet-stamp	red	fips-mesh	node::tests::handshake::nine_distinct_captures_in_fifteen_seconds_promote_at_most_eight	every promotion of an unheard peering is remembered
+memory-never-expires	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step

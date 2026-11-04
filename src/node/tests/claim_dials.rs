@@ -265,7 +265,7 @@ impl LanSetup {
 
     /// Reap node 1's outbound handshake legs as their 30 s timeout does.
     async fn time_out_claims(&mut self) {
-        let later = Node::now_ms() + 31_000;
+        let later = Node::interval_ms() + 31_000;
         self.nodes[1].node.drive_peer_timers(later).await;
     }
 
@@ -475,7 +475,7 @@ async fn an_honest_peer_reached_by_a_claim_leg_and_an_addressed_leg_ends_as_one_
     drain_all_packets(&mut nodes, false).await;
     let peers_1: Vec<NodeAddr> = nodes[1].node.peers.keys().copied().collect();
     let peers_0: Vec<NodeAddr> = nodes[0].node.peers.keys().copied().collect();
-    let later = Node::now_ms() + 31_000;
+    let later = Node::interval_ms() + 31_000;
     nodes[1].node.drive_peer_timers(later).await;
     let legs_after_timeout = nodes[1].node.connections().count();
     let still_peered = nodes[1].node.peers.contains_key(&n0);

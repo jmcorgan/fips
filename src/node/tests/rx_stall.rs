@@ -59,7 +59,7 @@ fn craft_msg1(node: &Node, sender: &Identity, sender_index: u32) -> Vec<u8> {
     let target = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let mut conn = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = conn
-        .start_handshake(sender.keypair(), EPOCH, 1000)
+        .start_handshake(sender.keypair(), EPOCH, LegStamp::at(1000))
         .expect("start_handshake produces noise msg1");
     build_msg1(SessionIndex::new(sender_index), &noise_msg1)
 }
@@ -247,7 +247,7 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
         }
         Trigger::PeerTimers(now_ms) => node.drive_peer_timers(now_ms).await,
         Trigger::StoredMsg1(link, addr) => {
-            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::now_ms())
+            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::interval_ms())
                 .await
         }
         Trigger::LinkMessage(peer) => {
@@ -425,7 +425,8 @@ fn age_past_rekey(node: &mut Node, peer: &NodeAddr) {
 
 /// Arm an outbound handshake to `addr` on TCP as a dial does: a link this
 /// node dialed, a machine that has sent its msg1 and holds the wire, and a
-/// retransmit timer due at `due_ms`. Returns the link and the msg1 wire.
+/// retransmit timer due at `due_ms`, both readings of the interval clock
+/// (`Node::interval_ms`). Returns the link and the msg1 wire.
 fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> (LinkId, Vec<u8>) {
     let tcp_id = TransportId::new(TCP_ID);
     let target = PeerIdentity::from_pubkey_full(Identity::generate().pubkey_full());
@@ -434,7 +435,11 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
     let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let noise_msg1 = leg
-        .start_handshake(node.identity().keypair(), node.startup_epoch(), now_ms)
+        .start_handshake(
+            node.identity().keypair(),
+            node.startup_epoch(),
+            LegStamp::at(now_ms),
+        )
         .unwrap();
     let wire = build_msg1(our_index, &noise_msg1);
     node.links.insert(
@@ -450,7 +455,7 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
     node.addr_to_link.insert((tcp_id, addr.clone()), link_id);
     node.pending_outbound
         .insert((tcp_id, our_index.as_u32()), link_id);
-    let mut machine = PeerMachine::new_outbound(link_id, target, now_ms);
+    let mut machine = PeerMachine::new_outbound(link_id, target, LegStamp::at(now_ms));
     let _ = machine.step(
         PeerEvent::Dial {
             transport_id: tcp_id,
@@ -569,7 +574,7 @@ async fn msg1_resend_to_dead_outbound_leg_recovers_after_background_connect() {
     let mut bh = Blackhole::silent();
     let (mut node, _tx, _) = node_with_udp_and_tcp(CONNECT_TIMEOUT_MS).await;
     let addr = bh.transport_addr();
-    let now_ms = Node::now_ms();
+    let now_ms = Node::interval_ms();
     let (link, wire) = dial_leg(&mut node, &addr, now_ms, now_ms + 1000);
 
     let r = timed_fire(&mut node, Trigger::PeerTimers(now_ms + 1000)).await;
@@ -1070,7 +1075,7 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> (Node, std::net::TcpStream,
         ReplySite::StoredMsg1 => {
             let (mut node, _tx, _) = node_with_udp_and_tcp(CONNECT_TIMEOUT_MS).await;
             let far_end = prime_link(&node, bh).await;
-            let now_ms = Node::now_ms();
+            let now_ms = Node::interval_ms();
             let (link_id, _) = dial_leg(&mut node, &link, now_ms, now_ms + 1000);
             (node, far_end, Trigger::StoredMsg1(link_id, link))
         }

@@ -38,11 +38,20 @@ real TCP sockets.
   with a coverage map in its module doc. They are evidence, not coverage: a
   red one means the reading of master was wrong, and a change that moves a
   cell replaces its test with a reproduction.
-- `clock.rs`: handshake timers and the restart gate against a forward
-  step of the wall clock with no time passing (four known defects). They
-  step the clock with the thread-local `crate::time::step_wall`, so they
-  run safely beside other tests. It holds copies of three private items of
-  `handshake_lines.rs`, each naming its original.
+- `clock.rs`: settlement intervals against steps of the wall clock:
+  handshake timers against forward and backward steps, an inbound leg
+  holding its msg2 reaped at its timeout, the shown start and idle times of
+  a pending handshake left on the wall clock, the restart gate for heard
+  and unheard peerings against a forward step with no time passing and
+  against monotonic time passing, the shown promotion time left on the
+  wall clock, the replay memory across a forward step and its entries'
+  expiry on the monotonic clock across a backward one, and the
+  TreeAnnounce rate limit against a backward step and at the monotonic
+  clock's first instants. They step the wall clock with the thread-local
+  `crate::time::step_wall` and advance the monotonic one with
+  `crate::time::advance`, so they run safely beside other tests. It holds
+  copies of three private items of `handshake_lines.rs` and two private
+  helpers of `handshake.rs`, each naming its original.
 - `crossing.rs`: crossed dials and a dialer's second dial. Crossed TCP
   dials (one working session; the smaller node's link record and its redial
   after a drop, known defects, with a single-dial control and a run that

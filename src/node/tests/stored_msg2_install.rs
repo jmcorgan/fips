@@ -273,6 +273,8 @@ async fn a_responder_restarting_a_peering_installs_the_peer_when_its_stored_msg2
         stale_link,
         idle_since,
     );
+    old.test_backdate_promoted(Duration::from_secs(60));
+    old.test_backdate_heard(Duration::from_secs(60));
     old.set_current_addr(tid, msg1.remote_addr.clone());
     old.set_remote_epoch(Some([0xAA; 8]));
     nodes[1].node.peers.insert(a, old);

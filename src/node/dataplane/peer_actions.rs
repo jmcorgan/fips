@@ -66,9 +66,14 @@ pub(in crate::node) struct PeerActionCtx {
     /// The peer's session index for this exchange (msg2 framing
     /// receiver_idx).
     pub(in crate::node) their_index: Option<SessionIndex>,
-    /// The wire timestamp driving this step (promotion ts). A loss report does
-    /// not use it: the retry schedule reads the peering clock.
+    /// The wire timestamp driving this step (promotion ts), Unix
+    /// milliseconds. A loss report does not use it: the retry schedule reads
+    /// the peering clock.
     pub(in crate::node) now_ms: u64,
+    /// The interval-clock reading (`Node::interval_ms`) driving this step:
+    /// the machine steps the executor runs read it, so the timers they arm
+    /// are deadlines on the monotonic clock.
+    pub(in crate::node) interval_ms: u64,
     /// Establish direction for this exchange. Discriminates the
     /// `PromoteToActive` failure cleanup: the pre-refactor inbound
     /// (`handle_msg1`) and outbound (`handle_msg2`) promote-Err arms were NOT
@@ -80,8 +85,9 @@ pub(in crate::node) struct PeerActionCtx {
 }
 
 impl Node {
-    /// Advance the machine for `link` by one event and execute the resulting
-    /// actions.
+    /// Advance the machine for `link` by one event at `interval_now`, a
+    /// reading of the interval clock (`Node::interval_ms`), and execute the
+    /// resulting actions.
     ///
     /// The borrow structure the whole seam turns on: the machine
     /// needs `&mut IndexAllocator` as a synchronous capability *while it is
@@ -93,13 +99,13 @@ impl Node {
         &mut self,
         link: LinkId,
         event: PeerEvent,
-        now: u64,
+        interval_now: u64,
         ambient: &PeerActionCtx,
     ) {
         let actions = match self.peer_machines.get_mut(&link) {
             // Disjoint field borrow: `self.peer_machines` (the map entry) and
             // `self.index_allocator` (the capability) are separate fields.
-            Some(machine) => machine.step(event, now, &mut self.index_allocator),
+            Some(machine) => machine.step(event, interval_now, &mut self.index_allocator),
             None => return,
         };
         self.execute_peer_actions(link, ambient, actions).await;
@@ -253,7 +259,7 @@ impl Node {
                             link,
                             ambient.transport_id,
                             &ambient.remote_addr,
-                            ambient.now_ms,
+                            ambient.interval_ms,
                         )
                         .await;
                     }
@@ -283,7 +289,7 @@ impl Node {
                             let follow = match self.peer_machines.get_mut(&promote_link) {
                                 Some(machine) => machine.step(
                                     PeerEvent::PromotionResolved { result },
-                                    ambient.now_ms,
+                                    ambient.interval_ms,
                                     &mut self.index_allocator,
                                 ),
                                 None => Vec::new(),

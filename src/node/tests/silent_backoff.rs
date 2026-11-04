@@ -120,6 +120,8 @@ impl Rig {
             .expect("the silent peer is present");
         session.test_set_last_seen(Node::now_ms() - idle_ms);
         session.test_set_authenticated_at(Node::now_ms() - idle_ms);
+        session.test_backdate_heard(Duration::from_millis(idle_ms));
+        session.test_backdate_promoted(Duration::from_millis(idle_ms));
         self.node.restart_dampener.clear();
     }
 

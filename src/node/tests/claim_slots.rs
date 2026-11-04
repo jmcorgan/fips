@@ -237,7 +237,7 @@ impl Victim {
     /// exists after the retry step.
     async fn tick(&mut self, attacker: &mut Attacker, beacons: usize) -> bool {
         let start = Instant::now();
-        let now = Node::now_ms();
+        let now = Node::interval_ms();
         self.node.check_timeouts().await;
         self.node.drive_peer_timers(now).await;
         self.node.process_pending_retries(Node::peering_now()).await;
