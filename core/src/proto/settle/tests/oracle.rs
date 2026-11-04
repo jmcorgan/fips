@@ -250,8 +250,17 @@ pub fn heal(w: &mut World) {
 pub type Exempt<'a> = &'a (dyn Fn(&World, &Breach) -> bool + Sync);
 
 /// The exemption of the model's convergence with itself: a `OneSession`
-/// breach on a path where a known shape was seen. Nothing else is exempt.
+/// breach on a path where a known shape other than the two defects left
+/// for later was seen. Nothing else is exempt.
 pub fn by_shape(w: &World, b: &Breach) -> bool {
+    b.oracle == Oracle::OneSession && w.shapes.iter().any(|s| !s.pinned())
+}
+
+/// The exemption of the runs against the models of deployed nodes: a
+/// `OneSession` breach on a path where any known shape was seen, the two
+/// defects left for later included.
+#[cfg(feature = "slow-explorers")]
+pub fn by_any_shape(w: &World, b: &Breach) -> bool {
     b.oracle == Oracle::OneSession && !w.shapes.is_empty()
 }
 

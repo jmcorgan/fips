@@ -252,7 +252,10 @@ GitHub's Linux test job also runs fips-core's slow test suites (the models of
 the deployed releases and the guard-switch meta-test, behind the core's
 `slow-tests` feature) on every push; a local run does that only with
 `--slow-tests` or `FIPS_CI_SLOW_TESTS=1`. Every other platform's test run
-skips them.
+skips them. The settlement explorers against the deployed models and the
+candidate rules (the core's `slow-explorers` feature) run only in a local run
+with `--slow-tests` or `FIPS_CI_SLOW_TESTS=1`, which the internal builder
+sets; GitHub CI does not run them.
 
 The Linux and musl legs also create an address-less dummy interface
 (`fips-probe0`) and pass its name to the tests as

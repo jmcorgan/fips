@@ -578,7 +578,12 @@ jobs:
       # runs at least once without it. This is the one place the slow suites
       # run on every push (the models of the deployed releases and the
       # guard-switch meta-test); the other platforms' jobs skip them. Mirrored
-      # in testing/ci-local.sh, where they run with --slow-tests.
+      # in testing/ci-local.sh, where they run with --slow-tests. The
+      # settlement explorers against the deployed models and the candidate
+      # rules (the core's `slow-explorers` feature) are left to local CI and
+      # the internal builder, which run them under --slow-tests (the builder
+      # sets FIPS_CI_SLOW_TESTS=1); the --all-features clippy step lints
+      # them.
       - name: Run the no_std core's tests on their own, with its slow suites
         run: cargo test -p fips-core --features slow-tests
 

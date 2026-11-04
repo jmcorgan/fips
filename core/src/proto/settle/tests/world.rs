@@ -299,6 +299,12 @@ pub struct PeerView {
     pub dials: Vec<Hs>,
 }
 
+/// The rekey msg1s a party sent, for the shape that names a peer's own
+/// rekey msg1: the model and the model of `master` name the rekey in
+/// flight; the core names every rekey it sent in this life, since a
+/// replacement ends its rekey side and the msg1 is still the peer's rekey.
+pub type Rekeys = Vec<(Node, Hs)>;
+
 /// A party's state, as the oracles read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
@@ -317,6 +323,8 @@ pub struct View {
     pub log: Vec<Entry>,
     /// The peers it redials whenever it holds none.
     pub configured: Vec<Node>,
+    /// The rekey msg1s it sent (see [`Rekeys`]).
+    pub rekeys: Rekeys,
 }
 
 impl View {
@@ -330,6 +338,7 @@ impl View {
             bounds: Vec::new(),
             log: Vec::new(),
             configured: Vec::new(),
+            rekeys: Vec::new(),
         }
     }
 }
@@ -352,6 +361,29 @@ pub enum Shape {
     /// handshake; an observation against FRC-1201, whose gates admit it
     /// where the current node's replay memory does not.
     OldLife,
+    /// Both of a node's own dials of one peer were answered and the
+    /// later-sent msg2 was read first; reading the earlier-sent one then
+    /// moved the node onto a session the peer had replaced. The late
+    /// second dial answered in the other order, a defect left for later.
+    LaterDialFirst,
+    /// A peer's own dial, arriving while the receiver held it on a link
+    /// old enough to rekey, armed a responder pending there, which the
+    /// dialer settles as a crossing and may never adopt. The dial on the
+    /// peer's aged link, a defect left for later.
+    DialAsRekey,
+}
+
+impl Shape {
+    /// Whether this shape is one of the two defects left for later, which
+    /// only the runs against the models of deployed nodes exempt; the
+    /// model's convergence with itself and the core explorer exclude the
+    /// starts that carry them instead.
+    pub fn pinned(self) -> bool {
+        match self {
+            Self::LaterDialFirst | Self::DialAsRekey => true,
+            Self::StaleFrame | Self::RekeyInstall | Self::OldLife => false,
+        }
+    }
 }
 
 /// A node, as the world drives it.
@@ -512,13 +544,14 @@ impl Net {
             return None;
         }
         let owner = self.owner(to)?;
+        let local = from.unwrap_or_else(|| self.home(me, to.transport));
         if kind == Kind::Ble
             && !fault!(BleSecondConn)
-            && let Some((i, _)) = self.conn(me, to)
+            && let Some((i, e)) = self.conn(me, to)
+            && self.conns[i].ends[e].local == local
         {
             return Some(self.conns[i].id);
         }
-        let local = from.unwrap_or_else(|| self.home(me, to.transport));
         let id = self.conns.len() as u32;
         let seen = match kind {
             Kind::Ble => local,
@@ -722,31 +755,58 @@ impl World {
                 if self.parties[y].epoch() != epoch || loose {
                     return Some((Shape::OldLife, hs, self.cur(x, id)));
                 }
-                let rekey = self.parties[y]
-                    .view()
+                let v = self.parties[y].view();
+                let rekey = v.rekeys.contains(&(me, hs))
+                    || v.peers.iter().any(|p| p.peer == me && p.rekey == Some(hs));
+                if rekey {
+                    return Some((Shape::RekeyInstall, hs, self.cur(x, id)));
+                }
+                // The sender's own dial, sent while it holds the receiver.
+                let dial = v
                     .peers
                     .iter()
-                    .any(|p| p.peer == me && p.rekey == Some(hs));
-                rekey.then(|| (Shape::RekeyInstall, hs, self.cur(x, id)))
+                    .any(|p| p.peer == me && p.dials.contains(&hs));
+                dial.then(|| (Shape::DialAsRekey, hs, self.cur(x, id)))
             }
-            Pkt::Msg2 { .. } | Pkt::Eof => None,
+            Pkt::Msg2 { id, hs, .. } => {
+                // The answer to one of the receiver's own dials, read while
+                // it holds the peer on a later dial of its own life.
+                let v = self.parties[x].view();
+                let p = v.peers.iter().find(|p| p.peer == id)?;
+                let own = |h: Hs| {
+                    h.0 >> 24 == u32::from(me.0) && (h.0 >> 16) & 0xff == (hs.0 >> 16) & 0xff
+                };
+                let later = own(p.origin) && p.origin.0 & 0xffff > hs.0 & 0xffff;
+                (p.dials.contains(&hs) && (later || loose)).then_some((
+                    Shape::LaterDialFirst,
+                    hs,
+                    Some(p.cur),
+                ))
+            }
+            Pkt::Eof => None,
         }
     }
 
     /// Record `shape` if the delivery to `x` turned out as the shape says:
     /// a stale frame left the receiver without the session its sender is
-    /// on; a rekey msg1, or a msg1 of a previous life, left it holding the
-    /// sender on that msg1's handshake as its session, which `before` was
-    /// not.
+    /// on; a rekey msg1, a msg1 of a previous life, or the msg2 of an
+    /// earlier own dial, left it holding the sender on that handshake as
+    /// its session, which `before` was not; a dial left a responder
+    /// pending on its handshake.
     fn witness(&mut self, x: usize, pkt: Pkt, shape: Shape, hs: Hs, before: Option<Hs>) {
-        let (Pkt::Frame { id, .. } | Pkt::Msg1 { id, .. }) = pkt else {
+        let (Pkt::Frame { id, .. } | Pkt::Msg1 { id, .. } | Pkt::Msg2 { id, .. }) = pkt else {
             return;
         };
         let shown = match shape {
             Shape::StaleFrame => !self.parties[x].holds(id, hs),
-            Shape::RekeyInstall | Shape::OldLife => {
+            Shape::RekeyInstall | Shape::OldLife | Shape::LaterDialFirst => {
                 before != Some(hs) && self.cur(x, id) == Some(hs)
             }
+            Shape::DialAsRekey => self.parties[x]
+                .view()
+                .peers
+                .iter()
+                .any(|p| p.peer == id && p.pending == Some((hs, false))),
         };
         if fault!(ShapeBlind) || !shown {
             return;

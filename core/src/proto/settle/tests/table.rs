@@ -96,7 +96,9 @@ fn drain(out: Vec<Output>) -> Vec<Output> {
             | Output::Release { .. }
             | Output::Close { .. }
             | Output::Retry { .. }
-            | Output::Reject { .. }) => Some(other),
+            | Output::Reject { .. }
+            | Output::Hold { .. }
+            | Output::Settle { .. }) => Some(other),
         })
         .collect()
 }

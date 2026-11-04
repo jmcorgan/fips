@@ -226,10 +226,38 @@ pub fn age(w: &mut World, ms: u64) {
     }
 }
 
-/// Nodes 0 and 1, node 0 the identity `first`.
+std::thread_local! {
+    /// Whether this thread builds two-node starts with the address order
+    /// flipped (see [`flipped`]).
+    static FLIPPED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Run `f` with every two-node start this thread builds in the other
+/// address order: node 0 the larger identity where its start names the
+/// smaller, and the other way round. The scripts and the explorer address
+/// nodes by index, so a start runs unchanged with the roles of the smaller
+/// and the larger node exchanged.
+#[cfg(feature = "slow-explorers")]
+pub fn flipped<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FLIPPED.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(FLIPPED.with(|c| c.replace(true)));
+    f()
+}
+
+/// Nodes 0 and 1, node 0 the identity `first`, or the other one when the
+/// address order is [`flipped`].
 fn pair(mk: Maker, first: Node, dials: &[&[(usize, u8)]]) -> World {
     let other = if first == A { B } else { A };
-    world_of(mk, &[first, other], dials)
+    if FLIPPED.with(core::cell::Cell::get) {
+        world_of(mk, &[other, first], dials)
+    } else {
+        world_of(mk, &[first, other], dials)
+    }
 }
 
 // The starts. Node 0 is the smaller node unless a name says otherwise.
@@ -722,7 +750,7 @@ pub fn starts() -> Vec<Start> {
             1_400
         ),
         s(11, "three nodes", three, three_script, 6, 54_800),
-        s(12, "two paths", paths, paths_script, 6, 58_500),
+        s(12, "two paths", paths, paths_script, 6, 96_900),
         s(13, "replayed msg1", replayed, replayed_script, 4, 1_400),
         s(
             13,

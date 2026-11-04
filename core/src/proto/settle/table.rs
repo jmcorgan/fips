@@ -39,10 +39,17 @@
 //!
 //! The gate both decides and stamps, so each input's method decides first
 //! and changes state only after, rather than through a separate plan.
+//!
+//! In a test build a table can also run one candidate rule for the two
+//! settlement cases left for later, chosen with `Table::under`; each keeps
+//! the rules above and changes one decision (the test-only block at the
+//! end of this file). No other build has any of it.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+#[cfg(test)]
+use super::faults::Candidate;
 use super::gates::{Ask, Epoch, Gates, Liveness, Source};
 use super::input::{Dial, Hello, Input};
 use super::legs::{Kind, LegOut, Legs, Start};
@@ -94,6 +101,22 @@ struct Answered {
     sent: bool,
 }
 
+/// Test-only, for a candidate rule: a session kept beside the peer's
+/// own, with the peer as it was held on it.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Kept<I> {
+    /// The peer as held on the kept session; its link is the kept one.
+    held: Held<I>,
+    /// A frame under the kept session puts the peer back on it.
+    back: bool,
+    /// This node moved off the kept session onto its own later dial, as
+    /// against replacing it as the responder.
+    dialer: bool,
+    /// When the kept session is dropped unsettled, if ever.
+    until: Option<I>,
+}
+
 /// Every link, leg and held peer of one node, and the gates.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Table<I> {
@@ -104,6 +127,12 @@ pub struct Table<I> {
     held: BTreeMap<NodeAddr, Held<I>>,
     answered: BTreeMap<LinkNo, Answered>,
     gates: Gates<I>,
+    /// Test-only: the candidate rule this node runs, if any.
+    #[cfg(test)]
+    cand: Option<Candidate>,
+    /// Test-only: the sessions a candidate rule keeps, by peer.
+    #[cfg(test)]
+    holds: BTreeMap<NodeAddr, Kept<I>>,
 }
 
 impl<I: Instant> Table<I> {
@@ -117,7 +146,18 @@ impl<I: Instant> Table<I> {
             held: BTreeMap::new(),
             answered: BTreeMap::new(),
             gates: Gates::new(),
+            #[cfg(test)]
+            cand: None,
+            #[cfg(test)]
+            holds: BTreeMap::new(),
         }
+    }
+
+    /// Test-only: the same table running the candidate rule `cand`.
+    #[cfg(test)]
+    pub(crate) fn under(mut self, cand: Option<Candidate>) -> Self {
+        self.cand = cand;
+        self
     }
 
     /// The link records.
@@ -137,6 +177,10 @@ impl<I: Instant> Table<I> {
 
     /// When [`Table::poll`] next has something to do.
     pub fn next_wake(&self) -> Option<I> {
+        #[cfg(test)]
+        if let Some(k) = self.holds.values().filter_map(|k| k.until).min() {
+            return Some(self.legs.next_wake().map_or(k, |w| w.min(k)));
+        }
         self.legs.next_wake()
     }
 
@@ -177,6 +221,10 @@ impl<I: Instant> Table<I> {
             }
             Input::State { .. } if fault!(StateIgnored) => {}
             Input::State { link, pair, proven } => self.links.path(link, pair, proven),
+            #[cfg(test)]
+            Input::HeldFrame { peer, .. } => self.held_frame(peer, now, &mut out),
+            #[cfg(test)]
+            Input::HoldLost { peer } => self.unhold(peer, false, &mut out),
         }
         out
     }
@@ -184,6 +232,8 @@ impl<I: Instant> Table<I> {
     /// The legs' resends and reaps due at `now`.
     pub fn poll(&mut self, now: I) -> Vec<Output> {
         let mut out = Vec::new();
+        #[cfg(test)]
+        self.expire(now, &mut out);
         for o in self.legs.poll(now, &mut self.links) {
             match o {
                 LegOut::Resend { link, bytes } => out.push(Output::Resend { link, bytes }),
@@ -222,6 +272,10 @@ impl<I: Instant> Table<I> {
         let peers: Vec<NodeAddr> = self.held.keys().copied().collect();
         for peer in peers {
             self.remove(peer, Why::Closed, now, &mut out);
+        }
+        #[cfg(test)]
+        for peer in self.holds.keys().copied().collect::<Vec<_>>() {
+            self.unhold(peer, true, &mut out);
         }
         out
     }
@@ -370,6 +424,8 @@ impl<I: Instant> Table<I> {
                     Why::Replacement
                 }
             };
+            #[cfg(test)]
+            self.hold_replaced(peer, source, now, out);
             self.remove(peer, why, now, out);
         }
         let link = self.links.open(hello.from, Dir::Inbound, Holder::Leg);
@@ -505,7 +561,10 @@ impl<I: Instant> Table<I> {
                 .links
                 .get(h.link)
                 .is_some_and(|r| r.dir == Dir::Outbound);
-        if own || self.me < peer {
+        let moves = own || self.me < peer;
+        #[cfg(test)]
+        let moves = moves || self.aged(h, now);
+        if moves {
             self.moveto(peer, link, from, own, out);
             return;
         }
@@ -574,6 +633,8 @@ impl<I: Instant> Table<I> {
         let (Some(leg), Some(h)) = (self.legs.take(link), self.held.get_mut(&peer)) else {
             return;
         };
+        #[cfg(test)]
+        let before = h.clone();
         let old = h.link;
         h.link = link;
         if !fault!(MoveKeepsOldPair) {
@@ -584,6 +645,9 @@ impl<I: Instant> Table<I> {
         }
         let pair = h.current.clone();
         self.links.hold(link, Holder::Peer(peer));
+        let retire = !kept(own);
+        #[cfg(test)]
+        let retire = retire && !self.hold_moved_off(peer, before, own, out);
         out.push(Output::Install(Install {
             peer,
             link,
@@ -598,7 +662,7 @@ impl<I: Instant> Table<I> {
                 transition: Transition::Move,
             });
         }
-        if !kept(own) {
+        if retire {
             let closes = self.links.retire(old);
             out.push(Output::Retire { link: old, closes });
         }
@@ -638,6 +702,11 @@ impl<I: Instant> Table<I> {
         h.heard = true;
         h.last = Some(now);
         self.gates.heard(&peer);
+        #[cfg(test)]
+        let h = {
+            self.unhold(peer, true, out);
+            self.held.get_mut(&peer).expect("held above")
+        };
         if h.current != from {
             h.current = from;
             out.push(Output::Reset {
@@ -659,6 +728,12 @@ impl<I: Instant> Table<I> {
             self.gates
                 .ended(peer, Some(h.epoch), h.setup, now, &self.params);
         }
+        #[cfg(test)]
+        if self.holds.get(&peer).is_some_and(|k| k.held.link == h.link) {
+            // A candidate keeps this session: its link stays.
+            out.push(Output::Remove { peer, why });
+            return;
+        }
         let closes = self.links.retire(h.link);
         let close = match why {
             Why::Orphaned | Why::Admin | Why::Closed => true,
@@ -669,6 +744,8 @@ impl<I: Instant> Table<I> {
             | Why::Disconnect
             | Why::Dead => false,
         };
+        #[cfg(test)]
+        self.unhold(peer, close, out);
         out.push(Output::Remove { peer, why });
         out.push(Output::Retire {
             link: h.link,
@@ -683,6 +760,149 @@ impl<I: Instant> Table<I> {
             | Why::Orphaned
             | Why::Admin
             | Why::Closed => {}
+        }
+    }
+}
+
+/// The candidate rules, test-only. Each keeps the core's own rules and
+/// changes one decision, so the explorer can compare the two.
+#[cfg(test)]
+impl<I: Instant> Table<I> {
+    /// How long a responder keeps a replaced unheard session.
+    const KEPT_FOR: core::time::Duration = core::time::Duration::from_secs(15);
+
+    /// Whether, under the aged-link candidate, this node's own dial
+    /// completing for `h` moves onto it: the held link is old enough to
+    /// rekey, so the peer can only have answered the dial as a rekey or a
+    /// replacement.
+    fn aged(&self, h: &Held<I>, now: I) -> bool {
+        self.cand == Some(Candidate::AgedMove)
+            && !fault!(AgedTieBreak)
+            && now.saturating_duration_since(h.installed)
+                >= crate::proto::rekey::Config::fmp().link_age
+    }
+
+    /// At a move off a held link this node dialed, keep the session moved
+    /// off under either late-dial candidate: one the peer's frame puts the
+    /// peer back on under the dialer's rule, receive-only under the
+    /// responder's. Whether it was kept.
+    fn hold_moved_off(
+        &mut self,
+        peer: NodeAddr,
+        before: Held<I>,
+        own: bool,
+        out: &mut Vec<Output>,
+    ) -> bool {
+        let back = match self.cand {
+            Some(Candidate::DialerSettle | Candidate::ResponderHold) => true,
+            Some(Candidate::AgedMove) | None => return false,
+        };
+        if !own {
+            return false;
+        }
+        self.unhold(peer, true, out);
+        out.push(Output::Hold {
+            peer,
+            link: before.link,
+        });
+        let kept = Kept {
+            held: before,
+            back,
+            dialer: true,
+            until: None,
+        };
+        self.holds.insert(peer, kept);
+        true
+    }
+
+    /// At a replacement of an unheard peering under the responder's
+    /// candidate, keep the replaced session for a while, dropping any
+    /// earlier kept one; the removal that follows then keeps its link.
+    fn hold_replaced(&mut self, peer: NodeAddr, source: Source, now: I, out: &mut Vec<Output>) {
+        let Some(h) = self.held.get(&peer) else {
+            return;
+        };
+        if self.cand != Some(Candidate::ResponderHold) || source != Source::Replacement || h.heard {
+            return;
+        }
+        let kept = Kept {
+            held: h.clone(),
+            back: true,
+            dialer: false,
+            until: Some(super::params::deadline(now, Self::KEPT_FOR)),
+        };
+        self.unhold(peer, true, out);
+        out.push(Output::Hold {
+            peer,
+            link: kept.held.link,
+        });
+        self.holds.insert(peer, kept);
+    }
+
+    /// Drop the session kept for `peer`, if any, and retire its link,
+    /// closing what the close rule closes when `close`.
+    fn unhold(&mut self, peer: NodeAddr, close: bool, out: &mut Vec<Output>) {
+        let Some(k) = self.holds.remove(&peer) else {
+            return;
+        };
+        let link = k.held.link;
+        out.push(Output::Settle {
+            peer,
+            link,
+            back: false,
+        });
+        let closes = self.links.retire(link);
+        out.push(Output::Retire {
+            link,
+            closes: if close { closes } else { Vec::new() },
+        });
+    }
+
+    /// A frame of `peer` under the kept session: unless that session is
+    /// receive-only, the peer is back on it, and the link it held instead
+    /// is retired by the close rule.
+    fn held_frame(&mut self, peer: NodeAddr, now: I, out: &mut Vec<Output>) {
+        if !self.holds.get(&peer).is_some_and(|k| k.back) {
+            return;
+        }
+        let Some(k) = self.holds.remove(&peer) else {
+            return;
+        };
+        out.push(Output::Settle {
+            peer,
+            link: k.held.link,
+            back: true,
+        });
+        let mut held = k.held;
+        held.heard = true;
+        held.last = Some(now);
+        self.links.hold(held.link, Holder::Peer(peer));
+        self.gates.heard(&peer);
+        if let Some(cur) = self.held.insert(peer, held) {
+            let closes = self.links.retire(cur.link);
+            out.push(Output::Retire {
+                link: cur.link,
+                closes,
+            });
+        }
+        let transition = if k.dialer {
+            Transition::Move
+        } else {
+            Transition::Replace
+        };
+        out.push(Output::Reset { peer, transition });
+    }
+
+    /// Drop every kept session whose time is up.
+    fn expire(&mut self, now: I, out: &mut Vec<Output>) {
+        let due: Vec<NodeAddr> = self
+            .holds
+            .iter()
+            .filter(|(_, k)| k.until.is_some_and(|t| t <= now))
+            .map(|(p, _)| *p)
+            .collect();
+        for peer in due {
+            self.unhold(peer, true, out);
         }
     }
 }

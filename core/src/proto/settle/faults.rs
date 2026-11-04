@@ -10,6 +10,12 @@
 //! environment variable, a comma-separated list of variant names, as the
 //! rekey machine's switches are. Outside test builds the `fault!` macro is
 //! the literal `false` and this module is not compiled.
+//!
+//! The candidate rules for the two settlement cases left for later
+//! ([`Candidate`]) are chosen here too: by `FIPS_SETTLE_CANDIDATE` for a
+//! whole process, or by a test for the stub nodes one thread builds. The
+//! core runs one only when its table is built under it, and only in a
+//! test build.
 
 use std::sync::OnceLock;
 use std::vec::Vec;
@@ -157,8 +163,37 @@ pub(crate) enum Fault {
     ResyncKeepsAll,
     /// The model party keeps nothing of the session a late dial moved off.
     ModelDropsFallback,
+    /// The core's stub shell hands the core a packet's wall stamp as its
+    /// instant.
+    PacketStamp,
     /// An answer not yet sent is drawn only by its own msg1, byte for byte.
     StoredByBytes,
+    /// The comparison keeps the larger node's own rekey after it yielded
+    /// it at a simultaneous rekey.
+    YieldKept,
+    /// The comparison keeps this node's own rekey after the peering it
+    /// rekeyed was removed or replaced.
+    RekeyOutlivesPeer,
+    /// The comparison does not count a frame under a drained session as
+    /// heard.
+    PreviousUnheard,
+    /// The core's stub shell takes a connection the far end closed as
+    /// unreachable before its end-of-stream arrives.
+    ReachablePeeks,
+    /// A failing seeded run is reported with its whole schedule, unshrunk.
+    NoShrink,
+    /// The comparison takes a silent msg1 that the rekey side named a copy
+    /// or recorded, where the model names it otherwise, for a difference.
+    RecordedCompared,
+    /// The comparison does not cut the shadow over at the peer's frame
+    /// after the rekey side cut its own rekey over there.
+    FrameCutoverMissed,
+    /// The core's stub shell drops a candidate rule's held session, so
+    /// frames under it no longer open.
+    CandidateHoldsNothing,
+    /// Under the aged-link candidate, an own dial completing on an aged
+    /// inbound link is judged by the tie-break alone.
+    AgedTieBreak,
 }
 
 impl Fault {
@@ -227,7 +262,17 @@ impl Fault {
         Self::PendingAnswers,
         Self::ResyncKeepsAll,
         Self::ModelDropsFallback,
+        Self::PacketStamp,
         Self::StoredByBytes,
+        Self::YieldKept,
+        Self::RekeyOutlivesPeer,
+        Self::PreviousUnheard,
+        Self::ReachablePeeks,
+        Self::NoShrink,
+        Self::RecordedCompared,
+        Self::FrameCutoverMissed,
+        Self::CandidateHoldsNothing,
+        Self::AgedTieBreak,
     ];
 
     /// The switch whose variant name is `name`.
@@ -255,4 +300,81 @@ fn set() -> &'static [Fault] {
 /// Whether `fault` is on in this process.
 pub(crate) fn on(fault: Fault) -> bool {
     set().contains(&fault)
+}
+
+/// The environment variable that names the candidate rule the core's
+/// stub nodes of a test process run, when a test does not choose one.
+pub(crate) const CANDIDATE: &str = "FIPS_SETTLE_CANDIDATE";
+
+/// A candidate rule for a settlement case left for later, built into the
+/// core behind this test-only selection so that the explorer can compare
+/// it with the core's own rule. No candidate reaches a non-test build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Candidate {
+    /// The late second dial: the dialer keeps the session it moved off
+    /// decryptable, and the peer's first frame under either session
+    /// settles which one it keeps.
+    DialerSettle,
+    /// The late second dial: a responder that replaced an unheard
+    /// peering keeps the replaced session for a while, and the dialer's
+    /// first frame under either settles which one it keeps; the dialer
+    /// keeps the session it moved off receive-only until it hears the
+    /// peer on the one it kept.
+    ResponderHold,
+    /// The dial on the peer's aged link: an own dial completing for a
+    /// peer held through a link old enough to rekey moves onto that dial,
+    /// whatever the held link's direction.
+    AgedMove,
+}
+
+impl Candidate {
+    /// Every candidate.
+    pub(crate) const ALL: &'static [Candidate] =
+        &[Self::DialerSettle, Self::ResponderHold, Self::AgedMove];
+
+    /// The candidate whose variant name is `name`.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|c| std::format!("{c:?}") == name)
+    }
+}
+
+std::thread_local! {
+    /// The candidate a test chose for the stub nodes this thread builds,
+    /// over the process's (see [`under_candidate`]).
+    static CHOSEN: core::cell::Cell<Option<Option<Candidate>>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// Run `f` with the stub nodes this thread builds running `cand` (or the
+/// core's own rules, with none), whatever the process names.
+#[cfg(feature = "slow-tests")]
+pub(crate) fn under_candidate<T>(cand: Option<Candidate>, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Option<Candidate>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CHOSEN.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(CHOSEN.with(|c| c.replace(Some(cand))));
+    f()
+}
+
+/// The candidate the stub nodes this thread builds run: the one a test
+/// chose, or else the one the process names in [`CANDIDATE`]; none when
+/// neither names one.
+pub(crate) fn candidate() -> Option<Candidate> {
+    if let Some(chosen) = CHOSEN.with(core::cell::Cell::get) {
+        return chosen;
+    }
+    static SET: OnceLock<Option<Candidate>> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let name = std::env::var(CANDIDATE).unwrap_or_default();
+        (!name.is_empty()).then(|| {
+            Candidate::named(&name)
+                .unwrap_or_else(|| panic!("{CANDIDATE} names no candidate {name:?}"))
+        })
+    })
 }

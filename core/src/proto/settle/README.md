@@ -55,14 +55,20 @@ release build.
   README.
 - `faults.rs`: the test-only switches that turn each guard of the core
   and of its tests off (`FIPS_SETTLE_FAULTS`), read through the `fault!` macro in
-  `mod.rs`.
-- `tests/`: the deterministic world, the model as a node of it, the named
-  starts, the bounded explorer, the settlement properties, the rekey
-  machine's decisions and a model of the current node. See its README.
+  `mod.rs`, and the choice of a candidate rule for the two settlement
+  cases left for later (`Candidate`; `FIPS_SETTLE_CANDIDATE` for a
+  process, or a test's choice for one thread's nodes).
+- `tests/`: the deterministic world, the model and the core as nodes of
+  it, the named starts, the bounded explorers, the settlement properties,
+  the rekey machine's decisions, a model of the current node, the
+  pinned late-dial cases, the scripted regressions, the seeded long
+  runs, the candidate rules explored, the meta-test of the switches and
+  the scans of this directory. See its README.
 
 The core grows here beside the model, and its tests compare it with the
 model. No core file (anything here outside `model/` and `tests/`) refers
-to the model, and nothing in `model/` refers to a core item.
+to the model, and nothing in `model/` refers to a core item; the scans in
+`tests/mod.rs` check both ways, by path.
 
 ## Rules for changing it
 
@@ -89,4 +95,22 @@ to the model, and nothing in `model/` refers to a core item.
   peering stamps the dampener; a refusal never does, so a sustained
   replay cannot keep a genuine restart out.
 - A core file's unit tests sit in `tests/<file>.rs`, attached from the
-  file with `#[path]`.
+  file with `#[path]`; a core file that holds a test fails a scan.
+- No core type has a `set_` method, and a new source file here or in
+  `model/` joins the scans' lists in `tests/mod.rs`, or the file count
+  there fails.
+- A new guard gets a switch in `faults.rs` and a row in
+  `tests/faults.rs`, and a new test is named by a row or listed there as
+  self-checked or characterisation; the scans fail otherwise.
+- The candidate rules are test-only, every item of them under
+  `#[cfg(test)]`: in `table.rs` the `Kept` record, the table's `cand` and
+  `holds` fields and the candidates' `impl` block; in `input.rs` the
+  `HeldFrame` and `HoldLost` inputs; in `output.rs` the `Hold` and
+  `Settle` outputs. A table runs one only when built with `Table::under`,
+  and the non-test build has no candidate code (the bare-metal build
+  shows it). Each candidate keeps the core's own rules and changes one
+  decision: the dialer's and the responder's late-dial rules keep the
+  session a late second dial moves off (`Hold`) until a frame settles it
+  (`Settle`), the responder's also a replaced unheard peering's for 15 s;
+  the aged-link rule moves an own dial completing on an aged inbound link
+  onto that dial.

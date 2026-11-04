@@ -289,6 +289,13 @@ all four before sending a change here. The repository guards in
 `testing/` (atomics, comment references, log strings) scan `core/src/`
 as well as `src/`.
 
+The settlement explorers against the deployed models and the candidate
+rules are gated by a second feature, `slow-explorers`, which turns
+`slow-tests` on too. Local CI with `--slow-tests`, and so the internal
+builder, runs them; GitHub CI does not, and the root's `--all-features`
+clippy pass lints them. After a change to the settlement core or its
+explorers, run `cargo test -p fips-core --features slow-explorers`.
+
 These checks run on the host, where `std` exists, so they cannot catch
 a dependency that links it. A separate build of the library for two
 targets with no `std` at all, `thumbv7em-none-eabihf` (Cortex-M4F) and
