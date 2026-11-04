@@ -933,6 +933,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the monotonic clock, as the other link and session rekey timers already
   were. Nothing on the wire changes.
 
+- A step of the system clock no longer times out a link handshake started
+  just now, resends its msg1 early, or keeps a stalled inbound handshake past
+  its timeout. The handshake timers read the wall clock, so a forward step (an
+  NTP correction, a manual set, a resume from suspend) ended a fresh dial, and
+  a backward step held a stalled handshake for as long as the step. They now
+  read the monotonic clock. The start and idle times `fipsctl` shows for a
+  pending handshake are read as before. Nothing on the wire changes.
+
+- A forward step of the system clock no longer lets a peer's new msg1 replace
+  a peering heard from just now. The restart gate measured the peering's
+  quiet time on the wall clock; it now uses the monotonic clock, as does the
+  memory of the msg1s that promoted a peering not yet heard from, which a
+  forward step emptied. The promotion and last-seen times shown for a peer
+  are unchanged. Nothing on the wire changes.
+
+- A backward step of the system clock no longer holds a peer's spanning-tree
+  announces for as long as the step. The per-peer announce limit now reads
+  the monotonic clock. Nothing on the wire changes.
+
 - Losing an interface no longer leaves its peers in the routing table. The
   peers stayed in the registry, the routes through them stayed selectable, and
   the node kept advertising reachability it no longer had — so transit traffic
@@ -1442,6 +1461,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resent msg1 with the stored msg2. Before, the dialer completed the link
   but the node never installed it, so the dialer's frames went unanswered
   until its link-dead timeout.
+- The link spin bit (the SP flag) starts again at each rekey, as the
+  session spin bit already does, instead of freezing until the new
+  session's frame counter passed the old one. No message format changes,
+  and peers take no measurement from it.
 
 #### Sessions and rekey
 
@@ -1534,6 +1557,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. A frame slightly over it used to get through, so on a UDP
   transport with `mtu` below 1,071 bytes bloom filters (`FilterAnnounce`)
   no longer reach UDP peers; keep `transports.udp.mtu` at 1,071 or above.
+- A Tor or Nym link no longer drops on frames its peer may send. Between two
+  peers configured with different `mtu` values, including a Tor or Nym end
+  that dials a TCP peer, the first frame between the two values from the
+  larger end was refused and the connection dropped. A Tor or Nym receiver
+  now accepts frames up to 65535 bytes whatever its own `mtu`, as a TCP
+  receiver already does, so the largest frame a peer can make it allocate
+  for rises from the local `mtu` (1400 bytes by default) to 64 KiB.
+- Closing a BLE link no longer discards what was queued on it. A Disconnect
+  sent just before a deliberate close was never written, so the peer kept
+  its session until link-dead detection. A closed BLE link's writer now
+  finishes its queue, for at most five seconds, as on TCP, Tor and Nym, and
+  stopping the transport still stops it.
+- An unverified BLE channel that never carries a handshake is now closed
+  once the handshake timeout (`node.rate_limit.handshake_timeout_secs`, 30 s
+  by default) has passed since it was admitted, or since the node last held
+  a handshake or link on it, as FRC-1301 Section 6.5.4 asks. Such a channel,
+  which anything in radio range can open, was held until link loss or
+  eviction. A link that once completed a handshake is kept. A channel the
+  scan loop probed with `auto_connect` off is closed the same way, and is
+  not probed again until its address rotates or a new discovery session
+  offers it.
 
 #### TUN
 
