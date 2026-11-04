@@ -8,7 +8,8 @@
 //! every setup check one starting `precondition:` (see `README.md`).
 //!
 //! This file holds the drivers the files share: real TCP nodes on
-//! 127.0.0.1, a crossed TCP dial, and delivery until the nodes are idle.
+//! 127.0.0.1, a crossed TCP dial, delivery until the nodes are idle, and
+//! the check that two nodes are left on one working session.
 
 mod audit;
 mod bounds;
@@ -18,6 +19,7 @@ mod clock;
 mod crossing;
 mod fsp;
 mod lane;
+mod restart;
 
 use super::spanning_tree::{
     TestNode, add_loopback_alias, bridge_to_unbounded, cleanup_nodes, loopback_tap,
@@ -167,6 +169,37 @@ pub(super) async fn heartbeat_reaches(
     match (before, after) {
         (Some((b, _)), Some((a, 0))) if a > b => Ok(()),
         _ => Err(format!("before {before:?} after {after:?}")),
+    }
+}
+
+/// Whether `nodes[a]` and `nodes[b]` hold each other on one session, each
+/// end's index the other's peer index, on which a heartbeat sent now
+/// authenticates each way. The error says what was seen.
+pub(super) async fn settled(nodes: &mut [TestNode], a: usize, b: usize) -> Result<(), String> {
+    let a_addr = *nodes[a].node.node_addr();
+    let b_addr = *nodes[b].node.node_addr();
+    let at_a = nodes[a]
+        .node
+        .get_peer(&b_addr)
+        .map(|p| (p.our_index(), p.their_index()));
+    let at_b = nodes[b]
+        .node
+        .get_peer(&a_addr)
+        .map(|p| (p.our_index(), p.their_index()));
+    let same = matches!(
+        (at_a, at_b),
+        (Some((ao, at)), Some((bo, bt))) if ao.is_some() && ao == bt && at == bo
+    );
+    let fresh = [
+        heartbeat_reaches(nodes, a, b).await,
+        heartbeat_reaches(nodes, b, a).await,
+    ];
+    if same && fresh.iter().all(Result::is_ok) {
+        Ok(())
+    } else {
+        Err(format!(
+            "one session {same}; (ours, theirs) at node {a} {at_a:?}, at node {b} {at_b:?}; heartbeats {a} to {b}, back: {fresh:?}"
+        ))
     }
 }
 

@@ -22,17 +22,22 @@
 
 use super::super::control::quieten;
 use super::super::crossed_dial::{Dial, cross_dials, hand, phase};
-use super::super::rekey_parity::{age_link, deliver, rekey_config, trigger_age};
+use super::super::rekey_parity::{
+    age_link, cutover, deliver, heartbeat, rekey_config, rekey_to_pending, trigger_age,
+};
 use super::super::spanning_tree::{
     LOOPBACK_REGISTRY, TestNode, cleanup_nodes, drain_all_packets, initiate_handshake,
     make_test_node, make_test_node_with_config, process_available_packets,
 };
 use super::super::*;
 use super::audit::{Breach, Exempt, assert_coherent, audit};
-use super::{alias, crossed_tcp, heartbeat_reaches, pool, pump, received, resolve_connect};
+use super::{
+    alias, crossed_tcp, heartbeat_reaches, pool, pump, received, resolve_connect, settled,
+};
 use super::{tcp_dial, tcp_pair};
-use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG2};
+use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2};
 use crate::proto::link::LinkMessageType;
+use crate::transport::loopback::LoopbackTransport;
 use crate::transport::{TransportHandle, TransportId};
 use fips_core::proto::rekey::Role;
 
@@ -862,4 +867,225 @@ async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer
         .filter(|b| matches!(b, Breach::Unadoptable { .. }))
         .collect();
     assert!(unadoptable.is_empty(), "defect: {unadoptable:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// A crossed msg1 read past the heard floor
+// ---------------------------------------------------------------------------
+
+/// Longer than the 15 s heard floor, below which a heard peering is not
+/// replaced.
+const SILENCE: Duration = Duration::from_secs(16);
+
+/// Give `tn` a loopback transport `id` whose own address is `addr`. A copy
+/// of `crossed_dial::add_transport`, which is private.
+fn loopback(tn: &mut TestNode, id: TransportId, addr: TransportAddr) {
+    let lo = LoopbackTransport::with_mtu(id, addr, 1280, LOOPBACK_REGISTRY.clone());
+    tn.node.transports.insert(id, TransportHandle::Loopback(lo));
+}
+
+/// Crossed dials whose larger node's msg1 reaches the smaller node late.
+/// The larger node reads the smaller node's msg1 and answers it; the
+/// smaller node installs from that answer to its own dial, and only then,
+/// having last heard the larger node `quiet` ago, reads the larger node's
+/// msg1. With `other` the larger node dials from a second transport to a
+/// second address of the smaller node's. Whether the two ends are left on
+/// one working session.
+async fn late_cross(other: bool, quiet: Duration) -> Result<(), String> {
+    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let s_addr = *nodes[s].node.node_addr();
+    let l_addr = *nodes[l].node.node_addr();
+    let t1 = nodes[s].transport_id;
+    let s1 = nodes[s].addr.clone();
+    let l1 = nodes[l].addr.clone();
+    let s_id = PeerIdentity::from_pubkey_full(nodes[s].node.identity().pubkey_full());
+    let l_id = PeerIdentity::from_pubkey_full(nodes[l].node.identity().pubkey_full());
+    let (l_tid, l_to) = if other {
+        let t2 = TransportId::new(2);
+        let s2 = alias(&s1, t2);
+        let l2 = alias(&l1, t2);
+        loopback(&mut nodes[s], t2, s2.clone());
+        loopback(&mut nodes[l], t2, l2);
+        (t2, s2)
+    } else {
+        (t1, s1)
+    };
+    nodes[s]
+        .node
+        .initiate_connection(t1, l1, l_id)
+        .await
+        .expect("precondition: the smaller node's dial starts");
+    nodes[l]
+        .node
+        .initiate_connection(l_tid, l_to, s_id)
+        .await
+        .expect("precondition: the larger node's dial starts");
+    deliver(&mut nodes[l]).await;
+    assert!(
+        nodes[l].node.get_peer(&s_addr).is_some(),
+        "precondition: the larger node promoted on the smaller node's msg1"
+    );
+    // The smaller node reads the answer to its own dial and what follows
+    // it; the larger node's msg1 is held back.
+    let queued: Vec<ReceivedPacket> =
+        std::iter::from_fn(|| nodes[s].packet_rx.try_recv().ok()).collect();
+    let mut late = Vec::new();
+    for packet in queued {
+        if phase(&packet) == Some(PHASE_MSG1) {
+            late.push(packet);
+        } else {
+            hand(&mut nodes[s].node, packet).await;
+        }
+    }
+    assert_eq!(
+        late.len(),
+        1,
+        "precondition: the larger node's one msg1 is held back"
+    );
+    nodes[s]
+        .node
+        .get_peer_mut(&l_addr)
+        .expect("precondition: the smaller node installed from its own dial's msg2")
+        .test_backdate_heard(quiet);
+    for packet in late {
+        hand(&mut nodes[s].node, packet).await;
+    }
+    pump(&mut nodes).await;
+    let out = settled(&mut nodes, s, l).await;
+    cleanup_nodes(&mut nodes).await;
+    out
+}
+
+/// A crossed msg1 the larger node sent from another transport, read by the
+/// smaller node after it installed from its own dial and heard nothing for
+/// longer than the heard floor, leaves one working session.
+#[tokio::test]
+#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
+async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session() {
+    let out = late_cross(true, SILENCE).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// As above, with the larger node's dial on the transport the smaller
+/// node's dial used.
+#[tokio::test]
+#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
+async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session() {
+    let out = late_cross(false, SILENCE).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// The same late crossed msg1, read with the larger node heard just now,
+/// inside the heard floor, leaves one working session: the assertion the
+/// two pins make can pass.
+#[tokio::test]
+async fn a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leaves_one_session() {
+    let out = late_cross(true, Duration::ZERO).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+// ---------------------------------------------------------------------------
+// A larger node's dial on an aged link after the smaller node's own rekey
+// ---------------------------------------------------------------------------
+
+/// The smaller node set the link up and, once the link is aged, rekeys it;
+/// both ends cut over, so the smaller node's session is younger than the
+/// rekey machine's session floor. What the larger node sends after the
+/// cutover is lost, and the smaller node last heard it `quiet` ago. Then
+/// the larger node dials the smaller node's second address. Whether the
+/// two ends are left on one working session.
+async fn aged_rekey(quiet: Duration) -> Result<(), String> {
+    let mut nodes = vec![
+        make_test_node_with_config(rekey_config(60), 1280).await,
+        make_test_node_with_config(rekey_config(60), 1280).await,
+    ];
+    let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
+    let (d, p) = if zero_smaller { (1, 0) } else { (0, 1) };
+    let d_addr = *nodes[d].node.node_addr();
+    let p_addr = *nodes[p].node.node_addr();
+    initiate_handshake(&mut nodes, p, d).await;
+    drain_all_packets(&mut nodes, false).await;
+    assert!(
+        nodes[d].node.get_peer(&p_addr).is_some() && nodes[p].node.get_peer(&d_addr).is_some(),
+        "precondition: the two nodes are peered"
+    );
+    age_link(&mut nodes, d, p, trigger_age());
+
+    // The smaller node's own rekey, completed at both ends.
+    rekey_to_pending(&mut nodes, p, d).await;
+    cutover(&mut nodes[p], &d_addr).await;
+    heartbeat(&mut nodes[p], &d_addr).await;
+    deliver(&mut nodes[d]).await;
+    {
+        let at_p = nodes[p]
+            .node
+            .get_peer(&d_addr)
+            .expect("precondition: the smaller node holds the larger");
+        let at_d = nodes[d]
+            .node
+            .get_peer(&p_addr)
+            .expect("precondition: the larger node holds the smaller");
+        assert!(
+            at_d.pending_new_session().is_none()
+                && at_d.our_index() == at_p.their_index()
+                && at_p.our_index() == at_d.their_index(),
+            "precondition: both ends cut over to the rekeyed session"
+        );
+    }
+    let rekeyed = link_view(&nodes[p], &d_addr).our_index;
+    let _lost = std::iter::from_fn(|| nodes[p].packet_rx.try_recv().ok()).count();
+    nodes[p]
+        .node
+        .get_peer_mut(&d_addr)
+        .expect("precondition: the smaller node holds the larger")
+        .test_backdate_heard(quiet);
+
+    // The larger node dials the smaller node's second address.
+    quieten(&mut nodes[d], &p_addr);
+    let tid = nodes[p].transport_id;
+    let alternate = alias(&nodes[p].addr, tid);
+    let p_npub = nodes[p].node.npub();
+    let data = nodes[d]
+        .node
+        .api_connect(&p_npub, &alternate.to_string(), "loopback")
+        .await
+        .expect("precondition: api_connect on an alternate path succeeds");
+    assert_eq!(data["refreshed"], true, "precondition: the dial starts");
+    deliver(&mut nodes[p]).await;
+    if quiet >= SILENCE {
+        assert_ne!(
+            link_view(&nodes[p], &d_addr).our_index,
+            rekeyed,
+            "precondition: the smaller node took the dial as a replacement of its young session"
+        );
+    }
+    deliver(&mut nodes[d]).await;
+    drain_all_packets(&mut nodes, false).await;
+    let out = settled(&mut nodes, d, p).await;
+    cleanup_nodes(&mut nodes).await;
+    out
+}
+
+/// A larger node's dial on the aged link the smaller node set up, made
+/// after the smaller node's own rekey and longer than the heard floor
+/// after the smaller node last heard it, leaves one working session.
+#[tokio::test]
+#[ignore = "known defect: after the smaller node's own rekey, the larger node's dial on its aged link is taken as a replacement while the larger node keeps its own session"]
+async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session() {
+    let out = aged_rekey(SILENCE).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// The same dial with the larger node heard just now leaves one working
+/// session: the assertion the pin makes can pass.
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_inside_the_heard_floor_leaves_one_session()
+ {
+    let out = aged_rekey(Duration::ZERO).await;
+    assert!(out.is_ok(), "defect: {out:?}");
 }

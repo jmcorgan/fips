@@ -13,10 +13,11 @@ real TCP sockets.
   files share: real TCP nodes on 127.0.0.1 (`tcp_node`, `tcp_pair`,
   `tcp_dial`, `resolve_connect`, `pool`), crossed TCP dials (`crossed_tcp`),
   delivery until idle for loopback and TCP nodes alike (`pump`), a fresh
-  heartbeat check (`heartbeat_reaches`), and the wrappers that absorb a
-  signature or key change multipath makes to a shared helper (`bind_index`,
-  `alias`, `tap`). A wrapper's body is the one place such a change is
-  made.
+  heartbeat check (`heartbeat_reaches`), the check that two nodes hold one
+  session that carries a heartbeat each way (`settled`), and the wrappers
+  that absorb a signature or key change multipath makes to a shared helper
+  (`bind_index`, `alias`, `tap`). A wrapper's body is the one place such a
+  change is made.
 - `audit.rs`: the shell audit. `audit(nodes, exempt)` reports every breach
   of four properties over real nodes, after running
   `link_index_audit::audit` on each node (which panics on its own);
@@ -59,14 +60,24 @@ real TCP sockets.
   address (the pair the winning msg2 came from, then the audit); a second
   msg1 more than 1 s after the first (in order, on another transport, and
   with the second msg2 first, a known defect checked by heartbeat and by the
-  audit); and a larger node's dial on a quiet peer's aged link (two known
-  defects). Each two-order case is one test per order. It holds copies of
+  audit); a larger node's dial on a quiet peer's aged link (two known
+  defects); a crossed msg1 the smaller node reads after installing from its
+  own dial and hearing nothing for longer than the heard floor, from another
+  transport and on the same one (known defects, with a control inside the
+  floor); and a larger node's dial on the aged link after the smaller
+  node's own rekey, past the heard floor (a known defect, with the same
+  control). Each two-order case is one test per order. It holds copies of
   private helpers of `crossed_dial.rs` and `control.rs`, each naming its
   original.
 - `fsp.rs`: an end-to-end session whose responder restarts before its
   frames reach the initiator. At the larger address it does not carry data
   within one exchange (a known defect); at the smaller address it does,
   which shows the assertion can pass.
+- `restart.rs`: a restarted node that reads a late rekey msg1 of its
+  peer's previous run, past the unheard floor, after the peer has moved
+  onto its new run: one session in every placement of the peer (a known
+  defect), with a control inside the floor. It drives the floor with
+  `crate::time::advance`.
 - `lane.rs`: five planted tests for the known-defect lane's self-check
   (`testing/known-defect-lane.sh`). Each is ignored, inventoried as `helper`,
   and must be classified as its name says: failing at its precondition, at a
