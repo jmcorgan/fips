@@ -1,0 +1,13 @@
+diff --git a/src/transport/ble/mod.rs b/src/transport/ble/mod.rs
+index fab1847f..3a8f680b 100644
+--- a/src/transport/ble/mod.rs
++++ b/src/transport/ble/mod.rs
+@@ -914,7 +914,7 @@ impl<I: BleIo> BleTransport<I> {
+                     pool.hold(&addr, now);
+                 }
+             }
+-            pool.unproven(now, timeout)
++            Vec::<TransportAddr>::new()
+                 .into_iter()
+                 .filter_map(|addr| pool.remove(&addr).map(|conn| (addr, conn)))
+                 .collect()

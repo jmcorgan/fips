@@ -10,6 +10,8 @@ mod acl;
 mod app_tun;
 #[cfg(ble_available)]
 mod ble;
+#[cfg(ble_available)]
+mod ble_lifecycle;
 mod bloom;
 mod bloom_echo;
 mod bloom_hold;

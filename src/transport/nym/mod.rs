@@ -426,7 +426,6 @@ impl NymTransport {
                 id,
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
             )
             .await;
@@ -621,7 +620,6 @@ impl NymTransport {
                 id,
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
             )
             .await;
@@ -685,6 +683,36 @@ impl NymTransport {
                 "Nym connection closed"
             );
         }
+    }
+
+    /// Pool an outbound connection to `remote` whose writer never finishes,
+    /// and return a receiver whose sender the writer holds, so it sees the
+    /// sender dropped only once the writer task has ended.
+    ///
+    /// Test-only: the conformance suite's stop rule needs a writer still
+    /// draining after a close, and cannot reach the private pool.
+    #[cfg(test)]
+    pub(crate) async fn stuck_writer(
+        &self,
+        remote: &TransportAddr,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (guard_tx, guard_rx) = tokio::sync::oneshot::channel::<()>();
+        self.pool.lock().await.insert(
+            remote.clone(),
+            ProxiedConnection {
+                send_tx: tokio::sync::mpsc::channel(1).0,
+                send_task: tokio::spawn(async move {
+                    let _guard = guard_tx;
+                    std::future::pending::<()>().await
+                }),
+                recv_task: tokio::spawn(std::future::pending::<()>()),
+                mtu: 1400,
+                established_at: Instant::now(),
+                meta: (),
+                id: next_conn_id(),
+            },
+        );
+        guard_rx
     }
 }
 
@@ -786,7 +814,6 @@ async fn nym_receive_loop(
     id: ConnId,
     packet_tx: PacketTx,
     pool: ProxiedPool<()>,
-    mtu: u16,
     stats: Arc<NymStats>,
 ) {
     proxied_receive_loop(
@@ -796,7 +823,6 @@ async fn nym_receive_loop(
         id,
         packet_tx,
         pool,
-        mtu,
         stats,
         "Nym",
         None,
@@ -1263,89 +1289,6 @@ mod tests {
         );
 
         nym.stop_async().await.unwrap();
-    }
-
-    // ========================================================================
-    // Deliberate close finishes the frames already queued
-    // ========================================================================
-
-    /// A frame queued immediately before a deliberate close must still reach
-    /// the peer through the proxy, and the close must still end the
-    /// connection at the far side.
-    #[tokio::test]
-    async fn nym_frame_queued_just_before_close_still_reaches_the_peer() {
-        let (mut dest, mut dest_rx, mut nym, target) = nym_via_mock_proxy().await;
-
-        let frame = build_msg1_frame();
-        nym.send_async(&target, &frame).await.unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(2), dest_rx.recv())
-            .await
-            .expect("timeout waiting for the first frame")
-            .expect("channel closed");
-        assert_eq!(first.data, frame);
-
-        nym.send_async(&target, &frame).await.unwrap();
-        nym.close_connection_async(&target).await;
-
-        let second = tokio::time::timeout(Duration::from_secs(2), dest_rx.recv())
-            .await
-            .expect("a frame queued just before close was never written")
-            .expect("channel closed");
-        assert_eq!(second.data, frame);
-        assert!(
-            wait_until(
-                || dest.stats().snapshot().pool_inbound == 0,
-                Duration::from_secs(5)
-            )
-            .await,
-            "the close must still end the connection once the queue is written"
-        );
-
-        nym.stop_async().await.unwrap();
-        dest.stop_async().await.unwrap();
-    }
-
-    /// Stopping the transport must stop a writer that is still draining after
-    /// a deliberate close, rather than leave it to its drain timer.
-    ///
-    /// The writer holds a oneshot sender and never finishes, so the sender is
-    /// dropped only once the task has been aborted.
-    #[tokio::test]
-    async fn nym_stop_ends_a_writer_still_draining_after_a_close() {
-        let (tx, _rx) = packet_channel(32);
-        let mut nym = NymTransport::new(TransportId::new(1), None, make_config(), tx);
-        nym.start_async().await.unwrap();
-        let remote = TransportAddr::from_string("192.0.2.1:2121");
-        let (guard_tx, mut guard_rx) = tokio::sync::oneshot::channel::<()>();
-        nym.pool.lock().await.insert(
-            remote.clone(),
-            ProxiedConnection {
-                send_tx: tokio::sync::mpsc::channel(1).0,
-                send_task: tokio::spawn(async move {
-                    let _guard = guard_tx;
-                    std::future::pending::<()>().await
-                }),
-                recv_task: tokio::spawn(std::future::pending::<()>()),
-                mtu: 1400,
-                established_at: Instant::now(),
-                meta: (),
-                id: next_conn_id(),
-            },
-        );
-
-        nym.close_connection_async(&remote).await;
-        tokio::time::timeout(Duration::from_secs(2), nym.stop_async())
-            .await
-            .expect("stop waited on a draining writer")
-            .unwrap();
-
-        assert!(
-            matches!(
-                guard_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-            ),
-            "a writer still draining after a close outlived the transport's stop"
-        );
     }
 
     /// With no pooled connection and no connect under way, `send_existing`

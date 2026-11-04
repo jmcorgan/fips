@@ -66,6 +66,9 @@ use udp::UdpTransport;
 pub(crate) mod framing;
 pub(crate) mod stream;
 
+#[cfg(test)]
+#[path = "tests/conformance/mod.rs"]
+mod conformance;
 mod stats_common;
 pub(crate) use stats_common::PoolCounters;
 

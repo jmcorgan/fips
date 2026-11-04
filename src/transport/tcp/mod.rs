@@ -32,7 +32,7 @@ use super::{
 use super::{resolve_socket_addrs, take_finished_connect};
 use crate::config::TcpConfig;
 use crate::proto::fmp::wire::{FMP_VERSION, PHASE_MSG2};
-use crate::transport::framing::{StreamError, read_fmp_packet};
+use crate::transport::framing::{RECV_CEILING, StreamError, read_fmp_packet};
 use crate::transport::stream::{
     ConnId, DrainingWriters, WRITER_DRAIN_TIMEOUT, next_conn_id, remove_own,
 };
@@ -59,16 +59,6 @@ use tracing::{debug, info, trace, warn};
 // ============================================================================
 // TCP Transport
 // ============================================================================
-
-/// The largest established frame a receive loop accepts: the largest `mtu`
-/// any peer can be configured with, since `mtu` is a `u16`, and so the
-/// largest frame any peer's `check_mtu` admits.
-///
-/// Nothing tells a TCP sender its peer's configured `mtu`, so bounding
-/// receives by the local value closes the connection on every frame
-/// between two peers' differing values. The bound guards allocation only:
-/// a stream does not tie a frame to a segment or to the local `mtu`.
-const RECV_CEILING: u16 = u16::MAX;
 
 /// TCP transport for FIPS.
 ///
@@ -910,6 +900,37 @@ impl TcpTransport {
             "TCP connection established (background connect)"
         );
     }
+
+    /// Pool an outbound connection to `remote` whose writer never finishes,
+    /// and return a receiver whose sender the writer holds, so it sees the
+    /// sender dropped only once the writer task has ended.
+    ///
+    /// Test-only: the conformance suite's stop rule needs a writer still
+    /// draining after a close, and cannot reach the private pool.
+    #[cfg(test)]
+    pub(crate) async fn stuck_writer(
+        &self,
+        remote: &TransportAddr,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (guard_tx, guard_rx) = tokio::sync::oneshot::channel::<()>();
+        self.pool.lock().await.insert(
+            PoolKey::outbound(remote.clone()),
+            TcpConnection {
+                send_tx: mpsc::channel(1).0,
+                send_task: tokio::spawn(async move {
+                    let _guard = guard_tx;
+                    std::future::pending::<()>().await
+                }),
+                recv_task: tokio::spawn(std::future::pending::<()>()),
+                mtu: 1400,
+                established_at: Instant::now(),
+                direction: Direction::Outbound,
+                id: next_conn_id(),
+            },
+        );
+        self.stats.record_pool_outbound_added();
+        guard_rx
+    }
 }
 
 impl Transport for TcpTransport {
@@ -1743,10 +1764,6 @@ fn read_mss_mtu(stream: &std::net::TcpStream, default_mtu: u16) -> u16 {
 mod mss_tests;
 
 #[cfg(test)]
-#[path = "tests/mtu.rs"]
-mod mtu_tests;
-
-#[cfg(test)]
 mod tests {
     use super::pool::PoolMap;
     use super::*;
@@ -2567,50 +2584,6 @@ mod tests {
     // Inbound first-frame deadline
     // ========================================================================
 
-    /// A socket that connects and sends nothing must have its inbound slot
-    /// released by the first-frame deadline.
-    ///
-    /// Break-check: with the `tokio::time::timeout` wrapper removed from the
-    /// first read, the socket parks on an unbounded `read_exact` and the
-    /// count stays at 1 for as long as the peer keeps the socket open, so
-    /// the second assertion fails.
-    #[tokio::test]
-    async fn idle_inbound_socket_releases_its_slot() {
-        let (tx, _rx) = packet_channel(100);
-        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
-        transport.set_first_frame_timeout(Duration::from_millis(200));
-        transport.start_async().await.unwrap();
-        let listen = transport.local_addr().unwrap();
-
-        // Connect and say nothing. Held open for the whole test so that any
-        // slot release is the deadline's doing and not a client disconnect.
-        let squatter = TcpStream::connect(listen).await.unwrap();
-
-        assert!(
-            wait_until(
-                || transport.stats().pool_inbound_count() == 1,
-                Duration::from_secs(2)
-            )
-            .await,
-            "an accepted socket should take an inbound slot"
-        );
-        assert!(
-            wait_until(
-                || transport.stats().pool_inbound_count() == 0,
-                Duration::from_secs(2)
-            )
-            .await,
-            "a silent inbound socket should lose its slot at the first-frame deadline"
-        );
-        assert!(
-            transport.pool.lock().await.is_empty(),
-            "the pool entry should go with the slot"
-        );
-
-        drop(squatter);
-        transport.stop_async().await.unwrap();
-    }
-
     /// With the cap filled by a silent socket, a genuine peer is refused
     /// until the deadline frees the slot, and admitted afterwards.
     ///
@@ -2815,43 +2788,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         assert_eq!(transport.stats().pool_inbound_count(), 1);
-        assert!(!transport.pool.lock().await.is_empty());
-
-        drop(peer);
-        transport.stop_async().await.unwrap();
-    }
-
-    /// An established connection quiet for longer than the first-frame
-    /// deadline, but not the idle deadline, keeps its slot: once a frame is
-    /// in, the first-frame deadline no longer applies.
-    ///
-    /// Break-check: apply the first-frame deadline to every read and the
-    /// connection is dropped after 200 ms of quiet.
-    #[tokio::test]
-    async fn established_connection_quiet_past_the_first_frame_deadline_is_kept() {
-        let (tx, mut rx) = packet_channel(100);
-        let mut transport = TcpTransport::new(TransportId::new(1), None, make_config(), tx);
-        transport.set_first_frame_timeout(Duration::from_millis(200));
-        transport.set_inbound_idle_timeout(Duration::from_secs(5));
-        transport.start_async().await.unwrap();
-        let listen = transport.local_addr().unwrap();
-
-        let mut peer = TcpStream::connect(listen).await.unwrap();
-        peer.write_all(&build_msg1_frame()).await.unwrap();
-        let packet = timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("timeout")
-            .expect("packet channel closed");
-        assert_eq!(packet.data, build_msg1_frame());
-
-        // Four first-frame deadlines' worth of silence after the first frame.
-        tokio::time::sleep(Duration::from_millis(800)).await;
-
-        assert_eq!(
-            transport.stats().pool_inbound_count(),
-            1,
-            "an established connection must not be dropped by the first-frame deadline"
-        );
         assert!(!transport.pool.lock().await.is_empty());
 
         drop(peer);
@@ -3578,58 +3514,6 @@ mod tests {
     // Deliberate close finishes the frames already queued
     // ========================================================================
 
-    /// A frame queued immediately before a deliberate close must still be
-    /// written.
-    ///
-    /// Sending only queues the frame for the connection's writer task. A close
-    /// that aborts that task before it has run discards the frame, which is
-    /// how a Disconnect sent just before a close, or a handshake message sent
-    /// just before the losing side of a crossed connection is closed, never
-    /// reaches the peer. The second half checks the close still closes: the
-    /// peer sees FIN and releases its inbound slot, so a writer that never
-    /// exits cannot pass.
-    #[tokio::test]
-    async fn a_frame_queued_just_before_close_still_reaches_the_peer() {
-        let (tx1, _rx1) = packet_channel(100);
-        let (tx2, mut rx2) = packet_channel(100);
-        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx1);
-        let mut t2 = TcpTransport::new(TransportId::new(2), None, make_config(), tx2);
-        t1.start_async().await.unwrap();
-        t2.start_async().await.unwrap();
-        let remote = TransportAddr::from_string(&t2.local_addr().unwrap().to_string());
-        let frame = build_msg1_frame();
-
-        // Pool the connection and let its writer go idle.
-        t1.send_async(&remote, &frame).await.unwrap();
-        let first = timeout(Duration::from_secs(2), rx2.recv())
-            .await
-            .expect("timeout waiting for the first frame")
-            .expect("packet channel closed");
-        assert_eq!(first.data, frame);
-
-        // Queue, then close with nothing in between.
-        t1.send_async(&remote, &frame).await.unwrap();
-        t1.close_connection_async(&remote).await;
-
-        let second = timeout(Duration::from_secs(2), rx2.recv())
-            .await
-            .expect("a frame queued just before close was never written")
-            .expect("packet channel closed");
-        assert_eq!(second.data, frame);
-
-        assert!(
-            wait_until(
-                || t2.stats().snapshot().pool_inbound == 0,
-                Duration::from_secs(5)
-            )
-            .await,
-            "the close must still end the connection once the queue is written"
-        );
-
-        t1.stop_async().await.unwrap();
-        t2.stop_async().await.unwrap();
-    }
-
     /// A deliberate close must return at once even when the writer cannot
     /// finish, because the peer has stopped reading. Draining happens after
     /// the close returns, never inside it.
@@ -3656,51 +3540,6 @@ mod tests {
         );
 
         t1.stop_async().await.unwrap();
-    }
-
-    /// Stopping the transport must stop a writer that is still draining after
-    /// a deliberate close, rather than leave it to its drain timer.
-    ///
-    /// The writer holds a oneshot sender and never finishes, so the sender is
-    /// dropped only once the task has been aborted. A stop that left it
-    /// draining returns with the sender still held.
-    #[tokio::test]
-    async fn stopping_the_transport_ends_a_writer_still_draining_after_a_close() {
-        let (tx1, _rx1) = packet_channel(100);
-        let mut t1 = TcpTransport::new(TransportId::new(1), None, make_outbound_config(), tx1);
-        t1.start_async().await.unwrap();
-        let remote = TransportAddr::from_string("127.0.0.1:9");
-        let (guard_tx, mut guard_rx) = tokio::sync::oneshot::channel::<()>();
-        t1.pool.lock().await.insert(
-            PoolKey::outbound(remote.clone()),
-            TcpConnection {
-                send_tx: mpsc::channel(1).0,
-                send_task: tokio::spawn(async move {
-                    let _guard = guard_tx;
-                    std::future::pending::<()>().await
-                }),
-                recv_task: tokio::spawn(std::future::pending::<()>()),
-                mtu: 1400,
-                established_at: Instant::now(),
-                direction: Direction::Outbound,
-                id: next_conn_id(),
-            },
-        );
-        t1.stats.record_pool_outbound_added();
-
-        t1.close_connection_async(&remote).await;
-        timeout(Duration::from_secs(2), t1.stop_async())
-            .await
-            .expect("stop waited on a draining writer")
-            .unwrap();
-
-        assert!(
-            matches!(
-                guard_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-            ),
-            "a writer still draining after a close outlived the transport's stop"
-        );
     }
 
     /// No frame a deliberate close left queued may reach the peer after the

@@ -52,6 +52,9 @@ impl Node {
         // First, and not behind the connection check below: a node with no
         // handshake in progress still holds TUN packets.
         self.release_stranded_tun_packets(std::time::Instant::now());
+        // Not behind it either: a BLE channel that never carries a msg1
+        // leaves no handshake connection to count.
+        self.close_unproven_ble_links().await;
 
         if self.connection_count() == 0 {
             return;
@@ -107,6 +110,38 @@ impl Node {
             }
         }
     }
+
+    /// Close each BLE channel that is unverified, has never completed a
+    /// handshake, and has gone the handshake timeout since it was admitted
+    /// or since this node last held a handshake or link on it, as FRC-1301
+    /// Section 6.5.4 asks.
+    ///
+    /// A handshake leg's own reap, above, closes the channel it ran on; this
+    /// covers a channel on which no leg was ever started, and one whose leg
+    /// ended without a reap, a timeout after the node last held it.
+    #[cfg(ble_available)]
+    async fn close_unproven_ble_links(&mut self) {
+        let timeout = Duration::from_secs(self.config().node.rate_limit.handshake_timeout_secs);
+        for (tid, transport) in &self.transports {
+            let crate::transport::TransportHandle::Ble(ble) = transport else {
+                continue;
+            };
+            let held = |addr: &crate::transport::TransportAddr| {
+                self.addr_to_link.contains_key(&(*tid, addr.clone()))
+            };
+            for addr in ble.close_unproven(timeout, held).await {
+                debug!(
+                    transport_id = %tid,
+                    remote_addr = %addr,
+                    "Closed a BLE channel that carried no handshake within the handshake timeout"
+                );
+            }
+        }
+    }
+
+    /// Without BLE there is no channel to close.
+    #[cfg(not(ble_available))]
+    async fn close_unproven_ble_links(&mut self) {}
 
     /// Remove a handshake connection and all associated state.
     ///
