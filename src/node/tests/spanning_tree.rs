@@ -262,7 +262,7 @@ pub(super) async fn dial_at(
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, 1000)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1 = build_msg1(our_index, &noise_msg1);

@@ -174,7 +174,7 @@ pub(super) async fn arm_pending_with_peer(
     let me = PeerIdentity::from_pubkey_full(e.node.identity().pubkey_full());
     let mut conn = super::outbound_leg(LinkId::new(0x0BAD_C0DE), me, 2000);
     let noise_msg1 = conn
-        .start_handshake(e.sender.keypair(), EPOCH, 2000)
+        .start_handshake(e.sender.keypair(), EPOCH, LegStamp::at(2000))
         .expect("the sender's msg1");
     let x = build_msg1(SessionIndex::new(sender_index), &noise_msg1);
     drain(&e.sock).await;
@@ -185,7 +185,7 @@ pub(super) async fn arm_pending_with_peer(
         .expect("the node answers the rekey msg1")
         .expect("the msg2 is read");
     let header = Msg2Header::parse(&buf[..n]).expect("the answer is a msg2");
-    conn.complete_handshake(&buf[header.noise_msg2_offset..n], 2000)
+    conn.complete_handshake(&buf[header.noise_msg2_offset..n], LegStamp::at(2000))
         .expect("the node's msg2 completes the sender's handshake");
     let session = conn.take_session().expect("the sender's session");
     (session, header.sender_idx)
@@ -231,7 +231,7 @@ async fn a_resent_setup_msg1_inside_the_rekey_age_is_answered_with_the_stored_ms
     let sender = Identity::generate();
     let peer = *PeerIdentity::from_pubkey_full(sender.pubkey_full()).node_addr();
     let first = craft_msg1_wire(&node, &sender, EPOCH, SessionIndex::new(1), 1000);
-    node.handle_msg1(packet(tid, &addr, first.clone(), 1000))
+    node.handle_msg1(packet(tid, &addr, first.clone(), super::timeline_ms(1000)))
         .await;
     drain(&sock).await;
     node.get_peer_mut(&peer)
@@ -255,7 +255,11 @@ async fn a_resent_setup_msg1_inside_the_rekey_age_is_answered_with_the_stored_ms
     // A fresh msg1 takes the replacement path instead of the stored msg2.
     drain(&sock).await;
     let fresh = craft_msg1_wire(&node, &sender, EPOCH, SessionIndex::new(2), 3000);
-    let logs = msg1_logged(&mut node, packet(tid, &addr, fresh, 3000)).await;
+    let logs = msg1_logged(
+        &mut node,
+        packet(tid, &addr, fresh, super::timeline_ms(3000)),
+    )
+    .await;
     assert!(
         logs.lines()
             .iter()
@@ -636,7 +640,9 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
     let keypair = from.node.identity().keypair();
     let epoch = from.node.startup_epoch();
     let machine = from.node.peer_machines.get_mut(&link_id).unwrap();
-    let noise_msg1 = machine.start_handshake(keypair, epoch, 1000).unwrap();
+    let noise_msg1 = machine
+        .start_handshake(keypair, epoch, LegStamp::at(1000))
+        .unwrap();
     let wire = build_msg1(our_index, &noise_msg1);
     machine.set_conn_handshake_msg1(wire.clone(), 2000);
     from.node.links.insert(

@@ -528,7 +528,7 @@ fn genuine_msg1(initiator: &Node, responder: &Node) -> Vec<u8> {
         .start_handshake(
             initiator.identity().keypair(),
             initiator.startup_epoch(),
-            1_000,
+            LegStamp::at(1_000),
         )
         .expect("the initiator side of a real msg1 must build");
     build_msg1(SessionIndex::new(7), &noise_msg1)
@@ -1089,6 +1089,7 @@ async fn a_restart_over_the_same_ble_link_is_verified_by_the_initiators_first_fr
         // enough to pass the liveness gate, so the msg1 reads as a restart.
         peer.set_remote_epoch(Some([0xAA; 8]));
         peer.touch(Node::now_ms().saturating_sub(60_000));
+        peer.test_backdate_heard(Duration::from_secs(60));
     }
 
     let msg1 = genuine_msg1(&nodes[0].node, &nodes[1].node);

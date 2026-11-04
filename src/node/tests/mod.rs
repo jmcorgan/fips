@@ -1,6 +1,7 @@
 use super::*;
 use crate::PeerIdentity;
 use crate::peer::machine::HandshakeCrypto;
+use crate::proto::fmp::LegStamp;
 use crate::transport::{LinkDirection, ReceivedPacket, TransportAddr, packet_channel};
 use crate::utils::index::SessionIndex;
 use std::time::Duration;
@@ -91,6 +92,29 @@ pub(super) fn refusals(node: &Node) -> u64 {
 
 pub(super) fn make_node() -> Node {
     make_node_with(Config::new())
+}
+
+thread_local! {
+    /// The last instant this test named on its timeline; see
+    /// [`timeline_ms`].
+    static TIMELINE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The wall-clock stamp of a packet arriving at `ms` on this test's
+/// timeline. A call later on the timeline than the last one advances the
+/// test clock (`crate::time::advance`) by the difference, so the gates,
+/// which read the monotonic clock, see at least the interval the test
+/// names between two deliveries. The first call, and a call earlier on the
+/// timeline than the last, as when a test runs a second scenario from its
+/// start, only set the timeline's place. Each test runs on its own thread,
+/// so each has its own timeline.
+pub(super) fn timeline_ms(ms: u64) -> u64 {
+    if let Some(last) = TIMELINE.with(|t| t.replace(Some(ms)))
+        && ms > last
+    {
+        crate::time::advance(Duration::from_millis(ms - last));
+    }
+    Node::now_ms()
 }
 
 /// A test node that reaches `Full` health on `start()`.
@@ -271,14 +295,15 @@ pub(super) fn outbound_leg(
     expected_identity: PeerIdentity,
     current_time_ms: u64,
 ) -> PeerMachine {
-    let mut machine = PeerMachine::new_outbound(link_id, expected_identity, current_time_ms);
+    let mut machine =
+        PeerMachine::new_outbound(link_id, expected_identity, LegStamp::at(current_time_ms));
     machine.set_leg(HandshakeCrypto::new());
     machine
 }
 
 /// The responder twin of [`outbound_leg`].
 pub(super) fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
-    let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
+    let mut machine = PeerMachine::new_inbound(link_id, LegStamp::at(current_time_ms));
     machine.set_leg(HandshakeCrypto::new());
     machine
 }
@@ -339,7 +364,7 @@ pub(super) fn seed_completed_connection_with(
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, current_time_ms)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(current_time_ms))
         .unwrap();
 
     // Run responder side to generate msg2
@@ -348,14 +373,19 @@ pub(super) fn seed_completed_connection_with(
     let mut resp_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
     let msg2 = resp_conn
-        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, current_time_ms)
+        .receive_handshake_init(
+            peer_keypair,
+            resp_epoch,
+            &msg1,
+            LegStamp::at(current_time_ms),
+        )
         .unwrap();
 
     // Complete initiator handshake
     node.peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .complete_handshake(&msg2, current_time_ms)
+        .complete_handshake(&msg2, LegStamp::at(current_time_ms))
         .unwrap();
 
     peer_identity

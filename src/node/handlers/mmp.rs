@@ -718,8 +718,13 @@ impl Node {
             return;
         }
         let ambient = self.link_dead_ctx(&node_addr, now_ms);
-        self.advance_peer_machine(link, PeerEvent::LinkDeadSuspected, Self::now_ms(), &ambient)
-            .await;
+        self.advance_peer_machine(
+            link,
+            PeerEvent::LinkDeadSuspected,
+            Self::interval_ms(),
+            &ambient,
+        )
+        .await;
     }
 
     /// Ambient shell facts for the routed liveness reap. The executor reads only
@@ -741,6 +746,7 @@ impl Node {
             our_index: peer.our_index(),
             their_index: peer.their_index(),
             now_ms,
+            interval_ms: Self::interval_ms(),
             is_outbound: false,
         }
     }

@@ -30,8 +30,10 @@ it out. Handshake message bytes are opaque here.
 - `state.rs`: `ConnectionState`, the bookkeeping of a connection in its
   handshake phase, which holds this node's index for the handshake as an
   `IndexLease` from the rekey machine's `lease::allocate`, so promotion
-  hands that lease to the link's machine; and `Fmp`, the stateless
-  lifecycle anchor `Node` holds.
+  hands that lease to the link's machine, and stamps its activity with a
+  `LegStamp`: a wall-clock reading for the start and idle times operators
+  are shown, and the caller's interval-clock reading, which the handshake
+  timeout reads; and `Fmp`, the stateless lifecycle anchor `Node` holds.
 - `silent.rs`: `SilentSessions`, the record of link sessions that ended
   without an authenticated frame, and the msg1 refusal it drives.
 - `limits.rs`: the connection-retry backoff arithmetic.

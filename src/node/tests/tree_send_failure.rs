@@ -50,7 +50,7 @@ fn open_rate_limit(nodes: &mut [TestNode], s: usize, peer: &NodeAddr) {
         .peers
         .get_mut(peer)
         .expect("setup: peer exists")
-        .set_last_tree_announce_sent_ms(0);
+        .set_last_tree_announce_sent_ms(None);
 }
 
 /// Take `s`'s transport to `peer` out of its transport map so link sends to

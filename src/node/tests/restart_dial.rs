@@ -166,11 +166,12 @@ async fn both_ends_dialling_after_a_peer_restart_settle_on_one_session_in_either
                 let (mut nodes, d, r) = restarted_pair(d_smaller, d_dialled).await;
                 let r_addr = *nodes[r].node.node_addr();
                 if silent {
-                    nodes[d]
+                    let p = nodes[d]
                         .node
                         .get_peer_mut(&r_addr)
-                        .expect("D holds R's previous run")
-                        .touch(Node::now_ms() - 16_000);
+                        .expect("D holds R's previous run");
+                    p.touch(Node::now_ms() - 16_000);
+                    p.test_backdate_heard(Duration::from_secs(16));
                 }
                 initiate_handshake(&mut nodes, d, r).await;
                 initiate_handshake(&mut nodes, r, d).await;

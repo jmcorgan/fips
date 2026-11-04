@@ -72,7 +72,7 @@ async fn test_two_node_handshake_udp() {
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     // Build wire msg1 and track in node state
@@ -304,7 +304,7 @@ async fn test_run_rx_loop_handshake() {
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
@@ -500,7 +500,7 @@ async fn test_cross_connection_both_initiate() {
         .peer_machines
         .get_mut(&link_id_a_out)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1_a = build_msg1(our_index_a, &noise_msg1_a);
@@ -538,7 +538,7 @@ async fn test_cross_connection_both_initiate() {
         .peer_machines
         .get_mut(&link_id_b_out)
         .unwrap()
-        .start_handshake(our_keypair_b, startup_epoch_b, 1000)
+        .start_handshake(our_keypair_b, startup_epoch_b, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1_b = build_msg1(our_index_b, &noise_msg1_b);
@@ -700,7 +700,7 @@ async fn test_stale_connection_cleanup() {
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, past_time_ms)
+        .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
         .unwrap();
 
     // Set up all the state that initiate_peer_connection would create
@@ -726,8 +726,11 @@ async fn test_stale_connection_cleanup() {
     );
     assert_eq!(node.index_allocator.count(), 1);
 
-    // Connection was created at time 1000ms. check_timeouts uses SystemTime::now(),
-    // which is far beyond the 30s timeout. The connection should be cleaned up.
+    // The leg's last activity was its msg1, just now. Once the handshake
+    // timeout has passed on the monotonic clock, the connection is cleaned
+    // up.
+    let timeout_ms = node.config().node.rate_limit.handshake_timeout_secs * 1000;
+    crate::time::advance(Duration::from_millis(timeout_ms + 1_000));
     node.check_timeouts().await;
 
     // Verify everything was cleaned up
@@ -785,7 +788,7 @@ async fn test_failed_connection_cleanup() {
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, now_ms)
+        .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
         .unwrap();
 
     let link = Link::connectionless(
@@ -812,7 +815,7 @@ async fn test_failed_connection_cleanup() {
         let alloc = &mut node.index_allocator;
         let actions = machine.step(
             crate::peer::machine::PeerEvent::HandshakeSendFailed,
-            now_ms,
+            Node::interval_ms(),
             alloc,
         );
         assert!(actions.is_empty());
@@ -859,7 +862,7 @@ async fn test_msg1_stored_for_resend() {
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), now_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), LegStamp::at(now_ms))
         .unwrap();
     let _ = conn.set_conn_our_index(our_lease);
     conn.set_conn_transport_id(transport_id);
@@ -891,7 +894,7 @@ async fn test_resend_scheduling() {
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), now_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), LegStamp::at(now_ms))
         .unwrap();
     conn.set_conn_source_addr(remote_addr.clone());
 
@@ -915,8 +918,11 @@ async fn test_resend_scheduling() {
     // which also carries the pending connection. Dial it to `SentMsg1`
     // (connectionless: no connect step) and arm its retransmit timer at
     // now + 1000ms, mirroring what a real dial arms.
-    let mut machine =
-        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, now_ms);
+    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+        link_id,
+        peer_identity,
+        LegStamp::at(now_ms),
+    );
     let _ = machine.step(
         crate::peer::machine::PeerEvent::Dial {
             transport_id,
@@ -976,7 +982,7 @@ async fn test_handshake_timeout_drive() {
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let _ = conn
-        .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), LegStamp::at(dial_ms))
         .unwrap();
     conn.set_conn_source_addr(remote_addr.clone());
 
@@ -995,8 +1001,11 @@ async fn test_handshake_timeout_drive() {
 
     // Machine in SentMsg1, carrying the pending connection, with a
     // HandshakeTimeout timer armed at dial + 30s.
-    let mut machine =
-        crate::peer::machine::PeerMachine::new_outbound(link_id, peer_identity, dial_ms);
+    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+        link_id,
+        peer_identity,
+        LegStamp::at(dial_ms),
+    );
     let _ = machine.step(
         crate::peer::machine::PeerEvent::Dial {
             transport_id,
@@ -1040,7 +1049,8 @@ async fn test_handshake_timeout_drive() {
 /// Test that msg2 is stored on the control machine's carrier for responder resend.
 #[test]
 fn test_msg2_stored_on_connection() {
-    let mut machine = crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), 1000);
+    let mut machine =
+        crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(1000));
 
     assert!(machine.conn_handshake_msg2().is_none());
 
@@ -1487,7 +1497,7 @@ fn genuine_msg1(initiator: &Node, responder: &Node) -> Vec<u8> {
         .start_handshake(
             initiator.identity().keypair(),
             initiator.startup_epoch(),
-            1_000,
+            LegStamp::at(1_000),
         )
         .expect("the initiator side of a real msg1 must build");
     build_msg1(SessionIndex::new(7), &noise_msg1)
@@ -1962,6 +1972,8 @@ fn install_peering_at_a_different_epoch(
     let link_id = node.allocate_link_id();
     let authenticated_at = Node::now_ms().saturating_sub(idle_secs * 1000);
     let mut peer = keyed_peer(node, initiator.identity(), link_id, authenticated_at);
+    peer.test_backdate_promoted(Duration::from_secs(idle_secs));
+    peer.test_backdate_heard(Duration::from_secs(idle_secs));
     peer.set_current_addr(transport_id, source_addr.clone());
     // Anything but the epoch the initiator's msg1 carries, so the msg1 reads
     // as a restart.
@@ -2267,7 +2279,11 @@ async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
     let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+        .start_handshake(
+            node_a.identity().keypair(),
+            node_a.startup_epoch(),
+            LegStamp::at(1000),
+        )
         .unwrap();
     let wire_msg1 = build_msg1(SessionIndex::new(7), &noise_msg1);
     let packet = ReceivedPacket::with_timestamp(
@@ -2458,7 +2474,7 @@ mod dead_encrypt_worker {
             .peer_machines
             .get_mut(&link_id)
             .unwrap()
-            .start_handshake(keypair, epoch, 1000)
+            .start_handshake(keypair, epoch, LegStamp::at(1000))
             .unwrap();
         node_a.links.insert(
             link_id,
@@ -2618,12 +2634,12 @@ fn genuine_addr() -> TransportAddr {
     TransportAddr::from_string("127.0.0.1:41102")
 }
 
-/// When a replay delivered before the genuine msg1 arrived: long enough
-/// before it that the phantom it promoted is past the age at which an
-/// unheard peering may be replaced.
-fn replayed_before_now() -> u64 {
-    Node::now_ms()
-        .saturating_sub(crate::node::handlers::handshake::UNHEARD_PEERING_MIN_AGE_MS + 500)
+/// Advance the test clock past the age at which an unheard peering may be
+/// replaced, as between a replay and a msg1 that arrives that long after it.
+fn advance_past_unheard_age() {
+    crate::time::advance(Duration::from_millis(
+        crate::node::handlers::handshake::UNHEARD_PEERING_MIN_AGE_MS + 500,
+    ));
 }
 
 /// Deliver a fresh genuine msg1 from `initiator` to `node` from `addr` on
@@ -2659,7 +2675,7 @@ async fn a_genuine_msg1_replaces_a_phantom_promoted_by_a_replay() {
         &initiator,
         transport_id,
         &replayer_addr(),
-        replayed_before_now(),
+        Node::now_ms(),
     )
     .await;
     assert_eq!(
@@ -2669,6 +2685,7 @@ async fn a_genuine_msg1_replaces_a_phantom_promoted_by_a_replay() {
         "the replay must have promoted a peer on the replayer's address, or \
          this test is not exercising the replay"
     );
+    advance_past_unheard_age();
 
     // The initiator dials from its own address with a fresh msg1. Nothing
     // has been heard from the phantom: no frame authenticated on its session.
@@ -2701,19 +2718,17 @@ async fn two_replayed_msg1s_do_not_stamp_the_restart_dampener() {
     // First capture, replayed long enough ago that the phantom it promoted
     // has gone past the restart interval with nothing heard on it (it is
     // reaped only at the 30 s link-dead check).
-    let long_ago = Node::now_ms().saturating_sub(IDLE_SECS * 1000);
     deliver_msg1(
         &mut node,
         &initiator,
         transport_id,
         &replayer_addr(),
-        long_ago,
+        Node::now_ms(),
     )
     .await;
-    assert!(
-        node.get_peer(&initiator_addr).is_some(),
-        "the first replay must have promoted a phantom"
-    );
+    node.get_peer_mut(&initiator_addr)
+        .expect("the first replay must have promoted a phantom")
+        .test_backdate_promoted(Duration::from_secs(IDLE_SECS));
 
     // Second, distinct capture from another address the replayer holds. It
     // replaces the first phantom, which was never heard from.
@@ -2723,7 +2738,7 @@ async fn two_replayed_msg1s_do_not_stamp_the_restart_dampener() {
         &initiator,
         transport_id,
         &second_replayer,
-        replayed_before_now(),
+        Node::now_ms(),
     )
     .await;
     assert_eq!(
@@ -2742,6 +2757,7 @@ async fn two_replayed_msg1s_do_not_stamp_the_restart_dampener() {
          msg1 for the whole interval"
     );
 
+    advance_past_unheard_age();
     deliver_msg1(
         &mut node,
         &initiator,
@@ -2896,11 +2912,12 @@ async fn a_replay_with_a_changed_sender_idx_is_dropped_before_teardown() {
             &initiator_addr,
             &replayer_addr(),
             capture.clone(),
-            replayed_before_now(),
+            Node::now_ms(),
         )
         .await,
         "precondition: the capture promoted a phantom"
     );
+    advance_past_unheard_age();
     let phantom = peering_link(&node, &initiator_addr);
     let links = node.link_count();
     let answered_before = node.stats().handshake.answered_before;
@@ -2953,7 +2970,6 @@ async fn alternating_two_captures_twenty_times_in_fifteen_seconds_promotes_at_mo
         ),
     ];
 
-    let start = Node::now_ms();
     let mut promoted = 0;
     for i in 0..20u64 {
         let (addr, msg1) = &captures[(i % 2) as usize];
@@ -2962,7 +2978,7 @@ async fn alternating_two_captures_twenty_times_in_fifteen_seconds_promotes_at_mo
             &initiator_addr,
             addr,
             msg1.clone(),
-            start + i * 700,
+            timeline_ms(i * 700),
         )
         .await
         {
@@ -2986,12 +3002,12 @@ async fn nine_distinct_captures_in_fifteen_seconds_promote_at_most_eight() {
     let initiator = make_node();
     let initiator_addr = node_addr_of(&initiator);
 
-    let start = Node::now_ms();
     let mut promoted = 0;
     for i in 0..9u64 {
         let addr = TransportAddr::from_string(&format!("127.0.0.1:{}", 41200 + i));
         let msg1 = genuine_msg1(&initiator, &node);
-        if promotes(&mut node, &initiator_addr, &addr, msg1, start + i * 1000).await {
+        let at = timeline_ms(i * 1000);
+        if promotes(&mut node, &initiator_addr, &addr, msg1, at).await {
             promoted += 1;
         }
     }
@@ -3023,7 +3039,7 @@ async fn the_genuine_msg1_still_replaces_a_phantom_after_the_ephemeral_is_stored
         &initiator,
         transport_id,
         &replayer_addr(),
-        replayed_before_now(),
+        Node::now_ms(),
     )
     .await;
     assert_eq!(
@@ -3031,6 +3047,7 @@ async fn the_genuine_msg1_still_replaces_a_phantom_after_the_ephemeral_is_stored
         1,
         "precondition: the replay's ephemeral is remembered"
     );
+    advance_past_unheard_age();
 
     deliver_msg1(
         &mut node,
@@ -3059,14 +3076,13 @@ async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_is_refused_wit
     let mut node = make_node();
     let initiator = make_node();
     let initiator_addr = node_addr_of(&initiator);
-    let start = Node::now_ms();
 
     deliver_msg1(
         &mut node,
         &initiator,
         TransportId::new(1),
         &replayer_addr(),
-        start,
+        timeline_ms(0),
     )
     .await;
     // The initiator's own msg1 lands just after the replay: a second msg1
@@ -3078,7 +3094,7 @@ async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_is_refused_wit
             &initiator_addr,
             &genuine_addr(),
             genuine.clone(),
-            start + 100,
+            timeline_ms(100),
         )
         .await,
         "a second msg1 inside the minimum age must not replace the peering"
@@ -3093,7 +3109,7 @@ async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_is_refused_wit
             &initiator_addr,
             &genuine_addr(),
             genuine,
-            start + 100 + 1_000,
+            timeline_ms(100 + 1_000),
         )
         .await,
         "a resend of the refused msg1 must not replace the phantom"
@@ -3112,7 +3128,7 @@ async fn a_genuine_msg1_meeting_a_phantom_promoted_just_before_it_is_refused_wit
             &initiator_addr,
             &genuine_addr(),
             next,
-            start + 100 + 2_000,
+            timeline_ms(100 + 2_000),
         )
         .await,
         "the initiator's next msg1 must replace a phantom that has had the \
@@ -3169,12 +3185,13 @@ async fn a_worker_bounce_from_a_replaced_session_does_not_mark_the_phantom_heard
         &initiator,
         transport_id,
         &genuine_addr(),
-        replayed_before_now(),
+        Node::now_ms(),
     )
     .await;
     let genuine = node.get_peer(&initiator_addr).expect("genuine peering");
     assert!(!genuine.is_heard(), "precondition: genuine peering unheard");
     let genuine_idx = genuine.our_index().expect("genuine index").as_u32();
+    advance_past_unheard_age();
 
     deliver_msg1(
         &mut node,
@@ -3287,12 +3304,12 @@ async fn a_replay_replacing_an_unheard_phantom_leaves_the_end_to_end_session_alo
     let mut node = make_node();
     let initiator = make_node();
     let initiator_addr = node_addr_of(&initiator);
-    let start = Node::now_ms();
 
     // A capture replayed while the initiator has no link peering here.
     let capture = genuine_msg1(&initiator, &node);
+    let at = timeline_ms(0);
     assert!(
-        promotes(&mut node, &initiator_addr, &replayer_addr(), capture, start).await,
+        promotes(&mut node, &initiator_addr, &replayer_addr(), capture, at).await,
         "precondition: the first capture promoted a phantom"
     );
     install_end_to_end_session(&mut node, &initiator);
@@ -3304,7 +3321,7 @@ async fn a_replay_replacing_an_unheard_phantom_leaves_the_end_to_end_session_alo
         &initiator_addr,
         &TransportAddr::from_string("127.0.0.1:41103"),
         capture,
-        start + 1_100,
+        timeline_ms(1_100),
     )
     .await;
     assert!(
@@ -3323,7 +3340,6 @@ async fn eight_captures_in_fifteen_seconds_never_end_the_end_to_end_session() {
     let mut node = make_node();
     let initiator = make_node();
     let initiator_addr = node_addr_of(&initiator);
-    let start = Node::now_ms();
     install_end_to_end_session(&mut node, &initiator);
 
     let mut replacements = 0;
@@ -3336,7 +3352,7 @@ async fn eight_captures_in_fifteen_seconds_never_end_the_end_to_end_session() {
             &initiator_addr,
             &TransportAddr::from_string(&format!("127.0.0.1:{}", 41200 + i)),
             capture,
-            start + i * 1_100,
+            timeline_ms(i * 1_100),
         )
         .await
             && before.is_some()
@@ -3693,8 +3709,7 @@ mod heard {
             .expect("precondition: the second msg1 is queued at the responder");
 
         // The first msg1 arrives 1.5 s before the second.
-        let now = Node::now_ms();
-        first.timestamp_ms = now - (UNHEARD_PEERING_MIN_AGE_MS + 500);
+        first.timestamp_ms = Node::now_ms();
         nodes[r].node.handle_msg1(first).await;
         let first_link = peering_link(&nodes[r].node, &d_addr)
             .expect("precondition: the first msg1 promoted the dialer");
@@ -3709,7 +3724,8 @@ mod heard {
             .map(|p| p.link_stats().packets_recv)
             .expect("precondition: the dialer promoted the responder on the first msg2");
 
-        second.timestamp_ms = now;
+        crate::time::advance(Duration::from_millis(UNHEARD_PEERING_MIN_AGE_MS + 500));
+        second.timestamp_ms = Node::now_ms();
         nodes[r].node.handle_msg1(second).await;
         assert!(
             peering_link(&nodes[r].node, &d_addr).is_some_and(|l| l != first_link),

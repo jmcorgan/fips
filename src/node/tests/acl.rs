@@ -58,7 +58,11 @@ async fn test_inbound_msg1_denied_by_acl() {
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
     let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+        .start_handshake(
+            node_a.identity().keypair(),
+            node_a.startup_epoch(),
+            LegStamp::at(1000),
+        )
         .unwrap();
     let wire_msg1 = build_msg1(SessionIndex::new(7), &noise_msg1);
     let packet = ReceivedPacket::with_timestamp(
@@ -112,7 +116,7 @@ async fn outbound_denied_at_msg2(
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(keypair_a, epoch_a, 1000)
+        .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let link_a = Link::connectionless(
@@ -137,7 +141,7 @@ async fn outbound_denied_at_msg2(
             node_b.identity().keypair(),
             responder_epoch,
             &noise_msg1,
-            1000,
+            LegStamp::at(1000),
         )
         .unwrap();
     let our_index_b = SessionIndex::new(9);
@@ -267,7 +271,11 @@ async fn test_acl_rejected_msg1_leaves_no_registry_trace() {
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
     let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+        .start_handshake(
+            node_a.identity().keypair(),
+            node_a.startup_epoch(),
+            LegStamp::at(1000),
+        )
         .unwrap();
     let wire_msg1 = build_msg1(SessionIndex::new(7), &noise_msg1);
     let packet = ReceivedPacket::with_timestamp(

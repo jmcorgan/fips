@@ -52,7 +52,7 @@ pub(super) fn craft_msg1_wire(
     let link_id = LinkId::new(0x0BAD_C0DE);
     let mut conn = outbound_leg(link_id, peer_b_identity, ts);
     let noise_msg1 = conn
-        .start_handshake(sender.keypair(), epoch, ts)
+        .start_handshake(sender.keypair(), epoch, LegStamp::at(ts))
         .expect("start_handshake produces noise msg1");
     build_msg1(sender_index, &noise_msg1)
 }
@@ -120,6 +120,9 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
     // with its keys). `current_addr` makes `should_admit_msg1` recognize the
     // source as an established peer.
     let mut old_peer = keyed_peer(&node, &sender, old_link, 1000);
+    // Promoted, and last heard, long before the restart's msg1.
+    old_peer.test_backdate_promoted(Duration::from_secs(60));
+    old_peer.test_backdate_heard(Duration::from_secs(60));
     old_peer.set_remote_epoch(Some(old_epoch));
     old_peer.set_current_addr(transport_id, peer_addr.clone());
     node.peers.insert(sender_addr, old_peer);
@@ -134,7 +137,7 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -228,7 +231,7 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -293,7 +296,7 @@ async fn chartest_msg1_duplicate_active_same_epoch_resends_stored_msg2() {
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -352,7 +355,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
         .peer_machines
         .get_mut(&out_link)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, 1000)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
         .unwrap();
     let out_l = Link::connectionless(
         out_link,
@@ -374,7 +377,7 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
         transport_id,
         remote_addr: inbound_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -421,7 +424,7 @@ fn seed_dial(
         .peer_machines
         .get_mut(&out_link)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, 1000)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
         .unwrap();
     if register {
         let link = Link::connectionless(
@@ -471,7 +474,7 @@ async fn chartest_msg1_at_cap_with_pending_outbound_is_dropped_without_a_msg2() 
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -533,7 +536,7 @@ async fn chartest_msg1_at_cap_from_the_address_we_are_dialing_leaves_our_dial_in
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -630,7 +633,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .peer_machines
         .get_mut(&link_a_out)
         .unwrap()
-        .start_handshake(keypair_a, epoch_a, 1000)
+        .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
         .unwrap();
     let wire_msg1_a = build_msg1(out_index_a, &noise_msg1_a);
     node_a.links.insert(
@@ -668,7 +671,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .peer_machines
         .get_mut(&link_b_out)
         .unwrap()
-        .start_handshake(keypair_b, epoch_b, 1000)
+        .start_handshake(keypair_b, epoch_b, LegStamp::at(1000))
         .unwrap();
     let wire_msg1_b = build_msg1(out_index_b, &noise_msg1_b);
     node_b.links.insert(
@@ -794,7 +797,7 @@ pub(super) async fn establish_active_peer_via_msg1(
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: ts,
+        timestamp_ms: timeline_ms(ts),
     };
     node.handle_msg1(packet).await;
     // Promotion emits a msg2 AND an initial TreeAnnounce; drain every queued
@@ -891,7 +894,7 @@ async fn chartest_msg1_rekey_responder_stores_pending_session() {
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -1000,7 +1003,7 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 
@@ -1096,7 +1099,7 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
         transport_id,
         remote_addr: peer_addr.clone(),
         data,
-        timestamp_ms: 2000,
+        timestamp_ms: timeline_ms(2000),
     };
     node.handle_msg1(packet).await;
 

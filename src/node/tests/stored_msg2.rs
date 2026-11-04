@@ -43,10 +43,12 @@ fn addr(nodes: &[TestNode], i: usize) -> NodeAddr {
 
 /// Stamp `tn`'s last authenticated frame from `peer` at `ago_ms` before now.
 fn last_heard(tn: &mut TestNode, peer: &NodeAddr, ago_ms: u64) {
-    tn.node
+    let p = tn
+        .node
         .get_peer_mut(peer)
-        .expect("the receiver holds the peer")
-        .touch(Node::now_ms() - ago_ms);
+        .expect("the receiver holds the peer");
+    p.touch(Node::now_ms() - ago_ms);
+    p.test_backdate_heard(Duration::from_millis(ago_ms));
 }
 
 /// How long ago `tn` last authenticated a frame from `peer`, in ms.

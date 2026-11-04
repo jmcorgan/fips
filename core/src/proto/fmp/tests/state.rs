@@ -4,7 +4,7 @@
 //! suite, and the handshake phase itself lives on the control machine.
 
 use crate::identity::PeerIdentity;
-use crate::proto::fmp::ConnectionState;
+use crate::proto::fmp::{ConnectionState, LegStamp};
 use crate::testutil::make_keypair;
 use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
@@ -18,7 +18,7 @@ fn make_peer_identity() -> PeerIdentity {
 #[test]
 fn outbound_initializes_pure_fields() {
     let identity = make_peer_identity();
-    let state = ConnectionState::outbound(LinkId::new(1), identity, 1000);
+    let state = ConnectionState::outbound(LinkId::new(1), identity, LegStamp::at(1000));
 
     assert!(state.is_outbound());
     assert!(!state.is_inbound());
@@ -34,7 +34,7 @@ fn outbound_initializes_pure_fields() {
 
 #[test]
 fn inbound_initializes_pure_fields() {
-    let state = ConnectionState::inbound(LinkId::new(2), 2000);
+    let state = ConnectionState::inbound(LinkId::new(2), LegStamp::at(2000));
 
     assert!(state.is_inbound());
     assert!(!state.is_outbound());
@@ -45,8 +45,12 @@ fn inbound_initializes_pure_fields() {
 #[test]
 fn inbound_with_transport_sets_transport_and_addr() {
     let addr = TransportAddr::from_string("192.0.2.1:5000");
-    let state =
-        ConnectionState::inbound_with_transport(LinkId::new(3), TransportId::new(7), addr, 3000);
+    let state = ConnectionState::inbound_with_transport(
+        LinkId::new(3),
+        TransportId::new(7),
+        addr,
+        LegStamp::at(3000),
+    );
 
     assert!(state.is_inbound());
     assert_eq!(state.transport_id(), Some(TransportId::new(7)));
@@ -58,7 +62,7 @@ fn inbound_with_transport_sets_transport_and_addr() {
 
 #[test]
 fn index_setters_round_trip() {
-    let mut state = ConnectionState::inbound(LinkId::new(1), 0);
+    let mut state = ConnectionState::inbound(LinkId::new(1), LegStamp::at(0));
     assert!(state.our_index().is_none());
     assert!(state.their_index().is_none());
 
@@ -76,7 +80,8 @@ fn index_setters_round_trip() {
 
 #[test]
 fn transport_and_source_setters_round_trip() {
-    let mut state = ConnectionState::outbound(LinkId::new(1), make_peer_identity(), 0);
+    let mut state =
+        ConnectionState::outbound(LinkId::new(1), make_peer_identity(), LegStamp::at(0));
     state.set_transport_id(TransportId::new(9));
     state.set_source_addr(TransportAddr::from_string("peer"));
     assert_eq!(state.transport_id(), Some(TransportId::new(9)));
@@ -85,7 +90,7 @@ fn transport_and_source_setters_round_trip() {
 
 #[test]
 fn identity_and_epoch_setters() {
-    let mut state = ConnectionState::inbound(LinkId::new(1), 0);
+    let mut state = ConnectionState::inbound(LinkId::new(1), LegStamp::at(0));
     assert!(state.expected_identity().is_none());
     assert!(state.remote_epoch().is_none());
 
@@ -103,7 +108,8 @@ fn identity_and_epoch_setters() {
 
 #[test]
 fn resend_bookkeeping() {
-    let mut state = ConnectionState::outbound(LinkId::new(1), make_peer_identity(), 0);
+    let mut state =
+        ConnectionState::outbound(LinkId::new(1), make_peer_identity(), LegStamp::at(0));
     assert!(state.handshake_msg1().is_none());
     assert!(state.handshake_msg2().is_none());
 
@@ -128,16 +134,45 @@ fn resend_bookkeeping() {
 
 #[test]
 fn timing_and_touch() {
-    let mut state = ConnectionState::outbound(LinkId::new(1), make_peer_identity(), 1000);
+    let mut state =
+        ConnectionState::outbound(LinkId::new(1), make_peer_identity(), LegStamp::at(1000));
     assert_eq!(state.duration(1500), 500);
     assert_eq!(state.idle_time(1500), 500);
     assert!(!state.is_timed_out(1500, 1000));
     assert!(state.is_timed_out(2500, 1000));
 
     // touch resets idle_time but not duration.
-    state.touch(2000);
+    state.touch(LegStamp::at(2000));
     assert_eq!(state.last_activity(), 2000);
     assert_eq!(state.idle_time(2500), 500);
     assert_eq!(state.duration(2500), 1500);
+    assert!(!state.is_timed_out(2500, 1000));
+}
+
+/// The leg keeps the two clocks apart: the shown start and last activity
+/// are the wall readings, and the idle time and timeout read the interval
+/// reading.
+#[test]
+fn a_legs_timeout_reads_its_interval_stamp_and_its_shown_times_the_wall_stamp() {
+    let start = LegStamp {
+        wall_ms: 1_700_000_000_000,
+        interval_ms: 1000,
+    };
+    let mut state = ConnectionState::inbound(LinkId::new(1), start);
+    assert_eq!(state.started_at(), start.wall_ms);
+    assert_eq!(state.last_activity(), start.wall_ms);
+    assert_eq!(state.active_at(), start.interval_ms);
+    assert_eq!(state.idle_time(1500), 500);
+    assert!(!state.is_timed_out(1500, 1000));
+    assert!(state.is_timed_out(2500, 1000));
+
+    let later = LegStamp {
+        wall_ms: 1_600_000_000_000,
+        interval_ms: 2000,
+    };
+    state.touch(later);
+    assert_eq!(state.started_at(), start.wall_ms);
+    assert_eq!(state.last_activity(), later.wall_ms);
+    assert_eq!(state.active_at(), later.interval_ms);
     assert!(!state.is_timed_out(2500, 1000));
 }

@@ -18,13 +18,9 @@ use super::super::spanning_tree::{
 use super::super::*;
 use fips_core::proto::rekey::Role;
 
-/// Wall-clock milliseconds, the clock the TreeAnnounce rate-limit stamp is
-/// kept in.
-fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// Milliseconds on the clock the TreeAnnounce rate-limit stamp is kept in.
+fn stamp_ms() -> u64 {
+    crate::time::mono_ms()
 }
 
 /// Two loopback nodes, node 0 having dialed node 1, delivered until idle.
@@ -42,9 +38,9 @@ async fn peered() -> Vec<TestNode> {
 }
 
 /// Record at `nodes[at]` a TreeAnnounce sent to `peer` just now, and return
-/// a wall-clock reading strictly later than the stamp.
+/// a reading of the stamp's clock strictly later than the stamp.
 async fn announced_just_now(nodes: &mut [TestNode], at: usize, peer: &NodeAddr) -> u64 {
-    let stamp = wall_ms();
+    let stamp = stamp_ms();
     let p = nodes[at]
         .node
         .get_peer_mut(peer)
@@ -54,10 +50,10 @@ async fn announced_just_now(nodes: &mut [TestNode], at: usize, peer: &NodeAddr) 
         !p.can_send_tree_announce(stamp),
         "precondition: the peer is inside its TreeAnnounce interval"
     );
-    while wall_ms() <= stamp {
+    while stamp_ms() <= stamp {
         tokio::task::yield_now().await;
     }
-    wall_ms()
+    stamp_ms()
 }
 
 /// Whether `nodes[at]`'s peer `peer` was sent a TreeAnnounce at or after
@@ -71,11 +67,11 @@ fn sent_at_once(nodes: &[TestNode], at: usize, peer: &NodeAddr, since: u64) -> R
         p.last_tree_announce_sent_ms(),
         p.has_pending_tree_announce(),
     );
-    if stamp >= since && !pending {
+    if stamp.is_some_and(|s| s >= since) && !pending {
         Ok(())
     } else {
         Err(format!(
-            "last TreeAnnounce stamp {stamp} against {since} after the old peer's, pending {pending}"
+            "last TreeAnnounce stamp {stamp:?} against {since} after the old peer's, pending {pending}"
         ))
     }
 }
@@ -126,6 +122,11 @@ async fn restart_dial(nodes: &mut [TestNode]) {
         .get_peer_mut(&a1)
         .expect("precondition: node 0 holds node 1")
         .touch(Node::now_ms().saturating_sub(60_000));
+    nodes[0]
+        .node
+        .get_peer_mut(&a1)
+        .expect("precondition: node 0 holds node 1")
+        .test_backdate_heard(std::time::Duration::from_secs(60));
     let restarted = restarted_node(&nodes[1], Config::new());
     let mut old = std::mem::replace(&mut nodes[1], restarted);
     cleanup_nodes(std::slice::from_mut(&mut old)).await;

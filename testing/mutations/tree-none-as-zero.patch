@@ -1,0 +1,14 @@
+diff --git a/src/peer/active.rs b/src/peer/active.rs
+--- a/src/peer/active.rs
++++ b/src/peer/active.rs
+@@ -1130,8 +1130,8 @@ impl ActivePeer {
+     /// `now_ms`, a monotonic reading: always for a peer never sent one,
+     /// otherwise once the interval has passed since the last.
+     pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
+-        self.last_tree_announce_sent_ms
+-            .is_none_or(|t| now_ms.saturating_sub(t) >= self.tree_announce_min_interval_ms)
++        now_ms.saturating_sub(self.last_tree_announce_sent_ms.unwrap_or(0))
++            >= self.tree_announce_min_interval_ms
+     }
+ 
+     /// Record that we sent a TreeAnnounce to this peer at `now_ms`, a

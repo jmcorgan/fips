@@ -279,7 +279,7 @@ async fn twenty_five_forged_frames_on_a_second_tcp_connection_leave_a_tcp_held_p
     let target = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
-        .start_handshake(sender.keypair(), [7u8; 8], 1000)
+        .start_handshake(sender.keypair(), [7u8; 8], LegStamp::at(1000))
         .expect("start_handshake produces noise msg1");
     let mut peer_conn = tokio::net::TcpStream::connect(listen).await.unwrap();
     peer_conn

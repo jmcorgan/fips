@@ -1,0 +1,12 @@
+diff --git a/src/node/handlers/handshake.rs b/src/node/handlers/handshake.rs
+--- a/src/node/handlers/handshake.rs
++++ b/src/node/handlers/handshake.rs
+@@ -1059,7 +1059,7 @@ impl Node {
+                     .map(|p| {
+                         if p.is_heard() {
+                             (
+-                                crate::peer::since(p.heard_at()).as_millis() as u64,
++                                p.idle_time(Self::now_ms()),
+                                 p.idle_time(now_ms),
+                                 EPOCH_RESTART_MIN_INTERVAL_SECS * 1000,
+                             )

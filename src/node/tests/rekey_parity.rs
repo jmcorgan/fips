@@ -1000,6 +1000,7 @@ async fn a_resent_dial_from_a_silent_restarted_peer_while_our_restart_pending_is
     let link = {
         let p = r.nodes[0].node.get_peer_mut(&b_addr).unwrap();
         p.touch(Node::now_ms() - 16_000);
+        p.test_backdate_heard(Duration::from_secs(16));
         p.link_id()
     };
 

@@ -3112,6 +3112,22 @@ impl Node {
         SessionClock::default().now()
     }
 
+    /// Now on the clock link handshake intervals are measured on: the
+    /// process's monotonic clock, in milliseconds (`crate::time::mono_ms`).
+    /// A step of the system clock does not move it.
+    pub(in crate::node) fn interval_ms() -> u64 {
+        crate::time::mono_ms()
+    }
+
+    /// Now on both clocks a handshake leg keeps, read together: the wall
+    /// clock for what operators are shown, the interval clock for timeouts.
+    pub(in crate::node) fn leg_stamp() -> crate::proto::fmp::LegStamp {
+        crate::proto::fmp::LegStamp {
+            wall_ms: Self::now_ms(),
+            interval_ms: Self::interval_ms(),
+        }
+    }
+
     /// The parameters of this node's session rekey machines.
     pub(in crate::node) fn session_params(&self) -> Params {
         session_params(&self.config().node)
