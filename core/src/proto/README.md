@@ -49,6 +49,10 @@ rest) at its own crate root.
   deployed link rekey decisions act on through state moves; see its
   README.
 - `routing/`: next-hop selection and routing error signals.
+- `settle/`: peer settlement, how crossed dials, restarts and rekeys
+  settle on one session on one link. Its core is compiled in every build
+  and called by nothing yet; its reference model is compiled for tests
+  and `test-hooks` alone; hidden from the docs.
 - `stp/`: the spanning tree.
 
 Each subdirectory has its own README.
