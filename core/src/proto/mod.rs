@@ -21,4 +21,6 @@ pub mod rate_limit;
 #[doc(hidden)]
 pub mod rekey;
 pub mod routing;
+#[doc(hidden)]
+pub mod settle;
 pub mod stp;
