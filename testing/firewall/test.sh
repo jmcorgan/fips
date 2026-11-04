@@ -23,6 +23,12 @@
 # Usage: ./test.sh [--skip-build] [--keep-up]
 
 set -euo pipefail
+# No check pipes into grep -q or another reader that can stop early. Under
+# pipefail, the reader exiting at its match kills a writer that still has
+# output to write with SIGPIPE, and the pipeline fails although the text
+# matched. bash's echo and printf write a multi-line string a line or two
+# at a time, so one line of output after the match is enough to lose it.
+# Checks match on a here-string, or on output captured first.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TESTING_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -146,8 +152,9 @@ wait_for_peers_exact() {
 resolve_fips_addr() {
     local container="$1"
     local npub="$2"
-    docker exec "$container" getent ahostsv6 "${npub}.fips" \
-        | awk '{print $1; exit}'
+    local hosts
+    hosts=$(docker exec "$container" getent ahostsv6 "${npub}.fips") || return
+    awk '{print $1; exit}' <<<"$hosts"
 }
 
 # Activate the fips firewall baseline inside a container. Mirrors the
@@ -215,20 +222,19 @@ assert_baseline_loaded() {
     # position is a larger change than this finding calls for; the
     # drop-counter check at the end of the run is the one that reads the
     # trailing rule specifically.
-    if ! printf '%s' "$listing" \
-        | grep -qE 'counter packets [0-9]+ bytes [0-9]+ drop'; then
+    if ! grep -qE 'counter packets [0-9]+ bytes [0-9]+ drop' <<<"$listing"; then
         fail "$container: trailing 'counter drop' rule missing from inet fips"
     fi
-    if ! printf '%s' "$listing" | grep -q 'iifname != "fips0" return'; then
+    if ! grep -q 'iifname != "fips0" return' <<<"$listing"; then
         fail "$container: non-fips0 early return rule missing"
     fi
-    if ! printf '%s' "$listing" | grep -q 'ct state established,related accept'; then
+    if ! grep -q 'ct state established,related accept' <<<"$listing"; then
         fail "$container: conntrack established,related rule missing"
     fi
-    if ! printf '%s' "$listing" | grep -q 'icmpv6 type echo-request accept'; then
+    if ! grep -q 'icmpv6 type echo-request accept' <<<"$listing"; then
         fail "$container: ICMPv6 echo-request rule missing"
     fi
-    if ! printf '%s' "$listing" | grep -q 'tcp dport 22 accept'; then
+    if ! grep -q 'tcp dport 22 accept' <<<"$listing"; then
         fail "$container: drop-in tcp dport 22 rule missing (fips.d not included?)"
     fi
     pass "$container: fips.nft baseline + drop-in loaded"
@@ -347,8 +353,8 @@ log "Case (d): drop-in allowlisted TCP/${ALLOWED_PORT} from node-a → node-b"
 # nc -zv -w3: zero-I/O scan, verbose, 3-second timeout. Exit 0 = port
 # open and reachable. The container's sshd is listening on [::]:22 by
 # default per the test entrypoint.
-if docker exec "$CONTAINER_A" nc -6 -z -v -w 3 "$ADDR_B" "$ALLOWED_PORT" 2>&1 \
-    | grep -qE 'succeeded|open'; then
+if nc_out=$(docker exec "$CONTAINER_A" nc -6 -z -v -w 3 "$ADDR_B" "$ALLOWED_PORT" 2>&1) \
+    && grep -qE 'succeeded|open' <<<"$nc_out"; then
     pass "(d) drop-in allowlisted TCP/${ALLOWED_PORT} reachable"
 else
     fail "(d) drop-in allowlisted TCP/${ALLOWED_PORT} should be reachable but was blocked"

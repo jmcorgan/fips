@@ -34,6 +34,12 @@
 # /dev/net/tun on the host.
 
 set -uo pipefail
+# No check pipes into grep -q or another reader that can stop early. Under
+# pipefail, the reader exiting at its match kills a writer that still has
+# output to write with SIGPIPE, and the pipeline fails although the text
+# matched. bash's echo and printf write a multi-line string a line or two
+# at a time, so one line of output after the match is enough to lose it.
+# Checks match on a here-string, or on output captured first.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=SCRIPTDIR/../lib/systemd-container.sh
@@ -613,7 +619,7 @@ check_resolution() {
     sleep 1
     local dig_output
     dig_output=$(cexec "$name" dig +tries=1 +time=3 @127.0.0.53 AAAA "${NPUB}.fips" 2>&1)
-    if echo "$dig_output" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+    if grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+' <<<"$dig_output"; then
         pass "end-to-end dig @127.0.0.53 returns AAAA"
     else
         fail "end-to-end dig @127.0.0.53 returned no AAAA"

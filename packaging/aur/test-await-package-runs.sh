@@ -14,6 +14,12 @@
 # Usage: bash packaging/aur/test-await-package-runs.sh
 
 set -euo pipefail
+# No check pipes into grep -q or another reader that can stop early. Under
+# pipefail, the reader exiting at its match kills a writer that still has
+# output to write with SIGPIPE, and the pipeline fails although the text
+# matched. bash's echo and printf write a multi-line string a line or two
+# at a time, so one line of output after the match is enough to lose it.
+# Checks match on a here-string, or on output captured first.
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GATE="${GATE:-$HERE/await-package-runs.sh}"
@@ -97,7 +103,7 @@ check() {
     AWAIT_POLLS=3 AWAIT_INTERVAL=0 bash "$GATE" 2>&1) || rc=$?
   if { [ "$expect" = zero ] && [ "$rc" -eq 0 ]; } ||
      { [ "$expect" = nonzero ] && [ "$rc" -ne 0 ]; }; then
-    if [ -z "$pattern" ] || printf '%s\n' "$LAST_OUT" | grep -qE -- "$pattern"; then
+    if [ -z "$pattern" ] || grep -qE -- "$pattern" <<<"$LAST_OUT"; then
       echo "PASS $name (exit $rc)"
       return 0
     fi
@@ -136,7 +142,7 @@ fx=$(fixture 2); all_green "$fx"
 runs "$(run "$TAG" completed failure 2026-09-06T20:31:48Z 2)" \
      "$(run maint completed success 2026-09-06T20:31:10Z 1)" > "$fx/package-macos.yml.json"
 if check "2 one tag run failed" "$fx" nonzero "concluded 'failure'"; then
-  printf '%s\n' "$LAST_OUT" | grep -q 'package-macos.yml' ||
+  grep -q 'package-macos.yml' <<<"$LAST_OUT" ||
     fail "2 one tag run failed: output does not name package-macos.yml"
 fi
 
@@ -216,7 +222,7 @@ rc=0
 found=$(DISCOVER_ONLY=1 WORKFLOW_DIR="$REPO_ROOT/.github/workflows" \
   GITHUB_REPOSITORY=example/fips TAG="$TAG" SHA="$SHA" bash "$GATE" 2>&1) || rc=$?
 if [ "$rc" -eq 0 ] && [ -n "$found" ] &&
-   printf '%s\n' "$found" | grep -qx 'package-linux.yml'; then
+   grep -qx 'package-linux.yml' <<<"$found"; then
   echo "PASS 10 real workflow discovery: $(printf '%s\n' "$found" | tr '\n' ' ')"
 else
   echo "FAIL 10 real workflow discovery: exit $rc, found: $found"
