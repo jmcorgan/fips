@@ -27,6 +27,12 @@
 # /dev/net/tun on the host (standard) and dpkg-deb to read the package.
 
 set -uo pipefail
+# No check pipes into grep -q or another reader that can stop early. Under
+# pipefail, the reader exiting at its match kills a writer that still has
+# output to write with SIGPIPE, and the pipeline fails although the text
+# matched. bash's echo and printf write a multi-line string a line or two
+# at a time, so one line of output after the match is enough to lose it.
+# Checks match on a here-string, or on output captured first.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=SCRIPTDIR/../lib/systemd-container.sh
@@ -896,7 +902,7 @@ DOCKERFILE
     fi
 
     # Verify it printed the warning
-    if echo "$output" | grep -q "No supported DNS resolver"; then
+    if grep -q "No supported DNS resolver" <<<"$output"; then
         pass "printed manual instructions warning"
     else
         fail "missing manual instructions warning"
@@ -904,7 +910,7 @@ DOCKERFILE
 
     # The script ships beyond Debian, so the hint must not name one
     # distribution's package manager.
-    if echo "$output" | grep -qE '(apt|apt-get|dnf|yum|zypper) install|pacman -S'; then
+    if grep -qE '(apt|apt-get|dnf|yum|zypper) install|pacman -S' <<<"$output"; then
         fail "manual instructions name a package manager"
     else
         pass "manual instructions name no package manager"
@@ -912,7 +918,7 @@ DOCKERFILE
 
     # Setup uses systemd-resolved only when it is active, so the hint
     # must say to start it, not only to install or enable it.
-    if echo "$output" | grep -qF 'enable --now systemd-resolved'; then
+    if grep -qF 'enable --now systemd-resolved' <<<"$output"; then
         pass "manual instructions start systemd-resolved"
     else
         fail "manual instructions do not start systemd-resolved"
@@ -959,7 +965,8 @@ check_gateway_default_bind() {
             read_ok=1
             # Matched on a here-string, not a pipe from printf: under
             # pipefail, grep -q exiting at its match can kill the writer with
-            # SIGPIPE and turn the match into a miss once the log is over 4 KB.
+            # SIGPIPE and turn the match into a miss whenever any of the log
+            # follows the matched line.
             if grep -q 'Gateway DNS resolver listening.*addr=\[::1\]:5365' <<<"$text"; then
                 listening=1
             fi
@@ -1001,7 +1008,7 @@ check_source_port_screen() {
     local name="$1" who="$2" port="$3" npub="$4"
     local out
     out=$(docker exec "$name" dig -b '::1#53000' +tries=1 +time=2 @::1 -p "$port" AAAA "${npub}.fips" 2>&1)
-    if echo "$out" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+    if grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+' <<<"$out"; then
         pass "$who: dig from source port 53000 returns AAAA"
     else
         fail "$who: dig from source port 53000 did not return AAAA"
@@ -1010,15 +1017,15 @@ check_source_port_screen() {
         return
     fi
     out=$(docker exec "$name" dig -b '::1#19' +tries=1 +time=2 @::1 -p "$port" AAAA "${npub}.fips" 2>&1)
-    if echo "$out" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+    if grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+' <<<"$out"; then
         fail "$who: dig from source port 19 was answered"
         echo "  --- dig output ---"
         echo "$out" | tail -15
-    elif echo "$out" | grep -qiE 'failed|bind'; then
+    elif grep -qiE 'failed|bind' <<<"$out"; then
         fail "$who: dig from source port 19 did not send (bind or send failed)"
         echo "  --- dig output ---"
         echo "$out" | tail -15
-    elif echo "$out" | grep -q 'timed out'; then
+    elif grep -q 'timed out' <<<"$out"; then
         pass "$who: dig from source port 19 gets no reply"
     else
         fail "$who: dig from source port 19: neither an answer nor a timeout"
@@ -1180,7 +1187,7 @@ EOF'
     # Wait for the DNS responder to bind.
     local ready=0
     for _i in $(seq 1 "$DAEMON_TIMEOUT"); do
-        if docker exec "$name" ss -uln 2>/dev/null | grep -q ':5354'; then
+        if grep -q ':5354' <<<"$(docker exec "$name" ss -uln 2>/dev/null)"; then
             ready=1
             break
         fi
@@ -1205,7 +1212,7 @@ EOF'
     bind_line=$(docker exec "$name" grep -m1 "DNS responder started" /var/log/fips.log 2>/dev/null \
                 | sed -r 's/\x1b\[[0-9;]*m//g' || echo "")
     echo "  daemon log: $bind_line"
-    if echo "$bind_line" | grep -qE "bind=\[?::1\]?:5354"; then
+    if grep -qE "bind=\[?::1\]?:5354" <<<"$bind_line"; then
         pass "daemon bound on [::1]:5354 (new default)"
     else
         fail "daemon bind line missing or wrong: $bind_line"
@@ -1253,7 +1260,7 @@ EOF'
     # Direct dig to the daemon's loopback bind — must succeed.
     local direct_output
     direct_output=$(docker exec "$name" dig +tries=1 +time=3 @::1 -p 5354 AAAA "${npub}.fips" 2>&1)
-    if echo "$direct_output" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+    if grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+' <<<"$direct_output"; then
         pass "direct dig @::1#5354 returns AAAA"
     else
         fail "direct dig @::1#5354 did not return AAAA"
@@ -1266,7 +1273,7 @@ EOF'
     # End-to-end via systemd-resolved stub.
     local stub_output
     stub_output=$(docker exec "$name" dig +tries=1 +time=3 @127.0.0.53 AAAA "${npub}.fips" 2>&1)
-    if echo "$stub_output" | grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+'; then
+    if grep -qE '^[a-zA-Z0-9].*\sAAAA\s+[0-9a-f:]+' <<<"$stub_output"; then
         pass "end-to-end dig @127.0.0.53 returns AAAA (the bug fix)"
     else
         fail "end-to-end dig @127.0.0.53 did not return AAAA"

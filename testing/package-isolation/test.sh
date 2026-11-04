@@ -241,7 +241,10 @@ verdict() {
         return 0
     fi
     iso=$(printf '%s\n' "$ver" | sed -n 's/^isolation: //p')
-    rev=$(printf '%s\n' "$ver" | head -n 1 | sed -nE 's/.*\(rev ([0-9a-f]+(-dirty)?)\)$/\1/p')
+    # Line 1 read by sed on a here-string, not through head: under pipefail
+    # and set -e, head exiting after line 1 can kill printf with SIGPIPE
+    # before it writes line 2, and that ends the script.
+    rev=$(sed -nE '1s/.*\(rev ([0-9a-f]+(-dirty)?)\)$/\1/p' <<<"$ver")
     short=$(git -C "$WORK/tree$n" rev-parse --short=10 HEAD)
     [ -z "$(git -C "$WORK/tree$n" status --porcelain)" ] || dirty="-dirty"
     want_iso="root-$n ${EXPECT_CORE[$n]}"

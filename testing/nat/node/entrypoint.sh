@@ -19,13 +19,16 @@ STUN_PORT="${STUN_PORT:-3478}"
 
 deadline=$((SECONDS + IFACE_WAIT_SECS))
 while [ "$SECONDS" -lt "$deadline" ]; do
-    if ip -4 addr show dev "$DATA_IF" 2>/dev/null | grep -q 'inet '; then
+    # Captured before matching: under pipefail, grep -q exiting at the first
+    # address can kill ip with SIGPIPE before it writes the next one, and
+    # turn the match into a miss.
+    if grep -q 'inet ' <<<"$(ip -4 addr show dev "$DATA_IF" 2>/dev/null)"; then
         break
     fi
     sleep 0.5
 done
 
-if ! ip -4 addr show dev "$DATA_IF" 2>/dev/null | grep -q 'inet '; then
+if ! grep -q 'inet ' <<<"$(ip -4 addr show dev "$DATA_IF" 2>/dev/null)"; then
     echo "Timed out after ${IFACE_WAIT_SECS}s waiting for IPv4 on ${DATA_IF}" >&2
     ip addr >&2 || true
     exit 1
