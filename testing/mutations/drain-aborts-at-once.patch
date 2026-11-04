@@ -1,0 +1,12 @@
+diff --git a/src/transport/stream.rs b/src/transport/stream.rs
+index e9c736d1..cee72fde 100644
+--- a/src/transport/stream.rs
++++ b/src/transport/stream.rs
+@@ -103,6 +103,7 @@ impl DrainingWriters {
+     /// drains still running.
+     pub(crate) fn drain(&self, send_task: JoinHandle<()>, bound: Duration) {
+         let writer = send_task.abort_handle();
++        send_task.abort();
+         let timer = drain_writer(send_task, bound);
+         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+         entries.retain(|(_, timer)| !timer.is_finished());

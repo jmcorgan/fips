@@ -1,9 +1,9 @@
 //! Connection lifecycle rules shared by the stream transports.
 //!
-//! TCP and the SOCKS5-proxied Tor and Nym transports each give a pooled
-//! connection its own writer task and receive loop, and either loop can
-//! outlive the pool entry it was created with. The rules for when such a loop
-//! may touch the pool are written once here.
+//! TCP, the SOCKS5-proxied Tor and Nym transports, and BLE each give a
+//! pooled connection its own writer task and receive loop, and either loop
+//! can outlive the pool entry it was created with. The rules for when such a
+//! loop may touch the pool are written once here.
 
 use std::collections::HashMap;
 use std::time::Duration;

@@ -89,7 +89,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|cl
 test-group = 'node-synthetic'
 
 [[profile.default.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(settle)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(ble_lifecycle|settle)::/)'
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
@@ -101,7 +101,7 @@ filter = 'package(fips-mesh) & test(/^node::tests::(acl|app_tun|ble|bootstrap|cl
 test-group = 'node-synthetic'
 
 [[profile.ci.overrides]]
-filter = 'package(fips-mesh) & test(/^node::tests::(settle)::/)'
+filter = 'package(fips-mesh) & test(/^node::tests::(ble_lifecycle|settle)::/)'
 test-group = 'node-synthetic'
 
 # The known-slow tests get 480 s instead of 300: the six 100-node tests (the

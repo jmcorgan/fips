@@ -62,3 +62,39 @@ memory-on-wall	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_a
 memory-verdict-on-packet-stamp	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
 memory-verdict-on-packet-stamp	red	fips-mesh	node::tests::handshake::nine_distinct_captures_in_fifteen_seconds_promote_at_most_eight	every promotion of an unheard peering is remembered
 memory-never-expires	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
+# Transport lifecycle rules (src/transport/tests/conformance and the BLE node tests).
+drain-aborts-at-once	red	fips-mesh	transport::conformance::tcp::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+drain-aborts-at-once	red	fips-mesh	transport::conformance::tor::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+drain-aborts-at-once	red	fips-mesh	transport::conformance::nym::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+drain-aborts-at-once	red	fips-mesh	transport::conformance::ble::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+drain-stop-leaves-writers	red	fips-mesh	transport::conformance::tcp::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+drain-stop-leaves-writers	red	fips-mesh	transport::conformance::tor::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+drain-stop-leaves-writers	red	fips-mesh	transport::conformance::nym::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+drain-stop-leaves-writers	red	fips-mesh	transport::conformance::ble::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+first-frame-deadline-ignored	red	fips-mesh	transport::conformance::tcp::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
+first-frame-deadline-ignored	red	fips-mesh	transport::conformance::tor::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
+first-frame-at-half	red	fips-mesh	transport::conformance::tcp::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
+first-frame-at-half	red	fips-mesh	transport::conformance::tor::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
+tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_an_accepted_connection	defect: (delivered, receive errors, connection kept)
+tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_connect_on_send_connection	defect: (delivered, receive errors, connection kept)
+tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_background_connection	defect: (delivered, receive errors, connection kept)
+tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_the_onion_listener	defect: (delivered, receive errors, connection kept)
+proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_dialled_connection	defect: (delivered, receive errors, connection kept)
+proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
+proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::nym::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
+proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+ble-writer-removes-by-address	red	fips-mesh	transport::ble::close_tests::a_writer_whose_write_fails_leaves_a_newer_connection_at_its_address_pooled
+ble-writer-removes-by-address	red	fips-mesh	transport::ble::close_tests::a_closed_connections_failed_write_leaves_the_newer_connection_at_its_address_pooled
+ble-close-aborts-writer	red	fips-mesh	transport::conformance::ble::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+ble-close-aborts-writer	red	fips-mesh	node::tests::ble_lifecycle::api_disconnect_over_ble_delivers_the_disconnect_before_closing
+ble-stop-leaves-drains	red	fips-mesh	transport::conformance::ble::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+ble-unproven-never-closed	red	fips-mesh	node::tests::ble_lifecycle::an_unverified_ble_channel_with_no_msg1_is_closed_after_the_handshake_timeout
+ble-unproven-never-closed	red	fips-mesh	transport::conformance::ble::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
+ble-unproven-at-half-timeout	red	fips-mesh	transport::conformance::ble::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
+ble-unproven-two-seconds-early	red	fips-mesh	transport::conformance::ble::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
+ble-unproven-two-seconds-early	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
+ble-unproven-ignores-handshake	red	fips-mesh	transport::conformance::ble::a_channel_that_completed_a_handshake_and_was_left_unverified_is_kept
+ble-unproven-ignores-held	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
+ble-unproven-ignores-held	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose_first_msg1_comes_late_is_kept_a_full_timeout_after_it	defect: a channel was closed 15 s after its first msg1

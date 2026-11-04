@@ -1,0 +1,13 @@
+diff --git a/src/transport/ble/mod.rs b/src/transport/ble/mod.rs
+index 873be36b..87514c82 100644
+--- a/src/transport/ble/mod.rs
++++ b/src/transport/ble/mod.rs
+@@ -1718,7 +1718,7 @@ async fn send_loop<S: BleStream + 'static>(
+             Err(e) => {
+                 stats.record_send_error();
+                 warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
+-                pool.lock().await.remove_own(&addr, id);
++                pool.lock().await.remove(&addr);
+                 return;
+             }
+         }

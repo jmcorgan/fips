@@ -35,9 +35,11 @@
 //! be evicted, once it has had at least `connect_timeout_ms` (never less than
 //! 10 s) to verify; a verified link is never evicted, and a newcomer that
 //! finds nothing evictable is refused. Eviction happens only when the pool is
-//! full and nothing closes an unverified link on a timer, so with
-//! `max_connections` above what the adapter can hold, links that never
-//! verify can keep the adapter's remaining connections.
+//! full. Apart from it, the node's timeout tick closes, through
+//! [`BleTransport::close_unproven`], a channel that is unverified, has never
+//! completed a handshake, and has gone the handshake timeout since it was
+//! admitted or since the node last held a handshake or link on it
+//! (FRC-1301 Section 6.5.4).
 
 pub mod addr;
 pub mod io;
@@ -78,6 +80,7 @@ use super::{
 };
 use crate::config::BleConfig;
 use crate::identity::NodeAddr;
+use crate::transport::stream::{ConnId, DrainingWriters, WRITER_DRAIN_TIMEOUT, next_conn_id};
 use addr::BleAddr;
 use io::{BleIo, BleScanner, BleStream};
 use neighbor::NeighborBuffer;
@@ -200,6 +203,9 @@ pub struct BleTransport<I: BleIo> {
     /// Link addresses the scan + probe loop has resolved to a node identity;
     /// a fresh memory for each loop started. See [`KnownNodes`].
     known_node_of: KnownNodes,
+    /// Writers of deliberately closed connections still finishing their
+    /// queues, which `stop_async` must also stop.
+    draining: DrainingWriters,
 }
 
 /// Advertised listener PSM by link address, shared between the scan loop
@@ -279,6 +285,7 @@ impl<I: BleIo> BleTransport<I> {
             local_pubkey: None,
             learned_psm: Arc::default(),
             known_node_of: Arc::default(),
+            draining: DrainingWriters::default(),
         }
     }
 
@@ -453,6 +460,10 @@ impl<I: BleIo> BleTransport<I> {
                 pool.remove(&addr);
             }
         }
+
+        // Stop the writers of closed connections still finishing their
+        // queues: they are out of the pool, so the drain above missed them.
+        self.draining.stop().await;
 
         self.state = TransportState::Down;
         info!("BLE transport stopped");
@@ -865,11 +876,72 @@ impl<I: BleIo> BleTransport<I> {
     }
 
     /// Close a specific connection.
+    ///
+    /// Aborts the receive task and lets the writer finish the frames already
+    /// queued, within [`WRITER_DRAIN_TIMEOUT`], without waiting for it.
+    /// Stopping the transport ends a writer still draining. This mirrors
+    /// `TcpTransport::close_connection_async`. Every other teardown (a
+    /// duplicate link replaced, eviction, link loss, a failed write, the
+    /// transport stopping) drops the entry with its writer and discards
+    /// the queue.
     pub async fn close_connection_async(&self, addr: &TransportAddr) {
-        let mut pool = self.pool.lock().await;
-        if let Some(conn) = pool.remove(addr) {
+        let removed = self.pool.lock().await.remove(addr);
+        if let Some(conn) = removed {
+            self.retire(conn);
             debug!(addr = %addr, "BLE connection closed");
-            drop(conn); // recv_task aborted via Drop
+        }
+    }
+
+    /// Close each channel on which no handshake has completed and that has
+    /// gone `timeout` since it was admitted or since the node last held it,
+    /// as FRC-1301 Section 6.5.4 asks, and return the addresses closed.
+    ///
+    /// `held` says whether the node holds a handshake or link on an address
+    /// now; each channel it holds starts its clock again. Only the node knows
+    /// that, so the node's timeout tick calls this; the transport sets no
+    /// timer of its own. A closed channel's writer finishes its queue as on
+    /// [`close_connection_async`](Self::close_connection_async).
+    pub async fn close_unproven(
+        &self,
+        timeout: std::time::Duration,
+        held: impl Fn(&TransportAddr) -> bool,
+    ) -> Vec<TransportAddr> {
+        let now = tokio::time::Instant::now();
+        let closed: Vec<_> = {
+            let mut pool = self.pool.lock().await;
+            for addr in pool.addrs() {
+                if held(&addr) {
+                    pool.hold(&addr, now);
+                }
+            }
+            pool.unproven(now, timeout)
+                .into_iter()
+                .filter_map(|addr| pool.remove(&addr).map(|conn| (addr, conn)))
+                .collect()
+        };
+        closed
+            .into_iter()
+            .map(|(addr, conn)| {
+                self.retire(conn);
+                debug!(
+                    addr = %addr,
+                    timeout_secs = timeout.as_secs(),
+                    "BLE channel closed: no handshake within the handshake timeout"
+                );
+                addr
+            })
+            .collect()
+    }
+
+    /// End a connection taken out of the pool by a deliberate close: abort
+    /// its receive task, and let its writer finish what was queued.
+    fn retire(&self, mut conn: BleConnection<Arc<I::Stream>>) {
+        let writer = conn.send_task.take();
+        // Aborts the receive task, and drops the queue's sender, so the
+        // writer ends once it has written what was queued.
+        drop(conn);
+        if let Some(writer) = writer {
+            self.draining.drain(writer, WRITER_DRAIN_TIMEOUT);
         }
     }
 
@@ -941,6 +1013,58 @@ impl<I: BleIo> BleTransport<I> {
             return conn.effective_mtu();
         }
         self.config.mtu()
+    }
+}
+
+#[cfg(test)]
+impl BleTransport<io::MockBleIo> {
+    /// Pool a connection at `remote` whose writer never finishes, and return
+    /// a receiver whose sender the writer holds, so it sees the sender
+    /// dropped only once the writer task has ended.
+    ///
+    /// Test-only: the conformance suite's stop rule needs a writer still
+    /// draining after a close, and cannot reach the private pool. The writer
+    /// also holds the far end of the mock stream, so the stream stays open.
+    pub(crate) async fn stuck_writer(
+        &self,
+        remote: &TransportAddr,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (guard_tx, guard_rx) = tokio::sync::oneshot::channel::<()>();
+        let far_addr = BleAddr::parse(remote.as_str().unwrap_or_default())
+            .unwrap_or_else(|_| BleAddr::parse("hci0/AA:BB:CC:DD:EE:FE").unwrap());
+        let (near, far) = io::MockBleStream::pair(
+            BleAddr::parse("hci0/AA:BB:CC:DD:EE:01").unwrap(),
+            far_addr.clone(),
+            self.config.mtu(),
+        );
+        let now = tokio::time::Instant::now();
+        let conn = BleConnection {
+            stream: Arc::new(near),
+            send_tx: tokio::sync::mpsc::channel(1).0,
+            send_task: Some(tokio::spawn(async move {
+                let _guard = guard_tx;
+                let _far = far;
+                std::future::pending::<()>().await
+            })),
+            recv_task: None,
+            send_mtu: self.config.mtu(),
+            recv_mtu: self.config.mtu(),
+            established_at: now,
+            verified: false,
+            grace_from: now,
+            outbound: true,
+            addr: far_addr,
+            node_addr: None,
+            id: next_conn_id(),
+            proven: false,
+            held_from: tokio::time::Instant::now(),
+        };
+        let outcome = self.pool.lock().await.insert(remote.clone(), conn, now);
+        assert!(
+            matches!(outcome, Insert::Admitted { .. }),
+            "precondition: the stuck writer's connection is pooled"
+        );
+        guard_rx
     }
 }
 
@@ -1277,11 +1401,13 @@ fn spawn_connection<S: BleStream + 'static>(
         recv_mtu,
     );
 
+    let id = next_conn_id();
     let (send_tx, send_rx) = tokio::sync::mpsc::channel(pool::SEND_QUEUE_DEPTH);
     let send_task = tokio::spawn(send_loop(
         Arc::clone(&stream),
         send_rx,
         ta.clone(),
+        id,
         Arc::clone(pool),
         Arc::clone(stats),
     ));
@@ -1299,6 +1425,9 @@ fn spawn_connection<S: BleStream + 'static>(
         outbound,
         addr,
         node_addr,
+        id,
+        proven: false,
+        held_from: admitted,
     };
     (conn, receive)
 }
@@ -1696,12 +1825,18 @@ async fn admit_inbound<S>(
 /// never held across the link.
 ///
 /// On a write error the connection is removed from the pool, which is where
-/// the old inline path put it too. Dropping the pool entry aborts this task
-/// and the receive task through `BleConnection`'s `Drop`.
+/// the old inline path put it too, but only while the entry at `addr` is
+/// still connection `id`: a newer connection at the same address is left
+/// alone. Dropping the pool entry aborts this task and the receive task
+/// through `BleConnection`'s `Drop`, except on a deliberate close, which
+/// takes this task out of the entry first and lets it finish the queue:
+/// the loop then ends when the queue's sender has gone and the queue is
+/// empty.
 async fn send_loop<S: BleStream + 'static>(
     stream: Arc<S>,
     mut frames: tokio::sync::mpsc::Receiver<Vec<u8>>,
     addr: TransportAddr,
+    id: ConnId,
     pool: Arc<Mutex<ConnectionPool<Arc<S>>>>,
     stats: Arc<BleStats>,
 ) {
@@ -1711,7 +1846,7 @@ async fn send_loop<S: BleStream + 'static>(
             Err(e) => {
                 stats.record_send_error();
                 warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
-                pool.lock().await.remove(&addr);
+                pool.lock().await.remove_own(&addr, id);
                 return;
             }
         }
@@ -2246,6 +2381,10 @@ async fn scan_probe_loop<I: io::BleIo>(
 // ============================================================================
 
 #[cfg(test)]
+#[path = "tests/close.rs"]
+mod close_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::framing::build_established_frame;
@@ -2572,6 +2711,9 @@ mod tests {
                 outbound: false,
                 addr: test_addr(2),
                 node_addr: None,
+                id: next_conn_id(),
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             },
             tokio::time::Instant::now(),
         );
@@ -2612,6 +2754,7 @@ mod tests {
             Arc::clone(&stream),
             send_rx,
             ta.clone(),
+            next_conn_id(),
             Arc::clone(&transport.pool),
             Arc::clone(&transport.stats),
         ));
@@ -2631,6 +2774,9 @@ mod tests {
                 outbound: false,
                 addr: test_addr(2),
                 node_addr: None,
+                id: next_conn_id(),
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             },
             tokio::time::Instant::now(),
         );
@@ -2874,6 +3020,9 @@ mod tests {
                 outbound: false,
                 addr: test_addr(2),
                 node_addr: None,
+                id: next_conn_id(),
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             },
             tokio::time::Instant::now(),
         );
@@ -4477,6 +4626,9 @@ mod tests {
                 outbound: false,
                 addr: test_addr(2),
                 node_addr: None,
+                id: next_conn_id(),
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             },
             tokio::time::Instant::now(),
         );
@@ -5042,10 +5194,12 @@ mod tests {
         transport.stop_async().await.unwrap();
     }
 
-    /// A link that never completes a handshake is not closed by any timer:
-    /// it leaves only by eviction or link loss.
+    /// The transport alone closes no unverified link on a timer: the node's
+    /// timeout tick owns the deadline, through `close_unproven`. Without it,
+    /// a link that never completes a handshake leaves only by eviction or
+    /// link loss.
     #[tokio::test(start_paused = true)]
-    async fn an_unverified_link_that_never_handshakes_stays_open() {
+    async fn the_transport_alone_sets_no_timer_on_an_unverified_link() {
         let keys = pubkeys_by_node_addr(2);
         let (p, ours) = (keys[0], keys[1]);
         let mut transport = accepting_transport(ours).await;
@@ -5966,6 +6120,9 @@ mod tests {
                 outbound,
                 addr: ble(n),
                 node_addr: Some(node(claims)),
+                id: next_conn_id(),
+                proven: false,
+                held_from: tokio::time::Instant::now(),
             }
         }
         let (local, p) = (node(1), node(2));
