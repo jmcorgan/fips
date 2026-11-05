@@ -12,7 +12,8 @@
 # daemon's TUN, so ip is a stub that reports an interface <name> present to
 # "ip link show <name>" exactly while $LINKS/<name> exists ($FIPS0 for fips0),
 # records every "ip -6 route" call to $CALLS, and passes every call it does
-# not answer to busybox.
+# not answer to busybox. sleep is a stub that records the wait a start takes
+# after deleting the prefix ($PREFIX_SLEEP), and passes every call to busybox.
 #
 # Seams:
 #   INIT_GATEWAY  the init script under test; default the one built into the
@@ -50,12 +51,14 @@ UBUS_REAL=/tmp/init-ubus.real
 DHCP_STOCK=/tmp/init-dhcp.stock
 INSTROOT=/tmp/init-instroot
 PREFIX=2001:2:f1b5::1/64
+# The script's PREFIX_WAIT, as a call to sleep.
+PREFIX_SLEEP="sleep 15"
 OPERATOR=2001:db8:1::1/64
 RA_SAVED=/etc/fips/gateway-ra-default.saved
 
 # The number of cases in the full run, counted by hand from the list at the
 # end of this file. A run that completes fewer exits 2.
-ALL_CASES=21
+ALL_CASES=25
 
 FAILURES=0
 CASES=0
@@ -174,8 +177,24 @@ STUB
 	chmod 0755 "$p"
 }
 
+# Install the sleep stub at the path the image's sleep has, a link to busybox
+# in every pinned image, as for ip_stub.
+sleep_stub() {
+	local p
+	p="$(command -v sleep)"
+	[ -n "$p" ] || p=/bin/sleep
+	rm -f "$p"
+	cat > "$p" <<STUB
+#!/bin/sh
+[ "sleep \$*" = "$PREFIX_SLEEP" ] && echo "sleep \$*" >> $CALLS
+exec /bin/busybox sleep "\$@"
+STUB
+	chmod 0755 "$p"
+}
+
 # The image as each case starts from: the init script under test, the stub
-# gateway and the recorders, a gateway-enabled fips.yaml, a LAN interface in
+# gateway and the recorders, a gateway-enabled fips.yaml with
+# gateway.global_prefix on, a LAN interface in
 # the network config, no boot links, the real ubus, fips0 present, and no
 # saved ra_default.
 reset() {
@@ -200,6 +219,7 @@ STUB
 	recorder /etc/init.d/fips
 	recorder /usr/bin/logger
 	ip_stub
+	sleep_stub
 	rm -rf "$LINKS"
 	mkdir -p "$LINKS"
 	touch "$FIPS0"
@@ -209,6 +229,7 @@ gateway:
   enabled: true
   pool: "fd01::/112"
   lan_interface: br-lan
+  global_prefix: true
 YAML
 	cat > /etc/config/network <<'UCI'
 config interface 'lan'
@@ -299,11 +320,34 @@ UBUS
 
 ubus_real() { cp "$UBUS_REAL" /bin/ubus; }
 
+# Make the odhcpd recorder log the ra_default each call finds, so a case can
+# tell a value odhcpd was given from one that only reached uci after its
+# restart; reset puts the plain recorder back.
+odhcpd_reports() {
+	cat > /etc/init.d/odhcpd <<STUB
+#!/bin/sh
+echo "odhcpd \$* ra_default=\$(uci -q get dhcp.lan.ra_default)" >> $CALLS
+exit 0
+STUB
+	chmod 0755 /etc/init.d/odhcpd
+}
+
 ip6addr() { uci -q get network.lan.ip6addr; }
 has_prefix() { [ "$(ip6addr)" = "$PREFIX" ]; }
 has_operator() { [ "$(ip6addr)" = "$OPERATOR" ]; }
 no_prefix() { [ -z "$(ip6addr)" ]; }
 no_ra_default() { [ -z "$(uci -q get dhcp.lan.ra_default)" ]; }
+ra_default_is() { [ "$(uci -q get dhcp.lan.ra_default)" = "$1" ]; }
+no_ra_saved() { [ ! -e "$RA_SAVED" ]; }
+ra_saved_is() { [ -e "$RA_SAVED" ] && [ "$(cat "$RA_SAVED")" = "$1" ]; }
+pool_route_set() { [ "$(uci -q get 'dhcp.@route6[0].target')" = fd01::/112 ]; }
+
+# global_prefix_line <line>: replace the fixture's gateway.global_prefix line;
+# an empty <line> removes it.
+global_prefix_line() {
+	sed -i '/global_prefix:/d' /etc/fips/fips.yaml
+	[ -z "$1" ] || sed -i "/lan_interface:/a\\$1" /etc/fips/fips.yaml
+}
 
 # Calls recorded since the last mark.
 mark() { MARK=$(wc -l < "$CALLS"); }
@@ -311,7 +355,13 @@ since() { tail -n +"$((MARK + 1))" "$CALLS"; }
 reloads_since() { since | grep -c '^network reload'; }
 reloads_since_are() { [ "$(reloads_since)" = "$1" ]; }
 odhcpd_restarts_since_are() { [ "$(since | grep -c '^odhcpd restart')" = "$1" ]; }
+odhcpd_last_saw() { [ "$(since | grep '^odhcpd restart' | tail -n 1)" = "odhcpd restart ra_default=$1" ]; }
 logged_since() { since | grep -qF "$1"; }
+no_prefix_wait() { ! logged_since "$PREFIX_SLEEP"; }
+# The first reload, wait and odhcpd restart since the mark, in that order.
+prefix_wait_is_before_odhcpd() {
+	[ "$(since | grep -E "^(network reload|$PREFIX_SLEEP|odhcpd restart)" | head -n 3 | tr '\n' ,)" = "network reload,$PREFIX_SLEEP,odhcpd restart," ]
+}
 
 # Run the init script with an action, as a user or procd would.
 init() { "$INIT" "$@" >/dev/null 2>&1; }
@@ -728,6 +778,104 @@ UCI
 
 # ── Runner ──────────────────────────────────────────────────────────────────
 
+# gateway.global_prefix is off unless set: a start on a stock LAN adds no prefix
+# and reloads nothing, but LAN clients keep the default route, which is how they
+# reach the pool with no upstream IPv6. odhcpd has to see ra_default 2 when it
+# restarts, or only uci holds it. Each way of leaving the key off reads the same.
+global_prefix_off_adds_no_prefix_and_keeps_the_default_route() {
+	begin global_prefix_off_adds_no_prefix_and_keeps_the_default_route
+	local line
+	for line in "" "  global_prefix: false" "  # global_prefix: true"; do
+		reset
+		odhcpd_reports
+		global_prefix_line "$line"
+		[ -z "$line" ] || precond "fips.yaml has [$line]" grep -qxF "$line" /etc/fips/fips.yaml
+		mark
+		enable_start
+		check "G1: [$line]: a start adds no prefix" no_prefix
+		check "G1: [$line]: a start does not reload the network" reloads_since_are 0
+		check "G1: [$line]: a start with no prefix to delete does not wait" no_prefix_wait
+		check "G1: [$line]: a start sets ra_default 2" ra_default_is 2
+		check "G1: [$line]: odhcpd restarts with ra_default 2" odhcpd_last_saw 2
+		check "G1: [$line]: a start saves the unset ra_default" ra_saved_is ""
+		check "G1: [$line]: the pool's route6 entry is set" pool_route_set
+		init stop
+		check "G1: [$line]: a stop deletes ra_default" no_ra_default
+		check "G1: [$line]: a stop removes what was saved" no_ra_saved
+	done
+	finish
+}
+
+# With it off, the operator's address is theirs through a start and a stop, and
+# their ra_default gives way to 2 only while the gateway runs.
+global_prefix_off_keeps_operator_settings() {
+	begin global_prefix_off_keeps_operator_settings
+	reset
+	global_prefix_line ""
+	uci set network.lan.ip6addr="$OPERATOR"
+	uci commit network
+	uci set dhcp.lan.ra_default=1
+	uci commit dhcp
+	mark
+	enable_start
+	check "G2: a start keeps the operator's address" has_operator
+	check "G2: a start does not reload the network" reloads_since_are 0
+	check "G2: a start that deletes nothing does not wait" no_prefix_wait
+	check "G2: a start sets ra_default 2" ra_default_is 2
+	check "G2: a start saves the operator's ra_default" ra_saved_is 1
+	init stop
+	check "G2: a stop keeps the operator's address" has_operator
+	check "G2: a stop puts the operator's ra_default back" ra_default_is 1
+	finish
+}
+
+# A router an older package set up holds the prefix; turning the option off, as
+# an upgrade does, gives it back once. odhcpd withdraws it in the RAs after the
+# reload and a restart loses those, so the start waits before its restart, or
+# clients on OpenWrt 23.05 and 22.03 keep the prefix and fail on it. The default
+# route stays.
+global_prefix_off_gives_back_an_older_prefix() {
+	begin global_prefix_off_gives_back_an_older_prefix
+	reset
+	global_prefix_line ""
+	uci set network.lan.ip6addr="$PREFIX"
+	uci commit network
+	mark
+	enable_start
+	check "G3: a start deletes the prefix an older package set" no_prefix
+	check "G3: that start reloads the network once" reloads_since_are 1
+	check "G3: that start waits for the withdrawal before it restarts odhcpd" prefix_wait_is_before_odhcpd
+	check "G3: that start sets ra_default 2" ra_default_is 2
+	mark
+	init start
+	check "G3: the next start reloads nothing" reloads_since_are 0
+	check "G3: the next start does not wait" no_prefix_wait
+	finish
+}
+
+# A start with no stop before it, after a power loss or a sysupgrade that kept
+# settings, finds the gateway's ra_default 2 with the replaced value saved. The
+# gateway is still in charge of it, so the value waits for the next stop.
+global_prefix_off_keeps_a_saved_ra_default_for_the_stop() {
+	begin global_prefix_off_keeps_a_saved_ra_default_for_the_stop
+	reset
+	uci set dhcp.lan.ra_default=1
+	uci commit dhcp
+	enable_start
+	if precond "the gateway set ra_default 2" ra_default_is 2; then
+		kill_matching "$INIT supervise"
+		kill_matching /usr/bin/fips-gateway
+		global_prefix_line ""
+		init start
+		check "G4: a start keeps ra_default 2" ra_default_is 2
+		check "G4: a start keeps what was saved" ra_saved_is 1
+		init stop
+		check "G4: a stop puts the saved ra_default back" ra_default_is 1
+		check "G4: a stop removes what was saved" no_ra_saved
+	fi
+	finish
+}
+
 [ -f "$INIT_GATEWAY" ] || harness_fail "no init script at $INIT_GATEWAY"
 for tool in flock uci pgrep ip; do
 	command -v "$tool" >/dev/null 2>&1 || harness_fail "$tool is missing from the image"
@@ -759,7 +907,11 @@ operator_ra_default_survives_a_power_loss
 stop_with_nothing_saved_keeps_ra_default
 pool_route_follows_lan_interface
 lan_interface_on_a_vlan_device
-lan_interface_beside_a_bridge_vlan_section"
+lan_interface_beside_a_bridge_vlan_section
+global_prefix_off_adds_no_prefix_and_keeps_the_default_route
+global_prefix_off_keeps_operator_settings
+global_prefix_off_gives_back_an_older_prefix
+global_prefix_off_keeps_a_saved_ra_default_for_the_stop"
 
 if [ -n "$INIT_CASES" ]; then
 	SELECTED="$INIT_CASES"

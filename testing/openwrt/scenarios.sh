@@ -460,7 +460,8 @@ stub_start_service_helpers() {
     }
     procd_close_instance() { return 0; }
     gateway_add_global_prefix() { echo "add_global_prefix" >> "$CALLS"; return 0; }
-    prefix_remove() { echo "prefix_remove" >> "$CALLS"; return 0; }
+    prefix_remove() { echo "prefix_remove" >> "$CALLS"; return 1; }
+    ra_force() { echo "ra_force" >> "$CALLS"; return 0; }
     gateway_add_ra_route() { echo "add_ra_route" >> "$CALLS"; return 0; }
     procd_open_instance() { echo "procd_open_instance" >> "$CALLS"; return 0; }
     return 0
@@ -481,7 +482,17 @@ scenario_start_service_guard() {
     assert_called "procd_open_instance" "an enabled gateway still starts the daemon"
     assert_called "command /etc/init.d/fips-gateway supervise" \
         "procd runs the gateway through the init script's supervise command"
-    assert_not_called "prefix_remove" "an enabled gateway keeps the LAN prefix"
+    assert_not_called "add_global_prefix" "the shipped config adds no LAN prefix"
+    assert_called "ra_force" "the shipped config keeps the advertised default route"
+
+    reset_state
+    CONFIG="$WORK/global-prefix.yaml"
+    sed 's/^  lan_interface: .*/&\n  global_prefix: true/' "$SHIPPED_YAML" > "$CONFIG"
+    start_service >/dev/null 2>&1
+    assert_called "add_global_prefix" "gateway.global_prefix adds the LAN prefix"
+    assert_not_called "prefix_remove" "gateway.global_prefix keeps the LAN prefix"
+    assert_called "ra_force" "gateway.global_prefix keeps the advertised default route"
+    assert_called "procd_open_instance" "with gateway.global_prefix the daemon still starts"
 
     reset_state
     CONFIG="$WORK/disabled.yaml"
@@ -494,6 +505,7 @@ YAML
     assert_none_called_with_prefix "dnsmasq_swap " "a disabled gateway does not redirect dnsmasq"
     assert_not_called "add_global_prefix" "a disabled gateway does not add the LAN prefix"
     assert_called "prefix_remove" "a disabled gateway gives the LAN prefix back"
+    assert_not_called "ra_force" "a disabled gateway does not force a default route"
     assert_not_called "add_ra_route" "a disabled gateway does not advertise the pool route"
     assert_not_called "procd_open_instance" "a disabled gateway does not start the daemon"
     return 0
@@ -1225,6 +1237,7 @@ stop_service() { :; }
 sysctl() { :; }
 modprobe() { :; }
 gateway_add_global_prefix() { :; }
+ra_force() { :; }
 gateway_add_ra_route() { :; }
 stop_service() { :; }
 echo "$name $action" >> "$CALLS"
