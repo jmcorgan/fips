@@ -137,6 +137,12 @@ const CALLS: &[&str] = &["now", "pair"];
 /// adapter. Nothing in the adapter calls it.
 const CLOCK_READS: &[(&str, usize)] = &[("icmp_rate_limit.rs", 1)];
 
+/// The times a decision module may name the host clock, by file: the
+/// limiter's per-source token bucket type, which counts the instants it is
+/// given and never reads the clock. A read through the name is still a `now`
+/// counted against [`CLOCK_READS`].
+const CLOCK_TYPES: &[(&str, usize)] = &[("icmp_rate_limit.rs", 1)];
+
 /// `source` with comments removed and every string and char literal left as
 /// `""`; attributes are kept.
 fn uncommented(source: &str) -> Vec<char> {
@@ -257,31 +263,79 @@ fn forbidden(source: &str) -> Vec<String> {
     found
 }
 
-/// The clock reads [`CLOCK_READS`] allows in `file`.
-fn allowed_reads(file: &str) -> usize {
-    CLOCK_READS
+/// The uses `allowances` grants `file`.
+fn allowed(allowances: &[(&str, usize)], file: &str) -> usize {
+    allowances
         .iter()
         .find(|(name, _)| *name == file)
         .map_or(0, |(_, n)| *n)
 }
 
+/// What is wrong with decision module `file` whose text is `source`: each
+/// forbidden name it uses, and a clock read or host clock name beyond what
+/// [`CLOCK_READS`] and [`CLOCK_TYPES`] allow it. Empty when nothing is.
+fn excess(file: &str, source: &str) -> Vec<String> {
+    let found = forbidden(source);
+    let mut wrong: Vec<String> = found
+        .iter()
+        .filter(|name| *name != "now" && *name != "HostClock")
+        .cloned()
+        .collect();
+    for (name, allowances) in [("now", CLOCK_READS), ("HostClock", CLOCK_TYPES)] {
+        let uses = found.iter().filter(|found| *found == name).count();
+        if uses != allowed(allowances, file) {
+            wrong.push(format!(
+                "{name} {uses} times, not the {} allowed",
+                allowed(allowances, file)
+            ));
+        }
+    }
+    wrong
+}
+
 /// No decision module names a runtime, channel, thread, clock, OS, I/O,
 /// socket or name lookup item outside its comments, literals and test-only
-/// items, and only the limiter's public wrapper reads the clock.
+/// items; only the limiter's public wrapper reads the clock, and only the
+/// limiter's bucket type names the host clock.
 #[test]
 fn no_decision_module_names_a_runtime_channel_thread_clock_os_or_socket_item() {
     for (file, source) in DECISIONS {
-        let found = forbidden(source);
-        let reads = found.iter().filter(|name| *name == "now").count();
-        let others: Vec<&String> = found.iter().filter(|name| *name != "now").collect();
-        assert!(others.is_empty(), "{file} names {others:?}");
-        assert_eq!(
-            reads,
-            allowed_reads(file),
-            "{file} reads the clock {reads} times, not the {} allowed",
-            allowed_reads(file)
+        let wrong = excess(file, source);
+        assert!(wrong.is_empty(), "{file} names {wrong:?}");
+    }
+}
+
+/// The limiter's allowance is exact: a second naming of the host clock, or a
+/// read through it, planted in the limiter is found.
+#[test]
+fn the_scan_finds_the_host_clock_named_or_read_once_more_in_the_limiter() {
+    let limiter = include_str!("../icmp_rate_limit.rs");
+    assert_eq!(excess("icmp_rate_limit.rs", limiter), Vec::<String>::new());
+    for (line, wrong) in [
+        (
+            "type Spare = crate::time::HostClock;",
+            "HostClock 2 times, not the 1 allowed",
+        ),
+        (
+            "fn tick() -> crate::time::HostInstant { crate::time::HostClock.now() }",
+            "now 2 times, not the 1 allowed",
+        ),
+    ] {
+        let source = format!("{limiter}\n{line}\n");
+        let found = excess("icmp_rate_limit.rs", &source);
+        assert!(
+            found.iter().any(|f| f == wrong),
+            "{line} must be found as {wrong}: {found:?}"
         );
     }
+    assert!(
+        !excess(
+            "outbound.rs",
+            &planted("type Clock = crate::time::HostClock;")
+        )
+        .is_empty(),
+        "another decision module may not name the host clock"
+    );
 }
 
 /// Every module the adapter declares is classed as a decision module or a

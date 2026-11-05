@@ -236,10 +236,11 @@ rebuilds the packet, fragments it and compresses each fragment). The
 adapter reports 1280 in the Packet Too Big it builds for a refusal, and
 in the one it answers itself for a destination no key names.
 
-ICMP Packet Too Big generation is rate-limited per source address
-(100ms interval) to prevent storms from applications sending many
-oversized packets. The ICMP response is delivered locally back through
-the TUN; no network traversal is needed, so delivery is reliable.
+ICMP Packet Too Big generation is rate-limited by a token bucket per
+source address (a burst of 10, then 10 a second) to prevent storms from
+applications sending many oversized packets. The ICMP response is
+delivered locally back through the TUN; no network traversal is needed,
+so delivery is reliable.
 
 ### TUN-Side TCP MSS Clamping
 
@@ -285,9 +286,11 @@ fallback) and the rationale for `max_mss` semantics are in
 
 ### ICMP Rate Limiting
 
-Packet Too Big is limited per source address to one message per 100 ms
-(a minimum interval, not a token bucket), which prevents a storm when an
-application sends a burst of oversized packets.
+Packet Too Big is limited by a token bucket per source address, as RFC
+4443 Section 2.4 (f) recommends: a burst of 10, then 10 a second. A short
+burst of oversized packets from one source, to one destination or to
+several, is answered for each packet, so the host learns the path MTU of
+every destination; a source that keeps sending them is held to the rate.
 
 Destination Unreachable is limited by one token bucket for the whole
 adapter, as RFC 4443 Section 2.4 (f) requires: a burst of 10, then 10 a

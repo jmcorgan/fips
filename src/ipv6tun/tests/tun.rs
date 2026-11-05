@@ -965,7 +965,6 @@ fn destination_unreachable_goes_ten_at_once_then_one_a_tenth_of_a_second() {
 /// packets from one source read back to back, to two mesh destinations no
 /// key names, with a Packet Too Big.
 #[test]
-#[ignore = "known defect: the reader withholds Packet Too Big for the second destination of one source"]
 fn the_reader_answers_back_to_back_oversized_packets_from_one_source_to_two_destinations_each() {
     let ours = *crate::Identity::generate().address();
     let known = crate::ipv6tun::link::any_key();

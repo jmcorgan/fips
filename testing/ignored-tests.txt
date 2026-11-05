@@ -81,7 +81,3 @@ benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
-known-defect  fips-mesh  ipv6tun::icmp_rate_limit::tests::a_second_packet_too_big_to_one_source_1_ms_after_the_first_is_allowed  src/ipv6tun/tests/icmp_rate_limit.rs
-known-defect  fips-mesh  ipv6tun::icmp_rate_limit::tests::a_burst_of_five_after_ten_quiet_seconds_is_answered_for_every_packet  src/ipv6tun/tests/icmp_rate_limit.rs
-known-defect  fips-mesh  ipv6tun::lifecycle::tests::back_to_back_oversized_packets_from_one_source_on_the_app_owned_path_each_draw_packet_too_big  src/ipv6tun/tests/lifecycle.rs
-known-defect  fips-mesh  ipv6tun::tun::name_tests::the_reader_answers_back_to_back_oversized_packets_from_one_source_to_two_destinations_each  src/ipv6tun/tests/tun.rs

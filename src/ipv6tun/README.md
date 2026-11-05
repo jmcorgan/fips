@@ -47,13 +47,17 @@ Decision modules:
 - `exthdr.rs`: walks a packet's IPv6 extension headers to its upper-layer
   header, for the ICMPv6 error checks and the MSS clamp.
 - `icmp.rs`: builds Destination Unreachable and Packet Too Big (RFC 4443) and
-  returns them; Packet Too Big is rate limited per source at a time the caller
-  gives, and Destination Unreachable by a token bucket whose burst and rate
-  are named here. Re-exports the MTU names from `mtu.rs` so their public paths
-  stay.
+  returns them; Packet Too Big is rate limited by a token bucket per source at
+  a time the caller gives, and Destination Unreachable by one token bucket
+  whose burst and rate are named here. Re-exports the MTU names from
+  `mtu.rs` so their public paths stay.
 - `icmp_rate_limit.rs`: the per-source Packet Too Big limiter, judged at a
-  given time (`check`). Its public `should_send` reads the clock for callers
-  outside the adapter and is the one clock read the guard allows.
+  given time (`check`): a token bucket per source of `PACKET_TOO_BIG_BURST`
+  (10), regaining one token each `PACKET_TOO_BIG_INTERVAL` (100 ms), named
+  here. Its public `should_send` reads the clock for callers outside the
+  adapter and is the one clock read the guard allows; its bucket type is the
+  one naming of the host clock the guard allows, since a bucket only counts
+  the instants it is given.
 - `inbound.rs`: rebuilds a packet a peer delivered (`unpack`) and marks it
   Congestion Experienced when the datagram was (`mark_ce`).
 - `ipv6_frag.rs`: IPv6 fragmentation of a host's packet of at most 1280
@@ -207,7 +211,9 @@ and from `fips-core`:
 - **Time and rate limiting**: `time::HostClock`, `fips_core::time::Clock`
   and `fips_core::node::rate_limit::TokenBucket`, in `tun.rs` and
   `lifecycle.rs`: the clock the two ICMPv6 limiters are judged at, and the
-  Destination Unreachable token bucket itself.
+  Destination Unreachable token bucket itself; and `TokenBucket` with
+  `time::HostClock` and `time::HostInstant` in `icmp_rate_limit.rs`, for the
+  Packet Too Big bucket of each source.
 - **DNS**: `dnsmsg` (message parsing and screening, and `clamp_ttl` in
   `config.rs`), `hosts` (`HostMap`, `HostMapReloader`,
   `DEFAULT_HOSTS_PATH`) and `utils::onlink::OnLinkPrefixes`, in `dns.rs`
@@ -250,7 +256,8 @@ tests or compile-time checks.
   channels or the link's channel ends, threads, clock reads, OS calls, I/O
   through `std::io` or `std::fs`, sockets, a lookup through `ToSocketAddrs`,
   or a driver module. `icmp_rate_limit.rs` may read the clock exactly
-  once, in `should_send`. Every module declared in `mod.rs` must be listed as
+  once, in `should_send`, and name the host clock exactly once, as the clock
+  of its token buckets. Every module declared in `mod.rs` must be listed as
   a decision module or a driver in `tests/mod.rs`, so a new module is never
   left unscanned. The scan checks names, not types, so an item reached under
   a name not on its lists passes.
@@ -272,8 +279,12 @@ tests or compile-time checks.
   multicast. The system TUN reader answers a destination outside `fd00::/8`,
   hairpins a packet to the node and clamps a SYN before that step, so a
   foreign-source packet to an off-mesh destination is answered code 0.
-- The Packet Too Big limiter counts a source whether or not a TUN queue is up
-  to take the answer.
+- Packet Too Big draws on a token bucket per source address: a burst of 10,
+  then 10 a second (RFC 4443 Section 2.4 (f)), so back-to-back oversized
+  packets from one source are each answered, to one destination or to
+  several, while a flood is held to the rate. The limiter counts a source
+  whether or not a TUN queue is up to take the answer, and drops a source
+  only once its bucket has refilled.
 - Every Destination Unreachable the host is sent draws on one token bucket for
   the adapter, shared by the reader and the handles: a burst of 10, then 10 a
   second (RFC 4443 Section 2.4 (f)). A token is spent whether or not a TUN

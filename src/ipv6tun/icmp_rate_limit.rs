@@ -1,43 +1,64 @@
 //! ICMP Packet Too Big rate limiting.
 //!
 //! Prevents ICMP flood from repeated oversized packets by rate-limiting
-//! ICMP Packet Too Big messages per source address.
+//! ICMP Packet Too Big messages per source address, with a token bucket for
+//! each source (RFC 4443 Section 2.4 (f)).
 
 use std::collections::HashMap;
 use std::net::Ipv6Addr;
 use std::time::{Duration, Instant};
 
+use crate::time::HostInstant;
+use fips_core::node::rate_limit::TokenBucket;
+
+/// The Packet Too Big a source may be sent at once after a quiet spell: the
+/// bucket size RFC 4443 Section 2.4 (f) gives as a default for a small or
+/// mid-size device, as for Destination Unreachable.
+pub(crate) const PACKET_TOO_BIG_BURST: u32 = 10;
+
+/// The time in which a source's bucket regains one Packet Too Big once its
+/// burst is spent: ten a second, the long-term rate RFC 4443 Section 2.4 (f)
+/// suggests.
+pub(crate) const PACKET_TOO_BIG_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a source is kept after its last check, at the least. A bucket
+/// left this long has refilled, so dropping it changes no answer.
+const MAX_AGE: Duration = Duration::from_secs(10);
+
+/// One source's bucket. It counts the instants it is given on the host's
+/// monotonic clock and never reads the clock itself.
+type Bucket = TokenBucket<crate::time::HostClock>;
+
 /// Rate limiter for ICMP Packet Too Big messages.
 ///
-/// Tracks the last time an ICMP PTB was sent to each source address
-/// and enforces a minimum interval between messages to prevent floods.
+/// Each source address has a token bucket of [`PACKET_TOO_BIG_BURST`],
+/// refilled at one per interval ([`PACKET_TOO_BIG_INTERVAL`] by default), so
+/// a burst of oversized packets is answered for each while a flood is held
+/// to the refill rate.
 pub struct IcmpRateLimiter {
-    /// Maps source IPv6 address to the last time we sent ICMP PTB to it.
-    last_sent: HashMap<Ipv6Addr, Instant>,
-    /// Minimum interval between ICMP messages to the same source.
-    min_interval: Duration,
+    /// Each source's bucket, and when the source was last checked.
+    sources: HashMap<Ipv6Addr, (Bucket, Instant)>,
+    /// Tokens each bucket regains a second.
+    rate: f64,
     /// Maximum age of entries before cleanup (prevents unbounded growth).
     max_age: Duration,
 }
 
 impl IcmpRateLimiter {
-    /// Create a new rate limiter.
-    ///
-    /// Default: max 10 ICMP/sec per source (100ms interval).
+    /// Create a new rate limiter: a burst of ten for each source, then ten a
+    /// second.
     pub fn new() -> Self {
-        Self {
-            last_sent: HashMap::new(),
-            min_interval: Duration::from_millis(100),
-            max_age: Duration::from_secs(10),
-        }
+        Self::with_interval(PACKET_TOO_BIG_INTERVAL)
     }
 
-    /// Create a rate limiter with custom interval.
-    pub fn with_interval(min_interval: Duration) -> Self {
+    /// Create a rate limiter whose buckets regain one token per `interval`.
+    /// An interval of zero is taken as one nanosecond.
+    pub fn with_interval(interval: Duration) -> Self {
+        let interval = interval.max(Duration::from_nanos(1));
         Self {
-            last_sent: HashMap::new(),
-            min_interval,
-            max_age: Duration::from_secs(10),
+            sources: HashMap::new(),
+            rate: 1.0 / interval.as_secs_f64(),
+            max_age: MAX_AGE.max(interval.saturating_mul(PACKET_TOO_BIG_BURST)),
         }
     }
 
@@ -51,20 +72,21 @@ impl IcmpRateLimiter {
 
     /// Check if we should send an ICMP PTB to this source address at `now`.
     ///
-    /// Returns true if at least the minimum interval has passed since the
-    /// last ICMP to this source, or if this is the first ICMP to it. If true
-    /// is returned, `now` is recorded as this source's last send, and entries
-    /// older than the maximum age at `now` are dropped.
+    /// Returns true if the source's bucket, refilled up to `now`, holds a
+    /// token, and spends it; a source checked for the first time has a full
+    /// bucket. If true is returned, entries not checked within the maximum
+    /// age at `now` are dropped.
     pub(crate) fn check(&mut self, src_addr: Ipv6Addr, now: Instant) -> bool {
-        // Check if we've sent to this source recently
-        if let Some(&last) = self.last_sent.get(&src_addr)
-            && now.duration_since(last) < self.min_interval
-        {
-            return false; // Too soon, rate limit
+        let at = HostInstant::from(now);
+        let rate = self.rate;
+        let (bucket, last) = self
+            .sources
+            .entry(src_addr)
+            .or_insert_with(|| (Bucket::with_params(PACKET_TOO_BIG_BURST, rate, at), now));
+        *last = now;
+        if !bucket.try_acquire(at) {
+            return false;
         }
-
-        // Update last sent time
-        self.last_sent.insert(src_addr, now);
 
         // Cleanup old entries to prevent unbounded growth
         self.cleanup(now);
@@ -74,20 +96,20 @@ impl IcmpRateLimiter {
 
     /// Remove entries older than max_age.
     fn cleanup(&mut self, now: Instant) {
-        self.last_sent
-            .retain(|_, &mut last| now.duration_since(last) < self.max_age);
+        self.sources
+            .retain(|_, (_, last)| now.duration_since(*last) < self.max_age);
     }
 
     /// Get the number of tracked sources.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.last_sent.len()
+        self.sources.len()
     }
 
     /// Check if there are no tracked sources.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.last_sent.is_empty()
+        self.sources.is_empty()
     }
 }
 
