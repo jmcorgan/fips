@@ -5,6 +5,10 @@ source file one level up, declared from that file with
 `#[cfg(test)] #[path = "tests/<file>.rs"]`, so it stays a child module of
 that file and can reach its private items.
 
+- `gateway_prefix.rs`: tests for `gateway.global_prefix` (`gateway.rs`), the
+  key the OpenWrt init script reads: off when absent, read as a boolean, kept
+  when the config is written back. `gateway.rs`'s other tests are still inline
+  there, so this one is declared as `mod prefix_tests`, not `mod tests`.
 - `udp_interface.rs`: tests for the interface-name rules in
   `Config::validate` (`mod.rs`): the UDP `interface` field, and the Ethernet
   `interface` rules that share the same name check.

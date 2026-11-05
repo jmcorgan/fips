@@ -67,6 +67,12 @@ pub struct GatewayConfig {
     /// LAN-facing interface for proxy ARP/NDP.
     pub lan_interface: String,
 
+    /// Give the LAN the OpenWrt init script's global-scope IPv6 prefix
+    /// (`gateway.global_prefix`, default: false). Read by that script; the
+    /// gateway binary does not act on it.
+    #[serde(default)]
+    pub global_prefix: bool,
+
     /// Gateway DNS configuration.
     #[serde(default)]
     pub dns: GatewayDnsConfig,
@@ -235,6 +241,10 @@ impl ConntrackConfig {
         self.icmp_timeout.unwrap_or(DEFAULT_CT_ICMP_TIMEOUT)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/gateway_prefix.rs"]
+mod prefix_tests;
 
 #[cfg(test)]
 mod tests {
