@@ -81,16 +81,3 @@ benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_setup_with_a_body_flag_bit_set_opens_no_session  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_setup_with_a_byte_after_its_noise_message_opens_no_session  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_setup_with_a_prefix_flag_bit_set_opens_no_session  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_setup_whose_payload_len_disagrees_with_its_length_opens_no_session  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_ack_with_a_body_flag_bit_set_does_not_complete_the_handshake  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_ack_with_a_byte_after_its_noise_message_does_not_complete_the_handshake  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_msg3_with_a_body_flag_bit_set_does_not_establish_the_session  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_session_msg3_with_a_byte_after_its_noise_message_does_not_establish_the_session  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::an_established_message_with_a_wrong_payload_len_is_not_delivered  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::an_established_message_with_a_reserved_prefix_bit_set_is_not_delivered  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::an_established_message_with_a_reserved_inner_flag_is_not_processed  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_routing_signal_whose_payload_len_disagrees_with_its_length_is_discarded  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_routing_signal_with_a_reserved_prefix_bit_set_is_discarded  src/node/tests/fsp_envelope.rs

@@ -315,7 +315,6 @@ async fn assert_setup_refused_then_answered(p: &mut Pair, faulty: &[u8], setup: 
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint answers a SessionSetup whose body flags byte is set"]
 async fn a_session_setup_with_a_body_flag_bit_set_opens_no_session() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -325,7 +324,6 @@ async fn a_session_setup_with_a_body_flag_bit_set_opens_no_session() {
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint answers a SessionSetup with a byte after its Noise message"]
 async fn a_session_setup_with_a_byte_after_its_noise_message_opens_no_session() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -340,7 +338,6 @@ async fn a_session_setup_with_a_byte_after_its_noise_message_opens_no_session() 
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint never reads a handshake prefix's flags"]
 async fn a_session_setup_with_a_prefix_flag_bit_set_opens_no_session() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -351,7 +348,6 @@ async fn a_session_setup_with_a_prefix_flag_bit_set_opens_no_session() {
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint never compares a handshake prefix's payload_len"]
 async fn a_session_setup_whose_payload_len_disagrees_with_its_length_opens_no_session() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -383,7 +379,6 @@ async fn assert_ack_refused_then_completed(p: &mut Pair, faulty: &[u8], ack: &[u
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint completes on a SessionAck whose body flags byte is set"]
 async fn a_session_ack_with_a_body_flag_bit_set_does_not_complete_the_handshake() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -393,7 +388,6 @@ async fn a_session_ack_with_a_body_flag_bit_set_does_not_complete_the_handshake(
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint completes on a SessionAck with a byte after its Noise message"]
 async fn a_session_ack_with_a_byte_after_its_noise_message_does_not_complete_the_handshake() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -424,7 +418,6 @@ async fn assert_msg3_refused_then_completed(p: &mut Pair, faulty: &[u8], msg3: &
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint establishes on a SessionMsg3 whose body flags byte is set"]
 async fn a_session_msg3_with_a_body_flag_bit_set_does_not_establish_the_session() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -436,7 +429,6 @@ async fn a_session_msg3_with_a_body_flag_bit_set_does_not_establish_the_session(
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint establishes on a SessionMsg3 with a byte after its Noise message"]
 async fn a_session_msg3_with_a_byte_after_its_noise_message_does_not_establish_the_session() {
     let mut p = Pair::new().await;
     let setup = p.setup().await;
@@ -476,7 +468,6 @@ async fn assert_message_refused_then_delivered(p: &mut Pair, faulty: &[u8], what
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint never compares an established message's payload_len"]
 async fn an_established_message_with_a_wrong_payload_len_is_not_delivered() {
     let mut p = Pair::new().await;
     p.establish().await;
@@ -491,7 +482,6 @@ async fn an_established_message_with_a_wrong_payload_len_is_not_delivered() {
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint ignores reserved bits of an established message's prefix flags"]
 async fn an_established_message_with_a_reserved_prefix_bit_set_is_not_delivered() {
     let mut p = Pair::new().await;
     p.establish().await;
@@ -530,7 +520,6 @@ async fn assert_unprocessed_then_processed(p: &mut Pair, faulty: &[u8], what: &s
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint processes a message whose inner_flags has a reserved bit set"]
 async fn an_established_message_with_a_reserved_inner_flag_is_not_processed() {
     let mut p = Pair::new().await;
     p.establish().await;
@@ -595,7 +584,6 @@ async fn a_coords_required_with_a_reserved_body_bit_is_discarded_before_it_is_ju
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint never compares a routing signal's payload_len"]
 async fn a_routing_signal_whose_payload_len_disagrees_with_its_length_is_discarded() {
     let mut faulty = coords_required();
     let len = faulty.len() - 4 + 1;
@@ -604,7 +592,6 @@ async fn a_routing_signal_whose_payload_len_disagrees_with_its_length_is_discard
 }
 
 #[tokio::test]
-#[ignore = "known defect: the endpoint ignores reserved bits of a routing signal's prefix flags"]
 async fn a_routing_signal_with_a_reserved_prefix_bit_set_is_discarded() {
     let mut faulty = coords_required();
     faulty[1] = FSP_FLAG_U | RESERVED_PREFIX_BIT;
