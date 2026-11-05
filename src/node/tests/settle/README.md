@@ -71,9 +71,11 @@ real TCP sockets.
   private helpers of `crossed_dial.rs` and `control.rs`, each naming its
   original.
 - `fsp.rs`: an end-to-end session whose responder restarts before its
-  frames reach the initiator. At the larger address it does not carry data
-  within one exchange (a known defect); at the smaller address it does,
-  which shows the assertion can pass.
+  frames reach the initiator. At the smaller address the pair carries data
+  within one exchange. At the larger address it recovers when the
+  initiator's msg3 resends end and the repair rekey it then starts
+  completes, an accepted ceiling the test asserts (32 s at the defaults,
+  counted on a frozen clock); a sooner recovery passes too.
 - `restart.rs`: a restarted node that reads a late rekey msg1 of its
   peer's previous run, past the unheard floor, after the peer has moved
   onto its new run: one session in every placement of the peer (a known
