@@ -34,6 +34,7 @@ mod dns_mesh;
 mod establish_chartests;
 mod forged_initial_msg2;
 mod forwarding;
+mod fsp_envelope;
 mod handshake;
 mod handshake_lines;
 mod heartbeat;

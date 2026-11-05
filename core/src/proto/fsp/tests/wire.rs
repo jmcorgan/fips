@@ -559,3 +559,52 @@ fn test_all_message_types_through_prefix() {
     let prefix = FspCommonPrefix::parse(&[0x03, 0x00, 0x49, 0x00]).unwrap();
     assert_eq!(prefix.phase, 3);
 }
+
+// ===== What a transit reads (FRC-1501 Section 4.7) =====
+//
+// A transit reads the coordinates of every SessionSetup and SessionAck, and
+// those of an established message whose header shows version 0, phase 0 and
+// U clear; FRC-1501 does not require it to apply the endpoint's discards. The
+// decoders and the header parser are shared with the transit, so they keep
+// reading these messages; the endpoint's checks sit beside them.
+
+/// A handshake body as `encode` writes it after the prefix, with its flags
+/// byte set and a byte after its Noise message.
+fn flagged_and_longer(encoded: &[u8]) -> Vec<u8> {
+    let mut body = encoded[4..].to_vec();
+    body[0] = 0xFF;
+    body.push(0);
+    body
+}
+
+#[test]
+fn the_shared_handshake_decoders_still_read_coordinates_past_reserved_flags_and_trailing_bytes() {
+    let (src, dest) = (make_coords(&[1, 2, 0]), make_coords(&[3, 4, 0]));
+
+    let setup = SessionSetup::new(src.clone(), dest.clone())
+        .with_handshake(vec![0xAA; 33])
+        .encode();
+    let decoded = SessionSetup::decode(&flagged_and_longer(&setup))
+        .expect("a transit reads a SessionSetup whatever its flags and length");
+    assert_eq!(
+        (decoded.src_coords, decoded.dest_coords),
+        (src.clone(), dest.clone())
+    );
+
+    let ack = SessionAck::new(src.clone(), dest.clone())
+        .with_handshake(vec![0xBB; 57])
+        .encode();
+    let decoded = SessionAck::decode(&flagged_and_longer(&ack))
+        .expect("a transit reads a SessionAck whatever its flags and length");
+    assert_eq!((decoded.src_coords, decoded.dest_coords), (src, dest));
+}
+
+#[test]
+fn the_encrypted_header_parser_still_reads_a_header_with_reserved_prefix_bits_set() {
+    let mut message = build_fsp_header(7, FSP_FLAG_CP | 0xF8, 6).to_vec();
+    message.extend_from_slice(&[0u8; 6 + TAG_SIZE]);
+    let header = FspEncryptedHeader::parse(&message)
+        .expect("a transit reads an established header whatever its reserved bits");
+    assert!(header.has_coords());
+    assert_eq!(header.counter, 7);
+}
