@@ -25,8 +25,10 @@ profile; outside `rekey/` this module has no cryptography.
   session table holds one machine per session, from its first handshake.
   Its README describes it.
 - `wire.rs`: the session message types (`SessionSetup`, `SessionAck`,
-  `SessionMsg3`), packet flags, the inner message catalog and the
-  header codecs.
+  `SessionMsg3`), packet flags, the inner message catalog, the header
+  codecs, and the checks a session endpoint makes on a message's
+  envelope (`check_prefix`, `check_header`, `check_sealed`,
+  `check_inner` and the strict handshake decoders).
 - `tests/`: the unit tests; its README describes it.
 
 ## Invariants
@@ -41,6 +43,14 @@ profile; outside `rekey/` this module has no cryptography.
   `core.rs` keeps the rule.
 - **The session wire is protocol** and does not change on the deployed
   lines.
+- **The shared decoders stay lenient.** A transit reads the coordinates
+  of a `SessionSetup`, a `SessionAck` and an established message
+  (FRC-1501 Section 4.7) and is not required to make the endpoint's
+  discards, so `decode`, `FspEncryptedHeader::parse` and
+  `FspCommonPrefix::parse` accept reserved bits and trailing bytes. A
+  session endpoint applies the checks beside them (FRC-1501 Section 5.1);
+  moving a check into a shared decoder would change what a transit
+  writes.
 - **The quorum counts links, not reporters.** A vote is keyed on the
   authenticated link peer a `PathBroken` arrived over. The reporter the
   body names is plaintext the sender chooses, so counting reporters

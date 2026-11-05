@@ -9,4 +9,5 @@ Unit tests for the session layer, declared from `fsp/mod.rs` as
 - `core.rs`: the coordinate and path-MTU reactions and the data
   transforms.
 - `quorum.rs`: `LinkQuorum`.
-- `wire.rs`: the session message and header codecs.
+- `wire.rs`: the session message and header codecs, what the shared
+  decoders still read for a transit, and the endpoint checks.

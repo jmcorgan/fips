@@ -18,8 +18,6 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
-known-defect  fips-core  proto::routing::tests::wire::routing_signals_with_a_reserved_sig_flags_bit_set_are_refused  core/src/proto/routing/tests/wire.rs
-known-defect  fips-core  proto::routing::tests::wire::routing_signals_with_bytes_after_the_body_are_refused  core/src/proto/routing/tests/wire.rs
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
@@ -94,6 +92,5 @@ known-defect  fips-mesh  node::tests::fsp_envelope::a_session_msg3_with_a_byte_a
 known-defect  fips-mesh  node::tests::fsp_envelope::an_established_message_with_a_wrong_payload_len_is_not_delivered  src/node/tests/fsp_envelope.rs
 known-defect  fips-mesh  node::tests::fsp_envelope::an_established_message_with_a_reserved_prefix_bit_set_is_not_delivered  src/node/tests/fsp_envelope.rs
 known-defect  fips-mesh  node::tests::fsp_envelope::an_established_message_with_a_reserved_inner_flag_is_not_processed  src/node/tests/fsp_envelope.rs
-known-defect  fips-mesh  node::tests::fsp_envelope::a_coords_required_with_a_reserved_body_bit_is_discarded_before_it_is_judged  src/node/tests/fsp_envelope.rs
 known-defect  fips-mesh  node::tests::fsp_envelope::a_routing_signal_whose_payload_len_disagrees_with_its_length_is_discarded  src/node/tests/fsp_envelope.rs
 known-defect  fips-mesh  node::tests::fsp_envelope::a_routing_signal_with_a_reserved_prefix_bit_set_is_discarded  src/node/tests/fsp_envelope.rs

@@ -588,7 +588,6 @@ fn coords_required() -> Vec<u8> {
 }
 
 #[tokio::test]
-#[ignore = "known defect: the CoordsRequired decoder ignores the reserved sig_flags byte"]
 async fn a_coords_required_with_a_reserved_body_bit_is_discarded_before_it_is_judged() {
     let mut faulty = coords_required();
     faulty[5] = 0x01;

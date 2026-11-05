@@ -201,7 +201,6 @@ fn decodes(name: &str, body: &[u8]) -> bool {
 }
 
 #[test]
-#[ignore = "known defect: the routing-signal decoders ignore the reserved sig_flags byte"]
 fn routing_signals_with_a_reserved_sig_flags_bit_set_are_refused() {
     let mut accepted = alloc::vec::Vec::new();
     for (name, body) in signal_bodies() {
@@ -221,7 +220,6 @@ fn routing_signals_with_a_reserved_sig_flags_bit_set_are_refused() {
 }
 
 #[test]
-#[ignore = "known defect: the routing-signal decoders accept bytes after the body"]
 fn routing_signals_with_bytes_after_the_body_are_refused() {
     let mut accepted = alloc::vec::Vec::new();
     for (name, body) in signal_bodies() {

@@ -585,7 +585,7 @@ Encoded with FSP prefix: ver=0, phase=0x1, flags=0, payload_len.
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | flags | 1 byte | Bit 0: REQUEST_ACK, Bit 1: BIDIRECTIONAL |
+| 0 | flags | 1 byte | Reserved |
 | 1 | src_coords_count | 2 bytes LE | Number of source coordinate entries |
 | 3 | src_coords | 16 x n bytes | Source's ancestry (NodeAddr, self -> root) |
 | ... | dest_coords_count | 2 bytes LE | Number of dest coordinate entries |

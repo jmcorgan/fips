@@ -19,6 +19,23 @@ use crate::proto::stp::{
 use alloc::vec::Vec;
 use core::fmt;
 
+/// Refuse a routing-signal body, as only a session endpoint decodes one, that
+/// sets a bit of its reserved `sig_flags` byte (`flags`) or that has bytes
+/// after its end: `len` bytes where the body is `body` (FRC-1501 Sections 5.1
+/// and 5.7).
+fn check_body(flags: u8, body: usize, len: usize) -> Result<(), Error> {
+    if flags != 0 {
+        return Err(Error::Malformed("routing signal sig_flags set"));
+    }
+    if len != body {
+        return Err(Error::MessageTooLong {
+            max: body,
+            got: len,
+        });
+    }
+    Ok(())
+}
+
 /// Plaintext link-layer routing error-signal message types (`0x20`–`0x2F`).
 ///
 /// Emitted by transit routers that cannot forward a `SessionDatagram` and have
@@ -126,11 +143,14 @@ impl CoordsRequired {
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
+    ///
+    /// Refuses a body with its reserved flags byte set or with bytes after
+    /// its 33 bytes.
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) = 33
         let mut reader = Reader::new(payload);
         reader.require(33)?;
-        // payload[0] is flags (reserved, ignored)
+        check_body(payload[0], COORDS_REQUIRED_SIZE - 1, payload.len())?;
         reader.advance(1);
         let dest_bytes = reader.read_array::<16>()?;
         let reporter_bytes = reader.read_array::<16>()?;
@@ -212,16 +232,19 @@ impl PathBroken {
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
+    ///
+    /// Refuses a body with its reserved flags byte set or with bytes after
+    /// its coordinate list.
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) + coords_count(2) = 35 minimum
         let mut reader = Reader::new(payload);
         reader.require(35)?;
-        // payload[0] is flags (reserved, ignored)
-        reader.advance(1);
+        let flags = reader.read_u8()?;
         let dest_bytes = reader.read_array::<16>()?;
         let reporter_bytes = reader.read_array::<16>()?;
 
-        let (last_known_coords, _consumed) = decode_optional_coords(reader.rest())?;
+        let (last_known_coords, consumed) = decode_optional_coords(reader.rest())?;
+        check_body(flags, reader.position() + consumed, payload.len())?;
 
         Ok(Self {
             dest_addr: NodeAddr::from_bytes(dest_bytes),
@@ -292,11 +315,14 @@ impl MtuExceeded {
     }
 
     /// Decode from wire format (after FSP prefix and msg_type byte consumed).
+    ///
+    /// Refuses a body with its reserved flags byte set or with bytes after
+    /// its 35 bytes.
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
         // flags(1) + dest_addr(16) + reporter(16) + mtu(2) = 35
         let mut reader = Reader::new(payload);
         reader.require(35)?;
-        // payload[0] is flags (reserved, ignored)
+        check_body(payload[0], MTU_EXCEEDED_SIZE - 1, payload.len())?;
         reader.advance(1);
         let dest_bytes = reader.read_array::<16>()?;
         let reporter_bytes = reader.read_array::<16>()?;
