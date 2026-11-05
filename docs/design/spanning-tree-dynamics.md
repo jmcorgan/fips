@@ -980,18 +980,19 @@ The protocol handles partitions gracefully (independent operation), heals
 automatically when connectivity returns, and adapts to heterogeneous link
 costs to form efficient tree structures.
 
-### Prior Art and FIPS Contributions
+### Prior Art and What FIPS Changes
 
-The protocol builds on established foundations (Yggdrasil/Ironwood
-tree-coordinate routing, IEEE 802.1D STP root election, CRDT-based
-distributed state, SWIM-style failure detection, ETX, OSPF-style
-hysteresis and hold-down) and adds several new elements (cost-aware
-parent selection on local-only metrics, the combined ETX + SRTT cost
-formula, flap dampening with mandatory-switch bypass, announcement
-suppression, and tree-only bloom filter merge with split-horizon).
-Both the prior-art map and the FIPS contributions list are
-consolidated in
-[fips-prior-work.md](fips-prior-work.md#fips-contributions).
+The protocol builds on established foundations: Yggdrasil/Ironwood
+tree-coordinate routing, with its tree-only bloom filter merge and
+bloom-guided lookup; IEEE 802.1D STP root election; CRDT-based
+distributed state; heartbeat failure detection; ETX; and hysteresis on
+a varying metric as in Babel. FIPS changes the parent cost (local-only
+metrics, with ETX and SRTT combined in one formula and added to depth),
+and adds flap dampening with mandatory-switch bypass after BGP route
+flap damping and announcement suppression after OSPF's MinLSInterval.
+The prior-art map and the list of what FIPS changes, each entry with
+its precedent, are consolidated in
+[fips-prior-work.md](fips-prior-work.md#what-fips-changes).
 
 ---
 

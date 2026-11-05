@@ -304,6 +304,11 @@ of academic and standards work, summarized below.
   contrasted with OSPF's cumulative model in
   [spanning-tree-dynamics.md §8](spanning-tree-dynamics.md#8-parent-selection).*
 
+- Villamizar, C., Chandra, R., Govindan, R.
+  [RFC 2439](https://datatracker.ietf.org/doc/html/rfc2439): "BGP Route
+  Flap Damping". 1998. *Suppressing unstable routes, while their removal
+  still takes effect.*
+
 - Chroboczek, J., Schinazi, D.
   [RFC 8966](https://www.rfc-editor.org/rfc/rfc8966): "The Babel Routing
   Protocol". 2021. *Split horizon (§3.7.4), ETX (Appendix A.2.2) and
@@ -325,21 +330,47 @@ of academic and standards work, summarized below.
   ACM SIGOPS Operating Systems Review 2007. *Framework for
   gossip-based protocols achieving O(log N) propagation.*
 
-## FIPS Contributions
+## What FIPS Changes
 
-The protocol builds on these foundations and adds several new elements:
+Most of the routing design above is inherited. The tree-only bloom
+filter merge with split-horizon exclusion is Ironwood's (`_getBloomFor`
+in `network/bloomfilter.go`). Bloom-guided lookup is Yggdrasil v0.5's,
+where a lookup is forwarded to the on-tree links whose filter holds the
+destination. FIPS changes the following, each listed with its
+precedent:
 
-- Cost-aware parent selection using local-only link metrics
-  (`effective_depth = depth + link_cost`), replacing Yggdrasil's
-  depth-only selection
-- Combined ETX + SRTT link cost formula with MMP-measured components
-- Flap dampening with mandatory switch bypass
-- Announcement suppression for transient state changes
-- Tree-only bloom filter merge with split-horizon exclusion
-- Hybrid coordinate warmup (CP flag piggybacking plus standalone
-  CoordsWarmup) layered on top of SessionSetup self-bootstrapping
-- Bloom-guided tree routing for discovery (vs. flooding)
-- Reverse-path routing for LookupResponse via `recent_requests`
+- **Cost in parent selection.** FIPS ranks candidate parents by
+  `effective_depth = depth + link_cost`, on local link metrics only.
+  Precedent: Ironwood since September 2024 scores a candidate by its
+  distance to the root times the peer's latency; at the Yggdrasil v0.5
+  release it chose by root and then path stability.
+- **The link cost formula.** `link_cost = etx * (1 + srtt_ms / 100)`,
+  with both terms measured by MMP, so one cost carries loss and delay.
+  Precedent: ETX (De Couto et al., used by Babel on wireless links) and
+  Ironwood's per-peer latency cost.
+- **Flap dampening with a mandatory-switch bypass.** Parent switches
+  that reach `flap_threshold` within a window suppress further
+  non-mandatory switches for a time; losing the parent or finding a
+  smaller root bypasses that. Precedent: BGP route flap damping
+  ([RFC 2439](https://datatracker.ietf.org/doc/html/rfc2439)), which
+  suppresses the use of an unstable route but not its removal.
+  Ironwood's guard against the same churn is simpler: at its periodic
+  refresh it moves to another parent only at less than half the cost.
+- **Announcement suppression.** A node sends at most one TreeAnnounce to
+  a peer per 500 ms, and changes during that interval are coalesced into
+  one. Precedent: OSPF's MinLSInterval, the minimum time between
+  originations of an LSA, 5 seconds in RFC 2328 Appendix B.
+- **Hybrid coordinate warmup.** Coordinates travel in SessionSetup and
+  SessionAck, then on the first N data packets of a session (default 5)
+  and again on demand, piggybacked with the CP flag or sent as a
+  standalone CoordsWarmup, and transit nodes cache them, so other data
+  packets carry addresses only. Precedent: Ironwood carries the source
+  and destination paths in every traffic packet (`network/traffic.go`).
+- **Reverse-path LookupResponse.** Each node a LookupRequest passes
+  records the peer it came from in `recent_requests`, and the response
+  retraces those records to the requester. Precedent: Ironwood routes
+  its lookup answer to the coordinates the lookup carried
+  (`path: lookup.from` in `network/pathfinder.go`).
 
 ## External Reference Index
 
@@ -355,6 +386,8 @@ The protocol builds on these foundations and adds several new elements:
 | [HIP](https://en.wikipedia.org/wiki/Host_Identity_Protocol) | identity-as-address |
 | [Babel (RFC 8966)](https://www.rfc-editor.org/rfc/rfc8966) | split horizon, ETX, route-selection hysteresis |
 | [RIP](https://en.wikipedia.org/wiki/Routing_Information_Protocol) | split-horizon |
+| [OSPF (RFC 2328)](https://datatracker.ietf.org/doc/html/rfc2328) | cumulative path cost contrast, MinLSInterval |
+| [BGP flap damping (RFC 2439)](https://datatracker.ietf.org/doc/html/rfc2439) | flap dampening |
 | [Noise Framework](https://noiseprotocol.org/) | FMP IK, FSP XK |
 | [WireGuard](https://www.wireguard.com/) | IK pattern, receiver-index dispatch, identity-bound sessions |
 | [Lightning BOLT #8](https://github.com/lightning/bolts/blob/master/08-transport.md) | XK pattern |
