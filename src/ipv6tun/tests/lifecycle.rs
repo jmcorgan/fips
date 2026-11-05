@@ -465,3 +465,54 @@ fn back_to_back_oversized_packets_from_one_source_on_the_app_owned_path_each_dra
         "Packet Too Big answers"
     );
 }
+
+/// Stopping a system TUN on Windows returns promptly when the host sends
+/// nothing into the adapter. The reader thread waits in the Wintun session's
+/// blocking receive, which only a packet or the session's shutdown ends, and
+/// the stop joins that thread with no time limit, so the stop has to end the
+/// receive itself. The node's end of the datagram channel is dropped first,
+/// as the node's receive loop has exited by the time the stop runs.
+///
+/// The stop runs on a thread of its own, so a stop that never returns fails
+/// the test at the bound instead of hanging the run.
+#[cfg(windows)]
+#[test]
+#[ignore = "needs Administrator and wintun.dll: creates the Wintun adapter"]
+fn stopping_a_wintun_tun_returns_with_no_host_traffic() {
+    /// Far longer than a stop that ends the receive takes, and far shorter
+    /// than the job's time limit.
+    const STOP_BOUND: Duration = Duration::from_secs(20);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (mut handles, _host, datagrams, _learned) = attached_by(any_key());
+            let _exits = handles.exits();
+            let device = handles
+                .open_tun()
+                .await
+                .expect("the Wintun adapter is created");
+            handles.spawn_tun(device).expect("the TUN threads start");
+            tx.send("started").unwrap();
+            // Let the reader reach its blocking receive.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(datagrams);
+            handles.stop_tun().await;
+            tx.send("stopped").unwrap();
+        });
+    });
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(60)),
+        Ok("started"),
+        "the TUN came up"
+    );
+    assert_eq!(
+        rx.recv_timeout(STOP_BOUND),
+        Ok("stopped"),
+        "stop_tun did not return within {STOP_BOUND:?}: the TUN reader is \
+         still blocked in the Wintun receive"
+    );
+}
