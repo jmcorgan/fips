@@ -2,14 +2,17 @@
 # Unit tests for the RPM install suite's network budget: the --deadline and
 # --label handling in packaging/rpm/dnf-bounded.sh, and retry_build's refusal
 # of a late retry and its messages with no deadline, off and on GitHub
-# Actions, in testing/lib/image-build.sh.
+# Actions, in testing/lib/image-build.sh. Also dnf-bounded.sh's retry after a
+# repository's metadata failed, which must leave the failed mirror out.
 #
 # dnf is a stand-in script on PATH that writes the librepo log lines the
 # report reads (DNF_BOUNDED_LOG points the script at it) and then sleeps and
-# exits as each case scripts it. retry_build runs a counting stand-in command,
-# and its sleep is a stand-in that only records the pause. Deadlines are a few
-# seconds out, so the cases run in about ten seconds with no containers and no
-# network.
+# exits as each case scripts it, or, for the metadata cases, fetches from the
+# first mirror of a repository's mirror list and fails on a broken one, as dnf
+# 4 does. retry_build runs a counting stand-in command, and its sleep is a
+# stand-in that only records the pause. Deadlines are a few seconds out, and
+# the metadata cases wait out the wrapper's own pauses between attempts, so
+# the cases run in about forty seconds with no containers and no network.
 #
 # What it does not assert: the per-attempt report line's wording beyond the
 # budget's own phrases, so a change to that line elsewhere does not break it.
@@ -36,20 +39,52 @@ mkdir -p "$WORK/bin"
 export DNF_BOUNDED_LOG="$WORK/librepo.log"
 export STUB_COUNT="$WORK/count"
 export STUB_PLAN=""
+export STUB_CONF="$WORK/repo.conf"
+export STUB_BROKEN=""
 
 # The dnf stand-in. STUB_PLAN holds one "SECONDS:STATUS:MIRROR" step per
 # attempt; each call takes the next, logs one download from MIRROR, sleeps,
-# and exits with STATUS.
+# and exits with STATUS. A step whose MIRROR is "list:REPO" stands for dnf
+# loading REPO's metadata instead: it reads the mirror list from the
+# --setopt=REPO.mirrorlist=file://... it was given, or else from STUB_LIST,
+# or from the one `dnf config-manager --dump REPO` names (STUB_CONF), logs
+# that fetch and a
+# repomd.xml download from the list's first mirror, and fails with dnf's
+# error when that mirror is one of STUB_BROKEN, without trying the next.
 cat >"$WORK/bin/dnf" <<'STUB'
 #!/bin/bash
 if [ "${1:-}" = "--version" ]; then
     echo "4.14.0"
     exit 0
 fi
+if [ "${1:-}" = "config-manager" ] && [ "${2:-}" = "--dump" ]; then
+    cat "$STUB_CONF"
+    exit 0
+fi
 n=$(($(cat "$STUB_COUNT" 2>/dev/null || echo 0) + 1))
 echo "$n" >"$STUB_COUNT"
 read -ra steps <<<"$STUB_PLAN"
 IFS=: read -r secs status mirror <<<"${steps[$((n - 1))]:-0:0:http://none.example}"
+if [[ "$mirror" == list:* ]]; then
+    repo=${mirror#list:}
+    list=${STUB_LIST:-$(sed -n 's/^mirrorlist = //p' "$STUB_CONF")}
+    for arg in "$@"; do
+        case "$arg" in
+            --setopt="$repo".mirrorlist=*) list=${arg#*.mirrorlist=} ;;
+        esac
+    done
+    echo "Downloading: $list" >>"$DNF_BOUNDED_LOG"
+    mirror=$(grep -m 1 -E '^[a-z]+://' "${list#file://}") || {
+        echo "dnf stand-in: no mirror in $list" >&2
+        exit 99
+    }
+    echo "Downloading: ${mirror}repodata/repomd.xml" >>"$DNF_BOUNDED_LOG"
+    if [[ " $STUB_BROKEN " == *" $mirror "* ]]; then
+        echo "Error: Failed to download metadata for repo '$repo': repomd.xml parser error: Parse error at line: 1 (Document is empty"
+        exit 1
+    fi
+    exit 0
+fi
 echo "Downloading: $mirror/repodata/repomd.xml" >>"$DNF_BOUNDED_LOG"
 sleep "$secs"
 exit "$status"
@@ -260,6 +295,59 @@ expect_rc "actions, recovered" 0
 expect_has "actions, recovered" "image-build: docker build -t x recovered on attempt 2 of 3
 ::warning::image-build: docker build -t x recovered on attempt 2 of 3
 rc=0 builds=2"
+
+# --- dnf-bounded: a retry after a repository's metadata failed ----------
+
+# The repomd.xml mirrors the stand-in fetched from, in order, from the log.
+fetched() {
+    grep -oE 'Downloading: [a-z]+://[^ ]+/repodata/repomd\.xml' "$DNF_BOUNDED_LOG" \
+        | sed -E 's|^Downloading: ||; s|repodata/repomd\.xml$||' | paste -sd' '
+}
+
+printf '%s\n' "# mirrors for appstream" http://broken1.example/9/AppStream/ \
+    http://broken2.example/9/AppStream/ http://good.example/9/AppStream/ >"$WORK/mirrorlist"
+STUB_BROKEN="http://broken1.example/9/AppStream/ http://broken2.example/9/AppStream/"
+
+echo
+echo "== Case 11: a retry after a metadata parse error asks a different mirror =="
+printf 'mirrorlist = file://%s\nbaseurl = \n' "$WORK/mirrorlist" >"$STUB_CONF"
+name="metadata retry"
+run_bounded "0:0:list:appstream 0:0:list:appstream 0:0:list:appstream" \
+    --bound 60 --attempts 3 --deadline $(($(now) + 90)) -- install x
+expect_rc "$name" 0
+expect_calls "$name" 3
+mirrors=$(fetched)
+[ "$mirrors" = "http://broken1.example/9/AppStream/ http://broken2.example/9/AppStream/ http://good.example/9/AppStream/" ]
+check "$name: each attempt asks a mirror no earlier attempt failed on" $? "$mirrors"
+expect_has "$name" "appstream: the next attempt leaves out http://broken1.example, 2 of 3 mirrors left"
+expect_has "$name" "appstream: the next attempt leaves out http://broken1.example http://broken2.example, 1 of 3 mirrors left"
+expect_has "$name" "; left out of appstream: http://broken1.example http://broken2.example"
+
+echo
+echo "== Case 12: a repository with a metalink is retried as it is, and says so =="
+printf 'metalink = https://mirrors.example/metalink?repo=appstream\nmirrorlist = file://%s\n' \
+    "$WORK/mirrorlist" >"$STUB_CONF"
+name="metalink"
+run_bounded "0:0:list:appstream 0:0:list:appstream" --bound 60 --attempts 2 -- install x
+expect_rc "$name" 1
+expect_calls "$name" 2
+mirrors=$(fetched)
+[ "$mirrors" = "http://broken1.example/9/AppStream/ http://broken1.example/9/AppStream/" ]
+check "$name: the retry asks the same mirror" $? "$mirrors"
+expect_has "$name" "appstream: its metadata failed; retrying with its mirrors as they are: it uses a metalink"
+expect_lacks "$name" "left out"
+
+echo
+echo "== Case 13: a mirror list that cannot be fetched leaves the retry as it is, and says so =="
+# dnf itself reads the list; the wrapper's own fetch of it fails.
+printf 'mirrorlist = file://%s\n' "$WORK/missing-mirrorlist" >"$STUB_CONF"
+name="unfetched list"
+STUB_LIST="file://$WORK/mirrorlist" run_bounded "0:0:list:appstream 0:0:list:appstream" \
+    --bound 60 --attempts 2 -- install x
+expect_rc "$name" 1
+expect_calls "$name" 2
+expect_has "$name" "appstream: its metadata failed; retrying with its mirrors as they are: its mirror list could not be fetched from file://$WORK/missing-mirrorlist"
+expect_lacks "$name" "left out"
 
 # --- Summary ----------------------------------------------------------
 echo

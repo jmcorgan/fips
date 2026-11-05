@@ -141,7 +141,7 @@ jobs:
       # reason as the convergence-gate step above.
       - name: Run NAT lab relay start and guard unit tests
         run: bash testing/lib/relay-verdict-test.sh
-      # Hermetic: dnf and the image build stubbed, no containers, about ten
+      # Hermetic: dnf and the image build stubbed, no containers, about forty
       # seconds. Kept in step with ci-local.sh's run_rpm_budget_test by hand,
       # for the same reason as the convergence-gate step above.
       - name: Run RPM install network budget unit tests

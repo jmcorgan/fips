@@ -41,6 +41,21 @@
 # killed again. A deadline that cannot be read is an error rather than no
 # deadline, so a broken hand-off fails loudly instead of running unbounded.
 #
+# A retry after a repository's metadata failed would reach the same mirror:
+# dnf 4 does not move on to the next mirror when repomd.xml fails to parse,
+# and the mirror list comes back in the same order each time, so one broken
+# mirror at the top of the list fails every attempt within seconds. So after
+# an attempt whose output names a repository whose metadata failed, the
+# mirror it last fetched that repository's repomd.xml from is left out: the
+# repository's mirror list is fetched under its own short bound, inside the
+# deadline, every mirror that has failed for it so far is dropped, and the
+# remaining attempts read the rest through
+# --setopt=REPO.mirrorlist=file://LIST. The attempt line names what was left
+# out. A repository with a metalink (dnf5 on Fedora), no mirror list, or a
+# list that cannot be fetched or has no mirror left is retried as it is, and
+# the report says why. The cache is copied back only after an attempt
+# succeeds, so no excluded mirror reaches a later call through it.
+#
 # --cache lets the calls of one run share a single download of the metadata,
 # each in its own fresh container. dnf writes only to the container's own
 # cache, and the copy back is written by DIR's owner, never by root, so a
@@ -49,7 +64,8 @@
 # call downloads what it needs.
 #
 # Runs inside the container, so it needs only bash, coreutils and dnf (and
-# tar and setpriv for --cache). It
+# tar and setpriv for --cache, and curl and dnf's config-manager plugin to
+# leave a failed mirror out; without them a retry runs as it is). It
 # handles both dnf 4 (EL9, which takes -v) and dnf5 (Fedora, which does not and
 # logs to a different file). DNF_BOUNDED_LOG overrides the librepo log it reads
 # the mirrors from, for testing/rpm-install/budget-test.sh.
@@ -118,7 +134,8 @@ if [[ "$version" == dnf5* ]]; then
 fi
 
 out=$(mktemp) || exit 1
-trap 'rm -f "$out"' EXIT
+lists=$(mktemp -d) || exit 1
+trap 'rm -rf "$out" "$lists"' EXIT
 
 # dnf's own cache, inside the container.
 dnf_cache=/var/cache/dnf
@@ -164,6 +181,92 @@ mirror_list() {
         | awk '{ printf "%s%s (%s)", sep, $2, $1; sep = ", " }'
 }
 
+# The scheme and host of each URL in a list, one per line.
+hosts_of() {
+    grep -oE '^[a-z]+://[^/]+' <<<"$1"
+}
+
+# Mirrors left out so far, as a newline-separated list per repository, and
+# the repositories whose filtered mirror list the next attempt reads.
+declare -A failed=()
+declare -A steered=()
+extra=()
+
+# The last attempt failed: if its output names a repository whose metadata
+# failed, leave out the mirror that repository's repomd.xml last came from,
+# and every mirror that failed for it before, for the attempts that remain.
+# $1 is how many seconds this may take. Anything that stops it leaves the
+# retry as it was, and the report says why.
+steer_retry() {
+    local by=$(($(date +%s) + $1)) repo conf url list hosts bad="" left n m why=""
+    repo=$(grep -oE "Failed to download metadata[^']* for repo(sitory)? '[^']+'" "$out" \
+        | tail -n 1 | cut -d"'" -f2)
+    [ -n "$repo" ] || return 0
+    if [ "$1" -lt 1 ]; then
+        why="the budget leaves no time to fetch its mirror list"
+    elif ! command -v curl >/dev/null; then
+        why="curl is not installed"
+    elif ! conf=$(timeout -k 2 "$1" dnf config-manager --dump "$repo" 2>/dev/null); then
+        why="its configuration could not be read"
+    elif [ -n "$(sed -n 's/^metalink = //p' <<<"$conf")" ]; then
+        why="it uses a metalink"
+    else
+        url=$(sed -n 's/^mirrorlist = //p' <<<"$conf")
+        left=$((by - $(date +%s)))
+        if [ -z "$url" ]; then
+            why="it has no mirror list"
+        elif [ "$left" -lt 1 ] \
+            || ! list=$(curl -fsSL --max-time "$left" "$url" 2>/dev/null); then
+            why="its mirror list could not be fetched from $url"
+        fi
+    fi
+    if [ -z "$why" ]; then
+        list=$(grep -E '^[a-z]+://' <<<"$list")
+        hosts=$(hosts_of "$list")
+        while IFS= read -r url; do
+            if grep -qxF -- "$(hosts_of "$url")" <<<"$hosts"; then
+                bad=$(hosts_of "$url")
+            fi
+        done < <(grep '/repodata/repomd\.xml$' <<<"$urls")
+        if [ -z "$bad" ]; then
+            why="none of its mirrors is in this attempt's log"
+        fi
+    fi
+    if [ -z "$why" ]; then
+        failed[$repo]+="$bad"$'\n'
+        list=$(while IFS= read -r url; do
+            grep -qxF -- "$(hosts_of "$url")" <<<"${failed[$repo]}" || echo "$url"
+        done <<<"$list")
+        n=$(grep -c . <<<"$list")
+        m=$(grep -c . <<<"$hosts")
+        if [ "$n" -eq 0 ]; then
+            why="every mirror in its list has failed"
+        else
+            echo "$list" >"$lists/$repo.mirrorlist"
+            steered[$repo]=1
+            report "dnf-bounded:   $repo: the next attempt leaves out $(paste -sd' ' <<<"${failed[$repo]%$'\n'}"), $n of $m mirrors left"
+        fi
+    fi
+    if [ -n "$why" ]; then
+        unset "steered[$repo]"
+        report "dnf-bounded:   $repo: its metadata failed; retrying with its mirrors as they are: $why"
+    fi
+    extra=()
+    for repo in "${!steered[@]}"; do
+        extra+=(--setopt="$repo.mirrorlist=file://$lists/$repo.mirrorlist")
+    done
+    return 0
+}
+
+# What the attempt about to run leaves out, for its report line.
+left_out() {
+    local repo text=""
+    for repo in "${!steered[@]}"; do
+        text+="; left out of $repo: $(paste -sd' ' <<<"${failed[$repo]%$'\n'}")"
+    done
+    echo "$text"
+}
+
 # Seconds left before the deadline; meaningful only when one was given.
 time_left() {
     echo $((deadline - $(date +%s)))
@@ -201,10 +304,11 @@ while true; do
     fi
     seen=0
     [ -f "$librepo_log" ] && seen=$(wc -l <"$librepo_log")
+    skipped=$(left_out)
     start=$SECONDS
     rc=0
     timeout -k 10 "$limit" dnf "${verbose[@]}" \
-        --setopt=timeout=20 --setopt=minrate=50k "${keep[@]}" "$@" >"$out" 2>&1 || rc=$?
+        --setopt=timeout=20 --setopt=minrate=50k "${keep[@]}" "${extra[@]}" "$@" >"$out" 2>&1 || rc=$?
     took=$((SECONDS - start))
 
     urls=""
@@ -223,7 +327,7 @@ while true; do
             outcome="killed at the ${bound}s bound"
         fi
     fi
-    report "dnf-bounded: $(date -u +%FT%TZ) attempt $attempt of $attempts, dnf $1: $outcome after ${took}s; mirrors: ${mirrors:-none}"
+    report "dnf-bounded: $(date -u +%FT%TZ) attempt $attempt of $attempts, dnf $1: $outcome after ${took}s; mirrors: ${mirrors:-none}$skipped"
     # The transfer lines, rate and size, from both dnf versions: one per
     # repository's metadata and the packages' total, not one per package.
     while IFS= read -r line; do
@@ -248,9 +352,17 @@ while true; do
         exit "$rc"
     fi
     pause=$((attempt * 5))
-    if [ -n "$deadline" ] && [ $(($(time_left) - pause)) -lt 30 ]; then
-        budget_spent "$attempt"
+    # The mirror list fetch may take only what the next attempt's own floor
+    # leaves of the budget, and 15 s at most.
+    steer=15
+    if [ -n "$deadline" ]; then
+        spare=$(($(time_left) - pause - 30))
+        if [ "$spare" -lt 0 ]; then
+            budget_spent "$attempt"
+        fi
+        [ "$spare" -lt "$steer" ] && steer=$spare
     fi
+    steer_retry "$steer"
     sleep "$pause"
     attempt=$((attempt + 1))
 done
