@@ -1,5 +1,6 @@
-//! Tests of the Packet Too Big limiter at exact times, through the check that
-//! takes the time rather than reading the clock.
+//! Tests of the Packet Too Big limiter: at exact times, through the check that
+//! takes the time rather than reading the clock, and through the wrapper that
+//! reads it (`should_send`).
 
 use super::*;
 
@@ -54,4 +55,72 @@ fn a_custom_interval_is_judged_to_the_millisecond() {
     assert!(limiter.check(src(), t0));
     assert!(!limiter.check(src(), t0 + Duration::from_millis(49)));
     assert!(limiter.check(src(), t0 + Duration::from_millis(50)));
+}
+
+#[test]
+fn test_first_send_allowed() {
+    let mut limiter = IcmpRateLimiter::new();
+    let addr: Ipv6Addr = "fd00::1".parse().unwrap();
+
+    assert!(limiter.should_send(addr));
+}
+
+#[test]
+fn test_rapid_sends_rate_limited() {
+    let mut limiter = IcmpRateLimiter::new();
+    let addr: Ipv6Addr = "fd00::1".parse().unwrap();
+
+    // First send should succeed
+    assert!(limiter.should_send(addr));
+
+    // Immediate second send should be rate limited
+    assert!(!limiter.should_send(addr));
+    assert!(!limiter.should_send(addr));
+}
+
+#[test]
+fn test_different_sources_independent() {
+    let mut limiter = IcmpRateLimiter::new();
+    let addr1: Ipv6Addr = "fd00::1".parse().unwrap();
+    let addr2: Ipv6Addr = "fd00::2".parse().unwrap();
+
+    // Both sources should be allowed independently
+    assert!(limiter.should_send(addr1));
+    assert!(limiter.should_send(addr2));
+
+    // But rapid resends to same source are limited
+    assert!(!limiter.should_send(addr1));
+    assert!(!limiter.should_send(addr2));
+}
+
+#[test]
+fn test_cleanup_removes_old_entries() {
+    let mut limiter = IcmpRateLimiter::new();
+    let addr1: Ipv6Addr = "fd00::1".parse().unwrap();
+    let addr2: Ipv6Addr = "fd00::2".parse().unwrap();
+
+    // Send to both addresses
+    assert!(limiter.should_send(addr1));
+    assert!(limiter.should_send(addr2));
+    assert_eq!(limiter.len(), 2);
+
+    // Manually trigger cleanup with a future timestamp
+    let future = Instant::now() + Duration::from_secs(11);
+    limiter.cleanup(future);
+
+    // All entries should be cleaned up
+    assert_eq!(limiter.len(), 0);
+}
+
+#[test]
+fn test_cleanup_preserves_recent_entries() {
+    let mut limiter = IcmpRateLimiter::new();
+    let addr: Ipv6Addr = "fd00::1".parse().unwrap();
+
+    assert!(limiter.should_send(addr));
+    assert_eq!(limiter.len(), 1);
+
+    // Cleanup with current time shouldn't remove recent entry
+    limiter.cleanup(Instant::now());
+    assert_eq!(limiter.len(), 1);
 }

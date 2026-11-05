@@ -110,15 +110,18 @@ The others:
   one to the same source within the interval is held back, and one at the end
   of the interval is built. The older tests of the builders stay in the
   file's inline `tests` module.
-- `icmp_rate_limit.rs` tests `../icmp_rate_limit.rs` as module `clock_tests`:
+- `icmp_rate_limit.rs` tests `../icmp_rate_limit.rs` as module `tests`:
   the Packet Too Big limiter judged at exact times through the check that
   takes the time (`check`), rather than by sleeping. A source is held back
   for the whole interval after a send and allowed again once it has passed,
   to the millisecond, with the default interval and a custom one; an attempt
   held back does not restart the interval; and an entry is dropped by the
   first allowed check at its maximum age and kept by one just short of it.
-  The older tests of the wrapper that reads the clock (`should_send`) stay in
-  the file's inline `tests` module.
+  The older tests of the wrapper that reads the clock (`should_send`), moved
+  here from the file's former inline module, check that a first send is
+  allowed, that an immediate resend to one source is held back while
+  sources are judged apart, and that cleanup drops old entries and keeps
+  recent ones.
 - `outbound.rs` tests `../outbound.rs` as module `host_tests`, on the
   values the host half's decisions return rather than on what a channel
   received: the host half turns a packet to a key the adapter holds into a
