@@ -167,7 +167,7 @@ service fips-gateway start
 ```
 
 Behind that single command, the init script
-(`/etc/init.d/fips-gateway`) does five things:
+(`/etc/init.d/fips-gateway`) does six things:
 
 1. **Loads gateway sysctls.** `net.ipv6.conf.all.proxy_ndp=1` and
    `net.ipv6.conf.all.forwarding=1` from
@@ -180,18 +180,28 @@ Behind that single command, the init script
    the gateway is listening, and dnsmasq goes back to port 5354
    whenever the gateway exits, so a gateway that fails to start
    leaves `.fips` resolving through the daemon.
-3. **Adds a global-scope IPv6 prefix** to `br-lan`. Without a
-   non-ULA address on the local interface, Android and Chrome
-   suppress AAAA queries entirely — they assume the LAN has no
-   real IPv6 and don't bother. The init script adds an address from
-   an unassigned, unrouted part of IANA's `2001::/23` block to
-   convince them otherwise. A LAN that already has an IPv6 address
-   you set keeps it, and gets no address from the gateway.
-4. **Adds an RA route for the virtual pool.** A UCI `route6` entry
+3. **Adds a global-scope IPv6 prefix** to `br-lan`, only if you set
+   `gateway.global_prefix: true`. Without a non-ULA address on the
+   local interface, Android and Chrome suppress AAAA queries entirely
+   — they assume the LAN has no real IPv6 and don't bother. On a
+   router with no upstream IPv6, set the option for those clients:
+   the init script then adds an address from an unassigned, unrouted
+   part of IANA's `2001::/23` block to convince them otherwise. Leave
+   it off on a router with upstream IPv6: LAN clients there pick the
+   unrouted address as the source for many global destinations, and
+   those connections fail. A LAN that already has an IPv6 address you
+   set keeps it, and gets no address from the gateway.
+4. **Has `odhcpd` advertise a default route**, with or without that
+   option, by setting `ra_default` to 2 while the gateway runs. On a
+   router with no upstream IPv6 this default route is how LAN clients
+   reach the pool. It leads nowhere else, so there a LAN client's
+   connection to a global IPv6 address fails at once with an
+   unreachable error from the router.
+5. **Adds an RA route for the virtual pool.** A UCI `route6` entry
    under `dhcp` tells `odhcpd` to advertise the pool CIDR via Router
    Advertisement (RFC 4191), so LAN clients learn how to reach pool
    addresses automatically. No per-client static routes needed.
-5. **Spawns `fips-gateway` under procd** with `--config
+6. **Spawns `fips-gateway` under procd** with `--config
    /etc/fips/fips.yaml`, with crash-respawn.
 
 Verify it is running:
@@ -316,9 +326,9 @@ BR_LAN_ADDR=$(ip -6 addr show br-lan \
 echo "$BR_LAN_ADDR"
 ```
 
-Pick from the global-scope prefix the init script added
-in Step 3, or your own ULA if `br-lan` has one — anything except a
-link-local `fe80::/10` address.
+Pick your ULA on `br-lan`, or the global-scope prefix if you set
+`gateway.global_prefix` in Step 3 — anything except a link-local
+`fe80::/10` address.
 
 Set up a one-file docroot and start a foreground `busybox httpd`
 bound to that LAN address on port 8000:
@@ -444,19 +454,23 @@ and so does the corresponding nftables rule.
 To turn the gateway off entirely:
 
 ```sh
-service fips-gateway stop
 service fips-gateway disable
+service fips-gateway stop
 ```
 
 The init script's `stop_service` handler reverses most of the
 LAN-side integration on the way out: dnsmasq's `.fips` forwarder is
 pointed back at the daemon's port 5354 and the RA route for the pool
-is withdrawn from `odhcpd`. The global-scope IPv6 prefix on `br-lan`
-stays while the service is enabled, so that a restart does not reload
-the network; `disable` removes it, with one network reload. (In the
-other order, `disable` then `stop`, the `stop` removes it.) The LAN
+is withdrawn from `odhcpd`. With `gateway.global_prefix` set, the
+global-scope IPv6 prefix on `br-lan` stays while the service is
+enabled, so that a restart does not reload the network; after the
+`disable`, the `stop` removes it, with one network reload. The LAN
 then reverts to the state it was in before you ran
-`service fips-gateway start` in Step 3. If you disable a running
+`service fips-gateway start` in Step 3. In the other order, `stop`
+and then `disable` straight after it, the prefix can stay: it did on
+OpenWrt 23.05.6 in every run tried, because `disable` keeps the prefix
+while the gateway runs and appears to find it still exiting. A further
+`service fips-gateway stop` removes it. If you disable a running
 gateway and reboot without stopping it, nothing removes the prefix:
 a disabled service is neither stopped at shutdown nor started at boot.
 Run `service fips-gateway stop` once after the reboot to remove it.
@@ -476,9 +490,9 @@ peering on the AP itself continues to work.
   table, one control socket, and one config block, but each half
   has its own use case.
 - **OpenWrt does the LAN-side glue for you.** The init script
-  reconfigures dnsmasq, installs the RA route, adds the global IPv6
-  prefix, and loads sysctls. On a non-OpenWrt host that integration
-  is manual — see [../how-to/deploy-gateway.md](../how-to/deploy-gateway.md).
+  reconfigures dnsmasq, installs the RA route, loads sysctls, and on
+  request adds the global IPv6 prefix. On a non-OpenWrt host that
+  integration is manual — see [../how-to/deploy-gateway.md](../how-to/deploy-gateway.md).
 - **Inbound forwards stay manual on every distro.** The
   `port_forwards[]` block is uniform across hosts, and on every
   distro you still own the decision of which LAN target to expose
