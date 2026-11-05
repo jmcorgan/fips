@@ -109,6 +109,12 @@ pub enum TunError {
     #[cfg(unix)]
     #[error("IPv6 is disabled: {0}")]
     Ipv6Disabled(String),
+
+    /// A stop shut the Wintun session down, which ended the read; the read
+    /// did not fail.
+    #[cfg(windows)]
+    #[error("the TUN session was shut down")]
+    ShutDown,
 }
 
 #[cfg(unix)]
@@ -999,7 +1005,8 @@ mod windows_tun {
         /// Read a packet from the TUN device.
         ///
         /// Blocks until a packet is available from the wintun session.
-        /// Returns the number of bytes copied into `buf`.
+        /// Returns the number of bytes copied into `buf`, or
+        /// [`TunError::ShutDown`] once a stop has shut the session down.
         pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, TunError> {
             match self.session.receive_blocking() {
                 Ok(packet) => {
@@ -1008,16 +1015,26 @@ mod windows_tun {
                     buf[..len].copy_from_slice(&bytes[..len]);
                     Ok(len)
                 }
+                Err(wintun::Error::ShuttingDown) => Err(TunError::ShutDown),
                 Err(e) => Err(TunError::Configure(format!("read failed: {}", e))),
             }
         }
 
         /// Shutdown the TUN device by removing the fd00::/8 route.
         ///
-        /// The wintun adapter and session are cleaned up when dropped.
+        /// This does not wake a reader blocked in the session's receive: the
+        /// TUN stop does that through [`Self::session`]. The wintun adapter
+        /// and session are cleaned up when the last holder of the session
+        /// drops it.
         pub async fn shutdown(&self) -> Result<(), TunError> {
             debug!(name = %self.name, "Shutting down TUN device");
             drop_route(self.luid)
+        }
+
+        /// The wintun session, for a stop to end the reader's blocking
+        /// receive with `Session::shutdown`.
+        pub(crate) fn session(&self) -> Arc<wintun::Session> {
+            self.session.clone()
         }
 
         /// Create a TunWriter for this device.
@@ -1166,6 +1183,7 @@ mod windows_tun {
                     }
                 }
                 Ok(_) => {}
+                Err(TunError::ShutDown) => break,
                 Err(e) => {
                     let err_str = format!("{}", e);
                     if !err_str.contains("Bad address") {

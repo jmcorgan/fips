@@ -164,6 +164,10 @@ pub(crate) struct Handles {
     /// serves the same purpose.
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     tun_shutdown_fd: Option<std::os::unix::io::RawFd>,
+    /// The Wintun session: shutting it down ends the reader's blocking
+    /// receive on Windows.
+    #[cfg(windows)]
+    tun_session: Option<Arc<wintun::Session>>,
 
     /// DNS responder task handle.
     dns_task: Option<tokio::task::JoinHandle<()>>,
@@ -226,6 +230,8 @@ impl Handles {
             tun_writer_handle: None,
             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             tun_shutdown_fd: None,
+            #[cfg(windows)]
+            tun_session: None,
             dns_task: None,
             dns_local_addr: None,
             dns_aliases: None,
@@ -674,6 +680,8 @@ impl Handles {
         // honor a narrower path the node has learned.
         let (writer, tun_tx) =
             device.create_writer(max_mss.clone(), path_mtu_lookup.clone(), capacity)?;
+        #[cfg(windows)]
+        let session = device.session();
 
         // Spawn writer thread. On exit, including a panic,
         // it self-reports `Exit::Tun` (sync context →
@@ -754,6 +762,10 @@ impl Handles {
         {
             self.tun_shutdown_fd = Some(shutdown_write_fd);
         }
+        #[cfg(windows)]
+        {
+            self.tun_session = Some(session);
+        }
         self.tun_state = TunState::Active;
         self.publish();
         self.run_link();
@@ -793,6 +805,15 @@ impl Handles {
                 libc::write(fd, b"x".as_ptr() as *const libc::c_void, 1);
                 libc::close(fd);
             }
+        }
+
+        // On Windows, end the reader's blocking Wintun receive, which
+        // only a packet or the session's shutdown ends.
+        #[cfg(windows)]
+        if let Some(session) = self.tun_session.take()
+            && let Err(e) = session.shutdown()
+        {
+            warn!(name = %name, error = %e, "Failed to shut down the Wintun session");
         }
 
         // Wait for threads to finish

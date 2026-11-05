@@ -278,7 +278,12 @@ The others:
   hundred held packets each draw the Destination Unreachable burst and no
   more than the bucket refills meanwhile; and the host path the handles
   build for the TUN reader draws on their bucket, so tokens it spends are
-  gone for the handles' answers.
+  gone for the handles' answers. On Windows, as Administrator with
+  `wintun.dll`, it stops a real Wintun adapter that has no host traffic and
+  fails if the stop has not returned within 20 seconds, on a thread of its
+  own so a hang fails the test and not the job. The test is ignored for the
+  unit-test run; the Administrator step of the Windows job in `ci.yml` runs
+  it by name.
 - `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
   `target_tests`: the warning about a firewall that polices another
   interface than the TUN keeps the `fips::control::firewall_state` target it
