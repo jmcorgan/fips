@@ -17,7 +17,8 @@
 #   stall-31              the move stalls 31 s, at the real bound, and the pair
 #                         completes (the old 30 s bound aborted here)
 #   retry-before-effect   attempt 1 times out before the move; its helper is
-#                         removed by name, and attempt 2 moves the link
+#                         removed by name before it can run, and attempt 2
+#                         moves the link
 #   effect-before-timeout the move lands, then the helper hangs past the bound;
 #                         the move is found in place and not repeated
 #   late-start            the helper does not exist until after `docker rm -f`
@@ -30,12 +31,20 @@
 #                         timing out: exit 4 and a NOT SCORED line naming the
 #                         timeout, not mesh assertion verdicts
 #
-# Every case but stall-31 shortens the bound to 2 or 3 s through drive.py, so
-# the suite does not wait out the real bound twice. stall-31 uses the bound the
-# module ships with. The suite takes about a minute and a half, most of it
-# stall-31.
-# VETH_TEST_BOTH_STALL sets both-attempts' stall (default 6 s); 31 shows what a
-# veth.py with the old fixed 30 s bound prints when its setup aborts.
+# A helper that must not act until the runner has removed it waits for its
+# own removal (an `after` gate on `rm {self}`), not for a sleep the removal
+# has to beat. Every case but stall-31 shortens the bound through drive.py to
+# SHORT_BOUND, so the suite does not wait out the real bound twice. Every
+# host command a case does not stall is an ordinary helper that must still
+# finish inside that bound, and so is attempt 2 of the stalled move in
+# retry-before-effect, late-start and late-lands-first, and the move itself in
+# effect-before-timeout; the fake cannot gate on the runner's own timeout, so
+# the bound is kept wide enough for a heavily loaded host (see the README).
+# stall-31 uses the bound the module ships with. The suite takes about two
+# minutes, a third of it stall-31.
+# VETH_TEST_BOTH_STALL adds a stall before both-attempts' helpers wait for
+# their removal (default 0 s); 31 shows what a veth.py with the old fixed 30 s
+# bound prints when its setup aborts.
 # VETH_TEST_SHOW_OUTPUT=1 prints each case's driver output after its checks.
 #
 # Run:
@@ -52,6 +61,10 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SUPPORT="$SCRIPT_DIR/veth-host-test"
 ALL_CASES=(healthy stall-31 retry-before-effect effect-before-timeout late-start late-lands-first
     both-attempts)
+
+# The shortened host-command bound, in seconds. An unstalled fake helper
+# takes about 6 s with the test held to 2% of one CPU.
+SHORT_BOUND=10
 
 # Docker calls one pair's setup makes when nothing stalls: the image lookup,
 # two PID reads, two purges, the stale delete, the add, two moves, two
@@ -156,6 +169,17 @@ helper_name() {
     grep -E "^run .* cmd=.*$1" "$STATE/helpers.log" | sed -n "${2}p" | awk '{print $2}'
 }
 
+# The helper never ran its command: the runner removed it by name while it
+# waited for that removal, and its gate did not give up waiting first.
+check_removed_unrun() {
+    local name="$1" helper="$2"
+    check "$name: timed-out helper removed by name" \
+        "$(grep -q "^rm $helper killed" "$STATE/helpers.log"; echo $?)" "${helper:-no helper}"
+    check "$name: removed helper never ran" \
+        "$(! grep -qE "^(gate-timeout|exit) $helper( |\$)" "$STATE/helpers.log"; echo $?)" \
+        "$(grep -E "^(gate-timeout|exit) $helper( |\$)" "$STATE/helpers.log")"
+}
+
 # Wait up to $2 seconds for a line matching $1 in the helpers log.
 await_helper_log() {
     local deadline=$((SECONDS + $2))
@@ -198,30 +222,31 @@ case_stall_31() {
     check "stall-31: no second attempt" "$([ "$runs" -eq 1 ]; echo $?)" "$runs helper runs for the move"
 }
 
+# The gate for a helper that may run its command only if the runner never
+# removes it: a removal kills it first, and GATE_CAP_SECS lets it go on.
+AWAIT_RM='[["helpers.log", "^rm {self} "]]'
+
 case_retry_before_effect() {
-    drive retry-before-effect "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"stall-before\", \"secs\": 6}]" 2 \
-        pair "$SIM_PARENT"
+    # Attempt 2 is an ordinary helper that must move the link inside the bound.
+    drive retry-before-effect "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"stall-before\", \"secs\": 0,
+        \"after\": $AWAIT_RM}]" "$SHORT_BOUND" pair "$SIM_PARENT"
     check_pair_done retry-before-effect
     local first second
     first=$(helper_name "$MOVE_B" 1)
     second=$(helper_name "$MOVE_B" 2)
-    check "retry-before-effect: timed-out helper removed by name" \
-        "$(grep -q "^rm $first killed" "$STATE/helpers.log"; echo $?)" "${first:-no helper}"
+    check_removed_unrun retry-before-effect "$first"
     check "retry-before-effect: move made by attempt 2" \
         "$(grep -qE "^move vh0102b .* by=$second\$" "$STATE/effects.log"; echo $?)" "${second:-no second helper}"
     check "retry-before-effect: helper state recorded" \
         "$(grep -q "$first.*\"Status\": \"running\"" "$OUT"; echo $?)"
     check "retry-before-effect: link location recorded" \
         "$(grep -q "vh0102b is in the host namespace" "$OUT"; echo $?)"
-    # The killed helper would have moved the link 6 s in; it must not.
-    sleep 5
-    check "retry-before-effect: killed helper never ran" \
-        "$([ "$(count "^exit $first" "$STATE/helpers.log")" -eq 0 ]; echo $?)"
 }
 
 case_effect_before_timeout() {
-    drive effect-before-timeout "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"stall-after\", \"secs\": 6}]" 2 \
-        pair "$SIM_PARENT"
+    # The move must land inside the bound; the helper then hangs past it.
+    drive effect-before-timeout "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"stall-after\",
+        \"secs\": $((SHORT_BOUND * 2))}]" "$SHORT_BOUND" pair "$SIM_PARENT"
     check_pair_done effect-before-timeout
     local runs
     runs=$(count "^run .*cmd=$MOVE_B" "$STATE/helpers.log")
@@ -234,11 +259,11 @@ case_late_start() {
     # Attempt 1's helper appears only after its removal was tried and attempt 2
     # has moved the link, so a slow runner cannot let it move the link first.
     # Attempt 2 is an ordinary helper, and its move must still finish inside
-    # the 2 s bound.
+    # the bound.
     local gate="[[\"helpers.log\", \"^rm {self} \"],
         [\"effects.log\", \"^move vh0102b host->fips-node-n02 by=(?!{self}$)\"]]"
     drive late-start "[{\"match\": \"$MOVE_B\", \"attempts\": [1], \"mode\": \"late-start\", \"secs\": 0,
-        \"after\": $gate}]" 2 pair "$SIM_PARENT"
+        \"after\": $gate}]" "$SHORT_BOUND" pair "$SIM_PARENT"
     local first
     first=$(helper_name "$MOVE_B" 1)
     check "late-start: helper absent at removal" \
@@ -252,7 +277,7 @@ case_late_start() {
 }
 
 case_late_lands_first() {
-    # Bound 3 s. Attempt 1's helper appears after its removal and once attempt
+    # Attempt 1's helper appears after its removal and once attempt
     # 2's helper is running, so after the check; attempt 2's waits for that late
     # move before making its own, so the late helper moves the link first.
     local late="[[\"helpers.log\", \"^rm {self} \"],
@@ -261,7 +286,7 @@ case_late_lands_first() {
             \"after\": $late},
         {\"match\": \"$MOVE_B\", \"attempts\": [2], \"mode\": \"stall-before\", \"secs\": 0,
             \"after\": [[\"effects.log\", \"^move vh0102b host->fips-node-n02 by=\"]]}]"
-    drive late-lands-first "$plan" 3 pair "$SIM_PARENT"
+    drive late-lands-first "$plan" "$SHORT_BOUND" pair "$SIM_PARENT"
     check_pair_done late-lands-first
     local first
     first=$(helper_name "$MOVE_B" 1)
@@ -270,9 +295,11 @@ case_late_lands_first() {
 }
 
 case_both_attempts() {
-    local stall="${VETH_TEST_BOTH_STALL:-6}"
-    local plan="[{\"match\": \"link set vh[0-9a-f]*0102b netns\", \"attempts\": [1, 2], \"mode\": \"stall-before\", \"secs\": $stall}]"
-    drive both-attempts "$plan" 2 runner "$SIM_PARENT" "$SIM_PARENT/scenarios/ethernet-only.yaml"
+    # Both stalled helpers wait for their removal, so neither has to finish.
+    local stall="${VETH_TEST_BOTH_STALL:-0}" move='link set vh[0-9a-f]*0102b netns'
+    local plan="[{\"match\": \"$move\", \"attempts\": [1, 2], \"mode\": \"stall-before\", \"secs\": $stall,
+        \"after\": $AWAIT_RM}]"
+    drive both-attempts "$plan" "$SHORT_BOUND" runner "$SIM_PARENT" "$SIM_PARENT/scenarios/ethernet-only.yaml"
     check "both-attempts: runner exits 4" "$(grep -qx 'RESULT exit=4' "$OUT"; echo $?)" "$(grep '^RESULT' "$OUT")"
     check "both-attempts: NOT SCORED printed, naming the timeout" \
         "$(grep -q '^NOT SCORED: run aborted in setup (VethSetupError: host command timed out 2 times' "$OUT"; echo $?)" \
@@ -280,8 +307,10 @@ case_both_attempts() {
     check "both-attempts: no assertion verdicts printed" \
         "$([ "$(count '^(PASS|FAIL) |=== Assertions ===' "$OUT")" -eq 0 ]; echo $?)"
     local runs
-    runs=$(count "^run .*cmd=link set vh[0-9a-f]*0102b netns" "$STATE/helpers.log")
+    runs=$(count "^run .*cmd=$move" "$STATE/helpers.log")
     check "both-attempts: two attempts at the move" "$([ "$runs" -eq 2 ]; echo $?)" "$runs helper runs"
+    check_removed_unrun "both-attempts (attempt 1)" "$(helper_name "$move" 1)"
+    check_removed_unrun "both-attempts (attempt 2)" "$(helper_name "$move" 2)"
 }
 
 for c in "${CASES[@]}"; do
