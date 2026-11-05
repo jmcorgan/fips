@@ -11,8 +11,8 @@ client that associates with the AP already has the AP as default
 router and DNS server, which is exactly the placement the gateway
 needs. The OpenWrt ipk ships with the `gateway:` block of
 `/etc/fips/fips.yaml` pre-populated and the integration glue
-(dnsmasq forwarding, RA route for the virtual pool, global-scope
-IPv6 prefix on `br-lan`) automated by the init script —
+(dnsmasq forwarding, RA route for the virtual pool, and on request a
+global-scope IPv6 prefix on `br-lan`) automated by the init script —
 [`packaging/openwrt-ipk/files/etc/init.d/fips-gateway`](https://github.com/jmcorgan/fips/blob/master/packaging/openwrt-ipk/files/etc/init.d/fips-gateway).
 The operator only needs to enable and start the service. Running the
 gateway on a non-OpenWrt LAN-edge host (a Linux router/server, for

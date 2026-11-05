@@ -362,9 +362,15 @@ section in `/etc/fips/fips.yaml`:
 /etc/init.d/fips-gateway start
 ```
 
-The first start gives the LAN the address `2001:2:f1b5::1/64`
-(`network.lan.ip6addr`), because Android and Chrome send no AAAA
-queries on a LAN that has only ULA addresses. An IPv6 address you set
+By default the gateway leaves the LAN's IPv6 address alone. That suits
+a router with upstream IPv6, whose clients already hold a global
+address. Android and Chrome send no AAAA queries on a LAN that has only
+ULA addresses, so on a router with no upstream IPv6 they do not look up
+`.fips` names at all unless `fips.yaml` has `gateway.global_prefix:
+true`.
+
+With it set, the first start gives the LAN the address
+`2001:2:f1b5::1/64` (`network.lan.ip6addr`). An IPv6 address you set
 there yourself is left in place and the gateway's address is not added
 beside it, so on a LAN whose only address you set is a ULA those
 clients still send no AAAA queries. The address lies in an unassigned
@@ -375,20 +381,38 @@ changing it reloads the network, which on OpenWrt 25.12 recreates
 deletes it: `disable` of a stopped gateway, `stop` of a disabled one
 (so `stop` and `disable` in either order), a start with
 `gateway.enabled` not true in `fips.yaml`, and removing the package.
-Disabling a running gateway and then rebooting deletes nothing:
-`disable` keeps the address while the gateway runs, and a disabled
-service is neither stopped at shutdown nor started at boot. Run
-`/etc/init.d/fips-gateway stop` once afterwards; it deletes the
-address and withdraws the gateway's RA settings.
+A start without `gateway.global_prefix` deletes it too, so a router
+an older package gave the address loses it at the first start after
+the upgrade, with one network reload. That start waits 15 seconds for
+odhcpd to advertise the prefix as withdrawn, and a client that hears
+this stops choosing the address. A client that misses it keeps the
+address, and its connections from it time out. On OpenWrt 23.05 and
+22.03, whose odhcpd gave the address no expiry, that lasts until the
+client's link drops. LAN clients keep their default route and their
+way to the address pool, but on a router with no upstream IPv6,
+Android and Chrome clients stop sending AAAA queries until you set the
+option. Disabling a running gateway and then
+rebooting deletes nothing: `disable` keeps the address while the
+gateway runs, and a disabled service is neither stopped at shutdown
+nor started at boot. Run `/etc/init.d/fips-gateway stop` once
+afterwards; it deletes the address and withdraws the gateway's RA
+settings.
 
-While it runs, the gateway sets the LAN's `ra_default` to 2, so that
-odhcpd advertises a default route even without upstream IPv6, and
-advertises a route to its address pool. It keeps the `ra_default` it
-replaced in `/etc/fips/gateway-ra-default.saved`, and a stop puts that
-value back, also after a power loss while the gateway ran. A stop with
-nothing saved, such as the one every package upgrade and removal makes
-whether or not the gateway ran, leaves `ra_default` alone unless it is
-2, the value an older package's start left.
+While it runs, the gateway sets the LAN's `ra_default` to 2, with or
+without `gateway.global_prefix`, so that odhcpd advertises a default
+route even without upstream IPv6, and advertises a route to its address
+pool. It keeps the `ra_default` it replaced in
+`/etc/fips/gateway-ra-default.saved`, and a stop puts that value back,
+also after a power loss while the gateway ran. A stop with nothing
+saved, such as the one every package upgrade and removal makes whether
+or not the gateway ran, leaves `ra_default` alone unless it is 2, the
+value an older package's start left.
+
+On an IPv4-only uplink that default route is a trade-off. It is how LAN
+clients reach the gateway's address pool, so the gateway keeps it. But
+it leads nowhere else, so a LAN client's connection to a global IPv6
+address fails at once with an unreachable error from the router, rather
+than on the client for want of a route.
 
 The LAN is the device `gateway.lan_interface` names, `br-lan` by
 default, which may be a VLAN device such as `br-lan.3`. The pool
@@ -397,12 +421,15 @@ network interface whose `device` is that name, or to `lan` when no
 interface has it. Read `network.lan` in this section as that
 interface.
 
-On a router with upstream IPv6, while the address is present, LAN
-clients may use it as the source for connections to any destination
-that shares more leading bits with it than with the client's upstream
-address, and those connections then fail or fall back slowly. With an
-upstream address in `2a00::/7`, that is every destination in
-`2000::/5`.
+Leave `gateway.global_prefix` off on a router with upstream IPv6. While
+the address is present, LAN clients use it as the source for
+connections to any destination that shares more leading bits with it
+than with the client's upstream address, and those connections fail,
+because nothing routes the address. With an upstream address in
+`2a00::/7`, that is every destination in `2000::/5`. Deprecating the
+address would avoid this, but odhcpd on OpenWrt 24.10 and later cannot
+do it: it advertises a prefix with a zero preferred lifetime with a
+zero valid lifetime too, which withdraws the prefix.
 
 A sysupgrade that keeps settings but drops the package runs none of
 the steps above. Delete the address by hand:
@@ -411,6 +438,18 @@ the steps above. Delete the address by hand:
 uci delete network.lan.ip6addr
 uci commit network
 /etc/init.d/network reload
+```
+
+A sysupgrade that keeps settings and carries the package can leave an
+older package's `ra_default` of 2 behind with nothing saved beside it.
+The next start then takes that 2 for yours, and every later stop puts
+it back. If you never set it, delete it by hand with the gateway
+stopped:
+
+```bash
+uci delete dhcp.lan.ra_default
+uci commit dhcp
+/etc/init.d/odhcpd restart
 ```
 
 See `docs/tutorials/deploy-fips-gateway.md` in the source tree for
