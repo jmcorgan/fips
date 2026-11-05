@@ -124,3 +124,53 @@ fn test_cleanup_preserves_recent_entries() {
     limiter.cleanup(Instant::now());
     assert_eq!(limiter.len(), 1);
 }
+
+/// Two oversized packets from one source within 100 ms both draw a Packet
+/// Too Big: RFC 4443 Section 2.4 (f) calls one error per interval an
+/// unreasonable limit and recommends a token bucket.
+#[test]
+#[ignore = "known defect: a second Packet Too Big to one source within 100 ms is withheld"]
+fn a_second_packet_too_big_to_one_source_1_ms_after_the_first_is_allowed() {
+    let mut limiter = IcmpRateLimiter::new();
+    let t0 = Instant::now();
+    assert!(limiter.check(src(), t0), "the first is allowed");
+    assert!(
+        limiter.check(src(), t0 + Duration::from_millis(1)),
+        "the second, 1 ms later, is withheld"
+    );
+}
+
+/// A source quiet for ten seconds that then sends five oversized packets at
+/// once, as a traceroute or a burst of sends to new destinations does, is
+/// answered for each.
+#[test]
+#[ignore = "known defect: a burst after a quiet spell draws one Packet Too Big, not one each"]
+fn a_burst_of_five_after_ten_quiet_seconds_is_answered_for_every_packet() {
+    let mut limiter = IcmpRateLimiter::new();
+    let t0 = Instant::now();
+    assert!(limiter.check(src(), t0));
+    let later = t0 + Duration::from_secs(10);
+    let allowed = (0..5).filter(|_| limiter.check(src(), later)).count();
+    assert_eq!(
+        allowed, 5,
+        "answers to a burst of five after ten quiet seconds"
+    );
+}
+
+/// A flood from one source stays limited, to at most ten at one instant and
+/// to between ten and twenty-one over one second.
+#[test]
+fn a_flood_from_one_source_is_held_to_ten_at_once_and_about_ten_more_a_second() {
+    let mut limiter = IcmpRateLimiter::new();
+    let t0 = Instant::now();
+    let at_once = (0..1000).filter(|_| limiter.check(src(), t0)).count();
+    assert!((1..=10).contains(&at_once), "{at_once} at one instant");
+    let mut limiter = IcmpRateLimiter::new();
+    let over_a_second = (0..1000)
+        .filter(|ms| limiter.check(src(), t0 + Duration::from_millis(*ms)))
+        .count();
+    assert!(
+        (10..=21).contains(&over_a_second),
+        "{over_a_second} over one second"
+    );
+}

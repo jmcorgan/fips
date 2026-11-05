@@ -425,3 +425,32 @@ fn a_flood_from_a_foreign_source_on_the_app_owned_path_draws_the_burst_and_no_mo
         answers.len()
     );
 }
+
+/// On the app-owned path, through the limiter the handles are built with,
+/// two oversized packets from one source sent back to back each draw a
+/// Packet Too Big, to the same destination and to two different ones. The
+/// host caches path MTU per destination, so a withheld answer is the only
+/// one that destination would have had.
+#[test]
+#[ignore = "known defect: the second of two back-to-back oversized packets from one source draws no Packet Too Big"]
+fn back_to_back_oversized_packets_from_one_source_on_the_app_owned_path_each_draw_packet_too_big() {
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let a = any_key().address().to_ipv6();
+    let b = any_key().address().to_ipv6();
+    let mut counts = Vec::new();
+    for (what, first, second) in [("same destination", a, a), ("two destinations", a, b)] {
+        let mut handles = Handles::new(us, Settings::with_tun(true));
+        let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
+        handles.install_sender(tun_tx);
+        assert!(handles.outbound(&bare(us, first, 1400)).is_none());
+        assert!(handles.outbound(&bare(us, second, 1400)).is_none());
+        let answers: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert!(answers.iter().all(|a| a[40] == 2), "{what}: ICMPv6 type 2");
+        counts.push((what, answers.len()));
+    }
+    assert_eq!(
+        counts,
+        [("same destination", 2), ("two destinations", 2)],
+        "Packet Too Big answers"
+    );
+}

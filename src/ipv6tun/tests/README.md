@@ -121,7 +121,11 @@ The others:
   here from the file's former inline module, check that a first send is
   allowed, that an immediate resend to one source is held back while
   sources are judged apart, and that cleanup drops old entries and keeps
-  recent ones.
+  recent ones. Two tests, ignored as known defects, state the burst RFC 4443
+  Section 2.4 (f) allows: a second answer to one source 1 ms after the first,
+  and an answer to each of five packets after ten quiet seconds; a third,
+  which gates, holds a flood from one source to ten at one instant and to
+  between ten and twenty-one over one second.
 - `outbound.rs` tests `../outbound.rs` as module `host_tests`, on the
   values the host half's decisions return rather than on what a channel
   received: the host half turns a packet to a key the adapter holds into a
@@ -236,7 +240,9 @@ The others:
   the mesh or to one no key names, draw the Destination Unreachable burst and
   no more than the bucket refills meanwhile; and the bucket, judged at given
   times, lets ten go at once, one more a tenth of a second later, and no more
-  than ten after a long quiet spell.
+  than ten after a long quiet spell. A test ignored as a known defect states
+  that the reader answers two oversized packets from one source, read back to
+  back to two destinations, with a Packet Too Big each.
 - `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
   loaded `inet fips` table that polices another interface than the TUN is
   reported as no firewall, every listener unfiltered, and one that polices
@@ -268,7 +274,9 @@ The others:
   hundred held packets each draw the Destination Unreachable burst and no
   more than the bucket refills meanwhile; and the host path the handles
   build for the TUN reader draws on their bucket, so tokens it spends are
-  gone for the handles' answers.
+  gone for the handles' answers. A test ignored as a known defect states that
+  two oversized packets from one source sent back to back on the app-owned
+  path each draw a Packet Too Big, to one destination and to two.
 - `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
   `target_tests`: the warning about a firewall that polices another
   interface than the TUN keeps the `fips::control::firewall_state` target it
