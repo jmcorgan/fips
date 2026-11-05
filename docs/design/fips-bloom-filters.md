@@ -460,10 +460,11 @@ A sent filter is tested only when it has at least 128 set bits (below
 that an honest child can match it by chance), and the guard applies
 only when the child already has a stored filter. Like the FPR cap,
 a rejection is silent on the wire and leaves the stored filter and
-its sequence untouched, so the previous filter is kept. Rejections
-are counted in `bloom.child_role_rejected` and logged at WARN with
-the overlap, the bound, and the digests of both filters. Parents and
-non-tree peers are not checked.
+its sequence untouched, so the previous filter is kept. Every
+rejection is counted in `bloom.child_role_rejected` and logged with
+the overlap, the bound, and the digests of both filters: the first
+from a peer in each five minutes at WARN, the rest at DEBUG. Parents
+and non-tree peers are not checked.
 
 ## Implementation Status
 

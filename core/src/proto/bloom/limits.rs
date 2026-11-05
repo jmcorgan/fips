@@ -57,3 +57,15 @@ pub const ECHO_MIN_BITS: usize = 128;
 /// older than the history still passes. Costs one filter (1 KB) per kept
 /// filter per peer.
 pub const SENT_HISTORY: usize = 4;
+
+/// How long after a child echo refusal from a peer is logged at WARN the
+/// later refusals from that peer are logged at DEBUG, in milliseconds.
+///
+/// Most peers that trip the guard do so transiently: a child that changed
+/// parent sends its next filter, the one it sends a non-parent, before its
+/// TreeAnnounce reaches us, and the burst ends when the announce lands,
+/// usually within a minute. A lasting one can refuse hundreds an hour. A
+/// refusal cannot tell the two apart when it happens, so the first refusal
+/// in each interval is a warning and the rest are not.
+/// The `bloom.child_role_rejected` counter counts every refusal.
+pub const ECHO_WARN_MS: u64 = 300_000;

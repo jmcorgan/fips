@@ -5,6 +5,6 @@ as `#[cfg(test)] mod tests;`.
 
 - `mod.rs`: declares the test files.
 - `core.rs`: `BloomFilter` operations and the false-positive estimate.
-- `state.rs`: `BloomState`, the outgoing filter, the send debounce and
-  the history of filters sent to each peer.
+- `state.rs`: `BloomState`, the outgoing filter, the send debounce, the
+  history of filters sent to each peer and the spacing of echo warnings.
 - `wire.rs`: the `FilterAnnounce` codec and its bounds.

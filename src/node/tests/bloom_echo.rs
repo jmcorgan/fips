@@ -11,7 +11,8 @@
 use super::spanning_tree::{TestNode, cleanup_nodes, run_tree_test};
 use super::*;
 use crate::node::diag::TreeRole;
-use crate::proto::bloom::{BloomFilter, ECHO_MIN_BITS, FilterAnnounce};
+use crate::proto::bloom::{BloomFilter, ECHO_MIN_BITS, ECHO_WARN_MS, FilterAnnounce};
+use crate::testutil::capture_logs_scoped;
 
 /// A converged four-node chain and, at node `u`, its parent `p` and child `c`.
 struct Chain {
@@ -377,6 +378,46 @@ async fn a_child_announcing_half_of_an_earlier_larger_filter_we_sent_it_is_merge
     );
     assert_eq!(held(&chain.outgoing(p), &subtree[..20]), 20);
     assert_eq!(chain.counters(), (accepted + 1, rejected));
+
+    chain.cleanup().await;
+}
+
+/// The message every child echo refusal is logged with.
+const ECHO_LINE: &str =
+    "FilterAnnounce from a tree child returns the filter we sent it, kept its previous filter";
+
+#[tokio::test]
+async fn only_the_first_child_echo_refusal_from_a_peer_in_each_interval_is_a_warning() {
+    let mut chain = Chain::new().await;
+    let (_, sent) = chain.parent_side(0xA1, 1000).await;
+    let c = chain.c;
+    let (accepted, rejected) = chain.counters();
+    let mut echo = sent.clone();
+    echo.insert(&c);
+
+    let (logs, guard) = capture_logs_scoped();
+    for _ in 0..3 {
+        chain.announce(c, &echo).await;
+    }
+    crate::time::advance(std::time::Duration::from_millis(ECHO_WARN_MS));
+    chain.announce(c, &echo).await;
+    drop(guard);
+
+    let levels: Vec<String> = logs
+        .lines_with(ECHO_LINE)
+        .iter()
+        .map(|line| line.split(' ').next().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        levels,
+        ["WARN", "DEBUG", "DEBUG", "WARN"],
+        "the first refusal and the first an interval later warn"
+    );
+    assert_eq!(
+        chain.counters(),
+        (accepted, rejected + 4),
+        "every refusal is counted"
+    );
 
     chain.cleanup().await;
 }

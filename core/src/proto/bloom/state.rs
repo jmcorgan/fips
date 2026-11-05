@@ -2,7 +2,7 @@
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::{BloomFilter, SENT_HISTORY};
+use super::{BloomFilter, ECHO_WARN_MS, SENT_HISTORY};
 use crate::identity::NodeAddr;
 use crate::proto::mmp::delivery::{Acks, LinkEvidence, ResendReason};
 use alloc::vec;
@@ -36,6 +36,9 @@ pub struct BloomState {
     /// oldest first, at most [`SENT_HISTORY`] of them. The newest is what
     /// change detection compares against; the child echo check reads all.
     sent_filters: BTreeMap<NodeAddr, VecDeque<BloomFilter>>,
+    /// When a child echo refusal from each peer was last logged at WARN, in
+    /// the caller's monotonic milliseconds. No entry: never.
+    echo_warned: BTreeMap<NodeAddr, u64>,
     /// Per-peer delivery tracking for sent announces.
     acks: Acks,
     /// Set when an accepted inbound filter may have changed outgoing
@@ -59,6 +62,7 @@ impl BloomState {
             sequence: 0,
             peer_sequences: BTreeMap::new(),
             sent_filters: BTreeMap::new(),
+            echo_warned: BTreeMap::new(),
             acks: Acks::new(),
             inbound_dirty: false,
             inbound_recomputes: 0,
@@ -260,9 +264,31 @@ impl BloomState {
         self.sent_filters.remove(peer_id);
     }
 
+    /// Whether a child echo refusal from `peer_id` at `now_ms` is logged at
+    /// WARN, recording it if so.
+    ///
+    /// True for the first refusal from the peer, and for the first one at
+    /// least [`ECHO_WARN_MS`] after the last that was; false in between, when
+    /// the caller logs at DEBUG. `now_ms` must come from a monotonic clock:
+    /// only the difference of two readings is used. A reading earlier than
+    /// the recorded one warns and restamps, as the send debounce does.
+    pub fn warn_echo(&mut self, peer_id: &NodeAddr, now_ms: u64) -> bool {
+        let due = match self.echo_warned.get(peer_id) {
+            Some(&at) => now_ms
+                .checked_sub(at)
+                .is_none_or(|elapsed| elapsed >= ECHO_WARN_MS),
+            None => true,
+        };
+        if due {
+            self.echo_warned.insert(*peer_id, now_ms);
+        }
+        due
+    }
+
     /// Remove stored filter state for a peer that was removed.
     pub fn remove_peer_state(&mut self, peer_id: &NodeAddr) {
         self.sent_filters.remove(peer_id);
+        self.echo_warned.remove(peer_id);
         self.last_update_sent.remove(peer_id);
         self.pending_updates.remove(peer_id);
         self.peer_sequences.remove(peer_id);

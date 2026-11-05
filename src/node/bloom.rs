@@ -311,17 +311,31 @@ impl Node {
         // child's subtree outright.
         if let Some(echo) = self.child_echo(from, &announce.filter) {
             self.metrics().bloom.record_reject(BloomReject::ChildRole);
-            warn!(
-                from = %self.peer_display_name(from),
-                seq = announce.sequence,
-                fill = format_args!("{:.3}", fill),
-                overlap = format_args!("{:.3}", echo.overlap),
-                bound = format_args!("{:.3}", echo.bound),
-                digest = %diag::filter_tag(&announce.filter),
-                sent_digest = %echo.sent_digest,
-                sends_ago = echo.sends_ago,
-                "FilterAnnounce from a tree child returns the filter we sent it, kept its previous filter"
-            );
+            macro_rules! log_echo {
+                ($level:ident) => {
+                    $level!(
+                        from = %self.peer_display_name(from),
+                        seq = announce.sequence,
+                        fill = format_args!("{:.3}", fill),
+                        overlap = format_args!("{:.3}", echo.overlap),
+                        bound = format_args!("{:.3}", echo.bound),
+                        digest = %diag::filter_tag(&announce.filter),
+                        sent_digest = %echo.sent_digest,
+                        sends_ago = echo.sends_ago,
+                        "FilterAnnounce from a tree child returns the filter we sent it, kept its previous filter"
+                    )
+                };
+            }
+            // Most peers that trip this are a child that changed parent and
+            // whose TreeAnnounce has not reached us yet, and a lasting one
+            // repeats it hundreds of times an hour, so only the first from a
+            // peer in each interval is a warning. Monotonic: the interval
+            // compares two reads.
+            if self.bloom_state.warn_echo(from, crate::time::mono_ms()) {
+                log_echo!(warn);
+            } else {
+                log_echo!(debug);
+            }
             return;
         }
 

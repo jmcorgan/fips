@@ -66,3 +66,8 @@ the 8192-bit filter:
 - At the worst case the `ECHO_MIN_BITS` floor allows (a sent filter of 128
   set bits, a child's filter at the FPR cap's fill 0.7248): `p` is about
   1.3e-10, so across the history at most about 5e-10 per announce.
+
+A refusal is counted every time, but logged at WARN only for the first
+from a peer in each `ECHO_WARN_MS` (five minutes); the rest go to DEBUG.
+`BloomState::warn_echo` decides, from a per-peer stamp the caller reads
+on its monotonic clock; `remove_peer_state` clears the stamp.

@@ -2,7 +2,7 @@
 
 use alloc::collections::BTreeMap;
 
-use crate::proto::bloom::{BloomFilter, BloomState, SENT_HISTORY};
+use crate::proto::bloom::{BloomFilter, BloomState, ECHO_WARN_MS, SENT_HISTORY};
 use crate::testutil::make_node_addr;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1077,4 +1077,65 @@ fn change_detection_compares_with_the_newest_sent_filter_only() {
     state.record_sent_filter(peer, own);
     state.mark_changed(&[peer], &BTreeMap::new());
     assert!(!state.needs_update(&peer), "it equals the latest");
+}
+
+#[test]
+fn only_the_first_echo_refusal_from_a_peer_in_each_interval_is_a_warning() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+
+    assert!(state.warn_echo(&peer, 1_000), "the first refusal warns");
+    assert!(!state.warn_echo(&peer, 1_000), "a second at once does not");
+    assert!(!state.warn_echo(&peer, 1_000 + ECHO_WARN_MS - 1));
+    assert!(
+        state.warn_echo(&peer, 1_000 + ECHO_WARN_MS),
+        "the first a full interval after the last warning warns"
+    );
+    assert!(!state.warn_echo(&peer, 1_000 + ECHO_WARN_MS + 1));
+}
+
+#[test]
+fn the_first_echo_refusal_from_a_node_in_its_first_millisecond_is_a_warning() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+
+    assert!(
+        state.warn_echo(&peer, 0),
+        "no zero stamp reads as a warning"
+    );
+    assert!(!state.warn_echo(&peer, 1), "and it was recorded");
+}
+
+#[test]
+fn echo_refusal_warnings_are_spaced_per_peer() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let (a, b) = (make_node_addr(1), make_node_addr(2));
+
+    assert!(state.warn_echo(&a, 1_000));
+    assert!(state.warn_echo(&b, 1_001), "another peer's first warns");
+    assert!(!state.warn_echo(&a, 1_002));
+}
+
+#[test]
+fn an_echo_refusal_read_before_the_last_warning_warns_and_restamps() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+
+    assert!(state.warn_echo(&peer, 10_000));
+    assert!(state.warn_echo(&peer, 5_000));
+    assert!(!state.warn_echo(&peer, 5_001), "spaced from the new stamp");
+}
+
+#[test]
+fn removing_a_peer_clears_its_echo_warning_stamp() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+    assert!(state.warn_echo(&peer, 1_000));
+
+    state.remove_peer_state(&peer);
+
+    assert!(
+        state.warn_echo(&peer, 1_001),
+        "a returning peer warns at once"
+    );
 }
