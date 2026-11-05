@@ -103,5 +103,4 @@ known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on
 known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session  src/node/tests/settle/crossing.rs
 known-defect  fips-mesh  node::tests::settle::crossing::a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session  src/node/tests/settle/crossing.rs
-known-defect  fips-mesh  node::tests::settle::fsp::a_restarted_larger_responder_carries_data_within_one_exchange  src/node/tests/settle/fsp.rs
 known-defect  fips-mesh  node::tests::settle::restart::a_rekey_msg1_of_the_peers_previous_run_read_late_by_the_restarted_node_leaves_one_session  src/node/tests/settle/restart.rs
