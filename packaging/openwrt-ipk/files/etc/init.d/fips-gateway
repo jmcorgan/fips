@@ -43,18 +43,32 @@ FIPS0_WAIT="${FIPS0_WAIT:-30}"
 
 # Global-scope IPv6 prefix assigned to the LAN (see lan_iface) so
 # Android/Chrome clients believe they have full IPv6 and actually send AAAA
-# queries. Only a LAN with no IPv6 address of the operator's gets it. An
-# unassigned address in IANA's 2001::/23 IETF protocol assignments block, not
-# routed on the internet. (It is not RFC 5180 benchmarking space, which is
-# 2001:2::/48.)
+# queries. An unassigned address in IANA's 2001::/23 IETF protocol assignments
+# block, not routed on the internet. (It is not RFC 5180 benchmarking space,
+# which is 2001:2::/48.)
+#
+# Only with gateway.global_prefix true in fips.yaml, and only on a LAN with no
+# IPv6 address of the operator's. The prefix is unrouted, and a LAN client also
+# holding an upstream address prefers it for many global destinations (RFC 6724
+# rule 8) and fails there, so it is the operator's choice. A zero preferred
+# lifetime would avoid that, but odhcpd on OpenWrt 24.10 and later advertises
+# such a prefix with a zero valid lifetime too, which withdraws it instead.
 #
 # Set by the first start and kept across stops and restarts while the service
 # is enabled: changing it reloads the network, which on OpenWrt 25.12 recreates
 # br-lan and drops the LAN for a few seconds. Turning the gateway off deletes
 # it: disable (below), a stop of a disabled service (stop_service), a start
-# with the gateway turned off in fips.yaml, and package removal, whose prerm
-# runs disable.
+# with the gateway turned off in fips.yaml, and a start without
+# gateway.global_prefix. Package removal's prerm runs stop, then disable, which
+# on OpenWrt 23.05.6 left the prefix; see disable.
 GLOBAL_PREFIX="2001:2:f1b5::1/64"
+# Seconds a start waits after deleting the prefix, before it restarts odhcpd.
+# odhcpd withdraws a removed prefix in the RAs that follow, and a restart loses
+# them. On OpenWrt 23.05 and 22.03 the prefix was advertised with no expiry, so
+# a client that misses them keeps it. odhcpd tries three times; in VM runs on
+# those releases the first try failed with the LAN still down, the next came
+# 2.3 to 7.4 s after the reload, and the last by 11 s.
+PREFIX_WAIT=15
 # The LAN's dhcp ra_default as it was before the gateway first set it, kept
 # until a stop puts it back: one line, empty when it was unset. On the overlay
 # rather than under /var, so a router that loses power while the gateway runs
@@ -90,11 +104,20 @@ start_service() {
 	# Load conntrack module for /proc/net/nf_conntrack.
 	modprobe nf_conntrack 2>/dev/null || true
 
-	# Add a global-scope IPv6 prefix to the LAN so Android/Chrome clients
-	# send AAAA queries (they suppress AAAA when only ULA addresses exist).
-	# Also set ra_default=2 so odhcpd advertises a default route even
-	# without upstream IPv6 — needed for clients to accept the prefix.
-	gateway_add_global_prefix
+	# With gateway.global_prefix, add a global-scope IPv6 prefix to the LAN
+	# so Android/Chrome clients send AAAA queries (they suppress AAAA when
+	# only ULA addresses exist). Without it, take back the one an earlier
+	# start left, and let odhcpd withdraw it before the restart below.
+	if [ "$(gateway_global_prefix)" = "true" ]; then
+		gateway_add_global_prefix
+	else
+		prefix_remove && sleep "$PREFIX_WAIT"
+	fi
+
+	# Have odhcpd advertise a default route even without upstream IPv6,
+	# whatever gateway.global_prefix says: it is how LAN clients reach the
+	# pool there.
+	ra_force
 
 	# Advertise the virtual IP pool via Router Advertisement so LAN clients
 	# learn a route to the pool automatically.
@@ -139,7 +162,9 @@ stop_service() {
 # Disabling also turns the gateway off, so the LAN prefix is deleted too,
 # except in an image build (IPKG_INSTROOT names the image's root, and the
 # build host's uci must not be touched) and while procd still runs the
-# gateway, which must keep its prefix; its stop deletes it then.
+# gateway, which must keep its prefix; its stop deletes it then. A disable
+# straight after a stop seems to land here too, with the gateway still exiting:
+# on OpenWrt 23.05.6 the prefix stayed, as no further stop comes.
 # shellcheck disable=SC2154 # rc.common sets initscript before sourcing this
 disable() {
 	name="$(basename "${initscript}")"
@@ -305,6 +330,26 @@ gateway_config_enabled() {
 	awk '/^gateway:/{found=1; next} found && /^[^ ]/{found=0} found && /enabled:/{gsub(/.*enabled:[[:space:]]*/, ""); gsub(/["'"'"']/, ""); print; exit}' "$CONFIG"
 }
 
+# Print gateway.global_prefix from fips.yaml: the value inside the top-level
+# "gateway:" block, or nothing when it is not set. Commented lines are skipped.
+# Block-style YAML only, as for gateway_dns_port.
+gateway_global_prefix() {
+	awk '
+		/^[A-Za-z_]/ { top = $1 }
+		top != "gateway:" { next }
+		/^[[:space:]]*#/ { next }
+		/^[[:space:]]+global_prefix:/ {
+			v = $0
+			sub(/^[[:space:]]+global_prefix:[[:space:]]*/, "", v)
+			sub(/[[:space:]]+#.*$/, "", v)
+			gsub(/["'"'"']/, "", v)
+			sub(/[[:space:]]+$/, "", v)
+			print v
+			exit
+		}
+	' "$CONFIG" 2>/dev/null
+}
+
 # Print the port the gateway's DNS listener will bind: the digits after the
 # last ":" of the "listen:" value inside the top-level "gateway:" block of
 # fips.yaml, or $GW_DNS_DEFAULT when there is no such line or its value does
@@ -454,9 +499,8 @@ gateway_remove_ra_route_uci() {
 	done
 }
 
-# Add a global-scope IPv6 prefix to the LAN and enable RA default route.
-# An address the operator set on the LAN is left in place, and the prefix is
-# not added beside it.
+# Add a global-scope IPv6 prefix to the LAN. An address the operator set on the
+# LAN is left in place, and the prefix is not added beside it.
 gateway_add_global_prefix() {
 	local iface current changed=""
 	iface="$(lan_iface)"
@@ -469,10 +513,23 @@ gateway_add_global_prefix() {
 		logger -t fips-gateway "network.$iface.ip6addr is set ($current); not adding $GLOBAL_PREFIX"
 	fi
 
-	# Force odhcpd to advertise a default route even without upstream IPv6,
-	# keeping the value it replaces for ra_restore. A saved value is kept as
-	# it is: one already there is from a start that was never stopped.
-	local ra_default
+	# Apply a changed prefix now. Only when it changed: a reload recreates
+	# br-lan on OpenWrt 25.12.
+	[ -n "$changed" ] && /etc/init.d/network reload 2>/dev/null
+	return 0
+}
+
+# Force odhcpd to advertise a default route even without upstream IPv6, keeping
+# the value it replaces for ra_restore. A saved value is kept as it is: one
+# already there is from a start that was never stopped. The change reaches
+# odhcpd through the restart in gateway_add_ra_route.
+#
+# On an IPv4-only uplink that route leads only to the pool, so a LAN client's
+# connection to a global address gets a prompt no-route from the router. The
+# pool has no other way to be reached, so the route stays.
+ra_force() {
+	local iface ra_default
+	iface="$(lan_iface)"
 	ra_default="$(uci -q get "dhcp.$iface.ra_default" 2>/dev/null || echo "")"
 	if [ ! -e "$RA_SAVED" ]; then
 		mkdir -p "${RA_SAVED%/*}" 2>/dev/null
@@ -482,20 +539,16 @@ gateway_add_global_prefix() {
 		uci set "dhcp.$iface.ra_default=2"
 		uci commit dhcp
 	fi
-
-	# Apply a changed prefix now. Only when it changed: a reload recreates
-	# br-lan on OpenWrt 25.12. The ra_default change reaches odhcpd through
-	# the restart in gateway_add_ra_route.
-	[ -n "$changed" ] && /etc/init.d/network reload 2>/dev/null
 	return 0
 }
 
 # Delete the LAN prefix when it is the one this script sets, and apply that.
-# An address the operator set is left alone.
+# An address the operator set is left alone. Fails when there was nothing to
+# delete.
 prefix_remove() {
 	local iface
 	iface="$(lan_iface)"
-	[ "$(uci -q get "network.$iface.ip6addr" 2>/dev/null)" = "$GLOBAL_PREFIX" ] || return 0
+	[ "$(uci -q get "network.$iface.ip6addr" 2>/dev/null)" = "$GLOBAL_PREFIX" ] || return 1
 	uci delete "network.$iface.ip6addr"
 	uci commit network
 	/etc/init.d/network reload 2>/dev/null || true
