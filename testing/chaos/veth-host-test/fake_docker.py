@@ -21,6 +21,15 @@ FAKE_DOCKER_PLAN, can make a given attempt at a given host command stall:
   stall-after   the helper runs the command, then waits SECS before exiting
   late-start    the helper does not exist for SECS, then runs the command
 
+A rule may also carry "after": a list of [LOG, REGEX] pairs, LOG being a file
+in the state directory and "{self}" in REGEX standing for the helper's own
+name. The helper then waits, before it registers (late-start) or before it
+runs its command (stall-before), until every REGEX matches somewhere in its
+LOG, so a case orders its events by what has happened rather than by how long
+it has been. A gate still open after GATE_CAP_SECS is logged as
+"gate-timeout NAME" in helpers.log and the helper goes on, so a runner that
+never reaches the awaited event fails its case instead of hanging it.
+
 Every call is appended to calls.log, and every change to the links to
 effects.log, both in the state directory.
 """
@@ -45,6 +54,7 @@ SELF = os.path.abspath(__file__)
 NODE_RE = re.compile(r"^fips-node-n(\d+)")
 PID_BASE = 4000
 IMAGE = "fake-sim-image"
+GATE_CAP_SECS = 60
 
 # The bash functions that stand in for `ip` and for sysfs reads inside a node
 # container. FAKE_NS names the container whose namespace they act on.
@@ -247,15 +257,46 @@ def unregister(name: str) -> None:
         pass
 
 
-def helper_main(name: str, mode: str, secs: float, args: list[str]) -> None:
+def log_has(log: str, rx: re.Pattern) -> bool:
+    """Report whether a regex matches anywhere in a state-directory log."""
+    try:
+        with open(path(log)) as f:
+            return rx.search(f.read()) is not None
+    except FileNotFoundError:
+        return False
+
+
+def await_gate(name: str, after: list) -> None:
+    """Wait until every [LOG, REGEX] in after matches, or GATE_CAP_SECS pass."""
+    deadline = time.monotonic() + GATE_CAP_SECS
+    pending = [(log, re.compile(rx.replace("{self}", re.escape(name)), re.M | re.S))
+               for log, rx in after]
+    while True:
+        pending = [(log, rx) for log, rx in pending if not log_has(log, rx)]
+        if not pending:
+            return
+        if time.monotonic() > deadline:
+            append("helpers.log", f"gate-timeout {name}")
+            return
+        time.sleep(0.05)
+
+
+def helper_main(name: str, mode: str, secs: float, after: list, args: list[str]) -> None:
     """Run as the detached process standing for one helper container."""
     rc = 1
     try:
         if mode == "late-start":
+            # Not a container yet, so not visible to docker rm or inspect; the
+            # wait file lets the test's cleanup kill it if the case ends first.
+            with open(helper_file(name, "wait"), "w") as f:
+                f.write(str(os.getpid()))
             time.sleep(secs)
+            await_gate(name, after)
+            os.remove(helper_file(name, "wait"))
         register(name)
         if mode == "stall-before":
             time.sleep(secs)
+            await_gate(name, after)
         rc = ipcmd("host", args, name)
         if mode == "stall-after":
             time.sleep(secs)
@@ -267,11 +308,11 @@ def helper_main(name: str, mode: str, secs: float, args: list[str]) -> None:
         os.rename(helper_file(name, "rc.tmp"), helper_file(name, "rc"))
 
 
-def plan_for(args: list[str]) -> tuple[str, float]:
-    """Return (mode, secs) for this attempt at a host command, from the plan."""
+def plan_for(args: list[str]) -> tuple[str, float, list]:
+    """Return (mode, secs, after) for this attempt at a host command."""
     plan_path = os.environ.get("FAKE_DOCKER_PLAN")
     if not plan_path:
-        return "none", 0.0
+        return "none", 0.0, []
     with open(plan_path) as f:
         rules = json.load(f)
     text = " ".join(args)
@@ -281,7 +322,7 @@ def plan_for(args: list[str]) -> tuple[str, float]:
                 attempts = json.load(f)
         except FileNotFoundError:
             attempts = {}
-        chosen = ("none", 0.0)
+        chosen = ("none", 0.0, [])
         bumped = set()
         for rule in rules:
             if re.search(rule["match"], text):
@@ -290,7 +331,7 @@ def plan_for(args: list[str]) -> tuple[str, float]:
                     attempts[key] = attempts.get(key, 0) + 1
                     bumped.add(key)
                 if attempts[key] in rule["attempts"]:
-                    chosen = (rule["mode"], float(rule["secs"]))
+                    chosen = (rule["mode"], float(rule["secs"]), rule.get("after", []))
         with open(path("attempts.json"), "w") as f:
             json.dump(attempts, f)
     return chosen
@@ -318,10 +359,10 @@ def docker_run(argv: list[str]) -> int:
         with locked():
             n = len(os.listdir(path("helpers")))
         name = f"auto-{os.getpid()}-{n}"
-    mode, secs = plan_for(args)
+    mode, secs, after = plan_for(args)
     append("helpers.log", f"run {name} mode={mode} secs={secs} cmd={' '.join(args)}")
     subprocess.Popen(
-        [sys.executable, SELF, "helper", name, mode, str(secs)] + args,
+        [sys.executable, SELF, "helper", name, mode, str(secs), json.dumps(after)] + args,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=open(helper_file(name, "out"), "w"),
@@ -404,7 +445,7 @@ def main(argv: list[str]) -> int:
     if argv and argv[0] == "sysfs":
         return sysfs(argv[1], argv[2])
     if argv and argv[0] == "helper":
-        helper_main(argv[1], argv[2], float(argv[3]), argv[4:])
+        helper_main(argv[1], argv[2], float(argv[3]), json.loads(argv[4]), argv[5:])
         return 0
 
     append("calls.log", " ".join(argv))
