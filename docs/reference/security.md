@@ -80,9 +80,10 @@ idempotent).
 | Noise pattern (link) | `Noise_IK_secp256k1_ChaChaPoly_SHA256`, with the deviation below | FMP link layer (IK with epoch payload) |
 | Noise pattern (session) | `Noise_XK_secp256k1_ChaChaPoly_SHA256`, with the deviation below | FSP session layer (XK with epoch payload) |
 
-These choices align with the Nostr cryptographic stack
-(secp256k1 + ChaCha20-Poly1305 + SHA-256) and the NIP-44 encrypted
-messaging standard.
+The curve, signatures and hash align with the Nostr cryptographic stack
+(secp256k1, Schnorr, SHA-256). The AEAD is FIPS's own choice for Noise:
+NIP-44, Nostr's encrypted messaging standard, uses ChaCha20 with
+HMAC-SHA256 rather than ChaCha20-Poly1305.
 
 ### Deviation: Empty Associated Data in the Handshake AEAD
 
@@ -91,8 +92,16 @@ respect. The handshake AEAD uses an empty associated-data field where
 standard Noise `EncryptAndHash` uses the handshake hash `h`.
 
 The choice was deliberate. Using secp256k1 rather than 25519 already put the
-construction outside standard Noise, so no standard-Noise peer could be
-confused with it, and the transcript hash bought no distinguishing value.
+construction outside the curves the Noise specification names, and the
+transcript hash bought no distinguishing value. The protocol name alone does
+not set FIPS apart: Lightning's BOLT 8 uses the same
+`Noise_XK_secp256k1_ChaChaPoly_SHA256`. The two still do not interoperate.
+FIPS hashes only the x coordinate of each DH result, sets no prologue and uses
+empty handshake associated data; BOLT 8 hashes the compressed point, mixes the
+prologue `lightning` into `h`, and uses `h` as the handshake AEAD's associated
+data. Their first handshake messages also differ in size, 50 bytes against
+33, and past that check the AEAD tag fails, so a BOLT 8 peer is not confused
+with a FIPS peer.
 
 That argument is about domain separation, and on those grounds it holds. It
 does not cover transcript binding, which is the property actually absent.

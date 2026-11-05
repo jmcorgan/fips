@@ -66,7 +66,7 @@ After Tor processes the new config, the hostname file appears:
 
 ```sh
 sudo cat /var/lib/tor/fips/hostname
-# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion
 ```
 
 Tor regenerates the onion key only on first run (or if you remove

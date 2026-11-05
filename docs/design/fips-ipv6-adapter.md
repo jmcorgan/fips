@@ -125,12 +125,14 @@ fd + node_addr[0..15] → IPv6 address (16 bytes)
 The `fd` prefix places node addresses in the IPv6 Unique Local Address (ULA)
 space defined by RFC 4193. ULAs are the IPv6 equivalent of RFC 1918 private
 addresses (10.x, 172.16.x, 192.168.x) — they are reserved for local use and
-are not routable over the public Internet. This means FIPS overlay addresses
-cannot conflict with native IPv6 traffic that may be present on the same host
-or network, and they will not leak beyond the local system even if routing is
-misconfigured. These are overlay identifiers — they appear in the TUN
-interface for application compatibility but have no meaning outside the FIPS
-mesh.
+are not routable over the public Internet. RFC 4193 claims a globally unique
+prefix only with high probability, and says a leaked address conflicts with no
+other address, not that it cannot leak: keeping these addresses inside a site
+is left to border routers and firewalls (Section 4.3). FIPS also does not use
+the RFC's layout of a random 40-bit Global ID in a /48. The 120 bits after `fd`
+are the node's hash, so a FIPS address is as unique as that hash makes it.
+These are overlay identifiers — they appear in the TUN interface for
+application compatibility but have no meaning outside the FIPS mesh.
 
 ## Identity Cache
 

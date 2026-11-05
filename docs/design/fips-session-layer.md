@@ -213,8 +213,12 @@ starts its own attempt at once. The decision between crossing handshakes
 ("crossing hellos") is taken when a msg3 authenticates, by one rule both
 ends apply alike: a node whose own setup is still unanswered gives way to
 the peer's completed handshake, and between two completed handshakes the
-one initiated by the node with the smaller address wins, as in IKEv2's
-simultaneous initiation (RFC 7296 §2.8).
+one initiated by the node with the smaller address wins. HIPv2 settles
+crossing exchanges the same way (RFC 7401 §6.7, step 3: a host in I1-SENT
+answers an I1 only when the sender's HIT is smaller than its own). IKEv2 has
+no rule for crossed initial exchanges; its nearest is for simultaneous
+rekeying, which closes the SA created with the lowest nonce (RFC 7296 §2.8.1
+and §2.8.2).
 
 - The node with the smaller address refuses a crossing setup, answering
   nothing, while its own setup is less than 5 s old, since the peer will
@@ -312,8 +316,8 @@ The XK pattern requires the initiator to know the responder's static key
 in advance (the `← s` pre-message), which is satisfied by the discovery
 or DNS lookup that precedes session establishment. In exchange, XK
 provides stronger initiator identity protection than IK — the initiator's
-static key is encrypted under the full shared secret (after three DH
-operations) rather than under only the responder's static key.
+static key is encrypted after two DH operations (es and ee; `se` is mixed
+in afterwards) rather than under only the responder's static key.
 
 ### Cryptographic Primitives
 
@@ -336,10 +340,10 @@ actual key parity.
 ### Privacy Note
 
 Noise XK provides stronger initiator identity protection than IK. In XK, the
-initiator's static key is encrypted in msg3 under the full shared secret
-(derived from three DH operations), so an attacker who compromises only the
-responder's nsec cannot decrypt the initiator's identity from captured
-handshake messages (they would also need the responder's ephemeral key).
+initiator's static key is encrypted in msg3 after two DH operations (es and
+ee), so an attacker who compromises only the responder's nsec cannot decrypt
+the initiator's identity from captured handshake messages (they would also
+need the responder's ephemeral key).
 This is the primary reason FSP uses XK rather than IK — session-layer
 traffic traverses untrusted intermediate nodes, making initiator identity
 protection more valuable than at the link layer.
@@ -387,9 +391,9 @@ entry expires, it cannot forward data packets (which carry only addresses, not
 coordinates) and sends a CoordsRequired error.
 
 FSP uses a hybrid warmup strategy combining proactive piggybacking with
-reactive standalone messages to keep transit caches populated (Yggdrasil
-uses a similar approach of embedding coordinates in session traffic to
-warm transit node caches):
+reactive standalone messages to keep transit caches populated. Ironwood,
+Yggdrasil's routing library, has no such cache: it carries the source and
+destination paths in every traffic packet and forwards on them.
 
 ### Proactive Warmup Phase
 

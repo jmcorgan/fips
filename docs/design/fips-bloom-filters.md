@@ -78,7 +78,7 @@ With m = 8,192 bits and k = 5:
 | 800 | 38.6% | 0.86% | Negligible |
 | 1,200 | 51.9% | 3.8% | Minor — occasional unnecessary candidate |
 | 1,600 | 62.3% | 9.4% | Elevated |
-| 2,400 | 78.3% | 27% | Poor — filter losing discrimination |
+| 2,400 | 76.9% | 27% | Poor — filter losing discrimination |
 | 3,350 | 87% | 50% | Useless for candidate selection |
 
 ### Filter Occupancy Model
@@ -307,14 +307,21 @@ property of the data structure). Entries are expired through:
 To test whether a node_addr is in a bloom filter:
 
 ```text
+h1, h2 = first two little-endian u64s of SHA-256(node_addr)
 for i in 0..hash_count:
-    bit_index = hash(node_addr, i) % filter_bits
+    bit_index = (h1 + i * h2) % filter_bits
     if not bits[bit_index]:
         return false    // Definitely not present
 return true             // Maybe present (possible false positive)
 ```
 
 Where `filter_bits = 8 × (512 << size_class)` — 8,192 for v1.
+
+The `hash_count` indices come from the two base hashes by double hashing,
+as in Kirsch and Mitzenmacher, "Building a Better Bloom Filter", which shows
+that two hash functions are enough without an increase in the asymptotic
+false positive rate. The FPR figures in this document use the formula for
+independent hash functions, so for this construction they are estimates.
 
 ## Wire Format
 

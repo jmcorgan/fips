@@ -255,10 +255,14 @@ Each LAN client must route the gateway's pool CIDR to the gateway's
 LAN-side IPv6 address. Three options, in order of preference for
 production:
 
-- **RA Route Information Option** (RFC 4191). If the LAN's RA daemon
-  (`radvd`, `dnsmasq --enable-ra`, OpenWrt's `odhcpd`) supports
-  publishing route options, configure it to advertise the pool CIDR
-  with the gateway as next-hop. Clients pick this up automatically.
+- **RA Route Information Option** (RFC 4191). If the gateway itself
+  sends the LAN's Router Advertisements and its RA daemon (`radvd`,
+  `dnsmasq --enable-ra`, OpenWrt's `odhcpd`) supports publishing route
+  options, configure it to advertise the pool CIDR. The option has no
+  next-hop field: clients route through the router that sent the RA, so
+  it works only when that router is the gateway. Clients pick this up
+  automatically. When another router sends the RAs, use the static route
+  below.
 
 - **Static route on the LAN router**. If clients route through a
   central LAN router, add a static route entry there — the router

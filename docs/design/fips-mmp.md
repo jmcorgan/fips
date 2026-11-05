@@ -90,9 +90,10 @@ is proportional to path length.
 
 ## Spin Bit and RTT
 
-The SP (spin bit) flag in the FMP inner header follows the QUIC spin
-bit pattern: reflected on receive, toggled on send when the reflected
-value matches the last sent value. The spin bit state machine runs
+The SP (spin bit) flag in the flags byte of the FMP common prefix,
+sent in the clear, follows the QUIC spin bit pattern: reflected on
+receive, toggled on send when the reflected value matches the last
+sent value. The spin bit state machine runs
 for TX reflection, but **RTT samples from the spin bit are
 discarded**. In a mesh protocol where frames are sent irregularly
 (tree announces, bloom filters, MMP reports on different timers),
@@ -105,8 +106,8 @@ goodput, or ETX update. If receiver-side dwell time exceeds the wire
 field, the report keeps its counters but sends a zero timestamp echo so
 the sender cannot form an invalid RTT sample.
 
-The spin bit lives in the link-layer FMP inner header, so this
-mechanism applies to link-layer MMP only. Session-layer MMP carries
+The link-layer spin bit is that SP flag in the FMP common prefix, so
+this mechanism applies to link-layer MMP only. Session-layer MMP carries
 its spin bit in the FSP encrypted inner header but uses it the same
 way: reflected for diagnostic visibility, not used for SRTT.
 
