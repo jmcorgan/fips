@@ -1,8 +1,8 @@
 //! FIPS-specific Bloom filter announcement state management.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::BloomFilter;
+use super::{BloomFilter, SENT_HISTORY};
 use crate::identity::NodeAddr;
 use crate::proto::mmp::delivery::{Acks, LinkEvidence, ResendReason};
 use alloc::vec;
@@ -32,8 +32,10 @@ pub struct BloomState {
     /// the peer, so it holds one entry per peer rather than one per address
     /// ever seen; a returning peer is reseeded from a later floor.
     peer_sequences: BTreeMap<NodeAddr, u64>,
-    /// Last outgoing filter sent to each peer (for change detection).
-    last_sent_filters: BTreeMap<NodeAddr, BloomFilter>,
+    /// The distinct outgoing filters most recently sent to each peer,
+    /// oldest first, at most [`SENT_HISTORY`] of them. The newest is what
+    /// change detection compares against; the child echo check reads all.
+    sent_filters: BTreeMap<NodeAddr, VecDeque<BloomFilter>>,
     /// Per-peer delivery tracking for sent announces.
     acks: Acks,
     /// Set when an accepted inbound filter may have changed outgoing
@@ -56,7 +58,7 @@ impl BloomState {
             pending_updates: BTreeSet::new(),
             sequence: 0,
             peer_sequences: BTreeMap::new(),
-            last_sent_filters: BTreeMap::new(),
+            sent_filters: BTreeMap::new(),
             acks: Acks::new(),
             inbound_dirty: false,
             inbound_recomputes: 0,
@@ -211,8 +213,19 @@ impl BloomState {
     }
 
     /// Record the outgoing filter that was sent to a peer.
+    ///
+    /// It becomes the newest of the filters kept for that peer. A filter
+    /// equal to one already kept moves to the newest place instead of being
+    /// kept twice, so a resend of the same content does not push an earlier,
+    /// different filter out. Beyond [`SENT_HISTORY`] filters the oldest is
+    /// dropped.
     pub fn record_sent_filter(&mut self, peer_id: NodeAddr, filter: BloomFilter) {
-        self.last_sent_filters.insert(peer_id, filter);
+        let sent = self.sent_filters.entry(peer_id).or_default();
+        sent.retain(|kept| *kept != filter);
+        sent.push_back(filter);
+        while sent.len() > SENT_HISTORY {
+            sent.pop_front();
+        }
     }
 
     /// Read back the last outgoing filter actually sent to a peer, if any.
@@ -223,20 +236,33 @@ impl BloomState {
     /// exceeds discards it and keeps the one it accepted before, so this is
     /// not always what the peer holds.
     pub fn last_sent_filter(&self, peer_id: &NodeAddr) -> Option<&BloomFilter> {
-        self.last_sent_filters.get(peer_id)
+        self.sent_filters.get(peer_id)?.back()
     }
 
-    /// Forget the filter last sent to a peer that restarted, which holds
-    /// none of this node's filters any more. The debounce and the announce
-    /// delivery state are kept: the link, and its session's delivery
-    /// record, survive the restart.
+    /// The distinct filters most recently sent to a peer, newest first: the
+    /// [`last_sent_filter`](Self::last_sent_filter), then up to
+    /// [`SENT_HISTORY`] less one before it. Empty when nothing was sent.
+    ///
+    /// A tree child whose view lags can return any of them, so the child
+    /// echo check tests an announce against each.
+    pub fn sent_history(&self, peer_id: &NodeAddr) -> impl Iterator<Item = &BloomFilter> {
+        self.sent_filters
+            .get(peer_id)
+            .into_iter()
+            .flat_map(|sent| sent.iter().rev())
+    }
+
+    /// Forget the filters sent to a peer that restarted, which holds none of
+    /// this node's filters any more. The debounce and the announce delivery
+    /// state are kept: the link, and its session's delivery record, survive
+    /// the restart.
     pub fn forget_sent(&mut self, peer_id: &NodeAddr) {
-        self.last_sent_filters.remove(peer_id);
+        self.sent_filters.remove(peer_id);
     }
 
     /// Remove stored filter state for a peer that was removed.
     pub fn remove_peer_state(&mut self, peer_id: &NodeAddr) {
-        self.last_sent_filters.remove(peer_id);
+        self.sent_filters.remove(peer_id);
         self.last_update_sent.remove(peer_id);
         self.pending_updates.remove(peer_id);
         self.peer_sequences.remove(peer_id);
@@ -264,7 +290,7 @@ impl BloomState {
         link: &LinkEvidence,
         now_ms: u64,
     ) {
-        let fresh = self.last_sent_filters.get(&peer) != Some(filter);
+        let fresh = self.last_sent_filter(&peer) != Some(filter);
         self.acks.record(peer, fresh, counter, link, now_ms);
     }
 
@@ -338,7 +364,7 @@ impl BloomState {
     ) {
         self.inbound_recomputes += 1;
         for (peer_addr, new_filter) in self.compute_outgoing_filters(targets, peer_filters) {
-            let changed = match self.last_sent_filters.get(&peer_addr) {
+            let changed = match self.last_sent_filter(&peer_addr) {
                 Some(last) => *last != new_filter,
                 None => true, // never sent → must send
             };

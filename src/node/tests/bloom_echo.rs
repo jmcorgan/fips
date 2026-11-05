@@ -301,7 +301,6 @@ async fn a_child_echo_threshold_of_one_turns_the_guard_off() {
 }
 
 #[tokio::test]
-#[ignore = "known defect: a child's echo of an earlier filter we sent passes the guard and is merged into the filter we send our parent"]
 async fn a_lagged_echo_of_an_earlier_filter_we_sent_does_not_reach_the_filter_we_send_our_parent() {
     let mut chain = Chain::new().await;
     let (_, earlier) = chain.parent_side(0xA1, 1000).await;

@@ -45,3 +45,15 @@ pub const SIZE_CLASS_BYTES: [usize; 4] = [512, 1024, 2048, 4096];
 /// probability about 1.6e-10 per announce. A returned filter below the floor
 /// adds at most about 26 entries upward, which is bounded.
 pub const ECHO_MIN_BITS: usize = 128;
+
+/// How many distinct filters sent to each peer are kept for the child echo
+/// check.
+///
+/// A tree child whose view lags can return an earlier filter we sent it
+/// rather than the latest, so an announce is tested against each kept filter
+/// with the same bound. Each comparison keeps its own false-cross chance, so
+/// across the history the chance is at most this many times one comparison's
+/// (`core/src/proto/bloom/README.md` gives the figures). An echo of a filter
+/// older than the history still passes. Costs one filter (1 KB) per kept
+/// filter per peer.
+pub const SENT_HISTORY: usize = 4;

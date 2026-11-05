@@ -21,6 +21,9 @@ struct ChildEcho {
     bound: f64,
     /// Digest of the filter we sent, to match against our send log.
     sent_digest: diag::Tag<8>,
+    /// How many distinct filters were sent to the peer after that one: 0
+    /// for the latest. A resend of a kept filter makes it the latest again.
+    sends_ago: usize,
 }
 
 /// Draw the origin of this node's FilterAnnounce sequence floor: a random
@@ -300,11 +303,12 @@ impl Node {
         }
 
         // Child echo guard. A tree child's filter is merged into the one we
-        // send our parent, so a child that returns what we sent it would make
-        // that filter claim everything we already know. Like the FPR cap,
-        // the rejection leaves the stored filter and filter_sequence as they
-        // were. It applies only when there is a stored filter to keep: with
-        // none, a false rejection would drop the child's subtree outright.
+        // send our parent, so a child that returns what we sent it, now or a
+        // few sends ago, would make that filter claim everything we know.
+        // Like the FPR cap, the rejection leaves the stored filter and
+        // filter_sequence as they were. It applies only when there is a
+        // stored filter to keep: with none, a false rejection would drop the
+        // child's subtree outright.
         if let Some(echo) = self.child_echo(from, &announce.filter) {
             self.metrics().bloom.record_reject(BloomReject::ChildRole);
             warn!(
@@ -315,6 +319,7 @@ impl Node {
                 bound = format_args!("{:.3}", echo.bound),
                 digest = %diag::filter_tag(&announce.filter),
                 sent_digest = %echo.sent_digest,
+                sends_ago = echo.sends_ago,
                 "FilterAnnounce from a tree child returns the filter we sent it, kept its previous filter"
             );
             return;
@@ -354,27 +359,32 @@ impl Node {
         self.bloom_state.note_inbound_change();
     }
 
-    /// The readings behind rejecting `got` from `from` as a return of the
-    /// filter we last sent it, or `None` to accept it.
+    /// The readings behind rejecting `got` from `from` as a return of a
+    /// filter we recently sent it, or `None` to accept it.
     ///
     /// Applies only when `from` is our tree child, already has a stored
-    /// filter (the one a rejection keeps), and we have sent it a filter;
-    /// the test itself is [`BloomFilter::echoes`] at
-    /// `node.bloom.child_echo_threshold`.
+    /// filter (the one a rejection keeps), and we have sent it a filter.
+    /// The test itself is [`BloomFilter::echoes`] at
+    /// `node.bloom.child_echo_threshold`, against each filter in
+    /// [`BloomState::sent_history`](crate::proto::bloom::BloomState::sent_history),
+    /// newest first: a child whose view lags returns an earlier one, which
+    /// can overlap the latest less than the bound.
     fn child_echo(&self, from: &NodeAddr, got: &BloomFilter) -> Option<ChildEcho> {
         if self.tree_role(from) != diag::TreeRole::Child {
             return None;
         }
         self.peers.get(from)?.inbound_filter()?;
-        let sent = self.bloom_state.last_sent_filter(from)?;
         let threshold = self.config().node.bloom.child_echo_threshold;
-        if !got.echoes(sent, threshold) {
-            return None;
-        }
+        let (sends_ago, sent) = self
+            .bloom_state
+            .sent_history(from)
+            .enumerate()
+            .find(|(_, sent)| got.echoes(sent, threshold))?;
         Some(ChildEcho {
             overlap: got.overlap(sent)?,
             bound: got.echo_bound(threshold),
             sent_digest: diag::filter_tag(sent),
+            sends_ago,
         })
     }
 

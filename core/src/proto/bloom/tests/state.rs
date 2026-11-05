@@ -2,7 +2,7 @@
 
 use alloc::collections::BTreeMap;
 
-use crate::proto::bloom::{BloomFilter, BloomState};
+use crate::proto::bloom::{BloomFilter, BloomState, SENT_HISTORY};
 use crate::testutil::make_node_addr;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -950,4 +950,131 @@ fn test_bloom_ack_later_session_base_is_never_complete() {
     assert!(t.outstanding(), "a lost announce must not confirm");
     let resends = t.hold(2_000, 120_000, false, late);
     assert_eq!(resends, vec![(FALLBACK_MS, ResendReason::Timeout)]);
+}
+
+/// A filter holding only the address made from `tag`.
+fn tagged(tag: u8) -> BloomFilter {
+    let mut filter = BloomFilter::new();
+    filter.insert(&make_node_addr(tag));
+    filter
+}
+
+/// The filters kept for `peer`, newest first.
+fn history(state: &BloomState, peer: &NodeAddr) -> Vec<BloomFilter> {
+    state.sent_history(peer).cloned().collect()
+}
+
+#[test]
+fn the_sent_history_keeps_the_last_four_distinct_filters_newest_first() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+    assert_eq!(SENT_HISTORY, 4);
+    assert!(history(&state, &peer).is_empty(), "nothing sent yet");
+
+    for tag in 10..16 {
+        state.record_sent_filter(peer, tagged(tag));
+    }
+
+    assert_eq!(
+        history(&state, &peer),
+        vec![tagged(15), tagged(14), tagged(13), tagged(12)],
+        "the four latest, newest first; 10 and 11 dropped"
+    );
+    assert_eq!(state.last_sent_filter(&peer), Some(&tagged(15)));
+}
+
+#[test]
+fn resending_a_kept_filter_moves_it_to_the_newest_place_without_dropping_another() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+    for tag in [10, 11, 12, 13] {
+        state.record_sent_filter(peer, tagged(tag));
+    }
+
+    state.record_sent_filter(peer, tagged(13));
+    assert_eq!(
+        history(&state, &peer),
+        vec![tagged(13), tagged(12), tagged(11), tagged(10)],
+        "a resend of the latest changes nothing"
+    );
+
+    state.record_sent_filter(peer, tagged(11));
+    assert_eq!(
+        history(&state, &peer),
+        vec![tagged(11), tagged(13), tagged(12), tagged(10)],
+        "an earlier filter sent again becomes the newest, kept once"
+    );
+    assert_eq!(state.last_sent_filter(&peer), Some(&tagged(11)));
+}
+
+#[test]
+fn the_sent_history_is_kept_per_peer() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let (a, b) = (make_node_addr(1), make_node_addr(2));
+    state.record_sent_filter(a, tagged(10));
+    state.record_sent_filter(b, tagged(20));
+    state.record_sent_filter(a, tagged(11));
+
+    assert_eq!(history(&state, &a), vec![tagged(11), tagged(10)]);
+    assert_eq!(history(&state, &b), vec![tagged(20)]);
+}
+
+#[test]
+fn forgetting_a_restarted_peer_clears_its_whole_sent_history() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let (peer, other) = (make_node_addr(1), make_node_addr(2));
+    for tag in [10, 11, 12] {
+        state.record_sent_filter(peer, tagged(tag));
+    }
+    state.record_sent_filter(other, tagged(20));
+
+    state.forget_sent(&peer);
+
+    assert!(history(&state, &peer).is_empty());
+    assert_eq!(state.last_sent_filter(&peer), None);
+    assert_eq!(history(&state, &other), vec![tagged(20)], "others kept");
+
+    state.record_sent_filter(peer, tagged(13));
+    assert_eq!(
+        history(&state, &peer),
+        vec![tagged(13)],
+        "a new history starts with nothing from before the restart"
+    );
+}
+
+#[test]
+fn removing_a_peer_clears_its_whole_sent_history() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let (peer, other) = (make_node_addr(1), make_node_addr(2));
+    for tag in [10, 11, 12] {
+        state.record_sent_filter(peer, tagged(tag));
+    }
+    state.record_sent_filter(other, tagged(20));
+
+    state.remove_peer_state(&peer);
+
+    assert!(history(&state, &peer).is_empty());
+    assert_eq!(state.last_sent_filter(&peer), None);
+    assert_eq!(history(&state, &other), vec![tagged(20)], "others kept");
+}
+
+#[test]
+fn change_detection_compares_with_the_newest_sent_filter_only() {
+    let mut state = BloomState::new(make_node_addr(0));
+    let peer = make_node_addr(1);
+    // What mark_changed computes for `peer` with no inbound filters.
+    let own = state.base_filter();
+    state.record_sent_filter(peer, own.clone());
+    state.record_sent_filter(peer, tagged(10));
+
+    state.mark_changed(&[peer], &BTreeMap::new());
+    assert!(
+        state.needs_update(&peer),
+        "the outgoing filter equals an earlier send, not the latest"
+    );
+
+    state.clear_pending_updates();
+    state.record_sent_filter(peer, own);
+    state.mark_changed(&[peer], &BTreeMap::new());
+    assert!(!state.needs_update(&peer), "it equals the latest");
 }

@@ -439,19 +439,26 @@ A tree child's inbound filter is merged into every outgoing filter,
 including the one sent to the parent. A child that returns the filter
 it was sent would make that upward filter claim everything the node
 already knows. Each `FilterAnnounce` from a tree child is therefore
-compared with the filter last sent to that child: its overlap is the
+compared with each of the last four distinct filters sent to that
+child, newest first, since a child whose view lags can return an
+earlier filter rather than the latest. Against each, the overlap is the
 share of the sent filter's set bits that the announced filter also
 sets. An unrelated filter overlaps at about its own fill ratio, and a
-returned one at 1.0. The announce is rejected when the overlap exceeds
-`fill + δ × (1 − fill)`, with δ = `node.bloom.child_echo_threshold`
-(default `0.8`, `1.0` disables it). The scaled form rejects a full
-return at any fill below the FPR cap while still merging a subtree
-that was already in the sent filter, as happens when a peer with
-descendants becomes a child.
+returned one at 1.0. The announce is rejected when its overlap with any
+of the four exceeds `fill + δ × (1 − fill)`, with δ =
+`node.bloom.child_echo_threshold` (default `0.8`, `1.0` disables it).
+The scaled form rejects a full return at any fill below the FPR cap
+while still merging a subtree that holds no more than the bound's share
+of any of those filters, as happens when a peer with descendants
+becomes a child. An honest child whose subtree holds more than that
+share of one of the last four filters sent to it is refused like an
+echo, and stays unmerged until the filter leaves the history and the
+child announces again. An echo of a filter older than the last four
+still passes.
 
-The guard applies only when the filter last sent to the child has at
-least 128 set bits (below that an honest child can match it by
-chance) and the child already has a stored filter. Like the FPR cap,
+A sent filter is tested only when it has at least 128 set bits (below
+that an honest child can match it by chance), and the guard applies
+only when the child already has a stored filter. Like the FPR cap,
 a rejection is silent on the wire and leaves the stored filter and
 its sequence untouched, so the previous filter is kept. Rejections
 are counted in `bloom.child_role_rejected` and logged at WARN with
