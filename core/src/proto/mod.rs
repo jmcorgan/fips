@@ -16,6 +16,7 @@ pub mod link;
 pub mod lookup;
 pub mod math;
 pub mod mmp;
+pub mod path;
 pub mod probe;
 pub mod rate_limit;
 #[doc(hidden)]

@@ -18,7 +18,8 @@ moves in from the root crate one module at a time. So far it holds:
 - `EntropySource`, the trait through which the host supplies random
   bytes;
 - `time::Clock` and `time::Instant`, the traits through which the host
-  supplies the time, with `Duration` from `core::time`;
+  supplies the time, with `Duration` from `core::time` and two helpers
+  over them, `time::deadline` and `time::backoff`;
 - the transport value types: `TransportId`, `LinkId`, `LinkDirection`,
   `TransportAddr` and `LinkStats`, re-exported under `fips::transport`.
   The transports themselves stay in the root crate;
@@ -35,6 +36,15 @@ moves in from the root crate one module at a time. So far it holds:
   the root crate meets `AeadKey` only as the type the sessions' key
   hand-outs return, and in the compile-time tie that pins that type to
   `ring`;
+- the multipath path set, `proto::path::PathSet`, generic over the
+  instant type and over a driver slot each path carries; the root
+  crate's aliases fix them over `HostClock`'s instant and its UDP slot.
+  Beside it, `proto::path::Bundle`, the machine of one link's paths,
+  generic over the clock, the entropy source and the driver slot, which
+  holds the candidates the host reports for the peer, learns whether
+  the peer implements multipath by capability probes, chooses the
+  link's active path, and holds the link's cost across a change of it;
+  nothing calls it yet;
 - the protocol itself, `proto`: the wire codecs and sans-IO state
   machines of every layer (link, session, spanning tree, bloom filters,
   routing, lookups, metrics, probes). The root crate reaches it as
@@ -93,11 +103,14 @@ time T"), not as a suspended task.
 time take it as a parameter, and timeouts are deadlines the caller
 schedules. A type that measures time takes the host's clock as a type
 parameter bounded by `time::Clock` and takes its instants as arguments;
-it never calls `Clock::now`, which is for the host. The host fixes the
-parameter in a type alias, as it does for the entropy source below: the
-root crate's is `HostClock`, its monotonic clock. This is what makes the
-state machines testable with synthetic timestamps, and what lets an
-embedded host supply its own timer.
+it never calls `Clock::now`, which is for the host. A type that only
+holds the instants it is handed may take the instant type
+(`I: time::Instant`) as its parameter instead of the clock, as rekey's
+`Ladder`, `SetupFacts` and `Carry` and `proto::path::PathSet` do. The
+host fixes the parameter in a type alias, as it does for the entropy
+source below: the root crate's is `HostClock`, its monotonic clock. This
+is what makes the state machines testable with synthetic timestamps, and
+what lets an embedded host supply its own timer.
 
 **Randomness is an argument.** Never reach for a thread-local or OS
 random source. Code that needs random bytes or a nonce takes them from
@@ -282,12 +295,13 @@ The first lints the library with only the features its
 in doing so gives the library the dev-dependencies' features, so code
 that needs `secp256k1`'s `rand` or `std` passes it; the first does
 not. The third lints the slow test suites the `slow-tests` feature
-gates (the models of the deployed releases and the guard-switch
-meta-test). Every platform's ordinary test run skips them; GitHub CI's
-Linux job runs them on every push, and local CI with `--slow-tests`. Run
-all four before sending a change here. The repository guards in
-`testing/` (atomics, comment references, log strings) scan `core/src/`
-as well as `src/`.
+gates (the rekey models of the deployed releases and the guard-switch
+meta-test, and the path module's day with a deployed peer and hour of
+the two-node simulator). Every platform's ordinary test run skips them;
+GitHub CI's Linux job runs them on every push, and local CI with
+`--slow-tests`. Run all four before sending a change here. The
+repository guards in `testing/` (atomics, comment references, log
+strings) scan `core/src/` as well as `src/`.
 
 The settlement explorers against the deployed models and the candidate
 rules are gated by a second feature, `slow-explorers`, which turns

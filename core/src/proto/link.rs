@@ -48,6 +48,15 @@ pub enum LinkMessageType {
     /// Periodic heartbeat for link liveness detection.
     /// No payload — the msg_type byte alone is sufficient.
     Heartbeat = 0x51,
+    /// Probe of a path to a peer under the link's current keys.
+    /// Payload is a [`PathProbe`](crate::proto::path::wire::PathProbe).
+    PathProbe = 0x52,
+    /// Answer to a `PathProbe`, sent on the transport it arrived on.
+    /// Payload is a [`PathAck`](crate::proto::path::wire::PathAck).
+    PathAck = 0x53,
+    /// Notice that the sender is closing one of the link's paths.
+    /// Payload is a [`PathClose`](crate::proto::path::wire::PathClose).
+    PathClose = 0x54,
 }
 
 impl LinkMessageType {
@@ -63,6 +72,9 @@ impl LinkMessageType {
             0x31 => Some(LinkMessageType::LookupResponse),
             0x50 => Some(LinkMessageType::Disconnect),
             0x51 => Some(LinkMessageType::Heartbeat),
+            0x52 => Some(LinkMessageType::PathProbe),
+            0x53 => Some(LinkMessageType::PathAck),
+            0x54 => Some(LinkMessageType::PathClose),
             _ => None,
         }
     }
@@ -85,6 +97,9 @@ impl fmt::Display for LinkMessageType {
             LinkMessageType::LookupResponse => "LookupResponse",
             LinkMessageType::Disconnect => "Disconnect",
             LinkMessageType::Heartbeat => "Heartbeat",
+            LinkMessageType::PathProbe => "PathProbe",
+            LinkMessageType::PathAck => "PathAck",
+            LinkMessageType::PathClose => "PathClose",
         };
         write!(f, "{}", name)
     }

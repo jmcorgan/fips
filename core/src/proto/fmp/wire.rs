@@ -223,6 +223,13 @@ pub const ENCRYPTED_MIN_SIZE: usize = ESTABLISHED_HEADER_SIZE + TAG_SIZE; // 32 
 /// Size of the encrypted inner header (timestamp + message type).
 pub const INNER_HEADER_SIZE: usize = 5;
 
+/// Bytes an established frame adds around a link message counted from its
+/// type byte: the established header, the 4-byte inner timestamp (the inner
+/// header less its type byte, which is the link message's own first byte)
+/// and the AEAD tag, 36 bytes. A transport link MTU less this is the largest
+/// link message the transport carries in one frame.
+pub const FRAME_OVERHEAD: usize = ESTABLISHED_HEADER_SIZE + (INNER_HEADER_SIZE - 1) + TAG_SIZE;
+
 // Flag bit constants (byte 1 of common prefix, meaningful only for phase 0x0).
 // Reserved for upcoming rekeying, congestion signaling, and RTT measurement.
 #[allow(dead_code)]

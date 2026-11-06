@@ -19,8 +19,11 @@ traits, is `fips_core::time` (`core/src/time/`).
   - `WallStamp`: Unix milliseconds of an instant, for the control API
     and logs. For a `HostInstant` it is the wall clock now less the
     instant's monotonic age.
-  - `deadline(now, d)`: `now + d`, with `d` capped at `CEILING` (100
-    years) so it never overflows or panics.
+  - `deadline(now, d)`: `fips_core::time::deadline`, re-exported for
+    the shell's timers: `now + d`, with `d` capped at `CEILING` (100
+    years) so it never overflows or panics. Its tests here run through
+    the re-export, on the host clock and on a test instant whose whole
+    range they can reach.
   - Test only: `step_wall` and `advance`, per-thread offsets on the
     wall and monotonic clocks, and `TestEpoch` with `at::<C>(ms)`, an
     instant `ms` milliseconds after a clock's fixed test epoch.

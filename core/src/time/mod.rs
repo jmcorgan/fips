@@ -3,12 +3,16 @@
 //! The core never reads a clock. A type that measures time takes the host's
 //! clock as a type parameter bounded by [`Clock`] and takes the clock's
 //! instants as method arguments; the host reads its clock and passes the
-//! instant in. The host fixes the parameter once, in a type alias at the path
-//! its callers already use, as it does for [`crate::entropy::EntropySource`].
+//! instant in. A type that only holds the instants it is handed takes the
+//! instant type, bounded by [`Instant`], instead. The host fixes the
+//! parameter once, in a type alias at the path its callers already use, as it
+//! does for [`crate::entropy::EntropySource`].
 //!
 //! Durations are [`core::time::Duration`], which needs neither `std` nor an
 //! allocator. The arithmetic between instants and durations is the three
-//! methods on [`Instant`].
+//! methods on [`Instant`]; [`deadline`] builds a deadline from them that
+//! never overflows, and [`backoff`] is the doubling, capped wait that
+//! retries and abandons share.
 
 pub use core::time::Duration;
 
@@ -39,6 +43,37 @@ pub trait Clock {
 
     /// The current instant.
     fn now(&self) -> Self::Instant;
+}
+
+/// The furthest a [`deadline`] reaches: 100 years. No host instant type
+/// overflows that far from a current reading; one whose range ends sooner
+/// gets a deadline at that end instead.
+pub const CEILING: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+
+/// `now + d`, with `d` capped at [`CEILING`].
+///
+/// Below the cap this is exactly `now + d`. An instant type whose range ends
+/// within the cap of `now` gets a deadline at or before that end instead of a
+/// panic: the step is halved until it fits.
+pub fn deadline<I: Instant>(now: I, d: Duration) -> I {
+    let mut step = d.min(CEILING);
+    loop {
+        if let Some(at) = now.checked_add(step) {
+            return at;
+        }
+        if step.is_zero() {
+            return now;
+        }
+        step /= 2;
+    }
+}
+
+/// `base` doubled `exponent` times, capped at `cap`. The doubling factor
+/// saturates at `u32::MAX` and the product at `Duration::MAX`, so any
+/// exponent gives the cap once the doubling reaches it.
+pub fn backoff(exponent: u32, base: Duration, cap: Duration) -> Duration {
+    let factor = 1u32.checked_shl(exponent).unwrap_or(u32::MAX);
+    base.saturating_mul(factor).min(cap)
 }
 
 #[cfg(test)]

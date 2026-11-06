@@ -44,7 +44,9 @@ it out. Handshake message bytes are opaque here.
   README describes it.
 - `wire.rs`: the link framing codec: the common prefix, the encrypted,
   msg1 and msg2 headers, the handshake message types, disconnect
-  reasons and the disconnect message.
+  reasons and the disconnect message, and `FRAME_OVERHEAD`, the bytes an
+  established frame adds around a link message, which the node's wire
+  length accounting and the path ack size rule both use.
 - `tests/`: the unit tests; its README describes it.
 
 ## Invariants
