@@ -8,6 +8,7 @@
 //! module selected below.
 
 use crate::transport::TransportError;
+use crate::transport::sockbuf::{self, Buffer};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -21,6 +22,40 @@ use super::linux as sys;
 use super::macos as sys;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use super::unix_other as sys;
+
+/// Size a listen socket's receive and send buffers, warning when the
+/// kernel grants less than asked.
+///
+/// Forced past the `net.core` ceiling where the process may (Linux, with
+/// `CAP_NET_ADMIN`), plain otherwise. Fails the setup only when a buffer
+/// could not be sized at all.
+fn size_buffers(
+    fd: RawFd,
+    recv_buf_size: usize,
+    send_buf_size: usize,
+) -> Result<(), TransportError> {
+    let recv = sockbuf::set_buffer(fd, Buffer::Recv, recv_buf_size)
+        .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
+    let send = sockbuf::set_buffer(fd, Buffer::Send, send_buf_size)
+        .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
+    if recv.clamped() {
+        warn!(
+            requested = recv.requested,
+            actual = recv.actual,
+            "UDP recv buffer clamped by kernel (grant CAP_NET_ADMIN or \
+             increase net.core.rmem_max)"
+        );
+    }
+    if send.clamped() {
+        warn!(
+            requested = send.requested,
+            actual = send.actual,
+            "UDP send buffer clamped by kernel (grant CAP_NET_ADMIN or \
+             increase net.core.wmem_max)"
+        );
+    }
+    Ok(())
+}
 
 /// Maximum number of datagrams a single recvmmsg / recvmsg_x / sendmmsg
 /// syscall will pull from / push to the kernel. Tuned to amortise syscall +
@@ -104,33 +139,7 @@ impl UdpRawSocket {
         let _ = sock.set_reuse_port(true);
         let _ = sock.set_reuse_address(true);
 
-        // Set socket buffer sizes
-        sock.set_recv_buffer_size(recv_buf_size)
-            .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
-        sock.set_send_buffer_size(send_buf_size)
-            .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
-
-        let actual_recv = sock
-            .recv_buffer_size()
-            .map_err(|e| TransportError::StartFailed(format!("get recv buffer: {}", e)))?;
-        let actual_send = sock
-            .send_buffer_size()
-            .map_err(|e| TransportError::StartFailed(format!("get send buffer: {}", e)))?;
-
-        if actual_recv < recv_buf_size {
-            warn!(
-                requested = recv_buf_size,
-                actual = actual_recv,
-                "UDP recv buffer clamped by kernel (increase net.core.rmem_max)"
-            );
-        }
-        if actual_send < send_buf_size {
-            warn!(
-                requested = send_buf_size,
-                actual = actual_send,
-                "UDP send buffer clamped by kernel (increase net.core.wmem_max)"
-            );
-        }
+        size_buffers(sock.as_raw_fd(), recv_buf_size, send_buf_size)?;
 
         sys::enable_drop_counting(sock.as_raw_fd());
 
@@ -172,32 +181,7 @@ impl UdpRawSocket {
         let _ = sock.set_reuse_port(true);
         let _ = sock.set_reuse_address(true);
 
-        sock.set_recv_buffer_size(recv_buf_size)
-            .map_err(|e| TransportError::StartFailed(format!("set recv buffer: {}", e)))?;
-        sock.set_send_buffer_size(send_buf_size)
-            .map_err(|e| TransportError::StartFailed(format!("set send buffer: {}", e)))?;
-
-        let actual_recv = sock
-            .recv_buffer_size()
-            .map_err(|e| TransportError::StartFailed(format!("get recv buffer: {}", e)))?;
-        let actual_send = sock
-            .send_buffer_size()
-            .map_err(|e| TransportError::StartFailed(format!("get send buffer: {}", e)))?;
-
-        if actual_recv < recv_buf_size {
-            warn!(
-                requested = recv_buf_size,
-                actual = actual_recv,
-                "UDP recv buffer clamped by kernel (increase net.core.rmem_max)"
-            );
-        }
-        if actual_send < send_buf_size {
-            warn!(
-                requested = send_buf_size,
-                actual = actual_send,
-                "UDP send buffer clamped by kernel (increase net.core.wmem_max)"
-            );
-        }
+        size_buffers(sock.as_raw_fd(), recv_buf_size, send_buf_size)?;
 
         sys::enable_drop_counting(sock.as_raw_fd());
 

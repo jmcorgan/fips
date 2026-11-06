@@ -30,7 +30,7 @@ const REQUESTS: &str = include_str!("../../control/snapshots/fipsctl_path_reques
 
 /// The keys of a one-path peer's `show_peers` row before the `paths`
 /// array, as the base renders them, both on the loop and off it.
-const BASE_KEYS: [&str; 26] = [
+const BASE_KEYS: [&str; 27] = [
     "authenticated_at_ms",
     "connectivity",
     "consecutive_decrypt_failures",
@@ -53,6 +53,7 @@ const BASE_KEYS: [&str; 26] = [
     "npub",
     "our_session_index",
     "replay_suppressed",
+    "replay_suppressed_total",
     "stats",
     "transport_addr",
     "transport_type",

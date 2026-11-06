@@ -6,6 +6,7 @@
 //! connected-fd syscall sequence.
 
 use super::unix::{BATCH_SIZE, sockaddr_to_socket_addr};
+use crate::transport::sockbuf::{self, Buffer};
 use std::io;
 use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
@@ -147,35 +148,10 @@ pub(super) fn prepare_fd(_fd: RawFd) -> io::Result<()> {
 pub(super) fn tune_connected_socket(_fd: RawFd) {}
 
 /// Apply receive and send buffer sizes to a connected peer socket.
+///
+/// Best-effort: forced past the `net.core` ceiling where the process may,
+/// plain otherwise, and any failure is ignored.
 pub(super) fn set_buf_sizes(fd: RawFd, recv_buf: usize, send_buf: usize) {
-    set_buf_size(fd, libc::SO_RCVBUFFORCE, libc::SO_RCVBUF, recv_buf);
-    set_buf_size(fd, libc::SO_SNDBUFFORCE, libc::SO_SNDBUF, send_buf);
-}
-
-/// Try `SO_*BUFFORCE` first (bypasses the rmem/wmem ceiling) and
-/// fall back to `SO_*BUF` if that fails. Returns silently — buffer
-/// sizing is best-effort.
-fn set_buf_size(fd: RawFd, force_name: libc::c_int, normal_name: libc::c_int, size: usize) {
-    let value: libc::c_int = size as libc::c_int;
-    let r = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            force_name,
-            &value as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if r < 0 {
-        // Fall back to non-force — kernel may clamp.
-        let _ = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                normal_name,
-                &value as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-    }
+    let _ = sockbuf::set_buffer(fd, Buffer::Recv, recv_buf);
+    let _ = sockbuf::set_buffer(fd, Buffer::Send, send_buf);
 }

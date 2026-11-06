@@ -26,8 +26,10 @@ use fips_core::proto::rekey::{
     Bond, Close, Completed, CycleView, Env, Identity, Ids, IndexLease, Input, PeerKey, Record,
     Role, SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
 };
+use portable_atomic::{AtomicU64, Ordering};
 use secp256k1::XOnlyPublicKey;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Connectivity of an active peer, as the control socket reports it.
@@ -200,8 +202,11 @@ struct PeerSendState {
     /// Whether an authenticated frame from this peer has arrived since it was
     /// promoted. Kept beside `last_seen` because `touch` writes both.
     heard: bool,
-    /// Number of replay detections suppressed since last session reset.
-    replay_suppressed_count: u32,
+    /// Replays refused from this peer since it was promoted, on the inline
+    /// path and in the decrypt workers, which hold a clone of it.
+    replay_total: Arc<AtomicU64>,
+    /// `replay_total` at the last session reset.
+    replay_base: u64,
     /// Frames authenticated on the previous session since the last cutover.
     prev_frames: u64,
     /// The receiver index of the last frame that failed to decrypt.
@@ -220,7 +225,8 @@ impl PeerSendState {
             link_stats: LinkStats::new(),
             last_seen,
             heard: false,
-            replay_suppressed_count: 0,
+            replay_total: Arc::new(AtomicU64::new(0)),
+            replay_base: 0,
             prev_frames: 0,
             failed_idx: None,
             mmp: None,
@@ -1031,20 +1037,39 @@ impl ActivePeer {
 
     /// Increment replay suppression counter. Returns the new count.
     pub fn increment_replay_suppressed(&mut self) -> u32 {
-        self.send.replay_suppressed_count += 1;
-        self.send.replay_suppressed_count
+        self.send.replay_total.fetch_add(1, Ordering::Relaxed);
+        self.replay_suppressed_count()
     }
 
     /// Reset replay suppression counter, returning previous count.
     pub fn reset_replay_suppressed(&mut self) -> u32 {
-        let count = self.send.replay_suppressed_count;
-        self.send.replay_suppressed_count = 0;
+        let total = self.replay_suppressed_total();
+        let count = self.replay_count(total);
+        self.send.replay_base = total;
         count
     }
 
-    /// Current replay suppression count.
+    /// Current replay suppression count: refusals since the last session
+    /// reset, on either receive path.
     pub fn replay_suppressed_count(&self) -> u32 {
-        self.send.replay_suppressed_count
+        self.replay_count(self.replay_suppressed_total())
+    }
+
+    /// The count since the last session reset, given the total.
+    fn replay_count(&self, total: u64) -> u32 {
+        u32::try_from(total.saturating_sub(self.send.replay_base)).unwrap_or(u32::MAX)
+    }
+
+    /// Refused replays since this peer was promoted. No session reset clears
+    /// the total; a connection that replaces the peer starts a new one.
+    pub fn replay_suppressed_total(&self) -> u64 {
+        self.send.replay_total.load(Ordering::Relaxed)
+    }
+
+    /// The running total, for a decrypt worker to add its refusals to.
+    #[cfg(unix)]
+    pub(crate) fn replay_total(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.send.replay_total)
     }
 
     // === Repeated Handshake Lines ===

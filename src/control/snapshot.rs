@@ -724,6 +724,7 @@ pub(crate) struct PeerRow {
     pub effective_depth: Option<f64>,
     pub stats: PeerLinkStats,
     pub replay_suppressed: u32,
+    pub replay_suppressed_total: u64,
     pub consecutive_decrypt_failures: u32,
     pub nostr_traversal: PeerNostrState,
     pub noise: Option<PeerNoiseCounters>,

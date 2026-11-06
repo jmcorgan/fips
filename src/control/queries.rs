@@ -325,6 +325,7 @@ pub fn show_peers(node: &Node) -> Value {
 
             // Security signals
             peer_json["replay_suppressed"] = json!(peer.replay_suppressed_count());
+            peer_json["replay_suppressed_total"] = json!(peer.replay_suppressed_total());
             peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures());
 
             // Nostr-traversal state if this peer's npub appears in
@@ -549,6 +550,7 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
             });
 
             peer_json["replay_suppressed"] = json!(peer.replay_suppressed);
+            peer_json["replay_suppressed_total"] = json!(peer.replay_suppressed_total);
             peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures);
 
             let nostr = &peer.nostr_traversal;

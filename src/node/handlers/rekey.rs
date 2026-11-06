@@ -606,7 +606,8 @@ impl Node {
     /// peer's machine with the acceptance when the worker accepts it, before
     /// any other input reaches it. A `TrySendError::Full` on the per-worker
     /// channel leaves the session with the machine, so it is not
-    /// black-holed. A no-op without a worker pool.
+    /// black-holed, as does a session with no peer to hold its refusals. A
+    /// no-op without a worker pool.
     #[cfg_attr(not(unix), allow(unused_variables))]
     fn delegate_link_epoch(
         &mut self,
@@ -623,10 +624,14 @@ impl Node {
             let Some(fmp_cipher) = recv.key else {
                 return;
             };
+            let Some(replay_total) = self.peers.get(node_addr).map(|p| p.replay_total()) else {
+                return;
+            };
             let state = crate::node::decrypt_worker::OwnedSessionState {
                 fmp_cipher,
                 fmp_replay: recv.window,
                 source_npub: None,
+                replay_total,
             };
             if workers.register_session(cache_key, state) {
                 self.decrypt_registered_sessions.insert(cache_key);
