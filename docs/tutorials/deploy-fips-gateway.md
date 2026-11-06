@@ -454,8 +454,8 @@ and so does the corresponding nftables rule.
 To turn the gateway off entirely:
 
 ```sh
-service fips-gateway stop
 service fips-gateway disable
+service fips-gateway stop
 ```
 
 The init script's `stop_service` handler reverses most of the
@@ -463,11 +463,14 @@ LAN-side integration on the way out: dnsmasq's `.fips` forwarder is
 pointed back at the daemon's port 5354 and the RA route for the pool
 is withdrawn from `odhcpd`. With `gateway.global_prefix` set, the
 global-scope IPv6 prefix on `br-lan` stays while the service is
-enabled, so that a restart does not reload the network; `disable`
-removes it, with one network reload. (In the
-other order, `disable` then `stop`, the `stop` removes it.) The LAN
+enabled, so that a restart does not reload the network; after the
+`disable`, the `stop` removes it, with one network reload. The LAN
 then reverts to the state it was in before you ran
-`service fips-gateway start` in Step 3. If you disable a running
+`service fips-gateway start` in Step 3. In the other order, `stop`
+and then `disable` straight after it, the prefix can stay: it did on
+OpenWrt 23.05.6 in every run tried, because `disable` keeps the prefix
+while the gateway runs and appears to find it still exiting. A further
+`service fips-gateway stop` removes it. If you disable a running
 gateway and reboot without stopping it, nothing removes the prefix:
 a disabled service is neither stopped at shutdown nor started at boot.
 Run `service fips-gateway stop` once after the reboot to remove it.

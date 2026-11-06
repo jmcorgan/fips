@@ -379,24 +379,48 @@ stays across stops and restarts while the service is enabled, because
 changing it reloads the network, which on OpenWrt 25.12 recreates
 `br-lan` and drops the LAN for a few seconds. Turning the gateway off
 deletes it: `disable` of a stopped gateway, `stop` of a disabled one
-(so `stop` and `disable` in either order), a start with
-`gateway.enabled` not true in `fips.yaml`, and removing the package.
-A start without `gateway.global_prefix` deletes it too, so a router
-an older package gave the address loses it at the first start after
-the upgrade, with one network reload. That start waits 15 seconds for
-odhcpd to advertise the prefix as withdrawn, and a client that hears
-this stops choosing the address. A client that misses it keeps the
-address, and its connections from it time out. On OpenWrt 23.05 and
-22.03, whose odhcpd gave the address no expiry, that lasts until the
-client's link drops. LAN clients keep their default route and their
-way to the address pool, but on a router with no upstream IPv6,
-Android and Chrome clients stop sending AAAA queries until you set the
-option. Disabling a running gateway and then
-rebooting deletes nothing: `disable` keeps the address while the
-gateway runs, and a disabled service is neither stopped at shutdown
-nor started at boot. Run `/etc/init.d/fips-gateway stop` once
-afterwards; it deletes the address and withdraws the gateway's RA
-settings.
+(so `disable` then `stop` on a running gateway), and a start with
+`gateway.enabled` not true in `fips.yaml`.
+
+Run `stop` and then `disable` straight after it, and the address can
+stay. On OpenWrt 23.05.6, `stop; disable` on one line left it in all
+seven runs tried. `disable` keeps the address while the gateway runs,
+and it appears to find the gateway still exiting (inferred, not
+traced), so no stop is left to delete it. A further `stop` deletes it.
+22.03.7 deleted it in the one run tried; on 24.10 and 25.12 the two
+commands were tried only with a pause between them, which deleted it.
+Removing the package makes the same two calls and left the address on
+23.05.6 in the one run tried, with no init script left to delete it.
+Delete it by hand, as for a sysupgrade below.
+
+A start without `gateway.global_prefix` deletes the address too, so a
+router an older package gave it loses it at the first start after the
+upgrade, with one network reload. That start waits 15 seconds for
+odhcpd to advertise the prefix as withdrawn. A client that formed the
+address itself from the advertisement (SLAAC) stops choosing it when
+it hears this. A client that misses it keeps the address, and its
+connections from it time out. On OpenWrt 23.05 and 22.03, whose odhcpd
+gave the address no expiry, that lasts until the client's link drops.
+
+A client with a DHCPv6 lease on the prefix does not stop choosing the
+address, even when it hears the withdrawal, because the withdrawal
+does not touch a leased address. OpenWrt's DHCPv6 server leases one to
+any client that asks. Such a client's connections from the address to
+global destinations time out, where before the upgrade they failed at
+once. `dhcpcd`, the only client tried, kept the address for the 25
+minutes measured, through a renewal the router refused. From the
+lifetime left on the address, this is inferred to last until the lease
+ends, about 12 hours at OpenWrt's default lease time. Another client
+may drop it sooner. Connections to the address pool are not affected.
+
+LAN clients keep their default route and their way to the address
+pool, but on a router with no upstream IPv6, Android and Chrome clients
+stop sending AAAA queries until you set the option. Disabling a
+running gateway and then rebooting deletes nothing: `disable` keeps the
+address while the gateway runs, and a disabled service is neither
+stopped at shutdown nor started at boot. Run
+`/etc/init.d/fips-gateway stop` once afterwards; it deletes the
+address and withdraws the gateway's RA settings.
 
 While it runs, the gateway sets the LAN's `ra_default` to 2, with or
 without `gateway.global_prefix`, so that odhcpd advertises a default

@@ -58,15 +58,16 @@ FIPS0_WAIT="${FIPS0_WAIT:-30}"
 # is enabled: changing it reloads the network, which on OpenWrt 25.12 recreates
 # br-lan and drops the LAN for a few seconds. Turning the gateway off deletes
 # it: disable (below), a stop of a disabled service (stop_service), a start
-# with the gateway turned off in fips.yaml, a start without
-# gateway.global_prefix, and package removal, whose prerm runs disable.
+# with the gateway turned off in fips.yaml, and a start without
+# gateway.global_prefix. Package removal's prerm runs stop, then disable, which
+# on OpenWrt 23.05.6 left the prefix; see disable.
 GLOBAL_PREFIX="2001:2:f1b5::1/64"
 # Seconds a start waits after deleting the prefix, before it restarts odhcpd.
 # odhcpd withdraws a removed prefix in the RAs that follow, and a restart loses
 # them. On OpenWrt 23.05 and 22.03 the prefix was advertised with no expiry, so
 # a client that misses them keeps it. odhcpd tries three times; in VM runs on
-# those releases the first try failed with the LAN still down, the next came 3
-# to 7 s after the reload, and the last by 11 s.
+# those releases the first try failed with the LAN still down, the next came
+# 2.3 to 7.4 s after the reload, and the last by 11 s.
 PREFIX_WAIT=15
 # The LAN's dhcp ra_default as it was before the gateway first set it, kept
 # until a stop puts it back: one line, empty when it was unset. On the overlay
@@ -161,7 +162,9 @@ stop_service() {
 # Disabling also turns the gateway off, so the LAN prefix is deleted too,
 # except in an image build (IPKG_INSTROOT names the image's root, and the
 # build host's uci must not be touched) and while procd still runs the
-# gateway, which must keep its prefix; its stop deletes it then.
+# gateway, which must keep its prefix; its stop deletes it then. A disable
+# straight after a stop seems to land here too, with the gateway still exiting:
+# on OpenWrt 23.05.6 the prefix stayed, as no further stop comes.
 # shellcheck disable=SC2154 # rc.common sets initscript before sourcing this
 disable() {
 	name="$(basename "${initscript}")"
