@@ -133,6 +133,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped because the host stopped reading) and `show_listening_sockets`. The
   daemon logs one more line at start, `IPv6 adapter status socket listening`.
 
+- Multipath: a link can now hold several paths to a peer, across transports
+  and addresses of one anonymity class and, unless `node.path.mix_kinds` is
+  set, of one kind, and move between them with no new handshake and one Noise
+  session throughout. Each node proves each path with an authenticated probe
+  and its answer, watches every path, and sends on one active path, leaving a
+  failed one at once and changing to a better one only past a margin and a
+  dwell. This implements the FIPS multipath version 1 draft
+  at its switchover level: Sections 4, 5, 7 and 8 and Appendix A, with every
+  `PathAck` field filled as Section 6.5 requires. Aggregation is not
+  implemented. The path messages are three new link message types, `0x52` to
+  `0x54`, inside the existing encrypted link. A peer without multipath
+  discards them, and the pair behaves as before. `node.path.*` sets the
+  behaviour, each transport's `role` (`never`, `backup`, `normal`, `preferred`)
+  ranks its paths, and UDP's and TCP's `kind` (`local`, `internet`) overrides
+  the kind the peer's address implies, which a VPN on RFC 1918 space needs.
+  `fipsctl path show`, `pin` and `unpin` (control commands `path_show`,
+  `path_pin` and `path_unpin`) show a link's paths and pin it to a transport or
+  to one path, `show_peers` lists each peer's `paths`, and fipstop shows them.
+  See `docs/design/fips-multi-path-switchover.md`.
+
 #### Node lifecycle
 
 - Transport-medium change detection, controlled by the new `node.netmon.*`
@@ -315,6 +335,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bad_state` keeps only the remaining causes.
 
 ### Changed
+
+- Multipath is on by default (`node.path.enabled: true`). A node with two
+  paths to a peer that also has it keeps both and moves between them. Set
+  `node.path.enabled: false` to keep every link on one path. Such a node
+  discards path messages unanswered, and its peers treat it as a node without
+  multipath.
+
+- `connect` to a live peer that has shown it implements multipath no longer
+  dials: the address is held as a path candidate, and the response carries
+  `refreshed: false` and `detail: "peer live, address held as a path
+  candidate"`, or `"peer live, not dialled"` when it is already a path. For a
+  peer not known to implement multipath the reply is unchanged, and the held
+  address starts capability probing, so small probes now reach that peer on
+  the link's path where nothing did before: the first at once, then at most
+  twelve in the first hour of probing and six in each hour after, while the
+  address is held.
+
+- With multipath on, a link that holds a path other than its original no
+  longer follows a change of the peer's source address. The new address becomes
+  a candidate and the link's paths keep working, so the link can stay on the
+  old address until that path fails or the new one proves better. A link
+  holding only its original path still follows the peer to a new source address
+  within that path's own transport on any frame but a path message, whether or
+  not the peer has multipath.
+
+- A frame that fails to authenticate now counts only against the path it
+  arrived on, and only if that is the link's original path or a path the peer
+  has acked. One from any other transport or address counts toward nothing, on
+  a link of one path as well, so a stranger who has seen a session index cannot
+  run the count up. Past the limit a path is marked Dead while another path can
+  carry the link, and a link's last path is warned about and kept.
 
 - On Windows the TUN adapter's address, IPv6 MTU and `fd00::/8` route are set
   through the IP Helper API instead of `netsh`, and a failure of any of them now
@@ -1041,6 +1092,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Data plane and transports
 
+- A frame the decrypt workers refuse as a replay is now counted. Only the
+  inline receive path counted one, so a worker's refusal left no trace.
+  `show_peers` gives the count under `replay_suppressed` as before, and a new
+  `replay_suppressed_total` gives it for the peer's life, since each session
+  reset clears the other.
+
+- The receive loop now gives the runtime thread back once per round of its
+  select. A busy data path could hold off every other task, socket readers
+  among them, for a whole scheduler budget, long enough for a frame on a slower
+  path to fall behind the replay window and be dropped.
+
 - A link rekey that completes while the session it replaced last time is
   still draining no longer leaks that session's index. Both the node's own
   cutover and a peer's first frame under the new keys moved the current
@@ -1539,6 +1601,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer than 30 days stays inside its peers' lookup window.
 
 #### Transports
+
+- The Ethernet packet socket and the UDP listen socket now get the buffers they
+  ask for. Plain `SO_RCVBUF` and `SO_SNDBUF` are capped at `net.core.rmem_max`
+  and `wmem_max`, 416 KB on a default host, which a cable fills in a few
+  milliseconds: under load the kernel dropped 5 to 10% of frames before the node
+  read them, path probes and acks among them. Both sockets now force the size
+  with `CAP_NET_ADMIN` and read back what they were granted, and without the
+  capability they take the capped size and warn, naming both remedies.
+
+- The Ethernet transport now reports the frames the kernel dropped at its
+  socket. It reads `PACKET_STATISTICS` into a new `kernel_drops` counter in its
+  stats, so the "Kernel recv drops first observed" warning covers a cable, and a
+  dropping Ethernet transport counts as congestion for ECN marking, as UDP does.
+
+- A beacon heard just before an Ethernet interface went away no longer makes the
+  node dial that neighbour on the interface it has just lost.
 
 - A TCP link no longer resets on frames it should carry. On Linux, a frame
   above the local MSS but within the configured `mtu` used to reset it, as
