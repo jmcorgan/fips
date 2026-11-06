@@ -462,6 +462,141 @@ fn test_rekey_jitter_grace_suppresses_spikes() {
     assert!(r.jitter_us() < 1_000_000); // less than 1 second
 }
 
+/// One received frame of a scripted stream: AEAD counter, sender timestamp
+/// (ms), receive instant (ms), and whether it arrived on the peer's active
+/// path p rather than a standby q.
+type Arrival = (u64, u32, u64, bool);
+
+/// A stream from two paths in receive order: p's frames take 20 to 30 ms,
+/// q's 400 ms or more, and the last frame is q's.
+const MIXED: [Arrival; 7] = [
+    (4, 1000, 1020, true),
+    (1, 700, 1100, false),
+    (5, 1100, 1125, true),
+    (2, 800, 1205, false),
+    (6, 1200, 1218, true),
+    (7, 1300, 1330, true),
+    (3, 950, 1352, false),
+];
+
+/// The receiver's sampled values: jitter, the last sampled receive instant,
+/// and the report's echo, dwell, jitter and one-way-delay trend.
+fn timing(r: &mut ReceiverState, report_ms: u64) -> (u32, Option<u64>, u32, u16, u32, i32) {
+    let jitter = r.jitter_us();
+    let last = r.last_recv_ms();
+    let rr = r.build_report(report_ms).expect("frames were received");
+    (
+        jitter,
+        last,
+        rr.timestamp_echo,
+        rr.dwell_time,
+        rr.jitter,
+        rr.owd_trend,
+    )
+}
+
+/// Draft 5.12: jitter samples and the echo come only from frames on the
+/// peer's active path. A receiver that takes a mixed stream sampled only on
+/// p has the timing of one that takes p's frames alone. Mutation: ignore
+/// `sampled` in `record_frame` (sample every frame).
+#[test]
+fn jitter_and_the_echo_of_a_mixed_stream_are_those_of_its_sampled_frames_alone() {
+    let mut mixed = ReceiverState::new(32);
+    let mut alone = ReceiverState::new(32);
+    for (counter, ts, at, on_p) in MIXED {
+        mixed.record_frame(counter, ts, 100, false, at, on_p);
+        if on_p {
+            alone.record_recv(counter, ts, 100, false, at);
+        }
+    }
+    let alone = timing(&mut alone, 1400);
+    assert_ne!(alone.0, 0, "precondition: p's own frames give some jitter");
+    assert_eq!(timing(&mut mixed, 1400), alone);
+}
+
+/// A stream sampled on every frame gives the values `record_recv` gave
+/// before the split, written here from the estimators' arithmetic and
+/// checked against `record_recv` at the parent commit.
+///
+/// Five frames 100 ms apart at the sender, received at 10000, 10120,
+/// 10210, 10330 and 10400 ms. The transit differences are +20, -10, +20
+/// and -30 ms; the jitter estimator keeps J16 += |D| - J16 / 16 (integer,
+/// in microseconds), so J16 runs 20000, 28750, 46954, 74020, and jitter is
+/// 74020 / 16 = 4626 us. The echo is the last sender timestamp, 1400, and
+/// the dwell to a report at 10450 is 50 ms. The trend's samples (receive
+/// offset from the previous frame less the sender timestamp, in us) are
+/// -1000000, -980000, -1110000, -1180000 and -1330000 at sequence 1 to 5:
+/// a least-squares slope of -860000 / 10 = -86000 us per packet, reported
+/// times 1000. Mutation: sample no frame in `record_frame`.
+#[test]
+fn a_stream_sampled_on_every_frame_gives_the_jitter_and_echo_master_gives() {
+    let mut r = ReceiverState::new(32);
+    for (counter, ts, at) in [
+        (1, 1000, 10_000),
+        (2, 1100, 10_120),
+        (3, 1200, 10_210),
+        (4, 1300, 10_330),
+        (5, 1400, 10_400),
+    ] {
+        r.record_frame(counter, ts, 100, false, at, true);
+    }
+    assert_eq!(
+        timing(&mut r, 10_450),
+        (4626, Some(10_400), 1400, 50, 4626, -86_000_000)
+    );
+}
+
+/// The receiver's counting values from a report: cumulative and interval
+/// packets and bytes, highest counter, reorders, the three burst fields
+/// and CE marks.
+fn counts(r: &mut ReceiverState, report_ms: u64) -> [u64; 10] {
+    let rr = r.build_report(report_ms).expect("frames were received");
+    [
+        rr.cumulative_packets_recv,
+        rr.cumulative_bytes_recv,
+        u64::from(rr.interval_packets_recv),
+        u64::from(rr.interval_bytes_recv),
+        rr.highest_counter,
+        u64::from(rr.cumulative_reorder_count),
+        u64::from(rr.burst_loss_count),
+        u64::from(rr.max_burst_loss),
+        u64::from(rr.mean_burst_loss),
+        u64::from(rr.ecn_ce_count),
+    ]
+}
+
+/// Draft 5.12, first paragraph: the link's loss accounting takes every
+/// frame, whichever path it came on. A stream with gaps, reorders and CE
+/// marks counts the same whether every frame is sampled or only half are.
+/// Mutation: return before counting on an unsampled frame.
+#[test]
+fn the_counting_half_takes_every_frame_whether_or_not_it_is_sampled() {
+    let stream: [(u64, usize, bool); 8] = [
+        (1, 300, false),
+        (2, 400, true),
+        (5, 500, false),
+        (3, 600, false),
+        (6, 700, true),
+        (9, 800, false),
+        (10, 900, true),
+        (7, 1000, false),
+    ];
+    let mut all = ReceiverState::new(32);
+    let mut half = ReceiverState::new(32);
+    for (i, (counter, bytes, ce)) in stream.into_iter().enumerate() {
+        let at = 1000 + 10 * i as u64;
+        all.record_frame(counter, counter as u32 * 10, bytes, ce, at, true);
+        half.record_frame(counter, counter as u32 * 10, bytes, ce, at, i % 2 == 0);
+    }
+    let all = counts(&mut all, 2000);
+    assert_eq!(
+        all,
+        [8, 5200, 8, 5200, 10, 2, 2, 2, 512, 3],
+        "precondition: the stream has reorders, bursts and CE marks"
+    );
+    assert_eq!(counts(&mut half, 2000), all);
+}
+
 // ===========================================================================
 // MmpMetrics
 // ===========================================================================

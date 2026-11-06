@@ -6,6 +6,7 @@ use crate::identity::OsEntropy;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::{self, HsLine, Msg1Path, OrNone, Shown, Withheld};
+use crate::node::handlers::path::NodeFacts;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
@@ -13,7 +14,7 @@ use crate::peer::machine::{
     CrossConnOutcome, FailReason, HandshakeCrypto, HandshakePhase, PeerAction, PeerEvent,
     PeerMachine, PeerState, TimerKind,
 };
-use crate::peer::{ActivePeer, LinkCaps, LinkOutputs};
+use crate::peer::{ActivePeer, LinkCaps, LinkOutputs, Match, PathCaps};
 use crate::proto::fmp::rekey::ik::read_msg1;
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 use crate::proto::fmp::{
@@ -23,7 +24,7 @@ use crate::proto::fmp::{
 use crate::time::HostClock;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
 use crate::utils::index::{IndexError, SessionIndex};
-use fips_core::proto::rekey::{Arrival, Input, Reason};
+use fips_core::proto::rekey::{Arrival, Input, Reason, Route};
 use fips_core::time::Clock as _;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -388,14 +389,18 @@ impl Node {
     ///    the same `TransportAddr` form we observe on inbound packets
     ///    (e.g., both numeric when peer config uses a numeric IP).
     ///
-    /// 2. An active peer's `current_addr()` matches `(transport_id,
-    ///    remote_addr)`. `current_addr` is updated from inbound encrypted-
-    ///    frame source addrs (always numeric `SocketAddr`-form), so this
-    ///    catches established peers whose `addr_to_link` key is hostname-
-    ///    form (because `initiate_connection` populated it from a
-    ///    hostname-bearing peer config) while inbound rekey msg1 arrives
-    ///    in numeric form. Without this second predicate, the carve-out
-    ///    misses any deployment that combines a hostname-based peer config
+    /// 2. `(transport_id, remote_addr)` is a path of an active peer proven
+    ///    at this end, the active one among them (`path_match` answers
+    ///    `Proven { .. }`): Live, or acked in the link, whatever its state
+    ///    now (multipath v1 draft, Section 5.10). A path still being probed
+    ///    is not. The active path's address is `current_addr()`, which is
+    ///    updated from inbound encrypted-frame source addrs (always numeric
+    ///    `SocketAddr`-form), so this catches established peers whose
+    ///    `addr_to_link` key is hostname-form (because `initiate_connection`
+    ///    populated it from a hostname-bearing peer config) while inbound
+    ///    rekey msg1 arrives in numeric form. Without this second
+    ///    predicate, the carve-out misses any deployment that combines a
+    ///    hostname-based peer config
     ///    with `udp.accept_connections: false` or `udp.outbound_only: true`
     ///    (the production trigger for the 2026-04-30 bug).
     ///
@@ -418,7 +423,10 @@ impl Node {
             return true;
         }
         if self.peers.values().any(|p| {
-            p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
+            matches!(
+                p.path_match(transport_id, remote_addr),
+                Match::Proven { .. }
+            )
         }) {
             return true;
         }
@@ -488,12 +496,16 @@ impl Node {
             // downstream would ever repair the map.
         }
 
-        // Predicate 2: the address scan over promoted peers, which always
-        // yields an identity when it matches.
+        // Predicate 2: the address scan over promoted peers, for a path of
+        // an active peer proven at this end, the active one among them,
+        // which always yields an identity when it matches.
         self.peers
             .values()
             .find(|p| {
-                p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
+                matches!(
+                    p.path_match(transport_id, remote_addr),
+                    Match::Proven { .. }
+                )
             })
             .map(|p| Msg1Waiver::Expect(*p.node_addr()))
             .unwrap_or(Msg1Waiver::Unattributed)
@@ -552,34 +564,60 @@ impl Node {
         }
     }
 
-    /// Send `reply`, an answer to `packet`'s msg1 from `peer`, on the peer's
-    /// established link, or on the connection the msg1 arrived on when the
-    /// established link's connection has gone. Returns the transport the
-    /// reply went out on.
+    /// Send `reply`, an answer to `packet`'s msg1 from `peer`, on `route`.
+    /// Returns the transport the reply went out on.
     ///
-    /// Neither send dials. The arrival connection is used only on a
-    /// connection-oriented transport: the remote opened it, so a reply on it
-    /// reaches only the remote. That is how a peer that redialed after its
-    /// old connection closed has its msg1 answered before the old link is
-    /// reaped. A connectionless source address is whatever the sender wrote,
-    /// so a msg1 that came that way is answered on the established link only.
+    /// [`Route::Arrival`] sends on the msg1's own transport and source
+    /// address, with the link up or not. A connectionless source address is
+    /// whatever the sender wrote, so this route trusts it; the machine picks
+    /// it only with multipath enabled (`node.path.enabled`), for a msg1 that
+    /// arrived on the established link, and the caller sends on it only when
+    /// the msg1 came on one of the link's proven paths. A msg1 on the link
+    /// from any other pair is answered on the established route with its
+    /// fallback instead.
+    ///
+    /// [`Route::Established`] sends on the peer's established link, or, with
+    /// `fallback` set, on the connection the msg1 arrived on when the
+    /// established link's connection has gone.
+    ///
+    /// Neither send dials. The established route's fallback uses the arrival
+    /// connection only on a connection-oriented transport: the remote opened
+    /// it, so a reply on it reaches only the remote. That is how a peer that
+    /// redialed after its old connection closed has its msg1 answered before
+    /// the old link is reaped. On that route a msg1 that came over a
+    /// connectionless transport is answered on the established link only.
     ///
     /// The arrival connection must also be on the established link's
-    /// transport. Session indices are looked up and retired by transport, and
-    /// the retirement paths use the transport the peer's link is on, so an
-    /// answer on another transport would leave the new index registered
-    /// where the peer's frames are not looked up, and never removed.
+    /// transport. The fallback stands in for the established link's own
+    /// connection, which the far end has replaced on that transport, so it
+    /// answers only there; sending an answer on another path is a choice for
+    /// the answer's route to make, not for this fallback.
     ///
     /// The fallback needs the established connection to be gone from the
     /// pool. A half-open one, whose path broke without a FIN or reset
     /// reaching this node, still accepts writes, so the reply is lost there
     /// until the link-dead reaper removes the peer.
-    async fn answer_msg1(
+    pub(in crate::node) async fn answer_msg1(
         &self,
         peer: &NodeAddr,
         packet: &ReceivedPacket,
         reply: &[u8],
+        route: Route,
     ) -> Result<TransportId, String> {
+        let fallback = match route {
+            Route::Arrival => {
+                let transport = self
+                    .transports
+                    .get(&packet.transport_id)
+                    .ok_or_else(|| "no transport for the msg1's arrival".to_string())?;
+                transport
+                    .send_existing(&packet.remote_addr, reply)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(packet.transport_id);
+            }
+            Route::Established { fallback } => fallback,
+        };
         let (tid, addr) = self
             .established_link(peer)
             .ok_or_else(|| "the peer has no established link".to_string())?;
@@ -592,7 +630,8 @@ impl Node {
             Err(TransportError::NotConnected) => {}
             Err(e) => return Err(e.to_string()),
         }
-        if packet.transport_id != tid
+        if !fallback
+            || packet.transport_id != tid
             || packet.remote_addr == addr
             || !transport.transport_type().connection_oriented
         {
@@ -1556,16 +1595,33 @@ impl Node {
                 .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
             return false;
         };
-        // On this peer's link, by its transport and current address or by an
-        // `addr_to_link` entry for its link, such as a hostname-keyed dial
-        // address beside a numeric current address.
-        let on_link = self.peers.get(peer).is_some_and(|p| {
-            (p.transport_id() == Some(packet.transport_id)
-                && p.current_addr() == Some(&packet.remote_addr))
-                || self
-                    .addr_to_link
-                    .get(&(packet.transport_id, packet.remote_addr.clone()))
-                    == Some(&p.link_id())
+        // On this peer's link: from a path the peer holds that is proven at
+        // this end (Live or acked; the original path is both), or, on a link
+        // whose peer is not capable, from a pair the peer holds no path for
+        // that an `addr_to_link` entry maps to its link. That is FRC-1201
+        // Section 5.7's setup address, such as the address the link was set
+        // up at after its one path followed the peer elsewhere, or a
+        // hostname-keyed dial address beside a numeric current address. On a
+        // link whose peer is capable such a pair is off the link (multipath
+        // draft Section 5.10). A held path still Probing is treated as no
+        // path, even where an `addr_to_link` entry maps its pair to the link:
+        // the machine then refuses the msg1 while the established link is
+        // reachable and accepts it once the link is down. `proven` keeps
+        // whether the pair is a proven path, for the answer's route below;
+        // the link step does not change the peer's paths.
+        let (on_link, proven) = self.peers.get(peer).map_or((false, false), |p| {
+            match p.path_match(packet.transport_id, &packet.remote_addr) {
+                Match::Proven { .. } => (true, true),
+                Match::Unproven => (false, false),
+                Match::None => (
+                    !p.bundle().is_some_and(|b| b.capable())
+                        && self
+                            .addr_to_link
+                            .get(&(packet.transport_id, packet.remote_addr.clone()))
+                            == Some(&p.link_id()),
+                    false,
+                ),
+            }
         });
         let arrival = Arrival {
             on_link,
@@ -1669,8 +1725,17 @@ impl Node {
             self.stats_mut()
                 .record_reject(RejectReason::Handshake(msg1_refusal(*reason)));
         }
-        for msg2 in &report.replies {
-            let sent = self.answer_msg1(peer, packet, msg2).await;
+        for (msg2, route) in &report.replies {
+            // An answer on the arrival goes there only when the msg1 came on
+            // one of the link's proven paths. A msg1 on the link from any
+            // other pair, such as the setup address of a link whose peer is
+            // not capable, is answered on the established link at the
+            // peer's current address (FRC-1201 Section 5.7).
+            let route = match route {
+                Route::Arrival if !proven => Route::Established { fallback: true },
+                other => *other,
+            };
+            let sent = self.answer_msg1(peer, packet, msg2, route).await;
             if report.pending {
                 match sent {
                     Ok(_) => debug!(
@@ -1883,6 +1948,17 @@ impl Node {
         // `pending_outbound`, whose control machine still carries the
         // handshake; a link rekey's attempt index is bound to its peer in
         // `peers_by_index`, and its peer's link machine reads the msg2.
+        //
+        // A fresh handshake is bound to the transport its msg1 went out on:
+        // `pending_outbound` is keyed by (transport, index), so a msg2 from
+        // any other transport misses and, unless it names a rekey, is
+        // discarded before any state changes. A relayed copy of the genuine
+        // msg2 therefore cannot complete the dial at a foreign address. A
+        // forgery carrying the sniffed index cannot spoil the dial on any
+        // transport, for another reason: a msg2 that does not authenticate
+        // leaves the attempt in place. A rekey msg2 is accepted from any
+        // transport: the link is established, and `peers_by_index` is keyed
+        // by the index alone.
         let key = (packet.transport_id, header.receiver_idx.as_u32());
         let setup = self.pending_outbound.get(&key).copied();
         let link_id = match setup {
@@ -1895,7 +1971,7 @@ impl Node {
                 id
             }
             _ => {
-                if let Some(&peer) = self.peers_by_index.get(&key)
+                if let Some(&peer) = self.peers_by_index.get(&key.1)
                     && self.peers.contains_key(&peer)
                 {
                     self.msg2_to_link(&peer, &packet).await;
@@ -2075,6 +2151,13 @@ impl Node {
         // machine never touches it.
         let out_snap = self.outbound_snapshot(&peer_node_addr);
         let own_dial = out_snap.has_existing_peer && out_snap.own_dial;
+        // A dial made while the peer was held, answered while it is still
+        // held on that link, is a later dial to a held peer even where the
+        // peer dialled the link: the record is taken at the dial, because a
+        // leg promoted after the dial started can hold an older link.
+        let held_now = self.peers.get(&peer_node_addr).map(|p| p.link_id());
+        let later_dial = held_now.is_some()
+            && self.peer_machines.get(&link_id).and_then(|m| m.held_link()) == held_now;
         let actions = match self.peer_machines.get_mut(&link_id) {
             Some(machine) => machine.step(
                 PeerEvent::Msg2 {
@@ -2171,6 +2254,7 @@ impl Node {
                 let local = self.session_node_keys();
                 let me = *self.identity().node_addr();
                 let params = crate::node::handlers::rekey::link_params(&self.config().node);
+                let path_params = crate::node::handlers::path::path_params(&self.config().node);
                 let workers = self.link_workers();
                 let prior = self.peer_link(&peer_node_addr);
 
@@ -2180,10 +2264,16 @@ impl Node {
                     // The peer's link machine is closed and rebuilt on the
                     // outbound session: what it held is unbound and freed.
                     // The peer is taken at the msg2's transport and source
-                    // address (FRC-1201, Section 5.6), and the outbound
-                    // index is bound on the transport the msg2 came on,
-                    // which is where the peer's frames on that session
-                    // arrive and are looked up.
+                    // address (FRC-1201, Section 5.6), and the rebuilt
+                    // machine records the outbound index's binding on the
+                    // transport the msg2 came on. The path machine starts
+                    // again with that pair as the new link's original path
+                    // (multipath v1 draft, Section 5.4), for a peer whose
+                    // handshake the ACL has passed; no probe is stepped here.
+                    let facts = NodeFacts {
+                        transports: &self.transports,
+                        denied: false,
+                    };
                     let mut caps = LinkCaps {
                         indices: &mut self.index_allocator,
                         local: &local,
@@ -2191,8 +2281,12 @@ impl Node {
                         params,
                         record: fips_core::proto::rekey::Record::new(),
                         workers,
+                        path: PathCaps {
+                            params: path_params,
+                            facts: &facts,
+                        },
                     };
-                    let out = peer.move_session(
+                    let (out, paths) = peer.move_session(
                         outbound_session,
                         outbound_lease,
                         header.sender_idx,
@@ -2200,6 +2294,10 @@ impl Node {
                         &mut caps,
                     );
                     self.run_link_outputs(&peer_node_addr, out);
+                    self.run_renewed(&peer_node_addr, paths);
+                    // The path machine started again with an empty
+                    // candidate table.
+                    self.paths_renewed(&peer_node_addr).await;
 
                     // A move to another pair is followed as a roam is: the
                     // connected UDP socket pinned to the old 5-tuple would
@@ -2220,6 +2318,20 @@ impl Node {
                             self.seed_path_mtu_for_link_peer(&peer_node_addr, key, *tid, addr);
                         }
                         self.relink(&peer_node_addr, prior, moved).await;
+                    }
+
+                    // The peer may have answered our second dial by
+                    // replacing the peering, which nothing here tells apart
+                    // from a rekey, and the operator's pin ends when the
+                    // peer is replaced through a new handshake. So once the
+                    // link is on that dial's session the pin ends, whichever
+                    // end dialled the peering it held; a crossed handshake
+                    // won on the tie-break keeps it.
+                    let swapped = self.peers.get(&peer_node_addr).and_then(|p| p.our_index())
+                        == Some(outbound_our_index);
+                    if (own_dial || later_dial) && swapped {
+                        self.step_path(&peer_node_addr, fips_core::proto::path::Input::Unpin)
+                            .await;
                     }
 
                     if suppressed > 0 {
@@ -2714,11 +2826,18 @@ impl Node {
         let me = *self.identity().node_addr();
         let mmp = self.config().node.mmp.clone();
         let params = crate::node::handlers::rekey::link_params(&self.config().node);
+        let path_params = crate::node::handlers::path::path_params(&self.config().node);
         let record = self.link_records.take(
             verified_identity.node_addr(),
             remote_epoch.unwrap_or_default(),
         );
         let workers = self.link_workers();
+        // A machine built at promotion, for a peer whose handshake the ACL
+        // has passed; no probe is stepped here.
+        let facts = NodeFacts {
+            transports: &self.transports,
+            denied: false,
+        };
         let mut caps = LinkCaps {
             indices: &mut self.index_allocator,
             local: &local,
@@ -2726,6 +2845,10 @@ impl Node {
             params,
             record,
             workers,
+            path: PathCaps {
+                params: path_params,
+                facts: &facts,
+            },
         };
         ActivePeer::with_session(
             verified_identity,

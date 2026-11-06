@@ -82,7 +82,12 @@ impl Node {
         if let Some(pool) = self.supervisor.staged_pools.encrypt.take() {
             return self.install_encrypt_workers(pool);
         }
-        self.install_encrypt_workers(crate::node::encrypt_worker::EncryptWorkerPool::spawn(n))
+        // The workers report each send they give up on as unreachable; the
+        // event loop takes the receiver and tells the links' path machines.
+        let (report, reports) = tokio::sync::mpsc::channel(64);
+        self.paths.reports = Some(reports);
+        let pool = crate::node::encrypt_worker::EncryptWorkerPool::spawn_reporting(n, report);
+        self.install_encrypt_workers(pool)
     }
 
     /// Install a started encrypt pool, or the main-loop path when none of

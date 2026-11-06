@@ -11,6 +11,15 @@ reach its private items.
   The lifecycle rules every connection-oriented transport keeps, written
   once and run against TCP, Tor, Nym and BLE, with a listing that fails the
   build when a transport kind has no entry. Its README states the rules.
+- `error.rs`: declared as `mod error_tests`, because `mod.rs` already has
+  an inline `tests` module. It covers the unreachable class of
+  `TransportError`: `is_unreachable` is true for `Unreachable` and for an
+  I/O error of kind `NetworkUnreachable`, `HostUnreachable` or
+  `NetworkDown`, and false for `NotConnected` and every other failure;
+  and `send_error` gives an unreachable error the same text a
+  `SendFailed` of it shows, the kernel's `ENETUNREACH`, `EHOSTUNREACH`
+  and `ENETDOWN` among them, while leaving any other error a
+  `SendFailed`, neither of them transient.
 
 `mod.rs` still carries an older inline `mod tests` block. New tests go
 here rather than into that block; the inline block is not converted in

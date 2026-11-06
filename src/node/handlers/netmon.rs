@@ -74,7 +74,7 @@
 //! `None` there and is skipped while any `connect()`-ed socket it holds stays
 //! pinned; the node-wide reaction repaired that peer as collateral and this one
 //! does not. Where the node dialled out, that is transient —
-//! `set_current_addr` replaces the configured string with the observed numeric
+//! the peer's `account` replaces the configured string with the observed numeric
 //! source on the first authentic frame. Which side supplies `current_addr` on
 //! an inbound peering is not established here, so the second group is not
 //! claimed to be empty in general.

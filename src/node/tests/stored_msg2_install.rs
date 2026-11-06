@@ -39,6 +39,7 @@ async fn absent_ethernet(id: TransportId) -> crate::transport::TransportHandle {
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = crate::transport::packet_channel(8);
     let mut eth = EthernetTransport::new(id, Some("lab".into()), config, tx);
@@ -51,7 +52,7 @@ async fn absent_ethernet(id: TransportId) -> crate::transport::TransportHandle {
 /// Swap `tn`'s loopback transport for one whose sends fail transiently, and
 /// return the loopback for [`replug`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn unplug(tn: &mut TestNode) -> crate::transport::TransportHandle {
+pub(super) async fn unplug(tn: &mut TestNode) -> crate::transport::TransportHandle {
     let tid = tn.transport_id;
     let loopback = tn
         .node
@@ -64,7 +65,7 @@ async fn unplug(tn: &mut TestNode) -> crate::transport::TransportHandle {
 
 /// Put `loopback` back on `tn` and stop the transport it replaces.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn replug(tn: &mut TestNode, loopback: crate::transport::TransportHandle) {
+pub(super) async fn replug(tn: &mut TestNode, loopback: crate::transport::TransportHandle) {
     if let Some(mut eth) = tn.node.transports.insert(tn.transport_id, loopback) {
         eth.stop().await.ok();
     }

@@ -252,30 +252,29 @@ pub(super) async fn crossed_tcp(zero_smaller: bool) -> (Vec<TestNode>, usize, us
 }
 
 /// Map session index `index` under transport `tid` to `peer` in `node`'s
-/// session-index map, with no link machine binding it. The map's key is
-/// `(transport, index)` on master and the bare index after multipath's
-/// rebase, so the planting is written once, here.
-pub(super) fn bind_index(node: &mut Node, tid: TransportId, index: u32, peer: NodeAddr) {
-    node.peers_by_index.insert((tid, index), peer);
+/// session-index map, with no link machine binding it. The map is keyed by
+/// the bare index, whatever transport the link runs on, so `tid` is not
+/// part of the key; it is kept so a test names the transport it plants
+/// for, and the planting is written once, here.
+pub(super) fn bind_index(node: &mut Node, _tid: TransportId, index: u32, peer: NodeAddr) {
+    node.peers_by_index.insert(index, peer);
 }
 
 /// A second loopback address for the node listening on `existing`, for
-/// transport `tid`: what is sent there lands in that node's receive channel.
-/// Multipath's rebase registers the alias under its transport, so the
-/// transport is taken now and ignored on master.
-pub(super) fn alias(existing: &TransportAddr, _tid: TransportId) -> TransportAddr {
-    add_loopback_alias(existing)
+/// transport `tid`: what is sent there lands in that node's receive channel,
+/// registered under `tid`.
+pub(super) fn alias(existing: &TransportAddr, tid: TransportId) -> TransportAddr {
+    add_loopback_alias(existing, tid)
 }
 
 /// A new loopback address on transport `tid` whose packets land in the
-/// returned channel, so a test sees what a node sends there. The transport
-/// is taken for multipath's rebase, which registers addresses under their
-/// transport, and ignored on master.
+/// returned channel, so a test sees what a node sends there. The address is
+/// registered under `tid`.
 pub(super) fn tap(
-    _tid: TransportId,
+    tid: TransportId,
 ) -> (
     TransportAddr,
     tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
 ) {
-    loopback_tap()
+    loopback_tap(tid)
 }

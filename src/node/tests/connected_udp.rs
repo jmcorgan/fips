@@ -3,18 +3,21 @@
 //! A `connect(2)`-ed UDP socket is pinned to one 5-tuple. When the peer
 //! moves, the address the socket was opened against is gone, but the
 //! socket is still installed and the send path prefers it over the
-//! wildcard listen socket. `ActivePeer::set_current_addr` returns
-//! whether the address actually changed precisely so the caller can
-//! drop the stale socket, and both post-decrypt paths have to act on
-//! that return: the decrypt-worker completion path
+//! wildcard listen socket. `ActivePeer::account` returns what the roam
+//! did, and its `changed()` says whether the address actually
+//! changed, precisely so the caller can drop the stale socket. Both
+//! post-decrypt paths, the decrypt-worker completion path
 //! (`process_authentic_fmp_plaintext`) and the in-line one
-//! (`handle_encrypted_frame`). These tests cover the in-line path,
-//! which is the one the worker path's own coverage does not reach. A
-//! crossed dial's move to the pair its winning msg2 came from drops the
-//! socket the same way; the two tests after the roaming ones cover it,
-//! reusing `crossed_dial`'s driver.
+//! (`handle_encrypted_frame`), reach `account_authentic`, which acts on
+//! that return. These tests drive it through the in-line entry, and the
+//! test of both paths through both entries: one frame stream, with an
+//! address change in it, leaves the same link counters, MMP receiver and
+//! spin bit, decrypt-failure count and roam on a peer whichever path it
+//! takes. A crossed dial's move to the pair its winning msg2 came from
+//! drops the socket the same way; the two tests after the roaming ones
+//! cover it, reusing `crossed_dial`'s driver.
 //!
-//! `bool` carries no `#[must_use]`, so discarding the return here is
+//! `Roam` carries no `#[must_use]`, so discarding the return here is
 //! silent under `-D warnings`; the assertions below are what makes the
 //! difference between binding it and dropping it observable.
 //!
@@ -22,7 +25,8 @@
 //! connected socket's drain, and sends through the encrypt workers on
 //! either kind of socket, are counted once in the UDP transport's stats,
 //! and that the encrypt-worker path refuses a frame over the UDP MTU as the
-//! inline path does.
+//! inline path does. The last checks that a won crossed handshake, which
+//! starts the link's path machine again, keeps the active path's socket.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::crossed_dial::{Crossed, Dial, cross_dials, hand};
@@ -30,11 +34,15 @@ use super::crossed_dial::{Crossed, Dial, cross_dials, hand};
 use super::spanning_tree::cleanup_nodes;
 use super::*;
 use crate::noise::NoiseSession;
+#[cfg(unix)]
+use crate::proto::fmp::wire::FRAME_OVERHEAD;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::proto::fmp::wire::{FLAG_CE, FLAG_SP};
 use crate::proto::fmp::wire::{build_encrypted, build_established_header, prepend_inner_header};
 
 /// The address `seed_completed_connection` promotes a peer on, and so
 /// the peer's `current_addr` before anything rotates it.
-const PROMOTED_ADDR: &str = "127.0.0.1:5000";
+pub(super) const PROMOTED_ADDR: &str = "127.0.0.1:5000";
 
 /// The address the peer is made to move to.
 const ROAMED_ADDR: &str = "127.0.0.1:5001";
@@ -50,7 +58,7 @@ const ROAMED_ADDR: &str = "127.0.0.1:5001";
 /// Returns the node, the peer's `NodeAddr`, the session index an
 /// inbound frame must name to be routed to that peer, and the session
 /// to encrypt those frames with.
-fn promoted_peer_with_the_far_side_session(
+pub(super) fn promoted_peer_with_the_far_side_session(
     transport_id: TransportId,
 ) -> (Node, NodeAddr, SessionIndex, NoiseSession) {
     let mut node = make_node();
@@ -117,10 +125,21 @@ fn promoted_peer_with_the_far_side_session(
 /// The link message is a heartbeat (`0x51`), which the dispatcher
 /// handles as a no-op — these tests are about the side effects that run
 /// before the dispatch, so the message must not have any of its own.
-fn far_side_frame(session: &mut NoiseSession, receiver_idx: SessionIndex) -> Vec<u8> {
-    let inner = prepend_inner_header(0, &[0x51]);
+pub(super) fn far_side_frame(session: &mut NoiseSession, receiver_idx: SessionIndex) -> Vec<u8> {
+    heartbeat_frame(session, receiver_idx, 0, 0)
+}
+
+/// [`far_side_frame`] with the inner timestamp `ts` and the header flags
+/// `flags`.
+fn heartbeat_frame(
+    session: &mut NoiseSession,
+    receiver_idx: SessionIndex,
+    ts: u32,
+    flags: u8,
+) -> Vec<u8> {
+    let inner = prepend_inner_header(ts, &[0x51]);
     let counter = session.current_send_counter();
-    let header = build_established_header(receiver_idx, counter, 0, inner.len() as u16);
+    let header = build_established_header(receiver_idx, counter, flags, inner.len() as u16);
     let ciphertext = session.encrypt_with_aad(&inner, &header).unwrap();
     build_encrypted(&header, &ciphertext)
 }
@@ -267,6 +286,154 @@ async fn a_crossed_dial_whose_msg2_comes_from_the_pair_the_link_is_on_keeps_the_
         connected_socket_after_the_move(Dial::AnsweredFromFirst).await,
         "a move that leaves the peer's address alone must leave the socket alone"
     );
+}
+
+/// The frames both receive paths are fed, in order: each heartbeat's inner
+/// timestamp, header flags and source address. The third moves the peer.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const STREAM: [(u32, u8, &str); 5] = [
+    (100, 0, PROMOTED_ADDR),
+    (120, FLAG_CE, PROMOTED_ADDR),
+    (140, FLAG_SP, ROAMED_ADDR),
+    (160, FLAG_CE | FLAG_SP, ROAMED_ADDR),
+    (180, 0, ROAMED_ADDR),
+];
+
+/// What a frame stream leaves on a peer: its link counters, its MMP
+/// receiver's counts and spin bit, where its roam left it, whether it is
+/// heard, and whether its connected socket survived. The MMP receiver's
+/// jitter and local receive times are left out: they read the host clock,
+/// which two nodes never read at the same instant.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, PartialEq)]
+struct Books {
+    packets: u64,
+    bytes: u64,
+    last_recv: u64,
+    mmp_packets: u64,
+    mmp_bytes: u64,
+    highest: u64,
+    ce: u32,
+    spin: bool,
+    transport: Option<TransportId>,
+    addr: Option<TransportAddr>,
+    paths: usize,
+    heard: bool,
+    last_seen: u64,
+    failures: u32,
+    socket: bool,
+}
+
+/// The [`Books`] of `peer` on `node`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn books(node: &Node, peer: &NodeAddr) -> Books {
+    let p = node.get_peer(peer).expect("the peer survives the stream");
+    let stats = p.link_stats();
+    let mmp = p.mmp().expect("a promoted peer measures its link");
+    Books {
+        packets: stats.packets_recv,
+        bytes: stats.bytes_recv,
+        last_recv: stats.last_recv_ms,
+        mmp_packets: mmp.receiver.cumulative_packets_recv(),
+        mmp_bytes: mmp.receiver.cumulative_bytes_recv(),
+        highest: mmp.receiver.highest_counter(),
+        ce: mmp.receiver.ecn_ce_count(),
+        spin: mmp.spin_bit.tx_bit(),
+        transport: p.transport_id(),
+        addr: p.current_addr().cloned(),
+        paths: p.paths().len(),
+        heard: p.heard(),
+        last_seen: p.last_seen(),
+        failures: p.consecutive_decrypt_failures(),
+        socket: p.connected_udp().is_some(),
+    }
+}
+
+/// The in-line path and the decrypt-worker path keep the same books. One
+/// stream of heartbeats, with CE and spin bits set on some and an address
+/// change partway, goes through `handle_encrypted_frame` on one node and,
+/// as the worker hands it back once it has checked the frame, through
+/// `process_authentic_fmp_plaintext` on another node in the same state. Both
+/// peers end with the same counters, MMP state, decrypt-failure count and
+/// roam, and with the values the stream implies, so a step dropped from both
+/// paths fails too.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn the_inline_and_worker_receive_paths_keep_the_same_books_across_a_roam() {
+    let tid = TransportId::new(1);
+    let (mut inline, inline_peer, index, mut far_side) =
+        promoted_peer_with_the_far_side_session(tid);
+    let (mut worker, worker_peer, _, _) = promoted_peer_with_the_far_side_session(tid);
+    install_connected_udp(&mut inline, &inline_peer, tid);
+    install_connected_udp(&mut worker, &worker_peer, tid);
+    // Both peers start with no decrypt failures, so a path that skipped the
+    // reset on an authentic frame would still end at zero. One failure each
+    // makes the reset show in the books.
+    let promoted = TransportAddr::from_string(PROMOTED_ADDR);
+    for (node, peer) in [(&mut inline, &inline_peer), (&mut worker, &worker_peer)] {
+        node.charge_failure(peer, tid, &promoted);
+    }
+
+    let mut bytes = 0;
+    let mut last = 0;
+    for (i, &(ts, flags, from)) in STREAM.iter().enumerate() {
+        let counter = far_side.current_send_counter();
+        let frame = heartbeat_frame(&mut far_side, index, ts, flags);
+        let at = 1_700_000_000_000 + 10 * i as u64;
+        let addr = TransportAddr::from_string(from);
+        bytes += frame.len() as u64;
+        last = counter;
+        inline
+            .handle_encrypted_frame(ReceivedPacket::with_timestamp(
+                tid,
+                addr.clone(),
+                frame.clone(),
+                at,
+            ))
+            .await;
+        worker
+            .process_authentic_fmp_plaintext(
+                &worker_peer,
+                crate::node::dataplane::LinkSlot::Current,
+                tid,
+                &addr,
+                at,
+                frame.len(),
+                counter,
+                flags & FLAG_CE != 0,
+                flags & FLAG_SP != 0,
+                &prepend_inner_header(ts, &[0x51]),
+            )
+            .await;
+    }
+
+    let seen = books(&inline, &inline_peer);
+    assert_eq!(
+        seen,
+        books(&worker, &worker_peer),
+        "the two receive paths must keep the same books"
+    );
+    let expected = Books {
+        packets: 5,
+        bytes,
+        last_recv: 1_700_000_000_040,
+        mmp_packets: 5,
+        mmp_bytes: bytes,
+        highest: last,
+        ce: 2,
+        // The node is the spin initiator: it flips on a frame that reflects
+        // its own bit, frames 1, 3 and 5 of STREAM, and ends set.
+        spin: true,
+        transport: Some(tid),
+        addr: Some(TransportAddr::from_string(ROAMED_ADDR)),
+        paths: 1,
+        heard: true,
+        last_seen: 1_700_000_000_040,
+        // Seeded at one above: the first authentic frame resets it.
+        failures: 0,
+        socket: false,
+    };
+    assert_eq!(seen, expected, "the books the stream implies");
 }
 
 /// Datagrams a peer sends after its connected socket is installed reach
@@ -556,11 +723,6 @@ fn udp_mtu(node: &Node) -> u16 {
         .mtu()
 }
 
-/// The established frame around a link message is the 16-byte header, the
-/// 4-byte inner timestamp, the message, and the 16-byte AEAD tag.
-#[cfg(unix)]
-const FRAME_OVERHEAD: usize = 36;
-
 /// A link message whose frame exceeds the UDP transport's MTU is refused on
 /// the encrypt-worker path with `MtuExceeded`, as `UdpTransport::send_async`
 /// refuses it on the inline path, and nothing reaches the peer. A frame of
@@ -661,5 +823,142 @@ async fn a_transit_forward_onto_the_encrypt_worker_path_over_the_udp_mtu_signals
 
     for (_, t) in node.transports.iter_mut() {
         t.stop().await.ok();
+    }
+}
+
+/// A won crossed handshake starts the link's path machine again on the
+/// active path and keeps that path's connected socket: the socket installed
+/// before the move is the one installed after.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_won_cross_connection_keeps_the_active_paths_connected_socket() {
+    use super::paths::cross_move;
+    use super::rekey_parity::linked_pair;
+    use super::spanning_tree::cleanup_nodes;
+
+    let mut nodes = linked_pair(Config::new(), Config::new()).await;
+    let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let l_addr = *nodes[l].node.node_addr();
+    let tid = nodes[s].transport_id;
+    install_connected_udp(&mut nodes[s].node, &l_addr, tid);
+    let peer = nodes[s].node.get_peer(&l_addr).unwrap();
+    let before = peer
+        .connected_udp()
+        .expect("precondition: a socket installed");
+    let (id, index) = (peer.active_path().unwrap().path_id(), peer.our_index());
+
+    cross_move(&mut nodes, s, l).await;
+
+    let peer = nodes[s].node.get_peer(&l_addr).unwrap();
+    assert_ne!(peer.our_index(), index, "precondition: the link moved");
+    assert_ne!(
+        peer.active_path().unwrap().path_id(),
+        id,
+        "precondition: the path machine started again"
+    );
+    let after = peer.connected_udp().expect("the socket survives the move");
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "the active path keeps the socket installed before the move"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// A sealed frame of the far side whose plaintext is `inner`, which may be
+/// shorter than the inner header.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sealed_frame(session: &mut NoiseSession, receiver_idx: SessionIndex, inner: &[u8]) -> Vec<u8> {
+    let counter = session.current_send_counter();
+    let header = build_established_header(receiver_idx, counter, 0, inner.len() as u16);
+    let ciphertext = session.encrypt_with_aad(inner, &header).unwrap();
+    build_encrypted(&header, &ciphertext)
+}
+
+/// Authentic frames of the link attributed to `peer`'s active path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn active_frames(node: &Node, peer: &NodeAddr) -> u32 {
+    let held = node.get_peer(peer).expect("the peer is kept");
+    held.active_path()
+        .expect("the peer holds a path")
+        .live()
+        .frames()
+}
+
+/// Section 5.3 of the multipath draft: the node resets a path's count when
+/// an authentic frame of the link arrives on it, whatever its length. With
+/// one failure charged on each of two peers, a frame whose plaintext is 3
+/// bytes, shorter than the five-byte inner header, resets the count on both
+/// the in-line path and the decrypt-worker path. A 4-byte plaintext, too
+/// short for the inner header but long enough for its timestamp, resets the
+/// count too, and neither path attributes it to the path as a frame.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn the_inline_and_worker_paths_both_reset_the_count_on_a_frame_too_short_for_the_inner_header()
+ {
+    let tid = TransportId::new(1);
+    let (mut inline, inline_peer, index, mut far_side) =
+        promoted_peer_with_the_far_side_session(tid);
+    let (mut worker, worker_peer, _, _) = promoted_peer_with_the_far_side_session(tid);
+    let promoted = TransportAddr::from_string(PROMOTED_ADDR);
+    for len in [3usize, 4] {
+        for (node, peer) in [(&mut inline, &inline_peer), (&mut worker, &worker_peer)] {
+            node.charge_failure(peer, tid, &promoted);
+            assert_eq!(
+                node.get_peer(peer).unwrap().consecutive_decrypt_failures(),
+                1,
+                "precondition: one failure charged before the {len}-byte frame"
+            );
+        }
+        let frames = (
+            active_frames(&inline, &inline_peer),
+            active_frames(&worker, &worker_peer),
+        );
+        let inner = vec![0u8; len];
+        let frame = sealed_frame(&mut far_side, index, &inner);
+        inline
+            .handle_encrypted_frame(ReceivedPacket::new(tid, promoted.clone(), frame.clone()))
+            .await;
+        worker
+            .process_authentic_fmp_plaintext(
+                &worker_peer,
+                crate::node::dataplane::LinkSlot::Current,
+                tid,
+                &promoted,
+                1_700_000_000_000,
+                frame.len(),
+                0,
+                false,
+                false,
+                &inner,
+            )
+            .await;
+        assert_eq!(
+            inline
+                .get_peer(&inline_peer)
+                .unwrap()
+                .consecutive_decrypt_failures(),
+            0,
+            "the in-line path did not reset the count on a {len}-byte plaintext"
+        );
+        assert_eq!(
+            worker
+                .get_peer(&worker_peer)
+                .unwrap()
+                .consecutive_decrypt_failures(),
+            0,
+            "the worker path did not reset the count on a {len}-byte plaintext"
+        );
+        assert_eq!(
+            (
+                active_frames(&inline, &inline_peer),
+                active_frames(&worker, &worker_peer),
+            ),
+            frames,
+            "a {len}-byte plaintext was attributed to the path as a frame"
+        );
     }
 }

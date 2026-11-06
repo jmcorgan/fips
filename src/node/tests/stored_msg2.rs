@@ -579,7 +579,7 @@ async fn after_our_initiator_cutover_an_off_path_msg1_and_an_earlier_link_msg1_3
 
     let a_identity = nodes[a].node.identity().clone();
     let a_epoch = nodes[a].node.startup_epoch();
-    let off_path = add_loopback_alias(&nodes[a].addr);
+    let off_path = add_loopback_alias(&nodes[a].addr, nodes[a].transport_id);
     let data = craft_msg1_wire(
         &nodes[b].node,
         &a_identity,
@@ -665,7 +665,7 @@ async fn a_sibling_dial_arriving_3_s_after_promotion_on_a_slow_first_path_leaves
     last_heard(&mut nodes[s], &l_addr, RECENT_MS);
     let l_identity = nodes[l].node.identity().clone();
     let l_epoch = nodes[l].node.startup_epoch();
-    let sibling = add_loopback_alias(&nodes[l].addr);
+    let sibling = add_loopback_alias(&nodes[l].addr, nodes[l].transport_id);
     let data = craft_msg1_wire(
         &nodes[s].node,
         &l_identity,
@@ -821,10 +821,9 @@ fn index_entries(tn: &TestNode, peer: &NodeAddr) -> usize {
         .count()
 }
 
-/// Whether `tn` still maps `index` on `peer`'s transport.
+/// Whether `tn` still maps `index` to `peer`.
 fn maps_index(tn: &TestNode, peer: &NodeAddr, index: SessionIndex) -> bool {
-    let tid = tn.node.get_peer(peer).unwrap().transport_id().unwrap();
-    tn.node.peers_by_index.contains_key(&(tid, index.as_u32()))
+    tn.node.peers_by_index.get(&index.as_u32()) == Some(peer)
 }
 
 /// B has just handled A's rekey msg1, which it must have answered: check B
@@ -1049,7 +1048,7 @@ async fn an_off_link_msg1_from_a_peer_silent_for_16_s_12_s_after_our_cutover_on_
             last_heard(&mut c.nodes[b], &c.a_addr, ago_ms);
             let a_identity = c.nodes[a].node.identity().clone();
             let a_epoch = c.nodes[a].node.startup_epoch();
-            let off_link = add_loopback_alias(&c.nodes[a].addr);
+            let off_link = add_loopback_alias(&c.nodes[a].addr, c.nodes[a].transport_id);
             let data = craft_msg1_wire(
                 &c.nodes[b].node,
                 &a_identity,

@@ -66,16 +66,22 @@ pub(super) enum Exempt {
     /// After crossed dials the smaller node, `node`, moves to its own
     /// outbound session but keeps the inbound link it promoted `peer` on as
     /// the peer's link record, and the connection it dialed is no live
-    /// link's setup address. Waives `RightLink` for `node`'s record of
-    /// `peer`, and `ConnectionsInUse` for `node`'s connection at `peer`'s
-    /// current address. Removed when a crossing moves the smaller node onto
-    /// the link it dialed.
+    /// link's setup address. The move renews the link's paths on the pair
+    /// the winning msg2 came from, releasing the inbound link's original
+    /// path, and with it that link's `(transport, address)` entry. Waives
+    /// `RightLink` for `node`'s record of `peer`, `MapsAgree`'s missing
+    /// entry for that record's link, and `ConnectionsInUse` for `node`'s
+    /// connection at `peer`'s current address. Removed when a crossing
+    /// moves the smaller node onto the link it dialed.
     CrossedInbound { node: usize, peer: usize },
     /// A node, `node`, whose own later dial to `peer` completed while it
     /// held the peer moves the session, its indices and its address onto
     /// that dial, but keeps the link the peer was promoted on as the peer's
     /// link record. On another transport or address the record is then at
-    /// another pair. Waives `RightLink` for `node`'s record of `peer`.
+    /// another pair, and the move's renewal of the link's paths on the
+    /// dial's pair releases the record's original path and its
+    /// `(transport, address)` entry. Waives `RightLink` for `node`'s record
+    /// of `peer`, and `MapsAgree`'s missing entry for that record's link.
     /// Removed when that move re-keys the peer's link record to the dial's
     /// link.
     MovedOwnDial { node: usize, peer: usize },
@@ -395,9 +401,14 @@ fn maps_agree(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Ve
     let waived: HashSet<LinkId> = exempt
         .iter()
         .filter_map(|e| match *e {
-            Exempt::HeldLinkEntry { node: n, peer } if n == i => node
-                .get_peer(nodes[peer].node.node_addr())
-                .map(|p| p.link_id()),
+            Exempt::HeldLinkEntry { node: n, peer }
+            | Exempt::CrossedInbound { node: n, peer }
+            | Exempt::MovedOwnDial { node: n, peer }
+                if n == i =>
+            {
+                node.get_peer(nodes[peer].node.node_addr())
+                    .map(|p| p.link_id())
+            }
             _ => None,
         })
         .collect();

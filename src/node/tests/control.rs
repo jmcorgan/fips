@@ -249,7 +249,7 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
 
     // A second address that reaches the peer, standing in for a second path
     // coming up.
-    let alternate = add_loopback_alias(&nodes[p].addr);
+    let alternate = add_loopback_alias(&nodes[p].addr, nodes[p].transport_id);
     assert_ne!(alternate, nodes[p].addr);
 
     let dialer_before = link_view(&nodes[d], &peer_addr);
@@ -417,6 +417,188 @@ async fn alternate_path_for_quiet_peer(dialer_smaller: bool, dialer_set_up: bool
     cleanup_nodes(&mut nodes).await;
 }
 
+/// One case of the pin across our later dial to a peering the peer dialled:
+/// the dialer holds the peer on the link the peer's dial made (Inbound at
+/// the dialer), pins it, and later dials the peer on a second address. The
+/// peer answers that dial as a rekey of the link it holds, or, when it
+/// dropped the peering first, promotes it afresh. Where the dialer moves to
+/// the dial's session its pin ends; where it stays on its own the pin is
+/// kept.
+async fn pin_across_our_later_dial_to_a_peering_the_peer_dialled(
+    dialer_smaller: bool,
+    peer_dropped_first: bool,
+) {
+    use super::rekey_parity::age_link;
+    use super::spanning_tree::initiate_handshake;
+    use fips_core::proto::path::{Input, Pin};
+
+    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
+    let (d, p) = if zero_smaller == dialer_smaller {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let dialer_addr = *nodes[d].node.node_addr();
+    let peer_addr = *nodes[p].node.node_addr();
+    let case =
+        format!("dialer smaller: {dialer_smaller}, peer dropped first: {peer_dropped_first}");
+
+    // The peer dials first.
+    initiate_handshake(&mut nodes, p, d).await;
+    drain_all_packets(&mut nodes, false).await;
+    let held = nodes[d]
+        .node
+        .get_peer(&peer_addr)
+        .map(|x| x.link_id())
+        .and_then(|l| nodes[d].node.links.get(&l))
+        .map(|l| l.direction());
+    assert_eq!(
+        held,
+        Some(LinkDirection::Inbound),
+        "precondition: the dialer holds the peer on the link the peer's dial made ({case})"
+    );
+    assert!(
+        nodes[p].node.get_peer(&dialer_addr).is_some(),
+        "precondition: the peer holds the dialer ({case})"
+    );
+    age_link(&mut nodes, d, p, Duration::from_secs(31));
+    quieten(&mut nodes[d], &peer_addr);
+    let alternate = add_loopback_alias(&nodes[p].addr, nodes[p].transport_id);
+
+    // The dialer pins its link on its active path.
+    let (transport, addr) = {
+        let a = nodes[d]
+            .node
+            .get_peer(&peer_addr)
+            .and_then(|x| x.active_path())
+            .expect("precondition: an active path");
+        (a.transport_id(), a.addr().clone())
+    };
+    nodes[d]
+        .node
+        .step_path(
+            &peer_addr,
+            Input::Pin {
+                transport,
+                addr: Some(addr.clone()),
+            },
+        )
+        .await;
+    let pin = Pin {
+        transport,
+        addr: Some(addr),
+    };
+    let held_pin = |tn: &TestNode| {
+        tn.node
+            .get_peer(&peer_addr)
+            .and_then(|x| x.bundle())
+            .and_then(|b| b.pin().cloned())
+    };
+    assert_eq!(
+        held_pin(&nodes[d]),
+        Some(pin.clone()),
+        "precondition: the dialer pinned its link ({case})"
+    );
+
+    let dialer_before = link_view(&nodes[d], &peer_addr);
+    let peer_link_before = link_view(&nodes[p], &dialer_addr).link_id;
+    if peer_dropped_first {
+        nodes[p].node.remove_active_peer(&dialer_addr);
+        assert!(
+            nodes[p].node.get_peer(&dialer_addr).is_none(),
+            "precondition: the peer dropped the peering ({case})"
+        );
+    }
+
+    // The dialer's later dial to the peer it holds, run to completion.
+    let peer_npub = nodes[p].node.npub();
+    let data = nodes[d]
+        .node
+        .api_connect(&peer_npub, &alternate.to_string(), "loopback")
+        .await
+        .expect("precondition: the later dial starts");
+    assert_eq!(
+        data["refreshed"], true,
+        "precondition: the connect dialled a held peer ({case})"
+    );
+    for _ in 0..20 {
+        if process_available_packets(&mut nodes).await == 0 {
+            break;
+        }
+    }
+
+    let peer_now = nodes[p].node.get_peer(&dialer_addr).map(|x| x.link_id());
+    if peer_dropped_first {
+        assert!(
+            peer_now.is_some() && peer_now != Some(peer_link_before),
+            "precondition: the peer promoted the dial as a new peering ({case})"
+        );
+    } else {
+        assert_eq!(
+            peer_now,
+            Some(peer_link_before),
+            "precondition: the peer kept its peering and answered the dial as a rekey ({case})"
+        );
+    }
+    assert_eq!(
+        outbound_leg_count(&nodes[d].node, &peer_addr),
+        0,
+        "precondition: the dial was answered and its leg resolved ({case})"
+    );
+    let dialer_after = link_view(&nodes[d], &peer_addr);
+    assert_eq!(
+        dialer_after.link_id, dialer_before.link_id,
+        "precondition: the dialer kept its link ({case})"
+    );
+    let moved = dialer_after.our_index != dialer_before.our_index;
+    assert_eq!(
+        moved, dialer_smaller,
+        "precondition: the dialer moved to the dial's session only when smaller ({case})"
+    );
+    assert_eq!(
+        held_pin(&nodes[d]),
+        if moved { None } else { Some(pin) },
+        "the dialer's pin ends when its own later dial to a held peer is answered and the \
+         peering is moved at the dialer, and is kept otherwise ({case})"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The smaller dialer holds a peering the peer dialled, pins it, and dials
+/// the peer again; the peer answers as a rekey and the dialer moves to the
+/// dial's session, so the pin ends.
+#[tokio::test]
+async fn a_pin_ends_when_our_later_dial_from_the_smaller_address_moves_a_peering_the_peer_dialled_and_answered_as_a_rekey()
+ {
+    pin_across_our_later_dial_to_a_peering_the_peer_dialled(true, false).await;
+}
+
+/// As above, but the peer dropped the peering first and promotes the dial
+/// afresh; the dialer moves and the pin ends.
+#[tokio::test]
+async fn a_pin_ends_when_our_later_dial_from_the_smaller_address_is_promoted_afresh_by_a_peer_that_dropped_the_peering_it_dialled()
+ {
+    pin_across_our_later_dial_to_a_peering_the_peer_dialled(true, true).await;
+}
+
+/// The larger dialer's later dial is answered as a rekey but leaves it on
+/// its own session, so the pin is kept.
+#[tokio::test]
+async fn a_pin_is_kept_when_our_later_dial_from_the_larger_address_leaves_us_on_a_peering_the_peer_dialled_and_answered_as_a_rekey()
+ {
+    pin_across_our_later_dial_to_a_peering_the_peer_dialled(false, false).await;
+}
+
+/// The larger dialer's later dial is promoted afresh by a peer that dropped
+/// the peering, but leaves the dialer on its own session, so the pin is
+/// kept.
+#[tokio::test]
+async fn a_pin_is_kept_when_our_later_dial_from_the_larger_address_leaves_us_on_a_peering_the_peer_dialled_and_dropped()
+ {
+    pin_across_our_later_dial_to_a_peering_the_peer_dialled(false, true).await;
+}
+
 /// `connect` naming a different address for a peer whose link is live does
 /// not dial it, says so, and leaves both ends exactly as they were.
 ///
@@ -448,7 +630,7 @@ async fn connect_to_live_peer_on_another_address(dialer_smaller: bool) {
     let peer_addr = *nodes[p].node.node_addr();
     let peer_npub = nodes[p].node.npub();
     age_link(&mut nodes, d, p, Duration::from_secs(31));
-    let alternate = add_loopback_alias(&nodes[p].addr);
+    let alternate = add_loopback_alias(&nodes[p].addr, nodes[p].transport_id);
 
     let dialer_before = link_view(&nodes[d], &peer_addr);
     let peer_before = link_view(&nodes[p], &dialer_addr);
@@ -992,4 +1174,112 @@ fn unproved_inbound_session_is_shown_without_npub_and_with_a_status() {
             "{render} render, established session status"
         );
     }
+}
+
+/// What `connect` does with another address of a live peer B at A, given
+/// A's and B's configurations, and with B first made capable at A when
+/// `capable`. Returns the response, whether A started a handshake leg
+/// toward B, whether A's link to B changed, and the sources A then holds
+/// the address from as a candidate, with the path A holds there, if any.
+async fn connect_live_alternate(
+    a: Config,
+    b: Config,
+    capable: bool,
+) -> (
+    serde_json::Value,
+    bool,
+    bool,
+    Option<fips_core::proto::path::Sources>,
+    Option<crate::peer::PathState>,
+) {
+    use super::paths::{capable_at, sources_at, state_at};
+    use super::rekey_parity::{linked_pair, pump};
+
+    let mut nodes = linked_pair(a, b).await;
+    let b_addr = *nodes[1].node.node_addr();
+    let t1 = nodes[0].transport_id;
+    if capable {
+        let q = add_loopback_alias(&nodes[1].addr, nodes[1].transport_id);
+        nodes[0].node.offer_path(&b_addr, t1, q).await;
+        pump(&mut nodes).await;
+    }
+    assert_eq!(
+        capable_at(&nodes[0], &b_addr),
+        capable,
+        "precondition: B's capability at A"
+    );
+    let alternate = add_loopback_alias(&nodes[1].addr, nodes[1].transport_id);
+    let before = link_view(&nodes[0], &b_addr);
+    let b_npub = nodes[1].node.npub();
+    let data = nodes[0]
+        .node
+        .api_connect(&b_npub, &alternate.to_string(), "loopback")
+        .await
+        .expect("api_connect to a live peer is not an error");
+    let dialled = outbound_leg_count(&nodes[0].node, &b_addr) > 0;
+    let moved = link_view(&nodes[0], &b_addr) != before;
+    let sources = sources_at(&nodes[0], &b_addr, t1, &alternate);
+    let state = state_at(&nodes[0], &b_addr, t1, &alternate);
+    cleanup_nodes(&mut nodes).await;
+    (data, dialled, moved, sources, state)
+}
+
+/// With multipath enabled, `connect` naming a new address of a live peer
+/// that has shown it implements multipath holds the address as a path
+/// candidate from the operator's request, dials nothing, leaves the link
+/// where it is, and says so; the pair is admitted as a path at once.
+/// Mutation: reply as a node without multipath does for a capable peer.
+#[tokio::test]
+async fn test_api_connect_to_a_live_capable_peer_holds_a_new_address_as_a_path_candidate() {
+    use super::paths::enabled;
+    let (data, dialled, moved, sources, state) =
+        connect_live_alternate(enabled(), enabled(), true).await;
+    assert_eq!(data["refreshed"], false);
+    assert_eq!(
+        data["detail"], "peer live, address held as a path candidate",
+        "the response says the address is held as a path candidate"
+    );
+    assert!(!dialled, "no handshake leg toward a live peer");
+    assert!(!moved, "the link is unchanged");
+    assert!(
+        sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Request)),
+        "the address is a candidate from the request: {sources:?}"
+    );
+    assert_eq!(
+        state,
+        Some(crate::peer::PathState::Probing),
+        "the address is admitted as a path and probed"
+    );
+}
+
+/// With multipath enabled, `connect` naming a new address of a live peer
+/// not known to implement multipath keeps the reply a node without
+/// multipath gives; the address is held as a candidate, which opens
+/// capability probing, and nothing is dialled.
+#[tokio::test]
+async fn test_api_connect_to_a_live_peer_not_known_capable_keeps_masters_reply() {
+    use super::paths::enabled;
+    let (data, dialled, moved, sources, state) =
+        connect_live_alternate(enabled(), Config::new(), false).await;
+    assert_eq!(data["refreshed"], false);
+    assert_eq!(data["detail"], "peer live, not dialled");
+    assert!(!dialled && !moved);
+    assert!(
+        sources.is_some_and(|s| s.has(fips_core::proto::path::Source::Request)),
+        "the address is held as a candidate: {sources:?}"
+    );
+    assert_eq!(state, None, "no path for a peer not known to be capable");
+}
+
+/// With multipath disabled, `connect` to a live peer gives the reply it
+/// always gave, and holds nothing.
+#[tokio::test]
+async fn test_api_connect_with_multipath_off_keeps_masters_reply() {
+    let (data, dialled, moved, sources, state) =
+        connect_live_alternate(Config::new(), Config::new(), false).await;
+    assert_eq!(data["refreshed"], false);
+    assert_eq!(data["detail"], "peer live, not dialled");
+    assert!(!dialled && !moved);
+    assert_eq!(sources, None);
+    assert_eq!(state, None);
 }

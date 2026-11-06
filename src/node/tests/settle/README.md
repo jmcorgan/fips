@@ -15,9 +15,10 @@ real TCP sockets.
   delivery until idle for loopback and TCP nodes alike (`pump`), a fresh
   heartbeat check (`heartbeat_reaches`), the check that two nodes hold one
   session that carries a heartbeat each way (`settled`), and the wrappers
-  that absorb a signature or key change multipath makes to a shared helper
-  (`bind_index`, `alias`, `tap`). A wrapper's body is the one place such a
-  change is made.
+  over shared helpers whose signature or key multipath changed
+  (`bind_index`, `alias`, `tap`): the session-index map keyed by the bare
+  index, and loopback addresses registered under their transport. A
+  wrapper's body is the one place such a change is made.
 - `audit.rs`: the shell audit. `audit(nodes, exempt)` reports every breach
   of four properties over real nodes, after running
   `link_index_audit::audit` on each node (which panics on its own);

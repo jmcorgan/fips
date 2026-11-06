@@ -95,7 +95,8 @@ deployed releases, and runs the session and link nodes this release ships
   which a timer fires on every poll or never, and a time trigger below
   the jitter plus the link-age floor), and every derived value.
   `msg1_span` gives the offset of the last msg1 resend, which the link
-  shell's silence bounds allow for.
+  shell's silence bounds allow for. The abandon backoff is
+  `time::backoff` over the check interval, capped at the pending hold.
 - `lease.rs`: `IndexLease` (a linear session index), `allocate`, the
   leak counter, `EpochTag` and `TagSource`. `IndexLease::for_test`, a
   lease no allocator handed out, exists only for tests and behind
@@ -219,12 +220,16 @@ at `next_wake` produces.
   setup msg1 draws the setup msg2, a copy is refused, a fresh one asks
   the shell to apply the restart gates. Once eligible: a msg1 off the
   established link while it is reachable is refused; a resend of the
-  msg1 that armed the held pending draws its msg2; any other msg1 meets
+  msg1 that armed the held pending draws its msg2 again, on the route
+  the first answer took; any other msg1 meets
   a pending in either role and is refused; a copy is refused while idle
   or attempting; a fresh msg1 is answered into a pending when idle, and
   while attempting the tie-break keeps the smaller node's attempt (the
-  larger abandons its own and answers). Every fresh msg1 refused after
-  authentication is recorded.
+  larger abandons its own and answers). The answer goes on the msg1's
+  arrival path when `Config::arrival` is on and the msg1 arrived on the
+  established link, and otherwise, as for a msg1 accepted off a link
+  that cannot be reached, on the established link with its fallback.
+  Every fresh msg1 refused after authentication is recorded.
 - **Reply.** An index-bearing reply naming no held index, or one held by
   an epoch rather than the attempt, is refused. A reply that does not
   read on the attempt's fork, or reads as another static, changes

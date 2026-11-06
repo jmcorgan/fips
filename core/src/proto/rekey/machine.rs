@@ -150,10 +150,12 @@ enum Change<'a, P: Profile> {
         tok: Authentic<P::Msg1, Replayable>,
         ephemeral: Option<Digest>,
     },
-    /// Answer a fresh eligible msg1, yielding an unanswered own attempt.
+    /// Answer a fresh eligible msg1, yielding an unanswered own attempt;
+    /// `on_link` is whether the msg1 arrived on the established link.
     Respond {
         tok: Authentic<P::Msg1, Replayable>,
         yield_own: bool,
+        on_link: bool,
     },
     /// The own attempt's reply authenticated.
     Reply {
@@ -888,6 +890,10 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         let fresh = (copy == Copied::Fresh).then_some(key);
         if !eligible {
             return match copy {
+                // The setup answer went out from the link setup on the
+                // connection that became the established link, and while the
+                // link is too young to rekey no path switch has moved it, so
+                // the established route is the first answer's route.
                 Copied::Setup => match self.record.setup_answer() {
                     Some(msg2) => Change::Resend {
                         msg: msg2.clone(),
@@ -914,7 +920,11 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 Some(h) => Change::Resend {
                     msg: h.msg2.clone(),
                     kind: MsgKind::Msg2,
-                    route: Route::Established { fallback: true },
+                    route: if fault!(ResendEstablished) {
+                        Route::Established { fallback: true }
+                    } else {
+                        h.route
+                    },
                 },
                 None => Change::Reject(Reason::AnsweredBefore),
             },
@@ -941,6 +951,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     Verdict::YieldOwn => Change::Respond {
                         tok,
                         yield_own: true,
+                        on_link: arrival.on_link,
                     },
                     Verdict::KeepOwn | Verdict::Accept | Verdict::DiscardCompeting => {
                         Change::Refuse {
@@ -953,6 +964,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             (Cycle::Idle, Copied::Fresh) => Change::Respond {
                 tok,
                 yield_own: false,
+                on_link: arrival.on_link,
             },
         }
     }
@@ -1132,7 +1144,11 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 }
                 out.push(Output::ReplaceRequested { tok });
             }
-            Change::Respond { tok, yield_own } => self.respond(now, tok, yield_own, env, out),
+            Change::Respond {
+                tok,
+                yield_own,
+                on_link,
+            } => self.respond(now, tok, yield_own, on_link, env, out),
             Change::Reply { proof, route } => self.reply(now, proof, route, env, out),
             Change::Candidate {
                 hs,
@@ -1319,12 +1335,17 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         self.mem.due = false;
     }
 
-    /// Answer a fresh eligible IK msg1 into a responder pending.
+    /// Answer a fresh eligible IK msg1 into a responder pending. The msg2
+    /// goes on the msg1's arrival path when arrival replies are on and the
+    /// msg1 arrived on the established link (`on_link`); otherwise, as for
+    /// a msg1 accepted off a link that cannot be reached, on the
+    /// established link with its fallback.
     fn respond(
         &mut self,
         now: C::Instant,
         tok: Authentic<P::Msg1, Replayable>,
         yield_own: bool,
+        on_link: bool,
         env: &mut Env<'_, P>,
         out: &mut Outputs<P>,
     ) {
@@ -1377,7 +1398,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 purpose: Purpose::Pending,
             });
         }
-        let mut arrival = self.params.cfg.arrival;
+        let mut arrival = self.params.cfg.arrival && on_link;
         if fault!(ReplyOnArrival) {
             arrival = !arrival;
         }
@@ -1399,6 +1420,7 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                 msg1: digest,
                 ephemeral,
                 msg2,
+                route,
             }),
         });
         if P::DAMPEN_AT == DampenAt::Answer {

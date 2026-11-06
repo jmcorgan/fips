@@ -22,6 +22,7 @@ async fn dialler(id: u32, mtu: u16, target: std::net::SocketAddr) -> (NymTranspo
         startup_timeout_secs: Some(5),
         connect_timeout_ms: Some(5000),
         mtu: Some(mtu),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, rx) = packet_channel(32);
     let mut t = NymTransport::new(TransportId::new(id), None, config, tx);

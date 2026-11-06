@@ -341,6 +341,7 @@ async fn pending_inbound_leg_holding_its_msg2() -> (Node, LinkId) {
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = crate::transport::packet_channel(8);
     let mut eth = EthernetTransport::new(transport_id, Some("lab".into()), config, tx);

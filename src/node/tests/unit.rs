@@ -596,7 +596,7 @@ fn test_node_promote_connection() {
     // Verify peers_by_index is populated
     let our_index = peer.our_index().unwrap();
     assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.get(&our_index.as_u32()),
         Some(&node_addr)
     );
 }
@@ -623,10 +623,7 @@ fn test_node_cross_connection_resolution() {
     // Verify first promotion populated peers_by_index
     let peer = node.get_peer(&node_addr).unwrap();
     let our_idx = peer.our_index().unwrap();
-    assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_idx.as_u32())),
-        Some(&node_addr)
-    );
+    assert_eq!(node.peers_by_index.get(&our_idx.as_u32()), Some(&node_addr));
 
     // Still only one peer
     assert_eq!(node.peer_count(), 1);
@@ -758,22 +755,20 @@ fn test_node_pending_outbound_tracking() {
 #[test]
 fn test_node_peers_by_index_tracking() {
     let mut node = make_node();
-    let transport_id = TransportId::new(1);
     let node_addr = make_node_addr(42);
 
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in peers_by_index
-    node.peers_by_index
-        .insert((transport_id, index.as_u32()), node_addr);
+    node.peers_by_index.insert(index.as_u32(), node_addr);
 
     // Verify lookup
-    let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
+    let found = node.peers_by_index.get(&index.as_u32());
     assert_eq!(found, Some(&node_addr));
 
     // Clean up
-    node.peers_by_index.remove(&(transport_id, index.as_u32()));
+    node.peers_by_index.remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert!(node.peers_by_index.is_empty());
@@ -1511,6 +1506,67 @@ async fn an_instance_qualified_candidate_matches_only_its_own_instance() {
     );
 
     node.stop().await.unwrap();
+}
+
+/// A configured address matches the peer's current path only at its active
+/// pair: a standby path the link holds at another address is still an
+/// alternative, as the address comparison it replaces also said.
+/// Mutation: match any proven path, not only the active one.
+#[test]
+fn a_candidate_at_a_standby_paths_pair_is_an_alternative_and_one_at_the_active_pair_is_not() {
+    let mut node = make_node();
+    for (id, name) in [(1, "main"), (2, "backup")] {
+        let (packet_tx, _packet_rx) = packet_channel(8);
+        let udp = UdpTransport::new(
+            TransportId::new(id),
+            Some(name.to_string()),
+            crate::config::UdpConfig {
+                bind_addr: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+            packet_tx,
+        );
+        node.transports
+            .insert(TransportId::new(id), TransportHandle::Udp(udp));
+    }
+    let peer_full = Identity::generate();
+    let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
+    let peer_node_addr = *peer_identity.node_addr();
+    let active = TransportAddr::from_string("192.0.2.1:2121");
+    let standby = TransportAddr::from_string("192.0.2.2:2121");
+    let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
+    active_peer.set_current_addr(TransportId::new(1), active);
+    active_peer.admit_path(TransportId::new(2), standby.clone());
+    active_peer.ack_path(TransportId::new(2), &standby);
+    assert!(
+        matches!(
+            active_peer.path_match(TransportId::new(2), &standby),
+            crate::peer::Match::Proven { active: false, .. }
+        ),
+        "precondition: the standby is a proven path that is not active"
+    );
+    node.peers.insert(peer_node_addr, active_peer);
+
+    let matches = |transport: &str, addr: &str| {
+        let candidate = crate::config::PeerAddress::new(transport, addr);
+        node.active_peer_matches_candidate(&peer_node_addr, &candidate)
+    };
+    assert!(
+        matches("udp", "192.0.2.1:2121"),
+        "the active pair is the current path"
+    );
+    assert!(
+        matches("udp/main", "192.0.2.1:2121"),
+        "so is the active pair named with its instance"
+    );
+    assert!(
+        !matches("udp", "192.0.2.2:2121"),
+        "the standby's pair is an alternative"
+    );
+    assert!(
+        !matches("udp/backup", "192.0.2.2:2121"),
+        "and so is the standby's pair named with its instance"
+    );
 }
 
 #[tokio::test]
@@ -2474,6 +2530,7 @@ async fn test_ipv6_shortfall_is_none_when_the_only_transport_is_an_ethernet_one_
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = packet_channel(8);
     let mut eth = EthernetTransport::new(TransportId::new(1), Some("lab".into()), config, tx);
@@ -5919,4 +5976,37 @@ async fn a_node_whose_tun_thread_ended_draws_no_ipv6_minimum_warning_when_a_narr
         "a node whose TUN thread ended has no TUN to warn about"
     );
     node.stop().await.unwrap();
+}
+
+/// A step of a link's rekey machine hands each msg2 it asks to send to the
+/// caller with the route the machine chose, so the answer goes where the
+/// machine says rather than always on the established link.
+#[tokio::test]
+async fn a_link_step_hands_each_reply_its_route() {
+    use crate::peer::LinkOutput;
+    use fips_core::proto::rekey::{MsgKind, Route};
+
+    let mut node = make_node();
+    let peer = *make_peer_identity().node_addr();
+    let routes = [
+        Route::Arrival,
+        Route::Established { fallback: true },
+        Route::Established { fallback: false },
+    ];
+    let out = routes
+        .iter()
+        .enumerate()
+        .map(|(i, &route)| LinkOutput::Send {
+            msg: vec![i as u8; 4],
+            kind: MsgKind::Msg2,
+            route,
+        })
+        .collect();
+    let report = node.run_link_step(&peer, out).await;
+    let expected: Vec<_> = routes
+        .iter()
+        .enumerate()
+        .map(|(i, &route)| (vec![i as u8; 4], route))
+        .collect();
+    assert_eq!(report.replies, expected);
 }

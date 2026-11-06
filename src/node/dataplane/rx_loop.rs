@@ -145,6 +145,25 @@ impl Node {
         };
 
         let mut tick = tokio::time::interval(self.tick_period());
+        // The links' path machines run on their own, faster tick, armed only
+        // while some link has work, and a tick missed is skipped, not run
+        // twice.
+        let mut path_tick = tokio::time::interval(crate::node::handlers::path::PATH_TICK);
+        path_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Kernel link events wake the carrier read between path ticks. Only a
+        // node with multipath enabled watches them for this; it is built here,
+        // inside the runtime, because the watcher needs one.
+        let watch = crate::node::handlers::path::carrier_watch(self.config().node.path.enabled);
+        // The encrypt workers' reports of unreachable sends, or a dummy
+        // channel when no pool was started: the same pattern, for the same
+        // reason, as the child-liveness receiver above.
+        let (mut report_rx, _report_guard) = match self.paths.reports.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
 
         // Set up control socket channel
         let (control_tx, mut control_rx) =
@@ -441,16 +460,18 @@ impl Node {
                         // Not policy-filtered: whether an interface's absence
                         // is normal is a statement about node *health*, not
                         // about whether the routes over it still work.
-                        if !edge.present {
-                            let reaped =
-                                self.reap_peers_on_transport(edge.transport_id).await;
-                            if reaped > 0 {
-                                info!(
-                                    transport_id = %edge.transport_id,
-                                    peers = reaped,
-                                    "Withdrew peers whose interface went away"
-                                );
-                            }
+                        //
+                        // Every link's path machine hears both edges: a loss
+                        // discards the paths on the interface, and a return
+                        // releases the addresses held back on it.
+                        let reaped =
+                            self.path_presence(edge.transport_id, edge.present).await;
+                        if reaped > 0 {
+                            info!(
+                                transport_id = %edge.transport_id,
+                                peers = reaped,
+                                "Withdrew peers whose interface went away"
+                            );
                         }
                     }
                 }
@@ -535,6 +556,15 @@ impl Node {
                         request.params.as_ref(),
                     ).await;
                     let _ = response_tx.send(response);
+                }
+                _ = path_tick.tick(), if self.paths.armed() => {
+                    self.path_tick().await;
+                }
+                _ = crate::node::handlers::path::changed(&watch), if watch.is_some() => {
+                    self.read_carrier().await;
+                }
+                Some(report) = report_rx.recv() => {
+                    self.path_unreachable(report.transport, report.dest).await;
                 }
                 deadline = tick.tick() => {
                     // Tick-body instrumentation. The gate is read ONCE per tick

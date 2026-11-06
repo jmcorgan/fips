@@ -100,6 +100,16 @@ impl UdpTransport {
         self.name.as_deref()
     }
 
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
+    }
+
+    /// The kind configured for this transport's paths, if any.
+    pub fn kind(&self) -> Option<crate::config::PathKind> {
+        self.config.kind
+    }
+
     /// Get the local bound address (only valid after start).
     pub fn local_addr(&self) -> Option<SocketAddr> {
         self.local_addr

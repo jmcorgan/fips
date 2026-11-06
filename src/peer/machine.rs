@@ -497,6 +497,10 @@ pub(crate) struct PeerMachine {
 
     /// Where this machine's dial came from; see [`DialOrigin`].
     origin: DialOrigin,
+    /// The link the dialled peer was held on when this dial started, `None`
+    /// if it was not held. A msg2 that finds the peer still on that link
+    /// answers a later dial to a held peer, not a crossed handshake.
+    held: Option<LinkId>,
 }
 
 impl PeerMachine {
@@ -514,6 +518,7 @@ impl PeerMachine {
             held_msg1: None,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
+            held: None,
         }
     }
 
@@ -533,6 +538,7 @@ impl PeerMachine {
             held_msg1: None,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
+            held: None,
         }
     }
 
@@ -859,6 +865,18 @@ impl PeerMachine {
     /// site, before the machine is first driven.
     pub(crate) fn set_dial_origin(&mut self, origin: DialOrigin) {
         self.origin = origin;
+    }
+
+    /// The link the dialled peer was held on when this dial started, if it
+    /// was held.
+    pub(crate) fn held_link(&self) -> Option<LinkId> {
+        self.held
+    }
+
+    /// Record the link the dialled peer is held on as this dial starts, or
+    /// `None` if it is not held. Called once, at the dial site.
+    pub(crate) fn note_held(&mut self, link: Option<LinkId>) {
+        self.held = link;
     }
 
     /// Remote startup epoch of the surviving carrier, recorded by the

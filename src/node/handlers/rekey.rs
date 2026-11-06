@@ -18,11 +18,10 @@ use crate::peer::{LinkOutput, LinkOutputs, LinkProfile, peer_now};
 use crate::proto::fsp::{SessionAck, SessionMsg3, SessionSetup};
 use crate::proto::link::SessionDatagram;
 use crate::proto::stp::{TreeCoordinate, coords_wire_size, encode_coords};
-use crate::transport::TransportId;
 use crate::utils::index::SessionIndex;
 use fips_core::proto::rekey::{
     Abandon, Config, DEPLOYED_SESSION_FLOOR, EpochTag, Input, MAX_AFTER, MsgKind, NodeKeys, Params,
-    Purpose, Reason, RecordStore, RecvCopy, Role, Slot, msg1_span,
+    Purpose, Reason, RecordStore, RecvCopy, Role, Route, Slot, msg1_span,
 };
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,11 +96,20 @@ pub(crate) const REKEY_HANDSHAKE: u64 = 30;
 /// link rekey's msg1 ladder. A time trigger below the jitter plus the 30 s
 /// link age at which a peer answers a msg1 as a rekey is raised to that
 /// sum, and timers the machine refuses fall back to the link defaults,
-/// each with a warning once.
+/// each with a warning once. With `node.path.enabled` a msg1 that arrived
+/// on the established link, on any of its proven paths, is answered on the
+/// path it arrived on (multipath v1 draft, Section 5.10); with multipath
+/// disabled every answer goes on the established link with its fallback.
 pub(crate) fn link_params(node: &crate::config::NodeConfig) -> Params {
     static TIMERS_WARNED: AtomicBool = AtomicBool::new(false);
     static AFTER_WARNED: AtomicBool = AtomicBool::new(false);
-    let base = Config::fmp();
+    // With multipath enabled a rekey answer goes on the path its msg1
+    // arrived on (multipath v1 draft, Section 5.10); set on the base so the
+    // fallbacks below keep it.
+    let base = Config {
+        arrival: node.path.enabled,
+        ..Config::fmp()
+    };
     let configured = Config {
         handshake: Duration::from_secs(node.rate_limit.handshake_timeout_secs),
         check: TICK,
@@ -179,8 +187,9 @@ pub(in crate::node) struct LinkReport {
     /// The machine asked for the restart gates on the msg1 it was given.
     pub(in crate::node) replace: bool,
     /// The msg2s the machine asked to send in answer to the msg1 it was
-    /// given, in order, for the caller to route as the msg1 arrived.
-    pub(in crate::node) replies: Vec<Vec<u8>>,
+    /// given, in order, each with the route the machine chose for it, for
+    /// the caller to send relative to where the msg1 arrived.
+    pub(in crate::node) replies: Vec<(Vec<u8>, Route)>,
     /// The slot a frame authenticated under and where its plaintext is.
     pub(in crate::node) delivered: Option<(Slot, Range<usize>)>,
     /// Why the input changed nothing (or only what its row names), in order.
@@ -264,9 +273,9 @@ impl Node {
         let mut last_release = None;
         for output in out {
             match output {
-                LinkOutput::Send { msg, kind, .. } => match kind {
+                LinkOutput::Send { msg, kind, route } => match kind {
                     MsgKind::Msg1 => self.send_link_msg1(node_addr, &msg, started).await,
-                    MsgKind::Msg2 => report.replies.push(msg),
+                    MsgKind::Msg2 => report.replies.push((msg, route)),
                     MsgKind::Setup | MsgKind::Ack | MsgKind::Msg3 => {
                         debug_assert!(false, "a link machine sent {kind:?}");
                     }
@@ -338,8 +347,9 @@ impl Node {
     /// tightened; the peer's tree declaration and filter are forgotten, so
     /// its announces, whose sequence numbers began again, are accepted; and
     /// this node's tree and filter are announced to it again, since it holds
-    /// neither. The link's MMP was reset by the cutover that reported the
-    /// restart, as at every cutover.
+    /// neither; and the operator's pin on the link ends, as it does when a
+    /// restart or replacement builds a new link. The link's MMP was reset by
+    /// the cutover that reported the restart, as at every cutover.
     async fn reset_restarted(&mut self, node_addr: &NodeAddr, epoch: [u8; 8]) {
         info!(
             peer = %self.peer_display_name(node_addr),
@@ -376,6 +386,8 @@ impl Node {
                 "Failed to send TreeAnnounce after peer restart"
             );
         }
+        self.step_path(node_addr, fips_core::proto::path::Input::Unpin)
+            .await;
     }
 
     /// Close the end-to-end session with `addr` and what describes it: the
@@ -539,36 +551,32 @@ impl Node {
 
     /// Carry out the outputs of `node_addr`'s link rekey machine that change
     /// the node's index maps and worker registrations, front to back: bind
-    /// and unbind its indices in `peers_by_index` by the transport recorded
-    /// at the binding, offer receive halves to the decrypt workers and tell
-    /// the machine which ones a worker accepted, revoke them, and free
-    /// released indices. The one place a link's index maps and worker
-    /// registrations change. The outputs of a `close`, a link's promotion
-    /// and a cross-connection move are all of this kind.
+    /// and unbind its indices in `peers_by_index`, offer receive halves to
+    /// the decrypt workers and tell the machine which ones a worker accepted,
+    /// revoke them, and free released indices. The map and the workers are
+    /// keyed by the index alone: indices come from one allocator, so a frame
+    /// naming a bound index finds its session whichever transport delivered
+    /// it, and the transport each output records plays no part here. The one
+    /// place a link's index maps and worker registrations change. The outputs
+    /// of a `close`, a link's promotion and a cross-connection move are all
+    /// of this kind.
     pub(in crate::node) fn run_link_outputs(&mut self, node_addr: &NodeAddr, out: LinkOutputs) {
         for output in out {
             match output {
-                LinkOutput::Bind {
-                    transport, index, ..
-                } => {
-                    self.peers_by_index.insert((transport, index), *node_addr);
+                LinkOutput::Bind { index, .. } => {
+                    self.peers_by_index.insert(index, *node_addr);
                 }
-                LinkOutput::Unbind { transport, index } => {
-                    self.peers_by_index.remove(&(transport, index));
+                LinkOutput::Unbind { index, .. } => {
+                    self.peers_by_index.remove(&index);
                 }
                 LinkOutput::Delegate {
-                    tag,
-                    transport,
-                    index,
-                    recv,
-                } => self.delegate_link_epoch(node_addr, tag, (transport, index), recv),
-                LinkOutput::Revoke {
-                    transport, index, ..
-                } => {
+                    tag, index, recv, ..
+                } => self.delegate_link_epoch(node_addr, tag, index, recv),
+                LinkOutput::Revoke { index, .. } => {
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((transport, index));
+                    self.unregister_decrypt_worker_session(index);
                     #[cfg(not(unix))]
-                    let _ = (transport, index);
+                    let _ = index;
                 }
                 LinkOutput::Release(lease) => {
                     let _ = self
@@ -604,7 +612,7 @@ impl Node {
         &mut self,
         node_addr: &NodeAddr,
         tag: EpochTag,
-        cache_key: (TransportId, u32),
+        cache_key: u32,
         recv: RecvCopy,
     ) {
         #[cfg(unix)]

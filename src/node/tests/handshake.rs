@@ -123,9 +123,7 @@ async fn test_two_node_handshake_udp() {
     );
     let our_index_b = peer_a_on_b.our_index().expect("B should have our_index");
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id_b, our_index_b.as_u32())),
+        node_b.peers_by_index.contains_key(&our_index_b.as_u32()),
         "Node B peers_by_index should be populated"
     );
 
@@ -157,9 +155,7 @@ async fn test_two_node_handshake_udp() {
         "Peer B on A should have our_index matching what we allocated"
     );
     assert!(
-        node_a
-            .peers_by_index
-            .contains_key(&(transport_id_a, our_index_a.as_u32())),
+        node_a.peers_by_index.contains_key(&our_index_a.as_u32()),
         "Node A peers_by_index should be populated"
     );
 
@@ -368,9 +364,7 @@ async fn test_run_rx_loop_handshake() {
         "B should have their_index"
     );
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id_b, our_index_b.as_u32())),
+        node_b.peers_by_index.contains_key(&our_index_b.as_u32()),
         "Node B peers_by_index should be populated"
     );
 
@@ -411,9 +405,7 @@ async fn test_run_rx_loop_handshake() {
         "A should know B's index"
     );
     assert!(
-        node_a
-            .peers_by_index
-            .contains_key(&(transport_id_a, our_index_a.as_u32())),
+        node_a.peers_by_index.contains_key(&our_index_a.as_u32()),
         "Node A peers_by_index should be populated"
     );
 
@@ -1295,14 +1287,19 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
 // Frame-length validation at the dispatch point
 // ============================================================================
 
+/// The link's original pair's address, as `seed_completed_connection` gives
+/// it: a frame that fails to authenticate counts only on a path of the link.
+const ORIGINAL: &str = "127.0.0.1:5000";
+
 /// Build a promoted peer and return the node, the peer's address, and the
 /// session index inbound frames must name to reach it.
 ///
-/// `handle_encrypted_frame` looks a frame up by `(transport_id, receiver_idx)`
-/// in `peers_by_index`, so a frame carrying this index reaches the decrypt and
-/// bumps the peer's failure counter. That counter is how the tests below tell
-/// "the frame reached its handler" apart from "the frame was dropped before
-/// the dispatch": an unknown session is dropped silently and counts nothing.
+/// `handle_encrypted_frame` looks a frame up by `receiver_idx` in
+/// `peers_by_index`, so a frame carrying this index reaches the decrypt and,
+/// from the link's original pair, bumps the peer's failure counter. That
+/// counter is how the tests below tell "the frame reached its handler" apart
+/// from "the frame was dropped before the dispatch": an unknown session is
+/// dropped silently and counts nothing.
 fn node_with_promoted_peer(transport_id: TransportId) -> (Node, NodeAddr, SessionIndex) {
     let mut node = make_node();
     let link_id = LinkId::new(1);
@@ -1343,7 +1340,7 @@ async fn an_established_frame_whose_declared_payload_len_disagrees_with_its_leng
 
     node.process_packet(ReceivedPacket::new(
         transport_id,
-        TransportAddr::from_string("127.0.0.1:2121"),
+        TransportAddr::from_string(ORIGINAL),
         frame,
     ))
     .await;
@@ -1372,7 +1369,7 @@ async fn an_established_frame_with_a_correct_payload_len_is_not_dropped() {
 
     node.process_packet(ReceivedPacket::new(
         transport_id,
-        TransportAddr::from_string("127.0.0.1:2121"),
+        TransportAddr::from_string(ORIGINAL),
         frame,
     ))
     .await;
@@ -2264,6 +2261,7 @@ async fn a_transient_msg2_failure_keeps_the_link_for_the_retry() {
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = crate::transport::packet_channel(8);
     let mut eth = EthernetTransport::new(transport_id, Some("lab".into()), config, tx);
@@ -2350,6 +2348,7 @@ async fn a_transient_msg2_failure_on_the_restart_path_leaves_the_fresh_leg_pendi
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = crate::transport::packet_channel(8);
     let mut eth = EthernetTransport::new(transport_id, Some("lab".into()), config, tx);
@@ -3764,6 +3763,98 @@ mod heard {
     async fn a_second_msg1_after_the_replaceable_age_from_the_smaller_address_leaves_a_working_peering()
      {
         a_second_msg1_after_the_replaceable_age_leaves_a_working_peering(false).await;
+    }
+
+    /// The dialer pins its link once its first dial completes. The responder
+    /// then replaces that young peering with the dialer's second dial, so the
+    /// dialer moves to the second dial's session; the peer was replaced
+    /// through a new handshake, so the dialer's pin ends.
+    async fn a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial(
+        dialer_larger: bool,
+    ) {
+        use crate::node::handlers::handshake::UNHEARD_PEERING_MIN_AGE_MS;
+        use fips_core::proto::path::Input;
+
+        let (mut nodes, d, r) = ordered_pair(dialer_larger).await;
+        let d_addr = node_addr_of(&nodes[d].node);
+        let r_addr = node_addr_of(&nodes[r].node);
+        initiate_handshake(&mut nodes, d, r).await;
+        initiate_handshake(&mut nodes, d, r).await;
+        let mut first = nodes[r]
+            .packet_rx
+            .try_recv()
+            .expect("precondition: the first msg1 is queued at the responder");
+        let mut second = nodes[r]
+            .packet_rx
+            .try_recv()
+            .expect("precondition: the second msg1 is queued at the responder");
+        first.timestamp_ms = Node::now_ms();
+        nodes[r].node.handle_msg1(first).await;
+        let first_link = peering_link(&nodes[r].node, &d_addr)
+            .expect("precondition: the first msg1 promoted the dialer");
+        process_available_packets(std::slice::from_mut(&mut nodes[d])).await;
+        let (transport, addr, index) = {
+            let p = nodes[d]
+                .node
+                .get_peer(&r_addr)
+                .expect("precondition: the dialer promoted the responder");
+            let a = p.active_path().expect("precondition: an active path");
+            (a.transport_id(), a.addr().clone(), p.our_index())
+        };
+        nodes[d]
+            .node
+            .step_path(
+                &r_addr,
+                Input::Pin {
+                    transport,
+                    addr: Some(addr),
+                },
+            )
+            .await;
+        assert!(
+            nodes[d]
+                .node
+                .get_peer(&r_addr)
+                .and_then(|p| p.bundle())
+                .is_some_and(|b| b.pin().is_some()),
+            "precondition: the dialer pinned its link"
+        );
+
+        crate::time::advance(Duration::from_millis(UNHEARD_PEERING_MIN_AGE_MS + 500));
+        second.timestamp_ms = Node::now_ms();
+        nodes[r].node.handle_msg1(second).await;
+        assert!(
+            peering_link(&nodes[r].node, &d_addr).is_some_and(|l| l != first_link),
+            "precondition: the second msg1 replaced the unheard peering"
+        );
+        drain_all_packets(&mut nodes, false).await;
+
+        let p = nodes[d]
+            .node
+            .get_peer(&r_addr)
+            .expect("the dialer still holds the responder");
+        assert_ne!(
+            p.our_index(),
+            index,
+            "precondition: the dialer moved to the second dial's session"
+        );
+        assert!(
+            p.bundle().is_some_and(|b| b.pin().is_none()),
+            "the dialer's pin ends when the responder replaced the peering"
+        );
+        cleanup_nodes(&mut nodes).await;
+    }
+
+    #[tokio::test]
+    async fn a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial_from_the_larger_address()
+     {
+        a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial_from_the_smaller_address()
+     {
+        a_pin_ends_when_the_peer_replaces_the_peering_with_our_second_dial(false).await;
     }
 }
 

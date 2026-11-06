@@ -49,13 +49,13 @@ pub use loadlog::LoadLog;
 pub use node::{
     BloomConfig, BuffersConfig, CacheConfig, ControlConfig, Grant, GrantConfig, LimitsConfig,
     LookupConfig, MmpConfig, NativeApiConfig, NetmonConfig, NodeConfig, NostrRendezvousConfig,
-    NostrRendezvousPolicy, Principal, RateLimitConfig, RekeyConfig, RendezvousConfig, RetryConfig,
-    SessionConfig, SessionMmpConfig, TreeConfig,
+    NostrRendezvousPolicy, PathConfig, Principal, ProbeConfig, RateLimitConfig, RekeyConfig,
+    RendezvousConfig, RetryConfig, SessionConfig, SessionMmpConfig, SwitchConfig, TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig, TransportSpec};
 pub use transport::{
-    BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, TcpConfig, TorConfig,
-    TransportInstances, TransportsConfig, UdpConfig,
+    BleConfig, DirectoryServiceConfig, EthernetConfig, NymConfig, PathKind, TcpConfig, TorConfig,
+    TransportInstances, TransportRole, TransportsConfig, UdpConfig,
 };
 
 /// Default config filename.
@@ -2090,7 +2090,45 @@ impl Config {
         // test build does not compile either.
         self.validate_ble_instances(cfg!(all(target_os = "macos", not(test))))?;
         self.validate_ble_peer_addresses(cfg!(all(target_os = "macos", not(test))))?;
-        self.validate_rendezvous()
+        self.validate_rendezvous()?;
+        self.validate_paths()
+    }
+
+    /// Refuse `node.path` settings the path machine cannot run with: a
+    /// switch margin that is not a finite number of at least 1.0, a zero
+    /// dwell, probe interval or sample count, and more samples than the
+    /// machine counts (255).
+    fn validate_paths(&self) -> Result<(), ConfigError> {
+        let path = &self.node.path;
+        let margin = path.switch.margin;
+        if !margin.is_finite() || margin < 1.0 {
+            return Err(ConfigError::Validation(format!(
+                "`node.path.switch.margin` = {margin} must be a finite number of at least 1.0: \
+                 a standby must beat the active path's score by this factor, and anything less \
+                 makes two equal paths swap after every dwell"
+            )));
+        }
+        let zeros = [
+            ("node.path.switch.dwell_secs", path.switch.dwell_secs),
+            ("node.path.probe.active_ms", path.probe.active_ms),
+            ("node.path.probe.standby_ms", path.probe.standby_ms),
+            ("node.path.min_samples", u64::from(path.min_samples)),
+        ];
+        for (key, value) in zeros {
+            if value == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "`{key}` must be greater than zero"
+                )));
+            }
+        }
+        if path.min_samples > u32::from(u8::MAX) {
+            return Err(ConfigError::Validation(format!(
+                "`node.path.min_samples` = {} must be at most {}",
+                path.min_samples,
+                u8::MAX
+            )));
+        }
+        Ok(())
     }
 
     /// Reject more than one BLE instance where the platform has one radio
@@ -2652,6 +2690,10 @@ mod attempt_timeout_floor;
 #[cfg(test)]
 #[path = "tests/offer_limit_floors.rs"]
 mod offer_limit_floors;
+
+#[cfg(test)]
+#[path = "tests/path.rs"]
+mod path_tests;
 
 #[cfg(test)]
 mod tests {

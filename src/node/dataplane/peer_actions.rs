@@ -277,6 +277,7 @@ impl Node {
                         ambient.now_ms,
                     ) {
                         Ok(result) => {
+                            let renewed = result.node_addr();
                             // A promotion that created or replaced a peer
                             // has already offered its session to the decrypt
                             // workers: the link's rekey machine is built
@@ -379,6 +380,12 @@ impl Node {
                                 let link = (ambient.transport_id, ambient.remote_addr.clone());
                                 self.relink(&node_addr, None, Some(link)).await;
                             }
+                            // The promoted peer's path machine is new, with an
+                            // empty candidate table. Boxed: the path steps it
+                            // runs can lead back into this executor.
+                            if let Some(node_addr) = renewed {
+                                Box::pin(self.paths_renewed(&node_addr)).await;
+                            }
                         }
                         Err(e) => {
                             // Promotion failed. `promote_connection` already
@@ -474,10 +481,10 @@ impl Node {
                     // machine's `index` payload.
                 }
                 PeerAction::UnregisterDecryptSession { index } => {
-                    // Executor supplies `transport_id` from ambient; keyed by
-                    // (tid, index) like `remove_active_peer` / the rekey drain path.
+                    // Keyed by index alone, like the link machine's `Revoke`
+                    // outputs that `remove_active_peer` and a drain carry out.
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((ambient.transport_id, index.as_u32()));
+                    self.unregister_decrypt_worker_session(index.as_u32());
                     #[cfg(not(unix))]
                     let _ = index;
                 }

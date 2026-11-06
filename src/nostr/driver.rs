@@ -285,10 +285,7 @@ impl RendezvousDriver {
         nostr_cfg: &NostrRendezvousConfig,
         now_ms: u64,
     ) -> Vec<PeerAddress> {
-        if !nostr_cfg.enabled
-            || !peer_config.via_nostr
-            || nostr_cfg.policy == NostrRendezvousPolicy::Disabled
-        {
+        if !Self::nostr_wanted(peer_config, nostr_cfg) {
             return Vec::new();
         }
 
@@ -306,7 +303,48 @@ impl RendezvousDriver {
                 return Vec::new();
             }
         };
+        Self::fallback_from(endpoints, existing, now_ms)
+    }
 
+    /// [`Self::nostr_peer_fallback_addresses`] from the advert cache alone:
+    /// a peer whose advert is not cached, or no longer current, gives none.
+    /// Never waits on a relay, so the node's event loop may call it on
+    /// every tick.
+    pub fn cached_addresses(
+        &self,
+        peer_config: &PeerConfig,
+        existing: &[PeerAddress],
+        nostr_cfg: &NostrRendezvousConfig,
+        now_ms: u64,
+    ) -> Vec<PeerAddress> {
+        if !Self::nostr_wanted(peer_config, nostr_cfg) {
+            return Vec::new();
+        }
+        let Some(endpoints) = self
+            .engine_arc()
+            .and_then(|bootstrap| bootstrap.cached_endpoints(&peer_config.npub))
+        else {
+            return Vec::new();
+        };
+        Self::fallback_from(endpoints, existing, now_ms)
+    }
+
+    /// Whether `peer_config`'s advert is to be read for candidates: Nostr
+    /// rendezvous is on and the peer is configured to use it.
+    fn nostr_wanted(peer_config: &PeerConfig, nostr_cfg: &NostrRendezvousConfig) -> bool {
+        nostr_cfg.enabled
+            && peer_config.via_nostr
+            && nostr_cfg.policy != NostrRendezvousPolicy::Disabled
+    }
+
+    /// The candidates an advert's `endpoints` give beside the static list
+    /// `existing`: each endpoint not already listed, in advert order, with
+    /// priorities after the highest of `existing` and `seen_at` `now_ms`.
+    fn fallback_from(
+        endpoints: Vec<OverlayEndpointAdvert>,
+        existing: &[PeerAddress],
+        now_ms: u64,
+    ) -> Vec<PeerAddress> {
         let mut fallback = Vec::new();
         let mut next_priority = existing
             .iter()

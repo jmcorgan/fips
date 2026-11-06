@@ -6,11 +6,11 @@
 //! the shell (a link setup's carrier). `peers_by_index` and the decrypt
 //! workers change only by the machine's outputs. The test drives two
 //! loopback nodes through every rekey step and checks, after each, that the
-//! map holds exactly the indices the machines bind, each under the transport
-//! recorded at its binding, that the allocator holds exactly the leased
-//! indices, and, with a decrypt-worker pool, that the workers hold exactly
-//! the sessions the machines recorded as delegated, through a cutover over
-//! an open drain and the peer's removal.
+//! map holds exactly the indices the machines bind, keyed by the index alone
+//! whatever transport each binding recorded, that the allocator holds
+//! exactly the leased indices, and, with a decrypt-worker pool, that the
+//! workers hold exactly the sessions the machines recorded as delegated,
+//! through a cutover over an open drain and the peer's removal.
 
 use super::rekey_parity::{
     age_link, cutover, deliver, heartbeat, rekey_config, rekey_to_pending, trigger_age,
@@ -32,7 +32,7 @@ pub(super) fn audit(node: &Node, step: &str) {
     let mut delegated = std::collections::HashSet::new();
     let mut leased = 0;
     for (addr, peer) in node.peers.iter() {
-        for (key, held) in peer.link_bindings() {
+        for ((_, key), held) in peer.link_bindings() {
             assert!(
                 bound.insert(key, *addr).is_none(),
                 "{step}: index {key:?} bound twice"
@@ -69,10 +69,7 @@ pub(super) fn audit(node: &Node, step: &str) {
             "{step}: the workers must hold exactly the sessions the machines delegated"
         );
         for peer in node.peers.values() {
-            let current = (
-                peer.transport_id().unwrap(),
-                peer.our_index().unwrap().as_u32(),
-            );
+            let current = peer.our_index().unwrap().as_u32();
             assert!(
                 delegated.contains(&current),
                 "{step}: the workers must hold every current session"

@@ -1315,9 +1315,10 @@ async fn client_on(node: &Node, tid: TransportId) -> (tokio::net::TcpStream, Tra
 /// A same-epoch rekey msg1 from a TCP peer whose established connection has
 /// gone is answered on the connection it arrived on when that connection is
 /// on the established link's transport. Arriving on another TCP transport it
-/// is not answered: the new session's index would be registered under a
-/// transport the peer's frames are not looked up on, and that the
-/// retirement paths do not remove it from.
+/// is not answered: the fallback stands in for the established link's own
+/// connection, so it answers only on that link's transport, and moving an
+/// answer to another path is the answer's route to choose, not the
+/// fallback's.
 #[tokio::test]
 async fn a_rekey_msg1_is_answered_on_its_connection_only_on_the_established_transport() {
     for other in [false, true] {
@@ -1343,7 +1344,13 @@ async fn a_rekey_msg1_is_answered_on_its_connection_only_on_the_established_tran
         let pending = node
             .get_peer(&sender_addr)
             .is_some_and(|p| p.pending_new_session().is_some());
-        let indexed = node.peers_by_index.keys().any(|(t, _)| *t == arrival);
+        // The node's index map is keyed by index alone, so where an index
+        // was bound is read from the transport the link machine recorded.
+        let indexed = node.get_peer(&sender_addr).is_some_and(|p| {
+            p.link_bindings()
+                .iter()
+                .any(|&((t, i), _)| t == arrival && node.peers_by_index.contains_key(&i))
+        });
         stop_all(&mut node).await;
         println!(
             "redial       other transport {other}: {r:?}, answered {answered}, pending {pending}, indexed there {indexed}"
@@ -1363,6 +1370,220 @@ async fn a_rekey_msg1_is_answered_on_its_connection_only_on_the_established_tran
             assert!(indexed, "the new index is registered on the transport");
         }
     }
+}
+
+/// Hold (`tid`, `from`) as a path of `peer` that is still Probing, and map
+/// the pair to the peer's link in `addr_to_link`, as a hostname-keyed dial
+/// alias or a path switch's re-point of that index would.
+fn hold_probing_alias(node: &mut Node, peer: &NodeAddr, tid: TransportId, from: &TransportAddr) {
+    let p = node.get_peer_mut(peer).unwrap();
+    p.admit_path(tid, from.clone());
+    assert_eq!(
+        p.path_match(tid, from),
+        crate::peer::Match::Unproven,
+        "precondition: the pair is held and Probing"
+    );
+    let link_id = p.link_id();
+    node.addr_to_link.insert((tid, from.clone()), link_id);
+}
+
+/// [`hold_probing_alias`], with the held path then given up on: Dead, and
+/// never acked, so still not proven at this end.
+fn hold_dead(node: &mut Node, peer: &NodeAddr, tid: TransportId, from: &TransportAddr) {
+    hold_probing_alias(node, peer, tid, from);
+    let p = node.get_peer_mut(peer).unwrap();
+    p.kill_path(tid, from);
+    assert_eq!(
+        p.path_match(tid, from),
+        crate::peer::Match::Unproven,
+        "precondition: the pair is held, Dead and never acked"
+    );
+}
+
+/// What became of a rekey msg1 from a Probing path: whether the client got a
+/// msg2, whether a pending session was armed, and how many msg1s were
+/// refused as off the link.
+struct ProbingOutcome {
+    answered: bool,
+    pending: bool,
+    off_link: u64,
+}
+
+/// Send `sender`'s rekey msg1 to `node` from a new connection on the TCP
+/// transport whose pair `peer` holds as a Probing path aliased to its link.
+async fn rekey_msg1_from_a_probing_path(
+    node: &mut Node,
+    sender: &Identity,
+    peer: &NodeAddr,
+) -> ProbingOutcome {
+    msg1_from(node, sender, peer, hold_probing_alias).await
+}
+
+/// [`rekey_msg1_from_a_probing_path`], with the connection's pair held by
+/// `hold`.
+async fn msg1_from(
+    node: &mut Node,
+    sender: &Identity,
+    peer: &NodeAddr,
+    hold: fn(&mut Node, &NodeAddr, TransportId, &TransportAddr),
+) -> ProbingOutcome {
+    node.get_peer_mut(peer)
+        .unwrap()
+        .test_backdate_session_established(Duration::from_secs(31));
+    let tcp_id = TransportId::new(TCP_ID);
+    let (mut client, from) = client_on(node, tcp_id).await;
+    hold(node, peer, tcp_id, &from);
+    let before = node.stats().handshake.off_link;
+    let data = craft_msg1(node, sender, 0x41);
+    let r = timed_process(node, ReceivedPacket::new(tcp_id, from, data)).await;
+    assert_no_dial("rekey msg1 from a Probing path", &r);
+    let answered = client_gets_msg2(&mut client).await;
+    ProbingOutcome {
+        answered,
+        pending: node
+            .get_peer(peer)
+            .is_some_and(|p| p.pending_new_session().is_some()),
+        off_link: node.stats().handshake.off_link - before,
+    }
+}
+
+/// A rekey msg1 from a path the peer holds but that is still Probing at this
+/// end is treated as from no path, even with an `addr_to_link` entry mapping
+/// its pair to the peer's link: while the established link is reachable it
+/// is refused as off the link, and nothing is armed or sent.
+#[tokio::test]
+async fn a_rekey_msg1_from_a_probing_path_is_refused_while_the_link_is_reachable() {
+    let bh = Blackhole::open(false);
+    let (mut node, sender, sender_addr, _far_end) = peer_on_tcp(&bh).await;
+    let out = rekey_msg1_from_a_probing_path(&mut node, &sender, &sender_addr).await;
+    stop_all(&mut node).await;
+    assert_eq!(out.off_link, 1, "the msg1 is refused as off the link");
+    assert!(!out.pending, "no pending session is armed");
+    assert!(!out.answered, "no msg2 goes out on the Probing path");
+}
+
+/// A held path that was never acked stays unproven when it goes Dead, so a
+/// rekey msg1 from it is treated as from no path, as from a Probing one:
+/// refused as off the link while the established link is reachable.
+#[tokio::test]
+async fn a_rekey_msg1_from_a_never_acked_dead_path_is_refused_while_the_link_is_reachable() {
+    let bh = Blackhole::open(false);
+    let (mut node, sender, sender_addr, _far_end) = peer_on_tcp(&bh).await;
+    let out = msg1_from(&mut node, &sender, &sender_addr, hold_dead).await;
+    stop_all(&mut node).await;
+    assert_eq!(out.off_link, 1, "the msg1 is refused as off the link");
+    assert!(!out.pending, "no pending session is armed");
+    assert!(!out.answered, "no msg2 goes out on the Dead path");
+}
+
+/// The same msg1 once the established link is down is the recovery case the
+/// no-path rule exists for: it is accepted, and answered on its own
+/// connection by the same-transport fallback.
+#[tokio::test]
+async fn a_rekey_msg1_from_a_probing_path_is_accepted_once_the_link_is_down() {
+    let mut bh = Blackhole::open(false);
+    let (mut node, sender, sender_addr, far_end) = peer_on_tcp(&bh).await;
+    kill_link(&node, &mut bh, far_end).await;
+    let out = rekey_msg1_from_a_probing_path(&mut node, &sender, &sender_addr).await;
+    stop_all(&mut node).await;
+    assert_eq!(out.off_link, 0, "nothing is refused as off the link");
+    assert!(out.pending, "the rekey's pending session is armed");
+    assert!(out.answered, "the msg1's own connection gets the msg2");
+}
+
+/// An answer the machine routes to the msg1's arrival goes out on the msg1's
+/// own connection even while the established link is up, and not on the
+/// established link; one routed to the established link goes there.
+#[tokio::test]
+async fn an_answer_routed_to_the_arrival_goes_out_on_the_msg1s_connection_with_the_link_up() {
+    use crate::proto::fmp::wire::build_msg2;
+    use fips_core::proto::rekey::Route;
+
+    let bh = Blackhole::open(false);
+    let (mut node, _sender, sender_addr, mut far_end) = peer_on_tcp(&bh).await;
+    let tcp_id = TransportId::new(TCP_ID);
+    let (mut client, from) = client_on(&node, tcp_id).await;
+    let msg1 = ReceivedPacket::new(tcp_id, from, Vec::new());
+    let reply = build_msg2(
+        SessionIndex::new(0x77),
+        SessionIndex::new(0x41),
+        &[0u8; crate::noise::HANDSHAKE_MSG2_SIZE],
+    );
+
+    let sent = node
+        .answer_msg1(&sender_addr, &msg1, &reply, Route::Arrival)
+        .await;
+    assert_eq!(sent, Ok(tcp_id));
+    assert!(
+        client_gets_msg2(&mut client).await,
+        "the msg1's own connection gets the answer"
+    );
+    assert!(
+        read_frame_within(&mut far_end, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "the established link does not"
+    );
+
+    let sent = node
+        .answer_msg1(
+            &sender_addr,
+            &msg1,
+            &reply,
+            Route::Established { fallback: true },
+        )
+        .await;
+    assert_eq!(sent, Ok(tcp_id));
+    assert!(
+        read_frame(&mut far_end)
+            .await
+            .is_some_and(|f| CommonPrefix::parse(&f).is_some_and(|p| p.phase == PHASE_MSG2)),
+        "an answer on the established route goes on the established link"
+    );
+    assert!(
+        !client_gets_msg2(&mut client).await,
+        "and not on the msg1's connection"
+    );
+    stop_all(&mut node).await;
+}
+
+/// With the established connection gone, an answer on the established route
+/// falls back to the msg1's own connection only when its route allows the
+/// fallback.
+#[tokio::test]
+async fn an_answer_on_the_established_route_falls_back_only_when_the_route_allows_it() {
+    use crate::proto::fmp::wire::build_msg2;
+    use fips_core::proto::rekey::Route;
+
+    let mut bh = Blackhole::open(false);
+    let (mut node, _sender, sender_addr, far_end) = peer_on_tcp(&bh).await;
+    kill_link(&node, &mut bh, far_end).await;
+    let tcp_id = TransportId::new(TCP_ID);
+    let (mut client, from) = client_on(&node, tcp_id).await;
+    let msg1 = ReceivedPacket::new(tcp_id, from, Vec::new());
+    let reply = build_msg2(
+        SessionIndex::new(0x77),
+        SessionIndex::new(0x41),
+        &[0u8; crate::noise::HANDSHAKE_MSG2_SIZE],
+    );
+
+    let plain = Route::Established { fallback: false };
+    let r = timeout(BOUND, node.answer_msg1(&sender_addr, &msg1, &reply, plain))
+        .await
+        .expect("the send returns without dialing");
+    assert!(r.is_err(), "without the fallback nothing is sent: {r:?}");
+    assert!(!client_gets_msg2(&mut client).await);
+
+    let answer = Route::Established { fallback: true };
+    let r = timeout(BOUND, node.answer_msg1(&sender_addr, &msg1, &reply, answer))
+        .await
+        .expect("the send returns without dialing");
+    assert_eq!(r, Ok(tcp_id));
+    assert!(
+        client_gets_msg2(&mut client).await,
+        "with it, the msg1's own connection gets the answer"
+    );
+    stop_all(&mut node).await;
 }
 
 /// A rekey msg1 answered on its own connection, because the established

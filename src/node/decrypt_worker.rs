@@ -92,9 +92,8 @@ pub(crate) struct DecryptJob {
     /// with the full ciphertext + tag intact.
     pub packet_data: Vec<u8>,
     /// Lookup key into the worker's owned session HashMap. Mirrors the
-    /// `peers_by_index` key on the Node side: `(transport_id,
-    /// receiver_idx)`.
-    pub cache_key: (TransportId, u32),
+    /// `peers_by_index` key on the Node side: `receiver_idx`.
+    pub cache_key: u32,
     /// Source kernel transport. Forwarded into the bounced
     /// `DecryptFallback` so rx_loop can update per-peer last-seen +
     /// link stats (otherwise the MMP link-dead timer fires at 30s
@@ -136,7 +135,7 @@ pub(crate) struct DecryptJob {
 pub(crate) struct DecryptFallback {
     pub source_node_addr: NodeAddr,
     /// Transport this packet arrived on — used by rx_loop's bounce
-    /// arm to call `peer.set_current_addr()` so address rotation +
+    /// arm to call `peer.account()` so address rotation +
     /// MMP link-dead tracking continue to see updates for packets
     /// handled by the worker.
     pub transport_id: TransportId,
@@ -184,13 +183,15 @@ pub(crate) struct DecryptFallback {
 /// the worker thread.
 pub(crate) struct DecryptFailureReport {
     pub source_node_addr: NodeAddr,
+    /// Transport the failing frame arrived on. rx_loop charges the failure
+    /// to the peer only if this is a transport the peer is on; the demux is
+    /// by index alone, so the frame may have come from anywhere.
+    pub transport_id: TransportId,
     pub fmp_counter: u64,
     pub fmp_replay_highest: u64,
     /// The frame's receiver index, so the failure line can say which of the
     /// peer's sessions it named.
     pub receiver_idx: u32,
-    /// Transport the frame arrived on.
-    pub transport_id: TransportId,
     /// Address the frame arrived from.
     pub remote_addr: TransportAddr,
     /// The frame's FMP flags, carrying its K-bit.
@@ -216,11 +217,11 @@ pub(crate) enum DecryptWorkerEvent {
 pub(crate) enum WorkerMsg {
     Job(DecryptJob),
     RegisterSession {
-        cache_key: (TransportId, u32),
+        cache_key: u32,
         state: OwnedSessionState,
     },
     UnregisterSession {
-        cache_key: (TransportId, u32),
+        cache_key: u32,
     },
 }
 
@@ -276,7 +277,7 @@ impl DecryptWorkerPool {
     /// Stable hash from session key → worker index. Same hash is used
     /// for session registration and per-packet dispatch so packets and
     /// registration arrive at the same shard.
-    fn worker_idx_for(&self, cache_key: (TransportId, u32)) -> usize {
+    fn worker_idx_for(&self, cache_key: u32) -> usize {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         cache_key.hash(&mut h);
@@ -342,11 +343,7 @@ impl DecryptWorkerPool {
     /// "re-register on a later event" — is documented at the only
     /// call site (`register_decrypt_worker_session`).
     #[must_use = "registration may have failed under queue pressure; caller must gate its own session-registered flag on the returned bool"]
-    pub fn register_session(
-        &self,
-        cache_key: (TransportId, u32),
-        state: OwnedSessionState,
-    ) -> bool {
+    pub fn register_session(&self, cache_key: u32, state: OwnedSessionState) -> bool {
         let idx = self.worker_idx_for(cache_key);
         match self
             .workers
@@ -370,7 +367,7 @@ impl DecryptWorkerPool {
 
     /// Drop a session from its worker (rekey, peer removed). Fire and
     /// forget — if the worker is gone we don't care.
-    pub fn unregister_session(&self, cache_key: (TransportId, u32)) {
+    pub fn unregister_session(&self, cache_key: u32) {
         let idx = self.worker_idx_for(cache_key);
         let _ = self
             .workers
@@ -384,7 +381,7 @@ fn run_worker(idx: usize, rx: Receiver<WorkerMsg>) {
 
     // The shard's owned session table. Lives entirely on this OS
     // thread — never observed by any other thread.
-    let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
+    let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
 
     while let Ok(msg) = rx.recv() {
         handle_msg(idx, &mut sessions, msg);
@@ -398,11 +395,7 @@ fn run_worker(idx: usize, rx: Receiver<WorkerMsg>) {
     trace!(worker = idx, "FMP+FSP decrypt worker thread exiting");
 }
 
-fn handle_msg(
-    idx: usize,
-    sessions: &mut HashMap<(TransportId, u32), OwnedSessionState>,
-    msg: WorkerMsg,
-) {
+fn handle_msg(idx: usize, sessions: &mut HashMap<u32, OwnedSessionState>, msg: WorkerMsg) {
     match msg {
         WorkerMsg::Job(job) => {
             if let Err(err) = handle_job(sessions, job) {
@@ -425,7 +418,7 @@ fn handle_msg(
 }
 
 fn handle_job(
-    sessions: &mut HashMap<(TransportId, u32), OwnedSessionState>,
+    sessions: &mut HashMap<u32, OwnedSessionState>,
     job: DecryptJob,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let DecryptJob {
@@ -491,10 +484,10 @@ fn handle_job(
         Err(_) => {
             let _ = fallback_tx.send(DecryptWorkerEvent::DecryptFailure(DecryptFailureReport {
                 source_node_addr,
+                transport_id,
                 fmp_counter,
                 fmp_replay_highest,
-                receiver_idx: cache_key.1,
-                transport_id,
+                receiver_idx: cache_key,
                 remote_addr,
                 fmp_flags,
             }));
@@ -512,10 +505,11 @@ fn handle_job(
     let fmp_plaintext_start = fmp_ciphertext_offset;
     let fmp_plaintext_end = fmp_ciphertext_offset + plaintext_len;
     const INNER_TIMESTAMP_LEN: usize = 4;
-    if plaintext_len < INNER_TIMESTAMP_LEN + 1 {
-        return Ok(());
-    }
-    let link_msg_start = fmp_plaintext_start + INNER_TIMESTAMP_LEN;
+    // A plaintext too short for the inner header is bounced too: the frame
+    // is authentic, and the node resets its path's count of authentication
+    // failures on any authentic frame (multipath draft Section 5.3) before
+    // dropping it, as the inline path does.
+    let link_msg_start = (fmp_plaintext_start + INNER_TIMESTAMP_LEN).min(fmp_plaintext_end);
     let link_msg_end = fmp_plaintext_end;
     let link_msg = &packet_data[link_msg_start..link_msg_end];
 
@@ -568,7 +562,7 @@ fn handle_job(
         remote_addr,
         timestamp_ms,
         packet_len,
-        receiver_idx: cache_key.1,
+        receiver_idx: cache_key,
         fmp_counter,
         fmp_flags,
         packet_data,
@@ -634,8 +628,8 @@ mod tests {
         wire.extend_from_slice(tag.as_ref());
 
         // Owning state held by the worker for this session.
-        let cache_key = (TransportId::new(1), 99u32);
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
+        let cache_key = 99u32;
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
         sessions.insert(
             cache_key,
             OwnedSessionState {
@@ -704,8 +698,8 @@ mod tests {
     /// growing the worker's `sessions` map unboundedly.
     #[test]
     fn handle_msg_unregister_session_removes_entry() {
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
-        let cache_key = (TransportId::new(1), 42u32);
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
+        let cache_key = 42u32;
         sessions.insert(cache_key, make_test_session_state());
         assert!(
             sessions.contains_key(&cache_key),
@@ -727,9 +721,9 @@ mod tests {
     /// have moved between slots before removal.
     #[test]
     fn handle_msg_unregister_session_idempotent_on_unknown_key() {
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
-        let key1 = (TransportId::new(1), 1u32);
-        let key2 = (TransportId::new(1), 2u32);
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
+        let key1 = 1u32;
+        let key2 = 2u32;
 
         sessions.insert(key1, make_test_session_state());
 
@@ -780,8 +774,8 @@ mod tests {
         wire.push(0xAB);
         wire.extend_from_slice(&[0u8; 16]); // invalid AEAD tag
 
-        let cache_key = (TransportId::new(1), 77u32);
-        let mut sessions: HashMap<(TransportId, u32), OwnedSessionState> = HashMap::new();
+        let cache_key = 77u32;
+        let mut sessions: HashMap<u32, OwnedSessionState> = HashMap::new();
         sessions.insert(
             cache_key,
             OwnedSessionState {
@@ -850,9 +844,8 @@ mod pool_tests {
     use std::sync::mpsc;
 
     /// A session key the pool hashes to worker `idx`.
-    fn key_on_worker(pool: &DecryptWorkerPool, idx: usize) -> (TransportId, u32) {
+    fn key_on_worker(pool: &DecryptWorkerPool, idx: usize) -> u32 {
         (0u32..)
-            .map(|n| (TransportId::new(1), n))
             .find(|key| pool.worker_idx_for(*key) == idx)
             .expect("some key hashes to every worker")
     }
@@ -866,12 +859,12 @@ mod pool_tests {
         }
     }
 
-    fn job(cache_key: (TransportId, u32)) -> DecryptJob {
+    fn job(cache_key: u32) -> DecryptJob {
         let (fallback_tx, _) = tokio::sync::mpsc::unbounded_channel::<DecryptWorkerEvent>();
         DecryptJob {
             packet_data: vec![0u8; 48],
             cache_key,
-            _transport_id: cache_key.0,
+            _transport_id: TransportId::new(1),
             _remote_addr: TransportAddr::from_string("127.0.0.1:1234"),
             timestamp_ms: 1_000,
             source_node_addr: NodeAddr::from_bytes([1u8; 16]),

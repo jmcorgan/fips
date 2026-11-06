@@ -35,6 +35,11 @@ and receive the reports and hold the configuration.
   configuration, so they do not change.
 - **The report formats are wire format** and do not change on the
   deployed lines.
+- **The receiver counts every frame and samples only some.** Packet,
+  byte, reorder, loss and ECN counts take every frame of the link;
+  jitter, the one-way-delay trend and the timestamp echo take only a
+  frame the caller marks sampled, which on a link of several paths is
+  one that arrived on the peer's active path.
 - **A session's rekey reset restarts its spin bit state** (keeping the
   role), because the new session's counters start again at zero; a
   link's rekey reset restarts the link's spin bit state the same way.

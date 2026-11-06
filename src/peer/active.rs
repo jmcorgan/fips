@@ -4,8 +4,11 @@
 //! ActivePeer holds tree state, Bloom filter, and routing information.
 
 use super::{
-    LinkCaps, LinkOutput, LinkOutputs, LinkProfile, LinkRekey, PeerInstant, peer_now, since,
+    LinkCaps, LinkOutput, LinkOutputs, LinkProfile, LinkRekey, Match, PathCaps, PeerBundle,
+    PeerInstant, PeerPath, Roam, UdpSlot, peer_now, since,
 };
+#[cfg(test)]
+use super::{Medium, PathSet, Rebind};
 use crate::config::MmpConfig;
 use crate::node::diag::HsLineCounts;
 use crate::node::session::{ThreadJitter, with_tags};
@@ -18,6 +21,7 @@ use crate::transport::{LinkId, LinkStats, TransportAddr, TransportId};
 use crate::utils::index::SessionIndex;
 use crate::{Ipv6Address, NodeAddr, PeerIdentity};
 use fips_core::proto::fmp::rekey::ik::{LinkKeys, setup_record};
+use fips_core::proto::path::{Account, Charge, Outputs};
 use fips_core::proto::rekey::{
     Bond, Close, Completed, CycleView, Env, Identity, Ids, IndexLease, Input, PeerKey, Record,
     Role, SealRefusal, Sealed, SendCopy, SetupFacts, Slot,
@@ -102,6 +106,17 @@ fn link_machine(
     }))
 }
 
+/// The path machine of a link established now on (`transport_id`,
+/// `addr`), its original path, with the parameters and facts `caps` gives
+/// (multipath v1 draft, Section 4).
+fn new_bundle(transport_id: TransportId, addr: TransportAddr, caps: &PathCaps<'_>) -> PeerBundle {
+    let env = fips_core::proto::path::Env {
+        facts: caps.facts,
+        cost: 1.0,
+    };
+    PeerBundle::new(peer_now(), transport_id, addr, caps.params, &env)
+}
+
 /// What link setup tells a new link's rekey machine: key-epoch bit 0, the
 /// session and the link starting now, nothing seen from the peer yet, the
 /// peer's startup epoch `peer_epoch`, if the setup carried one, and the
@@ -170,29 +185,12 @@ pub(crate) struct LinkAnchors {
 #[derive(Debug)]
 struct PeerSendState {
     // === Transport target ===
-    /// Transport ID for this peer's link.
-    transport_id: Option<TransportId>,
-    /// Current transport address (for roaming support).
-    current_addr: Option<TransportAddr>,
+    /// The machine of the link's paths: the paths this peer is reachable
+    /// over, and which one *our* frames go out on. `None` for a peer not
+    /// yet bound to a transport.
+    bundle: Option<PeerBundle>,
     /// Link used to reach this peer.
     link_id: LinkId,
-
-    // === Connected-UDP handles ===
-    /// Unix UDP fast-path: per-peer `connect()`-ed socket (paired with
-    /// the listen socket via `SO_REUSEPORT`). The kernel demux prefers
-    /// the connected 5-tuple, so inbound packets land here; the
-    /// encrypt-worker send path sends with `msg_name = NULL`, skipping
-    /// per-packet sockaddr handling + route lookup. Behind an `Arc` so
-    /// in-flight worker jobs survive rekey/address-change rotations.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    connected_udp: Option<std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>>,
-
-    /// Per-peer recv drain thread. Always paired with `connected_udp`:
-    /// the kernel routes inbound packets from this peer to the
-    /// connected socket, so it *must* be drained or the kernel recv
-    /// buffer fills. Drop signals shutdown via self-pipe.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    peer_recv_drain: Option<crate::transport::udp::PeerRecvDrain>,
 
     // === Hot counters ===
     /// Link statistics.
@@ -204,8 +202,6 @@ struct PeerSendState {
     heard: bool,
     /// Number of replay detections suppressed since last session reset.
     replay_suppressed_count: u32,
-    /// Consecutive decryption failures (reset on any successful decrypt).
-    consecutive_decrypt_failures: u32,
     /// Frames authenticated on the previous session since the last cutover.
     prev_frames: u64,
     /// The receiver index of the last frame that failed to decrypt.
@@ -219,18 +215,12 @@ impl PeerSendState {
     /// send-critical portion of `ActivePeer::new`.
     fn new(link_id: LinkId, last_seen: u64) -> Self {
         Self {
-            transport_id: None,
-            current_addr: None,
+            bundle: None,
             link_id,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            connected_udp: None,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            peer_recv_drain: None,
             link_stats: LinkStats::new(),
             last_seen,
             heard: false,
             replay_suppressed_count: 0,
-            consecutive_decrypt_failures: 0,
             prev_frames: 0,
             failed_idx: None,
             mmp: None,
@@ -421,6 +411,7 @@ impl ActivePeer {
     ) -> Result<(Self, LinkOutputs), IndexLease> {
         let bond = PeerKey::from_xonly(&identity.pubkey());
         let facts = setup_facts(remote_epoch, std::mem::take(&mut caps.record));
+        let bundle = new_bundle(transport_id, current_addr, &caps.path);
         let (rekey, out) = link_machine(
             bond,
             noise_session,
@@ -431,8 +422,7 @@ impl ActivePeer {
             caps,
         )?;
         let mut send = PeerSendState::new(link_id, authenticated_at);
-        send.transport_id = Some(transport_id);
-        send.current_addr = Some(current_addr);
+        send.bundle = Some(bundle);
         send.link_stats = link_stats;
         send.mmp = Some(MmpPeerState::new(
             mmp_config.mode,
@@ -500,6 +490,7 @@ impl ActivePeer {
             params: super::test_link_params(),
             record: Record::new(),
             workers: false,
+            path: super::test_caps(),
         };
         let bond = PeerKey::from_xonly(&noise_session.remote_static_xonly());
         let (rekey, _) = link_machine(
@@ -513,8 +504,7 @@ impl ActivePeer {
         )
         .unwrap_or_else(|_| unreachable!("a machine bonds to its own session's key"));
         let mut peer = Self::with_stats(identity, link_id, authenticated_at, link_stats);
-        peer.send.transport_id = Some(transport_id);
-        peer.send.current_addr = Some(current_addr);
+        peer.send.bundle = Some(new_bundle(transport_id, current_addr, &caps.path));
         peer.send.mmp = Some(MmpPeerState::new(
             mmp_config.mode,
             mmp_config.log_interval_secs,
@@ -528,42 +518,63 @@ impl ActivePeer {
 
     // === Connected-UDP fast path ===
 
-    /// Refcount the per-peer `connect()`-ed UDP socket if installed.
+    /// Refcount the active path's `connect()`-ed UDP socket if installed.
     /// Encrypt-worker send path uses this to bypass the wildcard
     /// listen socket's per-packet sockaddr handling.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn connected_udp(
         &self,
     ) -> Option<std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>> {
-        self.send.connected_udp.clone()
+        self.active_path()
+            .and_then(|path| path.driver().connected_udp())
     }
 
-    /// Install a per-peer `connect()`-ed UDP socket with its paired
-    /// recv drain thread. The two own each other's lifetime: the drain
-    /// is the only consumer of packets on this socket.
+    /// Install a `connect()`-ed UDP socket with its paired recv drain
+    /// thread on the active path. The two own each other's lifetime: the
+    /// drain is the only consumer of packets on this socket. A no-op on a
+    /// peer with no path: there is no address to have connected to.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn set_connected_udp(
         &mut self,
         socket: std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>,
         drain: crate::transport::udp::PeerRecvDrain,
     ) {
-        // Drop the old drain BEFORE the old socket so its last fd
-        // reference is released cleanly.
-        self.send.peer_recv_drain = None;
-        self.send.connected_udp = None;
-        self.send.connected_udp = Some(socket);
-        self.send.peer_recv_drain = Some(drain);
+        if let Some(slot) = self.active_slot() {
+            slot.set_connected_udp(socket, drain);
+        }
     }
 
-    /// Clear the per-peer connected UDP socket + drain. The drain
+    /// Clear the active path's connected UDP socket + drain. The drain
     /// exits via self-pipe signal; the kernel fd closes on last `Arc`
     /// drop (any in-flight worker jobs holding the old `Arc` stay
     /// valid until they complete).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[allow(dead_code)] // called from session-deregister + rekey follow-up
     pub(crate) fn clear_connected_udp(&mut self) {
-        self.send.peer_recv_drain = None;
-        self.send.connected_udp = None;
+        if let Some(slot) = self.active_slot() {
+            slot.clear_connected_udp();
+        }
+    }
+
+    /// The driver slot of the path our frames go out on.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn active_slot(&mut self) -> Option<&mut UdpSlot> {
+        let bundle = self.send.bundle.as_mut()?;
+        let index = bundle.paths().active_index()?;
+        bundle.driver_mut(index)
+    }
+
+    /// Dispose of a path the path set discarded and handed back: its
+    /// connected socket and drain go here, in the shell, drain first as for
+    /// the active path, never inside a path rule.
+    #[cfg(test)]
+    fn retire(path: Option<PeerPath>) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(mut path) = path {
+            path.driver_mut().clear_connected_udp();
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        drop(path);
     }
 
     // === Identity Accessors ===
@@ -647,10 +658,10 @@ impl ActivePeer {
         self.rekey.as_ref()?.tag(slot)
     }
 
-    /// The transport this peer's indices are bound on: the one it is
-    /// reached over. A peer with a session always has one.
+    /// The transport this peer's indices are bound on: the active path's,
+    /// the one it is reached over. A peer with a session always has one.
     fn bound_transport(&self) -> TransportId {
-        self.send.transport_id.unwrap_or(TransportId::new(0))
+        self.transport_id().unwrap_or(TransportId::new(0))
     }
 
     /// Get the Noise session, if present.
@@ -690,8 +701,9 @@ impl ActivePeer {
     /// moves to that session when the peer's msg2 arrives. The node that
     /// keeps its outbound handshake takes the msg2's transport and source
     /// address as the peer's (FRC-1201, Sections 5.3 and 5.6): the moved
-    /// session is bound on `to`'s transport, where the peer's frames on it
-    /// arrive, and the peer is held at `to`. The link's rekey
+    /// session's binding is recorded on `to`'s transport, and the peer is
+    /// held at `to`, across transports if need be, as the original path of
+    /// the renewed path machine. The link's rekey
     /// machine is closed, which abandons its own rekey in flight, ends a
     /// responder pending and the drain of the previous session, and releases
     /// every index they held, and a new one is built on `session` from what
@@ -704,13 +716,20 @@ impl ActivePeer {
     /// session is offered at once; its record is not read.
     ///
     /// Returns the outputs that unbind, revoke and release what the closed
-    /// machine held and bind (and offer) the new session. Hands `ours` back
-    /// in a release, changing nothing (the peer's pair included), when
-    /// `session` authenticated another key than the peer's. Also resets the
-    /// replay suppression counter and the repeated handshake line counts
-    /// since the session changed, and, once the link has moved, the link's
-    /// counter-derived MMP state, as a cutover does, since the new session's
-    /// frame counter starts again at 0.
+    /// machine held and bind (and offer) the new session, and the outputs of
+    /// the path machine's renewal. Hands `ours` back in a release, changing
+    /// nothing (the peer's pair included), when `session` authenticated
+    /// another key than the peer's; the path outputs are then empty. Also
+    /// resets the replay suppression counter and the repeated handshake line
+    /// counts since the session changed, and, once the link has moved, the
+    /// link's counter-derived MMP state, as a cutover does, since the new
+    /// session's frame counter starts again at 0, and starts the path
+    /// machine again at `to`, as a new link (multipath v1 draft, Sections
+    /// 5.2 and 5.4): a path already held at `to`, active or not, stays
+    /// with its connected socket and its count of failed frames, every
+    /// other path is released, and when none is held there `to` becomes
+    /// the new link's original path ([`PeerBundle::renew`]); `caps.path`
+    /// gives the facts it reads.
     pub(crate) fn move_session(
         &mut self,
         session: NoiseSession,
@@ -718,11 +737,11 @@ impl ActivePeer {
         theirs: SessionIndex,
         to: (TransportId, TransportAddr),
         caps: &mut LinkCaps<'_>,
-    ) -> LinkOutputs {
+    ) -> (LinkOutputs, Outputs<UdpSlot>) {
         self.reset_replay_suppressed();
         self.hs_lines.roll();
         let Some(old) = self.rekey.take() else {
-            return vec![LinkOutput::Release(ours)];
+            return (vec![LinkOutput::Release(ours)], Vec::new());
         };
         let remote = PeerKey::from_xonly(&session.remote_static_xonly());
         let view = old.view();
@@ -732,47 +751,268 @@ impl ActivePeer {
         };
         let Some(bond) = held else {
             self.rekey = Some(old);
-            return vec![LinkOutput::Release(ours)];
+            return (vec![LinkOutput::Release(ours)], Vec::new());
         };
         let (mut out, carry) = old.close(Close::CrossConnectionMove);
         let Some(carry) = carry else {
             out.push(LinkOutput::Release(ours));
-            return out;
+            return (out, Vec::new());
         };
+        let mut paths = Vec::new();
         match link_machine(bond, session, ours, theirs, to.0, carry.into(), caps) {
             Ok((rekey, built)) => {
                 out.extend(built);
                 self.rekey = Some(rekey);
                 self.reset_mmp();
-                self.set_current_addr(to.0, to.1);
+                let env = fips_core::proto::path::Env {
+                    facts: caps.path.facts,
+                    cost: self.live_cost(),
+                };
+                if let Some(bundle) = self.send.bundle.as_mut() {
+                    paths = bundle.renew(peer_now(), &env, to);
+                }
             }
             Err(lease) => out.push(LinkOutput::Release(lease)),
         }
-        out
+        (out, paths)
     }
 
-    /// Get the transport ID for this peer.
+    /// The transport our frames to this peer go out on: the active path's.
     pub fn transport_id(&self) -> Option<TransportId> {
-        self.send.transport_id
+        self.active_path().map(|path| path.transport_id())
     }
 
-    /// Get the current transport address.
+    /// Whether any path of the link, active or not, in any state, is on
+    /// `transport_id`.
+    pub(crate) fn uses(&self, transport_id: TransportId) -> bool {
+        self.send.bundle.as_ref().is_some_and(|b| {
+            b.paths()
+                .paths()
+                .iter()
+                .any(|p| p.transport_id() == transport_id)
+        })
+    }
+
+    /// The address our frames to this peer go to: the active path's.
     pub fn current_addr(&self) -> Option<&TransportAddr> {
-        self.send.current_addr.as_ref()
+        self.active_path().map(|path| path.addr())
     }
 
-    /// Update the current address (for roaming support).
+    /// Every path this peer is reachable over. The active one is
+    /// [`active_path`](Self::active_path).
+    // Read by tests until the path switch reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn paths(&self) -> &[PeerPath] {
+        self.send.bundle.as_ref().map_or(&[], |b| b.paths().paths())
+    }
+
+    /// The paths this peer is reachable over, with their identifiers and
+    /// state. Panics for a peer not yet bound to a transport.
+    #[cfg(test)]
+    pub(crate) fn path_set(&self) -> &PathSet {
+        self.bundle().expect("the peer is bound").paths()
+    }
+
+    /// The path our frames go out on, if the peer has one.
+    pub(crate) fn active_path(&self) -> Option<&PeerPath> {
+        self.send.bundle.as_ref().and_then(|b| b.paths().active())
+    }
+
+    /// The machine of the link's paths, once the peer is bound.
+    // Read by tests until the node steps the machine.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bundle(&self) -> Option<&PeerBundle> {
+        self.send.bundle.as_ref()
+    }
+
+    /// The machine of the link's paths, to step, once the peer is bound.
+    // Driven by tests until the node steps the machine.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bundle_mut(&mut self) -> Option<&mut PeerBundle> {
+        self.send.bundle.as_mut()
+    }
+
+    /// Close the link's path machine as the peer is removed, and return
+    /// every path's driver slot to release (draft Section 5.8). The peer
+    /// then holds no path.
+    pub(crate) fn close_paths(&mut self) -> Outputs<UdpSlot> {
+        self.send
+            .bundle
+            .take()
+            .map(PeerBundle::close)
+            .unwrap_or_default()
+    }
+
+    /// Account for one authentic frame of the link, `len` bytes long with
+    /// link message type `msg_type`, received at `now` from (`transport_id`,
+    /// `addr`): [`PeerBundle::account`], which attributes it to its path and,
+    /// while the link holds one path, roams that path's address inside its
+    /// transport, as FMP v1 does. A frame that arrives on a transport the
+    /// peer has no path on is still delivered (the demux is by index alone)
+    /// but creates nothing and moves nothing: an authentic frame proves the
+    /// peer produced it, not that it came from where it claims, so an
+    /// on-path relay rewriting the source (a rogue AP, anyone on a shared
+    /// L2) could otherwise move the whole send side onto another transport.
+    /// A peer with no path at all is bound by its first authentic frame,
+    /// and the result then says [`Roam::Bound`].
     ///
-    /// Called when we receive a valid authenticated packet from a new address.
-    /// Returns `true` if `(transport_id, addr)` actually changed — callers
-    /// use this to invalidate per-peer `connect(2)`-ed UDP sockets whose
-    /// 5-tuple just went stale.
-    pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> bool {
-        let changed = self.send.transport_id != Some(transport_id)
-            || self.send.current_addr.as_ref() != Some(&addr);
-        self.send.transport_id = Some(transport_id);
-        self.send.current_addr = Some(addr);
-        changed
+    /// [`Roam::changed`] says whether the address our frames go to changed,
+    /// so the caller can drop the `connect(2)`-ed UDP socket whose 5-tuple
+    /// just went stale, and [`Roam::left`] names the link the peer left, the
+    /// only one that loses its verification. A roam of a path that is not
+    /// active drops that path's own connected socket here.
+    pub(crate) fn account(
+        &mut self,
+        now: PeerInstant,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+        len: usize,
+        msg_type: u8,
+    ) -> Account {
+        let bound = self.send.bundle.is_none();
+        if bound {
+            self.bind(transport_id, addr.clone());
+        }
+        let Some(bundle) = self.send.bundle.as_mut() else {
+            unreachable!("the peer was bound above");
+        };
+        let mut account = bundle.account(now, transport_id, addr, len, msg_type);
+        if bound {
+            account.roam = Roam::Bound;
+        }
+        // A path that is not active roamed: its socket aims at the old address.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Roam::Standby { index } = account.roam
+            && let Some(slot) = bundle.driver_mut(index)
+        {
+            slot.clear_connected_udp();
+        }
+        account
+    }
+
+    /// Bind a peer that holds no path to (`transport_id`, `addr`), its
+    /// link's original path, on a path machine built as
+    /// [`unbound_caps`](super::unbound_caps) says.
+    fn bind(&mut self, transport_id: TransportId, addr: TransportAddr) {
+        let caps = super::unbound_caps();
+        self.send.bundle = Some(new_bundle(transport_id, addr, &caps));
+    }
+
+    /// Account for an authentic heartbeat from (`transport_id`, `addr`), for
+    /// tests of the roaming rule: see [`account`](Self::account).
+    #[cfg(test)]
+    pub fn set_current_addr(&mut self, transport_id: TransportId, addr: TransportAddr) -> Roam {
+        let heartbeat = crate::proto::link::LinkMessageType::Heartbeat.to_byte();
+        self.account(peer_now(), transport_id, &addr, 0, heartbeat)
+            .roam
+    }
+
+    /// Ask for the peer's send side to move to `(transport_id, addr)`.
+    ///
+    /// The deliberate counterpart of [`set_current_addr`](Self::set_current_addr):
+    /// that one is the roaming rule and never crosses transports; this one
+    /// is a path change. If the peer already holds that path it becomes the
+    /// active one, or it is bound if the peer has no path yet. A pair the
+    /// peer does not hold is admitted as a new path to be probed, and the
+    /// send side stays where it is. No path is re-pointed onto a new
+    /// address. `medium` is the kind of `transport_id`. See
+    /// [`PathSet::rebind`], past the path machine; for tests.
+    #[cfg(test)]
+    pub fn rebind_transport(
+        &mut self,
+        transport_id: TransportId,
+        addr: TransportAddr,
+        medium: Medium,
+    ) -> Rebind {
+        let Some(bundle) = self.send.bundle.as_mut() else {
+            self.bind(transport_id, addr);
+            return Rebind::Switched;
+        };
+        let (result, evicted) = bundle
+            .paths_mut()
+            .rebind(transport_id, addr, medium, rand::random);
+        Self::retire(evicted);
+        result
+    }
+
+    /// What the path (`transport_id`, `addr`) is to this peer at this end:
+    /// [`Match::Proven`] for a held path that is Live or that one of our
+    /// probes has had answered (the link's original path is both), with
+    /// whether it is the active path, [`Match::Unproven`] for a held path
+    /// that is neither, still Probing, and [`Match::None`] when the pair is
+    /// not held. The active path answers `Proven { active: true, .. }`, so
+    /// that is the test for "this pair is where our frames to the peer go".
+    pub(crate) fn path_match(&self, transport_id: TransportId, addr: &TransportAddr) -> Match {
+        self.send
+            .bundle
+            .as_ref()
+            .map_or(Match::None, |b| b.paths().classify(transport_id, addr))
+    }
+
+    /// The bound peer's path set, to change past the path machine, for
+    /// tests of the set's rules.
+    #[cfg(test)]
+    fn test_paths(&mut self) -> &mut PathSet {
+        self.send
+            .bundle
+            .as_mut()
+            .expect("the test peer is bound")
+            .paths_mut()
+    }
+
+    /// Hold (`transport_id`, `addr`) as a new Probing path beside the
+    /// peer's others, for tests that need a path not yet acked.
+    #[cfg(test)]
+    pub(crate) fn admit_path(&mut self, transport_id: TransportId, addr: TransportAddr) {
+        let admission = self
+            .test_paths()
+            .admit(transport_id, addr, Medium::Other, rand::random)
+            .expect("the test path is admitted");
+        if let super::Admission::Added { evicted, .. } = admission {
+            Self::retire(evicted);
+        }
+    }
+
+    /// Mark the held path (`transport_id`, `addr`) acked, as an answer to
+    /// one of our probes on it would, for tests that need a held path ready
+    /// to carry the link.
+    #[cfg(test)]
+    pub(crate) fn ack_path(&mut self, transport_id: TransportId, addr: &TransportAddr) {
+        let paths = self.test_paths();
+        let index = paths
+            .find(transport_id, addr)
+            .expect("the test path is held");
+        paths.mark_acked(index);
+    }
+
+    /// Mark the held path (`transport_id`, `addr`) Dead, as unanswered
+    /// probes would, for tests that need a held path given up on.
+    #[cfg(test)]
+    pub(crate) fn kill_path(&mut self, transport_id: TransportId, addr: &TransportAddr) {
+        let paths = self.test_paths();
+        let index = paths
+            .find(transport_id, addr)
+            .expect("the test path is held");
+        paths.mark_dead(index, peer_now());
+    }
+
+    /// Replace the peer's paths with a single original path on
+    /// `(transport_id, addr)`, for tests whose premise is a single-path peer
+    /// that has moved to another transport. Production never re-points a
+    /// path; the path switch will move a peer between held paths. The new
+    /// path machine is built as [`unbound_caps`](super::unbound_caps) says,
+    /// multipath disabled, as every caller's node runs.
+    #[cfg(test)]
+    pub(crate) fn repin(&mut self, transport_id: TransportId, addr: TransportAddr) {
+        for out in self.close_paths() {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let fips_core::proto::path::Output::Released { mut driver, .. } = out {
+                driver.clear_connected_udp();
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            drop(out);
+        }
+        self.bind(transport_id, addr);
     }
 
     // === Handshake Resend ===
@@ -821,22 +1061,38 @@ impl ActivePeer {
 
     // === Decryption Failure Tracking ===
 
-    /// Increment consecutive decryption failure counter, returning new count.
-    /// Saturates at `u32::MAX`, since only an authenticated frame resets it.
-    pub fn increment_decrypt_failures(&mut self) -> u32 {
-        self.send.consecutive_decrypt_failures =
-            self.send.consecutive_decrypt_failures.saturating_add(1);
-        self.send.consecutive_decrypt_failures
+    /// Count a frame of the link that failed to authenticate, received at
+    /// `now` from (`transport_id`, `addr`), on the path of that pair:
+    /// [`PeerBundle::charge`], which counts it only on the link's original
+    /// path or a path proven by a probe exchange. A peer that holds no path
+    /// counts nothing.
+    pub(crate) fn charge(
+        &mut self,
+        now: PeerInstant,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+    ) -> Charge {
+        self.send
+            .bundle
+            .as_mut()
+            .map_or(Charge::Nothing, |b| b.charge(now, transport_id, addr))
     }
 
-    /// Reset consecutive decryption failure counter.
-    pub fn reset_decrypt_failures(&mut self) {
-        self.send.consecutive_decrypt_failures = 0;
+    /// Start again the count of failures on the path of (`transport_id`,
+    /// `addr`), for an authentic frame of the link from there that is not
+    /// accounted: [`PeerBundle::authentic`]. A pair no path holds starts no
+    /// count again.
+    pub(crate) fn authentic(&mut self, transport_id: TransportId, addr: &TransportAddr) {
+        if let Some(bundle) = self.send.bundle.as_mut() {
+            bundle.authentic(transport_id, addr);
+        }
     }
 
-    /// Current consecutive decryption failure count.
+    /// The count of consecutive frames that failed to authenticate on the
+    /// path the node sends on, the active path; 0 for a peer that holds no
+    /// path. For a link of one path it is the count of its original pair.
     pub fn consecutive_decrypt_failures(&self) -> u32 {
-        self.send.consecutive_decrypt_failures
+        self.active_path().map_or(0, |p| p.live().fails())
     }
 
     /// Record the receiver index of a frame that failed to decrypt.
@@ -952,17 +1208,33 @@ impl ActivePeer {
 
     /// Link cost for routing decisions.
     ///
-    /// Returns a scalar cost where lower is better (1.0 = ideal).
-    /// Computed as RTT-weighted ETX: `etx * (1.0 + srtt_ms / 100.0)`.
-    ///
-    /// Returns 1.0 (optimistic default) when MMP metrics are not yet
-    /// available, matching depth-only parent selection behavior.
+    /// Returns a scalar cost where lower is better (1.0 = ideal): the
+    /// measured cost, [`Self::live_cost`], except across a change of the
+    /// link's active path, where the path machine holds the value from
+    /// just before the change until the switch dwell has passed and two
+    /// receiver reports have arrived. The hold is this node's own choice:
+    /// the multipath v1 draft leaves the link cost of a bundle to the node
+    /// (Section 5.12, its note). The clock is read only while the machine
+    /// holds a cost, which a link of one path never does.
     pub fn link_cost(&self) -> f64 {
+        let live = self.live_cost();
+        match self.bundle() {
+            Some(bundle) if bundle.holding() => bundle.cost(peer_now(), live),
+            _ => live,
+        }
+    }
+
+    /// The link cost as measured now: the
+    /// [`quality_index`](crate::proto::mmp::quality_index) of the link's
+    /// ETX and smoothed RTT, or 1.0 (optimistic default) when MMP metrics
+    /// are not yet available, matching depth-only parent selection
+    /// behavior.
+    pub(crate) fn live_cost(&self) -> f64 {
         match self.mmp() {
             Some(mmp) => {
                 let etx = mmp.metrics.etx;
                 match mmp.metrics.srtt_ms() {
-                    Some(srtt_ms) => etx * (1.0 + srtt_ms / 100.0),
+                    Some(srtt_ms) => crate::proto::mmp::quality_index(etx, srtt_ms),
                     None => 1.0,
                 }
             }

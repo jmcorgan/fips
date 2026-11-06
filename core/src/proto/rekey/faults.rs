@@ -169,6 +169,9 @@ pub(crate) enum Fault {
     /// A responder's msg2 goes on the arrival path with arrival replies
     /// off.
     ReplyOnArrival,
+    /// A held answer is resent on the established path whatever route the
+    /// first answer took.
+    ResendEstablished,
     /// Answering a msg1 refreshes liveness.
     RespondRefreshes,
     /// A msg3 from another static also retires the own completed epoch.
@@ -250,6 +253,7 @@ impl Fault {
         Self::ForgedTeardown,
         Self::ReplayAsUnauthenticated,
         Self::ReplyOnArrival,
+        Self::ResendEstablished,
         Self::RespondRefreshes,
         Self::FailedFinalRetires,
         Self::AbandonClearsTrigger,
