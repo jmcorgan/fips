@@ -14,6 +14,9 @@ fn test_link_message_type_roundtrip() {
         LinkMessageType::SessionDatagram,
         LinkMessageType::Disconnect,
         LinkMessageType::Heartbeat,
+        LinkMessageType::PathProbe,
+        LinkMessageType::PathAck,
+        LinkMessageType::PathClose,
     ];
 
     for ty in types {

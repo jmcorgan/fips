@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant as StdInstant};
 
-use fips_core::time::{Clock, Instant};
+use fips_core::time::{CEILING, Clock, Instant};
 
 use super::*;
 

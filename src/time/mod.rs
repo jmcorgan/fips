@@ -12,13 +12,12 @@ use std::time::{Duration, Instant as StdInstant};
 
 use fips_core::time::{Clock, Instant};
 
+/// `now + d` that never overflows, from the core, for the shell's timers.
+pub(crate) use fips_core::time::deadline;
+
 /// The process's monotonic epoch: the first read of [`mono_ms`] or of the
 /// test epoch.
 static START: LazyLock<StdInstant> = LazyLock::new(StdInstant::now);
-
-/// The furthest a [`deadline`] reaches: 100 years, which neither host instant
-/// type can overflow from a current reading.
-pub(crate) const CEILING: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
 /// Monotonic millisecond clock for the MMP time seam.
 ///
@@ -120,24 +119,6 @@ impl WallStamp for HostInstant {
         } else {
             wall.saturating_add(self.saturating_duration_since(now).as_millis() as u64)
         }
-    }
-}
-
-/// `now + d`, with `d` capped at [`CEILING`].
-///
-/// Below the cap this is exactly `now + d`. An instant type whose range ends
-/// within the cap of `now` gets a deadline at or before that end instead of a
-/// panic: the step is halved until it fits.
-pub(crate) fn deadline<I: Instant>(now: I, d: Duration) -> I {
-    let mut step = d.min(CEILING);
-    loop {
-        if let Some(at) = now.checked_add(step) {
-            return at;
-        }
-        if step.is_zero() {
-            return now;
-        }
-        step /= 2;
     }
 }
 

@@ -1,5 +1,8 @@
 //! Tests for the FMP link-framing wire codec.
 
+use crate::proto::fmp::wire::{
+    ENCRYPTED_MIN_SIZE, ESTABLISHED_HEADER_SIZE, FRAME_OVERHEAD, INNER_HEADER_SIZE,
+};
 use crate::proto::fmp::{Disconnect, DisconnectReason, HandshakeMessageType};
 
 // ===== HandshakeMessageType Tests =====
@@ -106,4 +109,20 @@ fn test_disconnect_decode_empty_payload() {
 fn test_disconnect_decode_unknown_reason() {
     let decoded = Disconnect::decode(&[0x80]).unwrap();
     assert_eq!(decoded.reason, DisconnectReason::Other);
+}
+
+// ===== Frame overhead =====
+
+/// An established frame carrying a link message is laid out as the 16-byte
+/// header, then under encryption the 4-byte timestamp and the message from
+/// its type byte, then the 16-byte AEAD tag. The type byte belongs to the
+/// message, so the frame adds the header, the timestamp and the tag.
+#[test]
+fn the_frame_overhead_is_the_header_the_timestamp_and_the_tag() {
+    assert_eq!(FRAME_OVERHEAD, 36);
+    assert_eq!(FRAME_OVERHEAD, ENCRYPTED_MIN_SIZE + INNER_HEADER_SIZE - 1);
+    assert_eq!(
+        FRAME_OVERHEAD,
+        ESTABLISHED_HEADER_SIZE + 4 + crate::noise::TAG_SIZE
+    );
 }
