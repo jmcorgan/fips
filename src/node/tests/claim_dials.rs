@@ -454,7 +454,7 @@ async fn an_honest_peer_reached_by_a_claim_leg_and_an_addressed_leg_ends_as_one_
     let n1 = *nodes[1].node.node_addr();
     let id0 = PeerIdentity::from_pubkey_full(nodes[0].node.identity().pubkey_full());
     let claimed_at = nodes[0].addr.clone();
-    let addressed_at = add_loopback_alias(&nodes[0].addr);
+    let addressed_at = add_loopback_alias(&nodes[0].addr, nodes[0].transport_id);
 
     nodes[1]
         .node

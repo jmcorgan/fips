@@ -4,6 +4,7 @@ use crate::NodeAddr;
 use crate::node::Node;
 use crate::node::diag::OrNone;
 use crate::peer::ActivePeer;
+use crate::transport::{TransportAddr, TransportId};
 use std::time::Instant;
 use tracing::{debug, info, trace};
 
@@ -11,11 +12,17 @@ impl Node {
     /// Dispatch a decrypted link message to the appropriate handler.
     ///
     /// Link messages are protocol messages exchanged between authenticated peers.
+    /// `arrival` is the transport the frame came in on and its source address,
+    /// which the path messages (0x52 to 0x54) are stepped with into the link's
+    /// path machine, and `len` the frame's length on the wire, which no
+    /// handler reads yet.
     pub(in crate::node) async fn dispatch_link_message(
         &mut self,
         from: &NodeAddr,
         plaintext: &[u8],
         ce_flag: bool,
+        arrival: (TransportId, &TransportAddr),
+        _len: usize,
     ) {
         if plaintext.is_empty() {
             return;
@@ -65,6 +72,10 @@ impl Node {
             0x51 => {
                 // Heartbeat — no-op, last_recv_time already updated by record_recv()
                 trace!(peer = %self.peer_display_name(from), "Received heartbeat");
+            }
+            0x52..=0x54 => {
+                // PathProbe, PathAck, PathClose: the link's path machine.
+                self.path_message(from, plaintext, arrival).await;
             }
             _ => {
                 if tracing::enabled!(tracing::Level::DEBUG)
@@ -136,8 +147,8 @@ impl Node {
     /// Free every session index `peer` holds as it leaves the node. Its link
     /// rekey machine is closed and its outputs carried out, which unbind the
     /// current, pending and previous sessions' indices and its own rekey
-    /// handshake's from `peers_by_index` by the transport recorded at each
-    /// binding, revoke them from the decrypt workers that hold them, and
+    /// handshake's from `peers_by_index` by index, whichever transport the
+    /// peer is on now, revoke them from the decrypt workers that hold them, and
     /// free them. The machine's replay record is filed under the peer and
     /// its startup epoch, for the next link with the peer at that epoch.
     pub(in crate::node) fn release_peer_indices(
@@ -247,6 +258,15 @@ impl Node {
 
         let link_id = peer.link_id();
         let transport_id = peer.transport_id();
+        // Hand back every path's driver slot. After this the peer holds no
+        // path, so `transport_id` is read first, for the bootstrap cleanup
+        // below.
+        for out in peer.close_paths() {
+            if let fips_core::proto::path::Output::Released { to, driver, keep } = out {
+                self.release_path(node_addr, link_id, to, driver, keep, true);
+            }
+        }
+        self.forget_connects(node_addr);
 
         // Free session indices (current, rekey, pending, previous)
         self.release_peer_indices(node_addr, &mut peer);

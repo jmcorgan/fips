@@ -50,11 +50,13 @@
 // warnings rather than gate every function individually.
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use crate::node::handlers::path::SendReport;
 #[cfg(test)]
 use crate::node::worker_set::{TestWorker, test_spawner};
 use crate::node::worker_set::{WorkerLiveness, WorkerSet, worth_logging};
 use crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE;
 use crate::proto::fsp::wire::FSP_HEADER_SIZE;
+use crate::transport::TransportId;
 use crate::transport::udp::UdpStats;
 use crate::transport::udp::io::AsyncUdpSocket;
 #[cfg(not(target_os = "macos"))]
@@ -72,6 +74,25 @@ use std::sync::OnceLock;
 #[cfg(any(target_os = "macos", test))]
 use std::sync::{Condvar, Mutex, PoisonError};
 use tracing::{debug, trace, warn};
+
+/// The sending end of the channel a worker reports unreachable sends on.
+pub(crate) type ReportTx = tokio::sync::mpsc::Sender<SendReport>;
+
+/// Report the failed send on `transport` to `dest` on `report` when `err`
+/// says the destination is unreachable. A full channel drops the report
+/// rather than block the worker; the next failed send reports again.
+pub(super) fn report_failure(
+    report: Option<&ReportTx>,
+    transport: TransportId,
+    dest: SocketAddr,
+    err: &std::io::Error,
+) {
+    if let Some(tx) = report
+        && crate::transport::unreachable_kind(err)
+    {
+        let _ = tx.try_send(SendReport { transport, dest });
+    }
+}
 
 /// A pre-cooked FMP-encrypt-and-send job. All state-touching work
 /// (counter reservation, MMP/stats update) was already done on the
@@ -131,6 +152,9 @@ pub(crate) struct FmpSendJob {
     /// Ignored when `connected_socket` is `Some` (the kernel knows
     /// the destination already).
     pub dest_addr: SocketAddr,
+    /// The UDP transport the job is sent on, named in the report of a send
+    /// to an unreachable destination.
+    pub transport: TransportId,
     /// **Unix connected-UDP fast path:** when set, the worker sends
     /// on this socket's fd without a destination sockaddr instead of
     /// the wildcard listen socket. The kernel skips per-packet
@@ -453,16 +477,28 @@ fn worker_channel() -> (WorkerSender, WorkerReceiver) {
     }
 }
 
-/// Start the production worker loop on `rx` in a named OS thread.
+/// Start the production worker loop on `rx` in a named OS thread, with no
+/// report of unreachable sends.
+#[cfg(test)]
 fn spawn_worker(idx: usize, rx: WorkerReceiver) -> std::io::Result<std::thread::JoinHandle<()>> {
+    start_worker(idx, rx, None)
+}
+
+/// Start the production worker loop on `rx` in a named OS thread, reporting
+/// each send it gives up on as unreachable on `report`.
+fn start_worker(
+    idx: usize,
+    rx: WorkerReceiver,
+    report: Option<ReportTx>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     let builder = std::thread::Builder::new().name(format!("fips-encrypt-{idx}"));
     #[cfg(target_os = "macos")]
     {
-        builder.spawn(move || run_worker_macos(idx, rx))
+        builder.spawn(move || run_worker_macos(idx, rx, report))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        builder.spawn(move || run_worker(idx, rx))
+        builder.spawn(move || run_worker(idx, rx, report))
     }
 }
 
@@ -499,9 +535,18 @@ impl EncryptWorkerPool {
     /// returned `EncryptWorkerPool` and all clones go away).
     ///
     /// A worker thread that cannot be started is logged and left dead;
-    /// the caller reads how many started from [`Self::liveness`].
+    /// the caller reads how many started from [`Self::liveness`]. The
+    /// workers report no unreachable send.
+    #[cfg(test)]
     pub fn spawn(n: usize) -> Self {
         Self::start_with(n, spawn_worker)
+    }
+
+    /// [`Self::spawn`] with each worker reporting, on `report`, every send
+    /// it gives up on because the destination is unreachable. Each worker
+    /// thread holds its own clone of the sender.
+    pub fn spawn_reporting(n: usize, report: ReportTx) -> Self {
+        Self::start_with(n, |idx, rx| start_worker(idx, rx, Some(report.clone())))
     }
 
     /// Build the pool, starting each worker with `spawn`. Production passes
@@ -1161,7 +1206,7 @@ fn push_mac_completion(
 /// packets into a fixed-size local batch, then issues one
 /// `sendmmsg(2)` per drain cycle.
 #[cfg(not(target_os = "macos"))]
-fn run_worker(idx: usize, rx: Receiver<QueuedFmpSendJob>) {
+fn run_worker(idx: usize, rx: Receiver<QueuedFmpSendJob>, report: Option<ReportTx>) {
     trace!(worker = idx, "FMP encrypt worker thread starting");
 
     const BATCH_SIZE: usize = 32;
@@ -1185,7 +1230,7 @@ fn run_worker(idx: usize, rx: Receiver<QueuedFmpSendJob>) {
                 Err(_) => break,
             }
         }
-        if let Err(err) = flush_batch_sync(&mut batch) {
+        if let Err(err) = flush_batch_sync(&mut batch, report.as_ref()) {
             debug!(worker = idx, error = %err, "FMP encrypt worker batch flush failed");
         }
     }
@@ -1193,14 +1238,14 @@ fn run_worker(idx: usize, rx: Receiver<QueuedFmpSendJob>) {
 }
 
 #[cfg(target_os = "macos")]
-fn run_worker_macos(idx: usize, rx: MacWorkerReceiver<QueuedFmpSendJob>) {
+fn run_worker_macos(idx: usize, rx: MacWorkerReceiver<QueuedFmpSendJob>, report: Option<ReportTx>) {
     trace!(worker = idx, "FMP encrypt worker thread starting");
 
     let batch_size = macos_worker_batch_size();
     let mut batch: Vec<QueuedFmpSendJob> = Vec::with_capacity(batch_size);
 
     while rx.recv_batch(&mut batch, batch_size) {
-        if let Err(err) = flush_batch_sync(&mut batch) {
+        if let Err(err) = flush_batch_sync(&mut batch, report.as_ref()) {
             debug!(worker = idx, error = %err, "FMP encrypt worker batch flush failed");
             batch.clear();
         }
@@ -1323,6 +1368,7 @@ fn seal_wire(
 /// ordering, and a single flow lives entirely inside one group.
 fn flush_batch_sync(
     batch: &mut Vec<QueuedFmpSendJob>,
+    report: Option<&ReportTx>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if batch.is_empty() {
         return Ok(());
@@ -1343,6 +1389,7 @@ fn flush_batch_sync(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         connected_socket: Option<std::sync::Arc<crate::transport::udp::ConnectedPeerSocket>>,
         dest_addr: SocketAddr,
+        transport: TransportId,
         stats: Arc<UdpStats>,
         wire_packets: Vec<Vec<u8>>,
         drop_on_backpressure: bool,
@@ -1365,6 +1412,7 @@ fn flush_batch_sync(
             fsp_seal,
             socket,
             dest_addr,
+            transport,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_socket,
             stats,
@@ -1407,7 +1455,7 @@ fn flush_batch_sync(
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let connected_fd = connected_socket.as_ref().map(|s| s.as_raw_fd());
             let matched = groups.iter_mut().position(|g| {
-                if g.dest_addr != dest_addr {
+                if g.dest_addr != dest_addr || g.transport != transport {
                     return false;
                 }
                 if g.socket.as_raw_fd() != socket_fd || !Arc::ptr_eq(&g.stats, &stats) {
@@ -1430,6 +1478,7 @@ fn flush_batch_sync(
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     connected_socket,
                     dest_addr,
+                    transport,
                     stats,
                     wire_packets: vec![wire_buf],
                     drop_on_backpressure,
@@ -1441,7 +1490,7 @@ fn flush_batch_sync(
             // Windows: encrypt worker pool isn't spawned (see
             // lifecycle.rs); this function is unreachable. Drop
             // values explicitly so the compiler sees them as used.
-            let _ = (socket, dest_addr, stats, wire_buf);
+            let _ = (socket, dest_addr, transport, stats, wire_buf);
         }
     }
 
@@ -1495,6 +1544,7 @@ fn flush_batch_sync(
             socket,
             connected_socket,
             dest_addr,
+            transport,
             stats,
             wire_packets,
             drop_on_backpressure: _,
@@ -1533,6 +1583,7 @@ fn flush_batch_sync(
                 }
                 Err(err) => {
                     stats.record_unsent(wire_packets.len() as u64);
+                    report_failure(report, transport, dest_addr, &err);
                     abandon(groups);
                     return Err(format!("sendmsg+UDP_GSO failed: {err}").into());
                 }
@@ -1549,6 +1600,7 @@ fn flush_batch_sync(
                 }
                 Err(err) => {
                     stats.record_unsent((wire_packets.len() - sent) as u64);
+                    report_failure(report, transport, dest_addr, &err);
                     abandon(groups);
                     return Err(format!("sendmmsg(2) failed: {err}").into());
                 }
@@ -1588,6 +1640,7 @@ fn flush_batch_sync(
                 }
                 let rest = group.wire_packets.len() - i - 1;
                 group.stats.record_unsent(rest as u64);
+                report_failure(report, group.transport, group.dest_addr, &err);
                 abandon(groups);
                 return Err(format!("sendto failed: {err}").into());
             }
@@ -1605,7 +1658,7 @@ fn flush_direct_batch_sync(
     batch: &mut Vec<FmpSendJob>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut queued: Vec<QueuedFmpSendJob> = batch.drain(..).map(QueuedFmpSendJob::direct).collect();
-    flush_batch_sync(&mut queued)
+    flush_batch_sync(&mut queued, None)
 }
 
 fn record_udp_send_path(connected: bool, count: u64) {
@@ -2139,6 +2192,7 @@ mod unix_tests {
                 }),
                 socket: send_sock,
                 dest_addr: recv_addr,
+                transport: TransportId::new(0),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 connected_socket: None,
                 stats: Arc::new(UdpStats::new()),
@@ -2273,6 +2327,7 @@ mod unix_tests {
                 }),
                 socket: send_sock,
                 dest_addr: recv_addr,
+                transport: TransportId::new(0),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 connected_socket: None,
                 stats: Arc::new(UdpStats::new()),
@@ -2404,6 +2459,7 @@ mod unix_tests {
             }),
             socket: socket.clone(),
             dest_addr: "127.0.0.1:9".parse().unwrap(),
+            transport: TransportId::new(0),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_socket: None,
             stats: Arc::new(UdpStats::new()),
@@ -2450,6 +2506,7 @@ mod unix_tests {
             fsp_seal: None,
             socket,
             dest_addr: "127.0.0.1:9".parse().unwrap(),
+            transport: TransportId::new(0),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_socket: None,
             stats: Arc::new(UdpStats::new()),
@@ -2512,6 +2569,7 @@ mod unix_tests {
             fsp_seal: None,
             socket: socket.clone(),
             dest_addr: dest,
+            transport: TransportId::new(0),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_socket: None,
             stats: stats.clone(),
@@ -2982,6 +3040,7 @@ mod tests {
                     fsp_seal: None,
                     socket,
                     dest_addr: dest,
+                    transport: TransportId::new(0),
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     connected_socket: None,
                     stats: Arc::new(UdpStats::new()),
@@ -3304,6 +3363,7 @@ mod mac_ordered_tests {
             fsp_seal: None,
             socket: socket.clone(),
             dest_addr: dest,
+            transport: TransportId::new(0),
             connected_socket: None,
             stats: Arc::new(UdpStats::new()),
             drop_on_backpressure: false,
@@ -3377,7 +3437,7 @@ mod mac_ordered_tests {
         let rig = Rig::new();
         drop(rig.sequenced(1));
         let mut batch = vec![rig.sequenced(2)];
-        flush_batch_sync(&mut batch).expect("flush");
+        flush_batch_sync(&mut batch, None).expect("flush");
         assert!(rig.received(), "the flow stalled at the dropped job's slot");
     }
 
@@ -3395,7 +3455,7 @@ mod mac_ordered_tests {
             Err(MacWorkerTryPushError::Closed(_))
         ));
         let mut batch = vec![rig.sequenced(4)];
-        flush_batch_sync(&mut batch).expect("flush");
+        flush_batch_sync(&mut batch, None).expect("flush");
         assert!(
             rig.received(),
             "the flow stalled at a slot the dead queue held"
@@ -3418,7 +3478,7 @@ mod mac_ordered_tests {
         };
         drop(group);
         let mut batch = vec![rig.sequenced(2)];
-        flush_batch_sync(&mut batch).expect("flush");
+        flush_batch_sync(&mut batch, None).expect("flush");
         assert!(
             rig.received(),
             "the flow stalled at a slot an undelivered group held"
@@ -3485,7 +3545,7 @@ mod mac_ordered_tests {
             "a closed flow was handed out again"
         );
         let mut batch = vec![QueuedFmpSendJob::macos_sequenced(rig.job(3), second)];
-        flush_batch_sync(&mut batch).expect("flush");
+        flush_batch_sync(&mut batch, None).expect("flush");
         assert!(rig.received(), "the replacement flow sent nothing");
     }
 
@@ -3560,6 +3620,7 @@ mod pool_tests {
                 fsp_seal: None,
                 socket: self.socket.clone(),
                 dest_addr: dest,
+                transport: TransportId::new(0),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 connected_socket: None,
                 stats: Arc::new(UdpStats::new()),
@@ -3655,7 +3716,7 @@ mod pool_tests {
             let release = release_rx.take().expect("one worker");
             std::thread::Builder::new().spawn(move || {
                 let _ = release.recv();
-                run_worker(idx, rx);
+                run_worker(idx, rx, None);
             })
         });
         let recv = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");

@@ -93,6 +93,11 @@ impl NymTransport {
         self.name.as_deref()
     }
 
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
+    }
+
     /// Get the transport statistics.
     pub fn stats(&self) -> &Arc<NymStats> {
         &self.stats

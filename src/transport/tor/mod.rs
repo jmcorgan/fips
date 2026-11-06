@@ -225,6 +225,11 @@ impl TorTransport {
         self.name.as_deref()
     }
 
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
+    }
+
     /// Get the onion service address (if active).
     pub fn onion_address(&self) -> Option<&str> {
         self.onion_address.as_deref()

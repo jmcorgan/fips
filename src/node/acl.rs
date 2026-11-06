@@ -818,6 +818,11 @@ impl Node {
         self.peer_acl.status()
     }
 
+    /// Whether the current peer ACL allows `peer`, without logging.
+    pub(crate) fn peer_allowed(&self, peer: &PeerIdentity) -> bool {
+        self.peer_acl.acl().check(peer).allowed()
+    }
+
     /// Reject a peer if the current ACL denies it.
     pub(crate) fn authorize_peer(
         &self,

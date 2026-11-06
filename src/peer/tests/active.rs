@@ -4,6 +4,7 @@ use super::*;
 use crate::Identity;
 use crate::node::REKEY_JITTER_SECS;
 use crate::node::diag::HsLine;
+use fips_core::time::Instant as _;
 use std::sync::LazyLock;
 
 /// A lease on `index` for a test peer, outside any allocator.
@@ -199,60 +200,62 @@ fn test_replay_suppression_counter() {
     assert_eq!(peer.reset_replay_suppressed(), 0);
 }
 
-#[test]
-fn test_increment_decrypt_failures_monotonic() {
-    let identity = make_peer_identity();
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
-
-    // Initial count is zero
-    assert_eq!(peer.consecutive_decrypt_failures(), 0);
-
-    // Each call returns a strictly increasing count
-    let mut prev = 0u32;
-    for expected in 1..=25u32 {
-        let count = peer.increment_decrypt_failures();
-        assert_eq!(count, expected, "increment must return monotonic count");
-        assert!(count > prev, "count must strictly increase");
-        assert_eq!(peer.consecutive_decrypt_failures(), count);
-        prev = count;
-    }
+/// A peer bound to `10.0.0.1:2121` on transport 1 by its first authentic frame,
+/// with that transport and address.
+fn bound_peer() -> (ActivePeer, TransportId, TransportAddr) {
+    let mut peer = ActivePeer::new(make_peer_identity(), LinkId::new(1), 1000);
+    let (tid, addr) = (
+        TransportId::new(1),
+        TransportAddr::from_string("10.0.0.1:2121"),
+    );
+    assert_eq!(peer.set_current_addr(tid, addr.clone()), Roam::Bound);
+    (peer, tid, addr)
 }
 
+/// Each failure charged to the original pair counts one and the threshold warns
+/// once, while a charge to a pair no path holds counts nothing.
 #[test]
-fn test_reset_decrypt_failures_zeroes_counter() {
-    let identity = make_peer_identity();
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
+fn charging_the_original_pair_counts_one_failure_each() {
+    let (mut peer, tid, addr) = bound_peer();
+    assert_eq!(peer.consecutive_decrypt_failures(), 0);
+    for expected in 1..=25u32 {
+        let charge = peer.charge(peer_now(), tid, &addr);
+        let want = if expected == 20 {
+            Charge::Warn
+        } else {
+            Charge::Counted
+        };
+        assert_eq!(charge, want, "failure {expected}");
+        assert_eq!(peer.consecutive_decrypt_failures(), expected);
+    }
+    // Another address on the transport, or another transport, is no path.
+    let other = TransportAddr::from_string("10.0.0.9:2121");
+    assert_eq!(peer.charge(peer_now(), tid, &other), Charge::Nothing);
+    assert_eq!(
+        peer.charge(peer_now(), TransportId::new(2), &addr),
+        Charge::Nothing
+    );
+    assert_eq!(peer.consecutive_decrypt_failures(), 25);
+}
 
-    // Drive counter up
+/// An authentic frame on a path's pair starts that path's count of failures
+/// again, and one from an address no path holds starts nothing.
+#[test]
+fn an_authentic_frame_on_the_pair_starts_its_count_again() {
+    let (mut peer, tid, addr) = bound_peer();
     for _ in 0..7 {
-        peer.increment_decrypt_failures();
+        peer.charge(peer_now(), tid, &addr);
     }
     assert_eq!(peer.consecutive_decrypt_failures(), 7);
-
-    // Reset zeroes it
-    peer.reset_decrypt_failures();
+    // From an address no path holds: nothing starts again.
+    peer.authentic(tid, &TransportAddr::from_string("10.0.0.9:2121"));
+    assert_eq!(peer.consecutive_decrypt_failures(), 7);
+    peer.authentic(tid, &addr);
     assert_eq!(peer.consecutive_decrypt_failures(), 0);
-
-    // Reset on zero is a no-op (still zero, no panic)
-    peer.reset_decrypt_failures();
+    peer.authentic(tid, &addr);
     assert_eq!(peer.consecutive_decrypt_failures(), 0);
-
-    // Counter resumes at 1 after reset
-    assert_eq!(peer.increment_decrypt_failures(), 1);
+    assert_eq!(peer.charge(peer_now(), tid, &addr), Charge::Counted);
     assert_eq!(peer.consecutive_decrypt_failures(), 1);
-}
-
-#[test]
-fn the_consecutive_decrypt_failure_counter_saturates_instead_of_overflowing() {
-    let identity = make_peer_identity();
-    let mut peer = ActivePeer::new(identity, LinkId::new(1), 1000);
-
-    // Nothing resets the counter between authenticated frames, so a long
-    // run of failures must not overflow it.
-    peer.send.consecutive_decrypt_failures = u32::MAX - 1;
-    assert_eq!(peer.increment_decrypt_failures(), u32::MAX);
-    assert_eq!(peer.increment_decrypt_failures(), u32::MAX);
-    assert_eq!(peer.consecutive_decrypt_failures(), u32::MAX);
 }
 
 #[test]
@@ -568,6 +571,7 @@ fn every_session_change_carries_the_withheld_handshake_lines_and_restarts_the_co
         params: crate::peer::test_link_params(),
         record: Record::new(),
         workers: false,
+        path: crate::peer::test_caps(),
     };
     let _ = b
         .peer
@@ -861,8 +865,9 @@ fn cross_move(end: &mut End) {
         params: crate::peer::test_link_params(),
         record: Record::new(),
         workers: false,
+        path: crate::peer::test_caps(),
     };
-    let out = end
+    let (out, _) = end
         .peer
         .move_session(next_recv, lease(7), SessionIndex::new(8), to, &mut caps);
     end.carry(&out);
@@ -953,4 +958,59 @@ fn a_cross_connection_move_accepts_the_peers_receiver_reports_on_the_new_session
         Some((4, 205, 0)),
         "the peer's first report on the new session is accepted"
     );
+}
+
+/// Dead times come from the peer clock, so the test step that moves every
+/// link rekey deadline (`crate::time::advance`) moves a path's Dead time and
+/// the eviction order with it.
+#[test]
+fn dead_times_are_stamped_on_the_peer_clock_that_moves_the_rekey_timers() {
+    let t = TransportId::new(1);
+    let addr = |n: u32| TransportAddr::from_string(&format!("10.0.0.{n}:2121"));
+    let mut next = 0;
+    let mut ids = move || {
+        next += 1;
+        next
+    };
+    let mut set = PathSet::new();
+    let mut add = |set: &mut PathSet, n: u32| match set.admit(t, addr(n), Medium::Other, &mut ids) {
+        Ok(crate::peer::Admission::Added {
+            index,
+            evicted: None,
+        }) => index,
+        other => panic!("expected a plain add, got {other:?}"),
+    };
+    let a = add(&mut set, 1);
+    let b = add(&mut set, 2);
+    add(&mut set, 3);
+    add(&mut set, 4);
+
+    let a_dead = peer_now();
+    set.mark_dead(a, a_dead);
+    crate::time::advance(Duration::from_secs(10));
+    let b_dead = peer_now();
+    set.mark_dead(b, b_dead);
+
+    assert_eq!(set.get(a).unwrap().dead_since(), Some(a_dead));
+    assert_eq!(
+        set.get(b).unwrap().dead_since(),
+        Some(b_dead),
+        "the Dead time is the peer-clock instant passed in"
+    );
+    assert!(
+        b_dead.saturating_duration_since(a_dead) >= Duration::from_secs(10),
+        "one advance of the peer clock separates the two Dead times"
+    );
+    assert!(
+        since(a_dead) >= Duration::from_secs(10),
+        "the same advance is seen by the peer clock the rekey timers read"
+    );
+
+    match set.admit(t, addr(5), Medium::Other, &mut ids) {
+        Ok(crate::peer::Admission::Added {
+            evicted: Some(evicted),
+            ..
+        }) => assert_eq!(evicted.addr(), &addr(1), "the path Dead longest goes first"),
+        other => panic!("expected an eviction, got {other:?}"),
+    }
 }

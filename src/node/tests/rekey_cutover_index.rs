@@ -22,10 +22,9 @@ enum SecondCutover {
     PeerFrame,
 }
 
-/// Whether `tn` maps `index` on its link to `peer` to a peer.
-fn registered(tn: &TestNode, peer: &NodeAddr, index: SessionIndex) -> bool {
-    let tid = tn.node.get_peer(peer).unwrap().transport_id().unwrap();
-    tn.node.peers_by_index.contains_key(&(tid, index.as_u32()))
+/// Whether `tn` maps `index` to a peer.
+fn registered(tn: &TestNode, index: SessionIndex) -> bool {
+    tn.node.peers_by_index.contains_key(&index.as_u32())
 }
 
 /// Node 0 cuts over a first rekey, then a second while the first session
@@ -49,8 +48,7 @@ async fn a_cutover_during_a_drain_releases_the_draining_sessions_index() {
             .previous_our_index()
             .expect("precondition: the first session drains in the previous slot");
         assert!(
-            registered(&nodes[0], &addr1, first)
-                && nodes[0].node.index_allocator.is_allocated(first),
+            registered(&nodes[0], first) && nodes[0].node.index_allocator.is_allocated(first),
             "{second:?}: control: a draining previous session's index stays registered and allocated"
         );
         heartbeat(&mut nodes[0], &addr1).await;
@@ -124,7 +122,7 @@ async fn a_cutover_during_a_drain_releases_the_draining_sessions_index() {
         );
 
         assert!(
-            !registered(&nodes[0], &addr1, first),
+            !registered(&nodes[0], first),
             "{second:?}: the first session's index must not stay registered after both drains"
         );
         assert!(

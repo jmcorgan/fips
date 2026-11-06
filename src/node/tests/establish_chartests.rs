@@ -160,8 +160,7 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
     );
     let our_index = peer.our_index().expect("promoted peer has our_index");
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.contains_key(&our_index.as_u32()),
         "fresh session index registered in peers_by_index"
     );
     assert_eq!(node.peer_count(), 1, "old peer removed, new peer added");
@@ -876,10 +875,7 @@ async fn chartest_msg1_rekey_responder_stores_pending_session() {
         assert!(p.pending_new_session().is_none());
         p.our_index().unwrap()
     };
-    assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, old_index.as_u32()))
-    );
+    assert!(node.peers_by_index.contains_key(&old_index.as_u32()));
     let index_count_before = node.index_allocator.count();
 
     // Age the live session past the 30s rekey gate (test-only seam).
@@ -928,13 +924,11 @@ async fn chartest_msg1_rekey_responder_stores_pending_session() {
     assert!(p.has_session(), "current session remains live");
 
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, old_index.as_u32())),
+        node.peers_by_index.contains_key(&old_index.as_u32()),
         "current index still registered"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, new_index.as_u32())),
+        node.peers_by_index.contains_key(&new_index.as_u32()),
         "new pending index registered"
     );
     assert_eq!(
@@ -1022,8 +1016,7 @@ async fn chartest_msg1_rekey_dual_init_we_win_drops_their_msg1() {
         "our rekey index retained"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "our rekey index still registered in peers_by_index"
     );
     assert_eq!(
@@ -1122,9 +1115,7 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
         .expect("responder allocated a pending index");
 
     assert!(
-        !node
-            .peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        !node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "abandoned rekey index unregistered"
     );
     assert!(
@@ -1132,8 +1123,7 @@ async fn chartest_msg1_rekey_dual_init_we_lose_becomes_responder() {
         "abandoned rekey index freed"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, new_index.as_u32())),
+        node.peers_by_index.contains_key(&new_index.as_u32()),
         "new pending index registered"
     );
 
@@ -1191,8 +1181,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         "control: the armed rekey holds an index"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "control: the rekey index is registered for dispatch"
     );
 
@@ -1218,9 +1207,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         "and must free exactly one"
     );
     assert!(
-        !node
-            .peers_by_index
-            .contains_key(&(transport_id, rekey_index.as_u32())),
+        !node.peers_by_index.contains_key(&rekey_index.as_u32()),
         "the abandoned cycle must clear its dispatch registration"
     );
 
@@ -1232,8 +1219,7 @@ async fn abandoned_rekey_frees_its_index_and_clears_both_registries() {
         "the established session's own index must not be freed"
     );
     assert!(
-        node.peers_by_index
-            .contains_key(&(transport_id, session_index.as_u32())),
+        node.peers_by_index.contains_key(&session_index.as_u32()),
         "the established session stays registered for dispatch"
     );
 }

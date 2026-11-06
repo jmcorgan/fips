@@ -254,7 +254,7 @@ mod async_impl {
 
                 match guard.try_io(|inner| inner.get_ref().send_to(data, dest_mac)) {
                     Ok(Ok(n)) => return Ok(n),
-                    Ok(Err(e)) => return Err(TransportError::SendFailed(format!("{}", e))),
+                    Ok(Err(e)) => return Err(crate::transport::send_error(e)),
                     Err(_would_block) => continue,
                 }
             }
@@ -458,7 +458,7 @@ mod async_impl {
             tokio::task::spawn_blocking(move || {
                 socket
                     .send_to(&data, &dest)
-                    .map_err(|e| TransportError::SendFailed(format!("{}", e)))
+                    .map_err(crate::transport::send_error)
             })
             .await
             .map_err(|e| TransportError::SendFailed(format!("spawn_blocking: {}", e)))?

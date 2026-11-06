@@ -13,8 +13,8 @@ use super::stub::{
 };
 use crate::proto::rekey::{
     Abandon, Arrival, Close, Config, CycleView, EpochTag, EvidenceKind, Input, Layer, Msg1Read,
-    MsgKind, Profile, Purpose, Reason, RecvHome, Role, SealRefusal, Slot, TagSource, Teardown,
-    Wait,
+    MsgKind, Profile, Purpose, Reason, RecvHome, Role, Route, SealRefusal, Slot, TagSource,
+    Teardown, Wait,
 };
 use crate::testutil::TestInstant;
 
@@ -210,6 +210,74 @@ fn ik_rekey_completes_through_the_attempt_the_reply_the_poll_and_the_adoption() 
     assert!(!b.m().view().current.expect("cur").k);
     conserved(&a);
     conserved(&b);
+}
+
+/// A byte-identical resend of a msg1 the responder has answered draws the
+/// held msg2 again on the route the first answer took: on the arrival path
+/// when arrival replies are on, on the established path when they are off.
+#[test]
+fn a_resent_answer_follows_the_route_of_the_first_answer() {
+    for (arrival, route) in [(true, Route::Arrival), (false, ANSWER)] {
+        let (x, y) = ordered(1, 2);
+        let params = with(Config::fmp(), |c| c.arrival = arrival);
+        let (a, mut b) = pair::<Ik>(x, y, 0, params);
+        let m1 = fresh(&a.local, &b.local);
+
+        let evs = b.recv(41_000, &m1);
+        let m2 = bytes(&last(&mut b.wire, MsgKind::Msg2));
+        let sends: Vec<_> = evs
+            .iter()
+            .filter(|e| matches!(e, Ev::Send(..)))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sends,
+            vec![Ev::Send(MsgKind::Msg2, m2.clone(), route)],
+            "arrival {arrival}: the first answer's route"
+        );
+        assert_eq!(
+            b.recv(42_000, &m1),
+            vec![Ev::Send(MsgKind::Msg2, m2, route)],
+            "arrival {arrival}: the resend follows the first answer"
+        );
+    }
+}
+
+/// With arrival replies on, a fresh eligible msg1 that arrived off the
+/// established link and was accepted because that link cannot be reached
+/// is answered on the established link with its fallback, and its resend
+/// draws the msg2 there again; one that arrived on the link is answered on
+/// its arrival path.
+#[test]
+fn with_arrival_on_an_off_link_msg1_accepted_while_unreachable_is_answered_on_the_link() {
+    for (on_link, route) in [(false, ANSWER), (true, Route::Arrival)] {
+        let (x, y) = ordered(1, 2);
+        let params = with(Config::fmp(), |c| c.arrival = true);
+        let (a, mut b) = pair::<Ik>(x, y, 0, params);
+        let m1 = fresh(&a.local, &b.local);
+        let at = Arrival {
+            on_link,
+            reachable: false,
+        };
+
+        let evs = b.recv_on(41_000, &m1, at);
+        let m2 = bytes(&last(&mut b.wire, MsgKind::Msg2));
+        let sends: Vec<_> = evs
+            .iter()
+            .filter(|e| matches!(e, Ev::Send(..)))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sends,
+            vec![Ev::Send(MsgKind::Msg2, m2.clone(), route)],
+            "on_link {on_link}: the answer's route"
+        );
+        assert_eq!(
+            b.recv_on(42_000, &m1, at),
+            vec![Ev::Send(MsgKind::Msg2, m2, route)],
+            "on_link {on_link}: the resend follows the first answer"
+        );
+    }
 }
 
 #[test]

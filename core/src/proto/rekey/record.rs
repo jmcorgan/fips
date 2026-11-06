@@ -17,7 +17,7 @@
 
 use alloc::collections::VecDeque;
 
-use super::Wire;
+use super::{Route, Wire};
 use crate::identity::NodeAddr;
 
 /// How many msg1 ephemerals the record keeps, besides the setup msg1's.
@@ -173,13 +173,19 @@ impl RecordStore {
 }
 
 /// The answer a responder pending holds: the msg1 that armed it, whole and
-/// by ephemeral, and the msg2 sent back, which a byte-identical resend of
-/// that msg1 draws again.
+/// by ephemeral, the msg2 sent back, which a byte-identical resend of that
+/// msg1 draws again, and the route that msg2 took, which the resend takes
+/// too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HeldAnswer {
     pub(crate) msg1: Digest,
     pub(crate) ephemeral: Digest,
     pub(crate) msg2: Wire,
+    /// The route of the first answer. [`Route::Arrival`] names a path by
+    /// the msg1 being answered, so a resend on it goes where the copy
+    /// arrived; that is where the first answer went while the initiator
+    /// resends on one path.
+    pub(crate) route: Route,
 }
 
 #[cfg(test)]

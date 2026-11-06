@@ -1456,6 +1456,105 @@ impl EcnConfig {
 }
 
 // ============================================================================
+// Multipath
+// ============================================================================
+
+/// The multipath path machine (`node.path.*`): whether a link may hold
+/// more than one path, and when it moves between them (the multipath
+/// draft, Sections 5.6 and 5.7, and its Appendix A for the defaults).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PathConfig {
+    /// Whether this node sends and answers path messages
+    /// (`node.path.enabled`). Off by default, which keeps every link on one
+    /// path as a node without multipath does (draft Section 8.2).
+    pub enabled: bool,
+
+    /// Round-trip samples a path needs before it is chosen over the active
+    /// path on its score; a failover does not wait for them
+    /// (`node.path.min_samples`). At least 1 and at most 255.
+    pub min_samples: u32,
+
+    /// Whether a link may hold paths of another kind than its original
+    /// path's, local beside Internet (`node.path.mix_kinds`). Off by
+    /// default, as the draft recommends (Section 5.5).
+    pub mix_kinds: bool,
+
+    /// When a link moves to a better path (`node.path.switch.*`).
+    pub switch: SwitchConfig,
+
+    /// How often paths are probed (`node.path.probe.*`).
+    pub probe: ProbeConfig,
+}
+
+impl Default for PathConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_samples: 2,
+            mix_kinds: false,
+            switch: SwitchConfig::default(),
+            probe: ProbeConfig::default(),
+        }
+    }
+}
+
+impl PathConfig {
+    /// Whether this section carries nothing but its defaults, so a file
+    /// that never named it does not gain one when written back.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// When a link moves from its active path to a better one
+/// (`node.path.switch.*`, the draft's `SWITCH_MARGIN` and `SWITCH_DWELL`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SwitchConfig {
+    /// The factor by which another path's score must beat the active
+    /// path's (`node.path.switch.margin`). A finite number of at least
+    /// 1.0; default 1.3.
+    pub margin: f64,
+
+    /// How long, in seconds, the other path must stay better by the margin
+    /// before the link moves (`node.path.switch.dwell_secs`). Default 2.
+    pub dwell_secs: u64,
+}
+
+impl Default for SwitchConfig {
+    fn default() -> Self {
+        Self {
+            margin: 1.3,
+            dwell_secs: 2,
+        }
+    }
+}
+
+/// The probe intervals of a link's paths (`node.path.probe.*`, the draft's
+/// `PATH_PROBE_INTERVAL_ACTIVE` and `PATH_PROBE_INTERVAL_STANDBY`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProbeConfig {
+    /// The probe interval, in milliseconds, of a path either end sends
+    /// data on (`node.path.probe.active_ms`). Default 200.
+    pub active_ms: u64,
+
+    /// The probe interval, in milliseconds, of a Live or Suspect standby
+    /// path (`node.path.probe.standby_ms`). Default 1000.
+    pub standby_ms: u64,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            active_ms: 200,
+            standby_ms: 1000,
+        }
+    }
+}
+
+// ============================================================================
 // Node Configuration (Root)
 // ============================================================================
 
@@ -1585,6 +1684,11 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "NetmonConfig::is_default")]
     pub netmon: NetmonConfig,
 
+    /// The multipath path machine (`node.path.*`). Skipped when written
+    /// back at its defaults, for the reason `netmon` is.
+    #[serde(default, skip_serializing_if = "PathConfig::is_default")]
+    pub path: PathConfig,
+
     /// Log level (`node.log_level`). Case-insensitive.
     /// Valid values: trace, debug, info, warn, error. Default: info.
     #[serde(default)]
@@ -1645,6 +1749,7 @@ impl Default for NodeConfig {
             ecn: EcnConfig::default(),
             rekey: RekeyConfig::default(),
             netmon: NetmonConfig::default(),
+            path: PathConfig::default(),
             log_level: None,
             log_file: None,
             log_max_size_mb: None,

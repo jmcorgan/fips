@@ -734,6 +734,17 @@ async fn worker_heartbeat(
     counter: u64,
 ) {
     let tid = nodes[1].transport_id;
+    heartbeat_on(nodes, slot, tid, link, counter).await;
+}
+
+/// [`worker_heartbeat`] arriving on node 1's transport `tid`.
+async fn heartbeat_on(
+    nodes: &mut [TestNode],
+    slot: crate::node::dataplane::LinkSlot,
+    tid: TransportId,
+    link: &crate::transport::TransportAddr,
+    counter: u64,
+) {
     let n0 = *nodes[0].node.node_addr();
     // A 4-byte inner timestamp, then the Heartbeat message type.
     let plaintext = [0u8, 0, 0, 0, 0x51];
@@ -765,7 +776,11 @@ async fn a_verified_link_stops_being_protected_when_its_peer_disconnects() {
         crate::proto::fmp::wire::DisconnectReason::Shutdown,
     )
     .encode();
-    nodes[1].node.dispatch_link_message(&n0, &bye, false).await;
+    let tid = nodes[1].transport_id;
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bye, false, (tid, &link), bye.len())
+        .await;
     assert!(
         nodes[1].node.get_peer(&n0).is_none(),
         "node 1 dropped the peer"
@@ -1138,7 +1153,11 @@ async fn a_malformed_disconnect_keeps_its_link_verified() {
         crate::proto::fmp::Disconnect::decode(&bad[1..]).is_err(),
         "the payload really is malformed"
     );
-    nodes[1].node.dispatch_link_message(&n0, &bad, false).await;
+    let tid = nodes[1].transport_id;
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bad, false, (tid, &link), bad.len())
+        .await;
     assert!(
         nodes[1].node.get_peer(&n0).is_some(),
         "node 1 keeps the peer"
@@ -1158,7 +1177,11 @@ async fn a_frame_processed_after_its_peer_left_does_not_verify_the_link() {
         crate::proto::fmp::wire::DisconnectReason::Shutdown,
     )
     .encode();
-    nodes[1].node.dispatch_link_message(&n0, &bye, false).await;
+    let tid = nodes[1].transport_id;
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bye, false, (tid, &link), bye.len())
+        .await;
     assert!(nodes[1].node.get_peer(&n0).is_none());
     assert_eq!(verified_at(&nodes[1], &link).await, Some(false));
 
@@ -1531,7 +1554,11 @@ async fn a_link_whose_peer_disconnected_gets_its_grace_again() {
         crate::proto::fmp::wire::DisconnectReason::Shutdown,
     )
     .encode();
-    nodes[1].node.dispatch_link_message(&n0, &bye, false).await;
+    let tid = nodes[1].transport_id;
+    nodes[1]
+        .node
+        .dispatch_link_message(&n0, &bye, false, (tid, &link), bye.len())
+        .await;
     assert!(
         nodes[1].node.get_peer(&n0).is_none(),
         "node 1 dropped the peer"
@@ -1690,4 +1717,123 @@ async fn a_genuine_ble_link_is_dialled_while_impostor_links_claiming_its_node_ar
 
     drop(impostors);
     cleanup_nodes(&mut nodes).await;
+}
+
+/// Give node 1 a second started BLE transport, as a second adapter does, and
+/// return its id.
+async fn add_second_ble(nodes: &mut [TestNode]) -> TransportId {
+    let second = TransportId::new(2);
+    let io = MockBleIo::new("hci1", ble_addr(77));
+    let (tx, _rx) = packet_channel(256);
+    let mut transport = BleTransport::new(second, None, base_config(), io, tx);
+    transport.set_local_pubkey(nodes[1].node.identity().pubkey().serialize());
+    transport.start_async().await.unwrap();
+    nodes[1]
+        .node
+        .transports
+        .insert(second, TransportHandle::Ble(transport));
+    second
+}
+
+/// An authentic frame of the peer's session arriving on a second BLE
+/// transport does not move the peer, so it must not withdraw the
+/// verification of the link the peer is still bound to: that link would be
+/// left evictable by a flood of newcomers.
+#[tokio::test]
+async fn a_frame_on_a_second_ble_transport_keeps_the_bound_link_verified() {
+    let mut nodes = peered_pair().await;
+    let n0 = *nodes[0].node.node_addr();
+    let n1 = *nodes[1].node.node_addr();
+    let link = nodes[1].addr.clone();
+    let second = add_second_ble(&mut nodes).await;
+
+    nodes[0]
+        .node
+        .send_tree_announce_to_peer(&n1)
+        .await
+        .expect("a frame to node 1");
+    assert!(
+        until(|| !nodes[1].packet_rx.is_empty()).await,
+        "node 1 reads it"
+    );
+    let mut frame = nodes[1].packet_rx.try_recv().unwrap();
+    frame.transport_id = second;
+    frame.remote_addr = ble_addr(91).to_transport_addr();
+    nodes[1].node.handle_encrypted_frame(frame).await;
+
+    let peer = nodes[1].node.get_peer(&n0).unwrap();
+    assert_eq!(
+        peer.transport_id(),
+        Some(nodes[1].transport_id),
+        "the peer is not moved"
+    );
+    assert_eq!(
+        verified_at(&nodes[1], &link).await,
+        Some(true),
+        "the link node 0 is still bound to stays verified"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The decrypt worker's path keeps the bound link verified the same way when
+/// the frame it checked arrived on a second BLE transport.
+#[tokio::test]
+async fn a_decrypt_worker_frame_on_a_second_ble_transport_keeps_the_bound_link_verified() {
+    let mut nodes = peered_pair().await;
+    let n0 = *nodes[0].node.node_addr();
+    let link = nodes[1].addr.clone();
+    let second = add_second_ble(&mut nodes).await;
+
+    let elsewhere = ble_addr(91).to_transport_addr();
+    heartbeat_on(
+        &mut nodes,
+        crate::node::dataplane::LinkSlot::Current,
+        second,
+        &elsewhere,
+        1_000_000,
+    )
+    .await;
+
+    let peer = nodes[1].node.get_peer(&n0).unwrap();
+    assert_eq!(
+        peer.transport_id(),
+        Some(nodes[1].transport_id),
+        "the peer is not moved"
+    );
+    assert_eq!(
+        verified_at(&nodes[1], &link).await,
+        Some(true),
+        "the link node 0 is still bound to stays verified"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The node tells the path machine that a BLE transport's paths are BLE
+/// ones, which hold one path per binding (multipath v1 draft, Section 5.1),
+/// and that every other transport's are not.
+#[tokio::test]
+async fn a_ble_transport_holds_its_paths_as_ble() {
+    use crate::node::handlers::path::NodeFacts;
+    use crate::transport::loopback::{LoopbackTransport, new_registry};
+    use fips_core::proto::path::{Facts, Kind, Medium};
+
+    let mut tn = make_test_node_ble(1).await;
+    let ble = tn.transport_id;
+    let loopback = TransportId::new(2);
+    let lo = LoopbackTransport::new(
+        loopback,
+        crate::transport::TransportAddr::from_string("loopback:ble-facts"),
+        new_registry(),
+    );
+    tn.node
+        .transports
+        .insert(loopback, TransportHandle::Loopback(lo));
+    let facts = NodeFacts {
+        transports: &tn.node.transports,
+        denied: false,
+    };
+    assert_eq!(facts.medium(ble), Medium::Ble);
+    assert_eq!(facts.kind(ble), Some(Kind::Local));
+    assert_eq!(facts.medium(loopback), Medium::Other);
+    cleanup_nodes(std::slice::from_mut(&mut tn)).await;
 }

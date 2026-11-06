@@ -46,6 +46,57 @@ const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
 /// Default UDP send buffer size (2 MB).
 const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 
+/// A transport's part in a link's paths (`role`), the operator's local
+/// policy of the multipath draft (Section 5.5, the note). Only a node with
+/// `node.path.enabled` acts on it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportRole {
+    /// No new path is made on this transport; a path held on it from
+    /// before ranks last.
+    Never,
+    /// Carries a link only while no `normal` or `preferred` path is Live.
+    Backup,
+    /// The default.
+    #[default]
+    Normal,
+    /// Carries a link whenever it is Live and scores within the switch
+    /// margin of the best path.
+    Preferred,
+}
+
+impl TransportRole {
+    /// The configuration spelling: `never`, `backup`, `normal` or
+    /// `preferred`, the strings serde reads and writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Backup => "backup",
+            Self::Normal => "normal",
+            Self::Preferred => "preferred",
+        }
+    }
+
+    /// Whether this is the default role, so a transport that names none
+    /// does not gain one when the configuration is written back.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Whether a transport's paths run over a local medium or face the
+/// Internet (`kind`, multipath draft Section 5.5). Set on UDP or TCP, it
+/// overrides the kind the peer's address implies; every other transport
+/// has the kind its medium fixes, and refuses the setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PathKind {
+    /// A local medium or a local address.
+    Local,
+    /// An Internet-facing address.
+    Internet,
+}
+
 /// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +172,17 @@ pub struct UdpConfig {
     /// work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_connections: Option<bool>,
+
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
+    /// The kind of this transport's paths (`kind: local | internet`), in
+    /// place of the kind the peer's address implies. Default: unset. Read
+    /// only with `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PathKind>,
 }
 
 impl UdpConfig {
@@ -337,6 +399,12 @@ pub struct EthernetConfig {
     /// no value of this field makes a missing interface fatal at startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional: Option<bool>,
+
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
 }
 
 impl EthernetConfig {
@@ -474,6 +542,17 @@ pub struct TcpConfig {
     /// where the public IP isn't bindable on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_addr: Option<String>,
+
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
+    /// The kind of this transport's paths (`kind: local | internet`), in
+    /// place of the kind the peer's address implies. Default: unset. Read
+    /// only with `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PathKind>,
 }
 
 impl TcpConfig {
@@ -639,6 +718,12 @@ pub struct TorConfig {
     /// will use to reach this onion. Default: 443.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertised_port: Option<u16>,
+
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
 }
 
 /// Directory-mode onion service configuration.
@@ -812,6 +897,12 @@ pub struct BleConfig {
     /// this long before probing the same address again. Default: 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_cooldown_secs: Option<u64>,
+
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
 }
 
 impl BleConfig {
@@ -921,6 +1012,12 @@ pub struct NymConfig {
     /// Defaults to 120.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_timeout_secs: Option<u64>,
+
+    /// This transport's part in a link's paths (`role: never | backup |
+    /// normal | preferred`). Default: normal. Read only with
+    /// `node.path.enabled`.
+    #[serde(default, skip_serializing_if = "TransportRole::is_default")]
+    pub role: TransportRole,
 }
 
 impl NymConfig {

@@ -4,9 +4,10 @@
 //! A restart means the same thing however it is learned. The process that
 //! held the session on record has gone, so what this node held about it is
 //! stale: the end-to-end session, the spanning-tree declaration and the
-//! filter it last accepted, and the clamp entry the session tightened. Each
-//! test drives a restart over loopback and asserts that both ends end up on
-//! one session with that state reset and announced again.
+//! filter it last accepted, and the clamp entry the session tightened; and
+//! the operator's pin on the link ends, as it does when a restart builds a
+//! new link. Each test drives a restart over loopback and asserts that both
+//! ends end up on one session with that state reset and announced again.
 
 use super::*;
 use crate::node::tests::rekey_parity::{
@@ -319,4 +320,61 @@ async fn outbound_completion_with_a_changed_epoch_replaces_the_machine() {
 
         cleanup_nodes(&mut nodes).await;
     }
+}
+
+/// Our rekey msg2 reveals that B restarted while A's link to B was pinned:
+/// the link is kept, and the pin ends, as it does when a restart builds a
+/// new link.
+#[tokio::test]
+async fn a_pin_ends_when_a_rekey_msg2_reveals_the_peer_restarted() {
+    let mut nodes = linked_pair(
+        rekey_config(REKEY_AFTER_SECS),
+        rekey_config(REKEY_AFTER_SECS),
+    )
+    .await;
+    let b_addr = *nodes[1].node.node_addr();
+    let (transport, addr) = {
+        let p = nodes[0]
+            .node
+            .get_peer(&b_addr)
+            .unwrap()
+            .active_path()
+            .unwrap();
+        (p.transport_id(), p.addr().clone())
+    };
+    nodes[0]
+        .node
+        .step_path(
+            &b_addr,
+            fips_core::proto::path::Input::Pin {
+                transport,
+                addr: Some(addr),
+            },
+        )
+        .await;
+    let link = nodes[0].node.get_peer(&b_addr).unwrap().link_id();
+    assert!(
+        nodes[0]
+            .node
+            .get_peer(&b_addr)
+            .unwrap()
+            .bundle()
+            .unwrap()
+            .pin()
+            .is_some(),
+        "precondition: A pinned its link to B"
+    );
+    let mut r = reveal_restart(nodes).await;
+    cutover(&mut r.nodes[0], &b_addr).await;
+    let peer = r.nodes[0].node.get_peer(&b_addr).unwrap();
+    assert_eq!(
+        peer.link_id(),
+        link,
+        "precondition: the link is kept across the restart"
+    );
+    assert!(
+        peer.bundle().unwrap().pin().is_none(),
+        "the pin ends when the peer restarted"
+    );
+    cleanup_nodes(&mut r.nodes).await;
 }

@@ -57,43 +57,57 @@ pub(super) async fn lock_large_network_test() -> tokio::sync::MutexGuard<'static
 }
 
 /// Register a second loopback address that delivers to the node already
-/// listening on `existing`.
+/// listening on `existing`, as received on its transport `transport_id`.
 ///
 /// Gives a test node a second reachable path without a second transport:
 /// packets sent to the returned address land in the same node's receive
-/// channel. Used by the alternate-path tests, whose point is that the node
-/// dialing it must treat the new address as a different path to the same
-/// peer.
-pub(super) fn add_loopback_alias(existing: &TransportAddr) -> TransportAddr {
-    let tx = LOOPBACK_REGISTRY
+/// channel, stamped with `transport_id`. Used by the alternate-path tests,
+/// whose point is that the node dialing it must treat the new address as a
+/// different path to the same peer; they pass the transport `existing` is
+/// on, and a test that gives the node a second transport passes that one's.
+pub(super) fn add_loopback_alias(
+    existing: &TransportAddr,
+    transport_id: TransportId,
+) -> TransportAddr {
+    let (_, tx) = LOOPBACK_REGISTRY
         .lock()
         .unwrap()
         .get(existing)
         .expect("existing loopback address must be registered")
         .clone();
     let alias = next_loopback_addr();
-    LOOPBACK_REGISTRY.lock().unwrap().insert(alias.clone(), tx);
+    LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(alias.clone(), (transport_id, tx));
     alias
 }
 
 /// Register a new loopback address whose packets land in the returned
-/// channel rather than in any node's.
+/// channel rather than in any node's, stamped with `transport_id`, the
+/// transport of the node the test hands them to.
 ///
 /// A test that hands what arrives there to a node on its own sees which of
 /// the node's addresses a peer sent each packet to, which the node's own
 /// receive channel does not record.
-pub(super) fn loopback_tap() -> (
+pub(super) fn loopback_tap(
+    transport_id: TransportId,
+) -> (
     TransportAddr,
     tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
 ) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
     let addr = next_loopback_addr();
-    LOOPBACK_REGISTRY.lock().unwrap().insert(addr.clone(), tx);
+    LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(addr.clone(), (transport_id, tx));
     (addr, rx)
 }
 
 /// Hold back every packet sent to `node` from now on by `delay`, or discard
-/// them all when `delay` is `None`.
+/// them all when `delay` is `None`. Packets that get through keep the
+/// transport id registered for `node.addr`.
 ///
 /// Stands in for a slow receive path (a real socket on a stalled host) on a
 /// loopback node: the loopback transport looks its destination up in the
@@ -104,7 +118,7 @@ pub(super) fn loopback_tap() -> (
 /// keeps the forwarder's sender alive, so the forwarder ends only when the
 /// test's runtime is dropped.
 pub(super) fn delay_loopback_delivery(node: &TestNode, delay: Option<Duration>) {
-    let inner = LOOPBACK_REGISTRY
+    let (transport_id, inner) = LOOPBACK_REGISTRY
         .lock()
         .unwrap()
         .get(&node.addr)
@@ -124,7 +138,7 @@ pub(super) fn delay_loopback_delivery(node: &TestNode, delay: Option<Duration>) 
     LOOPBACK_REGISTRY
         .lock()
         .unwrap()
-        .insert(node.addr.clone(), tx);
+        .insert(node.addr.clone(), (transport_id, tx));
 }
 
 /// Build a node that stands for `old` after a restart: the same identity
@@ -139,7 +153,7 @@ pub(super) fn restarted_node(old: &TestNode, config: crate::config::Config) -> T
     LOOPBACK_REGISTRY
         .lock()
         .unwrap()
-        .insert(old.addr.clone(), tx);
+        .insert(old.addr.clone(), (old.transport_id, tx));
     let loopback = LoopbackTransport::new(
         old.transport_id,
         old.addr.clone(),
@@ -197,7 +211,10 @@ pub(super) async fn make_test_node_with_config(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedPacket>();
     let addr = next_loopback_addr();
 
-    LOOPBACK_REGISTRY.lock().unwrap().insert(addr.clone(), tx);
+    LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(addr.clone(), (transport_id, tx));
 
     let loopback =
         LoopbackTransport::with_mtu(transport_id, addr.clone(), mtu, LOOPBACK_REGISTRY.clone());

@@ -189,6 +189,19 @@ link down. What it does depends on whether the link is live:
   address is dialled alongside the existing link, and the response carries
   `refreshed: true`. This is the failover path.
 
+With multipath enabled (`node.path.enabled`), a peer that has shown it
+implements multipath is live until nothing has been heard from it on any of
+its paths for `node.link_dead_timeout_secs`, and the address of a `connect`
+to a live peer is held as a path candidate instead of being dialled: the
+link probes it, and uses it as a path once it answers. The response carries
+`refreshed: false` and `detail: "peer live, address held as a path
+candidate"`, or `detail: "peer live, not dialled"` when the address is
+already one of the link's paths. To move such a link to an address on a
+transport its path already answers on, disconnect and then connect. For a
+peer not known to implement multipath the address is also held as a
+candidate, which starts the probes that find out, and the response is the
+one above.
+
 A `connect` that starts an ordinary dial to a peer the node does not yet hold
 reports `refreshed: false` and no `detail`.
 

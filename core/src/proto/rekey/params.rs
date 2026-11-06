@@ -102,7 +102,9 @@ pub struct Config {
     /// The initiator's cutover delay of a next-only delayed-cutover
     /// profile.
     pub delay: Duration,
-    /// Send a responder's msg2 on the msg1's arrival path (multipath).
+    /// Send a responder's msg2 on the msg1's arrival path (multipath), for
+    /// a msg1 that arrived on the established link; one accepted off a
+    /// link that cannot be reached is answered on the established link.
     pub arrival: bool,
 }
 
@@ -368,9 +370,8 @@ impl Params {
     /// The abandon backoff after `n` abandoned attempts, before its random
     /// term: one check doubled per abandon, capped at the pending hold.
     pub(crate) fn backoff(&self, n: u8) -> Duration {
-        let shift = u32::from(n.saturating_sub(1));
-        let factor = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
-        self.cfg.check.saturating_mul(factor).min(self.cfg.hold)
+        let exponent = u32::from(n.saturating_sub(1));
+        crate::time::backoff(exponent, self.cfg.check, self.cfg.hold)
     }
 }
 

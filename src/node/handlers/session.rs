@@ -66,21 +66,16 @@ use tracing::{debug, info, trace, warn};
 pub(in crate::node) const PATH_MTU_RELEASE_MIN_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(1000);
 
-/// Bytes the link layer adds to an encoded `SessionDatagram` on its way to the
-/// wire: the established FMP header, the 4-byte session-relative timestamp and
-/// the AEAD tag. Mirrors the buffer `send_encrypted_link_message_with_ce`
-/// builds.
+/// Wire size of an encoded `SessionDatagram` of `encoded_len` bytes: the
+/// datagram is a link message, so the link layer adds the established frame's
+/// overhead around it, as the buffer `send_encrypted_link_message_with_ce`
+/// builds does.
 ///
-/// Spelled out in full rather than through the `crate::proto::fmp::wire`
-/// import above, which is `#[cfg(unix)]`. This constant feeds `link_wire_len`,
-/// whose caller `send_session_datagram` is compiled on every platform, so
-/// taking the name from that import fails to build on Windows.
-const LINK_FRAME_OVERHEAD: usize =
-    crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE + 4 + crate::noise::TAG_SIZE;
-
-/// Wire size of an encoded `SessionDatagram` of `encoded_len` bytes.
+/// The constant is named by its full path rather than through the
+/// `crate::proto::fmp::wire` import above, which is `#[cfg(unix)]`: the caller
+/// `send_session_datagram` is compiled on every platform.
 fn link_wire_len(encoded_len: usize) -> usize {
-    encoded_len + LINK_FRAME_OVERHEAD
+    encoded_len + crate::proto::fmp::wire::FRAME_OVERHEAD
 }
 
 /// Divisor giving the share of the session table that unauthenticated
@@ -2841,6 +2836,7 @@ impl Node {
             }),
             socket,
             dest_addr: socket_addr,
+            transport: transport_id,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_socket,
             stats,

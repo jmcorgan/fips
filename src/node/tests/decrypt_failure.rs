@@ -1,8 +1,8 @@
 //! Tests for the consecutive-decrypt-failure threshold.
 //!
-//! Covers `Node::handle_decrypt_failure` (in `node/dataplane/encrypted.rs`),
-//! which increments `ActivePeer::increment_decrypt_failures` on each AEAD
-//! verification failure and logs one warning when the count reaches
+//! Covers `Node::charge_failure` (in `node/dataplane/encrypted.rs`), which
+//! counts each AEAD verification failure on the link's path it arrived on
+//! and logs one warning when that path's count reaches
 //! `DECRYPT_FAILURE_THRESHOLD`. The peer is kept: a frame that does not
 //! authenticate names its peer only by a receiver index sent in clear, so
 //! anyone who has seen the index can produce the failures. The warning is
@@ -33,7 +33,7 @@ fn threshold_warnings(logs: &crate::testutil::LogCapture) -> usize {
 
 /// Assert the peer and its index entry are still held, and return its
 /// consecutive failure count.
-fn held_count(node: &Node, node_addr: &NodeAddr, key: &(TransportId, u32), when: &str) -> u32 {
+fn held_count(node: &Node, node_addr: &NodeAddr, key: &u32, when: &str) -> u32 {
     let count = node
         .get_peer(node_addr)
         .unwrap_or_else(|| panic!("peer present {when}"))
@@ -60,6 +60,8 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
     // so peers_by_index is populated by promote_connection.
     let identity = seed_completed_connection(&mut node, link_id, transport_id, 1_000);
     let node_addr = *identity.node_addr();
+    // The original pair `seed_completed_connection` gives the link.
+    let addr = TransportAddr::from_string("127.0.0.1:5000");
 
     node.promote_connection(link_id, identity, 2_000).unwrap();
 
@@ -68,7 +70,7 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("promoted peer must have our_index");
-    let key = (transport_id, our_index.as_u32());
+    let key = our_index.as_u32();
     assert_eq!(
         held_count(&node, &node_addr, &key, "after promote"),
         0,
@@ -78,7 +80,7 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
     let (logs, guard) = crate::testutil::capture_logs_scoped();
 
     for expected in 1..THRESHOLD {
-        node.handle_decrypt_failure(&node_addr);
+        node.charge_failure(&node_addr, transport_id, &addr);
         assert_eq!(
             held_count(&node, &node_addr, &key, "below the threshold"),
             expected,
@@ -91,7 +93,7 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
         "no threshold warning before the threshold-th failure"
     );
 
-    node.handle_decrypt_failure(&node_addr);
+    node.charge_failure(&node_addr, transport_id, &addr);
     assert_eq!(
         held_count(&node, &node_addr, &key, "at the threshold"),
         THRESHOLD
@@ -103,7 +105,7 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
     );
 
     for expected in THRESHOLD + 1..=2 * THRESHOLD {
-        node.handle_decrypt_failure(&node_addr);
+        node.charge_failure(&node_addr, transport_id, &addr);
         assert_eq!(
             held_count(&node, &node_addr, &key, "past the threshold"),
             expected,
@@ -120,9 +122,9 @@ fn reaching_the_decrypt_failure_threshold_logs_one_warning_and_keeps_the_peer() 
     // An authenticated frame resets the counter; a later run warns again.
     node.get_peer_mut(&node_addr)
         .unwrap()
-        .reset_decrypt_failures();
+        .authentic(transport_id, &addr);
     for _ in 0..THRESHOLD {
-        node.handle_decrypt_failure(&node_addr);
+        node.charge_failure(&node_addr, transport_id, &addr);
     }
     assert_eq!(
         held_count(&node, &node_addr, &key, "after a second run"),
@@ -178,11 +180,11 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("promoted peer must have our_index");
-    let key = (transport_id, our_index.as_u32());
+    let key = our_index.as_u32();
     assert_eq!(dataplane_drops(&node), (Some(0), Some(0)));
 
     let unknown = our_index.as_u32().wrapping_add(1);
-    assert!(!node.peers_by_index.contains_key(&(transport_id, unknown)));
+    assert!(!node.peers_by_index.contains_key(&unknown));
     node.handle_encrypted_frame(frame_naming(transport_id, unknown))
         .await;
     assert_eq!(
@@ -193,7 +195,7 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
 
     let orphaned = our_index.as_u32().wrapping_add(2);
     let gone = NodeAddr::from_bytes([0x77; 16]);
-    node.peers_by_index.insert((transport_id, orphaned), gone);
+    node.peers_by_index.insert(orphaned, gone);
     node.handle_encrypted_frame(frame_naming(transport_id, orphaned))
         .await;
     assert_eq!(
@@ -202,7 +204,7 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
         "a frame naming an index left on a removed peer must be counted as orphaned"
     );
     assert!(
-        !node.peers_by_index.contains_key(&(transport_id, orphaned)),
+        !node.peers_by_index.contains_key(&orphaned),
         "the orphaned entry is removed with the drop"
     );
 

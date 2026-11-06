@@ -15,6 +15,8 @@ mod forwarding;
 mod peer_actions;
 mod rx_loop;
 
-#[cfg(all(test, ble_available))]
+#[cfg(test)]
+pub(in crate::node) use encrypted::DECRYPT_FAILURE_THRESHOLD;
+#[cfg(all(test, any(ble_available, target_os = "linux", target_os = "macos")))]
 pub(in crate::node) use encrypted::LinkSlot;
 pub(in crate::node) use peer_actions::PeerActionCtx;

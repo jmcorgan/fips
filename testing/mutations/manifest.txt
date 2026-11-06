@@ -7,13 +7,13 @@
 # picks one `defect:` assertion of a test that has more than one. See run.sh.
 move-keeps-old-pair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	s takes the msg2's transport and source address as l's
 move-keeps-old-pair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	s takes the msg2's transport and source address as l's
-move-keeps-old-pair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	src/node/tests/ble.rs:994
+move-keeps-old-pair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 keeps L2, the link its winning handshake ran on, pooled
 move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first	defect: crossed TCP dials lost the peering
 move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first	defect: crossed TCP dials lost the peering
 move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
 move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_from_another_address_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer	defect: Err(
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: the audit finds only the dialer's documented breach
+move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer	defect: the audit finds only the dialer's documented breach
 ignore-own-dial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering	the responder must have decrypted the dialer's frames on the peering that replaced the first
 ignore-own-dial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer	defect: Err(
 ignore-own-dial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(

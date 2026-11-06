@@ -301,6 +301,11 @@ impl EthernetTransport {
         self.name.as_deref()
     }
 
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
+    }
+
     /// Get the interface name.
     pub fn interface_name(&self) -> &str {
         &self.interface
@@ -1652,6 +1657,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: Some(optional),
+            role: crate::config::TransportRole::default(),
         };
         let (tx, rx) = super::super::packet_channel(8);
         (
@@ -1836,6 +1842,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: None,
+            role: crate::config::TransportRole::default(),
         };
         let (tx, _rx) = super::super::packet_channel(8);
         let mut eth = EthernetTransport::new(TransportId::new(9), None, config, tx);
@@ -2416,6 +2423,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: Some(true),
+            role: crate::config::TransportRole::default(),
         };
         let (tx, _rx) = super::super::packet_channel(8);
         let mut eth = EthernetTransport::new(TransportId::new(11), None, config, tx);

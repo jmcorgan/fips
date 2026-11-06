@@ -6,6 +6,7 @@ mod workers;
 use super::{Node, NodeError, NodeState};
 use supervisor::{Action, Child, Event, PeeringDesired, SupervisorFsm};
 
+use super::handlers::path_intake::{Feed, mdns_lane};
 use super::peering::lan::{
     KnownLabels, LanOffer, MAX_PENDING_LAN_CANDIDATES, PendingLan, PendingPair, lan_target_on_link,
 };
@@ -57,6 +58,11 @@ enum AltDial {
     /// The peer is quiet but has no concrete candidate to dial.
     NoNewPath,
 }
+
+/// The `detail` a control-API `connect` reports for a capable peer whose
+/// link is live, when the address it names is now held as a path
+/// candidate.
+const CANDIDATE_DETAIL: &str = "peer live, address held as a path candidate";
 
 /// The `detail` a control-API `connect` reports for a held peer whose link
 /// is live.
@@ -210,6 +216,7 @@ impl Node {
         new_config.peers = new_by_addr.into_values().collect();
         self.replace_context(|ctx| ctx.config = std::sync::Arc::new(new_config));
         self.rebase_aliases().await;
+        self.offer_configs().await;
 
         for peer_config in added_configs {
             outcome.added += 1;
@@ -634,6 +641,11 @@ impl Node {
         // `poll_pending_connects`), mirroring the connection's own lifetime.
         let mut machine = PeerMachine::new_outbound(link_id, peer_identity, Self::leg_stamp());
         machine.set_dial_origin(origin);
+        machine.note_held(
+            self.peers
+                .get(peer_identity.node_addr())
+                .map(|p| p.link_id()),
+        );
         self.peer_machines.insert(link_id, machine);
 
         if is_connection_oriented {
@@ -913,8 +925,18 @@ impl Node {
     /// Called from the tick handler. Iterates operational transports,
     /// drains their discovery buffers, and initiates connections to
     /// newly discovered peers (if auto_connect is enabled).
+    ///
+    /// With multipath enabled, a beacon of a peer the node holds a link
+    /// with is first a path candidate for that link, on every transport
+    /// whether it auto-connects or not (multipath v1 draft, Section 5.5:
+    /// no transport setting forbids probing a peer the node is linked
+    /// with), and the listings' silences are checked once per poll. The
+    /// beacon then meets the dial gate as before, so a live peer's beacon
+    /// is never dialled.
     pub(super) async fn poll_transport_discovery(&mut self) {
         let self_node_addr = *self.identity().node_addr();
+        let intake = self.config().node.path.enabled;
+        let mut heard: Vec<(NodeAddr, TransportId, TransportAddr)> = Vec::new();
 
         // Drain each auto-connect transport's discovery buffer (the I/O) and
         // apply the driver-only prefilters that read live path-granular state the
@@ -933,7 +955,8 @@ impl Node {
             if !transport.is_operational() {
                 continue;
             }
-            if !transport.auto_connect() {
+            let auto = transport.auto_connect();
+            if !auto && !intake {
                 // Still drain the buffer so it doesn't grow unbounded.
                 let _ = transport.discover();
                 continue;
@@ -957,6 +980,12 @@ impl Node {
                 let candidate_transport_id = *transport_id;
                 let remote_addr = peer.addr;
                 let connected = self.peers.contains_key(&node_addr);
+                if intake && connected {
+                    heard.push((node_addr, candidate_transport_id, remote_addr.clone()));
+                }
+                if !auto {
+                    continue;
+                }
 
                 if connected {
                     // Active peer: skip every candidate while the link we
@@ -1016,6 +1045,14 @@ impl Node {
                 });
             }
         }
+
+        for (node_addr, transport_id, remote_addr) in heard {
+            self.intake(&node_addr, Feed::Beacon, transport_id, remote_addr)
+                .await;
+        }
+        self.offer_configs().await;
+        self.intake_expire().await;
+        self.reread().await;
 
         if transport_neighbors.is_empty() {
             return;
@@ -1405,6 +1442,12 @@ impl Node {
         let configured = self.configured_node_addrs();
         let known = self.known_lan_labels();
         let now_ms = self.uptime().as_millis() as u64;
+        let lanes = if self.config().node.path.enabled {
+            self.udp_lanes()
+        } else {
+            Vec::new()
+        };
+        let mut linked: Vec<(NodeAddr, TransportId, TransportAddr)> = Vec::new();
 
         // No await in this block: the thread-local generator is not `Send`.
         {
@@ -1455,6 +1498,18 @@ impl Node {
                     );
                     continue;
                 }
+                // A linked peer's advert is a path candidate on the UDP
+                // instance on its interface (multipath v1 draft, Section
+                // 5.4, the note); its offer to the LAN set below stays.
+                if self.peers.contains_key(identity.node_addr())
+                    && let Some(lane) = mdns_lane(&lanes, peer.addr, &peer.interfaces)
+                {
+                    linked.push((
+                        *identity.node_addr(),
+                        lane,
+                        TransportAddr::from_socket_addr(peer.addr),
+                    ));
+                }
                 let pair = PendingPair {
                     node: *identity.node_addr(),
                     identity,
@@ -1496,6 +1551,9 @@ impl Node {
             }
         }
 
+        for (node_addr, lane, addr) in linked {
+            self.intake(&node_addr, Feed::Mdns, lane, addr).await;
+        }
         self.dial_pending_lan(on_link).await;
     }
 
@@ -2587,6 +2645,96 @@ impl Node {
             .collect()
     }
 
+    /// The transport and address a configured peer address dials to, or
+    /// `None` (logged at debug) if no operational transport can carry it.
+    ///
+    /// The transport field may name a specific instance (`"udp/aware"`):
+    /// the type half picks the resolver, the instance half is handed to
+    /// whichever resolver can honour it, and only the UDP one can. The
+    /// `"nat"` pseudo-address is not resolved here; callers handle it.
+    pub(in crate::node) fn resolve_peer_address(
+        &self,
+        addr: &PeerAddress,
+    ) -> Option<(TransportId, TransportAddr)> {
+        let spec = addr.spec();
+        if addr.transport == "ethernet" {
+            return match self.resolve_ethernet_addr(&addr.addr) {
+                Ok(result) => Some(result),
+                Err(e) => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        error = %e,
+                        "Failed to resolve Ethernet address"
+                    );
+                    None
+                }
+            };
+        }
+        if addr.transport == "ble" {
+            #[cfg(ble_available)]
+            {
+                return match self.resolve_ble_addr(&addr.addr) {
+                    Ok(result) => Some(result),
+                    Err(e) => {
+                        debug!(
+                            transport = %addr.transport,
+                            addr = %addr.addr,
+                            error = %e,
+                            "Failed to resolve BLE address"
+                        );
+                        None
+                    }
+                };
+            }
+            #[cfg(not(ble_available))]
+            {
+                debug!(transport = %addr.transport, "BLE transport not available on this build");
+                return None;
+            }
+        }
+        let tid = if spec.kind == "udp"
+            && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
+        {
+            match self.find_udp_transport_for_remote_addr(remote_socket_addr, spec.instance) {
+                Some((id, _)) => id,
+                None => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        "No compatible operational UDP transport for address"
+                    );
+                    return None;
+                }
+            }
+        } else if spec.instance.is_some() {
+            // Only the UDP resolver above can honour an instance name.
+            // Matching any instance of the type here would be the silent
+            // wrong-lane substitution this whole mechanism exists to
+            // prevent, so refuse instead.
+            debug!(
+                transport = %addr.transport,
+                addr = %addr.addr,
+                "Instance-qualified address for a transport type that \
+                 does not support instance selection"
+            );
+            return None;
+        } else {
+            match self.find_transport_for_type(spec.kind) {
+                Some(id) => id,
+                None => {
+                    debug!(
+                        transport = %addr.transport,
+                        addr = %addr.addr,
+                        "No operational transport for address type"
+                    );
+                    return None;
+                }
+            }
+        };
+        Some((tid, TransportAddr::from_string(&addr.addr)))
+    }
+
     async fn attempt_peer_address_list(
         &mut self,
         peer_config: &PeerConfig,
@@ -2628,82 +2776,8 @@ impl Node {
                 continue;
             }
 
-            let (transport_id, remote_addr) = if addr.transport == "ethernet" {
-                match self.resolve_ethernet_addr(&addr.addr) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        debug!(
-                            transport = %addr.transport,
-                            addr = %addr.addr,
-                            error = %e,
-                            "Failed to resolve Ethernet address"
-                        );
-                        continue;
-                    }
-                }
-            } else if addr.transport == "ble" {
-                #[cfg(ble_available)]
-                {
-                    match self.resolve_ble_addr(&addr.addr) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                error = %e,
-                                "Failed to resolve BLE address"
-                            );
-                            continue;
-                        }
-                    }
-                }
-                #[cfg(not(ble_available))]
-                {
-                    debug!(transport = %addr.transport, "BLE transport not available on this build");
-                    continue;
-                }
-            } else {
-                let tid = if spec.kind == "udp"
-                    && let Ok(remote_socket_addr) = addr.addr.parse::<SocketAddr>()
-                {
-                    match self.find_udp_transport_for_remote_addr(remote_socket_addr, spec.instance)
-                    {
-                        Some((id, _)) => id,
-                        None => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                "No compatible operational UDP transport for address"
-                            );
-                            continue;
-                        }
-                    }
-                } else if spec.instance.is_some() {
-                    // Only the UDP resolver above can honour an instance name.
-                    // Matching any instance of the type here would be the
-                    // silent wrong-lane substitution this whole mechanism
-                    // exists to prevent, so refuse instead.
-                    debug!(
-                        transport = %addr.transport,
-                        addr = %addr.addr,
-                        "Instance-qualified address for a transport type that \
-                         does not support instance selection"
-                    );
-                    continue;
-                } else {
-                    match self.find_transport_for_type(spec.kind) {
-                        Some(id) => id,
-                        None => {
-                            debug!(
-                                transport = %addr.transport,
-                                addr = %addr.addr,
-                                "No operational transport for address type"
-                            );
-                            continue;
-                        }
-                    }
-                };
-                (tid, TransportAddr::from_string(&addr.addr))
+            let Some((transport_id, remote_addr)) = self.resolve_peer_address(addr) else {
+                continue;
             };
 
             if self.is_connecting_to_peer_on_path(&peer_node_addr, transport_id, &remote_addr) {
@@ -3276,7 +3350,8 @@ impl Node {
     /// is checked before the candidate lookup, so a live peer with no known
     /// address is `PeerLive` rather than an error.
     ///
-    /// A peer gone quiet past the heartbeat interval is dialled on the
+    /// A peer whose link is no longer live (past the heartbeat interval, or
+    /// past `link_dead_timeout_secs` for a capable peer) is dialled on the
     /// candidates that differ from its current path, or on every concrete
     /// candidate when none does, and reports [`AltDial::Started`].
     ///
@@ -3361,17 +3436,45 @@ impl Node {
     /// than as a property of the candidate, because the candidate's path is
     /// not the question: a live link should not be replaced by *any* path,
     /// and a dead one should be replaced by whichever path answers.
+    ///
+    /// A peer that has shown it implements multipath, on a node with
+    /// multipath enabled, is live while an authentic frame has arrived on
+    /// any of its paths within `link_dead_timeout_secs`: a node SHOULD NOT
+    /// initiate a new handshake to a capable peer while the link to it is
+    /// live (multipath v1 draft, Section 5.4), and its other addresses are
+    /// found by its paths instead. Every other peer is live until it is
+    /// quiet past the heartbeat interval ([`Self::peer_link_is_stale`]).
+    /// A peer we do not hold is live.
     pub(in crate::node) fn active_peer_link_is_live(&self, peer_node_addr: &NodeAddr) -> bool {
-        !self.active_peer_needs_same_path_refresh(peer_node_addr)
-    }
-
-    fn active_peer_needs_same_path_refresh(&self, peer_node_addr: &NodeAddr) -> bool {
         let Some(peer) = self.peers.get(peer_node_addr) else {
-            return false;
+            return true;
         };
-        self.peer_link_is_stale(peer, Self::now_ms())
+        let now_ms = Self::now_ms();
+        let node = &self.config().node;
+        if node.path.enabled && peer.bundle().is_some_and(|b| b.capable()) {
+            return peer.idle_time(now_ms) <= node.link_dead_timeout_secs.saturating_mul(1000);
+        }
+        !self.peer_link_is_stale(peer, now_ms)
     }
 
+    /// Whether `candidate`, a configured or advertised address of the peer
+    /// at `peer_node_addr`, names the pair our frames to the peer go to now:
+    /// its active path.
+    ///
+    /// The candidate is matched as a pair. Every transport its spec admits
+    /// is tried, whether or not it is operational: the type must be equal,
+    /// and so must the instance where the spec names one. On each, the
+    /// address is taken as its string, and the pair matches when the peer
+    /// holds it as its active path. An Ethernet address (`interface/mac`)
+    /// therefore never matches the MAC its path holds, as the string
+    /// comparison this replaces never matched it. Trying every admitted
+    /// transport, not only the one a dial would pick, keeps an unqualified
+    /// address matching the instance the peer is on when two instances of a
+    /// type share an address family. A peer held on a NAT-traversal
+    /// transport never matches: that socket is the way on to a traversed
+    /// path, and a configured address equal to its remote must still count
+    /// as the way off. When the peer's transport handle is gone, only the
+    /// address is compared.
     pub(in crate::node) fn active_peer_matches_candidate(
         &self,
         peer_node_addr: &NodeAddr,
@@ -3390,11 +3493,13 @@ impl Node {
         {
             return false;
         }
-        let current_addr = current_addr.to_string();
-        let current_transport = peer
+        let addr = TransportAddr::from_string(&candidate.addr);
+        if peer
             .transport_id()
-            .and_then(|id| self.transports.get(&id))
-            .map(|transport| (transport.transport_type().name, transport.name()));
+            .is_none_or(|id| !self.transports.contains_key(&id))
+        {
+            return addr == *current_addr;
+        }
 
         // Compare against the candidate's *parsed* transport: a peer address
         // may name an instance (`"udp/aware"`), while a handle reports its type
@@ -3404,12 +3509,18 @@ impl Node {
         // every NDP callback — would re-dial a peer it is already connected to,
         // forever.
         let spec = candidate.spec();
-        candidate.addr == current_addr
-            && current_transport
-                .map(|(kind, instance)| {
-                    kind == spec.kind && spec.instance.is_none_or(|want| instance == Some(want))
-                })
-                .unwrap_or(true)
+        self.transports
+            .iter()
+            .filter(|(_, handle)| {
+                handle.transport_type().name == spec.kind
+                    && spec.instance.is_none_or(|want| handle.name() == Some(want))
+            })
+            .any(|(id, _)| {
+                matches!(
+                    peer.path_match(*id, &addr),
+                    crate::peer::Match::Proven { active: true, .. }
+                )
+            })
     }
 
     // === Control API methods ===
@@ -3423,7 +3534,11 @@ impl Node {
     /// For a peer the node already holds, the treatment is the one
     /// [`Node::update_peers`] gives a refreshed runtime peer. A peer whose
     /// link is live is not dialled: the response's `refreshed` is `false` and
-    /// its `detail` is `"peer live, not dialled"`. This is not an error, so a
+    /// its `detail` is `"peer live, not dialled"`. With multipath enabled the
+    /// address is held as a path candidate instead of being dialled; for a
+    /// peer that has shown it implements multipath, the `detail` is then
+    /// `"peer live, address held as a path candidate"`, unless the address
+    /// is a path the link already holds. This is not an error, so a
     /// script that re-announces a live peer does not fail. A peer gone quiet
     /// past the heartbeat interval is dialled on the supplied address as an
     /// alternate path, in parallel with the link it holds, and `refreshed` is
@@ -3461,6 +3576,31 @@ impl Node {
         if let Some(identity) = peer_identity
             && self.peers.contains_key(identity.node_addr())
         {
+            if self.config().node.path.enabled
+                && self.active_peer_link_is_live(identity.node_addr())
+                && let Some(path) = self
+                    .connect_candidate(identity.node_addr(), &peer_config.addresses[0])
+                    .await
+            {
+                info!(
+                    npub = %npub,
+                    address = %address,
+                    transport = %transport,
+                    "API connect held the address as a path candidate of a live peer"
+                );
+                let detail = if path {
+                    PEER_LIVE_DETAIL
+                } else {
+                    CANDIDATE_DETAIL
+                };
+                return Ok(serde_json::json!({
+                    "npub": npub,
+                    "address": address,
+                    "transport": transport,
+                    "refreshed": false,
+                    "detail": detail,
+                }));
+            }
             let dial = self
                 .try_active_peer_alternative_addresses(&peer_config, identity)
                 .await
@@ -3691,6 +3831,9 @@ impl Node {
             self.supervisor
                 .nostr_rendezvous
                 .remove_bootstrap_transport(&transport_id);
+            // Every link's path machine discards its paths on the transport
+            // before the transport goes.
+            self.path_removed(transport_id).await;
             if let Some(mut handle) = self.transports.remove(&transport_id) {
                 let _ = handle.stop().await;
             }

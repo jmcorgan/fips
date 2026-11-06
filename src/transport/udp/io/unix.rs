@@ -340,7 +340,7 @@ impl AsyncUdpSocket {
 
             match guard.try_io(|inner| inner.get_ref().send_to(data, dest)) {
                 Ok(Ok(n)) => return Ok(n),
-                Ok(Err(e)) => return Err(TransportError::SendFailed(format!("{}", e))),
+                Ok(Err(e)) => return Err(crate::transport::send_error(e)),
                 Err(_would_block) => continue,
             }
         }

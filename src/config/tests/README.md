@@ -55,6 +55,15 @@ that file and can reach its private items.
   at 4, a per-sender limit of 0 included; that each at or above its floor is
   kept; and that a signal lifetime raised to 120 s is refused by the
   replay-window check when `replay_window_secs` is not above 240 s.
+- `path.rs`: tests for the multipath settings: `node.path` (`PathConfig`,
+  `node.rs`) reads every key and defaults to multipath off with the draft's
+  values, each transport's `role` (`transport.rs`) takes all four values
+  and defaults to `normal`, `kind` is taken by UDP and TCP and refused
+  elsewhere, a configuration that names none of them writes none back,
+  `Config::validate` refuses a zero dwell, probe interval or sample count,
+  more than 255 samples and a margin under 1.0 or not a number with a
+  message naming the key, and the section layers per key across files
+  through `Config::load_from_paths`.
 - `floors.rs`: tests for `Config::apply_floors` (`floors.rs`): a value
   outside its protocol bound runs at the bound with one warning, target
   `fips::config`, naming the key, the configured value and the value used; a
@@ -73,8 +82,8 @@ that file and can reach its private items.
 
 `mod.rs` declares the others as `mod udp_interface_tests`, `mod rekey_switch`,
 `mod tick_setting`, `mod buffers`, `mod grants`, `mod sockets`, `mod merge`,
-`mod signal_ttl_floor`, `mod attempt_timeout_floor` and
-`mod offer_limit_floors`, not as
+`mod signal_ttl_floor`, `mod attempt_timeout_floor`, `mod offer_limit_floors`
+and `mod path_tests`, not as
 `mod tests`, because `mod.rs` still carries an inline `mod tests` block of
 that name. That block, and the inline blocks in the other files here,
 predate the rule that unit tests live in this directory; moving them is a

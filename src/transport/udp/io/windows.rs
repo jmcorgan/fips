@@ -202,7 +202,7 @@ impl AsyncUdpSocket {
         self.inner
             .send_to(data, dest)
             .await
-            .map_err(|e| TransportError::SendFailed(format!("{}", e)))
+            .map_err(crate::transport::send_error)
     }
 
     /// Receive a payload, source address, and kernel drop counter.
