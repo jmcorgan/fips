@@ -674,7 +674,7 @@ Encoded with FSP prefix: ver=0, phase=0x1, flags=0, payload_len.
 
 | Offset | Field | Size | Description |
 | ------ | ----- | ---- | ----------- |
-| 0 | flags | 1 byte | Bit 0: REQUEST_ACK, Bit 1: BIDIRECTIONAL |
+| 0 | flags | 1 byte | Reserved |
 | 1 | src_coords_count | 2 bytes LE | Number of source coordinate entries |
 | 3 | src_coords | 16 x n bytes | Source's ancestry (NodeAddr, self -> root) |
 | ... | dest_coords_count | 2 bytes LE | Number of dest coordinate entries |
@@ -786,8 +786,8 @@ then delivers the complete IPv6 packet to the TUN interface.
 
 **Format 0x01+**: Reserved for future use (e.g., full-header gateway traffic).
 
-**Compression savings**: 29 bytes per packet (34 bytes stripped, 7 bytes
-format + residual added). Net overhead for IPv6 traffic: 77 bytes
+**Compression savings**: 33 bytes per packet (the 40-byte IPv6 header becomes
+7 bytes of format and residual fields). Net overhead for IPv6 traffic: 77 bytes
 (`FIPS_IPV6_OVERHEAD`), down from 110 bytes base DataPacket overhead.
 
 ### PathMtuNotification (0x13)

@@ -43,7 +43,17 @@ Rules for changing these:
   appearing, a removal, a move, another helper starting), the case sets that
   order with an `after` gate, never with a sleep. A loaded host slows the
   runner's chain of docker calls but not a helper's sleep, so a race set up
-  by a sleep reds on a slow runner. The fake cannot see the runner's own
-  client timeout fire, so a case that needs a helper to finish, or to be
-  removed, inside the bound still depends on the host running an unstalled
-  helper inside it; keep that margin wide.
+  by a sleep reds on a slow runner. A helper that must not act before the
+  runner removes it waits for its own removal (a gate on `rm {self}`), as in
+  `retry-before-effect` and `both-attempts`, rather than stalling for a time
+  the removal has to beat.
+- The one ordering a gate cannot set is against the runner's own client
+  timeout, which the fake cannot see fire. Every case that shortens the bound
+  needs each host command it does not stall to finish inside it, as an
+  ordinary helper; so do attempt 2's move in `retry-before-effect`,
+  `late-start` and `late-lands-first`, and the move itself in
+  `effect-before-timeout`. That is the exemption from the rule above, and it
+  is why every such case uses the one shortened bound, `SHORT_BOUND` in
+  `../veth-host-test.sh` (10 s), wide enough that an unstalled helper still
+  finishes inside it with the test held to 2% of one CPU, where it takes about
+  6 s. A new case shortens the bound to the same value.

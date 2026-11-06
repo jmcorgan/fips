@@ -194,6 +194,13 @@ gateway:
   enabled: true
   pool: "fd01::/112"
   lan_interface: "br-lan"
+  # Give the LAN the unrouted address 2001:2:f1b5::1/64. On a router with no
+  # upstream IPv6, Android and Chrome send AAAA queries only with this: they
+  # need a global-scope address. Leave it off with upstream IPv6: LAN clients
+  # pick that address as a source and their connections fail. The advertised
+  # IPv6 default route, which LAN clients reach the pool through, stays on
+  # either way.
+  # global_prefix: true
   dns:
     # listen: "[::1]:5365"   # the default; the init script points dnsmasq at this port
     upstream: "[::1]:5354"

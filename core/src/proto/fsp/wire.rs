@@ -92,6 +92,10 @@ pub const FSP_FLAG_K: u8 = 0x02;
 /// Unencrypted — payload is plaintext (error signals).
 pub const FSP_FLAG_U: u8 = 0x04;
 
+/// Reserved bits (3 to 7) of the prefix flags of an established message or
+/// routing signal. On the handshake phases the whole flags byte is reserved.
+pub const FSP_FLAGS_RESERVED: u8 = 0xF8;
+
 // ============================================================================
 // Common Prefix
 // ============================================================================
@@ -112,7 +116,6 @@ pub struct FspCommonPrefix {
     /// Per-message signal flags.
     pub flags: u8,
     /// Length of payload following the phase-specific header.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub payload_len: u16,
 }
 
@@ -171,7 +174,6 @@ pub struct FspEncryptedHeader {
     /// Per-message flags (CP, K).
     pub flags: u8,
     /// Length of encrypted payload (excluding AEAD tag).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub payload_len: u16,
     /// Monotonic counter used as AEAD nonce.
     pub counter: u64,
@@ -346,6 +348,92 @@ pub fn parse_encrypted_coords(
 }
 
 // ============================================================================
+// Endpoint Checks
+// ============================================================================
+//
+// FRC-1501 Section 5.1: a session endpoint discards silently a message whose
+// `payload_len` is not the length its phase gives, that sets a reserved bit,
+// or that is a handshake message or routing signal with bytes after its body.
+// A transit reads the coordinates of the same messages (Section 4.7) and is
+// not required to make these checks, so the decoders and parsers it shares
+// with the endpoint stay as lenient as they are, and the checks sit beside
+// them for the endpoint to call. The routing-signal decoders, which only the
+// endpoint calls, make their own checks.
+//
+// FRC-2501 keeps these discards (Sections 5.1, 5.2, 5.4 and 5.9) with two
+// differences this branch follows: every bit of `inner_flags` is reserved, and
+// a source ignores a routing signal's body flags (FRC-2201 Section 6.3).
+
+/// Check the prefix of a handshake message or routing signal against `rest`,
+/// the number of bytes after it: `payload_len` must equal `rest`, a handshake
+/// prefix's flags must be 0, and a routing signal's reserved prefix bits must
+/// be clear. An established message's prefix is checked by [`check_header`]
+/// and [`check_sealed`] once its header and coordinate block are parsed, so
+/// it passes here.
+pub fn check_prefix(prefix: &FspCommonPrefix, rest: usize) -> Result<(), Error> {
+    let handshake = matches!(
+        prefix.phase,
+        FSP_PHASE_MSG1 | FSP_PHASE_MSG2 | FSP_PHASE_MSG3
+    );
+    let signal = prefix.phase == FSP_PHASE_ESTABLISHED && prefix.is_unencrypted();
+    if !handshake && !signal {
+        return Ok(());
+    }
+    if handshake && prefix.flags != 0 {
+        return Err(Error::Malformed("handshake prefix flags set"));
+    }
+    if signal && prefix.flags & FSP_FLAGS_RESERVED != 0 {
+        return Err(Error::Malformed("reserved prefix flag set"));
+    }
+    if usize::from(prefix.payload_len) != rest {
+        return Err(Error::Malformed("payload_len does not match the message"));
+    }
+    Ok(())
+}
+
+/// Check that an established message's header sets no reserved prefix bit.
+pub fn check_header(header: &FspEncryptedHeader) -> Result<(), Error> {
+    if header.flags & FSP_FLAGS_RESERVED != 0 {
+        return Err(Error::Malformed("reserved prefix flag set"));
+    }
+    Ok(())
+}
+
+/// Check an established message's `payload_len` against `sealed`, the number
+/// of bytes after its header and coordinate block: the ciphertext and its tag.
+pub fn check_sealed(header: &FspEncryptedHeader, sealed: usize) -> Result<(), Error> {
+    if sealed.checked_sub(TAG_SIZE) != Some(usize::from(header.payload_len)) {
+        return Err(Error::Malformed("payload_len does not match the message"));
+    }
+    Ok(())
+}
+
+/// Check that an authenticated message's `inner_flags` is 0: every bit is
+/// reserved, bit 0 included (FRC-2501 Section 5.9; [`FspInnerFlags`]).
+pub fn check_inner(inner_flags: u8) -> Result<(), Error> {
+    if inner_flags != 0 {
+        return Err(Error::Malformed("reserved inner flag set"));
+    }
+    Ok(())
+}
+
+/// Check a handshake body as the endpoint must, once its decoder has read it:
+/// its flags byte `flags` must be 0, and the decoder must have read all of
+/// it, `read` bytes of `len`.
+fn check_handshake(flags: u8, read: usize, len: usize) -> Result<(), Error> {
+    if flags != 0 {
+        return Err(Error::Malformed("handshake body flags set"));
+    }
+    if read != len {
+        return Err(Error::MessageTooLong {
+            max: read,
+            got: len,
+        });
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Session Layer Message Types
 // ============================================================================
 
@@ -424,51 +512,29 @@ impl fmt::Display for SessionMessageType {
 // Session Flags
 // ============================================================================
 
-/// Session flags for setup options.
+/// The `SessionSetup` body flags byte.
+///
+/// FRC-1501 reserves it with no named bits: a sender writes 0, and a session
+/// endpoint discards a setup that sets any bit ([`SessionSetup::decode_strict`]).
+/// [`SessionSetup::decode`] keeps the byte as it arrived, since a transit reads
+/// a setup's coordinates whatever its flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SessionFlags {
-    /// Request acknowledgement from destination.
-    pub request_ack: bool,
-    /// Set up bidirectional session.
-    pub bidirectional: bool,
-}
+pub struct SessionFlags(u8);
 
 impl SessionFlags {
-    /// Create default flags.
+    /// Create the flags a sender writes: none set.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set request_ack flag.
-    pub fn with_ack(mut self) -> Self {
-        self.request_ack = true;
-        self
-    }
-
-    /// Set bidirectional flag.
-    pub fn bidirectional(mut self) -> Self {
-        self.bidirectional = true;
-        self
-    }
-
     /// Convert to a byte.
     pub fn to_byte(&self) -> u8 {
-        let mut flags = 0u8;
-        if self.request_ack {
-            flags |= 0x01;
-        }
-        if self.bidirectional {
-            flags |= 0x02;
-        }
-        flags
+        self.0
     }
 
-    /// Convert from a byte.
+    /// Convert from a byte, keeping every bit.
     pub fn from_byte(byte: u8) -> Self {
-        Self {
-            request_ack: byte & 0x01 != 0,
-            bidirectional: byte & 0x02 != 0,
-        }
+        Self(byte)
     }
 }
 
@@ -567,23 +633,27 @@ impl FspInnerFlags {
 ///
 /// ## Wire Format
 ///
-/// | Offset | Field            | Size    | Description                         |
-/// |--------|------------------|---------|-------------------------------------|
-/// | 0      | msg_type         | 1 byte  | 0x00                                |
-/// | 1      | flags            | 1 byte  | Bit 0: REQUEST_ACK, Bit 1: BIDIR   |
-/// | 2      | src_coords_count | 2 bytes | u16 LE, number of src coord entries |
-/// | 4      | src_coords       | 16 × n  | NodeAddr array (self → root)        |
-/// | ...    | dest_coords_count| 2 bytes | u16 LE, number of dest coord entries|
-/// | ...    | dest_coords      | 16 × m  | NodeAddr array (dest → root)        |
-/// | ...    | handshake_len    | 2 bytes  | u16 LE, Noise payload length        |
-/// | ...    | handshake_payload| variable| Noise XX msg1 (33 bytes — ephemeral key)    |
+/// Encoded with FSP common prefix: `[ver_phase:1][flags:1][payload_len:2 LE][body]`,
+/// where `ver_phase = 0x01` (version 0, phase MSG1) and `flags = 0` for handshake.
+///
+/// **Body** (after 4-byte FSP prefix):
+///
+/// | Offset | Field             | Size       | Description                                         |
+/// |--------|-------------------|------------|-----------------------------------------------------|
+/// | 0      | flags             | 1 byte     | Reserved                                            |
+/// | 1      | src_coords_count  | 2 bytes LE | Number of source coordinate entries                 |
+/// | 3      | src_coords        | 16 × n     | Source's ancestry (NodeAddr, self → root)           |
+/// | ...    | dest_coords_count | 2 bytes LE | Number of dest coordinate entries                   |
+/// | ...    | dest_coords       | 16 × m     | Destination's ancestry                              |
+/// | ...    | handshake_len     | 2 bytes LE | Noise payload length                                |
+/// | ...    | handshake_payload | variable   | Noise XX msg1 (33 bytes — ephemeral key only)       |
 #[derive(Clone, Debug)]
 pub struct SessionSetup {
     /// Source coordinates (for return path caching).
     pub src_coords: TreeCoordinate,
     /// Destination coordinates (for forward routing).
     pub dest_coords: TreeCoordinate,
-    /// Session options.
+    /// The reserved body flags byte.
     pub flags: SessionFlags,
     /// Noise XX handshake message 1.
     pub handshake_payload: Vec<u8>,
@@ -637,8 +707,24 @@ impl SessionSetup {
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
+    ///
+    /// Reads the body whatever its flags byte and ignores bytes after the
+    /// Noise message, as a transit reads it; a session endpoint decodes with
+    /// [`SessionSetup::decode_strict`].
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
+        Self::read(&mut Reader::new(payload))
+    }
+
+    /// Decode as a session endpoint must: refuse a body that sets a flag bit
+    /// or has bytes after its Noise message (FRC-1501 Section 5.1).
+    pub fn decode_strict(payload: &[u8]) -> Result<Self, Error> {
         let mut reader = Reader::new(payload);
+        let setup = Self::read(&mut reader)?;
+        check_handshake(setup.flags.to_byte(), reader.position(), payload.len())?;
+        Ok(setup)
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Result<Self, Error> {
         let flags = SessionFlags::from_byte(reader.read_u8()?);
 
         let (src_coords, consumed) = decode_coords(reader.rest())?;
@@ -738,8 +824,24 @@ impl SessionAck {
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
+    ///
+    /// Reads the body whatever its flags byte and ignores bytes after the
+    /// Noise message, as a transit reads it; a session endpoint decodes with
+    /// [`SessionAck::decode_strict`].
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
+        Self::read(&mut Reader::new(payload))
+    }
+
+    /// Decode as a session endpoint must: refuse a body that sets a flag bit
+    /// or has bytes after its Noise message (FRC-1501 Section 5.1).
+    pub fn decode_strict(payload: &[u8]) -> Result<Self, Error> {
         let mut reader = Reader::new(payload);
+        let ack = Self::read(&mut reader)?;
+        check_handshake(ack.flags, reader.position(), payload.len())?;
+        Ok(ack)
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Result<Self, Error> {
         let flags = reader.read_u8()?;
 
         let (src_coords, consumed) = decode_coords(reader.rest())?;
@@ -819,8 +921,24 @@ impl SessionMsg3 {
     }
 
     /// Decode from wire format (after 4-byte FSP prefix has been consumed).
+    ///
+    /// Reads the body whatever its flags byte and ignores bytes after the
+    /// Noise message; a session endpoint decodes with
+    /// [`SessionMsg3::decode_strict`].
     pub fn decode(payload: &[u8]) -> Result<Self, Error> {
+        Self::read(&mut Reader::new(payload))
+    }
+
+    /// Decode as a session endpoint must: refuse a body that sets a flag bit
+    /// or has bytes after its Noise message (FRC-1501 Section 5.1).
+    pub fn decode_strict(payload: &[u8]) -> Result<Self, Error> {
         let mut reader = Reader::new(payload);
+        let msg3 = Self::read(&mut reader)?;
+        check_handshake(msg3.flags, reader.position(), payload.len())?;
+        Ok(msg3)
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Result<Self, Error> {
         let flags = reader.read_u8()?;
 
         let hs_len = reader.read_u16_le()? as usize;

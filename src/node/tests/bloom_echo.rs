@@ -11,7 +11,8 @@
 use super::spanning_tree::{TestNode, cleanup_nodes, run_tree_test};
 use super::*;
 use crate::node::diag::TreeRole;
-use crate::proto::bloom::{BloomFilter, ECHO_MIN_BITS, FilterAnnounce};
+use crate::proto::bloom::{BloomFilter, ECHO_MIN_BITS, ECHO_WARN_MS, FilterAnnounce};
+use crate::testutil::capture_logs_scoped;
 
 /// A converged four-node chain and, at node `u`, its parent `p` and child `c`.
 struct Chain {
@@ -296,6 +297,127 @@ async fn a_child_echo_threshold_of_one_turns_the_guard_off() {
 
     assert_eq!(chain.stored(&c), Some(echo));
     assert_eq!(chain.counters(), (accepted + 1, rejected));
+
+    chain.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_lagged_echo_of_an_earlier_filter_we_sent_does_not_reach_the_filter_we_send_our_parent() {
+    let mut chain = Chain::new().await;
+    let (_, earlier) = chain.parent_side(0xA1, 1000).await;
+    let (p_side, current) = chain.parent_side(0xA1, 1400).await;
+    let (p, c) = (chain.p, chain.c);
+    let previous = chain.stored(&c);
+    let threshold = 0.8;
+
+    // A child whose view lags returns the earlier filter, not the current one.
+    let mut lagged = earlier.clone();
+    lagged.insert(&c);
+    assert!(
+        lagged.echoes(&earlier, threshold),
+        "control: the lagged filter returns the earlier filter we sent"
+    );
+    let overlap = lagged.overlap(&current).unwrap();
+    let bound = lagged.echo_bound(threshold);
+    assert!(
+        overlap <= bound,
+        "control: against the current filter alone it slips under the bound \
+         (overlap {overlap:.3}, bound {bound:.3})"
+    );
+    chain.announce(c, &lagged).await;
+
+    // The later echo of the current filter is rejected, as it is today.
+    let mut echo = current.clone();
+    echo.insert(&c);
+    chain.announce(c, &echo).await;
+
+    let sample = &p_side[..20];
+    assert_eq!(
+        held(&chain.outgoing(p), sample),
+        0,
+        "P's own entries must not come back to P through C"
+    );
+    assert_eq!(chain.stored(&c), previous, "C keeps its previous filter");
+
+    chain.cleanup().await;
+}
+
+/// A peer whose subtree reached us through our parent was sent a large filter
+/// holding that subtree. Once it is our child, our parent's side no longer
+/// holds the subtree, so the filter we send it next is the rest. The child
+/// then announces its subtree, half of the earlier filter. It must be merged:
+/// an honest subtree holding no more than the bound's share of an earlier
+/// filter we sent is not an echo. One holding more of any of the last four
+/// filters sent to it is refused like an echo, and stays unmerged until the
+/// filter leaves the history and the child announces again.
+#[tokio::test]
+async fn a_child_announcing_half_of_an_earlier_larger_filter_we_sent_it_is_merged() {
+    let mut chain = Chain::new().await;
+    let (all, earlier) = chain.parent_side(0xA1, 1300).await;
+    let (p, c) = (chain.p, chain.c);
+    let (subtree, rest) = all.split_at(650);
+
+    let mut parent = filter_of(rest);
+    parent.insert(&p);
+    chain.announce(p, &parent).await;
+    assert_eq!(chain.stored(&p), Some(parent), "setup: P's side shrank");
+    let current = chain.send(c).await;
+    assert_ne!(current, earlier, "setup: the current filter differs");
+    let (accepted, rejected) = chain.counters();
+
+    let mut filter = filter_of(subtree);
+    filter.insert(&c);
+    let overlap = filter.overlap(&earlier).unwrap();
+    chain.announce(c, &filter).await;
+
+    assert_eq!(
+        chain.stored(&c),
+        Some(filter.clone()),
+        "overlap with the earlier filter {overlap:.3}, bound {:.3}",
+        filter.echo_bound(0.8)
+    );
+    assert_eq!(held(&chain.outgoing(p), &subtree[..20]), 20);
+    assert_eq!(chain.counters(), (accepted + 1, rejected));
+
+    chain.cleanup().await;
+}
+
+/// The message every child echo refusal is logged with.
+const ECHO_LINE: &str =
+    "FilterAnnounce from a tree child returns the filter we sent it, kept its previous filter";
+
+#[tokio::test]
+async fn only_the_first_child_echo_refusal_from_a_peer_in_each_interval_is_a_warning() {
+    let mut chain = Chain::new().await;
+    let (_, sent) = chain.parent_side(0xA1, 1000).await;
+    let c = chain.c;
+    let (accepted, rejected) = chain.counters();
+    let mut echo = sent.clone();
+    echo.insert(&c);
+
+    let (logs, guard) = capture_logs_scoped();
+    for _ in 0..3 {
+        chain.announce(c, &echo).await;
+    }
+    crate::time::advance(std::time::Duration::from_millis(ECHO_WARN_MS));
+    chain.announce(c, &echo).await;
+    drop(guard);
+
+    let levels: Vec<String> = logs
+        .lines_with(ECHO_LINE)
+        .iter()
+        .map(|line| line.split(' ').next().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        levels,
+        ["WARN", "DEBUG", "DEBUG", "WARN"],
+        "the first refusal and the first an interval later warn"
+    );
+    assert_eq!(
+        chain.counters(),
+        (accepted, rejected + 4),
+        "every refusal is counted"
+    );
 
     chain.cleanup().await;
 }

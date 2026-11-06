@@ -18,8 +18,10 @@ source file's private items. Two are not:
   passed as a function), OS call, path through `std::io` or `std::fs`, socket,
   lookup through `ToSocketAddrs`, or path through one of the adapter's driver
   modules, renamed or not. The limiter's public `should_send` is the one clock
-  read allowed. Every module `../mod.rs` declares must be listed as a decision
-  module or a driver, and only one; lines planted in a copy of `outbound.rs`
+  read allowed, and its token bucket type the one naming of the host clock;
+  a second naming or a read through it planted in the limiter is found.
+  Every module `../mod.rs` declares must be listed as a decision module or a
+  driver, and only one; lines planted in a copy of `outbound.rs`
   show the scan finds each kind of item, and ignores one in a comment, a literal
   or a test-only item while still finding one a feature build compiles. It is a
   check of names, not types: an item reached under a name not on its lists
@@ -106,19 +108,26 @@ The others:
   built with a multicast or unspecified source: not by `too_big` for a packet
   to a multicast group, and not by the builder given such a source.
   Packet Too Big (`too_big`) is judged by the per-source limiter at the time
-  given: an answer with no TUN queue up still counts against its source, so
-  one to the same source within the interval is held back, and one at the end
-  of the interval is built. The older tests of the builders stay in the
-  file's inline `tests` module.
-- `icmp_rate_limit.rs` tests `../icmp_rate_limit.rs` as module `clock_tests`:
-  the Packet Too Big limiter judged at exact times through the check that
-  takes the time (`check`), rather than by sleeping. A source is held back
-  for the whole interval after a send and allowed again once it has passed,
-  to the millisecond, with the default interval and a custom one; an attempt
-  held back does not restart the interval; and an entry is dropped by the
-  first allowed check at its maximum age and kept by one just short of it.
-  The older tests of the wrapper that reads the clock (`should_send`) stay in
-  the file's inline `tests` module.
+  given: an answer with no TUN queue up still spends its source's token, so
+  once the burst is spent, half with no queue and half with one, the next to
+  the same source is held back, and one an interval later is built. The
+  older tests of the builders stay in the file's inline `tests` module.
+- `icmp_rate_limit.rs` tests `../icmp_rate_limit.rs` as module `tests`:
+  the Packet Too Big limiter, a token bucket per source, judged at exact
+  times through the check that takes the time (`check`), rather than by
+  sleeping. A second answer to one source 1 ms after the first is allowed,
+  and so is each of a burst of five after ten quiet seconds, while a flood
+  from one source is held to ten at one instant and between ten and
+  twenty-one over one second. A source that has spent its burst is held back
+  until one interval has passed and allowed then, to the millisecond, with
+  the default interval and a custom one; an attempt held back does not
+  restart the interval; each source has a bucket of its own; an entry is
+  dropped by the first allowed check at its maximum age and kept by one just
+  short of it, and kept longer while its bucket has not refilled; and a zero
+  interval refills almost at once rather than never. The tests of the
+  wrapper that reads the clock (`should_send`) check that a first send is
+  allowed and that rapid sends draw the burst and no more than refills
+  meanwhile, and the cleanup tests that old entries go and recent ones stay.
 - `outbound.rs` tests `../outbound.rs` as module `host_tests`, on the
   values the host half's decisions return rather than on what a channel
   received: the host half turns a packet to a key the adapter holds into a
@@ -233,7 +242,9 @@ The others:
   the mesh or to one no key names, draw the Destination Unreachable burst and
   no more than the bucket refills meanwhile; and the bucket, judged at given
   times, lets ten go at once, one more a tenth of a second later, and no more
-  than ten after a long quiet spell.
+  than ten after a long quiet spell. The reader answers two oversized packets
+  from one source, read back to back to two destinations, with a Packet Too
+  Big each.
 - `status.rs` tests `../status.rs`: the listening-sockets panel's reply. A
   loaded `inet fips` table that polices another interface than the TUN is
   reported as no firewall, every listener unfiltered, and one that polices
@@ -258,14 +269,21 @@ The others:
   and the TUN device takes the address the node's attach gave, not the seed
   the handles were built with. It also covers how the handles answer the host
   on the app-owned path and for a refusal: the Packet Too Big limiter counts a
-  refusal's source while no TUN queue is up, so a second refusal from it once
-  a queue is up is held back, and two oversize packets from one source in a
-  row are answered with one Packet Too Big; a hundred undeliverable packets
+  refusal's source while no TUN queue is up, so once refusals with no queue
+  have spent the source's burst a further refusal once a queue is up is held
+  back, oversize packets from one source in a row are answered with Packet
+  Too Big for the burst and no more, and two sent back to back each draw one,
+  to one destination and to two; a hundred undeliverable packets
   on the app-owned path, a hundred from a foreign source, and a refusal of a
   hundred held packets each draw the Destination Unreachable burst and no
   more than the bucket refills meanwhile; and the host path the handles
   build for the TUN reader draws on their bucket, so tokens it spends are
-  gone for the handles' answers.
+  gone for the handles' answers. On Windows, as Administrator with
+  `wintun.dll`, it stops a real Wintun adapter that has no host traffic and
+  fails if the stop has not returned within 20 seconds, on a thread of its
+  own so a hang fails the test and not the job. The test is ignored for the
+  unit-test run; the Administrator step of the Windows job in `ci.yml` runs
+  it by name.
 - `firewall_state.rs` tests `../firewall_state.rs` (Linux only) as module
   `target_tests`: the warning about a firewall that polices another
   interface than the TUN keeps the `fips::control::firewall_state` target it

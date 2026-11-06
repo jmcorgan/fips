@@ -85,7 +85,7 @@ With m = 8,192 bits and k = 5:
 | 800 | 38.6% | 0.86% | Negligible |
 | 1,200 | 51.9% | 3.8% | Minor — occasional unnecessary candidate |
 | 1,600 | 62.3% | 9.4% | Elevated |
-| 2,400 | 78.3% | 27% | Poor — filter losing discrimination |
+| 2,400 | 76.9% | 27% | Poor — filter losing discrimination |
 | 3,350 | 87% | 50% | Useless for candidate selection |
 
 ### Filter Occupancy Model
@@ -310,14 +310,21 @@ property of the data structure). Entries are expired through:
 To test whether a node_addr is in a bloom filter:
 
 ```text
+h1, h2 = first two little-endian u64s of SHA-256(node_addr)
 for i in 0..hash_count:
-    bit_index = hash(node_addr, i) % filter_bits
+    bit_index = (h1 + i * h2) % filter_bits
     if not bits[bit_index]:
         return false    // Definitely not present
 return true             // Maybe present (possible false positive)
 ```
 
 Where `filter_bits = 8 × (512 << size_class)` — 8,192 for size_class 1 (default).
+
+The `hash_count` indices come from the two base hashes by double hashing,
+as in Kirsch and Mitzenmacher, "Building a Better Bloom Filter", which shows
+that two hash functions are enough without an increase in the asymptotic
+false positive rate. The FPR figures in this document use the formula for
+independent hash functions, so for this construction they are estimates.
 
 ## Wire Format
 
@@ -439,24 +446,32 @@ A tree child's inbound filter is merged into every outgoing filter,
 including the one sent to the parent. A child that returns the filter
 it was sent would make that upward filter claim everything the node
 already knows. Each `FilterAnnounce` from a tree child is therefore
-compared with the filter last sent to that child: its overlap is the
+compared with each of the last four distinct filters sent to that
+child, newest first, since a child whose view lags can return an
+earlier filter rather than the latest. Against each, the overlap is the
 share of the sent filter's set bits that the announced filter also
 sets. An unrelated filter overlaps at about its own fill ratio, and a
-returned one at 1.0. The announce is rejected when the overlap exceeds
-`fill + δ × (1 − fill)`, with δ = `node.bloom.child_echo_threshold`
-(default `0.8`, `1.0` disables it). The scaled form rejects a full
-return at any fill below the FPR cap while still merging a subtree
-that was already in the sent filter, as happens when a peer with
-descendants becomes a child.
+returned one at 1.0. The announce is rejected when its overlap with any
+of the four exceeds `fill + δ × (1 − fill)`, with δ =
+`node.bloom.child_echo_threshold` (default `0.8`, `1.0` disables it).
+The scaled form rejects a full return at any fill below the FPR cap
+while still merging a subtree that holds no more than the bound's share
+of any of those filters, as happens when a peer with descendants
+becomes a child. An honest child whose subtree holds more than that
+share of one of the last four filters sent to it is refused like an
+echo, and stays unmerged until the filter leaves the history and the
+child announces again. An echo of a filter older than the last four
+still passes.
 
-The guard applies only when the filter last sent to the child has at
-least 128 set bits (below that an honest child can match it by
-chance) and the child already has a stored filter. Like the FPR cap,
+A sent filter is tested only when it has at least 128 set bits (below
+that an honest child can match it by chance), and the guard applies
+only when the child already has a stored filter. Like the FPR cap,
 a rejection is silent on the wire and leaves the stored filter and
-its sequence untouched, so the previous filter is kept. Rejections
-are counted in `bloom.child_role_rejected` and logged at WARN with
-the overlap, the bound, and the digests of both filters. Parents and
-non-tree peers are not checked.
+its sequence untouched, so the previous filter is kept. Every
+rejection is counted in `bloom.child_role_rejected` and logged with
+the overlap, the bound, and the digests of both filters: the first
+from a peer in each five minutes at WARN, the rest at DEBUG. Parents
+and non-tree peers are not checked.
 
 ## Implementation Status
 

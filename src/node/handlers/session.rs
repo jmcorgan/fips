@@ -26,7 +26,8 @@ use crate::proto::fsp::quorum::QuorumVerdict;
 use crate::proto::fsp::wire::{
     FSP_COMMON_PREFIX_SIZE, FSP_FLAG_CP, FSP_FLAG_K, FSP_HEADER_SIZE, FSP_PHASE_ESTABLISHED,
     FSP_PHASE_MSG1, FSP_PHASE_MSG2, FSP_PHASE_MSG3, FSP_PORT_HEADER_SIZE, FSP_PORT_IPV6_SHIM,
-    FspCommonPrefix, FspEncryptedHeader, fsp_strip_inner_header, parse_encrypted_coords,
+    FspCommonPrefix, FspEncryptedHeader, check_header, check_inner, check_prefix, check_sealed,
+    fsp_strip_inner_header, parse_encrypted_coords,
 };
 use crate::proto::fsp::{
     FspAction, FspInnerFlags, SessionAck, SessionMessageType, SessionMsg3, SessionSetup,
@@ -487,6 +488,15 @@ impl Node {
 
         let inner = &payload[FSP_COMMON_PREFIX_SIZE..];
 
+        // FRC-1501 Section 5.1: a handshake message or routing signal whose
+        // payload_len is not the bytes after its prefix, or whose prefix sets
+        // a reserved bit, is discarded before it is read. A transit has
+        // already read its coordinates, as Section 4.7 allows.
+        if let Err(e) = check_prefix(&prefix, inner.len()) {
+            debug!(phase = prefix.phase, error = %e, "Session payload discarded");
+            return;
+        }
+
         match prefix.phase {
             FSP_PHASE_MSG1 => {
                 self.handle_session_setup(src_addr, link_peer, inner).await;
@@ -534,14 +544,19 @@ impl Node {
     /// Handle an encrypted session message (phase 0x0, U flag clear).
     ///
     /// Full FSP receive pipeline:
-    /// 1. Parse FspEncryptedHeader (12 bytes) → counter, flags, header_bytes
+    /// 1. Parse FspEncryptedHeader (12 bytes) → counter, flags, header_bytes,
+    ///    discarding a header with a reserved prefix bit set
     /// 2. If CP flag: parse the cleartext coords, keeping the source's
-    /// 3. Session lookup (must be Established)
-    /// 4. AEAD decrypt with AAD = header_bytes
-    /// 5. Once a key of the session has authenticated the message, write the
+    /// 3. Discard a message whose payload_len is not its ciphertext less
+    ///    the tag
+    /// 4. Session lookup (must be Established)
+    /// 5. AEAD decrypt with AAD = header_bytes
+    /// 6. Strip FSP inner header → timestamp, msg_type, inner_flags, and
+    ///    discard a message with a reserved inner flag set: it takes its
+    ///    replay row but is not processed (FRC-1501 Section 4.8)
+    /// 7. Once a key of the session has authenticated the message, write the
     ///    source coordinates under the peer's address
-    /// 6. Strip FSP inner header → timestamp, msg_type, inner_flags
-    /// 7. Dispatch by msg_type
+    /// 8. Dispatch by msg_type
     async fn handle_encrypted_session_msg(
         &mut self,
         src_addr: &NodeAddr,
@@ -560,6 +575,10 @@ impl Node {
                 return;
             }
         };
+        if let Err(e) = check_header(&header) {
+            debug!(flags = header.flags, error = %e, "Encrypted session message discarded");
+            return;
+        }
 
         // Determine where ciphertext starts (after header, optionally after coords)
         let mut ciphertext_offset = FSP_HEADER_SIZE;
@@ -580,6 +599,19 @@ impl Node {
                     return;
                 }
             }
+        }
+
+        // Every check but inner_flags is made before any key is tried
+        // (FRC-1501 Section 5.1).
+        let sealed = payload.len().saturating_sub(ciphertext_offset);
+        if let Err(e) = check_sealed(&header, sealed) {
+            debug!(
+                payload_len = header.payload_len,
+                sealed,
+                error = %e,
+                "Encrypted session message discarded"
+            );
+            return;
         }
 
         // Look up session entry — must be Established to decrypt
@@ -660,14 +692,14 @@ impl Node {
         let Some((range, tag)) = delivered else {
             return;
         };
-        if let Some(coords) = stated {
-            self.write_stated(src_addr, coords);
-        }
         let Some(plaintext) = frame.get(range) else {
             return;
         };
 
-        // Strip FSP inner header (6 bytes)
+        // Strip FSP inner header (6 bytes). A message whose inner header is
+        // short or sets a reserved inner flag has taken its replay row above
+        // but is not processed, and that includes the coordinate write
+        // (FRC-1501 Section 4.8).
         let (timestamp, msg_type, inner_flags_byte, rest) = match fsp_strip_inner_header(plaintext)
         {
             Some(parts) => parts,
@@ -676,6 +708,18 @@ impl Node {
                 return;
             }
         };
+        if let Err(e) = check_inner(inner_flags_byte) {
+            debug!(
+                src = %self.peer_display_name(src_addr),
+                inner_flags = inner_flags_byte,
+                error = %e,
+                "Session message discarded after authentication"
+            );
+            return;
+        }
+        if let Some(coords) = stated {
+            self.write_stated(src_addr, coords);
+        }
 
         // MMP per-message recording on RX path, for the epoch MMP measures
         // only: a frame the peer sealed under the epoch a cutover retired
@@ -838,7 +882,7 @@ impl Node {
         link_peer: &NodeAddr,
         inner: &[u8],
     ) {
-        let setup = match SessionSetup::decode(inner) {
+        let setup = match SessionSetup::decode_strict(inner) {
             Ok(s) => s,
             Err(e) => {
                 debug!(error = %e, "Malformed SessionSetup");
@@ -1039,7 +1083,7 @@ impl Node {
     ///
     /// Processes msg2, generates and sends msg3, then transitions to Established.
     async fn handle_session_ack(&mut self, src_addr: &NodeAddr, inner: &[u8]) {
-        let ack = match SessionAck::decode(inner) {
+        let ack = match SessionAck::decode_strict(inner) {
             Ok(a) => a,
             Err(e) => {
                 debug!(error = %e, "Malformed SessionAck");
@@ -1145,7 +1189,7 @@ impl Node {
     /// processes msg3, learns the initiator's identity, and transitions
     /// to Established.
     async fn handle_session_msg3(&mut self, src_addr: &NodeAddr, inner: &[u8]) {
-        let msg3 = match SessionMsg3::decode(inner) {
+        let msg3 = match SessionMsg3::decode_strict(inner) {
             Ok(m) => m,
             Err(e) => {
                 debug!(error = %e, "Malformed SessionMsg3");

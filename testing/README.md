@@ -193,8 +193,17 @@ the time left, no retry starts that cannot finish, and a setup that runs out
 fails with a line naming the step and the budget, above dnf-bounded's report
 of the mirrors, while the CI step still has time to report it. The image
 build receives the deadline as a build secret, so it does not change the
-image's cache key. `budget-test.sh` tests that logic with dnf stubbed, in about
-ten seconds, and both CI runners run it.
+image's cache key.
+
+A retry after a repository's metadata failed to load leaves out the mirror
+that served it: dnf 4 does not move on to another mirror when `repomd.xml`
+fails to parse, so without that one broken mirror at the top of the list fails
+every attempt within seconds. dnf-bounded fetches the repository's mirror list
+inside the budget, drops every mirror that has failed for it, and points the
+remaining attempts at the rest; a repository it cannot do that for (a metalink,
+or a list it cannot fetch) is retried as it is, and its report says why.
+`budget-test.sh` tests the budget and the mirror exclusion with dnf stubbed, in
+about forty seconds, and both CI runners run it.
 
 ### [boringtun/](boringtun/) -- WireGuard Throughput Baseline
 

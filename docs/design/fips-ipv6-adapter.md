@@ -125,12 +125,14 @@ fd + node_addr[0..15] → IPv6 address (16 bytes)
 The `fd` prefix places node addresses in the IPv6 Unique Local Address (ULA)
 space defined by RFC 4193. ULAs are the IPv6 equivalent of RFC 1918 private
 addresses (10.x, 172.16.x, 192.168.x) — they are reserved for local use and
-are not routable over the public Internet. This means FIPS overlay addresses
-cannot conflict with native IPv6 traffic that may be present on the same host
-or network, and they will not leak beyond the local system even if routing is
-misconfigured. These are overlay identifiers — they appear in the TUN
-interface for application compatibility but have no meaning outside the FIPS
-mesh.
+are not routable over the public Internet. RFC 4193 claims a globally unique
+prefix only with high probability, and says a leaked address conflicts with no
+other address, not that it cannot leak: keeping these addresses inside a site
+is left to border routers and firewalls (Section 4.3). FIPS also does not use
+the RFC's layout of a random 40-bit Global ID in a /48. The 120 bits after `fd`
+are the node's hash, so a FIPS address is as unique as that hash makes it.
+These are overlay identifiers — they appear in the TUN interface for
+application compatibility but have no meaning outside the FIPS mesh.
 
 ## Identity Cache
 
@@ -236,10 +238,11 @@ rebuilds the packet, fragments it and compresses each fragment). The
 adapter reports 1280 in the Packet Too Big it builds for a refusal, and
 in the one it answers itself for a destination no key names.
 
-ICMP Packet Too Big generation is rate-limited per source address
-(100ms interval) to prevent storms from applications sending many
-oversized packets. The ICMP response is delivered locally back through
-the TUN; no network traversal is needed, so delivery is reliable.
+ICMP Packet Too Big generation is rate-limited by a token bucket per
+source address (a burst of 10, then 10 a second) to prevent storms from
+applications sending many oversized packets. The ICMP response is
+delivered locally back through the TUN; no network traversal is needed,
+so delivery is reliable.
 
 ### TUN-Side TCP MSS Clamping
 
@@ -285,9 +288,11 @@ fallback) and the rationale for `max_mss` semantics are in
 
 ### ICMP Rate Limiting
 
-Packet Too Big is limited per source address to one message per 100 ms
-(a minimum interval, not a token bucket), which prevents a storm when an
-application sends a burst of oversized packets.
+Packet Too Big is limited by a token bucket per source address, as RFC
+4443 Section 2.4 (f) recommends: a burst of 10, then 10 a second. A short
+burst of oversized packets from one source, to one destination or to
+several, is answered for each packet, so the host learns the path MTU of
+every destination; a source that keeps sending them is held to the rate.
 
 Destination Unreachable is limited by one token bucket for the whole
 adapter, as RFC 4443 Section 2.4 (f) requires: a burst of 10, then 10 a

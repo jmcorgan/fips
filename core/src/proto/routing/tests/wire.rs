@@ -161,3 +161,76 @@ fn test_mtu_exceeded_boundary_mtu_values() {
         assert_eq!(decoded.mtu, mtu);
     }
 }
+
+// ===== Reserved flags and trailing bytes (FRC-2501 Section 5.1, FRC-2201 Section 6.3) =====
+
+/// The body of each routing signal, as the dispatcher hands it to the
+/// decoder: the FSP prefix and the type byte already consumed.
+fn signal_bodies() -> [(&'static str, alloc::vec::Vec<u8>); 4] {
+    let coords = make_coords(&[0xCC, 0xDD, 0xEE]);
+    [
+        (
+            "CoordsRequired",
+            CoordsRequired::new(make_node_addr(1), make_node_addr(2)).encode()[5..].to_vec(),
+        ),
+        (
+            "PathBroken",
+            PathBroken::new(make_node_addr(1), make_node_addr(2)).encode()[5..].to_vec(),
+        ),
+        (
+            "PathBroken with coordinates",
+            PathBroken::new(make_node_addr(1), make_node_addr(2))
+                .with_last_coords(coords)
+                .encode()[5..]
+                .to_vec(),
+        ),
+        (
+            "MtuExceeded",
+            MtuExceeded::new(make_node_addr(1), make_node_addr(2), 1280).encode()[5..].to_vec(),
+        ),
+    ]
+}
+
+/// Decode `body` as the routing signal `name` names.
+fn decodes(name: &str, body: &[u8]) -> bool {
+    match name {
+        "CoordsRequired" => CoordsRequired::decode(body).is_ok(),
+        "MtuExceeded" => MtuExceeded::decode(body).is_ok(),
+        _ => PathBroken::decode(body).is_ok(),
+    }
+}
+
+#[test]
+fn routing_signals_are_read_whatever_their_reserved_sig_flags_byte_holds() {
+    let mut refused = alloc::vec::Vec::new();
+    for (name, body) in signal_bodies() {
+        for bit in 0..8 {
+            let mut flagged = body.clone();
+            flagged[0] = 1 << bit;
+            if !decodes(name, &flagged) {
+                refused.push(format!("{name} with sig_flags bit {bit}"));
+            }
+        }
+    }
+    assert!(
+        refused.is_empty(),
+        "a source ignores the sig_flags byte; refused: {refused:?}"
+    );
+}
+
+#[test]
+fn routing_signals_with_bytes_after_the_body_are_refused() {
+    let mut accepted = alloc::vec::Vec::new();
+    for (name, body) in signal_bodies() {
+        assert!(decodes(name, &body), "{name}: the conforming body decodes");
+        let mut longer = body.clone();
+        longer.push(0);
+        if decodes(name, &longer) {
+            accepted.push(name);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "a routing signal with a byte after its body must be refused; accepted: {accepted:?}"
+    );
+}

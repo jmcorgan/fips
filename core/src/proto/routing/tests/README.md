@@ -7,4 +7,5 @@ Unit tests for routing, declared from `routing/mod.rs` as
 - `util.rs`: shared fixtures (a routing view, coordinates).
 - `core.rs`: next-hop selection and the transit decision.
 - `limits.rs`: the error-signal rate limiter and its bound.
-- `wire.rs`: the error-signal codecs.
+- `wire.rs`: the error-signal codecs, including the refusal of bytes
+  after a body and that the reserved flag byte is ignored.

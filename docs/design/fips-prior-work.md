@@ -30,11 +30,15 @@ global routing tables. FIPS adapts these algorithms for
 multi-transport operation, Nostr identity integration, and constrained
 MTU environments.
 
-The theoretical foundation for greedy routing on tree embeddings draws
-on [Kleinberg's work](https://www.cs.cornell.edu/home/kleinber/swn.pdf)
-on navigable small-world networks, which showed that greedy forwarding
-succeeds in O(log² n) steps when the network has hierarchical
-structure. Thorup-Zwick compact routing schemes separately demonstrated
+The background to greedy routing includes
+[Kleinberg's work](https://www.cs.cornell.edu/home/kleinber/swn.pdf)
+on navigable small-world networks, which showed that on a
+two-dimensional lattice where each node has one long-range contact
+drawn from the inverse-square distribution, greedy forwarding delivers
+in O(log² n) expected steps. That result is for the lattice and does
+not carry over to tree embeddings; the greedy embedding results under
+[Greedy Embedding Theory](#greedy-embedding-theory) are the ones that
+do. Thorup-Zwick compact routing schemes separately demonstrated
 that sublinear routing state is achievable with bounded stretch,
 motivating the use of tree coordinates rather than full routing tables.
 
@@ -43,12 +47,18 @@ motivating the use of tree coordinates rather than full routing tables.
 FIPS distributes reachability information using bloom filters computed
 with a split-horizon rule: when advertising to a peer, exclude that
 peer's own contributions. This technique is borrowed from
-distance-vector routing protocols —
+distance-vector routing protocols:
 [RIP](https://en.wikipedia.org/wiki/Routing_Information_Protocol)
-(1988) and [Babel](https://www.irif.fr/~jch/software/babel/) use
-split-horizon to prevent routing loops by not advertising a route back
-to the neighbor it was learned from. FIPS applies the same principle
-to probabilistic set advertisements rather than distance-vector tables.
+(1988) and Babel
+([RFC 8966 Section 3.7.4](https://www.rfc-editor.org/rfc/rfc8966#section-3.7.4))
+use split horizon to avoid advertising a route back to the neighbor it
+was learned from. Babel applies it only on symmetric, transitive links,
+and not on decentralised wireless links where updates are multicast.
+FIPS sends each peer its own unicast filter, so the exclusion stays
+valid on every transport, shared-medium ones included. Ironwood already
+applies the rule to bloom filters: `_getBloomFor` in
+`network/bloomfilter.go` merges only on-tree peers' filters and skips
+the peer the filter is built for. FIPS inherits that.
 
 ## Cryptographic Identity as Network Address
 
@@ -156,11 +166,11 @@ dwell-time compensation, rather than from packet round-trips.
 The Expected Transmission Count (ETX) metric, computed from
 bidirectional delivery ratios, was introduced by
 [De Couto et al. (2003)](https://pdos.csail.mit.edu/papers/grid:mobicom03/paper.pdf)
-for wireless mesh routing and is used in protocols including
-[OLSR](https://en.wikipedia.org/wiki/Optimized_Link_State_Routing_Protocol)
-and [Babel](https://www.irif.fr/~jch/software/babel/). FIPS computes
-ETX per-link from MMP loss measurements and uses it for cost-based
-parent selection and as the primary key in next-hop candidate ranking.
+for wireless mesh routing, and Babel uses it on wireless links
+([RFC 8966 Appendix A.2.2](https://www.rfc-editor.org/rfc/rfc8966#section-a.2.2)).
+FIPS computes ETX per-link from MMP loss measurements and uses it for
+cost-based parent selection and as the primary key in next-hop
+candidate ranking.
 
 The CE (Congestion Experienced) echo flag provides hop-by-hop
 [ECN](https://en.wikipedia.org/wiki/Explicit_Congestion_Notification)
@@ -184,33 +194,46 @@ end-to-end PathMtuNotification echo back to the source.
 ## Session Restart and Simultaneous Initiation
 
 FSP's epoch-based peer restart detection mirrors IKEv2's
-INITIAL_CONTACT notification, and its lowest-address-wins
-simultaneous-initiation tie-breaker mirrors IKEv2's resolution rule.
+INITIAL_CONTACT notification. Its lowest-address-wins
+simultaneous-initiation tie-breaker follows HIPv2, where a host that
+has sent an I1 answers a crossing I1 only when the sender's HIT is
+smaller than its own (RFC 7401 Section 6.7, step 3). IKEv2 has no rule
+for crossed initial exchanges; the nearest is its rule for simultaneous
+rekeying, which closes the SA created with the lowest nonce (RFC 7296
+Sections 2.8.1 and 2.8.2), and that is an analogy only.
 
 - Kaufman, C., Hoffman, P., Nir, Y., Eronen, P., Kivinen, T.
   [RFC 7296](https://datatracker.ietf.org/doc/html/rfc7296):
   "Internet Key Exchange Protocol Version 2 (IKEv2)". 2014.
-  *Simultaneous initiation resolution (§2.8) and INITIAL_CONTACT peer
-  restart detection (§2.4).*
+  *INITIAL_CONTACT peer restart detection (§2.4).*
+
+- Moskowitz, R., Ed., Heer, T., Jokela, P., Henderson, T.
+  [RFC 7401](https://datatracker.ietf.org/doc/html/rfc7401):
+  "Host Identity Protocol Version 2 (HIPv2)". 2015. *Smaller-HIT
+  tie-break for crossing I1 packets (§6.7, step 3).*
 
 ## Hybrid Coordinate Warmup
 
 FSP's hybrid coordinate warmup (CP flag piggybacking + standalone
-CoordsWarmup) draws on Yggdrasil's approach of embedding coordinates
-in session traffic to keep transit caches populated.
+CoordsWarmup) keeps transit coordinate caches populated. It draws on
+Yggdrasil's approach of carrying coordinates with the traffic, but
+Ironwood carries the source and destination paths in every traffic
+packet and forwards on them, so it has no transit cache to warm.
 
 - [Yggdrasil Network](https://yggdrasil-network.github.io/).
-  *Coordinate-based overlay routing with session traffic used to warm
-  transit node coordinate caches.*
+  *Coordinate-based overlay routing, with the source and destination
+  paths carried in every traffic packet.*
 
 ## Cryptographic Primitives
 
-FIPS reuses [Nostr's](https://github.com/nostr-protocol/nips)
-cryptographic stack — secp256k1 for identity keys, Schnorr signatures
-for authentication, SHA-256 for hashing, and ChaCha20-Poly1305 for
-authenticated encryption. This is the same primitive set used across
-Bitcoin, Nostr, and a growing ecosystem of self-sovereign identity
-systems. No novel cryptography is introduced.
+FIPS shares its identity primitives with
+[Nostr's](https://github.com/nostr-protocol/nips) cryptographic stack:
+secp256k1 for identity keys, Schnorr signatures for authentication and
+SHA-256 for hashing, the same set used across Bitcoin, Nostr, and a
+growing ecosystem of self-sovereign identity systems. Its AEAD,
+ChaCha20-Poly1305, is FIPS's own choice for Noise; Nostr's NIP-44 v2
+uses ChaCha20 with HMAC-SHA256 instead. No novel cryptography is
+introduced.
 
 ## Spanning-Tree Dynamics: Foundations
 
@@ -239,15 +262,16 @@ of academic and standards work, summarized below.
   IEEE INFOCOM 2009. *Dynamic embedding for nodes joining/leaving;
   introduced Gravity-Pressure routing for failure recovery.*
 
-- Crovella, M. et al.
+- Cvetkovski, A., Crovella, M.
   ["On the Choice of a Spanning Tree for Greedy Embedding"](https://www.cs.bu.edu/faculty/crovella/paper-archive/networking-science13.pdf).
   Networking Science 2013. *Analysis of how tree structure affects
   routing stretch.*
 
 - Bläsius, T. et al.
   ["Hyperbolic Embeddings for Near-Optimal Greedy Routing"](https://dl.acm.org/doi/10.1145/3381751).
-  ACM Journal of Experimental Algorithmics 2020. *Achieved 100%
-  success ratio with 6% stretch on Internet graph.*
+  ACM Journal of Experimental Algorithmics 2020. *Reports 100% success
+  ratio and 6% stretch for the Internet graph of Boguñá et al., one of
+  the networks it evaluates.*
 
 ### Link Metrics
 
@@ -268,6 +292,16 @@ of academic and standards work, summarized below.
   contrasted with OSPF's cumulative model in
   [spanning-tree-dynamics.md §8](spanning-tree-dynamics.md#8-parent-selection).*
 
+- Villamizar, C., Chandra, R., Govindan, R.
+  [RFC 2439](https://datatracker.ietf.org/doc/html/rfc2439): "BGP Route
+  Flap Damping". 1998. *Suppressing unstable routes, while their removal
+  still takes effect.*
+
+- Chroboczek, J., Schinazi, D.
+  [RFC 8966](https://www.rfc-editor.org/rfc/rfc8966): "The Babel Routing
+  Protocol". 2021. *Split horizon (§3.7.4), ETX (Appendix A.2.2) and
+  hysteresis in route selection on a varying metric (Appendix A.3).*
+
 ### Distributed Systems Primitives
 
 - Shapiro, M., Preguiça, N., Baquero, C., Zawirski, M.
@@ -284,21 +318,47 @@ of academic and standards work, summarized below.
   ACM SIGOPS Operating Systems Review 2007. *Framework for
   gossip-based protocols achieving O(log N) propagation.*
 
-## FIPS Contributions
+## What FIPS Changes
 
-The protocol builds on these foundations and adds several new elements:
+Most of the routing design above is inherited. The tree-only bloom
+filter merge with split-horizon exclusion is Ironwood's (`_getBloomFor`
+in `network/bloomfilter.go`). Bloom-guided lookup is Yggdrasil v0.5's,
+where a lookup is forwarded to the on-tree links whose filter holds the
+destination. FIPS changes the following, each listed with its
+precedent:
 
-- Cost-aware parent selection using local-only link metrics
-  (`effective_depth = depth + link_cost`), replacing Yggdrasil's
-  depth-only selection
-- Combined ETX + SRTT link cost formula with MMP-measured components
-- Flap dampening with mandatory switch bypass
-- Announcement suppression for transient state changes
-- Tree-only bloom filter merge with split-horizon exclusion
-- Hybrid coordinate warmup (CP flag piggybacking plus standalone
-  CoordsWarmup) layered on top of SessionSetup self-bootstrapping
-- Bloom-guided tree routing for discovery (vs. flooding)
-- Reverse-path routing for LookupResponse via `recent_requests`
+- **Cost in parent selection.** FIPS ranks candidate parents by
+  `effective_depth = depth + link_cost`, on local link metrics only.
+  Precedent: Ironwood since September 2024 scores a candidate by its
+  distance to the root times the peer's latency; at the Yggdrasil v0.5
+  release it chose by root and then path stability.
+- **The link cost formula.** `link_cost = etx * (1 + srtt_ms / 100)`,
+  with both terms measured by MMP, so one cost carries loss and delay.
+  Precedent: ETX (De Couto et al., used by Babel on wireless links) and
+  Ironwood's per-peer latency cost.
+- **Flap dampening with a mandatory-switch bypass.** Parent switches
+  that reach `flap_threshold` within a window suppress further
+  non-mandatory switches for a time; losing the parent or finding a
+  smaller root bypasses that. Precedent: BGP route flap damping
+  ([RFC 2439](https://datatracker.ietf.org/doc/html/rfc2439)), which
+  suppresses the use of an unstable route but not its removal.
+  Ironwood's guard against the same churn is simpler: at its periodic
+  refresh it moves to another parent only at less than half the cost.
+- **Announcement suppression.** A node sends at most one TreeAnnounce to
+  a peer per 500 ms, and changes during that interval are coalesced into
+  one. Precedent: OSPF's MinLSInterval, the minimum time between
+  originations of an LSA, 5 seconds in RFC 2328 Appendix B.
+- **Hybrid coordinate warmup.** Coordinates travel in SessionSetup and
+  SessionAck, then on the first N data packets of a session (default 5)
+  and again on demand, piggybacked with the CP flag or sent as a
+  standalone CoordsWarmup, and transit nodes cache them, so other data
+  packets carry addresses only. Precedent: Ironwood carries the source
+  and destination paths in every traffic packet (`network/traffic.go`).
+- **Reverse-path LookupResponse.** Each node a LookupRequest passes
+  records the peer it came from in `recent_requests`, and the response
+  retraces those records to the requester. Precedent: Ironwood routes
+  its lookup answer to the coordinates the lookup carried
+  (`path: lookup.from` in `network/pathfinder.go`).
 
 ## External Reference Index
 
@@ -307,13 +367,15 @@ The protocol builds on these foundations and adds several new elements:
 | [IEEE 802.1D STP](https://en.wikipedia.org/wiki/Spanning_Tree_Protocol) | spanning tree, root election |
 | [Yggdrasil v0.5](https://yggdrasil-network.github.io/2023/10/22/upcoming-v05-release.html) | tree coordinates, greedy routing |
 | [Ironwood](https://github.com/Arceliar/ironwood) | tree coordinates, candidate ranking |
-| [Kleinberg, Small-world](https://www.cs.cornell.edu/home/kleinber/swn.pdf) | greedy routing on tree embeddings |
+| [Kleinberg, Small-world](https://www.cs.cornell.edu/home/kleinber/swn.pdf) | greedy routing on a lattice |
 | [CJDNS](https://github.com/cjdelisle/cjdns) | cryptographic-identity-as-address |
 | [Tor](https://www.torproject.org/) | onion address scheme, dual-layer encryption |
 | [I2P](https://geti2p.net/) | dual-layer encryption (garlic routing) |
 | [HIP](https://en.wikipedia.org/wiki/Host_Identity_Protocol) | identity-as-address |
-| [Babel](https://www.irif.fr/~jch/software/babel/) | split-horizon, ETX |
+| [Babel (RFC 8966)](https://www.rfc-editor.org/rfc/rfc8966) | split horizon, ETX, route-selection hysteresis |
 | [RIP](https://en.wikipedia.org/wiki/Routing_Information_Protocol) | split-horizon |
+| [OSPF (RFC 2328)](https://datatracker.ietf.org/doc/html/rfc2328) | cumulative path cost contrast, MinLSInterval |
+| [BGP flap damping (RFC 2439)](https://datatracker.ietf.org/doc/html/rfc2439) | flap dampening |
 | [Noise Framework](https://noiseprotocol.org/) | FMP and FSP XX handshakes |
 | [WireGuard](https://www.wireguard.com/) | receiver-index dispatch, identity-bound sessions |
 | [Lightning BOLT #8](https://github.com/lightning/bolts/blob/master/08-transport.md) | comparison reference |
@@ -322,8 +384,8 @@ The protocol builds on these foundations and adds several new elements:
 | [TCP SRTT/RTO (RFC 6298)](https://www.rfc-editor.org/rfc/rfc6298) | Jacobson/Karels SRTT |
 | [ECN (RFC 3168)](https://www.rfc-editor.org/rfc/rfc3168) | CE echo |
 | [DTLS 1.2 (RFC 6347)](https://datatracker.ietf.org/doc/html/rfc6347) | replay window |
-| [IKEv2 (RFC 7296)](https://datatracker.ietf.org/doc/html/rfc7296) | INITIAL_CONTACT, simultaneous-initiation tie-breaker |
+| [IKEv2 (RFC 7296)](https://datatracker.ietf.org/doc/html/rfc7296) | INITIAL_CONTACT |
+| [HIPv2 (RFC 7401)](https://datatracker.ietf.org/doc/html/rfc7401) | simultaneous-initiation tie-breaker |
 | [PMTUD (RFC 1191)](https://datatracker.ietf.org/doc/html/rfc1191) | adapted PMTUD |
 | [ETX paper, De Couto et al.](https://pdos.csail.mit.edu/papers/grid:mobicom03/paper.pdf) | ETX metric |
-| [OLSR](https://en.wikipedia.org/wiki/Optimized_Link_State_Routing_Protocol) | ETX in mesh routing |
 | [Nostr](https://github.com/nostr-protocol/nips) | identity stack |

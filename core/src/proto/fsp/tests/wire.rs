@@ -49,35 +49,22 @@ fn test_session_message_type_invalid() {
 // ===== SessionFlags Tests =====
 
 #[test]
-fn test_session_flags() {
-    let flags = SessionFlags::new().with_ack().bidirectional();
-
-    assert!(flags.request_ack);
-    assert!(flags.bidirectional);
-
-    let byte = flags.to_byte();
-    let restored = SessionFlags::from_byte(byte);
-
-    assert_eq!(flags, restored);
-}
-
-#[test]
-fn test_session_flags_default() {
-    let flags = SessionFlags::new();
-    assert!(!flags.request_ack);
-    assert!(!flags.bidirectional);
-    assert_eq!(flags.to_byte(), 0);
+fn session_flags_name_no_bits_and_keep_the_byte_as_it_arrived() {
+    assert_eq!(SessionFlags::new().to_byte(), 0);
+    assert_eq!(SessionFlags::default(), SessionFlags::new());
+    for byte in [0x01, 0x02, 0x80, 0xA5, 0xFF] {
+        assert_eq!(SessionFlags::from_byte(byte).to_byte(), byte);
+    }
 }
 
 // ===== SessionSetup Tests =====
 
 #[test]
 fn test_session_setup() {
-    let setup = SessionSetup::new(make_coords(&[1, 0]), make_coords(&[2, 0]))
-        .with_flags(SessionFlags::new().with_ack());
+    let setup = SessionSetup::new(make_coords(&[1, 0]), make_coords(&[2, 0]));
 
-    assert!(setup.flags.request_ack);
-    assert!(!setup.flags.bidirectional);
+    assert_eq!(setup.flags, SessionFlags::new());
+    assert_eq!(setup.encode()[4], 0, "a sender writes the body flags as 0");
 }
 
 // ===== Encode/Decode Roundtrip Tests =====
@@ -86,7 +73,6 @@ fn test_session_setup() {
 fn test_session_setup_encode_decode() {
     let handshake = vec![0xAA; 82]; // typical Noise IK msg1
     let setup = SessionSetup::new(make_coords(&[1, 2, 0]), make_coords(&[3, 4, 0]))
-        .with_flags(SessionFlags::new().with_ack().bidirectional())
         .with_handshake(handshake.clone());
 
     let encoded = setup.encode();
@@ -543,4 +529,229 @@ fn test_all_message_types_through_prefix() {
     // SessionMsg3 (phase 3)
     let prefix = FspCommonPrefix::parse(&[0x03, 0x00, 0x49, 0x00]).unwrap();
     assert_eq!(prefix.phase, 3);
+}
+
+// ===== What a transit reads (FRC-1501 Section 4.7) =====
+//
+// A transit reads the coordinates of every SessionSetup and SessionAck, and
+// those of an established message whose header shows version 0, phase 0 and
+// U clear; FRC-1501 does not require it to apply the endpoint's discards. The
+// decoders and the header parser are shared with the transit, so they keep
+// reading these messages; the endpoint's checks sit beside them.
+
+/// A handshake body as `encode` writes it after the prefix, with its flags
+/// byte set and a byte after its Noise message.
+fn flagged_and_longer(encoded: &[u8]) -> Vec<u8> {
+    let mut body = encoded[4..].to_vec();
+    body[0] = 0xFF;
+    body.push(0);
+    body
+}
+
+#[test]
+fn the_shared_handshake_decoders_still_read_coordinates_past_reserved_flags_and_trailing_bytes() {
+    let (src, dest) = (make_coords(&[1, 2, 0]), make_coords(&[3, 4, 0]));
+
+    let setup = SessionSetup::new(src.clone(), dest.clone())
+        .with_handshake(vec![0xAA; 33])
+        .encode();
+    let decoded = SessionSetup::decode(&flagged_and_longer(&setup))
+        .expect("a transit reads a SessionSetup whatever its flags and length");
+    assert_eq!(
+        (decoded.src_coords, decoded.dest_coords),
+        (src.clone(), dest.clone())
+    );
+
+    let ack = SessionAck::new(src.clone(), dest.clone())
+        .with_handshake(vec![0xBB; 57])
+        .encode();
+    let decoded = SessionAck::decode(&flagged_and_longer(&ack))
+        .expect("a transit reads a SessionAck whatever its flags and length");
+    assert_eq!((decoded.src_coords, decoded.dest_coords), (src, dest));
+}
+
+#[test]
+fn the_encrypted_header_parser_still_reads_a_header_with_reserved_prefix_bits_set() {
+    let mut message = build_fsp_header(7, FSP_FLAG_CP | 0xF8, 6).to_vec();
+    message.extend_from_slice(&[0u8; 6 + TAG_SIZE]);
+    let header = FspEncryptedHeader::parse(&message)
+        .expect("a transit reads an established header whatever its reserved bits");
+    assert!(header.has_coords());
+    assert_eq!(header.counter, 7);
+}
+
+// ===== Endpoint checks (FRC-1501 Section 5.1) =====
+
+/// Whether a handshake phase's strict decoder accepts a body.
+type Strict = fn(&[u8]) -> bool;
+
+/// One message of each handshake phase as `encode` writes it, prefix
+/// included, with its strict decoder applied to the body.
+fn handshakes() -> [(&'static str, Vec<u8>, Strict); 3] {
+    let (src, dest) = (make_coords(&[1, 2, 0]), make_coords(&[3, 4, 0]));
+    [
+        (
+            "SessionSetup",
+            SessionSetup::new(src.clone(), dest.clone())
+                .with_handshake(vec![0xAA; 33])
+                .encode(),
+            |body| SessionSetup::decode_strict(body).is_ok(),
+        ),
+        (
+            "SessionAck",
+            SessionAck::new(src, dest)
+                .with_handshake(vec![0xBB; 57])
+                .encode(),
+            |body| SessionAck::decode_strict(body).is_ok(),
+        ),
+        (
+            "SessionMsg3",
+            SessionMsg3::new(vec![0xCC; 73]).encode(),
+            |body| SessionMsg3::decode_strict(body).is_ok(),
+        ),
+    ]
+}
+
+#[test]
+fn strict_handshake_decoders_accept_every_conforming_message() {
+    for (name, encoded, strict) in handshakes() {
+        assert!(strict(&encoded[4..]), "{name}: a conforming body decodes");
+        let prefix = FspCommonPrefix::parse(&encoded).unwrap();
+        assert!(
+            check_prefix(&prefix, encoded.len() - 4).is_ok(),
+            "{name}: a conforming prefix passes"
+        );
+    }
+}
+
+#[test]
+fn strict_handshake_decoders_refuse_any_body_flag_bit() {
+    for (name, encoded, strict) in handshakes() {
+        for bit in 0..8 {
+            let mut body = encoded[4..].to_vec();
+            body[0] = 1 << bit;
+            assert!(
+                !strict(&body),
+                "{name} with body flag bit {bit} must be refused"
+            );
+        }
+    }
+}
+
+#[test]
+fn strict_handshake_decoders_refuse_bytes_after_the_noise_message() {
+    for (name, encoded, strict) in handshakes() {
+        let mut body = encoded[4..].to_vec();
+        body.push(0);
+        assert!(
+            !strict(&body),
+            "{name} with a trailing byte must be refused"
+        );
+    }
+}
+
+#[test]
+fn check_prefix_refuses_any_handshake_prefix_flag_bit() {
+    for (name, encoded, _) in handshakes() {
+        for bit in 0..8 {
+            let mut flagged = encoded.clone();
+            flagged[1] = 1 << bit;
+            let prefix = FspCommonPrefix::parse(&flagged).unwrap();
+            assert!(
+                check_prefix(&prefix, flagged.len() - 4).is_err(),
+                "{name} with prefix flag bit {bit} must be refused"
+            );
+        }
+    }
+}
+
+#[test]
+fn check_prefix_refuses_a_handshake_or_signal_payload_len_that_is_not_the_rest() {
+    let signal = build_fsp_error_prefix(34);
+    for (name, encoded) in handshakes()
+        .map(|(name, encoded, _)| (name, encoded))
+        .into_iter()
+        .chain([("routing signal", signal.to_vec())])
+    {
+        let prefix = FspCommonPrefix::parse(&encoded).unwrap();
+        let len = usize::from(prefix.payload_len);
+        for rest in [len - 1, len + 1, 0] {
+            assert!(
+                check_prefix(&prefix, rest).is_err(),
+                "{name}: payload_len {len} with {rest} bytes after the prefix must be refused"
+            );
+        }
+        assert!(
+            check_prefix(&prefix, len).is_ok(),
+            "{name}: matching length passes"
+        );
+    }
+}
+
+#[test]
+fn check_prefix_refuses_a_routing_signal_with_a_reserved_prefix_bit() {
+    for bit in 3..8 {
+        let mut signal = build_fsp_error_prefix(34);
+        signal[1] |= 1 << bit;
+        let prefix = FspCommonPrefix::parse(&signal).unwrap();
+        assert!(
+            check_prefix(&prefix, 34).is_err(),
+            "a routing signal with prefix bit {bit} must be refused"
+        );
+    }
+    let mut signal = build_fsp_error_prefix(34);
+    signal[1] |= FSP_FLAG_CP | FSP_FLAG_K;
+    let prefix = FspCommonPrefix::parse(&signal).unwrap();
+    assert!(
+        check_prefix(&prefix, 34).is_ok(),
+        "bits 0 to 2 are not reserved"
+    );
+}
+
+#[test]
+fn check_prefix_leaves_an_established_message_to_the_header_checks() {
+    let header = build_fsp_header(7, FSP_FLAG_CP | FSP_FLAGS_RESERVED, 6);
+    let prefix = FspCommonPrefix::parse(&header).unwrap();
+    assert!(check_prefix(&prefix, 0).is_ok());
+}
+
+#[test]
+fn check_header_refuses_each_reserved_prefix_bit_and_passes_cp_and_k() {
+    let parse = |flags: u8| {
+        let mut message = build_fsp_header(7, flags, 6).to_vec();
+        message.extend_from_slice(&[0u8; 6 + TAG_SIZE]);
+        FspEncryptedHeader::parse(&message).unwrap()
+    };
+    for bit in 3..8 {
+        assert!(
+            check_header(&parse(1 << bit)).is_err(),
+            "an established header with prefix bit {bit} must be refused"
+        );
+    }
+    assert!(check_header(&parse(FSP_FLAG_CP | FSP_FLAG_K)).is_ok());
+}
+
+#[test]
+fn check_sealed_compares_payload_len_with_the_bytes_less_the_tag() {
+    let mut message = build_fsp_header(7, 0, 6).to_vec();
+    message.extend_from_slice(&[0u8; 6 + TAG_SIZE]);
+    let header = FspEncryptedHeader::parse(&message).unwrap();
+    assert!(check_sealed(&header, 6 + TAG_SIZE).is_ok());
+    for sealed in [5 + TAG_SIZE, 7 + TAG_SIZE, TAG_SIZE, TAG_SIZE - 1, 0] {
+        assert!(
+            check_sealed(&header, sealed).is_err(),
+            "payload_len 6 with {sealed} sealed bytes must be refused"
+        );
+    }
+}
+
+#[test]
+fn check_inner_refuses_every_inner_flag_bit_including_bit_0() {
+    assert!(check_inner(0).is_ok());
+    for bit in 0..8 {
+        assert!(
+            check_inner(1 << bit).is_err(),
+            "inner_flags bit {bit} must be refused"
+        );
+    }
 }

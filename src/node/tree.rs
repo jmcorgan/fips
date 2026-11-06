@@ -592,7 +592,7 @@ impl Node {
                     // identity sets. Our parent_id is unchanged in this branch,
                     // so our tree-peer set is unchanged and our outgoing filter
                     // content is unchanged. Use mark_changed_peers, which
-                    // checks for actual content delta against last_sent_filters,
+                    // checks for actual content delta against the last sent filter,
                     // instead of mark_all_updates_needed, which marks
                     // unconditionally regardless of whether content changed.
                     let peer_addrs: Vec<NodeAddr> = self.peers.keys().copied().collect();

@@ -217,8 +217,12 @@ starts its own attempt at once. The decision between crossing handshakes
 ("crossing hellos") is taken when a msg3 authenticates, by one rule both
 ends apply alike: a node whose own setup is still unanswered gives way to
 the peer's completed handshake, and between two completed handshakes the
-one initiated by the node with the smaller address wins, as in IKEv2's
-simultaneous initiation (RFC 7296 §2.8).
+one initiated by the node with the smaller address wins. HIPv2 settles
+crossing exchanges the same way (RFC 7401 §6.7, step 3: a host in I1-SENT
+answers an I1 only when the sender's HIT is smaller than its own). IKEv2 has
+no rule for crossed initial exchanges; its nearest is for simultaneous
+rekeying, which closes the SA created with the lowest nonce (RFC 7296 §2.8.1
+and §2.8.2).
 
 - The node with the smaller address refuses a crossing setup, answering
   nothing, while its own setup is less than 5 s old, since the peer will
@@ -393,9 +397,9 @@ entry expires, it cannot forward data packets (which carry only addresses, not
 coordinates) and sends a CoordsRequired error.
 
 FSP uses a hybrid warmup strategy combining proactive piggybacking with
-reactive standalone messages to keep transit caches populated (Yggdrasil
-uses a similar approach of embedding coordinates in session traffic to
-warm transit node caches):
+reactive standalone messages to keep transit caches populated. Ironwood,
+Yggdrasil's routing library, has no such cache: it carries the source and
+destination paths in every traffic packet and forwards on them.
 
 ### Proactive Warmup Phase
 

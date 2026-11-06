@@ -298,11 +298,11 @@ fragments a packet of up to 1280 bytes instead of answering, since a host
 ignores a Packet Too Big that reports less than 1280 (see
 [Fragmentation policy](#fragmentation-policy)).
 
-ICMPv6 Packet Too Big generation is rate-limited per source address
-(100ms interval) to prevent storms from applications sending many
-oversized packets. The ICMP response is delivered locally back
-through the TUN; no network traversal is needed, so delivery is
-reliable.
+ICMPv6 Packet Too Big generation is rate-limited by a token bucket per
+source address (a burst of 10, then 10 a second) to prevent storms from
+applications sending many oversized packets. The ICMP response is
+delivered locally back through the TUN; no network traversal is needed,
+so delivery is reliable.
 
 ## Fragmentation Policy
 

@@ -30,6 +30,7 @@ environment   fips-mesh  ipv6tun::bsdnet::tests::a_route_added_twice_through_the
 environment   fips-mesh  ipv6tun::bsdnet::tests::a_route_present_through_another_interface_is_refused_and_left_in_place  src/ipv6tun/tests/bsdnet.rs
 environment   fips-mesh  ipv6tun::bsdnet::tests::a_tun_device_created_twice_in_turn_comes_up_configured_both_times  src/ipv6tun/tests/bsdnet.rs
 environment   fips-mesh  ipv6tun::bsdnet::tests::configuring_a_configured_tun_device_again_accepts_its_own_address_and_route  src/ipv6tun/tests/bsdnet.rs
+environment   fips-mesh  ipv6tun::lifecycle::tests::stopping_a_wintun_tun_returns_with_no_host_traffic  src/ipv6tun/tests/lifecycle.rs
 environment   fips-mesh  ipv6tun::winnet::tests::a_route_added_twice_on_one_interface_is_accepted  src/ipv6tun/tests/winnet.rs
 environment   fips-mesh  ipv6tun::winnet::tests::a_wintun_adapter_created_twice_in_turn_comes_up_configured_both_times  src/ipv6tun/tests/winnet.rs
 environment   fips-mesh  ipv6tun::winnet::tests::an_address_added_twice_on_one_interface_is_accepted  src/ipv6tun/tests/winnet.rs

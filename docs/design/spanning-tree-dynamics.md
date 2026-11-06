@@ -36,11 +36,12 @@ foundations and references that underpin this document, see
 
 ### The CRDT Approach
 
-The spanning tree is maintained as a distributed soft-state CRDT-Set (see
-Shapiro et al., "Conflict-free Replicated Data Types"). Each node makes
-independent local decisions about parent selection, gossips these decisions
-to peers, and the system converges to a consistent structure without
-coordination.
+The spanning tree is maintained as a distributed soft-state CRDT-Set, the
+framing the Ironwood README uses for its own tree. CRDTs are defined by
+Shapiro et al., "Conflict-free Replicated Data Types"; soft state is not part
+of that paper. Each node makes independent local decisions about parent
+selection, gossips these decisions to peers, and the system converges to a
+consistent structure without coordination.
 
 Key properties:
 
@@ -183,10 +184,11 @@ The propagation time is O(tree depth), not O(network size). In the example:
 - Any node wanting to reach B checks bloom filters to identify routing paths
 - Total: 1-2 gossip rounds for B to be locatable
 
-Note: The use of bloom filters for reachability identification is a FIPS
-addition. Yggdrasil uses DHT-based lookup flooding to discover coordinates;
-FIPS replaces this with bloom filter summaries that propagate through tree
-edges, providing O(1) per-peer reachability checks. See
+Note: Bloom filter reachability is inherited from Yggdrasil v0.5. In
+Yggdrasil v0.4, routes were set up through a DHT; v0.5 removed it for a
+key-to-coordinate lookup that a node forwards to the on-tree links whose bloom
+filter holds the destination. FIPS keeps that design: bloom filter summaries
+propagate through tree edges, providing O(1) per-peer reachability checks. See
 [fips-bloom-filters.md](fips-bloom-filters.md) for details.
 
 Note: Nodes A, C, E never add B to their TreeState. They can still route to B
@@ -352,10 +354,12 @@ peered with C.
 the improvement exceeds cost-based hysteresis (`parent_hysteresis`, default
 0.2 = 20% improvement required). A hold-down timer (`hold_down_secs`,
 default 30s) further suppresses non-mandatory re-evaluation after a switch.
-Hysteresis and hold-down timers are well-established techniques in routing
-protocol design (used in OSPF, BGP, and IS-IS); FIPS adapts these to the
-specific context of tree-coordinate routing with local-only link metrics.
-See §8 for details.
+On a continuously varying metric such as ETX, route selection needs hysteresis
+to avoid persistent oscillation (RFC 8966 Appendix A.3, which switches routes
+only when both the current and a smoothed metric favor the new one). FIPS uses
+a fixed improvement threshold instead, with a hold-down timer, in the specific
+context of tree-coordinate routing with local-only link metrics. See §8 for
+details.
 
 **Sequence number advancement**: Each parent change increments the sequence
 number. Nodes observing rapid sequence increases can detect instability and
@@ -454,9 +458,9 @@ Detecting failed links is critical for timely reconvergence.
 
 ### Detection Mechanisms
 
-**MMP heartbeat-based detection** (following the general approach of
-heartbeat-based failure detectors; see Das et al., "SWIM" for the
-theoretical framework):
+**MMP heartbeat-based detection** (an ordinary heartbeat failure detector.
+Das et al., "SWIM", present their protocol as the alternative to heartbeating,
+and MMP has none of SWIM's indirect probing or suspicion):
 
 **Heartbeat sending.** Every `heartbeat_interval` (default 10 seconds), if
 no frame has been sent to a peer recently, the node sends a Heartbeat
@@ -538,9 +542,11 @@ conditions and the rationale for the local-only cost metric.
 
 The implementation uses cost-weighted depth to balance tree depth against link
 quality. Each candidate parent is evaluated by its **effective depth** — the
-tree depth plus a local link cost penalty derived from MMP metrics. This
-cost-aware parent selection is a FIPS addition — Yggdrasil selects parents
-purely by tree depth without link quality consideration.
+tree depth plus a local link cost penalty derived from MMP metrics. At the
+Yggdrasil v0.5 release, Ironwood chose a parent by root and then path
+stability, with no depth or cost term. In September 2024 it added a latency
+cost, scoring a candidate by its distance to the root times the peer's
+latency. FIPS differs in the cost it uses: MMP's ETX and SRTT, added to depth.
 
 **Algorithm** (`TreeState::evaluate_parent()` in `tree/state.rs`):
 
@@ -974,18 +980,19 @@ The protocol handles partitions gracefully (independent operation), heals
 automatically when connectivity returns, and adapts to heterogeneous link
 costs to form efficient tree structures.
 
-### Prior Art and FIPS Contributions
+### Prior Art and What FIPS Changes
 
-The protocol builds on established foundations (Yggdrasil/Ironwood
-tree-coordinate routing, IEEE 802.1D STP root election, CRDT-based
-distributed state, SWIM-style failure detection, ETX, OSPF-style
-hysteresis and hold-down) and adds several new elements (cost-aware
-parent selection on local-only metrics, the combined ETX + SRTT cost
-formula, flap dampening with mandatory-switch bypass, announcement
-suppression, and tree-only bloom filter merge with split-horizon).
-Both the prior-art map and the FIPS contributions list are
-consolidated in
-[fips-prior-work.md](fips-prior-work.md#fips-contributions).
+The protocol builds on established foundations: Yggdrasil/Ironwood
+tree-coordinate routing, with its tree-only bloom filter merge and
+bloom-guided lookup; IEEE 802.1D STP root election; CRDT-based
+distributed state; heartbeat failure detection; ETX; and hysteresis on
+a varying metric as in Babel. FIPS changes the parent cost (local-only
+metrics, with ETX and SRTT combined in one formula and added to depth),
+and adds flap dampening with mandatory-switch bypass after BGP route
+flap damping and announcement suppression after OSPF's MinLSInterval.
+The prior-art map and the list of what FIPS changes, each entry with
+its precedent, are consolidated in
+[fips-prior-work.md](fips-prior-work.md#what-fips-changes).
 
 ---
 

@@ -2278,8 +2278,9 @@ run_relay_verdict_test() {
 }
 
 # Unit tests for the RPM install suite's network budget: dnf-bounded.sh's
-# deadline and retry_build's refusal of a late retry. Hermetic: dnf and the
-# build are stubbed, no containers, about ten seconds. Kept in step with the
+# deadline and its retry after a metadata failure, and retry_build's refusal
+# of a late retry. Hermetic: dnf and the build are stubbed, no containers,
+# about forty seconds. Kept in step with the
 # ci.yml step of the same name by hand, like run_relay_verdict_test.
 run_rpm_budget_test() {
     local rc=0

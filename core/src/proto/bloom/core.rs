@@ -164,7 +164,7 @@ impl BloomFilter {
     }
 
     /// Whether this filter, announced by a tree child, returns the filter
-    /// `sent` that we last sent that child.
+    /// `sent` that we sent that child.
     ///
     /// True when [`overlap`](Self::overlap) exceeds
     /// [`echo_bound`](Self::echo_bound): more than `threshold` of the part

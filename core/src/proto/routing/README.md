@@ -17,7 +17,10 @@ the outcome.
 - `state.rs`: `Router`, the routing state `Node` holds.
 - `limits.rs`: the error-signal rate limiter.
 - `wire.rs`: the error signals (`CoordsRequired`, `PathBroken`,
-  `MtuExceeded`) and their message type registry.
+  `MtuExceeded`) and their message type registry. Only a session endpoint
+  decodes a signal, so the decoders refuse one with bytes after its body,
+  as FRC-2501 Section 5.1 requires. They ignore the reserved flags byte,
+  as FRC-2201 Section 6.3 has a source do.
 - `tests/`: the unit tests; its README describes it.
 
 ## Invariants

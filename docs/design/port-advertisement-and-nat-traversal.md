@@ -205,28 +205,32 @@ By author, when the responder's pubkey is already known:
 }]
 ```
 
-By application protocol, for "open discovery" of any peer running
-the same application:
+By application, for "open discovery" of any peer running the same
+application:
 
 ```json
 ["REQ", "<sub_id>", {
   "kinds": [<advert_kind>],
-  "#protocol": ["<application_protocol_name>"]
+  "#d": ["<application-defined-scope>"]
 }]
 ```
 
-Adverts whose `protocol` tag does not match the consumer's expected
-value, or whose `expiration` tag has elapsed, are rejected at
-validation. Consumers cache adverts in memory keyed by author npub
-and respect the embedded expiration.
+The `protocol` tag is not part of either filter. NIP-01 expects relays
+to index only single-letter tags, so a relay need not serve a
+`#protocol` filter; a consumer compares `protocol` itself once an
+advert arrives. Adverts whose `protocol` tag does not match the
+consumer's expected value, or whose `expiration` tag has elapsed, are
+rejected at validation. Consumers cache adverts in memory keyed by
+author npub and respect the embedded expiration.
 
 #### FIPS example: discovery filters
 
-The FIPS daemon issues both filter shapes: by-author for peers it
-intends to dial directly, and by-`#protocol` when an operator has
-opted into open discovery against the same application namespace.
-Cached adverts persist until their `expiration` lapses; a periodic
-prune drops expired entries.
+The FIPS daemon issues both filter shapes, with `#d` set to
+`fips-overlay-v1-next`: by-author for peers it intends to dial directly, and
+with no author for its standing subscription, which fills the advert
+cache that `policy: open` sweeps for peers. Cached adverts persist
+until their `expiration` lapses; a periodic prune drops expired
+entries.
 
 ---
 
@@ -460,13 +464,13 @@ responder should be suppressed by the application layer; see
 
 Offer and answer payloads are NIP-44-encrypted to the recipient and
 NIP-59 gift-wrapped, so only the intended recipient can decrypt.
-Authentication of the sender comes from the inner-wrap signature
-(the rumour signed by the sender's long-term identity inside the
-NIP-59 seal), **not** from the outer wrap signature (which is the
+Authentication of the sender comes from the signature on the NIP-59
+seal, made by the sender's long-term identity (the rumour inside the
+seal is unsigned), **not** from the outer wrap signature (which is the
 ephemeral pubkey).
 
 The inner JSON `senderNpub` / `recipientNpub` fields must be bound
-to the actual signing pubkey of the inner rumour. Treating those
+to the pubkey that actually signed the seal. Treating those
 JSON fields as independently trustworthy is a vulnerability —
 implementations must compare them against the unwrapped signature.
 
@@ -477,8 +481,8 @@ example, a Noise Protocol handshake keyed from the Nostr identity,
 or an application-specific authenticated-encryption layer. FIPS
 runs its FMP Noise XX handshake immediately after adoption; the
 identity proven by the Noise handshake is the same Nostr pubkey
-that signed the inner offer/answer rumour, so a man-in-the-middle on
-the relay cannot impersonate the responder.
+that signed the seal around the offer/answer rumour, so a
+man-in-the-middle on the relay cannot impersonate the responder.
 
 ### Replay protection
 

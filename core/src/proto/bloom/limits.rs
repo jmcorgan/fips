@@ -45,3 +45,27 @@ pub const SIZE_CLASS_BYTES: [usize; 4] = [512, 1024, 2048, 4096];
 /// probability about 1.6e-10 per announce. A returned filter below the floor
 /// adds at most about 26 entries upward, which is bounded.
 pub const ECHO_MIN_BITS: usize = 128;
+
+/// How many distinct filters sent to each peer are kept for the child echo
+/// check.
+///
+/// A tree child whose view lags can return an earlier filter we sent it
+/// rather than the latest, so an announce is tested against each kept filter
+/// with the same bound. Each comparison keeps its own false-cross chance, so
+/// across the history the chance is at most this many times one comparison's
+/// (`core/src/proto/bloom/README.md` gives the figures). An echo of a filter
+/// older than the history still passes. Costs one filter (1 KB) per kept
+/// filter per peer.
+pub const SENT_HISTORY: usize = 4;
+
+/// How long after a child echo refusal from a peer is logged at WARN the
+/// later refusals from that peer are logged at DEBUG, in milliseconds.
+///
+/// Most peers that trip the guard do so transiently: a child that changed
+/// parent sends its next filter, the one it sends a non-parent, before its
+/// TreeAnnounce reaches us, and the burst ends when the announce lands,
+/// usually within a minute. A lasting one can refuse hundreds an hour. A
+/// refusal cannot tell the two apart when it happens, so the first refusal
+/// in each interval is a warning and the rest are not.
+/// The `bloom.child_role_rejected` counter counts every refusal.
+pub const ECHO_WARN_MS: u64 = 300_000;

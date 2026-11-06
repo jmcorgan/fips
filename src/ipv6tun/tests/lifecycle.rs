@@ -5,7 +5,7 @@
 
 use super::{Exit, Handles, report_exit, report_thread};
 use crate::ipv6tun::config::{DnsConfig, Settings};
-use crate::ipv6tun::icmp_rate_limit::IcmpRateLimiter;
+use crate::ipv6tun::icmp_rate_limit::{IcmpRateLimiter, PACKET_TOO_BIG_BURST};
 use crate::ipv6tun::link::{
     DatagramRx, Feeds, FromMesh, HostLink, LearnedRx, PeerKey, any_key, pair,
 };
@@ -244,9 +244,10 @@ fn bare(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, len: usize) -> Vec<u8>
 }
 
 /// The Packet Too Big limiter counts a refusal's source even while no TUN
-/// queue is up to take the answer, so a second refusal from the same source
-/// once a queue is up, inside the interval, is not answered; handles that
-/// answered none before do answer it.
+/// queue is up to take the answer, so once refusals with no queue up have
+/// spent the source's burst, a further refusal once a queue is up, inside
+/// the interval, is not answered; handles that answered none before do
+/// answer it.
 #[test]
 fn packet_too_big_with_no_tun_queue_up_still_counts_against_its_source() {
     let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
@@ -258,16 +259,21 @@ fn packet_too_big_with_no_tun_queue_up_still_counts_against_its_source() {
         payload: crate::ipv6tun::ipv6_shim::compress_ipv6(&sent).unwrap(),
     };
 
-    // An hour's interval, so a runner stalled between the two refusals
-    // cannot let the second one through.
+    // An hour's interval, so a runner stalled between the refusals
+    // cannot let the last one through.
     let mut counted = Handles::new(us, Settings::with_tun(true));
     *counted.icmp_limiter.lock().unwrap() =
         IcmpRateLimiter::with_interval(Duration::from_secs(3600));
-    counted.answer(refusal());
+    for _ in 0..PACKET_TOO_BIG_BURST {
+        counted.answer(refusal());
+    }
     let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
     counted.install_sender(tun_tx);
     counted.answer(refusal());
-    assert!(rx.try_recv().is_err(), "held back by the first refusal");
+    assert!(
+        rx.try_recv().is_err(),
+        "held back by the refusals before it"
+    );
 
     let mut fresh = Handles::new(us, Settings::with_tun(true));
     let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
@@ -276,25 +282,31 @@ fn packet_too_big_with_no_tun_queue_up_still_counts_against_its_source() {
     assert_eq!(rx.try_iter().count(), 1, "answered with nothing before it");
 }
 
-/// A packet an embedder that owns the TUN sends over the node-wide MTU, to a
-/// destination no key names, is answered with Packet Too Big once; a second
-/// from the same source straight after is held back.
+/// Packets an embedder that owns the TUN sends over the node-wide MTU, to a
+/// destination no key names, are answered with Packet Too Big for the
+/// source's burst; one more from the same source straight after is held
+/// back.
 #[test]
-fn repeated_packet_too_big_on_the_app_owned_path_is_answered_once() {
+fn repeated_packet_too_big_on_the_app_owned_path_is_answered_for_the_burst_and_no_more() {
     let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
     let mut handles = Handles::new(us, Settings::with_tun(true));
-    // An hour's interval, so a runner stalled between the two packets cannot
-    // let the second one through.
+    // An hour's interval, so a runner stalled between the packets cannot
+    // let the last one through.
     *handles.icmp_limiter.lock().unwrap() =
         IcmpRateLimiter::with_interval(Duration::from_secs(3600));
-    let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
+    let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(32);
     handles.install_sender(tun_tx);
     let over = bare(us, any_key().address().to_ipv6(), 1400);
-    assert!(handles.outbound(&over).is_none());
-    assert!(handles.outbound(&over).is_none());
+    for _ in 0..=PACKET_TOO_BIG_BURST {
+        assert!(handles.outbound(&over).is_none());
+    }
     let answers: Vec<Vec<u8>> = rx.try_iter().collect();
-    assert_eq!(answers.len(), 1, "one Packet Too Big");
-    assert_eq!(answers[0][40], 2, "ICMPv6 type 2");
+    assert_eq!(
+        answers.len(),
+        PACKET_TOO_BIG_BURST as usize,
+        "one Packet Too Big for each of the burst"
+    );
+    assert!(answers.iter().all(|a| a[40] == 2), "ICMPv6 type 2");
 }
 
 /// The most Destination Unreachable the bucket can let through within
@@ -423,5 +435,84 @@ fn a_flood_from_a_foreign_source_on_the_app_owned_path_draws_the_burst_and_no_mo
         "a hundred packets from a foreign source drew {} answers, outside the burst and the \
          bucket's ceiling of {ceiling}",
         answers.len()
+    );
+}
+
+/// On the app-owned path, through the limiter the handles are built with,
+/// two oversized packets from one source sent back to back each draw a
+/// Packet Too Big, to the same destination and to two different ones. The
+/// host caches path MTU per destination, so a withheld answer is the only
+/// one that destination would have had.
+#[test]
+fn back_to_back_oversized_packets_from_one_source_on_the_app_owned_path_each_draw_packet_too_big() {
+    let us: std::net::Ipv6Addr = "fd00::1".parse().unwrap();
+    let a = any_key().address().to_ipv6();
+    let b = any_key().address().to_ipv6();
+    let mut counts = Vec::new();
+    for (what, first, second) in [("same destination", a, a), ("two destinations", a, b)] {
+        let mut handles = Handles::new(us, Settings::with_tun(true));
+        let (tun_tx, rx) = crate::ipv6tun::tun::TunTx::bounded(8);
+        handles.install_sender(tun_tx);
+        assert!(handles.outbound(&bare(us, first, 1400)).is_none());
+        assert!(handles.outbound(&bare(us, second, 1400)).is_none());
+        let answers: Vec<Vec<u8>> = rx.try_iter().collect();
+        assert!(answers.iter().all(|a| a[40] == 2), "{what}: ICMPv6 type 2");
+        counts.push((what, answers.len()));
+    }
+    assert_eq!(
+        counts,
+        [("same destination", 2), ("two destinations", 2)],
+        "Packet Too Big answers"
+    );
+}
+
+/// Stopping a system TUN on Windows returns promptly when the host sends
+/// nothing into the adapter. The reader thread waits in the Wintun session's
+/// blocking receive, which only a packet or the session's shutdown ends, and
+/// the stop joins that thread with no time limit, so the stop has to end the
+/// receive itself. The node's end of the datagram channel is dropped first,
+/// as the node's receive loop has exited by the time the stop runs.
+///
+/// The stop runs on a thread of its own, so a stop that never returns fails
+/// the test at the bound instead of hanging the run.
+#[cfg(windows)]
+#[test]
+#[ignore = "needs Administrator and wintun.dll: creates the Wintun adapter"]
+fn stopping_a_wintun_tun_returns_with_no_host_traffic() {
+    /// Far longer than a stop that ends the receive takes, and far shorter
+    /// than the job's time limit.
+    const STOP_BOUND: Duration = Duration::from_secs(20);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (mut handles, _host, datagrams, _learned) = attached_by(any_key());
+            let _exits = handles.exits();
+            let device = handles
+                .open_tun()
+                .await
+                .expect("the Wintun adapter is created");
+            handles.spawn_tun(device).expect("the TUN threads start");
+            tx.send("started").unwrap();
+            // Let the reader reach its blocking receive.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(datagrams);
+            handles.stop_tun().await;
+            tx.send("stopped").unwrap();
+        });
+    });
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(60)),
+        Ok("started"),
+        "the TUN came up"
+    );
+    assert_eq!(
+        rx.recv_timeout(STOP_BOUND),
+        Ok("stopped"),
+        "stop_tun did not return within {STOP_BOUND:?}: the TUN reader is \
+         still blocked in the Wintun receive"
     );
 }

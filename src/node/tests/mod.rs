@@ -30,6 +30,7 @@ mod discovery_msg1_cap;
 mod dns_mesh;
 mod forged_initial_msg2;
 mod forwarding;
+mod fsp_envelope;
 mod handshake;
 mod handshake_lines;
 mod heartbeat;

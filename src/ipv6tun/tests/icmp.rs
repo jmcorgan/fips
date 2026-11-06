@@ -22,26 +22,34 @@ fn packet(src: Ipv6Addr, dst: Ipv6Addr, len: usize) -> Vec<u8> {
     p
 }
 
-/// Packet Too Big through one limiter: a second to the same source inside
-/// the interval is held back, whether or not the first had a queue to go
-/// to, and one at the end of the interval is sent.
+/// Packet Too Big through one limiter: answers with no queue to go to spend
+/// the source's burst as answers with one do, and once the burst is spent
+/// the next to the same source is held back until a token returns one
+/// interval later.
 #[test]
-fn repeated_packet_too_big_to_one_source_is_held_back_for_the_interval_with_or_without_a_queue() {
+fn repeated_packet_too_big_to_one_source_is_held_back_once_its_burst_is_spent_with_or_without_a_queue()
+ {
+    use crate::ipv6tun::icmp_rate_limit::PACKET_TOO_BIG_BURST;
     let over = packet(us(), "fd00::2".parse().unwrap(), 1100);
     let mtu = 1033;
+    let built = build_packet_too_big(&over, mtu, "fd00::2".parse().unwrap());
     let mut limiter = IcmpRateLimiter::new();
     let t0 = Instant::now();
     let ms = |n| t0 + Duration::from_millis(n);
-    assert_eq!(
-        too_big(&over, mtu, &mut limiter, t0, false),
-        None,
-        "no queue"
-    );
+    let half = PACKET_TOO_BIG_BURST / 2;
+    for _ in 0..half {
+        assert_eq!(
+            too_big(&over, mtu, &mut limiter, t0, false),
+            None,
+            "no queue"
+        );
+    }
+    for _ in half..PACKET_TOO_BIG_BURST {
+        assert_eq!(too_big(&over, mtu, &mut limiter, t0, true), built);
+    }
+    assert_eq!(too_big(&over, mtu, &mut limiter, t0, true), None);
     assert_eq!(too_big(&over, mtu, &mut limiter, ms(99), true), None);
-    assert_eq!(
-        too_big(&over, mtu, &mut limiter, ms(100), true),
-        build_packet_too_big(&over, mtu, "fd00::2".parse().unwrap())
-    );
+    assert_eq!(too_big(&over, mtu, &mut limiter, ms(100), true), built);
     assert_eq!(too_big(&over, mtu, &mut limiter, ms(150), true), None);
 }
 

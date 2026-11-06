@@ -960,3 +960,30 @@ fn destination_unreachable_goes_ten_at_once_then_one_a_tenth_of_a_second() {
         "no more than the burst after a quiet spell"
     );
 }
+
+/// The system TUN reader, through its limiter, answers each of two oversized
+/// packets from one source read back to back, to two mesh destinations no
+/// key names, with a Packet Too Big.
+#[test]
+fn the_reader_answers_back_to_back_oversized_packets_from_one_source_to_two_destinations_each() {
+    let ours = *crate::Identity::generate().address();
+    let known = crate::ipv6tun::link::any_key();
+    let (host, paths, _datagrams) = reader_host(known);
+    let (tun_tx, tun_rx) = TunTx::bounded(8);
+    for _ in 0..2 {
+        let stranger = *crate::ipv6tun::link::any_key().address().as_bytes();
+        let mut packet = bare(&ours, &stranger, 1400);
+        assert!(handle_tun_packet(
+            &mut packet,
+            1360,
+            "test0",
+            ours,
+            &tun_tx,
+            &host,
+            &paths
+        ));
+    }
+    let answers: Vec<Vec<u8>> = tun_rx.try_iter().collect();
+    assert!(answers.iter().all(|a| a[40] == 2), "ICMPv6 type 2");
+    assert_eq!(answers.len(), 2, "Packet Too Big answers");
+}

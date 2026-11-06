@@ -141,7 +141,7 @@ jobs:
       # reason as the convergence-gate step above.
       - name: Run NAT lab relay start and guard unit tests
         run: bash testing/lib/relay-verdict-test.sh
-      # Hermetic: dnf and the image build stubbed, no containers, about ten
+      # Hermetic: dnf and the image build stubbed, no containers, about forty
       # seconds. Kept in step with ci-local.sh's run_rpm_budget_test by hand,
       # for the same reason as the convergence-gate step above.
       - name: Run RPM install network budget unit tests
@@ -985,6 +985,18 @@ jobs:
           cargo test -p fips-mesh --lib -- --include-ignored ipv6tun::winnet:: --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/tun-setup-tests.log"
           grep -qE '^test result: ok\. 10 passed;' "$RUNNER_TEMP/tun-setup-tests.log"
+
+      # Stopping a system TUN with no host traffic returns within its bound.
+      # The test stops the TUN on a thread of its own and fails at the bound,
+      # so a stop that never returns reds the step instead of hanging the job.
+      # The grep fails the step unless the one test ran and passed.
+      - name: Run the TUN stop test as Administrator
+        shell: bash
+        run: |
+          cargo test -p fips-mesh --lib -- --include-ignored --exact \
+            ipv6tun::lifecycle::tests::stopping_a_wintun_tun_returns_with_no_host_traffic --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/tun-stop-test.log"
+          grep -qE '^test result: ok\. 1 passed;' "$RUNNER_TEMP/tun-stop-test.log"
 
       # The ci profile retries a failing test, so a test that passed only on
       # retry leaves the job green. Annotate each one, and list it in the run
