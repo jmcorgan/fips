@@ -81,6 +81,11 @@ enum Commands {
         /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
         peer: String,
     },
+    /// Show a peer's paths, or pin its traffic to a transport or one path
+    Path {
+        #[command(subcommand)]
+        what: PathCommands,
+    },
     /// Diagnose reachability of a mesh endpoint
     Probe {
         /// Target identifier: npub (bech32) or hostname from /etc/fips/hosts
@@ -188,6 +193,37 @@ enum ShowCommands {
     IdentityCache,
     /// Native datagram API flows and listeners
     NativeFlows,
+}
+
+#[derive(Subcommand, Debug)]
+enum PathCommands {
+    /// Show every path to a peer: its state, role, pin and measurements
+    Show {
+        /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
+        peer: String,
+    },
+    /// Pin traffic to the peer to a transport, or with an address to one
+    /// path on it. The pin is kept until unpinned, the transport is removed
+    /// or the peer is replaced through a new handshake; while nothing it
+    /// names is live, paths are chosen as if unpinned, and the pin applies
+    /// again when one is.
+    Pin {
+        /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
+        peer: String,
+        /// Transport: instance name as configured, or the numeric id
+        /// `path show` prints. Names are per transport type, so a name
+        /// several transports share is refused, with their ids; give one
+        /// of those. A shared name that is itself one of those ids takes
+        /// that transport
+        transport: String,
+        /// The peer's address on that transport, to pin one path
+        address: Option<String>,
+    },
+    /// Clear the peer's pin
+    Unpin {
+        /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
+        peer: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -322,6 +358,35 @@ fn build_query(command: &str) -> String {
 fn build_command(command: &str, params: serde_json::Value) -> String {
     let req = serde_json::json!({"command": command, "params": params});
     format!("{}\n", serde_json::to_string(&req).unwrap())
+}
+
+/// Build the request for a `path` subcommand, resolving the peer to an
+/// npub. The address is sent only when given, since a pin without one
+/// names the whole transport.
+fn path_request(what: &PathCommands) -> String {
+    match what {
+        PathCommands::Show { peer } => {
+            build_command("path_show", serde_json::json!({"npub": resolve_peer(peer)}))
+        }
+        PathCommands::Pin {
+            peer,
+            transport,
+            address,
+        } => {
+            let mut params = serde_json::json!({
+                "npub": resolve_peer(peer),
+                "transport": transport,
+            });
+            if let Some(addr) = address {
+                params["address"] = serde_json::json!(addr);
+            }
+            build_command("path_pin", params)
+        }
+        PathCommands::Unpin { peer } => build_command(
+            "path_unpin",
+            serde_json::json!({"npub": resolve_peer(peer)}),
+        ),
+    }
 }
 
 /// Print a control socket response, handling error status.
@@ -641,6 +706,7 @@ fn main() {
             let npub = resolve_peer(peer);
             build_command("disconnect", serde_json::json!({"npub": npub}))
         }
+        Commands::Path { what } => path_request(what),
         Commands::Probe {
             target,
             json,
@@ -1716,6 +1782,10 @@ fn probe_close(report: &serde_json::Value) {
 #[cfg(test)]
 #[path = "tests/fipsctl.rs"]
 mod query_tests;
+
+#[cfg(test)]
+#[path = "tests/fipsctl_path.rs"]
+mod path_tests;
 
 #[cfg(test)]
 mod tests {

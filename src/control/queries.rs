@@ -249,6 +249,8 @@ pub fn show_peers(node: &Node) -> Value {
     let any_peer_has_srtt = node.peers().any(|p| p.has_srtt());
 
     let now = now_ms();
+    // One instant for every row's paths, as the snapshot's publish takes.
+    let instant = crate::peer::peer_now();
     let peers: Vec<Value> = node
         .peers()
         .map(|peer| {
@@ -397,11 +399,39 @@ pub fn show_peers(node: &Node) -> Value {
                 peer_json["mmp"] = mmp_json;
             }
 
+            peer_json["paths"] = render_paths(&node.peer_paths(peer, instant));
+
             peer_json
         })
         .collect();
 
     json!({ "peers": peers })
+}
+
+/// Render a peer's paths as the `paths` array of its `show_peers` row, one
+/// object per path; `path_show` adds its own keys to each.
+pub(crate) fn render_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
+    paths
+        .iter()
+        .map(|p| {
+            json!({
+                "transport_id": p.transport_id,
+                "transport": p.transport,
+                "transport_type": p.transport_type,
+                "addr": p.addr,
+                "state": p.state,
+                "active": p.active,
+                "remote_active": p.remote_active,
+                "role": p.role,
+                "pinned": p.pinned,
+                "last_rtt_ms": p.last,
+                "min_rtt_ms": p.least,
+                "rtt_samples": p.samples,
+                "etx": p.etx,
+                "score": p.score,
+            })
+        })
+        .collect()
 }
 
 /// Render a snapshot [`EntityMmp`](super::snapshot::EntityMmp) into the inline
@@ -554,6 +584,8 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
             if let Some(mmp) = &peer.mmp {
                 peer_json["mmp"] = render_entity_mmp(mmp, "lqi");
             }
+
+            peer_json["paths"] = render_paths(&peer.paths);
 
             peer_json
         })

@@ -54,6 +54,7 @@ mod multi_path;
 mod multi_path_handshake;
 mod netmon;
 mod path_accept;
+mod path_control;
 mod path_intake;
 mod path_padding;
 mod paths;

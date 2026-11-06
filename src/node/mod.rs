@@ -2738,6 +2738,11 @@ impl Node {
         let any_peer_has_srtt = self.peers().any(|p| p.has_srtt());
 
         let now_ms = Self::now_ms();
+        // One instant for every row's paths. Each row's `paths` is a fresh
+        // allocation per peer per publish, and a changing round trip makes
+        // a row unequal to its predecessor, so `reconcile_rows` reuses it
+        // less often on a link whose paths are measured.
+        let instant = crate::peer::peer_now();
         let peer_rows: Vec<snap::PeerRow> = self
             .peers()
             .map(|peer| {
@@ -2835,6 +2840,7 @@ impl Node {
                     rekey_draining: peer.is_draining(),
                     current_k_bit: peer.current_k_bit(),
                     mmp,
+                    paths: self.peer_paths(peer, instant),
                 }
             })
             .collect();

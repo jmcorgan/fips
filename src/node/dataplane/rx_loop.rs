@@ -543,8 +543,11 @@ impl Node {
                     self.handle_native(message);
                 }
                 Some((request, response_tx)) = control_rx.recv() => {
-                    // Only mutating COMMAND requests (`connect` / `disconnect`)
-                    // reach the rx_loop now. Every pure-read `show_*` query is
+                    // Only mutating COMMAND requests (`connect` / `disconnect`,
+                    // the probe commands, `path_pin` / `path_unpin`) and
+                    // `path_show`, which reads the live path machines the
+                    // snapshot does not carry, reach the rx_loop now. Every
+                    // pure-read `show_*` query is
                     // served off-loop from the read handle in the control accept
                     // task (`snapshot_dispatch`), so it never round-trips here —
                     // the data-plane dispatch path carries no `show_*` arm. A

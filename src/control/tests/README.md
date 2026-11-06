@@ -42,3 +42,10 @@ declared from that file as `#[cfg(test)] #[path = "tests/<file>.rs"] mod
   `../mod.rs` and `../queries.rs` do.
 - The snapshot tests of `../queries.rs` and their fixtures stay where they
   are (`../snapshots/`); `queries.rs` here adds fixtures there.
+- `../snapshots/fipsctl_path_requests.json` is not a reply fixture and no
+  query test writes it. It is a request fixture: the path requests
+  `fipsctl` builds, each with its command line, with `<npub>` and `<addr>`
+  placeholders. Two tests read it, so the client and the daemon share one
+  source: the node's round trip through the control protocol
+  (`src/node/tests/path_control.rs`) and `fipsctl`'s own test of the
+  requests it builds.

@@ -1052,7 +1052,7 @@ impl TransportHandle {
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.name(),
             #[cfg(test)]
-            TransportHandle::Loopback(_) => None,
+            TransportHandle::Loopback(t) => t.name(),
         }
     }
 

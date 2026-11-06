@@ -92,10 +92,14 @@ fn draw_table(
 
     // Build the grouped display: a styled label row before each non-empty
     // group, the group's peer rows, and a blank separator before the next
-    // group. `peer_display_idx[p]` is the display-row index of sorted peer `p`,
-    // so the stored peer-index selection (used by detail + navigation) can be
-    // translated to the display row to highlight, and the cursor only ever
-    // lands on peer rows.
+    // group. A peer with more than one path is drawn as a tree: one child
+    // row per path carries the path's own Transport, SRTT and LQI, and the
+    // peer row keeps the link-level columns (Dir, Loss, EffD, Goodput and the
+    // packet counts). A peer with one path, or a row from a daemon that sends
+    // no `paths`, stays one line. `peer_display_idx[p]` is the display-row
+    // index of sorted peer `p`, so the stored peer-index selection (used by
+    // detail + navigation) can be translated to the display row to highlight,
+    // and the cursor only ever lands on peer rows.
     let mut rows: Vec<Row> = Vec::new();
     let mut peer_display_idx: Vec<usize> = Vec::with_capacity(peers.len());
     let mut last_group: Option<u8> = None;
@@ -123,25 +127,15 @@ fn draw_table(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Transport: "type addr" (e.g., "udp 1.2.3.4:2121")
-        let transport = {
-            let t_type = peer
-                .get("transport_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let t_addr = peer
-                .get("transport_addr")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if t_type.is_empty() && t_addr.is_empty() {
-                "-".to_string()
-            } else if t_type.is_empty() {
-                t_addr.to_string()
-            } else if t_addr.is_empty() {
-                t_type.to_string()
-            } else {
-                format!("{t_type}/{t_addr}")
-            }
+        // Transport: "type/addr" (e.g., "udp/1.2.3.4:2121"). A one-path
+        // peer's comes from its path, since the row's own `transport_type`
+        // names the link's original transport, which after a switch may not
+        // be the one the address beside it is on.
+        let paths = peer_paths(peer);
+        let multi = paths.len() > 1;
+        let transport = match paths.as_slice() {
+            [one] => type_addr(one, "transport_type", "addr"),
+            _ => type_addr(peer, "transport_type", "transport_addr"),
         };
 
         let dir = peer
@@ -170,6 +164,14 @@ fn draw_table(
             Style::default()
         };
 
+        // With more than one path, the per-path columns move to the child
+        // rows; Loss is the link's and stays.
+        let (transport, srtt, lqi) = if multi {
+            (String::new(), String::new(), String::new())
+        } else {
+            (transport, srtt, lqi)
+        };
+
         peer_display_idx.push(rows.len());
         rows.push(
             Row::new(vec![
@@ -187,6 +189,21 @@ fn draw_table(
             ])
             .style(row_style),
         );
+
+        // One child row per path, tree-drawn under the peer:
+        //   peer
+        //    ├─ cable   active   udp/10.0.0.2:2121
+        //    └─ wifi    live     udp/10.0.1.2:2121
+        if multi {
+            for (i, path) in paths.iter().enumerate() {
+                let branch = if i + 1 == paths.len() {
+                    "└─"
+                } else {
+                    "├─"
+                };
+                rows.push(path_row(path, branch));
+            }
+        }
     }
 
     let widths = [
@@ -241,6 +258,106 @@ fn draw_table(
             &mut scrollbar_state,
         );
     }
+}
+
+/// `type/addr` from the two keys of `value`, either alone when the other is
+/// missing, and `-` when both are.
+fn type_addr(value: &serde_json::Value, type_key: &str, addr_key: &str) -> String {
+    let t_type = value.get(type_key).and_then(|v| v.as_str()).unwrap_or("");
+    let t_addr = value.get(addr_key).and_then(|v| v.as_str()).unwrap_or("");
+    if t_type.is_empty() && t_addr.is_empty() {
+        "-".to_string()
+    } else if t_type.is_empty() {
+        t_addr.to_string()
+    } else if t_addr.is_empty() {
+        t_type.to_string()
+    } else {
+        format!("{t_type}/{t_addr}")
+    }
+}
+
+/// The `paths` array of a `show_peers` row, one entry per path the link
+/// holds. Empty for a row from a daemon that does not send it.
+fn peer_paths(peer: &serde_json::Value) -> Vec<serde_json::Value> {
+    peer.get("paths")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The transport a path runs over: its configured instance name, else its
+/// type, else `#<id>` when the transport is gone.
+fn path_label(path: &serde_json::Value) -> String {
+    let name = path.get("transport").and_then(|v| v.as_str());
+    let t_type = path.get("transport_type").and_then(|v| v.as_str());
+    match (name, t_type) {
+        (Some(n), _) if !n.is_empty() => n.to_string(),
+        (_, Some(t)) if !t.is_empty() => t.to_string(),
+        _ => format!("#{}", helpers::u64_field(path, "transport_id")),
+    }
+}
+
+/// A path's state as shown: `active` for the path this node sends on, else
+/// its state, then `,pinned` when the operator's pin names it, `,remote`
+/// when the peer said it sends on it, and `,backup` for a backup transport.
+fn state_label(path: &serde_json::Value) -> String {
+    let flag = |key: &str| path.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let active = flag("active");
+    let mut label = if active {
+        "active".to_string()
+    } else {
+        helpers::str_field(path, "state").to_string()
+    };
+    if flag("pinned") {
+        label.push_str(",pinned");
+    }
+    if flag("remote_active") && !active {
+        label.push_str(",remote");
+    }
+    if path.get("role").and_then(|v| v.as_str()) == Some("backup") {
+        label.push_str(",backup");
+    }
+    label
+}
+
+/// A path's child row under its peer. The path's own round trip and score
+/// fill the SRTT and LQI columns; the link-level columns stay blank here,
+/// since the peer row above carries them. The active path is green, a live
+/// standby dim, an unproven (probing) one yellow and a failing one red.
+fn path_row(path: &serde_json::Value, branch: &str) -> Row<'static> {
+    let active = path
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let state = helpers::str_field(path, "state");
+    let style = if active {
+        Style::default().fg(Color::Green)
+    } else if state == "probing" {
+        Style::default().fg(Color::Yellow)
+    } else if state == "suspect" || state == "dead" {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let rtt = path
+        .get("last_rtt_ms")
+        .and_then(|v| v.as_u64())
+        .map(|ms| ms.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    Row::new(vec![
+        Cell::from(format!(" {branch} {}", path_label(path))),
+        Cell::from(state_label(path)),
+        Cell::from(type_addr(path, "transport_type", "addr")),
+        Cell::from(""),
+        Cell::from(rtt),
+        Cell::from(""),
+        Cell::from(helpers::opt_f64_field(path, "score", 2)),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(""),
+    ])
+    .style(style)
 }
 
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Value]) {
@@ -360,6 +477,37 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, peers: &[serde_json::Va
             "State",
             helpers::str_field(&transport, "state"),
         ));
+        lines.push(Line::from(""));
+    }
+
+    // Every path the link holds, in the path set's order.
+    let paths = peer_paths(peer);
+    if !paths.is_empty() {
+        lines.push(helpers::section_header("Paths"));
+        for path in &paths {
+            lines.push(helpers::kv_line(
+                &path_label(path),
+                &format!(
+                    "{}  {}",
+                    type_addr(path, "transport_type", "addr"),
+                    state_label(path)
+                ),
+            ));
+            let rtt = |key: &str| {
+                path.get(key)
+                    .and_then(|v| v.as_u64())
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_else(|| "-".to_string())
+            };
+            lines.push(Line::from(format!(
+                "      rtt {} min {} n={}  etx {}  score {}",
+                rtt("last_rtt_ms"),
+                rtt("min_rtt_ms"),
+                helpers::u64_field(path, "rtt_samples"),
+                helpers::opt_f64_field(path, "etx", 2),
+                helpers::opt_f64_field(path, "score", 2),
+            )));
+        }
         lines.push(Line::from(""));
     }
 

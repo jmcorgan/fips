@@ -84,6 +84,9 @@ pub struct LoopbackTransport {
     /// The part the transport plays in a link's paths, standing in for a
     /// configured `role`; `normal` unless a test set another.
     role: crate::config::TransportRole,
+    /// The instance name the transport reports, standing in for a
+    /// configured instance's name; none unless a test set one.
+    name: Option<String>,
 }
 
 impl LoopbackTransport {
@@ -118,6 +121,7 @@ impl LoopbackTransport {
             discovered: Mutex::new(Vec::new()),
             autoconnect: AtomicBool::new(false),
             role: crate::config::TransportRole::Normal,
+            name: None,
         }
     }
 
@@ -130,6 +134,17 @@ impl LoopbackTransport {
     /// with that `role` does.
     pub fn set_role(&mut self, role: crate::config::TransportRole) {
         self.role = role;
+    }
+
+    /// Report `name` as this transport's instance name from now on, as a
+    /// transport configured under that name does.
+    pub fn set_name(&mut self, name: &str) {
+        self.name = Some(name.to_string());
+    }
+
+    /// The instance name a test gave this transport, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// The part this transport plays in a link's paths.
