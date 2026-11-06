@@ -244,10 +244,19 @@ packet. The drop counter feeds into the ECN congestion detection
 system (see [fips-mmp.md](fips-mmp.md#ecn-congestion-signaling)).
 
 Socket buffers (`recv_buf_size`, `send_buf_size`) are configured at
-bind time via `socket2`. Linux internally doubles the requested value
-(to account for kernel bookkeeping overhead) and silently clamps to
-`net.core.rmem_max` / `net.core.wmem_max` if the request exceeds the
-host kernel limits. The full UDP transport configuration is in
+bind time by one helper (`transport/sockbuf.rs`) shared by the UDP
+listen socket, the per-peer connected UDP sockets and the Ethernet
+packet socket. On Linux it asks first with `SO_RCVBUFFORCE` /
+`SO_SNDBUFFORCE`, which the kernel grants past the host limits to a
+process holding `CAP_NET_ADMIN`, and falls back to plain `SO_RCVBUF`
+/ `SO_SNDBUF`, which the kernel clamps to `net.core.rmem_max` /
+`net.core.wmem_max`. Linux internally doubles the value it accepts
+(to account for kernel bookkeeping overhead). The helper reads back
+what the kernel granted, and the UDP listen socket and the Ethernet
+socket warn when it is less than asked, naming both remedies: grant
+`CAP_NET_ADMIN` or raise the sysctl. Those two sockets fail setup
+only when no size can be set; the connected sockets size their
+buffers best-effort. The full UDP transport configuration is in
 [../reference/configuration.md](../reference/configuration.md). The
 host-side sysctl requirements and how to set them persistently live
 in

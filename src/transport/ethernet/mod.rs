@@ -357,6 +357,37 @@ impl EthernetTransport {
         &self.stats
     }
 
+    /// Query transport-local congestion indicators.
+    ///
+    /// On Linux this is the one reader of the socket's kernel drop count,
+    /// which resets when read: each call takes the drops since the last one
+    /// into the stats total and reports the total. The node's congestion
+    /// sample calls it once a second. Drops on a socket torn down between
+    /// two calls are not counted. Elsewhere the transport cannot see the
+    /// kernel's drops and reports none.
+    pub fn congestion(&self) -> super::TransportCongestion {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(socket) = self.binding.socket() {
+                match socket.get_ref().take_drops() {
+                    Ok(drops) => self.stats.record_kernel_drops(drops),
+                    Err(e) => trace!(
+                        transport_id = %self.transport_id,
+                        error = %e,
+                        "Could not read the socket's kernel drop count"
+                    ),
+                }
+            }
+            super::TransportCongestion {
+                recv_drops: Some(self.stats.kernel_drops.load(Ordering::Relaxed)),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            super::TransportCongestion::default()
+        }
+    }
+
     /// Start the transport asynchronously.
     ///
     /// Binds the interface if it is present, then hands the transport to a
@@ -979,6 +1010,9 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
 
             ctx.binding.tear_down();
             ctx.presence.transition(Presence::Absent);
+            // Beacons heard on the binding just torn down name neighbours
+            // reached through it: a dial to one now cannot be sent.
+            ctx.neighbor_buffer.take();
             absence_reported = false;
 
             let outcome = churn.detached(Instant::now());
@@ -1504,6 +1538,14 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "tests/rebind.rs"]
 mod rebind_tests;
+
+#[cfg(test)]
+#[path = "tests/detach.rs"]
+mod detach_tests;
+
+#[cfg(test)]
+#[path = "tests/congestion.rs"]
+mod congestion_tests;
 
 #[cfg(test)]
 mod tests {

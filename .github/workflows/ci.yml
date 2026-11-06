@@ -629,7 +629,7 @@ jobs:
             exit 1
           fi
           echo "running $BIN as root"
-          sudo -E env FIPS_TEST_PRIVILEGED=1 "$BIN" transport::ethernet --test-threads=1 \
+          sudo -E env FIPS_TEST_PRIVILEGED=1 "$BIN" transport::ethernet transport::sockbuf --test-threads=1 \
             | tee "$RUNNER_TEMP/privileged-tests.log"
           grep -qE '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/privileged-tests.log"
 

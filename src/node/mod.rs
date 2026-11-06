@@ -2832,6 +2832,7 @@ impl Node {
                         bytes_recv: stats.bytes_recv,
                     },
                     replay_suppressed: peer.replay_suppressed_count(),
+                    replay_suppressed_total: peer.replay_suppressed_total(),
                     consecutive_decrypt_failures: peer.consecutive_decrypt_failures(),
                     nostr_traversal,
                     noise,

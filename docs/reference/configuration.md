@@ -794,8 +794,8 @@ adding entries and the precedence rules:
 |-----------|------|---------|-------------|
 | `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port. Ignored when `outbound_only: true` (kernel-assigned ephemeral port is used regardless). |
 | `transports.udp.mtu` | u16 | `1357` | Transport MTU; the default is the smallest that carries a 1280-byte IPv6 packet |
-| `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
-| `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
+| `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Granted in full to a process with `CAP_NET_ADMIN` (`SO_RCVBUFFORCE`); without it the kernel clamps to `net.core.rmem_max`, which must then be >= this value, and the daemon warns when clamped. See [../how-to/tune-udp-buffers.md](../how-to/tune-udp-buffers.md). |
+| `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Granted in full to a process with `CAP_NET_ADMIN` (`SO_SNDBUFFORCE`); without it the kernel clamps to `net.core.wmem_max`, which must then be >= this value, and the daemon warns when clamped. |
 | `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts. Implicitly forced false when `outbound_only: true`. |
 | `transports.udp.public` | bool | `false` | If advertised: `true` publishes direct `host:port`; `false` publishes `udp:nat` rendezvous |
 | `transports.udp.external_addr` | string | *(none)* | Explicit advertise-as override. Bare IP (`"203.0.113.45"` — bind port is appended) or full `host:port`. Takes precedence over the bound address and STUN autodiscovery. Useful when the public IP isn't on a local interface (cloud 1:1 NAT, EIP) or to skip STUN for a deterministic value. |
@@ -815,8 +815,8 @@ root; on macOS it requires read/write access to a `/dev/bpf*` device.
 | `interface` | string | *(required)* | Network interface name (e.g., `"eth0"`, `"enp3s0"`) |
 | `ethertype` | u16 | `0x2121` | EtherType |
 | `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 3 (for frame type + length prefix) |
-| `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
-| `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
+| `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB). On Linux it is granted in full with `CAP_NET_ADMIN` and otherwise clamped to `net.core.rmem_max` with a warning, as for UDP |
+| `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB). On Linux it is granted in full with `CAP_NET_ADMIN` and otherwise clamped to `net.core.wmem_max` with a warning, as for UDP |
 | `listen` | bool | `true` | Listen for neighbor beacons from other nodes. Renamed from `discovery` in v0.5.0; the old key is still accepted as an alias, so a deployed config loads unchanged |
 | `announce` | bool | `false` | Broadcast announcement beacons on the LAN |
 | `auto_connect` | bool | `false` | Auto-connect to discovered peers |

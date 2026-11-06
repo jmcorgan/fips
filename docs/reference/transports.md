@@ -49,6 +49,7 @@ module.
 | `beacons_dropped` | Received beacons the discovery buffer had no room for |
 | `frames_too_short` | Frames below minimum length, dropped |
 | `frames_too_long` | Frames above transport MTU, dropped |
+| `kernel_drops` | Kernel `PACKET_STATISTICS` drop count, summed over every binding (Linux only; feeds ECN congestion detection) |
 
 ## Tor
 

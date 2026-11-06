@@ -80,6 +80,8 @@ pub(crate) struct OwnedSessionState {
     pub fmp_cipher: LessSafeKey,
     pub fmp_replay: ReplayWindow,
     pub source_npub: Option<String>,
+    /// The peer's running total of refused replays, shared with the node.
+    pub replay_total: Arc<AtomicU64>,
 }
 
 /// Pre-cooked decrypt + dispatch job. Built on rx_loop after parsing
@@ -469,7 +471,8 @@ fn handle_job(
     // replays. **Direct &mut access** — no Arc<Mutex> lock acquire.
     let fmp_replay_highest = state.fmp_replay.highest();
     if !state.fmp_replay.check(fmp_counter) {
-        return Ok(()); // replay; drop silently
+        state.replay_total.fetch_add(1, Ordering::Relaxed);
+        return Ok(()); // replay; count it and drop
     }
 
     let mut nonce_bytes = [0u8; 12];
@@ -636,6 +639,7 @@ mod tests {
                 fmp_cipher: open_cipher,
                 fmp_replay: ReplayWindow::new(),
                 source_npub: None,
+                replay_total: Default::default(),
             },
         );
 
@@ -689,6 +693,7 @@ mod tests {
             fmp_cipher: LessSafeKey::new(unbound),
             fmp_replay: ReplayWindow::new(),
             source_npub: None,
+            replay_total: Default::default(),
         }
     }
 
@@ -782,6 +787,7 @@ mod tests {
                 fmp_cipher: open_cipher,
                 fmp_replay: ReplayWindow::new(),
                 source_npub: None,
+                replay_total: Default::default(),
             },
         );
 
@@ -856,6 +862,7 @@ mod pool_tests {
             fmp_cipher: LessSafeKey::new(key),
             fmp_replay: ReplayWindow::new(),
             source_npub: None,
+            replay_total: Default::default(),
         }
     }
 

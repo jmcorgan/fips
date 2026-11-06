@@ -42,6 +42,11 @@ pub(crate) mod watcher;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod presence;
 
+/// Kernel socket buffer sizing for the transports that own a descriptor:
+/// forced past the `net.core` ceiling where the process may, plain otherwise.
+#[cfg(unix)]
+pub(crate) mod sockbuf;
+
 #[cfg(ble_available)]
 pub mod ble;
 
@@ -1473,7 +1478,7 @@ impl TransportHandle {
         match self {
             TransportHandle::Udp(t) => t.congestion(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            TransportHandle::Ethernet(_) => TransportCongestion::default(),
+            TransportHandle::Ethernet(t) => t.congestion(),
             TransportHandle::Tcp(_) => TransportCongestion::default(),
             TransportHandle::Tor(_) => TransportCongestion::default(),
             TransportHandle::Nym(_) => TransportCongestion::default(),

@@ -277,6 +277,8 @@ impl Node {
         info!("RX event loop started");
         // Optional per-stage perf profiler (FIPS_PERF=1). No-op otherwise.
         crate::perf_profile::maybe_spawn_reporter();
+        // Ends with this loop.
+        let _task_wait = super::wait::watch();
 
         loop {
             // Bounded drain mode: break as soon as all peers have cleared. In
@@ -318,12 +320,12 @@ impl Node {
                         None => break, // channel closed
                     }
                     // Drain remaining ready inbound packets in a tight loop
-                    // before yielding back to select! — every yield is a
-                    // futex hop on tokio's multi-thread scheduler, and at
-                    // line rate the kernel UDP queue typically has several
-                    // datagrams available per wake. Caps at a batch
-                    // boundary so other branches (tick, control) eventually
-                    // get a turn even under sustained load.
+                    // before going back to select!: at line rate the kernel
+                    // UDP queue typically has several datagrams available
+                    // per wake, and each round of this loop ends in a yield.
+                    // The cap bounds how long one round runs. It gives the
+                    // later branches (tick, control) no turn: under `biased`
+                    // they are reached only when this branch reads empty.
                     //
                     // **Interleave fallback drain** every N packets so
                     // bounced FMP plaintexts (heartbeats, post-FMP-
@@ -700,6 +702,15 @@ impl Node {
                     break;
                 }
             }
+            // Give the runtime thread back once per round. An outside thread
+            // can keep a burst arm ready, and then this task would return to
+            // the scheduler only when its cooperative budget ran out, 128
+            // rounds on, with every spawned task waiting. A listen socket's
+            // reader is one, and a probe waiting in its socket for that long
+            // falls behind the replay window. This frees spawned tasks only:
+            // the select's later arms still wait for the ready arm to read
+            // empty.
+            tokio::task::yield_now().await;
         }
 
         info!("RX event loop stopped (channel closed)");
