@@ -1,0 +1,124 @@
+# One peer, two UDP paths: a netem flap of the veth, the K-timeout bound
+#
+# The all-IP twin of dual-path-flap. Two nodes joined twice, both by UDP: a
+# dedicated veth carrying IP (10.222.0.0/24), on which each node runs a UDP
+# instance bound to that interface (`transports.udp.<veth>.interface`), and
+# the Docker bridge on the ordinary wildcard instance (`udp/main`). The dial
+# owner lists both addresses, bridge first: the bridge is dialled and
+# carries link-up, and the veth address is offered to the link's path
+# machine as a configured candidate, which makes it a second path. The veth
+# scores better (1 to 3 ms against 40 ms each way on the bridge), so each
+# end moves onto it once it is Live, and every flap hits the active path.
+#
+# What this exercises that dual-path-flap cannot: two UDP instances as two
+# paths, and `udp.interface` binding on the listen and connected sockets.
+# The flap is the same: 100% netem loss on the veth in both directions, the
+# interface up and its carrier kept, so each end detects the loss only by
+# its probes timing out and must switch within the K-timeout bound,
+# 3 x 200 ms + 400 ms + 50 ms + 250 ms = 1300 ms. Interface-bound UDP
+# reports neither carrier nor presence in any case.
+#
+# Recovery: as dual-path-flap; a restored path waits for the floor's next
+# slot or the peer's floor probe, then the dwell before the fail-back.
+#
+#   n01 ===udp/veth=== n02      (flapped)
+#   n01 ---udp/main--- n02      (never touched)
+
+scenario:
+  name: "dual-udp-flap"
+  seed: 42
+  duration_secs: 180
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, udp-veth+udp]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.2]
+  bridge_policy:
+    delay_ms: [40, 40]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.2]
+
+# Only the veth flaps; the bridge path is the standby. protect_connectivity
+# is off for the reason dual-path-flap gives.
+link_flaps:
+  enabled: true
+  only_transport: udp-veth
+  interval_secs: {min: 35, max: 45}
+  max_down_links: 1
+  down_duration_secs: {min: 12, max: 18}
+  protect_connectivity: false
+
+# Each TCP session runs a 1 Mbit/s UDP stream beside it, which max_stall
+# holds to its ceiling.
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 5, max: 10}
+  duration_secs: {min: 20, max: 30}
+  parallel_streams: 2
+  udp_mbps: 1
+
+node_churn:
+  enabled: false
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  min_traffic:
+    min_sessions_ok: 2
+
+  # Every flap, at both ends, within the K-timeout bound,
+  # 3 x 200 + 400 + 50 + 250 = 1300 ms.
+  switch_latency:
+    max_ms: 1300
+    each_end: true
+
+  # Each flap moves both ends off the veth and back (4); the first move
+  # onto the veth at each end (2).
+  path_switches:
+    min_total: 4
+    per_flap: 4
+    extra: 2
+  # A timeout of the active path that no down explains, which a switch count
+  # cannot see. Reported, not held.
+  active_timeouts: {}
+
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+  # Held on the UDP streams, at the receiver: they stop only while no
+  # path carries them. A TCP receiver can stay silent after a switch for
+  # as long as its sender's retransmission timer runs, which is TCP's own
+  # recovery, so the TCP sessions' figure is reported, not bounded.
+  max_stall:
+    max_secs: 2
+    stream: udp
+  paths_live:
+    min: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug,fips::node::dataplane::wait=debug"
+  output_dir: "./sim-results"

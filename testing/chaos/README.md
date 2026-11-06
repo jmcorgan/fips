@@ -107,6 +107,15 @@ Explicit topologies exercising non-UDP transports.
 | ethernet-only | 4     | Ethernet       | Ring  | 30s      | yes   | --         | AF_PACKET transport with beacon discovery  |
 | ethernet-mesh | 6     | UDP + Ethernet | Mesh  | 120s     | yes   | yes        | Mixed UDP/Ethernet, netem mutation + flaps |
 | tcp-mesh      | 6     | UDP + TCP      | Mesh  | 120s     | yes   | yes        | Mixed UDP/TCP, netem mutation + flaps      |
+| dual-path-flap | 2    | Ethernet + UDP | Pair  | 180s     | yes   | yes        | Two paths; netem flaps of the cable, K-timeout switch |
+| dual-udp-flap | 2     | UDP + UDP      | Pair  | 180s     | yes   | yes        | Two interface-bound UDP paths; the same flaps |
+| dual-path-carrier | 2 | Ethernet + UDP | Pair  | 180s     | yes   | scheduled  | Two paths; the cable taken down at one end; signalled switch in 1 s |
+| forward-only  | 2     | UDP + UDP      | Pair  | 160s     | yes   | scheduled  | Two UDP paths; the active one fails one way, under load |
+| loaded-standby | 2    | Ethernet + UDP | Pair  | 90s      | yes   | scheduled  | Standby starved under load, then the cable lost; Dead standby probed at once |
+| two-bound-udp | 2     | UDP lanes      | Pair  | 120s     | yes   | --         | Two bound UDP instances per end on one subnet; acks cross |
+| two-bound-udp-bulk | 2 | UDP lanes     | Pair  | 120s     | yes   | --         | The same under uncapped traffic; no frame refused as a replay |
+| steady-dual-path | 2  | Ethernet + UDP | Pair  | 300s     | yes   | --         | Two healthy near-equal paths; no churn (calibration) |
+| dead-grace-long | 2   | Ethernet + UDP | Pair  | 780s     | yes   | scheduled  | By hand: the cable down past the 600 s grace |
 
 - **ethernet-only**: 4-node ring on raw Ethernet (AF_PACKET). Peers discovered
   via beacons, not static config. Minimal netem (1-5ms delay).
@@ -118,6 +127,76 @@ Explicit topologies exercising non-UDP transports.
 - **tcp-mesh**: 6-node mesh with 4 UDP and 3 TCP edges. Both transports use
   static peer config. Netem mutation (30% fraction, every 20-40s) and link
   flaps (1 link max, 10-20s down).
+- **dual-path-flap**: two nodes joined by a raw-Ethernet veth and by UDP over
+  the bridge (`[n01, n02, ethernet+udp]`), multipath on. Only the cable
+  flaps, by 100% netem loss with carrier kept, so neither end has a signal:
+  each must move the link to the bridge within the K-timeout bound (1300 ms,
+  `switch_latency` at each end), under the same session (`max_promotions`,
+  `max_dials`), without a stall in traffic, and move back after the
+  restore. `paths_live` is the control that the cable was a second path.
+- **dual-udp-flap**: the all-IP twin (`[n01, n02, udp-veth+udp]`): a veth
+  carrying IP with an interface-bound UDP instance at each end, plus UDP
+  over the bridge. The veth address is a configured candidate that the
+  link's path machine makes a second path; the flaps and assertions are
+  dual-path-flap's.
+- **dual-path-carrier**: dual-path-flap's pair, with the cable taken down
+  administratively on a schedule (`ip link set down` at n01, then n02, then
+  n01). The downed end loses presence and closes the path to its peer; the
+  far end loses carrier. Each end must switch within 1 s, the bound with
+  a signal, and within 500 ms (`signalled_ms`). The far end's probes to the
+  downed address are held to the draft's floor (`path_floor`), and with
+  the capture on and tx counters of its own veth they are the figures the
+  draft's question 4 asks for (`figures.json`).
+- **forward-only**: dual-udp-flap's pair, under scheduled bidirectional
+  load, with the veth failing in one direction: n02's frames dropped at
+  n01's veth ingress for 30 s, then n01's at n02's. Neither end has a
+  signal; both must switch within the K-timeout bound (1300 ms).
+  `reverse_heard` is the control that the step stayed one-directional:
+  the undropped direction delivered to its end (against a capture) and
+  neither end's neighbour entry failed. It counts the undropped end's
+  path messages in the step's second half, or from its last one when the
+  half holds none, since a Dead path's interval can grow longer than
+  the half. Probes to the stopped address are held to the floor and
+  counted against the capture at the far ingress.
+- **loaded-standby**: the cable and a bridge half delayed 500 ms each way,
+  under bidirectional load for 25 s until the standby is Dead at both ends,
+  then the cable taken down at n01. With nothing Live each end must probe
+  its acked Dead standby at once (draft 5.7) and bring it back: `rescue`
+  checks the probe, within 60 ms of the active path leaving Live, and the
+  standby Live within 2 s, with no peer removed. Its control is that the
+  standby was Dead, not merely Suspect, before the cut. The 500 ms is the
+  largest delay considered (200 to 500 ms); measured on the development
+  host, the containers' frame rate had a tenth percentile of 12405
+  frames/s, and 500 ms leaves the control working on a host half as fast.
+- **two-bound-udp**: one veth pair carrying two lanes (`[n01, n02, udp-veth,
+  {lanes: 2}]`), an interface-bound UDP instance on each lane at each end,
+  all on port 2122, no bridge. Once the link is up the runner binds n02's
+  neighbour entries for n01's lane addresses each to the other lane's MAC,
+  so every answer to n01's probe on one lane arrives on the other. A node
+  must credit an answer by the path it echoes, not the instance it arrived
+  on: all four lane pairs Live at n01, none going Suspect after, and the
+  sentinel address no host answers never Live (`lanes`, `paths_live` with
+  `configured`). The control is a frame captured on a lane addressed to
+  the other lane's address. Traffic is light, capped at 8 Mbit/s: at the
+  generator's uncapped rate the crossed listen socket overflows, so a lane
+  would go Suspect for load rather than for the crediting rule.
+- **two-bound-udp-bulk**: the same two lanes with the rate cap removed and
+  `lanes` left out, since the crossed listen socket still overflows at that
+  rate. The check is `max_replay_refusals: {max_total: 0, min_nodes: 2}`:
+  a standby probe waiting behind the bulk stream's frames must still be read
+  inside the replay window, on a node whose decrypt workers refuse what falls
+  behind it.
+- **steady-dual-path**: the churn calibration. A cable (`role: preferred`,
+  through `transport_overrides`) and a bridge path, both 1 to 3 ms, nothing
+  flapped, light traffic, 300 s. A healthy pair meets once, switches at
+  most twice (each end onto the cable), never dials its live peer, and
+  holds the cable as a second path. `ethernet-churn` stays in local CI as
+  the interface-binding regression it was added for.
+- **dead-grace-long**: run by hand, in neither runner. dual-path-carrier's
+  pair with the cable down at n01 for 660 s, past the far end's 600 s
+  `PATH_DEAD_GRACE`: the probes and bytes to the downed address over a
+  whole grace, all held to the floor (24 by the floor's arithmetic), the
+  path discarded with `why=Grace`, and the recovery after the return.
 
 ### Congestion and ECN
 
@@ -168,7 +247,22 @@ inbound packets. Combined with small `recv_buf_size`, this reliably triggers
 Traffic sessions capture iperf3 results using `--json` output. Results are
 collected per-session from containers and saved as `iperf3-results.json` in
 the scenario output directory, enabling automated throughput analysis across
-scenario runs.
+scenario runs. Each result also carries the receiver's own intervals
+(`server_output_json`, from `--get-server-output` against a server started
+with `--json`), which count what arrived; `max_stall` reads those, not the
+client's, which count what the sender wrote. With `traffic.udp_mbps` set, each
+session also runs a constant-rate UDP stream to the container's second
+iperf3 server (port 5202), saved as `iperf3-udp-results.json`; a
+`max_stall` with `stream: udp` holds its ceiling on those streams and
+reports the TCP sessions' figure beside it, since a TCP receiver can stay
+silent after a path switch for as long as its sender's retransmission
+timer runs. The stream's client writes a line per event (`--json-stream`), so
+one whose file is still empty 5 s after it started never got going: a lost
+start datagram does that, since iperf3 does not retry it. It is started once
+more for the time left, and the check's message counts every restart in the
+run, since the seconds before it are not measured, including one whose stream
+the run killed at its end. A second empty file fails the check, and
+so does a stream that cannot be read, whose message gives what its file held.
 
 ## CLI Options
 
@@ -239,6 +333,8 @@ traffic:
   interval_secs: { min: 0, max: 30 }
   duration_secs: { min: 5, max: 90 }
   parallel_streams: 4
+  # rate_mbps: 8                    # cap each stream (iperf3 -b); uncapped by default
+  # udp_mbps: 1                     # a constant-rate UDP stream beside each session
 
 node_churn:
   enabled: true
@@ -284,6 +380,115 @@ assertions:
                                       # peer on another transport
 ```
 
+A two-path suite asserts on the path switch executor's lines and the
+path machine's debug lines, which `testing/chaos/sim-assert-test.py` tests
+against planted input:
+
+```yaml
+assertions:
+  path_switches: {min_total: 4, per_flap: 4, extra: 2}  # or max_total
+  switch_latency: {max_ms: 1300, each_end: true}  # signalled_ms: tighter
+  max_promotions: {per_node: 1}     # a second promotion is a re-peering
+  max_dials: 0                      # no dial after a node's first promotion
+  max_stall: {max_secs: 2}          # longest zero-byte run at a receiver;
+                                    # stream: udp holds the UDP streams instead
+  paths_live: {min: 2}              # paths Live per node, original included
+```
+
+`max_kernel_drops` reads the final congestion snapshot instead. It is a
+ceiling on the share of frames the kernel dropped at each node's Ethernet
+socket because the receive buffer was full, as dropped / (received +
+dropped), and fails a node that reports no count at all:
+
+```yaml
+assertions:
+  max_kernel_drops: {max_pct: 1, min_nodes: 2}  # min_nodes: how many nodes
+                                                # must report an Ethernet count
+```
+
+`max_replay_refusals` reads the same snapshot: the replays each node refused
+from each peer since it was promoted, on the inline path and in the decrypt
+workers. It fails a node that reports no count at all:
+
+```yaml
+assertions:
+  max_replay_refusals: {max_total: 0, min_nodes: 2}  # min_nodes: how many
+                                                     # nodes must report one
+```
+
+`active_timeouts` is a report and fails nothing. It counts `Live -> Suspect
+why=Timeout` on a node's active path that falls outside the K-timeout bound
+after a down at that node, which `path_switches` cannot see, and prints each
+one with each node's largest `Task wait` around it (`not kept` for a log with
+no such line):
+
+```yaml
+assertions:
+  active_timeouts: {}               # within_ms: the bound, default 1300
+```
+
+Two more read a path's own timeline (`sim/paths.py`), for a path that has
+stopped answering:
+
+```yaml
+assertions:
+  path_floor: true        # draft 5.6: probes to a stopped path, 1, 1, 2, 4 s ...
+  discovery_limit: true   # at most 8 probes per Probing episode
+```
+
+`path_floor` places each stop at the path's Dead entry and ends it on an
+answer, the peer's probe reviving it, or its release; it allows 50 ms for
+log-stamp error and exempts the two probes the draft does: the early probe
+when the peer clears `ACTIVE`, and the probe Section 5.7 requires at once
+when the active path fails with nothing Live (each in `sim/paths.py`, with
+how it is recognised). It refuses a
+stop it cannot place: one whose Dead entry came more than 60 s
+(`PATH_SILENCE_MAX`) after the path's first unanswered probe. Every run with
+path lines writes `figures.json` beside `analysis.txt` and a "Path figures"
+section in it: each stop's probes, bytes and gaps, each scheduled down's
+probes, captures and recovery at each end, the switch latencies, announce
+resends, and the peer's reorder count across each switch. A scheduled down
+can `capture: [n02]` on that end's veth for its window, and read
+`counters: [n02]`, that veth's `tx_packets` and `tx_dropped`, just before
+the down and just after the restore; with carrier off a frame the far end
+sends is counted there but never reaches the capture's tap.
+
+`switch_latency` measures from the stamp each flap takes inside the
+container, in the same shell as the command that makes it. `paths_live`
+and `max_dials` read `debug` lines, so a scenario declaring them must set
+`fips::node::handlers::path=debug` and `fips::node::lifecycle=debug` in
+`logging.rust_log`; loading refuses it otherwise.
+
+`transport_overrides: {ethernet: {...}, udp-veth: {...}, udp: {...}}` is
+merged into every generated transport instance of that kind after the
+harness injects it, which `fips_overrides`, merged before, cannot reach.
+
+A scenario can also script timed steps beside the random managers, at
+offsets in seconds from the end of warmup (`sim/schedule.py`):
+
+```yaml
+schedule:
+  # admin: `ip link set dev <veth> down` at `end`, then up after `secs`;
+  # presence goes at that end and carrier at the other. Ethernet edges only.
+  - {at: 20, down: [n01, n02], mode: admin, end: n01, secs: 15}
+  # netem (the default): 100% loss both ways, as a random flap.
+  - {at: 60, down: [n01, n02], secs: 15}
+  # iperf3 from the first node to the second.
+  - {at: 10, load: [n01, n02], secs: 50, streams: 4, bidir: true}
+  # oneway: n02's IPv4 frames dropped at n01's veth ingress (ARP passes);
+  # both ends' neighbour entries are read before the drop is lifted.
+  - {at: 90, down: [n01, n02], mode: oneway, from: n02, to: n01, secs: 30}
+```
+
+Each down is stamped inside the container in the same shell as its
+command, like a random flap, so `switch_latency` reads both. A step whose
+command fails ends the run `NOT SCORED` (exit 4) rather than scoring a down
+that did not happen. `admin` is refused with `node_churn`, whose restart
+brings the veth back up, and on a `udp-veth` edge, whose interface-bound UDP
+reports neither carrier nor presence; `oneway` is refused with `node_churn`
+too, and needs a veth edge. `reverse_heard: true` checks each `oneway`
+step on a `udp-veth` edge that captures at its `from` end.
+
 ## Topology Algorithms
 
 | Algorithm        | Parameters           | Description                                             |
@@ -306,6 +511,41 @@ the dual-connect race condition where both sides initiate simultaneously,
 and creates a clear "owning side" for each link — relevant for
 auto-reconnect testing. Ethernet edges are excluded from static config
 since they use beacon discovery.
+
+### Dual edges: two paths between one pair
+
+An explicit adjacency entry may name one of two dual transports, which join
+the pair twice so that it holds two paths under one session:
+
+- `ethernet+udp`: raw Ethernet on a veth pair, found by beacon, and UDP
+  over the bridge, dialled from static config.
+- `udp-veth+udp`: UDP bound to a veth pair (`interface:`, port 2122), and
+  UDP over the bridge, dialled from static config.
+
+`udp-veth` on its own is a single edge carried by UDP over a dedicated veth.
+With a fourth element, `[n01, n02, udp-veth, {lanes: 2}]`, the veth pair
+carries lanes: macvlan interfaces `vl<k>-<node>` in bridge mode on each end,
+lane `k` of the lower id `10.222.e.{2k+1}` and of the higher `10.222.e.{2k+2}`,
+each with its own bound UDP instance. The veths are NOARP and each end's
+entries for the other's lanes are fixed, so lane 0 does not answer ARP for
+every address; both nodes take `rp_filter=0` and `arp_ignore=0`. The
+dialler lists every pair of its lane and the peer's lane, and a sentinel at
+`10.222.e.250` no host answers. A node holds at most one laned edge, and
+lanes do not run with node churn.
+Each `udp-veth` edge is numbered in sorted edge order, and edge `k` is
+`10.222.k.0/24`: the lower node id is `.1`, the higher `.2`. Each end runs
+an interface-bound UDP instance named after its veth, and a node that has
+one names its bridge instance `main`, so its static peers qualify the
+bridge half as `udp/main`.
+
+The bridge half of a dual edge is the dialled one and carries link-up; the
+veth half becomes a second path through the link's path machine. The
+dialler of a dual edge is chosen as for any static edge, and a dual edge's
+peer entry carries a `priority` on each address (the bridge first); no
+other edge writes one. The edge's ordinary netem policy applies to the
+veth half; `netem.bridge_policy` sets the bridge half's, and
+`link_flaps.only_transport` (`ethernet`, `udp-veth`, ...) confines flaps to
+edges of that transport, a dual edge counting as its veth half.
 
 ## Output
 

@@ -10,12 +10,16 @@
 #   b -> fips-interop:b   ("parent / comparison")
 #   c -> fips-interop:c   ("release baseline")
 #
+# (the repository is FIPS_INTEROP_IMAGE; see names.sh).
+#
 # Node identity vs image slot are SEPARATE:
 #   - A spec entry is a slot letter.
 #   - Node id = <slot><ordinal>, ordinal counting occurrences of that
 #     slot, 1-based. Spec `a a b c` -> node ids `a1 a2 b1 c1`.
-#   - Container name = fips-interop-<nodeid>.
-#   - IPv4 = 172.30.0.1<index>, index = 0-based position in the spec
+#   - Container name = <run name>-<nodeid>, fips-interop-<nodeid> by
+#     default (FIPS_INTEROP_NAME).
+#   - IPv4 = <subnet>.1<index>, 172.30.0.1<index> by default
+#     (FIPS_INTEROP_SUBNET), index = 0-based position in the spec
 #     (10, 11, 12, 13, ...).
 #
 # Topology is a FULL MESH by default: every node auto-connects to every
@@ -25,8 +29,9 @@
 # derive_keys.py helper, keyed by a unique per-node string so that two
 # nodes of the same slot (a1, a2) still get DISTINCT identities.
 #
-# Output goes to <runs-base>/generated-configs/ (see FIPS_INTEROP_RUNS_DIR
-# under Environment, below):
+# Output goes to <runs-base>/generated-configs/ for the default run name
+# and to <runs-base>/runs/<name>/generated-configs/ for any other (see
+# FIPS_INTEROP_RUNS_DIR and FIPS_INTEROP_NAME under Environment, below):
 #   <nodeid>.yaml                  per-node daemon config (one per node)
 #   docker-compose.generated.yml   generated compose, one service per node
 #   nodes.env                      manifest for the driver to source
@@ -57,6 +62,31 @@
 #                          stderr; set it to a path outside the source
 #                          tree to keep generated artefacts out of the
 #                          checkout.
+#   FIPS_INTEROP_NAME      Run name (default fips-interop): container
+#                          prefix, compose project and per-run directory.
+#   FIPS_INTEROP_IMAGE     Image repository (default: the run name).
+#   FIPS_INTEROP_SUBNET    First three octets of the mesh /24 (default
+#                          172.30.0). See names.sh for all three.
+#   FIPS_INTEROP_MULTIPATH Unset (the default) or `request` or `config`:
+#                          the multipath mode interop-test.sh --multipath
+#                          sets. Every slot a and slot c node joins a
+#                          second network on FIPS_INTEROP_SUBNET2 as eth1
+#                          (the first is named eth0); slot a gets a second
+#                          UDP transport `mp2` bound to eth1 on port 2122,
+#                          `node.path.enabled: true`, and its peer
+#                          addresses qualified as `udp/main`; slot c's
+#                          configuration is unchanged. With `config`, slot
+#                          a's entry for each slot c peer also lists that
+#                          peer's second-network address on `udp/mp2` and
+#                          is `connect_policy: manual`, so the slot c node
+#                          is the only dialler. Both slots run under
+#                          capture-entry.sh, which captures eth1 (and eth0
+#                          on slot c) into <run-base>/captures/ before the
+#                          daemon starts, and log the dispatch, path and
+#                          lifecycle modules at debug. Unset, the output is
+#                          what it was before the mode existed.
+#   FIPS_INTEROP_SUBNET2   First three octets of the second network's /24
+#                          (default 172.30.1); multipath mode only.
 
 set -euo pipefail
 
@@ -83,12 +113,37 @@ else
     fi
 fi
 
-OUT_DIR="$RUNS_BASE/generated-configs"
+# shellcheck source=names.sh
+source "$SCRIPT_DIR/names.sh"
+interop_names
+
+OUT_DIR="$GEN_DIR"
 
 REKEY_AFTER_SECS="${REKEY_AFTER_SECS:-35}"
 MESH_NAME="fips-interop-mesh"
 UDP_PORT=2121
-SUBNET_PREFIX="172.30.0.1"     # node N gets ${SUBNET_PREFIX}<index>
+SUBNET_PREFIX="${INTEROP_SUBNET}.1"   # node N gets ${SUBNET_PREFIX}<index>
+
+# Multipath mode (see Environment above).
+MULTIPATH="${FIPS_INTEROP_MULTIPATH:-}"
+case "$MULTIPATH" in
+    ""|request|config) ;;
+    *)
+        echo "ERROR: FIPS_INTEROP_MULTIPATH must be request or config (got '$MULTIPATH')" >&2
+        exit 1
+        ;;
+esac
+SUBNET2="${FIPS_INTEROP_SUBNET2:-172.30.1}"
+MP_TRANSPORT="udp/mp2"
+MP_PORT=2122
+CAPTURES_DIR="$RUN_BASE/captures"
+if [ -n "$MULTIPATH" ]; then
+    interop_check_subnet FIPS_INTEROP_SUBNET2 "$SUBNET2"
+    if [ "$SUBNET2" = "$INTEROP_SUBNET" ]; then
+        echo "ERROR: FIPS_INTEROP_SUBNET2 must differ from FIPS_INTEROP_SUBNET" >&2
+        exit 1
+    fi
+fi
 
 # ── Args: the node-spec ──────────────────────────────────────────────
 
@@ -119,7 +174,7 @@ done
 # node id.
 
 NODE_IDS=()
-declare -A NODE_SLOT NODE_IP NODE_CTR
+declare -A NODE_SLOT NODE_IP NODE_CTR NODE_IP2
 declare -A SLOT_COUNT=([a]=0 [b]=0 [c]=0)
 
 index=0
@@ -128,8 +183,13 @@ for slot in "${SPEC[@]}"; do
     nid="${slot}${SLOT_COUNT[$slot]}"
     NODE_IDS+=("$nid")
     NODE_SLOT[$nid]="$slot"
-    NODE_CTR[$nid]="fips-interop-$nid"
+    NODE_CTR[$nid]="$INTEROP_NAME-$nid"
     NODE_IP[$nid]="${SUBNET_PREFIX}${index}"
+    # In the multipath mode slots a and c also sit on the second network,
+    # at the same last octet.
+    if [ -n "$MULTIPATH" ] && [ "$slot" != "b" ]; then
+        NODE_IP2[$nid]="${SUBNET2}.1${index}"
+    fi
     index=$(( index + 1 ))
 done
 
@@ -227,8 +287,12 @@ done
 # ── Phase 2: emit per-node configs ───────────────────────────────────
 
 emit_peer_block() {
-    # Args: peer node-id
-    local pid="$1"
+    # Args: peer node-id [own node-id]
+    local pid="$1" own="${2:-}"
+    if [ -n "$MULTIPATH" ] && [ "${NODE_SLOT[$own]:-}" = "a" ]; then
+        emit_mp_peer_block "$pid"
+        return
+    fi
     cat <<EOF
   - npub: "${NPUB[$pid]}"
     alias: "$pid"
@@ -237,6 +301,33 @@ emit_peer_block() {
         addr: "${NODE_IP[$pid]}:$UDP_PORT"
     connect_policy: auto_connect
 EOF
+}
+
+# A slot a node's peer entry in the multipath mode. Its UDP transports
+# are named, and a bare `udp` resolves to the lowest instance id, which
+# may be mp2, so the first-network address names `udp/main`. With
+# `config`, a slot c peer's second-network address follows it on mp2, at
+# a priority above the default 100 so the first address stays first
+# wherever priority orders anything, and the entry is `manual`: the new
+# node never dials it, so no handshake goes to the second address.
+emit_mp_peer_block() {
+    local pid="$1" policy="auto_connect"
+    cat <<EOF
+  - npub: "${NPUB[$pid]}"
+    alias: "$pid"
+    addresses:
+      - transport: udp/main
+        addr: "${NODE_IP[$pid]}:$UDP_PORT"
+EOF
+    if [ "$MULTIPATH" = "config" ] && [ "${NODE_SLOT[$pid]}" = "c" ]; then
+        cat <<EOF
+      - transport: $MP_TRANSPORT
+        addr: "${NODE_IP2[$pid]}:$UDP_PORT"
+        priority: 200
+EOF
+        policy="manual"
+    fi
+    echo "    connect_policy: $policy"
 }
 
 for nid in "${NODE_IDS[@]}"; do
@@ -252,6 +343,10 @@ for nid in "${NODE_IDS[@]}"; do
         echo "  rekey:"
         echo "    after_secs: $REKEY_AFTER_SECS"
         echo "    after_messages: 65536"
+        if [ -n "$MULTIPATH" ] && [ "${NODE_SLOT[$nid]}" = "a" ]; then
+            echo "  path:"
+            echo "    enabled: true"
+        fi
         echo ""
         echo "tun:"
         echo "  enabled: true"
@@ -263,12 +358,24 @@ for nid in "${NODE_IDS[@]}"; do
         echo ""
         echo "transports:"
         echo "  udp:"
-        echo "    bind_addr: \"0.0.0.0:$UDP_PORT\""
-        echo "    mtu: 1472"
+        if [ -n "$MULTIPATH" ] && [ "${NODE_SLOT[$nid]}" = "a" ]; then
+            # A different port for mp2, so it does not share 2121 with the
+            # unbound main socket.
+            echo "    main:"
+            echo "      bind_addr: \"0.0.0.0:$UDP_PORT\""
+            echo "      mtu: 1472"
+            echo "    ${MP_TRANSPORT#udp/}:"
+            echo "      bind_addr: \"0.0.0.0:$MP_PORT\""
+            echo "      interface: eth1"
+            echo "      mtu: 1472"
+        else
+            echo "    bind_addr: \"0.0.0.0:$UDP_PORT\""
+            echo "    mtu: 1472"
+        fi
         echo ""
         echo "peers:"
         for pid in ${ADJ[$nid]}; do
-            emit_peer_block "$pid"
+            emit_peer_block "$pid" "$nid"
         done
     } > "$cfg"
     echo "  generated $cfg"
@@ -278,6 +385,16 @@ done
 #
 # One service per node, image pinned to the node's slot. This supersedes
 # the static docker-compose.yml.
+
+RUST_LOG_LINE="RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug,fips::node::handlers::mmp=debug"
+if [ -n "$MULTIPATH" ]; then
+    # The old node's discard of an unknown link message type is a debug!
+    # in dataplane::dispatch; the new node's path sends are debug! lines in
+    # handlers::path (and the intake in handlers::path_intake); and each
+    # dial's `Connection initiated` is a debug! in node::lifecycle.
+    RUST_LOG_LINE+=",fips::node::dataplane::dispatch=debug,fips::node::handlers::path=debug,fips::node::handlers::path_intake=debug,fips::node::lifecycle=debug"
+    mkdir -p "$CAPTURES_DIR"
+fi
 
 COMPOSE_FILE="$OUT_DIR/docker-compose.generated.yml"
 {
@@ -290,12 +407,23 @@ COMPOSE_FILE="$OUT_DIR/docker-compose.generated.yml"
     echo "# same slot (e.g. a1, a2) run the SAME daemon build. Netem is applied"
     echo "# by the driver via 'docker exec ... tc qdisc' on each container eth0."
     echo ""
+    # The project is the run name, so a second run's compose file, in its
+    # own directory, cannot take down this run's containers or network.
+    echo "name: $INTEROP_NAME"
+    echo ""
     echo "networks:"
     echo "  fips-interop-net:"
     echo "    driver: bridge"
     echo "    ipam:"
     echo "      config:"
-    echo "        - subnet: 172.30.0.0/24"
+    echo "        - subnet: ${INTEROP_SUBNET}.0/24"
+    if [ -n "$MULTIPATH" ]; then
+        echo "  fips-interop-net2:"
+        echo "    driver: bridge"
+        echo "    ipam:"
+        echo "      config:"
+        echo "        - subnet: ${SUBNET2}.0/24"
+    fi
     echo ""
     echo "x-fips-interop-common: &fips-interop-common"
     echo "  cap_add:"
@@ -309,22 +437,49 @@ COMPOSE_FILE="$OUT_DIR/docker-compose.generated.yml"
     # handlers::mmp at debug so the driver's "MMP link teardown" scan, which
     # catches a peer removed at any point of the run, can match: the line is
     # a debug! in that module.
-    echo "    - RUST_LOG=info,fips::node::handlers::rekey=debug,fips::node::handlers::handshake=debug,fips::node::handlers::mmp=debug"
+    echo "    - $RUST_LOG_LINE"
     echo ""
     echo "services:"
     for nid in "${NODE_IDS[@]}"; do
         slot="${NODE_SLOT[$nid]}"
         echo "  $nid:"
         echo "    <<: *fips-interop-common"
-        echo "    image: fips-interop:$slot"
+        echo "    image: $INTEROP_IMAGE:$slot"
         echo "    container_name: ${NODE_CTR[$nid]}"
         echo "    hostname: $nid"
+        if [ -n "$MULTIPATH" ] && [ "$slot" != "b" ]; then
+            # The capture wrapper (capture-entry.sh). A service-level
+            # environment replaces the anchor's, so RUST_LOG is repeated.
+            ifaces="eth1"
+            [ "$slot" = "c" ] && ifaces="eth1 eth0"
+            echo "    entrypoint: [\"/bin/sh\", \"/usr/local/bin/capture-entry.sh\"]"
+            echo "    environment:"
+            echo "      - $RUST_LOG_LINE"
+            echo "      - FIPS_CAPTURE_NODE=$nid"
+            echo "      - FIPS_CAPTURE_IFACES=$ifaces"
+            echo "      - FIPS_CAPTURE_SNAPLEN_eth0=128"
+        fi
         echo "    volumes:"
         echo "      - $REPO_ROOT/testing/docker/resolv.conf:/etc/resolv.conf:ro"
         echo "      - ./$nid.yaml:/etc/fips/fips.yaml:ro"
+        if [ -n "$MULTIPATH" ] && [ "$slot" != "b" ]; then
+            echo "      - $SCRIPT_DIR/capture-entry.sh:/usr/local/bin/capture-entry.sh:ro"
+            echo "      - $CAPTURES_DIR:/captures"
+        fi
         echo "    networks:"
         echo "      fips-interop-net:"
         echo "        ipv4_address: ${NODE_IP[$nid]}"
+        if [ -n "$MULTIPATH" ]; then
+            # Named, so netem and the captures find each network where
+            # they expect it: Docker does not otherwise promise which ethN
+            # a network gets.
+            echo "        interface_name: eth0"
+            if [ "$slot" != "b" ]; then
+                echo "      fips-interop-net2:"
+                echo "        ipv4_address: ${NODE_IP2[$nid]}"
+                echo "        interface_name: eth1"
+            fi
+        fi
     done
 } > "$COMPOSE_FILE"
 echo "  generated $COMPOSE_FILE"
@@ -341,6 +496,23 @@ MANIFEST="$OUT_DIR/nodes.env"
     echo "# Mesh name: $MESH_NAME"
     echo "# Node-spec: ${SPEC[*]}"
     echo "INTEROP_SPEC=\"${SPEC[*]}\""
+    echo "INTEROP_NAME=\"$INTEROP_NAME\""
+    echo "INTEROP_IMAGE=\"$INTEROP_IMAGE\""
+    echo "INTEROP_SUBNET=\"$INTEROP_SUBNET\""
+    if [ -n "$MULTIPATH" ]; then
+        echo "INTEROP_MULTIPATH=\"$MULTIPATH\""
+        echo "INTEROP_SUBNET2=\"$SUBNET2\""
+        echo "INTEROP_MP_TRANSPORT=\"$MP_TRANSPORT\""
+        echo "INTEROP_MP_PORT=\"$MP_PORT\""
+        echo "INTEROP_CAPTURES=\"$CAPTURES_DIR\""
+        printf 'INTEROP_NODE_IPS2="'
+        for nid in "${NODE_IDS[@]}"; do
+            if [ -n "${NODE_IP2[$nid]:-}" ]; then
+                printf '%s:%s ' "$nid" "${NODE_IP2[$nid]}"
+            fi
+        done
+        printf '"\n'
+    fi
     echo "INTEROP_NODE_IDS=\"${NODE_IDS[*]}\""
     echo "INTEROP_TOPOLOGY=\"$TOPOLOGY\""
     echo "INTEROP_TOPOLOGY_EDGES=\"${EDGES_LIST[*]:-}\""

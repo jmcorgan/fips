@@ -40,6 +40,14 @@ class AnalysisResult:
     peers_promoted: list[tuple[str, str]] = field(default_factory=list)
     peer_removals: list[tuple[str, str]] = field(default_factory=list)
     parent_switches: list[tuple[str, str]] = field(default_factory=list)
+    path_switches: list[tuple[str, str]] = field(default_factory=list)
+    dials: list[tuple[str, str]] = field(default_factory=list)
+    anon_dials: list[tuple[str, str]] = field(default_factory=list)
+    path_lines: list[tuple[str, str]] = field(default_factory=list)
+    task_waits: list[tuple[str, str]] = field(default_factory=list)
+    announce_resends: list[tuple[str, str]] = field(default_factory=list)
+    decrypt_failures: list[tuple[str, str]] = field(default_factory=list)
+    peer_drops: list[tuple[str, str]] = field(default_factory=list)
     mmp_link_metrics: list[tuple[str, str]] = field(default_factory=list)
     mmp_session_metrics: list[tuple[str, str]] = field(default_factory=list)
     handshake_timeouts: list[tuple[str, str]] = field(default_factory=list)
@@ -70,6 +78,9 @@ class AnalysisResult:
             f"Peers promoted:        {len(self.peers_promoted)}",
             f"Peer removals:         {len(self.peer_removals)}",
             f"Parent switches:       {len(self.parent_switches)}",
+            f"Path switches:         {len(self.path_switches)}",
+            f"Dials:                 {len(self.dials)}",
+            f"Anonymous dials:       {len(self.anon_dials)}",
             f"Handshake timeouts:    {len(self.handshake_timeouts)}",
             f"MMP link samples:      {len(self.mmp_link_metrics)}",
             f"MMP session samples:   {len(self.mmp_session_metrics)}",
@@ -160,6 +171,41 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         # Parent switches
         if "Parent switched" in line:
             result.parent_switches.append((source, line))
+        # Path switches: the switch executor's line, one per move of a
+        # link's active path, whatever drove it.
+        if "Path switched" in line:
+            result.path_switches.append((source, line))
+        # Dials: one per handshake this node starts to a named peer.
+        if "Connection initiated" in line:
+            result.dials.append((source, line))
+        # Anonymous dials: one per handshake started to a beaconing address
+        # whose key is not yet known. The line names no peer.
+        if "Anonymous discovery connection initiated" in line:
+            result.anon_dials.append((source, line))
+        # The path machine's state changes, the path messages it sent, its
+        # moves to a new address and its switches, in log order, for the
+        # per-path timelines.
+        if (
+            "Path state changed" in line
+            or "Path message sent" in line
+            or "Path moved to a new address" in line
+            or "Path switched" in line
+        ):
+            result.path_lines.append((source, line))
+        # How long a spawned task waited for the runtime thread, at most once
+        # a second.
+        if "Task wait" in line:
+            result.task_waits.append((source, line))
+        # Bloom announces resent for want of an acknowledgement.
+        if "Resending unconfirmed FilterAnnounce" in line:
+            result.announce_resends.append((source, line))
+        # Frames that failed to decrypt, replay rejections among them (the
+        # first three per peer; later ones are not logged).
+        if "Decryption failed" in line:
+            result.decrypt_failures.append((source, line))
+        # A peer removed because its link was left with no path.
+        if "Removing peer:" in line:
+            result.peer_drops.append((source, line))
         # Handshake timeouts
         if "timed out" in line and ("handshake" in line.lower() or "Handshake" in line):
             result.handshake_timeouts.append((source, line))

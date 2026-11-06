@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from .docker_exec import docker_exec_quiet, is_container_running
 from .scenario import LinkFlapsConfig
+from .schedule import StepError, run_stamped
 from .topology import SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,16 @@ class LinkState:
     is_down: bool = False
     down_since: float | None = None
     restore_at: float | None = None
+
+
+def _stamp(out: str | None) -> float | None:
+    """The epoch a ``date +%s.%N`` printed as the first line of ``out``."""
+    if not out:
+        return None
+    try:
+        return float(out.splitlines()[0].strip())
+    except (ValueError, IndexError):
+        return None
 
 
 class LinkManager:
@@ -52,6 +63,12 @@ class LinkManager:
         self.link_states: dict[tuple[str, str], LinkState] = {
             edge: LinkState(edge=edge) for edge in sorted(topology.edges)
         }
+        # Every edge taken down or restored, as (epoch seconds, "down" |
+        # "up", a, b). The switch-latency assertion reads the down edges
+        # against the nodes' own log timestamps, so this is wall-clock time
+        # (the containers share the host clock), stamped inside the
+        # container immediately before the command that made the change.
+        self.flap_events: list[tuple[float, str, str, str]] = []
 
     @property
     def down_count(self) -> int:
@@ -68,6 +85,10 @@ class LinkManager:
         up_links = [
             e for e, ls in self.link_states.items()
             if not ls.is_down and e[0] not in down and e[1] not in down
+            and (
+                self.config.only_transport is None
+                or self.topology.transport_for_edge(*e) == self.config.only_transport
+            )
         ]
         if not up_links:
             return
@@ -108,15 +129,24 @@ class LinkManager:
         a, b = edge
         state = self.link_states[edge]
 
-        self._set_held(a, b, True)
+        # The down is stamped inside the container, in the same shell as the
+        # first direction's tc command: a stamp taken on the host before two
+        # docker execs would include their start-up, hundreds of ms under
+        # load, in every latency measured from it.
+        host = time.time()
+        stamp = self._set_held(a, b, True)
         self._set_held(b, a, True)
+        now = stamp if stamp is not None else host
 
-        now = time.time()
         state.is_down = True
         state.down_since = now
         state.restore_at = now + duration
+        self.flap_events.append((now, "down", a, b))
 
-        log.info("Link DOWN: %s -- %s (restore in %.0fs)", a, b, duration)
+        log.info(
+            "Link DOWN: %s -- %s (restore in %.0fs; stamped %.6f in %s, host %.6f)",
+            a, b, duration, now, "container" if stamp is not None else "host only", host,
+        )
 
     def _link_up(self, edge: tuple[str, str]):
         """Restore link by re-installing each direction's current netem params.
@@ -126,18 +156,104 @@ class LinkManager:
         a, b = edge
         state = self.link_states[edge]
 
-        self._set_held(a, b, False)
+        host = time.time()
+        stamp = self._set_held(a, b, False)
         self._set_held(b, a, False)
+        now = stamp if stamp is not None else host
 
-        down_for = time.time() - state.down_since if state.down_since else 0
+        down_for = now - state.down_since if state.down_since else 0
+        self.flap_events.append((now, "up", a, b))
         state.is_down = False
         state.down_since = None
         state.restore_at = None
 
         log.info("Link UP: %s -- %s (was down %.0fs)", a, b, down_for)
 
-    def _set_held(self, src_node: str, dst_node: str, held: bool):
+    def scripted_down(
+        self, edge: tuple[str, str], mode: str, end: str | None, duration: float,
+        src: str | None = None,
+    ) -> float:
+        """Take an edge down for a scheduled step, by ``mode``; return the
+        stamp. Raises ``StepError`` when the command did not run.
+
+        ``netem`` holds both directions at 100% loss, as a random flap does.
+        ``admin`` sets ``end``'s veth down: presence goes at that end and
+        carrier at the other. ``oneway`` drops the IPv4 frames from ``src``
+        at ``end``'s veth ingress; ARP still passes, so neither end's
+        neighbour entry for the other fails and the reverse direction
+        keeps delivering. Dropping at the receiver's ingress, not by netem
+        at the sender, keeps the frames visible to a capture at the
+        receiver, whose packet taps run before tc ingress.
+        """
+        a, b = edge
+        state = self.link_states[edge]
+        host = time.time()
+        if mode == "oneway":
+            iface = veth_interface_name(end, src)
+            stamp = run_stamped(
+                self.topology.container_name(end),
+                f"tc qdisc add dev {iface} ingress 2>/dev/null; "
+                f"tc filter add dev {iface} parent ffff: protocol ip prio 1 "
+                f"u32 match u32 0 0 action drop",
+            )
+        elif mode == "netem":
+            stamp = self._set_held(a, b, True)
+            if stamp is None or self._set_held(b, a, True) is None:
+                raise StepError(f"netem down of {a}--{b} did not install")
+        elif mode == "admin":
+            other = b if end == a else a
+            iface = veth_interface_name(end, other)
+            stamp = run_stamped(
+                self.topology.container_name(end), f"ip link set dev {iface} down"
+            )
+        else:
+            raise StepError(f"unknown down mode {mode!r}")
+        state.is_down = True
+        state.down_since = stamp
+        state.restore_at = None
+        self.flap_events.append((stamp, "down", a, b))
+        log.info(
+            "Link DOWN (scheduled, %s%s): %s -- %s for %.0fs; stamped %.6f in "
+            "the container, host %.6f",
+            mode, f" at {end}" if end else "", a, b, duration, stamp, host,
+        )
+        return stamp
+
+    def scripted_up(self, edge: tuple[str, str], mode: str, end: str | None) -> float:
+        """Restore an edge a scheduled step took down; return the stamp.
+        Raises ``StepError`` when the command did not run."""
+        a, b = edge
+        state = self.link_states[edge]
+        if mode == "oneway":
+            other = b if end == a else a
+            stamp = run_stamped(
+                self.topology.container_name(end),
+                f"tc filter del dev {veth_interface_name(end, other)} parent ffff: prio 1",
+            )
+        elif mode == "netem":
+            stamp = self._set_held(a, b, False)
+            if stamp is None or self._set_held(b, a, False) is None:
+                raise StepError(f"netem restore of {a}--{b} did not install")
+        elif mode == "admin":
+            other = b if end == a else a
+            iface = veth_interface_name(end, other)
+            stamp = run_stamped(
+                self.topology.container_name(end), f"ip link set dev {iface} up"
+            )
+        else:
+            raise StepError(f"unknown down mode {mode!r}")
+        down_for = stamp - state.down_since if state.down_since else 0
+        state.is_down = False
+        state.down_since = None
+        self.flap_events.append((stamp, "up", a, b))
+        log.info("Link UP (scheduled, %s): %s -- %s (was down %.1fs)", mode, a, b, down_for)
+        return stamp
+
+    def _set_held(self, src_node: str, dst_node: str, held: bool) -> float | None:
         """Mark the src->dst direction held down (or not) and install it.
+
+        Returns the epoch the container stamped immediately before its tc
+        command, or None when no command ran or it failed.
 
         The flag is set whether or not the container is running, so a node
         that restarts during or after the flap re-installs the right params.
@@ -150,24 +266,24 @@ class LinkManager:
         use tc qdisc replace on the dedicated veth interface.
         """
         if not self.netem_mgr:
-            return
+            return None
 
         container = self.topology.container_name(src_node)
         transport = self.topology.transport_for_edge(src_node, dst_node)
 
-        if transport == "ethernet":
+        if self.topology.is_veth(transport):
             iface = veth_interface_name(src_node, dst_node)
             state = self.netem_mgr.veth_states.get(container, {}).get(iface)
             if state is None:
                 log.warning("No veth netem state for %s -> %s (%s)", src_node, dst_node, iface)
-                return
+                return None
             cmd = f"tc qdisc replace dev {iface} root netem "
         else:
             dest_ip = self.topology.nodes[dst_node].docker_ip
             state = self.netem_mgr.states.get(container, {}).get(dest_ip)
             if state is None:
                 log.warning("No netem state for %s -> %s", src_node, dst_node)
-                return
+                return None
             cmd = (
                 f"tc qdisc replace dev {IFACE} parent {state.class_id} "
                 f"handle {state.netem_handle} netem "
@@ -184,9 +300,10 @@ class LinkManager:
                 src_node,
             )
             self.netem_mgr.down_nodes.add(src_node)
-            return
+            return None
 
-        docker_exec_quiet(container, cmd + state.tc_args())
+        out = docker_exec_quiet(container, "date +%s.%N; " + cmd + state.tc_args())
+        return _stamp(out)
 
     def _would_disconnect(self, edge: tuple[str, str]) -> bool:
         """Check if removing this edge (plus currently-down edges) disconnects the graph."""

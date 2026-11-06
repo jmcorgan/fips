@@ -11,6 +11,47 @@ from .keys import derive_full
 from .naming import name_suffix, veth_token
 from .scenario import TopologyConfig
 
+# An edge carried by UDP over a dedicated veth pair, each end an
+# interface-bound UDP instance (``transports.udp.<iface>.interface``). The
+# harness's stand-in for "wifi and cable, both IP": two UDP instances on
+# two interfaces, so a peer reachable over both holds two paths.
+UDP_VETH = "udp-veth"
+
+# Port of the interface-bound UDP instances. Not 2121: the bridge instance
+# binds the wildcard on that port, and a second wildcard bind on the same
+# port would conflict.
+VETH_PORT = 2122
+
+# Second octet of the /24s the veth pairs carry. Clear of docker's default
+# pool (172.17-31), the sim's claimed 10.30.x ranges and sidecar's 10.40.x.
+_VETHNET = "10.222"
+
+# The host part of a laned edge's sentinel address: on the edge's /24 and
+# answered by no host, so a path to it never goes Live.
+SENTINEL = 250
+
+
+@dataclass(frozen=True)
+class UdpVethLink:
+    """One end of a ``udp-veth`` edge, as a node sees it."""
+
+    peer_id: str
+    # The veth interface in this node's container, and the UDP instance
+    # name bound to it.
+    iface: str
+    local_ip: str
+    peer_ip: str
+
+    @property
+    def instance(self) -> str:
+        """The name of the UDP instance bound to this end's veth."""
+        return self.iface
+
+    @property
+    def peer_addr(self) -> str:
+        """The far end's address and port, as a peer address lists it."""
+        return f"{self.peer_ip}:{VETH_PORT}"
+
 
 @dataclass
 class SimNode:
@@ -33,6 +74,17 @@ class SimTopology:
     edges: set[tuple[str, str]] = field(default_factory=set)
     # Per-edge transport type; edges not in this dict default to "udp"
     edge_transport: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Edges declared ``ethernet+udp`` or ``udp-veth+udp``: a veth half
+    # (Ethernet found by beacon, or UDP bound to the veth) *and* a UDP
+    # static-peer entry over the bridge, so the pair holds two paths under
+    # one session. ``edge_transport`` names the veth half, which is what
+    # netem and link flaps act on.
+    dual_edges: set[tuple[str, str]] = field(default_factory=set)
+    # ``udp-veth`` edges carried by several lanes: macvlan interfaces on the
+    # edge's one veth pair, each its own interface, MAC and address on the
+    # edge's /24, so the two ends of a lane share one segment with the other
+    # lanes and an answer can arrive on a lane other than its probe's.
+    edge_lanes: dict[tuple[str, str], int] = field(default_factory=dict)
     # Suffix scoping globally-visible names to this run and scenario; empty
     # outside the CI harness, which keeps a bare run's names unchanged.
     name_suffix: str = ""
@@ -45,6 +97,93 @@ class SimTopology:
         host names are scoped differently from its container names.
         """
         return veth_token(self.name_suffix)
+
+    def is_dual(self, a: str, b: str) -> bool:
+        """Whether the edge also carries a UDP static-peer link."""
+        return _make_edge(a, b) in self.dual_edges
+
+    def is_veth(self, transport: str) -> bool:
+        """Whether edges of this transport run over a dedicated veth pair."""
+        return transport in ("ethernet", UDP_VETH)
+
+    def veth_edges(self) -> list[tuple[str, str]]:
+        """Every edge that needs a veth pair: Ethernet and ``udp-veth``."""
+        return sorted(
+            e for e, t in self.edge_transport.items() if self.is_veth(t)
+        )
+
+    def has_veth(self) -> bool:
+        """Whether any edge needs a veth pair."""
+        return bool(self.veth_edges())
+
+    def udpveth_edges(self) -> list[tuple[str, str]]:
+        """Edges carried by UDP over a veth, in canonical order. The index
+        of an edge here is what its /24 is numbered by."""
+        return sorted(e for e, t in self.edge_transport.items() if t == UDP_VETH)
+
+    def lanes(self, a: str, b: str) -> int:
+        """How many lanes the edge has: 0 for one without lanes."""
+        return self.edge_lanes.get(_make_edge(a, b), 0)
+
+    def lane_links(self, node_id: str, peer_id: str) -> list[UdpVethLink]:
+        """This node's lanes on its laned edge to ``peer_id``, in lane order.
+
+        On edge ``e`` lane ``k`` of the lower node id is ``10.222.e.{2k+1}``
+        and of the higher ``10.222.e.{2k+2}``; the lane is named
+        ``vl{k}-{node}``, so a node may hold one laned edge.
+        """
+        e = self.udpveth_edges().index(_make_edge(node_id, peer_id))
+        low = node_id < peer_id
+        return [
+            UdpVethLink(
+                peer_id=peer_id,
+                iface=f"vl{k}-{node_id}",
+                local_ip=f"{_VETHNET}.{e}.{2 * k + (1 if low else 2)}",
+                peer_ip=f"{_VETHNET}.{e}.{2 * k + (2 if low else 1)}",
+            )
+            for k in range(self.lanes(node_id, peer_id))
+        ]
+
+    def sentinel(self, node_id: str, peer_id: str) -> str:
+        """The laned edge's sentinel address and port: no host answers it."""
+        e = self.udpveth_edges().index(_make_edge(node_id, peer_id))
+        return f"{_VETHNET}.{e}.{SENTINEL}:{VETH_PORT}"
+
+    def veth_links(self, node_id: str) -> list[UdpVethLink]:
+        """This node's ends of its ``udp-veth`` edges, with addressing.
+
+        Edge ``k`` (in ``udpveth_edges`` order) is ``10.222.k.0/24``: the
+        lower node id is ``.1``, the higher ``.2``. A laned edge gives one
+        link per lane (``lane_links``).
+        """
+        links = []
+        for k, (a, b) in enumerate(self.udpveth_edges()):
+            if node_id not in (a, b):
+                continue
+            if k > 255:
+                raise ValueError("more than 256 udp-veth edges are not addressable")
+            local, peer = (a, b) if node_id == a else (b, a)
+            if self.lanes(a, b):
+                links.extend(self.lane_links(local, peer))
+                continue
+            local_ip = f"{_VETHNET}.{k}.{1 if node_id == a else 2}"
+            peer_ip = f"{_VETHNET}.{k}.{2 if node_id == a else 1}"
+            links.append(
+                UdpVethLink(
+                    peer_id=peer,
+                    iface=veth_interface_name(local, peer),
+                    local_ip=local_ip,
+                    peer_ip=peer_ip,
+                )
+            )
+        return links
+
+    def veth_ip(self, node_id: str, peer_id: str) -> str | None:
+        """The veth IP ``node_id`` has on its ``udp-veth`` edge to ``peer_id``."""
+        for link in self.veth_links(node_id):
+            if link.peer_id == peer_id:
+                return link.local_ip
+        return None
 
     def transport_for_edge(self, a: str, b: str) -> str:
         """Get the transport type for an edge (defaults to 'udp')."""
@@ -165,6 +304,7 @@ class SimTopology:
         static_edges = {
             e for e in self.edges
             if self.edge_transport.get(e, "udp") != "ethernet"
+            or e in self.dual_edges
         }
 
         outbound: dict[str, list[str]] = {nid: [] for nid in self.nodes}
@@ -253,7 +393,7 @@ def generate_topology(
         adjacency = config.params.get("adjacency")
         if not adjacency:
             raise ValueError("explicit topology requires params.adjacency")
-        edges, edge_transport = _generate_explicit(
+        edges, edge_transport, dual_edges, edge_lanes = _generate_explicit(
             adjacency, config.default_transport
         )
         # Validate all referenced nodes exist
@@ -268,6 +408,8 @@ def generate_topology(
     # Assign transport types to edges
     if config.algorithm != "explicit":
         edge_transport = _assign_edge_transports(edges, config, rng)
+        dual_edges = set()
+        edge_lanes = {}
 
     # Build peer lists from edges
     for a, b in edges:
@@ -280,6 +422,8 @@ def generate_topology(
         nodes=nodes,
         edges=edges,
         edge_transport=edge_transport,
+        dual_edges=dual_edges,
+        edge_lanes=edge_lanes,
         name_suffix=name_suffix(),
     )
 
@@ -358,28 +502,45 @@ def _generate_erdos_renyi(
 
 def _generate_explicit(
     adjacency: list, default_transport: str = "udp"
-) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str]]:
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], str], set[tuple[str, str]]]:
     """Build edges from an explicit adjacency list.
 
     Each entry is a 2-element list ``[nodeA, nodeB]`` (uses default
-    transport) or a 3-element list ``[nodeA, nodeB, transport]``.
+    transport) or a 3-element list ``[nodeA, nodeB, transport]``. The
+    transport ``ethernet+udp`` declares a dual edge: an Ethernet veth and
+    a UDP static-peer link between the same two nodes, so the pair holds
+    two paths under one session. ``udp-veth+udp`` is the all-IP dual edge:
+    UDP over a dedicated veth (an interface-bound UDP instance at each
+    end) and UDP over the bridge.
 
-    Returns ``(edges, edge_transport)`` where ``edge_transport`` maps
-    each edge to its transport type.
+    A ``udp-veth`` entry may carry a fourth element ``{lanes: n}``: its
+    veth pair then carries ``n`` lanes (``SimTopology.lane_links``).
+
+    Returns ``(edges, edge_transport, dual_edges, edge_lanes)`` where
+    ``edge_transport`` maps each edge to its transport type (``ethernet``
+    for a dual edge), ``dual_edges`` is the set of dual edges and
+    ``edge_lanes`` the lane count of each laned edge.
     """
     edges = set()
     edge_transport: dict[tuple[str, str], str] = {}
+    dual_edges: set[tuple[str, str]] = set()
+    edge_lanes: dict[tuple[str, str], int] = {}
     for i, entry in enumerate(adjacency):
-        if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
+        if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3, 4):
             raise ValueError(
                 f"explicit adjacency[{i}]: expected [nodeA, nodeB] or "
                 f"[nodeA, nodeB, transport], got {entry}"
             )
         edge = _make_edge(str(entry[0]), str(entry[1]))
         edges.add(edge)
-        transport = str(entry[2]) if len(entry) == 3 else default_transport
+        transport = str(entry[2]) if len(entry) >= 3 else default_transport
+        if len(entry) == 4:
+            edge_lanes[edge] = int(entry[3]["lanes"])
+        if transport in ("ethernet+udp", f"{UDP_VETH}+udp"):
+            transport = transport[: -len("+udp")]
+            dual_edges.add(edge)
         edge_transport[edge] = transport
-    return edges, edge_transport
+    return edges, edge_transport, dual_edges, edge_lanes
 
 
 def _assign_edge_transports(

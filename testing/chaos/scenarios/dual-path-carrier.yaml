@@ -1,0 +1,111 @@
+# One peer, two paths: the cable taken down administratively, a
+# signalled switch
+#
+# Two nodes joined by a raw-Ethernet veth (the cable) and by UDP over the
+# bridge. The bridge half is dialled and carries link-up; the cable is found
+# by beacon, scores better (1 to 3 ms against 40 ms each way) and carries
+# the link once it is Live.
+#
+# What a down is here: `ip link set dev <veth> down` at one end, on a
+# schedule. That end loses presence (IFF_UP clears) and sends a PathClose
+# over the bridge; the far end loses carrier (IFF_RUNNING clears) and hears
+# the close. Both ends have a signal, so each must move the link to the
+# bridge within 1 s, the bound for a switch with a signal, and within
+# 500 ms of the stamp: the earliest a switch by probe timeouts alone could
+# come is (K - 1) x 200 ms + 400 ms = 800 ms after the cut, so 500 ms tells
+# a signalled switch from a timed-out one.
+#
+# The far end keeps probing the downed end's address while it is stopped,
+# held to the draft's floor (1, 1, 2, 4, 8 s ...); those probes and their
+# bytes are the figures the draft's question 4 asks for. A capture runs on
+# the far end's own veth during each step, and its tx counters are read
+# before and after, as a second count of what the far end sent; with
+# carrier off the kernel drops a frame before the capture tap, so where
+# neither sees the probes the count rests on the node's own lines
+# (recorded in the figures).
+#
+# Recovery: the downed end's interface returns, and an interface that
+# returns has its candidates probed at once; the far end's stopped path
+# waits for the floor's next slot unless the downed end's probe revives it
+# first.
+#
+#   n01 ===eth=== n02      (admin down: n01 at 20 s, n02 at 75 s, n01 at 135 s)
+#   n01 ---udp--- n02      (never touched)
+
+scenario:
+  name: "dual-path-carrier"
+  seed: 42
+  duration_secs: 180
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, ethernet+udp]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+  bridge_policy:
+    delay_ms: [40, 40]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+
+link_flaps:
+  enabled: false
+
+schedule:
+  - {at: 20, down: [n01, n02], mode: admin, end: n01, secs: 15, capture: [n02], counters: [n02]}
+  - {at: 75, down: [n01, n02], mode: admin, end: n02, secs: 20, capture: [n01], counters: [n01]}
+  - {at: 135, down: [n01, n02], mode: admin, end: n01, secs: 25, capture: [n02], counters: [n02]}
+
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 10, max: 20}
+  duration_secs: {min: 10, max: 20}
+  parallel_streams: 1
+
+node_churn:
+  enabled: false
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  # The 1 s bound at both ends, and a signal behind each switch.
+  switch_latency:
+    max_ms: 1000
+    each_end: true
+    signalled_ms: 500
+
+  # The draft's bounds on the probes to the downed end, and on discovery.
+  path_floor: true
+  discovery_limit: true
+
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+  paths_live:
+    min: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug"
+  output_dir: "./sim-results"

@@ -18,16 +18,34 @@ from .assertions import (
     evaluate_baseline,
     evaluate_congestion_signals,
     evaluate_delivery,
+    evaluate_discovery_limit,
+    evaluate_max_dials,
     evaluate_max_errors,
+    evaluate_max_kernel_drops,
+    evaluate_max_replay_refusals,
     evaluate_max_parent_switches,
+    evaluate_max_promotions,
+    evaluate_max_stall,
     evaluate_min_parent_switches,
     evaluate_min_traffic,
+    evaluate_path_floor,
+    evaluate_active_timeouts,
+    evaluate_path_switches,
+    evaluate_paths_live,
+    evaluate_lanes,
+    evaluate_rescue,
+    evaluate_reverse_heard,
+    evaluate_switch_latency,
     evaluate_tree_parents,
+    switch_delays,
 )
+from . import paths
 from .compose import generate_compose
 from .config_gen import write_configs
+from .capture import Capture
 from .control import (
     query_peers,
+    query_transports,
     snapshot_all_congestion,
     snapshot_all_mmp,
     snapshot_all_trees,
@@ -37,6 +55,7 @@ from .link_swap import LinkSwapManager
 from .links import LinkManager
 from .logs import AnalysisResult, analyze_logs, collect_logs, write_sim_metadata
 from .naming import name_suffix
+from .schedule import Schedule, StepError
 from .netclaim import claim_network, remove_network
 from .netem import NetemManager
 from .nodes import NodeManager
@@ -62,13 +81,16 @@ SETTLE_TIMEOUT_SECS = 90
 # names what raised, not whose fault it was: a stalled host command and a node
 # container that died during setup both end here.
 NOT_SCORED = "NOT SCORED: run aborted in setup"
+# The same for a scheduled step whose command failed: a down or a load that
+# did not happen would be scored as though it had.
+UNSCORED_STEP = "NOT SCORED: a scheduled step failed"
 
 
-def not_scored_line(exc: BaseException) -> str:
-    """The NOT SCORED line for a setup abort: the exception's class and first line."""
+def not_scored_line(exc: BaseException, head: str = NOT_SCORED) -> str:
+    """The NOT SCORED line for an abort: the exception's class and first line."""
     lines = str(exc).strip().splitlines()
     cause = type(exc).__name__ + (f": {lines[0]}" if lines else "")
-    return f"{NOT_SCORED} ({cause})"
+    return f"{head} ({cause})"
 
 
 class SimRunner:
@@ -113,6 +135,13 @@ class SimRunner:
         self.link_mgr: LinkManager | None = None
         self.link_swap_mgr: LinkSwapManager | None = None
         self.traffic_mgr: TrafficManager | None = None
+        self.schedule: Schedule | None = None
+        # A laned edge's per-node facts, its run-long captures and their
+        # frames, and when the simulation loop began (the end of warmup).
+        self.lanes: dict[str, dict] = {}
+        self._lanecaps: list[tuple[str, str, Capture]] = []
+        self.lane_frames: dict[str, dict[str, list[dict]]] = {}
+        self.loop_start: float | None = None
         self.node_mgr: NodeManager | None = None
         self.peer_churn_mgr: PeerChurnManager | None = None
 
@@ -127,6 +156,150 @@ class SimRunner:
         # Set by _probe_delivery. None means the probe never ran, which the
         # delivery assertion reports as a harness failure.
         self.delivery_probe: dict | None = None
+
+    def _npub(self, node_id: str) -> str:
+        """A node's npub: the one it reported if known, else its configured one."""
+        if self.peer_churn_mgr and node_id in self.peer_churn_mgr.npub_cache:
+            return self.peer_churn_mgr.npub_cache[node_id]
+        return self.topology.nodes[node_id].npub
+
+    def _startlanes(self) -> None:
+        """Read each laned node's lane transport ids, start a capture on each
+        lane of the frames addressed to its other lanes, and cross the far
+        end's neighbour entries (VethManager.cross_lanes)."""
+        outbound = self.topology.directed_outbound()
+        for (a, b), _n in sorted(self.topology.edge_lanes.items()):
+            for node, peer in ((a, b), (b, a)):
+                container = self.topology.container_name(node)
+                data = query_transports(container) or {}
+                ids = {
+                    t.get("name"): f"transport:{t.get('transport_id')}"
+                    for t in data.get("transports", [])
+                }
+                lanes = self.topology.lane_links(node, peer)
+                if any(lane.iface not in ids for lane in lanes):
+                    raise RuntimeError(f"{node}: lane transports not all up: {sorted(ids)}")
+                self.lanes[container] = {
+                    "lanes": [(lane.iface, lane.local_ip) for lane in lanes],
+                    "dialler": peer in outbound[node],
+                    "configured": {
+                        (ids[own.iface], other.peer_addr) for own in lanes for other in lanes
+                    },
+                    "sentinel": self.topology.sentinel(node, peer),
+                }
+                for lane in lanes:
+                    others = [l.local_ip for l in lanes if l.iface != lane.iface]
+                    filt = "udp and (" + " or ".join(f"dst host {ip}" for ip in others) + ")"
+                    cap = Capture(container, lane.iface, f"lane-{lane.iface}", filt, limit=500)
+                    cap.start()
+                    self._lanecaps.append((container, lane.iface, cap))
+            self.veth_mgr.cross_lanes(a, b)
+
+    def _stoplanes(self) -> None:
+        """Stop the run-long lane captures and keep their frames."""
+        for container, iface, cap in self._lanecaps:
+            self.lane_frames.setdefault(container, {})[iface] = cap.stop()
+        self._lanecaps.clear()
+
+    def _downs(self) -> list[tuple[float, str, str]]:
+        """Every down the run made, in time order: its stamp and its two
+        ends, named as the log sources (the containers) are."""
+        cname = self.topology.container_name
+        events = list(self.link_mgr.flap_events) if self.link_mgr else []
+        if self.schedule:
+            events += self.schedule.links.flap_events
+        return [
+            (t, cname(a), cname(b)) for t, kind, a, b in sorted(events) if kind == "down"
+        ]
+
+    def _figures(self, result: AnalysisResult) -> str:
+        """Write figures.json beside analysis.txt; return its text section."""
+        mmp = (self.scenario.fips_overrides.get("node") or {}).get("mmp") or {}
+        fig = paths.figures(
+            result.path_lines,
+            self.schedule.records if self.schedule else [],
+            self.topology.container_name,
+            switch_delays(self._downs(), result.path_switches),
+            result.mmp_link_metrics,
+            result.path_switches,
+            result.announce_resends,
+            mmp.get("log_interval_secs"),
+        )
+        with open(os.path.join(self.output_dir, "figures.json"), "w") as f:
+            json.dump(fig, f, indent=2)
+        return paths.summary(fig)
+
+    def _evaluatepaths(
+        self, result: AnalysisResult, iperf_results: list[dict],
+        udp_results: list[dict],
+    ) -> None:
+        """Apply the two-path assertions the scenario declares."""
+        a = self.scenario.assertions
+        downs = self._downs()
+        nodes = [self.topology.container_name(n) for n in sorted(self.topology.nodes)]
+        outcomes = []
+        if a.path_switches is not None:
+            outcomes.append(
+                evaluate_path_switches(a.path_switches, result.path_switches, len(downs))
+            )
+        if a.active_timeouts is not None:
+            outcomes.append(evaluate_active_timeouts(
+                a.active_timeouts, result.path_lines, downs, result.task_waits, nodes,
+            ))
+        if a.max_promotions is not None:
+            outcomes.append(evaluate_max_promotions(a.max_promotions, result.peers_promoted))
+        if a.switch_latency is not None:
+            outcomes.append(
+                evaluate_switch_latency(a.switch_latency, downs, result.path_switches)
+            )
+        if a.max_stall is not None:
+            restarts = self.traffic_mgr.restarts if self.traffic_mgr else 0
+            outcomes.append(
+                evaluate_max_stall(a.max_stall, iperf_results, udp_results, restarts)
+            )
+        if a.max_dials is not None:
+            outcomes.append(
+                evaluate_max_dials(
+                    a.max_dials, result.dials, result.peers_promoted, result.anon_dials
+                )
+            )
+        if a.paths_live is not None:
+            outcomes.append(evaluate_paths_live(
+                a.paths_live, result.path_lines, nodes,
+                {n: info["configured"] for n, info in self.lanes.items() if info["dialler"]},
+                self.loop_start,
+            ))
+        if a.lanes is not None:
+            outcomes.append(evaluate_lanes(
+                a.lanes, result.path_lines, self.lanes, self.lane_frames,
+            ))
+        if a.path_floor is not None:
+            outcomes.append(evaluate_path_floor(a.path_floor, result.path_lines))
+        if a.discovery_limit is not None:
+            outcomes.append(evaluate_discovery_limit(a.discovery_limit, result.path_lines))
+        if a.rescue is not None:
+            outcomes.append(evaluate_rescue(
+                a.rescue,
+                self.schedule.records if self.schedule else [],
+                result.path_lines,
+                self.topology.container_name,
+                result.peer_drops,
+                result.decrypt_failures,
+            ))
+        if a.reverse_heard is not None:
+            outcomes.append(evaluate_reverse_heard(
+                a.reverse_heard,
+                self.schedule.records if self.schedule else [],
+                result.path_lines,
+                self.topology.container_name,
+                self.topology.veth_ip,
+            ))
+        for outcome in outcomes:
+            self.assertion_outcomes.append(outcome)
+            if outcome.passed:
+                log.info("%s", outcome.detail)
+            else:
+                log.error("%s", outcome.detail)
 
     def _evaluate_max_parent_switches(
         self, cfg, parent_switches: list[tuple[str, str]]
@@ -203,6 +376,8 @@ class SimRunner:
             self.aborted = True
             if in_setup:
                 self.setup_abort = not_scored_line(exc)
+            elif isinstance(exc, StepError):
+                self.setup_abort = not_scored_line(exc, UNSCORED_STEP)
         finally:
             result = self._teardown()
 
@@ -303,6 +478,7 @@ class SimRunner:
         write_configs(
             self.topology, config_dir, self.scenario.fips_overrides,
             ephemeral_nodes=self._ephemeral_nodes,
+            transport_overrides=self.scenario.transport_overrides,
         )
         log.info("Wrote node configs to %s", config_dir)
 
@@ -346,15 +522,18 @@ class SimRunner:
         docker_compose(self.compose_file, ["up", "-d"])
         self._containers_started = True
 
-        # 6. Set up veth pairs for Ethernet edges (before netem)
+        # 6. Set up veth pairs for Ethernet and udp-veth edges (before
+        # netem)
         #
-        # The entrypoint script waits for configured Ethernet interfaces
-        # to appear before starting FIPS, so we just need to create the
-        # veth pairs promptly after containers are running.
-        if self.topology.has_ethernet():
+        # The entrypoint script waits for every interface the config binds
+        # a transport to before starting FIPS, for as long as setup takes,
+        # until each node is told its veths are done (mark_ready).
+        if self.topology.has_veth():
             self.veth_mgr = VethManager(self.topology)
-            log.info("Setting up Ethernet veth pairs...")
+            log.info("Setting up veth pairs...")
             self.veth_mgr.setup_all()
+            for node_id in sorted({n for edge in self.topology.veth_edges() for n in edge}):
+                self.veth_mgr.mark_ready(node_id)
 
         # 7. Initialize managers
         if s.netem.enabled:
@@ -385,6 +564,13 @@ class SimRunner:
             self.bloom_rate_monitor = BloomSendRateMonitor(
                 self.topology, s.assertions.bloom_send_rate,
             )
+
+        if s.schedule:
+            # Its own link manager, so the random flap loop never runs on it.
+            links = LinkManager(
+                self.topology, s.link_flaps, self._stream("schedule"), netem_mgr=self.netem_mgr
+            )
+            self.schedule = Schedule(s.schedule, self.topology, links, self._npub)
 
         if s.traffic.enabled:
             self.traffic_mgr = TrafficManager(
@@ -422,6 +608,9 @@ class SimRunner:
         if self.peer_churn_mgr:
             self.peer_churn_mgr.refresh_all_npubs()
 
+        if self.topology.edge_lanes:
+            self._startlanes()
+
         # Initial link swap policy assignment (after warmup so the netem
         # tc state is fully set up and the daemons have already
         # discovered each other under the calm baseline).
@@ -451,6 +640,7 @@ class SimRunner:
     def _simulation_loop(self):
         """Main event loop driving stochastic behavior."""
         start = time.time()
+        self.loop_start = start
         s = self.scenario
         duration = s.duration_secs
         log.info("Simulation running for %ds...", duration)
@@ -488,6 +678,11 @@ class SimRunner:
                 )
                 self.bloom_rate_monitor.sample_window_start()
                 bloom_window_started = True
+
+            # Scheduled steps. A failed step raises StepError, which ends
+            # the run NOT SCORED.
+            if self.schedule:
+                self.schedule.tick(elapsed)
 
             # Deterministic link swap (before netem mutation so a
             # mutation round can't clobber the swap mid-tick).
@@ -738,6 +933,16 @@ class SimRunner:
                 log.info("Stopping traffic sessions...")
                 self.traffic_mgr.stop_all()
 
+            # Stop the lane captures while the containers are up
+            if self._lanecaps:
+                log.info("Stopping lane captures...")
+                self._stoplanes()
+
+            # End scheduled steps still running
+            if self.schedule:
+                log.info("Ending scheduled steps...")
+                self.schedule.finish()
+
             # Restore links
             if self.link_mgr:
                 log.info("Restoring downed links...")
@@ -761,13 +966,19 @@ class SimRunner:
 
             # Collect iperf3 throughput results before containers stop
             iperf_results: list[dict] = []
+            udp_results: list[dict] = []
             if self.traffic_mgr:
-                iperf_results = self.traffic_mgr.collect_results()
-                if iperf_results:
-                    iperf_path = os.path.join(self.output_dir, "iperf3-results.json")
+                iperf_results = list(self.traffic_mgr.collect_results())
+                udp_results = list(self.traffic_mgr.udp_results)
+            if self.schedule:
+                iperf_results += self.schedule.collect()
+            for name, got in (("iperf3-results.json", iperf_results),
+                              ("iperf3-udp-results.json", udp_results)):
+                if got:
+                    iperf_path = os.path.join(self.output_dir, name)
                     with open(iperf_path, "w") as f:
-                        json.dump(iperf_results, f, indent=2)
-                    log.info("Saved %d iperf3 results to %s", len(iperf_results), iperf_path)
+                        json.dump(got, f, indent=2)
+                    log.info("Saved %d iperf3 results to %s", len(got), iperf_path)
 
             # Take final tree snapshot while nodes are still running, once the
             # tree has stopped moving. A node restored a moment ago is its own
@@ -786,10 +997,13 @@ class SimRunner:
 
             # Analyze
             result = analyze_logs(logs)
+            report = result.summary()
+            if result.path_lines:
+                report += self._figures(result)
             analysis_path = os.path.join(self.output_dir, "analysis.txt")
             with open(analysis_path, "w") as f:
-                f.write(result.summary())
-            print(result.summary())
+                f.write(report)
+            print(report)
 
             # Log-derived assertions (evaluated after analyze_logs so
             # parent_switches and similar are populated). See
@@ -817,6 +1031,8 @@ class SimRunner:
                     log.info("%s", outcome.detail)
                 else:
                     log.error("%s", outcome.detail)
+
+            self._evaluatepaths(result, iperf_results, udp_results)
 
             # Applied to every scenario by default, so this is the one
             # assertion that is present even when the YAML declares no
@@ -870,6 +1086,28 @@ class SimRunner:
             if cong_cfg is not None:
                 outcome = evaluate_congestion_signals(
                     cong_cfg, self.final_congestion
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            kd_cfg = self.scenario.assertions.max_kernel_drops
+            if kd_cfg is not None:
+                outcome = evaluate_max_kernel_drops(
+                    kd_cfg, self.final_congestion
+                )
+                self.assertion_outcomes.append(outcome)
+                if outcome.passed:
+                    log.info("%s", outcome.detail)
+                else:
+                    log.error("%s", outcome.detail)
+
+            rr_cfg = self.scenario.assertions.max_replay_refusals
+            if rr_cfg is not None:
+                outcome = evaluate_max_replay_refusals(
+                    rr_cfg, self.final_congestion
                 )
                 self.assertion_outcomes.append(outcome)
                 if outcome.passed:

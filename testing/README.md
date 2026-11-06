@@ -44,14 +44,17 @@ and a local STUN responder.
 
 Automated network testing with configurable node counts, topology
 algorithms (random geometric, Erdos-Renyi, chain, explicit), and fault
-injection (netem mutation, link flaps, traffic generation, node
-churn). 10 scenarios covering general stress and node churn, discovery
-over sparse topologies, spanning-tree and bloom-propagation regression,
-transport-specific validation (UDP, TCP, Ethernet), and ECN/congestion
-testing. Scenarios are
-defined in YAML and executed via a Python harness that manages the full
-lifecycle: topology generation, Docker orchestration, fault scheduling,
-log collection, and analysis.
+injection (netem mutation, link flaps, traffic generation, node churn,
+scheduled steps). 19 scenarios covering general stress and node churn,
+discovery over sparse topologies, spanning-tree and bloom-propagation
+regression, transport-specific validation (UDP, TCP, Ethernet),
+ECN/congestion testing, and multipath: two paths between a pair of
+nodes, one failed by netem loss, by an interface taken down or in one
+direction, with the switch, the probes to the stopped path and the
+standby's rescue asserted. Scenarios are defined in YAML and executed
+via a Python harness that manages the full lifecycle: topology
+generation, Docker orchestration, fault scheduling, log collection, and
+analysis.
 
 ### [interop/](interop/) -- Mixed-Version Interop Harness
 
@@ -130,7 +133,11 @@ A multi-homed node whose default route moves between two live access paths
 while mesh traffic is in flight, with the far peer reachable only through a
 router so the path to it actually follows that default route. Asserts the
 peering survives without a re-handshake (`link_id` and `authenticated_at_ms`
-unchanged) and that the far side re-pins to the new source address.
+unchanged). It runs two rounds. With multipath off, the far side must re-pin
+to the new source address. With multipath on, the far side may keep sending
+to either address, and Phase 4 then takes down the interface it sends to:
+it must switch to the other address within the K-timeout bound (1300 ms)
+under the same session.
 
 Includes a negative control that runs the same move with
 `node.netmon.enabled: false` and requires the outage, so a topology that

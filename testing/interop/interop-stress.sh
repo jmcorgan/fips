@@ -27,8 +27,10 @@
 # is known only after the driver exits. The loop saves a failed rep's
 # per-node logs and then tears the mesh down itself.
 #
-# Reps run SERIALLY — interop-test.sh uses fixed container names and a
-# fixed Docker network, so two reps must never overlap.
+# Reps run SERIALLY — the reps of one loop share their run name's
+# containers and Docker network, so two reps must never overlap. Two
+# loops may run at once under different FIPS_INTEROP_NAME and
+# FIPS_INTEROP_SUBNET values.
 #
 # Usage:
 #   ./interop-stress.sh [--reps N] [--topology <name> | node-spec...]
@@ -54,8 +56,12 @@
 #                          stderr; set it to a path outside the source
 #                          tree to keep generated artefacts out of the
 #                          checkout.
+#   FIPS_INTEROP_NAME, FIPS_INTEROP_IMAGE, FIPS_INTEROP_SUBNET
+#                          forwarded to interop-test.sh; see names.sh.
 #
-# Artifacts (per invocation): <runs-base>/.stress-runs/<UTC-ts>/
+# Artifacts (per invocation): <run-base>/.stress-runs/<UTC-ts>/, where
+# <run-base> is <runs-base> for the default run name and
+# <runs-base>/runs/<name> otherwise.
 #   rep-NN/driver.log        full interop-test.sh output for that rep.
 #   rep-NN/docker-<container>.log
 #                            per-container `docker logs` (FAILED reps only).
@@ -87,10 +93,14 @@ else
     fi
 fi
 
-RUNS_BASE="$INTEROP_RUNS_BASE/.stress-runs"
 # The driver's generated mesh (same paths as interop-test.sh), read for the
-# expected container set and used to tear a kept-up rep down.
-GEN_DIR="$INTEROP_RUNS_BASE/generated-configs"
+# expected container set and used to tear a kept-up rep down. names.sh
+# reads RUNS_BASE as the harness root, so it is set to that first.
+RUNS_BASE="$INTEROP_RUNS_BASE"
+# shellcheck source=names.sh
+source "$SCRIPT_DIR/names.sh"
+interop_names
+RUNS_BASE="$RUN_BASE/.stress-runs"
 COMPOSE_FILE="$GEN_DIR/docker-compose.generated.yml"
 NODES_ENV="$GEN_DIR/nodes.env"
 
@@ -141,7 +151,7 @@ teardown_rep() {
     if [ "$rc" -ne 0 ]; then
         echo "       WARN: teardown failed ($rc)"
     fi
-    left="$(docker ps -a --filter 'name=fips-interop-' --format '{{.Names}}' 2>/dev/null)"
+    left="$(docker ps -a --filter "name=^$INTEROP_NAME-" --format '{{.Names}}' 2>/dev/null)"
     if [ -n "$left" ]; then
         echo "       WARN: containers remain after teardown: $(echo "$left" | tr '\n' ' ')"
     fi
