@@ -7,11 +7,22 @@ declared in `../mod.rs`; it runs in nextest's `node-synthetic` group (a
 `settle` override in `.config/nextest.toml`), because some of its files open
 real TCP sockets.
 
+## The multipath setting
+
+Every test here states `node.path.enabled` and takes nothing from the daemon's
+default, so a change of default changes none of them. The tests of
+`crossing.rs` and `audit.rs` run both ways: a test's plain name runs multipath
+off, and its `_with_multipath_on` sibling runs it on. They are two tests and
+not one loop, since a pin that fails in a loop's first pass would never reach
+the second, and each pin has a line of its own in
+`testing/ignored-tests.txt`. The other files run off, which is what they test.
+
 ## Files
 
 - `mod.rs`: the module declarations, the module doc, and the drivers the
-  files share: real TCP nodes on 127.0.0.1 (`tcp_node`, `tcp_pair`,
-  `tcp_dial`, `resolve_connect`, `pool`), crossed TCP dials (`crossed_tcp`),
+  files share: the multipath setting (`with_path`, `loopback_node`), real TCP
+  nodes on 127.0.0.1 (`tcp_node`, `tcp_pair`, `tcp_dial`, `resolve_connect`,
+  `pool`), crossed TCP dials (`crossed_tcp`),
   delivery until idle for loopback and TCP nodes alike (`pump`), a fresh
   heartbeat check (`heartbeat_reaches`), the check that two nodes hold one
   session that carries a heartbeat each way (`settled`), and the wrappers

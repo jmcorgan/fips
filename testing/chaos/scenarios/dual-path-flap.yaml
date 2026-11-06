@@ -73,9 +73,9 @@ traffic:
 node_churn:
   enabled: false
 
-# Multipath is off by default until it is turned on for every node; the
-# MMP line once a second gives the peer's reorder count at a resolution
-# a switch can be put against.
+# Multipath is on by default, and is stated here so this suite says which
+# it runs. The MMP line once a second gives the peer's reorder count at a
+# resolution a switch can be put against.
 fips_overrides:
   node:
     path:

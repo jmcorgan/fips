@@ -16,11 +16,11 @@ use super::super::spanning_tree::{
     run_tree_test_with_configs, verify_tree_convergence,
 };
 use super::super::*;
-use super::pump;
+use super::{pump, with_path};
 
 /// A routable two-node pair, converged, with coordinates cached.
 async fn routable_pair() -> Vec<TestNode> {
-    let configs = (0..2).map(|_| Config::new()).collect();
+    let configs = (0..2).map(|_| with_path(Config::new(), false)).collect();
     let mut nodes = run_tree_test_with_configs(configs, &[(0, 1)]).await;
     verify_tree_convergence(&nodes);
     populate_all_coord_caches(&mut nodes);
@@ -174,7 +174,7 @@ async fn restarted_responder(responder_larger: bool) -> (bool, Option<u64>) {
 #[tokio::test]
 async fn a_restarted_larger_responder_carries_data_both_ways_within_the_msg3_resends_and_one_handshake()
  {
-    let config = Config::new();
+    let config = with_path(Config::new(), false);
     assert_eq!(
         config.node.rate_limit.handshake_max_resends, 5,
         "precondition: the default msg3 resend count"

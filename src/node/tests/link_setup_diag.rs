@@ -118,7 +118,12 @@ pub(super) struct Established {
 }
 
 pub(super) async fn established(age: u64) -> Established {
-    let mut node = make_node();
+    established_from(age, Config::new()).await
+}
+
+/// [`established`] on a node built from `config`.
+pub(super) async fn established_from(age: u64, config: Config) -> Established {
+    let mut node = make_node_with(config);
     let tid = TransportId::new(1);
     let (sock, addr) = register_udp_with_peer_socket(&mut node, tid).await;
     let sender = Identity::generate();

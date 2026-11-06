@@ -1466,8 +1466,8 @@ impl EcnConfig {
 #[serde(default)]
 pub struct PathConfig {
     /// Whether this node sends and answers path messages
-    /// (`node.path.enabled`). Off by default, which keeps every link on one
-    /// path as a node without multipath does (draft Section 8.2).
+    /// (`node.path.enabled`). On by default. Off keeps every link on one
+    /// path, as a node without multipath does (draft Section 8.2).
     pub enabled: bool,
 
     /// Round-trip samples a path needs before it is chosen over the active
@@ -1490,7 +1490,7 @@ pub struct PathConfig {
 impl Default for PathConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             min_samples: 2,
             mix_kinds: false,
             switch: SwitchConfig::default(),

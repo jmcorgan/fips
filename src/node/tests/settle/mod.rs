@@ -23,7 +23,7 @@ mod restart;
 
 use super::spanning_tree::{
     TestNode, add_loopback_alias, bridge_to_unbounded, cleanup_nodes, loopback_tap,
-    process_available_packets,
+    make_test_node_with_config, process_available_packets,
 };
 use super::*;
 use crate::config::TcpConfig;
@@ -31,10 +31,23 @@ use crate::proto::link::LinkMessageType;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::{TransportHandle, TransportId};
 
+/// `config` with multipath set as `on`. Every test here states the setting
+/// it runs instead of taking the daemon's default, so a change of default
+/// changes none of them.
+pub(super) fn with_path(mut config: Config, on: bool) -> Config {
+    config.node.path.enabled = on;
+    config
+}
+
+/// A loopback test node with multipath set as `on`.
+pub(super) async fn loopback_node(on: bool) -> TestNode {
+    make_test_node_with_config(with_path(Config::new(), on), 1280).await
+}
+
 /// A node with one real TCP transport, transport id 1, listening on an
-/// ephemeral port of 127.0.0.1.
-pub(super) async fn tcp_node() -> TestNode {
-    let mut node = make_node_with(Config::new());
+/// ephemeral port of 127.0.0.1, with multipath set as `on`.
+pub(super) async fn tcp_node(on: bool) -> TestNode {
+    let mut node = make_node_with(with_path(Config::new(), on));
     let transport_id = TransportId::new(1);
     let config = TcpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
@@ -63,10 +76,11 @@ pub(super) async fn tcp_node() -> TestNode {
     }
 }
 
-/// Two TCP nodes, index 0 the smaller node address when `zero_smaller`.
-pub(super) async fn tcp_pair(zero_smaller: bool) -> Vec<TestNode> {
+/// Two TCP nodes with multipath set as `on`, index 0 the smaller node
+/// address when `zero_smaller`.
+pub(super) async fn tcp_pair(on: bool, zero_smaller: bool) -> Vec<TestNode> {
     loop {
-        let mut nodes = vec![tcp_node().await, tcp_node().await];
+        let mut nodes = vec![tcp_node(on).await, tcp_node(on).await];
         if (nodes[0].node.node_addr() < nodes[1].node.node_addr()) == zero_smaller {
             return nodes;
         }
@@ -207,8 +221,8 @@ pub(super) async fn settled(nodes: &mut [TestNode], a: usize, b: usize) -> Resul
 /// `initiate_connection`, both connects resolve and both msg1s are sent
 /// before either is read; then everything is delivered. Returns the nodes
 /// and the indices of the smaller and the larger node.
-pub(super) async fn crossed_tcp(zero_smaller: bool) -> (Vec<TestNode>, usize, usize) {
-    let mut nodes = tcp_pair(zero_smaller).await;
+pub(super) async fn crossed_tcp(on: bool, zero_smaller: bool) -> (Vec<TestNode>, usize, usize) {
+    let mut nodes = tcp_pair(on, zero_smaller).await;
     let (s, l) = if zero_smaller { (0, 1) } else { (1, 0) };
     tcp_dial(&mut nodes, 0, 1).await;
     tcp_dial(&mut nodes, 1, 0).await;

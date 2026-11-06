@@ -140,6 +140,32 @@ Tell the daemon to drop a peer link.
 | -------- | ----------- |
 | `peer` | npub (bech32) or hostname from `/etc/fips/hosts`. |
 
+### `path <what>`
+
+Show a peer's paths, or pin its traffic to a transport or to one path. A peer
+is an npub (bech32) or a hostname from `/etc/fips/hosts`.
+
+| Subcommand | Description |
+| ---------- | ----------- |
+| `path show <peer>` | Whether multipath is on and the peer capable, the link's cost and whether it is held after a switch, the pin, and each path: its transport, address, state, role, whether it is active at either end, round trips, ETX, score, whether it is acked, how long since it was last heard, unanswered probes, proven MTU, frames and bytes received, and failed frames. |
+| `path pin <peer> <transport> [<address>]` | Pin the link. With an address it pins that path; without one it pins the transport, and paths are chosen among that transport's. `transport` is an instance name as configured, or the numeric id `path show` prints; a name several transports share is refused, with their ids. |
+| `path unpin <peer>` | Clear the pin. |
+
+A pin in force moves the link at once. While nothing it names is live, paths
+are chosen as if it were not there, and it applies again when something it
+names is. It ends:
+
+- when it is unpinned;
+- when its transport is removed;
+- when the peer is replaced through a new handshake, such as a peer restart,
+  whether seen at a handshake or inside this node's own rekey;
+- when this node's own later dial to the peer is answered and the peering is
+  replaced. It also ends where the peer was only rekeying, since the dialer
+  cannot tell the two apart.
+
+A crossed handshake won on the tie-break keeps it. `pin` and `unpin` are refused
+on a node with `node.path.enabled: false`, where a pin would do nothing.
+
 ### `probe <target>`
 
 Diagnose whether a mesh endpoint is reachable, in five stages, and

@@ -400,7 +400,16 @@ pub(super) fn base_config() -> BleConfig {
 /// A BLE test node whose transport runs the pre-handshake key exchange with
 /// the node's own key, as the daemon's transport does, under `config`.
 pub(super) async fn make_test_node_ble_with(node_num: u8, config: BleConfig) -> TestNode {
-    let mut node = make_node();
+    make_test_node_ble_from(node_num, config, Config::new()).await
+}
+
+/// [`make_test_node_ble_with`] on a node built from `node_config`.
+pub(super) async fn make_test_node_ble_from(
+    node_num: u8,
+    config: BleConfig,
+    node_config: Config,
+) -> TestNode {
+    let mut node = make_node_with(node_config);
     let transport_id = TransportId::new(1);
     let addr = ble_addr(node_num);
     let io = MockBleIo::new("hci0", addr.clone());

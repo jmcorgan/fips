@@ -9,7 +9,7 @@ use super::*;
 use heartbeat::set_heartbeat_interval;
 use spanning_tree::{
     TestNode, add_loopback_alias, cleanup_nodes, drain_all_packets, make_test_node,
-    process_available_packets, run_tree_test,
+    process_available_packets, run_tree_test, run_tree_test_with_configs,
 };
 
 /// Count the in-flight handshake legs a node is running toward `peer`.
@@ -599,8 +599,9 @@ async fn a_pin_is_kept_when_our_later_dial_from_the_larger_address_leaves_us_on_
     pin_across_our_later_dial_to_a_peering_the_peer_dialled(false, true).await;
 }
 
-/// `connect` naming a different address for a peer whose link is live does
-/// not dial it, says so, and leaves both ends exactly as they were.
+/// With multipath off, `connect` naming a different address for a peer whose
+/// link is live does not dial it, says so, sends nothing and leaves both ends
+/// exactly as they were.
 ///
 /// Between two nodes on this code, a dial to a live peer did not move its
 /// link; it either re-keyed the link or left the peer holding a responder
@@ -610,16 +611,41 @@ async fn a_pin_is_kept_when_our_later_dial_from_the_larger_address_leaves_us_on_
 async fn test_api_connect_to_a_live_peer_on_another_address_dials_nothing_and_changes_neither_end()
 {
     for dialer_smaller in [true, false] {
-        connect_to_live_peer_on_another_address(dialer_smaller).await;
+        connect_to_live_peer_on_another_address(super::paths::disabled(), dialer_smaller, 0).await;
     }
 }
 
-/// One orientation of
-/// [`test_api_connect_to_a_live_peer_on_another_address_dials_nothing_and_changes_neither_end`].
-async fn connect_to_live_peer_on_another_address(dialer_smaller: bool) {
+/// With multipath on, the same `connect` gives the same reply and leaves both
+/// ends' links and sessions as they were, and the address it holds starts
+/// capability probing on the link's path, to learn whether the peer implements
+/// multipath. The first probe goes at once, and at this instant it is the one
+/// frame that reaches the peer; more follow on the capability schedule.
+/// Mutation: drop the candidate, so no probe goes.
+#[tokio::test]
+async fn test_api_connect_to_a_live_peer_on_another_address_sends_one_capability_probe_with_multipath_on()
+ {
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    for dialer_smaller in [true, false] {
+        connect_to_live_peer_on_another_address(super::paths::enabled(), dialer_smaller, 1).await;
+    }
+    let received = logs.lines_with("Path message received");
+    drop(guard);
+    assert_eq!(received.len(), 2, "one per orientation: {received:?}");
+    for line in &received {
+        assert!(line.contains("msg_type=82"), "a probe, 0x52: {line}");
+    }
+}
+
+/// One orientation of the two tests above, between two nodes built from
+/// `config`, with `frames` the number that reach the peer.
+async fn connect_to_live_peer_on_another_address(
+    config: Config,
+    dialer_smaller: bool,
+    frames: usize,
+) {
     use super::rekey_parity::{age_link, deliver};
 
-    let mut nodes = run_tree_test(2, &[(0, 1)], false).await;
+    let mut nodes = run_tree_test_with_configs(vec![config.clone(), config], &[(0, 1)]).await;
     let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
     let (d, p) = if zero_smaller == dialer_smaller {
         (0, 1)
@@ -656,8 +682,8 @@ async fn connect_to_live_peer_on_another_address(dialer_smaller: bool) {
     );
     assert_eq!(
         deliver(&mut nodes[p]).await,
-        0,
-        "nothing reaches the peer (dialer smaller: {dialer_smaller})"
+        frames,
+        "what reaches the peer (dialer smaller: {dialer_smaller})"
     );
     assert_eq!(
         link_view(&nodes[d], &peer_addr),
@@ -1258,9 +1284,9 @@ async fn test_api_connect_to_a_live_capable_peer_holds_a_new_address_as_a_path_c
 /// capability probing, and nothing is dialled.
 #[tokio::test]
 async fn test_api_connect_to_a_live_peer_not_known_capable_keeps_masters_reply() {
-    use super::paths::enabled;
+    use super::paths::{disabled, enabled};
     let (data, dialled, moved, sources, state) =
-        connect_live_alternate(enabled(), Config::new(), false).await;
+        connect_live_alternate(enabled(), disabled(), false).await;
     assert_eq!(data["refreshed"], false);
     assert_eq!(data["detail"], "peer live, not dialled");
     assert!(!dialled && !moved);
@@ -1275,8 +1301,9 @@ async fn test_api_connect_to_a_live_peer_not_known_capable_keeps_masters_reply()
 /// always gave, and holds nothing.
 #[tokio::test]
 async fn test_api_connect_with_multipath_off_keeps_masters_reply() {
+    use super::paths::disabled;
     let (data, dialled, moved, sources, state) =
-        connect_live_alternate(Config::new(), Config::new(), false).await;
+        connect_live_alternate(disabled(), disabled(), false).await;
     assert_eq!(data["refreshed"], false);
     assert_eq!(data["detail"], "peer live, not dialled");
     assert!(!dialled && !moved);

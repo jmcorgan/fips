@@ -17,22 +17,26 @@
 //!   adopt (known defects).
 //!
 //! Each test is run once per address order, so each order has its own
-//! verdict. Setup checks are marked `precondition:`; the assertion of the
-//! behaviour is marked `defect:`.
+//! verdict, and once per setting of `node.path.enabled`: a test's plain name
+//! runs multipath off, and its `_with_multipath_on` sibling runs it on, as two
+//! tests and not one loop, since a pin that fails in a loop's first pass would
+//! never reach the second. Setup checks are marked `precondition:`; the
+//! assertion of the behaviour is marked `defect:`.
 
 use super::super::control::quieten;
-use super::super::crossed_dial::{Dial, cross_dials, hand, phase};
+use super::super::crossed_dial::{Dial, cross_dials_from, hand, phase};
 use super::super::rekey_parity::{
     age_link, cutover, deliver, heartbeat, rekey_config, rekey_to_pending, trigger_age,
 };
 use super::super::spanning_tree::{
     LOOPBACK_REGISTRY, TestNode, cleanup_nodes, drain_all_packets, initiate_handshake,
-    make_test_node, make_test_node_with_config, process_available_packets,
+    make_test_node_with_config, process_available_packets,
 };
 use super::super::*;
 use super::audit::{Breach, Exempt, assert_coherent, audit};
 use super::{
-    alias, crossed_tcp, heartbeat_reaches, pool, pump, received, resolve_connect, settled,
+    alias, crossed_tcp, heartbeat_reaches, loopback_node, pool, pump, received, resolve_connect,
+    settled, with_path,
 };
 use super::{tcp_dial, tcp_pair};
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2};
@@ -86,8 +90,8 @@ fn link_view(tn: &TestNode, peer: &NodeAddr) -> LinkView {
 
 /// Crossed TCP dials must leave one open connection at each end and a
 /// session on which a heartbeat authenticates both ways.
-async fn working_session(zero_smaller: bool) {
-    let (mut nodes, s, l) = crossed_tcp(zero_smaller).await;
+async fn working_session(on: bool, zero_smaller: bool) {
+    let (mut nodes, s, l) = crossed_tcp(on, zero_smaller).await;
     let mut bad = Vec::new();
     if let Err(e) = heartbeat_reaches(&mut nodes, s, l).await {
         bad.push(format!("smaller to larger heartbeat: {e}"));
@@ -119,19 +123,33 @@ async fn working_session(zero_smaller: bool) {
 
 #[tokio::test]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first() {
-    working_session(true).await;
+    working_session(false, true).await;
+}
+
+/// [`crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first`] with multipath on.
+#[tokio::test]
+async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first_with_multipath_on()
+ {
+    working_session(true, true).await;
 }
 
 #[tokio::test]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first() {
-    working_session(false).await;
+    working_session(false, false).await;
+}
+
+/// [`crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first`] with multipath on.
+#[tokio::test]
+async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first_with_multipath_on()
+ {
+    working_session(true, false).await;
 }
 
 /// After crossed TCP dials the smaller node's link record for the peer is
 /// the link it dialed (direction `Outbound`) at the pair it holds the peer
 /// at, and `addr_to_link` names that link there.
-async fn smaller_on_its_dialed_link(zero_smaller: bool) {
-    let (mut nodes, s, l) = crossed_tcp(zero_smaller).await;
+async fn smaller_on_its_dialed_link(on: bool, zero_smaller: bool) {
+    let (mut nodes, s, l) = crossed_tcp(on, zero_smaller).await;
     let l_addr = *nodes[l].node.node_addr();
     let mut bad = Vec::new();
     {
@@ -172,13 +190,29 @@ async fn smaller_on_its_dialed_link(zero_smaller: bool) {
 #[tokio::test]
 #[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
 async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first() {
-    smaller_on_its_dialed_link(true).await;
+    smaller_on_its_dialed_link(false, true).await;
+}
+
+/// [`crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
+async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_smaller_first_with_multipath_on()
+ {
+    smaller_on_its_dialed_link(true, true).await;
 }
 
 #[tokio::test]
 #[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
 async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first() {
-    smaller_on_its_dialed_link(false).await;
+    smaller_on_its_dialed_link(false, false).await;
+}
+
+/// [`crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after crossed dials the smaller node keeps the inbound link it was promoted on as the peer's link record"]
+async fn crossed_tcp_dials_leave_the_smaller_node_on_the_link_it_dialed_larger_first_with_multipath_on()
+ {
+    smaller_on_its_dialed_link(true, false).await;
 }
 
 /// Close the smaller node's connection to the larger and report whether a
@@ -240,8 +274,8 @@ async fn redial_after_drop(nodes: &mut [TestNode], s: usize, l: usize) -> Result
 /// After crossed TCP dials, when the one surviving connection drops, a send
 /// from the smaller node (which holds the peer at the address it dialed)
 /// redials it, as it does after a single dial.
-async fn crossed_then_redial(zero_smaller: bool) {
-    let (mut nodes, s, l) = crossed_tcp(zero_smaller).await;
+async fn crossed_then_redial(on: bool, zero_smaller: bool) {
+    let (mut nodes, s, l) = crossed_tcp(on, zero_smaller).await;
     heartbeat_reaches(&mut nodes, s, l)
         .await
         .expect("precondition: frames authenticate smaller to larger");
@@ -257,22 +291,38 @@ async fn crossed_then_redial(zero_smaller: bool) {
 #[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
 async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first()
  {
-    crossed_then_redial(true).await;
+    crossed_then_redial(false, true).await;
+}
+
+/// [`after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
+async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_smaller_first_with_multipath_on()
+ {
+    crossed_then_redial(true, true).await;
 }
 
 #[tokio::test]
 #[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
 async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first()
  {
-    crossed_then_redial(false).await;
+    crossed_then_redial(false, false).await;
+}
+
+/// [`after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after crossed dials the smaller node cannot redial a dropped connection, because its link record is the inbound link"]
+async fn after_crossed_tcp_dials_a_send_from_the_smaller_node_redials_a_dropped_connection_larger_first_with_multipath_on()
+ {
+    crossed_then_redial(true, false).await;
 }
 
 /// The run above with the smaller node's link record rewritten, by the
 /// test, to the link it dialed (direction `Outbound` at the peer's pair):
 /// it redials, so the stale record is what stops the redial, and the redial
 /// pins can pass once the record is right.
-async fn rewritten_then_redial(zero_smaller: bool) {
-    let (mut nodes, s, l) = crossed_tcp(zero_smaller).await;
+async fn rewritten_then_redial(on: bool, zero_smaller: bool) {
+    let (mut nodes, s, l) = crossed_tcp(on, zero_smaller).await;
     heartbeat_reaches(&mut nodes, s, l)
         .await
         .expect("precondition: frames authenticate smaller to larger");
@@ -307,18 +357,32 @@ async fn rewritten_then_redial(zero_smaller: bool) {
 
 #[tokio::test]
 async fn with_its_link_record_rewritten_to_outbound_the_smaller_node_redials_smaller_first() {
-    rewritten_then_redial(true).await;
+    rewritten_then_redial(false, true).await;
+}
+
+/// [`with_its_link_record_rewritten_to_outbound_the_smaller_node_redials_smaller_first`] with multipath on.
+#[tokio::test]
+async fn with_its_link_record_rewritten_to_outbound_the_smaller_node_redials_smaller_first_with_multipath_on()
+ {
+    rewritten_then_redial(true, true).await;
 }
 
 #[tokio::test]
 async fn with_its_link_record_rewritten_to_outbound_the_smaller_node_redials_larger_first() {
-    rewritten_then_redial(false).await;
+    rewritten_then_redial(false, false).await;
+}
+
+/// [`with_its_link_record_rewritten_to_outbound_the_smaller_node_redials_larger_first`] with multipath on.
+#[tokio::test]
+async fn with_its_link_record_rewritten_to_outbound_the_smaller_node_redials_larger_first_with_multipath_on()
+ {
+    rewritten_then_redial(true, false).await;
 }
 
 /// The control for the redial pins: after a single TCP dial, a send from
 /// the dialer redials a dropped connection.
-async fn single_then_redial(dialer_smaller: bool) {
-    let mut nodes = tcp_pair(dialer_smaller).await;
+async fn single_then_redial(on: bool, dialer_smaller: bool) {
+    let mut nodes = tcp_pair(on, dialer_smaller).await;
     let (d, r) = (0, 1);
     tcp_dial(&mut nodes, d, r).await;
     resolve_connect(&mut nodes[d]).await;
@@ -333,12 +397,26 @@ async fn single_then_redial(dialer_smaller: bool) {
 
 #[tokio::test]
 async fn after_one_tcp_dial_a_send_from_the_dialer_redials_a_dropped_connection_smaller_dialer() {
-    single_then_redial(true).await;
+    single_then_redial(false, true).await;
+}
+
+/// [`after_one_tcp_dial_a_send_from_the_dialer_redials_a_dropped_connection_smaller_dialer`] with multipath on.
+#[tokio::test]
+async fn after_one_tcp_dial_a_send_from_the_dialer_redials_a_dropped_connection_smaller_dialer_with_multipath_on()
+ {
+    single_then_redial(true, true).await;
 }
 
 #[tokio::test]
 async fn after_one_tcp_dial_a_send_from_the_dialer_redials_a_dropped_connection_larger_dialer() {
-    single_then_redial(false).await;
+    single_then_redial(false, false).await;
+}
+
+/// [`after_one_tcp_dial_a_send_from_the_dialer_redials_a_dropped_connection_larger_dialer`] with multipath on.
+#[tokio::test]
+async fn after_one_tcp_dial_a_send_from_the_dialer_redials_a_dropped_connection_larger_dialer_with_multipath_on()
+ {
+    single_then_redial(true, false).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,8 +440,8 @@ fn route(at: &TransportAddr, to: &TestNode) {
 /// and check it holds the peer at the msg2's transport and source address;
 /// then deliver everything and check the audit finds the pair coherent,
 /// with the crossing's exemption for the smaller node.
-async fn coherent_pair(dial: Dial) {
-    let crossed = cross_dials(dial).await;
+async fn coherent_pair(on: bool, dial: Dial) {
+    let crossed = cross_dials_from(dial, with_path(Config::new(), on)).await;
     let (s, l, to) = (crossed.s, crossed.l, crossed.to.clone());
     let dialled = to.1.clone();
     let mut nodes = crossed.nodes;
@@ -403,12 +481,24 @@ async fn coherent_pair(dial: Dial) {
 
 #[tokio::test]
 async fn a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair() {
-    coherent_pair(Dial::OtherTransport).await;
+    coherent_pair(false, Dial::OtherTransport).await;
+}
+
+/// [`a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair`] with multipath on.
+#[tokio::test]
+async fn a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair_with_multipath_on() {
+    coherent_pair(true, Dial::OtherTransport).await;
 }
 
 #[tokio::test]
 async fn a_crossed_dial_won_from_another_address_leaves_a_coherent_pair() {
-    coherent_pair(Dial::OtherAddress).await;
+    coherent_pair(false, Dial::OtherAddress).await;
+}
+
+/// [`a_crossed_dial_won_from_another_address_leaves_a_coherent_pair`] with multipath on.
+#[tokio::test]
+async fn a_crossed_dial_won_from_another_address_leaves_a_coherent_pair_with_multipath_on() {
+    coherent_pair(true, Dial::OtherAddress).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -417,8 +507,8 @@ async fn a_crossed_dial_won_from_another_address_leaves_a_coherent_pair() {
 
 /// Two loopback nodes, with the indices of the dialer and the responder,
 /// the dialer's address the larger when `dialer_larger`.
-async fn ordered_pair(dialer_larger: bool) -> (Vec<TestNode>, usize, usize) {
-    let nodes = vec![make_test_node().await, make_test_node().await];
+async fn ordered_pair(on: bool, dialer_larger: bool) -> (Vec<TestNode>, usize, usize) {
+    let nodes = vec![loopback_node(on).await, loopback_node(on).await];
     let zero_larger = nodes[0].node.node_addr() > nodes[1].node.node_addr();
     if zero_larger == dialer_larger {
         (nodes, 0, 1)
@@ -455,10 +545,10 @@ pub(super) struct LateDial {
 /// 1.5 s before the second, and nothing the dialer sends on the first
 /// peering is read by the responder before the second msg1. Then everything
 /// is delivered.
-pub(super) async fn second_msg1_late(dialer_larger: bool, second: Second) -> LateDial {
+pub(super) async fn second_msg1_late(on: bool, dialer_larger: bool, second: Second) -> LateDial {
     use crate::node::handlers::handshake::UNHEARD_PEERING_MIN_AGE_MS;
 
-    let (mut nodes, d, r) = ordered_pair(dialer_larger).await;
+    let (mut nodes, d, r) = ordered_pair(on, dialer_larger).await;
     let d_addr = *nodes[d].node.node_addr();
     let r_addr = *nodes[r].node.node_addr();
     initiate_handshake(&mut nodes, d, r).await;
@@ -633,8 +723,8 @@ enum Kept {
 /// and then by the audit. Without an exemption the audit finds exactly the
 /// breaches `kept` names at the dialer, which are the documented move;
 /// with it, none.
-async fn late_dial_works(dialer_larger: bool, second: Second, kept: Kept) {
-    let mut late = second_msg1_late(dialer_larger, second).await;
+async fn late_dial_works(on: bool, dialer_larger: bool, second: Second, kept: Kept) {
+    let mut late = second_msg1_late(on, dialer_larger, second).await;
     let works = working_peering(&mut late).await;
     assert!(works.is_ok(), "defect: {works:?}");
     let (d, r) = (late.d, late.r);
@@ -680,29 +770,57 @@ async fn late_dial_works(dialer_larger: bool, second: Second, kept: Kept) {
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer() {
-    late_dial_works(true, Second::InOrder, Kept::Entry).await;
+    late_dial_works(false, true, Second::InOrder, Kept::Entry).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer_with_multipath_on()
+{
+    late_dial_works(true, true, Second::InOrder, Kept::Entry).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_smaller_dialer() {
-    late_dial_works(false, Second::InOrder, Kept::Entry).await;
+    late_dial_works(false, false, Second::InOrder, Kept::Entry).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_leaves_a_working_peering_smaller_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_msg1_more_than_1s_later_leaves_a_working_peering_smaller_dialer_with_multipath_on()
+ {
+    late_dial_works(true, false, Second::InOrder, Kept::Entry).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer()
  {
-    late_dial_works(true, Second::OtherTransport, Kept::Record).await;
+    late_dial_works(false, true, Second::OtherTransport, Kept::Record).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer_with_multipath_on()
+ {
+    late_dial_works(true, true, Second::OtherTransport, Kept::Record).await;
 }
 
 #[tokio::test]
 async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer()
  {
-    late_dial_works(false, Second::OtherTransport, Kept::Record).await;
+    late_dial_works(false, false, Second::OtherTransport, Kept::Record).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer`] with multipath on.
+#[tokio::test]
+async fn a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer_with_multipath_on()
+ {
+    late_dial_works(true, false, Second::OtherTransport, Kept::Record).await;
 }
 
 /// The reordered case, checked by heartbeat: both ends on one session.
-async fn reordered_works(dialer_larger: bool) {
-    let mut late = second_msg1_late(dialer_larger, Second::Reordered).await;
+async fn reordered_works(on: bool, dialer_larger: bool) {
+    let mut late = second_msg1_late(on, dialer_larger, Second::Reordered).await;
     let works = working_peering(&mut late).await;
     cleanup_nodes(&mut late.nodes).await;
     assert!(works.is_ok(), "defect: {works:?}");
@@ -712,20 +830,36 @@ async fn reordered_works(dialer_larger: bool) {
 #[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
 async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer()
  {
-    reordered_works(true).await;
+    reordered_works(false, true).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer_with_multipath_on()
+ {
+    reordered_works(true, true).await;
 }
 
 #[tokio::test]
 #[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
 async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer()
  {
-    reordered_works(false).await;
+    reordered_works(false, false).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the two ends are left on different sessions"]
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_smaller_dialer_with_multipath_on()
+ {
+    reordered_works(true, false).await;
 }
 
 /// The reordered case, checked by the audit: no breach of `OneSession`'s
 /// first clause. Other breaches are not this pin's reason and are ignored.
-async fn reordered_one_session(dialer_larger: bool) {
-    let mut late = second_msg1_late(dialer_larger, Second::Reordered).await;
+async fn reordered_one_session(on: bool, dialer_larger: bool) {
+    let mut late = second_msg1_late(on, dialer_larger, Second::Reordered).await;
     let breaches = audit(&mut late.nodes, &[]).await;
     cleanup_nodes(&mut late.nodes).await;
     let split: Vec<&Breach> = breaches
@@ -739,14 +873,30 @@ async fn reordered_one_session(dialer_larger: bool) {
 #[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
 async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer()
  {
-    reordered_one_session(true).await;
+    reordered_one_session(false, true).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer_with_multipath_on()
+ {
+    reordered_one_session(true, true).await;
 }
 
 #[tokio::test]
 #[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
 async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer()
  {
-    reordered_one_session(false).await;
+    reordered_one_session(false, false).await;
+}
+
+/// [`a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: when the second dial's msg2 reaches the dialer first, the audit finds the two ends on different sessions"]
+async fn a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_smaller_dialer_with_multipath_on()
+ {
+    reordered_one_session(true, false).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -767,10 +917,10 @@ struct AgedDial {
 }
 
 /// Drive the aged-link dial to the point both ends are quiet.
-async fn aged_link_dial() -> AgedDial {
+async fn aged_link_dial(on: bool) -> AgedDial {
     let mut nodes = vec![
-        make_test_node_with_config(rekey_config(60), 1280).await,
-        make_test_node_with_config(rekey_config(60), 1280).await,
+        make_test_node_with_config(with_path(rekey_config(60), on), 1280).await,
+        make_test_node_with_config(with_path(rekey_config(60), on), 1280).await,
     ];
     let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
     let (d, p) = if zero_smaller { (1, 0) } else { (0, 1) };
@@ -841,10 +991,8 @@ async fn aged_link_dial() -> AgedDial {
 
 /// After its dial on the peer's aged link, the larger node's own genuine
 /// rekey, started inside the pending's hold, is answered by the peer.
-#[tokio::test]
-#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer discards that node's next rekey while it holds the pending the dial left"]
-async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered() {
-    let AgedDial { mut nodes, d, p } = aged_link_dial().await;
+async fn rekey_answered(on: bool) {
+    let AgedDial { mut nodes, d, p } = aged_link_dial(on).await;
     let peer_addr = *nodes[p].node.node_addr();
     nodes[d].node.poll_link_rekeys().await;
     assert!(
@@ -870,14 +1018,26 @@ async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answere
     );
 }
 
+#[tokio::test]
+#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer discards that node's next rekey while it holds the pending the dial left"]
+async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered() {
+    rekey_answered(false).await;
+}
+
+/// [`a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer discards that node's next rekey while it holds the pending the dial left"]
+async fn a_larger_dialers_rekey_after_its_dial_on_the_peers_aged_link_is_answered_with_multipath_on()
+ {
+    rekey_answered(true).await;
+}
+
 /// After its dial on the peer's aged link, with both ends quiet, neither
 /// end holds a pending the other has no handshake able to adopt: no breach
 /// of `OneSession`'s second clause. Other breaches are not this pin's
 /// reason and are ignored.
-#[tokio::test]
-#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer holds a responder pending the larger node never adopts"]
-async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt() {
-    let AgedDial { mut nodes, .. } = aged_link_dial().await;
+async fn none_unadoptable(on: bool) {
+    let AgedDial { mut nodes, .. } = aged_link_dial(on).await;
     let breaches = audit(&mut nodes, &[]).await;
     cleanup_nodes(&mut nodes).await;
     let unadoptable: Vec<&Breach> = breaches
@@ -885,6 +1045,20 @@ async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer
         .filter(|b| matches!(b, Breach::Unadoptable { .. }))
         .collect();
     assert!(unadoptable.is_empty(), "defect: {unadoptable:#?}");
+}
+
+#[tokio::test]
+#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer holds a responder pending the larger node never adopts"]
+async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt() {
+    none_unadoptable(false).await;
+}
+
+/// [`a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after a larger node's dial on a quiet peer's aged link, the peer holds a responder pending the larger node never adopts"]
+async fn a_larger_dialers_dial_on_the_peers_aged_link_leaves_no_pending_the_peer_cannot_adopt_with_multipath_on()
+ {
+    none_unadoptable(true).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -909,8 +1083,8 @@ fn loopback(tn: &mut TestNode, id: TransportId, addr: TransportAddr) {
 /// msg1. With `other` the larger node dials from a second transport to a
 /// second address of the smaller node's. Whether the two ends are left on
 /// one working session.
-async fn late_cross(other: bool, quiet: Duration) -> Result<(), String> {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+async fn late_cross(on: bool, other: bool, quiet: Duration) -> Result<(), String> {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
     let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
         (0, 1)
     } else {
@@ -985,7 +1159,16 @@ async fn late_cross(other: bool, quiet: Duration) -> Result<(), String> {
 #[tokio::test]
 #[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
 async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session() {
-    let out = late_cross(true, SILENCE).await;
+    let out = late_cross(false, true, SILENCE).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// [`a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
+async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on()
+ {
+    let out = late_cross(true, true, SILENCE).await;
     assert!(out.is_ok(), "defect: {out:?}");
 }
 
@@ -994,7 +1177,16 @@ async fn a_crossed_msg1_from_another_transport_read_past_the_heard_floor_leaves_
 #[tokio::test]
 #[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
 async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session() {
-    let out = late_cross(false, SILENCE).await;
+    let out = late_cross(false, false, SILENCE).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// [`a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: a crossed msg1 read past the heard floor makes the smaller node replace its session while the larger node keeps its own"]
+async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_one_session_with_multipath_on()
+ {
+    let out = late_cross(true, false, SILENCE).await;
     assert!(out.is_ok(), "defect: {out:?}");
 }
 
@@ -1003,7 +1195,15 @@ async fn a_crossed_msg1_on_the_same_transport_read_past_the_heard_floor_leaves_o
 /// two pins make can pass.
 #[tokio::test]
 async fn a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leaves_one_session() {
-    let out = late_cross(true, Duration::ZERO).await;
+    let out = late_cross(false, true, Duration::ZERO).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// [`a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leaves_one_session`] with multipath on.
+#[tokio::test]
+async fn a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leaves_one_session_with_multipath_on()
+ {
+    let out = late_cross(true, true, Duration::ZERO).await;
     assert!(out.is_ok(), "defect: {out:?}");
 }
 
@@ -1017,10 +1217,10 @@ async fn a_crossed_msg1_from_another_transport_read_inside_the_heard_floor_leave
 /// cutover is lost, and the smaller node last heard it `quiet` ago. Then
 /// the larger node dials the smaller node's second address. Whether the
 /// two ends are left on one working session.
-async fn aged_rekey(quiet: Duration) -> Result<(), String> {
+async fn aged_rekey(on: bool, quiet: Duration) -> Result<(), String> {
     let mut nodes = vec![
-        make_test_node_with_config(rekey_config(60), 1280).await,
-        make_test_node_with_config(rekey_config(60), 1280).await,
+        make_test_node_with_config(with_path(rekey_config(60), on), 1280).await,
+        make_test_node_with_config(with_path(rekey_config(60), on), 1280).await,
     ];
     let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
     let (d, p) = if zero_smaller { (1, 0) } else { (0, 1) };
@@ -1095,7 +1295,16 @@ async fn aged_rekey(quiet: Duration) -> Result<(), String> {
 #[tokio::test]
 #[ignore = "known defect: after the smaller node's own rekey, the larger node's dial on its aged link is taken as a replacement while the larger node keeps its own session"]
 async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session() {
-    let out = aged_rekey(SILENCE).await;
+    let out = aged_rekey(false, SILENCE).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// [`a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session`] with multipath on.
+#[tokio::test]
+#[ignore = "known defect: after the smaller node's own rekey, the larger node's dial on its aged link is taken as a replacement while the larger node keeps its own session"]
+async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_leaves_one_session_with_multipath_on()
+ {
+    let out = aged_rekey(true, SILENCE).await;
     assert!(out.is_ok(), "defect: {out:?}");
 }
 
@@ -1104,6 +1313,14 @@ async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_le
 #[tokio::test]
 async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_inside_the_heard_floor_leaves_one_session()
  {
-    let out = aged_rekey(Duration::ZERO).await;
+    let out = aged_rekey(false, Duration::ZERO).await;
+    assert!(out.is_ok(), "defect: {out:?}");
+}
+
+/// [`a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_inside_the_heard_floor_leaves_one_session`] with multipath on.
+#[tokio::test]
+async fn a_larger_dialers_dial_on_the_aged_link_after_the_smaller_nodes_rekey_inside_the_heard_floor_leaves_one_session_with_multipath_on()
+ {
+    let out = aged_rekey(true, Duration::ZERO).await;
     assert!(out.is_ok(), "defect: {out:?}");
 }

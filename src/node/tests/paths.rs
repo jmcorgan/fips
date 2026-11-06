@@ -53,7 +53,7 @@ fn transport_roles_map_to_the_cores_four_roles() {
 }
 
 /// Each path setting of the node's configuration reaches the core machine's
-/// parameters, and the default configuration runs multipath disabled.
+/// parameters, and the default configuration runs multipath enabled.
 #[test]
 fn the_path_settings_map_onto_the_machines_parameters() {
     let mut node = crate::config::NodeConfig::default();
@@ -75,9 +75,9 @@ fn the_path_settings_map_onto_the_machines_parameters() {
     assert_eq!(cfg.active_interval, Duration::from_millis(250));
     assert_eq!(cfg.standby_interval, Duration::from_millis(3000));
     assert_eq!(cfg.heartbeat, Duration::from_secs(15));
-    // The default configuration runs multipath disabled.
+    // The default configuration runs multipath enabled.
     assert!(
-        !path_params(&crate::config::NodeConfig::default())
+        path_params(&crate::config::NodeConfig::default())
             .config()
             .enabled
     );
@@ -120,7 +120,7 @@ fn one_path(tn: &TestNode, peer: &NodeAddr) -> (TransportId, TransportAddr) {
 /// frame.
 #[tokio::test]
 async fn promotion_builds_a_disabled_bundle_at_the_link_pair() {
-    let mut nodes = linked_pair(Config::new(), Config::new()).await;
+    let mut nodes = linked_pair(disabled(), disabled()).await;
     for (me, other) in [(0, 1), (1, 0)] {
         let peer = *nodes[other].node.node_addr();
         let pair = one_path(&nodes[me], &peer);
@@ -149,7 +149,7 @@ async fn promotion_builds_a_disabled_bundle_at_the_link_pair() {
         );
         assert!(
             matches!(roam.roam, Roam::Roamed { .. }),
-            "multipath is disabled by default: {roam:?}"
+            "multipath is disabled: {roam:?}"
         );
     }
     cleanup_nodes(&mut nodes).await;
@@ -479,6 +479,14 @@ pub(super) fn enabled() -> Config {
     config
 }
 
+/// A configuration with multipath disabled, for a test of that setting or of
+/// a peer without multipath, which must not follow the daemon's default.
+pub(super) fn disabled() -> Config {
+    let mut config = Config::new();
+    config.node.path.enabled = false;
+    config
+}
+
 /// Give `tn` a second loopback transport `id` with MTU `mtu` at an address
 /// of its own, and return the address. A packet sent to it reaches `tn` on
 /// `id`; one sent from it carries that address as its source.
@@ -671,7 +679,7 @@ async fn a_received_probe_and_its_ack_each_leave_a_received_line() {
 /// is not made capable by it.
 #[tokio::test]
 async fn a_disabled_node_discards_a_probe_and_sends_nothing() {
-    let mut nodes = linked_pair(Config::new(), Config::new()).await;
+    let mut nodes = linked_pair(disabled(), disabled()).await;
     let b = *nodes[1].node.node_addr();
     let a = *nodes[0].node.node_addr();
     nodes[0]
@@ -1408,15 +1416,15 @@ fn advance_to(at: crate::peer::PeerInstant, before: Duration) {
     crate::time::advance(left.saturating_sub(before));
 }
 
-/// With the default configuration the path tick stays disarmed and steps no
+/// With multipath disabled the path tick stays disarmed and steps no
 /// machine; a machine of two paths arms it and is stepped only at its wake.
 #[tokio::test]
 async fn the_path_tick_is_disarmed_and_steps_nothing_without_work() {
-    let mut nodes = linked_pair(Config::new(), Config::new()).await;
+    let mut nodes = linked_pair(disabled(), disabled()).await;
     let b = *nodes[1].node.node_addr();
     // A step of a disabled machine, as a path message or a tick makes.
     nodes[0].node.step_path(&b, Input::Poll).await;
-    assert!(!nodes[0].node.paths.armed(), "nothing to do with defaults");
+    assert!(!nodes[0].node.paths.armed(), "nothing to do when disabled");
     for _ in 0..100 {
         crate::time::advance(Duration::from_millis(50));
         nodes[0].node.path_tick().await;
@@ -2627,7 +2635,7 @@ async fn setup_rekey(enabled: bool) -> (bool, bool, bool) {
     const REKEY_AFTER_SECS: u64 = 60;
     let trigger_age =
         Duration::from_secs(REKEY_AFTER_SECS + crate::node::REKEY_JITTER_SECS as u64 + 1);
-    let mut cfg0 = crate::config::Config::new();
+    let mut cfg0 = disabled();
     cfg0.node.rekey.after_secs = REKEY_AFTER_SECS;
     cfg0.node.rekey.after_messages = u64::MAX;
     let mut cfg1 = crate::config::Config::new();
@@ -3098,7 +3106,7 @@ async fn dialling_pair(capable: bool) -> (Vec<TestNode>, NodeAddr, TransportAddr
         let (nodes, b, _a2, b2) = two_transports(1280).await;
         (nodes, b, b2)
     } else {
-        let mut nodes = linked_pair(enabled(), Config::new()).await;
+        let mut nodes = linked_pair(enabled(), disabled()).await;
         second_transport(&mut nodes[0], t2(), 1280);
         let b2 = second_transport(&mut nodes[1], t2(), 1280);
         let b = *nodes[1].node.node_addr();
@@ -3558,7 +3566,7 @@ async fn a_configured_second_address_is_offered_to_the_bundle_of_a_won_cross_con
 /// Mutation: never unlist from a whole list.
 #[tokio::test]
 async fn dropping_a_peers_only_candidate_from_the_configuration_stops_capability_probing() {
-    let (mut nodes, aliases) = configured_pair(enabled(), Config::new(), 0, 1).await;
+    let (mut nodes, aliases) = configured_pair(enabled(), disabled(), 0, 1).await;
     let b = *nodes[1].node.node_addr();
     let t1 = nodes[0].transport_id;
     let sent = |nodes: &[TestNode]| {
@@ -3600,7 +3608,7 @@ async fn dropping_a_peers_only_candidate_from_the_configuration_stops_capability
 /// so B is capable at A and A holds nothing on `t2()`. Returns the nodes,
 /// B's address, and A's and B's second addresses.
 async fn heard_pair(capable: bool) -> (Vec<TestNode>, NodeAddr, TransportAddr, TransportAddr) {
-    let b_cfg = if capable { enabled() } else { Config::new() };
+    let b_cfg = if capable { enabled() } else { disabled() };
     let mut nodes = linked_pair(enabled(), b_cfg).await;
     let a2 = second_transport(&mut nodes[0], t2(), 1280);
     let b2 = second_transport(&mut nodes[1], t2(), 1280);

@@ -36,12 +36,17 @@
 //! Exemptions are listed in [`Exempt`], each with a plain reason and the
 //! change that removes it. One applies only when the test passes it; the
 //! audit never infers one from state.
+//!
+//! The audit's own tests run with multipath off under their plain names and
+//! on as their `_with_multipath_on` siblings; each case's body is a helper
+//! taking the setting.
 
 use super::super::link_index_audit;
-use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, make_test_node};
+use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake};
 use super::super::*;
 use super::{
-    bind_index, crossed_tcp, heartbeat_reaches, pump, resolve_connect, tcp_dial, tcp_pair,
+    bind_index, crossed_tcp, heartbeat_reaches, loopback_node, pump, resolve_connect, tcp_dial,
+    tcp_pair, with_path,
 };
 use crate::transport::{TransportHandle, TransportId};
 use fips_core::proto::rekey::Role;
@@ -511,9 +516,8 @@ async fn connections_in_use(
 }
 
 /// A single loopback dial, delivered until idle, is coherent.
-#[tokio::test]
-async fn the_audit_passes_a_single_loopback_dial() {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+async fn loopback_passes(on: bool) {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
     initiate_handshake(&mut nodes, 0, 1).await;
     pump(&mut nodes).await;
     let a1 = *nodes[1].node.node_addr();
@@ -525,9 +529,21 @@ async fn the_audit_passes_a_single_loopback_dial() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// [`loopback_passes`] with multipath off.
+#[tokio::test]
+async fn the_audit_passes_a_single_loopback_dial() {
+    loopback_passes(false).await;
+}
+
+/// [`loopback_passes`] with multipath on.
+#[tokio::test]
+async fn the_audit_passes_a_single_loopback_dial_with_multipath_on() {
+    loopback_passes(true).await;
+}
+
 /// One TCP dial from `nodes[d]`, delivered until idle.
-async fn single_tcp_dial(zero_smaller: bool, d: usize) -> Vec<TestNode> {
-    let mut nodes = tcp_pair(zero_smaller).await;
+async fn single_tcp_dial(on: bool, zero_smaller: bool, d: usize) -> Vec<TestNode> {
+    let mut nodes = tcp_pair(on, zero_smaller).await;
     tcp_dial(&mut nodes, d, 1 - d).await;
     resolve_connect(&mut nodes[d]).await;
     pump(&mut nodes).await;
@@ -540,19 +556,41 @@ async fn single_tcp_dial(zero_smaller: bool, d: usize) -> Vec<TestNode> {
 }
 
 /// A single TCP dial from the larger node is coherent.
-#[tokio::test]
-async fn the_audit_passes_a_single_tcp_dial_from_the_larger_node() {
-    let mut nodes = single_tcp_dial(true, 1).await;
+async fn larger_passes(on: bool) {
+    let mut nodes = single_tcp_dial(on, true, 1).await;
     assert_coherent(&mut nodes, &[], "a TCP dial from the larger node").await;
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A single TCP dial from the smaller node is coherent.
+/// [`larger_passes`] with multipath off.
 #[tokio::test]
-async fn the_audit_passes_a_single_tcp_dial_from_the_smaller_node() {
-    let mut nodes = single_tcp_dial(true, 0).await;
+async fn the_audit_passes_a_single_tcp_dial_from_the_larger_node() {
+    larger_passes(false).await;
+}
+
+/// [`larger_passes`] with multipath on.
+#[tokio::test]
+async fn the_audit_passes_a_single_tcp_dial_from_the_larger_node_with_multipath_on() {
+    larger_passes(true).await;
+}
+
+/// A single TCP dial from the smaller node is coherent.
+async fn smaller_passes(on: bool) {
+    let mut nodes = single_tcp_dial(on, true, 0).await;
     assert_coherent(&mut nodes, &[], "a TCP dial from the smaller node").await;
     cleanup_nodes(&mut nodes).await;
+}
+
+/// [`smaller_passes`] with multipath off.
+#[tokio::test]
+async fn the_audit_passes_a_single_tcp_dial_from_the_smaller_node() {
+    smaller_passes(false).await;
+}
+
+/// [`smaller_passes`] with multipath on.
+#[tokio::test]
+async fn the_audit_passes_a_single_tcp_dial_from_the_smaller_node_with_multipath_on() {
+    smaller_passes(true).await;
 }
 
 /// The breaches in `breaches` that `node`'s maps show.
@@ -564,9 +602,8 @@ fn at_node(breaches: &[Breach], node: usize) -> Vec<&Breach> {
 /// smaller node's link record for the larger node (the inbound link it was
 /// promoted on, at another pair than the one it holds the peer at), and its
 /// connection to the peer, which no live link uses.
-#[tokio::test]
-async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record() {
-    let (mut nodes, s, l) = crossed_tcp(true).await;
+async fn exemption_needed(on: bool) {
+    let (mut nodes, s, l) = crossed_tcp(on, true).await;
     let breaches = audit(&mut nodes, &[]).await;
     let at_s = at_node(&breaches, s);
     assert!(
@@ -590,12 +627,24 @@ async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inboun
     cleanup_nodes(&mut nodes).await;
 }
 
+/// [`exemption_needed`] with multipath off.
+#[tokio::test]
+async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record() {
+    exemption_needed(false).await;
+}
+
+/// [`exemption_needed`] with multipath on.
+#[tokio::test]
+async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record_with_multipath_on()
+ {
+    exemption_needed(true).await;
+}
+
 /// The crossing exemption waives the named node's record and connection
 /// only: naming the smaller node clears its breaches, naming the larger
 /// node leaves them.
-#[tokio::test]
-async fn the_crossing_exemption_waives_only_the_named_nodes_record() {
-    let (mut nodes, s, l) = crossed_tcp(true).await;
+async fn exemption_scoped(on: bool) {
+    let (mut nodes, s, l) = crossed_tcp(on, true).await;
     let named = audit(&mut nodes, &[Exempt::CrossedInbound { node: s, peer: l }]).await;
     assert!(
         named.is_empty(),
@@ -611,13 +660,24 @@ async fn the_crossing_exemption_waives_only_the_named_nodes_record() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// [`exemption_scoped`] with multipath off.
+#[tokio::test]
+async fn the_crossing_exemption_waives_only_the_named_nodes_record() {
+    exemption_scoped(false).await;
+}
+
+/// [`exemption_scoped`] with multipath on.
+#[tokio::test]
+async fn the_crossing_exemption_waives_only_the_named_nodes_record_with_multipath_on() {
+    exemption_scoped(true).await;
+}
+
 /// A link left in the link map with no peer or handshake leg naming it, the
 /// shape of a stale link-map entry after a rekey, is flagged by the audit's
 /// own clause (the index audit does not read the link map, so it does not
 /// panic first).
-#[tokio::test]
-async fn the_audit_flags_a_link_map_entry_no_peer_or_leg_uses() {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+async fn stale_flagged(on: bool) {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
     initiate_handshake(&mut nodes, 0, 1).await;
     pump(&mut nodes).await;
     let stale = nodes[0].node.allocate_link_id();
@@ -644,12 +704,22 @@ async fn the_audit_flags_a_link_map_entry_no_peer_or_leg_uses() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// [`stale_flagged`] with multipath off.
+#[tokio::test]
+async fn the_audit_flags_a_link_map_entry_no_peer_or_leg_uses() {
+    stale_flagged(false).await;
+}
+
+/// [`stale_flagged`] with multipath on.
+#[tokio::test]
+async fn the_audit_flags_a_link_map_entry_no_peer_or_leg_uses_with_multipath_on() {
+    stale_flagged(true).await;
+}
+
 /// An index-map entry for an index no link machine binds panics inside the
 /// audit, through the index audit it runs first.
-#[tokio::test]
-#[should_panic(expected = "peers_by_index must map exactly")]
-async fn the_index_audit_inside_the_audit_panics_on_an_unbound_index() {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+async fn unbound_panics(on: bool) {
+    let mut nodes = vec![loopback_node(on).await, loopback_node(on).await];
     initiate_handshake(&mut nodes, 0, 1).await;
     pump(&mut nodes).await;
     let peer = *nodes[1].node.node_addr();
@@ -658,11 +728,24 @@ async fn the_index_audit_inside_the_audit_panics_on_an_unbound_index() {
     let _ = audit(&mut nodes, &[]).await;
 }
 
+/// [`unbound_panics`] with multipath off.
+#[tokio::test]
+#[should_panic(expected = "peers_by_index must map exactly")]
+async fn the_index_audit_inside_the_audit_panics_on_an_unbound_index() {
+    unbound_panics(false).await;
+}
+
+/// [`unbound_panics`] with multipath on.
+#[tokio::test]
+#[should_panic(expected = "peers_by_index must map exactly")]
+async fn the_index_audit_inside_the_audit_panics_on_an_unbound_index_with_multipath_on() {
+    unbound_panics(true).await;
+}
+
 /// A TCP connection opened with no handshake on it, which no link uses, is
 /// flagged at the node that opened it.
-#[tokio::test]
-async fn the_audit_flags_an_open_connection_no_link_uses() {
-    let mut nodes = tcp_pair(true).await;
+async fn open_flagged(on: bool) {
+    let mut nodes = tcp_pair(on, true).await;
     let at = nodes[1].addr.clone();
     let tid = nodes[0].transport_id;
     let Some(TransportHandle::Tcp(tcp)) = nodes[0].node.transports.get(&tid) else {
@@ -696,15 +779,27 @@ async fn the_audit_flags_an_open_connection_no_link_uses() {
     cleanup_nodes(&mut nodes).await;
 }
 
+/// [`open_flagged`] with multipath off.
+#[tokio::test]
+async fn the_audit_flags_an_open_connection_no_link_uses() {
+    open_flagged(false).await;
+}
+
+/// [`open_flagged`] with multipath on.
+#[tokio::test]
+async fn the_audit_flags_an_open_connection_no_link_uses_with_multipath_on() {
+    open_flagged(true).await;
+}
+
 /// A rekey stopped with both ends pending, the initiator on its pending
 /// and the responder on its own, is not flagged by `OneSession`'s second
 /// clause: each end's pending has a complement at the other.
-#[tokio::test]
-async fn the_audit_passes_a_rekey_left_at_both_ends_pending() {
+async fn pending_passes(on: bool) {
     use super::super::rekey_parity::{
         age_link, linked_pair, rekey_config, rekey_to_pending, trigger_age,
     };
-    let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
+    let config = with_path(rekey_config(60), on);
+    let mut nodes = linked_pair(config.clone(), config).await;
     age_link(&mut nodes, 0, 1, trigger_age());
     rekey_to_pending(&mut nodes, 0, 1).await;
     let a1 = *nodes[1].node.node_addr();
@@ -723,4 +818,16 @@ async fn the_audit_passes_a_rekey_left_at_both_ends_pending() {
         "defect: a two-way pending is flagged as unadoptable: {unadoptable:#?}"
     );
     cleanup_nodes(&mut nodes).await;
+}
+
+/// [`pending_passes`] with multipath off.
+#[tokio::test]
+async fn the_audit_passes_a_rekey_left_at_both_ends_pending() {
+    pending_passes(false).await;
+}
+
+/// [`pending_passes`] with multipath on.
+#[tokio::test]
+async fn the_audit_passes_a_rekey_left_at_both_ends_pending_with_multipath_on() {
+    pending_passes(true).await;
 }

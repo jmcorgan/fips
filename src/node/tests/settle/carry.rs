@@ -13,9 +13,10 @@
 use super::super::rekey_parity::trigger_age;
 use super::super::rekey_parity::{deliver, linked_pair, pump, rekey_config, stale_session};
 use super::super::spanning_tree::{
-    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node, restarted_node,
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, restarted_node,
 };
 use super::super::*;
+use super::{loopback_node, with_path};
 use fips_core::proto::rekey::Role;
 
 /// Milliseconds on the clock the TreeAnnounce rate-limit stamp is kept in.
@@ -25,7 +26,7 @@ fn stamp_ms() -> u64 {
 
 /// Two loopback nodes, node 0 having dialed node 1, delivered until idle.
 async fn peered() -> Vec<TestNode> {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
     initiate_handshake(&mut nodes, 0, 1).await;
     drain_all_packets(&mut nodes, false).await;
     let a1 = *nodes[1].node.node_addr();
@@ -127,7 +128,7 @@ async fn restart_dial(nodes: &mut [TestNode]) {
         .get_peer_mut(&a1)
         .expect("precondition: node 0 holds node 1")
         .test_backdate_heard(std::time::Duration::from_secs(60));
-    let restarted = restarted_node(&nodes[1], Config::new());
+    let restarted = restarted_node(&nodes[1], with_path(Config::new(), false));
     let mut old = std::mem::replace(&mut nodes[1], restarted);
     cleanup_nodes(std::slice::from_mut(&mut old)).await;
     initiate_handshake(nodes, 1, 0).await;
@@ -161,7 +162,11 @@ async fn a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_
 /// A drops its side of an aged link and redials B; B answers as a rekey.
 /// A holds B's filter within three Bloom ticks.
 async fn redial(redialer_smaller: bool) {
-    let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
+    let mut nodes = linked_pair(
+        with_path(rekey_config(60), false),
+        with_path(rekey_config(60), false),
+    )
+    .await;
     let zero_smaller = nodes[0].node.node_addr() < nodes[1].node.node_addr();
     let (a, b) = if zero_smaller == redialer_smaller {
         (0, 1)
@@ -317,13 +322,13 @@ async fn verified(tn: &TestNode, addr: &TransportAddr) -> Option<bool> {
 #[cfg(ble_available)]
 #[tokio::test]
 async fn the_ble_initiators_link_is_verified_before_any_responder_frame() {
-    use super::super::ble::{base_config, larger_second, link_genuinely, make_test_node_ble_with};
+    use super::super::ble::{base_config, larger_second, link_genuinely, make_test_node_ble_from};
     use super::super::crossed_dial::{hand, phase};
     use crate::proto::fmp::wire::{PHASE_MSG1, PHASE_MSG2};
 
     let mut nodes = vec![
-        make_test_node_ble_with(1, base_config()).await,
-        make_test_node_ble_with(2, base_config()).await,
+        make_test_node_ble_from(1, base_config(), with_path(Config::new(), false)).await,
+        make_test_node_ble_from(2, base_config(), with_path(Config::new(), false)).await,
     ];
     larger_second(&mut nodes);
     let _bank = link_genuinely(&nodes).await;

@@ -8,9 +8,9 @@
 //! handshake map of the node, and that the genuine msg2 still completes the
 //! dial afterwards. How many of them the node reads is not asserted.
 
-use super::super::spanning_tree::{TestNode, cleanup_nodes, make_test_node};
+use super::super::spanning_tree::{TestNode, cleanup_nodes};
 use super::super::*;
-use super::pump;
+use super::{loopback_node, pump};
 use crate::noise::HANDSHAKE_MSG2_SIZE;
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, build_msg2};
 
@@ -22,9 +22,9 @@ const SPRAY: u64 = 1000;
 /// index. Node 2 is the forger.
 async fn dial_unanswered() -> (Vec<TestNode>, LinkId, ReceivedPacket, SessionIndex) {
     let mut nodes = vec![
-        make_test_node().await,
-        make_test_node().await,
-        make_test_node().await,
+        loopback_node(false).await,
+        loopback_node(false).await,
+        loopback_node(false).await,
     ];
     let node1 = PeerIdentity::from_pubkey_full(nodes[1].node.identity().pubkey_full());
     let (tid, addr) = (nodes[0].transport_id, nodes[1].addr.clone());
