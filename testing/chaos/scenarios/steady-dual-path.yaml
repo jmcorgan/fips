@@ -1,0 +1,101 @@
+# One peer, two healthy paths of near-equal round trip: no churn
+#
+# The churn calibration, run in local CI. Two nodes
+# joined by a raw-Ethernet veth and by UDP over the bridge, both 1 to 3 ms,
+# nothing flapped. The cable is `role: preferred`, so each end moves the
+# link onto it once it is Live and has no reason to move it again: the
+# scores are near-equal, inside the switch margin, and nothing fails.
+#
+# A healthy pair meets once and stays: one promotion per node, no dial
+# after it (a live peer's cable beacon must not be dialled, the #147
+# skip), and at most two switches in the run, each end's one move onto
+# the cable. The control is that the cable was a second path at both ends.
+#
+# ethernet-churn stays in local CI beside it as the interface-binding
+# regression it was added for; this suite is the calibration, not that.
+#
+#   n01 ===eth=== n02      (role: preferred)
+#   n01 ---udp--- n02
+
+scenario:
+  name: "steady-dual-path"
+  seed: 42
+  duration_secs: 300
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, ethernet+udp]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+  bridge_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 15, max: 30}
+  duration_secs: {min: 10, max: 20}
+  parallel_streams: 1
+
+node_churn:
+  enabled: false
+
+transport_overrides:
+  ethernet:
+    role: preferred
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  max_promotions:
+    per_node: 1
+  # Each end's one move onto the cable, read as the run's total.
+  path_switches:
+    max_total: 2
+  # A timeout of the active path that no down explains, which a switch count
+  # cannot see. Reported, not held.
+  active_timeouts: {}
+  max_dials: 0
+  paths_live:
+    min: 2
+  # The traffic is uncapped iperf3 over the cable. A socket buffer held to
+  # the kernel's default ceiling (416 KB) overflowed under it, and the
+  # probes lost with the data made the path timeouts and switches the
+  # ceiling above was then charged for. Over a whole run the worse node
+  # dropped 2.4 to 4.0% of its cable frames in 3 of 3 such runs (the
+  # better one 1.1% or more); with the buffer the node asks for granted,
+  # at most 0.031% in 6 of 6. The ceiling sits about 8x from each.
+  max_kernel_drops:
+    max_pct: 0.3
+    min_nodes: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug,fips::node::dataplane::wait=debug"
+  output_dir: "./sim-results"

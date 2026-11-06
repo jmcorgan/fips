@@ -39,6 +39,18 @@ class PairTopology:
         """The one Ethernet edge."""
         return [("n01", "n02")]
 
+    def veth_edges(self):
+        """Every edge that needs a veth pair: the one Ethernet edge."""
+        return self.ethernet_edges()
+
+    def transport_for_edge(self, a, b):
+        """The edge's transport: Ethernet, so no end is addressed."""
+        return "ethernet"
+
+    def lanes(self, a, b):
+        """The edge carries no lanes."""
+        return 0
+
     def container_name(self, node_id):
         """Container name for a node, as the runner renders it."""
         return f"fips-node-{node_id}"

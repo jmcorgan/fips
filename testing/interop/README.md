@@ -53,9 +53,10 @@ Node identity and image slot are **separate**:
 - A spec entry is a slot letter.
 - Node id = `<slot><ordinal>`, ordinal counting occurrences of that slot,
   1-based.
-- Container name = `fips-interop-<nodeid>`.
-- IPv4 = `172.30.0.1<index>`, index = 0-based position in the spec
-  (`.10`, `.11`, `.12`, ...).
+- Container name = `<name>-<nodeid>`, `fips-interop-<nodeid>` by default
+  (see [Running several meshes on one host](#running-several-meshes-on-one-host)).
+- IPv4 = `<subnet>.1<index>`, `172.30.0.1<index>` by default, index =
+  0-based position in the spec (`.10`, `.11`, `.12`, ...).
 - Each node maps to its image slot: `a1`, `a2` → `fips-interop:a`.
 - A pair is **same-version** iff the two nodes' slots resolve to the same
   built SHA (read from `.build/refs.env`); else **MIXED**.
@@ -99,6 +100,9 @@ loss-induced instability with no version variable at all.
 | `generate-configs.sh`   | Generate per-node configs, the generated compose, manifests.    |
 | `interop-test.sh`       | Test driver: bring up, converge, rekey, analyze, attribute.     |
 | `interop-stress.sh`     | Netem stress loop: N reps, pass rate, mixed-vs-same attribution.|
+| `names.sh`              | Run name, image repository, subnet and their paths (sourced).  |
+| `checks.sh`             | Log and capture readers, multipath checks and their controls.  |
+| `capture-entry.sh`      | Multipath mode: start packet captures, then the entrypoint.    |
 | `README.md`             | This document.                                                 |
 
 Generated at runtime: `generated-configs/` (per-node configs +
@@ -214,6 +218,11 @@ expected and is not by itself a failure, so every other outcome exits 0.
 | `FIPS_INTEROP_KEEP_UP`       | `1` = leave containers running after the test. The stress loop sets it for every rep and tears down itself. |
 | `FIPS_INTEROP_KEEP_WORKTREES`| `1` = keep `build-images.sh` worktrees (debug).   |
 | `FIPS_INTEROP_RUNS_DIR`      | Root for the three scratch dirs — see [Scratch directory location](#scratch-directory-location). |
+| `FIPS_INTEROP_NAME`          | Run name (default `fips-interop`); see below.     |
+| `FIPS_INTEROP_IMAGE`         | Image repository (default: the run name).         |
+| `FIPS_INTEROP_SUBNET`        | Mesh `/24`, three octets (default `172.30.0`).    |
+| `FIPS_INTEROP_SUBNET2`       | Multipath mode's second `/24` (default `172.30.1`). |
+| `FIPS_CI_RUN_ID`             | Run label on the multipath mode's control and hand-back containers, the ones it starts outside compose (default `manual`). |
 
 The netem hook reuses the flake-lab mechanism (`docker exec ... tc qdisc` on
 each container's `eth0`) — host-side bridge qdisc does not shape
@@ -242,6 +251,141 @@ stderr warning naming the variable. The in-tree paths are
 dirty the checkout — but pointing the variable outside the source
 tree is recommended, so lab runs do not interleave with the source
 working copy at all.
+
+### Running several meshes on one host
+
+By default every run uses the containers `fips-interop-<node>`, the
+compose project `fips-interop`, the images `fips-interop:a/b/c` and the
+subnet `172.30.0.0/24`, so two runs on one host replace each other. Three
+variables, read by every script through `names.sh`, keep runs apart:
+
+- `FIPS_INTEROP_NAME` names the run: its containers are `<name>-<node>`,
+  its compose project is `<name>`, and its generated configs (and stress
+  artefacts) live in `runs/<name>/` under the runs directory instead of at
+  its top.
+- `FIPS_INTEROP_IMAGE` names the image repository, `<image>:a/b/c`. It
+  defaults to the run name, and a repository other than `fips-interop`
+  keeps its build worktrees and `refs.env` in `.build/images/<image>/`.
+  Build once under one repository and point several named runs at it.
+- `FIPS_INTEROP_SUBNET` sets the mesh `/24`. The driver checks it against
+  every Docker network and host route before it starts the mesh.
+
+```bash
+export FIPS_INTEROP_RUNS_DIR=/var/lib/fips-interop FIPS_INTEROP_IMAGE=lab
+bash testing/interop/build-images.sh HEAD HEAD~1 v0.5.3
+FIPS_INTEROP_NAME=lab-one FIPS_INTEROP_SUBNET=172.29.110 \
+    bash testing/interop/interop-test.sh a b c &
+FIPS_INTEROP_NAME=lab-two FIPS_INTEROP_SUBNET=172.29.112 \
+    bash testing/interop/interop-test.sh a a c
+```
+
+The default containers, images, subnet and paths are the ones the
+harness has always used, but the default compose project is now
+`fips-interop` where it used to be the directory name,
+`generated-configs`, so the default mesh network is now
+`fips-interop_fips-interop-net` instead of
+`generated-configs_fips-interop-net`. A mesh still up from the harness
+before this change (left by `FIPS_INTEROP_KEEP_UP=1`, or by a killed
+run) is not removed by the driver's `compose down`, and its network
+holds `172.30.0.0/24`, so the driver stops at the subnet check. Bring
+that mesh down with the old harness's `compose down` before the first
+run of this one. That run rewrites the compose file under the new
+project name; after it, the old mesh comes down only by naming its
+project:
+
+```bash
+docker compose -p generated-configs \
+    -f "$FIPS_INTEROP_RUNS_DIR/generated-configs/docker-compose.generated.yml" \
+    down --volumes --remove-orphans
+```
+
+## The multipath mode (manual)
+
+`interop-test.sh --multipath a c` runs a node with multipath enabled
+(`a1`, slot `a`) against a release that does not implement it (`c1`,
+slot `c`, built from `v0.5.3` or whichever ref the slot holds), and
+checks what the multipath draft promises such a peer. It is run by hand
+and is not part of local CI or GitHub CI.
+
+```bash
+export FIPS_INTEROP_RUNS_DIR=/var/lib/fips-interop FIPS_INTEROP_IMAGE=mp
+bash testing/interop/build-images.sh HEAD v0.5.3 v0.5.3
+FIPS_INTEROP_NAME=mp-req FIPS_INTEROP_SUBNET=172.29.110 \
+  FIPS_INTEROP_SUBNET2=172.29.111 \
+  bash testing/interop/interop-test.sh --multipath a c
+FIPS_INTEROP_NAME=mp-cfg FIPS_INTEROP_SUBNET=172.29.112 \
+  FIPS_INTEROP_SUBNET2=172.29.113 \
+  bash testing/interop/interop-test.sh --multipath=config a c
+FIPS_INTEROP_NAME=mp-hour FIPS_INTEROP_SUBNET=172.29.114 \
+  FIPS_INTEROP_SUBNET2=172.29.115 \
+  bash testing/interop/interop-test.sh --probe-hour a c
+```
+
+The three may run at once, each under its own name and subnet pair. A
+short run takes about 15 minutes, the hour run about 70.
+
+**What changes in the mesh.** The generator adds a second network
+(`FIPS_INTEROP_SUBNET2`, default `172.30.1`) for every slot `a` and slot
+`c` node, as `eth1`, and names the first network `eth0`. Slot `a` gets a
+second UDP transport, `mp2`, bound to `eth1` on port 2122, with
+`node.path.enabled: true`; its peer addresses name `udp/main`. Slot `c`'s
+configuration is what the default mode writes. The candidate for the old
+node's second address comes from `fipsctl connect <c1> <addr> udp/mp2`
+once the link is up (`--multipath`, `--multipath=request`), or from a
+configured address on a peer entry the new node does not dial
+(`--multipath=config`, `connect_policy: manual`): a configured second
+address on an `auto_connect` entry is dialled at startup and would put
+handshakes on the old node's second interface.
+
+**The captures.** Both containers run under `capture-entry.sh` instead of
+the image's entrypoint directly: it waits for each interface, starts one
+`tcpdump -U --immediate-mode` per interface (`eth1`, and `eth0` with a
+128-byte snap length on `c1`) writing to `<run-base>/captures/`, and
+execs the image's entrypoint only when each is listening, so the
+captures cover the daemon's startup and survive the container being
+killed. Each start writes new files. The daemon's binary and
+configuration are untouched; the container's entrypoint and one mount
+are not.
+
+**The phases** (after the usual Phases 0 to 8):
+
+- **M0** runs every check below on planted logs and captures and fails
+  the run unless each gives its expected verdict. `bash
+  testing/interop/checks.sh --controls <image> <dir>` runs them alone.
+- **Pre** checks each capture started before its daemon, the addresses
+  on `eth0` and `eth1`, and that `mp2` is up on `eth1`.
+- **M1** (request) checks the old node got no capability probe in the
+  40 s before the candidate, and that the connect reply held it without
+  a dial.
+- **M2** checks, at 310 s from link-up, 1 to `capability_bound 310` = 6
+  probes discarded at the old node, no PathAck or PathClose, every
+  unknown type a probe; every probe sent on the original path at 27
+  bytes, seen on the old node's `eth0`, and spaced at or above the
+  draft's floors; `smoothed_loss` in the old node's receiver reports
+  present and 0; one path in `fipsctl path show`; and no FIPS frame (any
+  UDP datagram but the control, or an ARP request for the old node's
+  second address) on either second interface, nor a send or dial line to
+  the second network (the log witness).
+- **M3** (short runs) kills the old node with SIGKILL, waits for the new
+  node's link-dead removal (and, in the request run, its re-dial),
+  restarts it and checks the relink, the outage's quiet second
+  interface, and the new link's probes: none in the request run, whose
+  candidate went with the old link, and at most 4 in the first 60 s in
+  the configured run.
+- **M4** (`--probe-hour`) counts the probes over 3610 s against
+  `capability_bound 3610` = 12, reports their gaps and the bytes the old
+  node received.
+- **C1, C2, M5** send a marked datagram (UDP 40999 to 40999, which
+  nothing listens on) across the second network; each capture must count
+  it once, so its zero was a live capture's.
+
+Each count reads the daemon logs through `count_log_pattern`,
+`matching_lines` or `counted_lines`; an unreadable log or capture is
+*not established*, which fails the run. A zero read from a log line
+counts only once that line has been seen in the run: the old node's
+discard line at least once, the new node's probe send line at least as
+often as the old node's discards, and each node's `Connection
+initiated` at least once on the first network.
 
 ## How to read the output
 

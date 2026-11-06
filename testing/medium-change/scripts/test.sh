@@ -18,6 +18,15 @@
 # so the suite demonstrates the regression rather than asserting it from a
 # changelog entry.
 #
+# Everything above is round 1, with multipath off. Round 2 restarts both
+# nodes with multipath on and runs Phases 1 and 2 again. There a source move
+# between two capable peers makes the new address a candidate, not a roam,
+# and the old path keeps working (draft 5.3 and 5.4's Note), so Phase 2
+# accepts node-b's view of node-a at either address. Phase 4 then loses the
+# interface node-b is sending to: node-a's interface goes down, and node-b,
+# with no signal but its probes timing out, must move to the remaining path
+# within the K-timeout bound under the same session.
+#
 # No phase moves the route until the move can mean something: node-a's
 # connected socket to node-b is pinned to the path the phase starts from, and
 # a ping has collected enough replies to show the data plane is carrying
@@ -85,6 +94,14 @@ PIN_DEADLINE_SECS="${MC_PIN_DEADLINE_SECS:-15}"
 # How many times Phase 3 runs. More than one is a diagnosis loop for the
 # control's baseline; see the README.
 CONTROL_RUNS="${MC_CONTROL_RUNS:-1}"
+# Phase 4's bound on node-b's switch after node-a's interface goes: K probe
+# timeouts at the active cadence, the timeout, a tick and a margin,
+# 3 x 200 + 400 + 50 + 250 ms.
+SWITCH_MS=1300
+# Round 2's log level at both nodes: node-a's default plus the path handler,
+# whose switch and state lines Phase 4 reads. A caller's MC_RUST_LOG stands
+# for both rounds.
+ROUND2_LOG="info,fips::node::netmon=debug,fips::node::handlers::netmon=debug,fips::node::handlers::path=debug"
 # Where every phase's ping log and both nodes' logs are kept, pass or fail.
 # Unset, they go to a temporary directory that is printed from on failure and
 # removed at exit.
@@ -405,6 +422,7 @@ wait_for_mesh() {
 # traffic, and checks continuity against what was recorded.
 assert_move_survives() {
     local label="$1" from_prefix="$2" to_prefix="$3" expect_src="$4" tag="$5"
+    local either="${6:-}"
 
     echo ""
     echo "── $label ──"
@@ -474,11 +492,138 @@ assert_move_survives() {
 
     # 3. The far side actually re-pinned to the new source address. Without
     #    this the first two could pass on a topology where nothing moved.
+    #    With multipath on, the new address is a candidate and the old path
+    #    keeps working, so either address is right there.
     if [ "$addr_after" = "${expect_src}.10:2121" ]; then
         ok "$label: node-b re-pinned to ${expect_src}.10:2121"
+    elif [ -n "$either" ] && [ "$addr_after" = "${either}.10:2121" ]; then
+        ok "$label: node-b sends to node-a at ${addr_after}, its other path (multipath on)"
     else
         bad "$label: node-b still sees node-a at ${addr_after:-<none>}, expected ${expect_src}.10:2121"
     fi
+    return 0
+}
+
+# The addresses node-b holds a Live path to node-a at, one per line, read from
+# its path lines: each path's last state, and a path that has logged nothing
+# is the link's original, Live at the address node-b sends to.
+live_addrs() {
+    local active="$1"
+    docker logs "$NODE_B" 2>&1 | python3 -c "
+import re, sys
+latest = {}
+for line in sys.stdin:
+    if 'Path state changed' not in line:
+        continue
+    f = dict(re.findall(r'(\w+)=(\S+)', line))
+    latest[f.get('path_id')] = (f.get('remote_addr'), f.get('next'))
+live = {a for a, n in latest.values() if n == 'Some(Live)'}
+if sys.argv[1] not in {a for a, _ in latest.values()}:
+    live.add(sys.argv[1])
+print('\n'.join(sorted(live)))
+" "$active"
+    return 0
+}
+
+# Milliseconds from an epoch stamp to node-b's first "Path switched" line to
+# the given address after it, or -1 when there is none.
+switch_after() {
+    local stamp="$1" to="$2"
+    docker logs "$NODE_B" 2>&1 | python3 -c "
+import sys
+from datetime import datetime
+stamp, to = float(sys.argv[1]), sys.argv[2]
+for line in sys.stdin:
+    if 'Path switched' not in line or ('to=' + to) not in line:
+        continue
+    head = line.split(' ', 1)[0]
+    try:
+        t = datetime.fromisoformat(head.replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        continue
+    if t >= stamp:
+        print(round((t - stamp) * 1000))
+        sys.exit(0)
+print(-1)
+" "$stamp" "$to"
+    return 0
+}
+
+# The interface of node-a's on the given path, resolved by subnet.
+iface_a() {
+    docker exec "$NODE_A" sh -c "ip -4 -oneline addr show | awk -v p='${1}.' '\$4 ~ \"^\"p {print \$2; exit}'"
+    return 0
+}
+
+# ── Phase 4: the old interface lost ─────────────────────────────────────────
+#
+# With multipath on, node-b holds a path to each of node-a's addresses and
+# sends on one. That interface of node-a's goes down: node-b hears nothing
+# more on that path, and must switch to the other within the K-timeout bound,
+# keeping the session, with traffic carried across.
+assert_lost() {
+    local label="Phase 4: the interface node-b sends to lost"
+    echo ""
+    echo "── $label ──"
+
+    local active lost keep
+    active="$(peer_field "$NODE_B" transport_addr)"
+    case "$active" in
+        "${PRIMARY}".*)   lost="$PRIMARY"; keep="$SECONDARY" ;;
+        "${SECONDARY}".*) lost="$SECONDARY"; keep="$PRIMARY" ;;
+        *) bad "$label: node-b's active address ${active:-<none>} is on neither of node-a's paths"; return 0 ;;
+    esac
+    local live
+    live="$(live_addrs "$active")"
+    echo "  node-b sends to node-a at $active; Live paths at: ${live//$'\n'/, }"
+    if ! grep -qx "${keep}.10:2121" <<< "$live"; then
+        bad "$label: precondition: node-b holds no Live path to node-a at ${keep}.10:2121, so losing $active tests nothing"
+        return 0
+    fi
+
+    # node-a's own traffic leaves by the path that stays.
+    move_default_route "$keep"
+    if ! start_traffic "$label" "$keep" phase4; then
+        return 0
+    fi
+    local link_before auth_before
+    link_before="$(peer_field "$NODE_B" link_id)"
+    auth_before="$(peer_field "$NODE_B" authenticated_at_ms)"
+
+    local dev stamp moved_ms
+    dev="$(iface_a "$lost")"
+    echo "  taking node-a's $dev (${lost}.10) down ..."
+    stamp="$(docker exec "$NODE_A" sh -c "date +%s.%N; ip link set dev $dev down" | head -1)"
+    moved_ms="$(awk -v s="$stamp" 'BEGIN { printf "%d", s * 1000 }')"
+    sleep 10
+    ping_stop
+
+    local gap ms addr_after link_after auth_after
+    gap="$(ping_max_gap "$moved_ms")"
+    ms="$(switch_after "$stamp" "${keep}.10:2121")"
+    addr_after="$(peer_field "$NODE_B" transport_addr)"
+    link_after="$(peer_field "$NODE_B" link_id)"
+    auth_after="$(peer_field "$NODE_B" authenticated_at_ms)"
+    docker exec "$NODE_A" ip link set dev "$dev" up || true
+    echo "  node-b switched to ${keep}.10:2121 after ${ms} ms; sends to $addr_after; longest gap ${gap}s"
+
+    if [ "$ms" -ge 0 ] && [ "$ms" -le "$SWITCH_MS" ]; then
+        ok "$label: node-b switched to ${keep}.10:2121 ${ms} ms after the interface went (bound ${SWITCH_MS} ms)"
+    else
+        bad "$label: node-b did not switch to ${keep}.10:2121 within ${SWITCH_MS} ms (${ms} ms, -1 for none)"
+    fi
+    if [ "$addr_after" = "${keep}.10:2121" ] && [ "$link_after" = "$link_before" ] \
+        && [ "$auth_after" = "$auth_before" ]; then
+        ok "$label: node-b sends to ${keep}.10:2121 under the same session"
+    else
+        bad "$label: node-b at ${addr_after:-<none>}, link_id $link_before→$link_after, authenticated_at_ms $auth_before→$auth_after"
+    fi
+    if [ "$gap" != "-1" ] && awk "BEGIN{exit !($gap <= $MAX_GAP_SECS)}"; then
+        ok "$label: traffic continuous, longest gap ${gap}s (limit ${MAX_GAP_SECS}s)"
+    else
+        bad "$label: longest gap ${gap}s exceeds the ${MAX_GAP_SECS}s limit"
+    fi
+    return 0
 }
 
 # ── Negative control ────────────────────────────────────────────────────────
@@ -581,6 +726,24 @@ main() {
     for ((run = 1; run <= CONTROL_RUNS; run++)); do
         assert_control_fails "$run"
     done
+
+    echo ""
+    echo "── Round 2: multipath on at both nodes ──"
+    "$GENERATE_SCRIPT" "$MESH_NAME" true on >/dev/null
+    export MC_RUST_LOG="${MC_RUST_LOG:-$ROUND2_LOG}"
+    "${COMPOSE[@]}" up -d --force-recreate node-a node-b >/dev/null 2>&1
+    move_default_route "$PRIMARY"
+    if wait_for_mesh; then
+        ok "round 2: mesh converged with multipath on"
+        # Phase 1 stays strict: the peers are not yet capable when the first
+        # move comes, since node-b holds no candidate of node-a's other than
+        # the link's own pair until node-a's address moves.
+        assert_move_survives "Round 2, Phase 1: primary → secondary" "$PRIMARY" "$SECONDARY" "$SECONDARY" r2-phase1
+        assert_move_survives "Round 2, Phase 2: secondary → primary" "$SECONDARY" "$PRIMARY" "$PRIMARY" r2-phase2 "$SECONDARY"
+        assert_lost
+    else
+        bad "round 2: mesh did not re-form with multipath on"
+    fi
 
     echo ""
     echo "=============================================="

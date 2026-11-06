@@ -28,9 +28,10 @@ x-fips-common: &fips-common
     - NET_RAW
   restart: "no"
   environment:
-    # `default`, deliberately — NOT `chaos`. The chaos entrypoint waits up to
-    # 30 s for every configured Ethernet interface to appear before it starts
-    # the daemon, which is precisely the workaround this mechanism retires. The
+    # `default`, deliberately — NOT `chaos`. The chaos entrypoint waits for
+    # every configured Ethernet interface to appear, until the harness says it
+    # has set up the container's veths (600 s at most), before it starts the
+    # daemon, which is precisely the workaround this mechanism retires. The
     # daemon must do its own waiting here or the suite proves nothing.
     - FIPS_TEST_MODE=default
     - RUST_LOG=info,fips::transport::ethernet=debug,fips::node=debug,fips::ipv6tun::icmp=debug,fips::ipv6tun::lifecycle=debug

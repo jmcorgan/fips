@@ -1,0 +1,106 @@
+# One peer, two UDP paths: the active path fails in one direction only
+#
+# Two nodes joined by a veth carrying IP, with an interface-bound UDP
+# instance at each end, and by UDP over the bridge. The veth scores better
+# (1 to 3 ms against 40 ms each way) and carries the link once Live.
+#
+# What a down is here: the IPv4 frames one end sends on the veth are
+# dropped at the other end's veth ingress (`mode: oneway`, a tc ingress
+# filter). The other direction keeps delivering: the dropped sender still
+# hears its peer, and its peer hears nothing from it. Neither end has a
+# signal, so each must switch on its probes timing out, within the
+# K-timeout bound of 1300 ms, while bidirectional load runs.
+#
+# The drop is IPv4 only, so ARP passes and neither end's neighbour entry
+# for the other fails; `reverse_heard` checks that, and that the
+# undropped direction delivered to the step's end against a capture at
+# the dropped sender: every path message it logged in the step's second
+# half, or from its last one when the half holds none, is in the capture.
+# The end whose sends still arrive stops answering the dropped one's
+# probes from its own side, goes Dead about 11 s in and probes at the
+# floor; the dropped sender hears those probes, which revive
+# its own Dead path. Probes to the stopped address are held to the floor
+# and counted against the capture at the far ingress (taps see a frame
+# before tc ingress drops it).
+#
+#   n01 ===udp/veth=== n02      (n02's frames dropped at n01 from 20 s for
+#                                30 s; n01's at n02 from 90 s for 30 s)
+#   n01 ---udp/main--- n02      (never touched)
+
+scenario:
+  name: "forward-only"
+  seed: 42
+  duration_secs: 160
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, udp-veth+udp]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+  bridge_policy:
+    delay_ms: [40, 40]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+
+link_flaps:
+  enabled: false
+
+# Random traffic is off: the scheduled loads are the traffic, and two
+# iperf3 clients at one server would collide.
+traffic:
+  enabled: false
+
+schedule:
+  - {at: 15, load: [n01, n02], secs: 45, streams: 4, bidir: true}
+  - {at: 20, down: [n01, n02], mode: oneway, from: n02, to: n01, secs: 30, capture: [n01, n02]}
+  - {at: 85, load: [n01, n02], secs: 45, streams: 4, bidir: true}
+  - {at: 90, down: [n01, n02], mode: oneway, from: n01, to: n02, secs: 30, capture: [n01, n02]}
+
+node_churn:
+  enabled: false
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  # The K-timeout bound at both ends: both lose answers; the dropped
+  # sender still hears.
+  switch_latency:
+    max_ms: 1300
+    each_end: true
+
+  # The positive control, then the draft's bounds.
+  reverse_heard: true
+  path_floor: true
+  discovery_limit: true
+
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+  paths_live:
+    min: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug"
+  output_dir: "./sim-results"

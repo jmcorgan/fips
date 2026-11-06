@@ -1,13 +1,16 @@
 #!/bin/bash
 # Render the two node configs for the medium-change lab.
 #
-# Usage: generate-configs.sh [mesh-name] [netmon-enabled]
+# Usage: generate-configs.sh [mesh-name] [netmon-enabled] [multipath on|off]
 #
 # `netmon-enabled` re-renders node-a with detection off. The test script uses
 # that for its negative control: the same topology and the same move, with the
 # only difference being the mechanism under test. A regression test that has
 # never been seen to fail is a claim, not a test, so the suite proves the
 # failure rather than asserting it from the changelog.
+#
+# `multipath` writes node.path.enabled at both nodes, `off` by default, so the
+# suite states which it runs rather than taking the daemon's default.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +25,11 @@ OUTPUT_DIR="$MC_DIR/generated-configs${FIPS_CI_NAME_SUFFIX:-}"
 
 MESH_NAME="${1:-medium-change-$(date +%s)-$$}"
 NETMON_ENABLED="${2:-true}"
+case "${3:-off}" in
+    on)  PATH_ENABLED=true ;;
+    off) PATH_ENABLED=false ;;
+    *)   echo "multipath must be on or off, got '${3}'" >&2; exit 2 ;;
+esac
 
 primary="${MC_PRIMARY_PREFIX:-172.31.60}"
 far="${MC_FAR_PREFIX:-172.31.62}"
@@ -45,6 +53,8 @@ node:
   identity:
     nsec: "$nsec"
 $netmon_block
+  path:
+    enabled: $PATH_ENABLED
   retry:
     max_retries: 5
     base_interval_secs: 2
@@ -111,4 +121,4 @@ NPUB_A=$npub_a
 NPUB_B=$npub_b
 EOF
 
-echo "Generated configs in $OUTPUT_DIR (netmon on node-a: $NETMON_ENABLED)"
+echo "Generated configs in $OUTPUT_DIR (netmon on node-a: $NETMON_ENABLED, multipath: $PATH_ENABLED)"

@@ -25,12 +25,26 @@
 #
 # Usage:
 #   ./interop-test.sh [--topology <name>] [node-spec...]
+#   ./interop-test.sh --multipath[=request|config] a c
+#   ./interop-test.sh --probe-hour a c
 #
 #   --topology  built-in multi-hop topology selecting a node-spec + edge
 #               set + default data-plane streams. Known: multihop-3v-cycle
 #               (6 nodes, 2 of each version, one cycle, two leaves —
 #               exercises cross-version forwarding + mesh-size). Without
 #               it the mesh is a full mesh from the positional node-spec.
+#   --multipath a multipath-enabled node (slot a) against a release node
+#               (slot c), joined on a second network as well as the first:
+#               the new node is given the old node's second-network address
+#               as a path candidate, by `fipsctl connect` once the link is
+#               up (request, the default) or as a configured address of a
+#               peer it does not dial (config), and the run checks what the
+#               multipath draft promises the old node (phases M0 to M5,
+#               below). Needs the spec `a c` and an `a` image that knows
+#               node.path. Run by hand; not part of local CI.
+#   --probe-hour  --multipath=request, with the re-dial replaced by an hour
+#               from link-up that counts the capability probes, their gaps
+#               and their bytes at the old node.
 #   node-spec   space-separated slot letters (a/b/c), default `a b c`.
 #               e.g. `a a b c` (4-node, one same-version control pair),
 #                    `a a a`   (3-node same-version flake rig).
@@ -77,12 +91,22 @@
 #                          stderr; set it to a path outside the source
 #                          tree to keep generated artefacts out of the
 #                          checkout.
+#   FIPS_INTEROP_NAME      run name (default fips-interop): container
+#                          prefix, compose project, per-run directory.
+#   FIPS_INTEROP_IMAGE     image repository (default: the run name); point
+#                          several named runs at one build with it.
+#   FIPS_INTEROP_SUBNET    first three octets of the mesh /24 (default
+#                          172.30.0); checked free before the mesh starts.
+#                          See names.sh.
+#   FIPS_INTEROP_SUBNET2   the multipath mode's second /24 (default 172.30.1).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../lib/wait-converge.sh"
+# shellcheck source=../lib/image-build.sh
+source "$SCRIPT_DIR/../lib/image-build.sh"
 
 # ── Scratch-dir root ─────────────────────────────────────────────────
 #
@@ -103,10 +127,14 @@ else
     fi
 fi
 
-GEN_DIR="$RUNS_BASE/generated-configs"
+# shellcheck source=names.sh
+source "$SCRIPT_DIR/names.sh"
+interop_names
 COMPOSE_FILE="$GEN_DIR/docker-compose.generated.yml"
 NODES_ENV="$GEN_DIR/nodes.env"
-REFS_ENV="$RUNS_BASE/.build/refs.env"
+# The log readers and the multipath checks.
+# shellcheck source=checks.sh
+source "$SCRIPT_DIR/checks.sh"
 
 # ── Built-in topology selection ──────────────────────────────────────
 #
@@ -116,14 +144,30 @@ REFS_ENV="$RUNS_BASE/.build/refs.env"
 # across versions. Without it, positional args are the node-spec and the
 # mesh is a full mesh (historical behavior).
 TOPOLOGY_NAME=""
+MULTIPATH=""
+PROBE_HOUR=0
 _ARGS=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --topology)   TOPOLOGY_NAME="${2:-}"; shift 2 ;;
-        --topology=*) TOPOLOGY_NAME="${1#--topology=}"; shift ;;
-        *)            _ARGS+=("$1"); shift ;;
+        --topology)    TOPOLOGY_NAME="${2:-}"; shift 2 ;;
+        --topology=*)  TOPOLOGY_NAME="${1#--topology=}"; shift ;;
+        --multipath)   MULTIPATH="request"; shift ;;
+        --multipath=*) MULTIPATH="${1#--multipath=}"; shift ;;
+        --probe-hour)  PROBE_HOUR=1; shift ;;
+        *)             _ARGS+=("$1"); shift ;;
     esac
 done
+if [ "$PROBE_HOUR" -eq 1 ]; then
+    if [ -n "$MULTIPATH" ] && [ "$MULTIPATH" != "request" ]; then
+        echo "ERROR: --probe-hour runs the request source only" >&2
+        exit 2
+    fi
+    MULTIPATH="request"
+fi
+case "$MULTIPATH" in
+    ""|request|config) ;;
+    *) echo "ERROR: --multipath takes request or config (got '$MULTIPATH')" >&2; exit 2 ;;
+esac
 set -- ${_ARGS[@]+"${_ARGS[@]}"}
 
 if [ -n "$TOPOLOGY_NAME" ]; then
@@ -159,6 +203,21 @@ if [ "${#SPEC[@]}" -eq 0 ]; then
     SPEC=(a b c)
 fi
 SPEC_STR="${SPEC[*]}"
+
+# The multipath mode's old node logs its discards with no peer field, so
+# a count there is attributable only when the old node has one peer.
+INTEROP_SUBNET2=""
+if [ -n "$MULTIPATH" ]; then
+    if [ "$SPEC_STR" != "a c" ] || [ -n "$TOPOLOGY_NAME" ]; then
+        echo "ERROR: --multipath and --probe-hour need the spec 'a c' and no --topology (got '$SPEC_STR')" >&2
+        exit 2
+    fi
+    INTEROP_SUBNET2="${FIPS_INTEROP_SUBNET2:-172.30.1}"
+    interop_check_subnet FIPS_INTEROP_SUBNET2 "$INTEROP_SUBNET2"
+    export FIPS_INTEROP_MULTIPATH="$MULTIPATH"
+else
+    unset FIPS_INTEROP_MULTIPATH
+fi
 
 # ── Timing ───────────────────────────────────────────────────────────
 
@@ -253,8 +312,8 @@ for slot in $(printf '%s\n' "${SPEC[@]}" | sort -u); do
         a|b|c) ;;
         *) echo "ERROR: invalid slot '$slot' in node-spec" >&2; exit 2 ;;
     esac
-    if ! docker image inspect "fips-interop:$slot" >/dev/null 2>&1; then
-        echo "ERROR: image fips-interop:$slot not present." >&2
+    if ! docker image inspect "$INTEROP_IMAGE:$slot" >/dev/null 2>&1; then
+        echo "ERROR: image $INTEROP_IMAGE:$slot not present." >&2
         echo "Build the three images first:" >&2
         echo "  bash $SCRIPT_DIR/build-images.sh <ref-a> <ref-b> <ref-c>" >&2
         exit 2
@@ -263,15 +322,24 @@ done
 
 # ── (Re)generate configs for this node-spec ──────────────────────────
 #
-# Always regenerate when the spec on disk does not match the requested
-# spec (or no manifest exists). Generation is deterministic and cheap.
+# Always regenerate when the spec, edges, run name, image repository or
+# subnet on disk do not match the requested ones (or no manifest exists).
+# Generation is deterministic and cheap.
+
+# manifest_value <VAR>: the value nodes.env records for VAR, empty if none.
+manifest_value() {
+    sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$NODES_ENV"
+}
 
 need_regen=1
 if [ -f "$NODES_ENV" ]; then
-    existing_spec="$(sed -n 's/^INTEROP_SPEC="\(.*\)"$/\1/p' "$NODES_ENV")"
-    existing_edges="$(sed -n 's/^INTEROP_TOPOLOGY_EDGES="\(.*\)"$/\1/p' "$NODES_ENV")"
-    if [ "$existing_spec" = "$SPEC_STR" ] \
-        && [ "$existing_edges" = "${FIPS_INTEROP_EDGES:-}" ]; then
+    if [ "$(manifest_value INTEROP_SPEC)" = "$SPEC_STR" ] \
+        && [ "$(manifest_value INTEROP_TOPOLOGY_EDGES)" = "${FIPS_INTEROP_EDGES:-}" ] \
+        && [ "$(manifest_value INTEROP_NAME)" = "$INTEROP_NAME" ] \
+        && [ "$(manifest_value INTEROP_IMAGE)" = "$INTEROP_IMAGE" ] \
+        && [ "$(manifest_value INTEROP_SUBNET)" = "$INTEROP_SUBNET" ] \
+        && [ "$(manifest_value INTEROP_MULTIPATH)" = "$MULTIPATH" ] \
+        && [ "$(manifest_value INTEROP_SUBNET2)" = "$INTEROP_SUBNET2" ]; then
         need_regen=0
     fi
 fi
@@ -309,6 +377,15 @@ parse_map SLOT_OF       "$INTEROP_NODE_SLOTS"
 parse_map CONTAINER     "$INTEROP_NODE_CONTAINERS"
 parse_map NODE_IP_OF    "$INTEROP_NODE_IPS"
 parse_map NPUB_OF       "$INTEROP_NODE_NPUBS"
+declare -A NODE_IP2_OF
+parse_map NODE_IP2_OF   "${INTEROP_NODE_IPS2:-}"
+INTEROP_MULTIPATH="${INTEROP_MULTIPATH:-}"
+INTEROP_CAPTURES="${INTEROP_CAPTURES:-}"
+INTEROP_MP_TRANSPORT="${INTEROP_MP_TRANSPORT:-}"
+MP_DIR="$RUN_BASE/multipath"
+MP_A1_START=1
+MP_C1_START=1
+MP_MACS=""
 
 # Topology metadata: per-node expected direct-peer degree, and the
 # undirected direct-edge set (for direct-vs-routed pair labeling).
@@ -386,9 +463,9 @@ load_slot_metadata() {
             continue
         fi
         local lbl_ref lbl_sha
-        lbl_ref="$(docker image inspect "fips-interop:$slot" \
+        lbl_ref="$(docker image inspect "$INTEROP_IMAGE:$slot" \
             --format '{{ index .Config.Labels "fips.interop.ref" }}' 2>/dev/null || true)"
-        lbl_sha="$(docker image inspect "fips-interop:$slot" \
+        lbl_sha="$(docker image inspect "$INTEROP_IMAGE:$slot" \
             --format '{{ index .Config.Labels "fips.interop.sha" }}' 2>/dev/null || true)"
         [ -n "$lbl_ref" ] && SLOT_REF[$slot]="$lbl_ref"
         [ -n "$lbl_sha" ] && SLOT_SHA[$slot]="$lbl_sha"
@@ -521,26 +598,8 @@ phase_result() {
     fi
 }
 
-# Count a pattern across all node logs.
-#
-# A node whose logs cannot be read makes the whole count unusable rather than
-# contributing 0. The previous form ended each read `| grep -cE … || true`, so a
-# failed `docker logs` yielded 0 for that node and the eight expect-zero
-# assertions in the GLOBAL_PATTERNS loop read a clean result from a node that was
-# never consulted. Same defect and same fix as rekey-test.sh.
-count_log_pattern() {
-    local pattern="$1" total=0 n logs count
-    for n in "${NODES[@]}"; do
-        if ! logs=$(docker logs "${CONTAINER[$n]}" 2>&1); then
-            echo "unreadable:${CONTAINER[$n]}"
-            return 1
-        fi
-        count=$(grep -cE "$pattern" <<<"$logs" || true)
-        total=$((total + count))
-    done
-    echo "$total"
-    return 0
-}
+# count_log_pattern <pattern> [node...] is in checks.sh, with the other
+# log readers.
 
 # Count completed FMP rekey cutovers across all node logs.
 #
@@ -749,7 +808,7 @@ _stream_one() {
 # Launch all stream pairs in the background for <label> over <dur>s.
 launch_streams() {
     local label="$1" dur="$2"
-    _STREAM_TMP="$(mktemp -d)"
+    _STREAM_TMP="$(mktemp -d)"  # mount-tmpdir: ping counts this shell writes and reads, never mounted
     _STREAM_PIDS=(); _STREAM_FILES=()
     local sp from to
     for sp in "${STREAM_PAIRS[@]}"; do
@@ -801,6 +860,662 @@ dump_diagnostics() {
     done
 }
 
+# ── Multipath mode (--multipath, --probe-hour) ───────────────────────
+#
+# A node with multipath enabled (a1, slot a) against a release that does
+# not implement it (c1, slot c), joined on a second network as well as
+# the first. What the multipath draft promises such a peer, and what the
+# phases below check:
+#
+#   M0  every check below fails or abstains on planted input (checks.sh)
+#   Pre each capture runs before its daemon; addresses; mp2 is up
+#   M1  no capability probe before a candidate is held (request mode);
+#       the candidate is given by `fipsctl connect` and not dialled
+#   C1  a marked datagram shows each second-interface capture live, and
+#       the ARP request before it shows no neighbour entry existed
+#   M2  1 to capability_bound(310) probes discarded at the old node, no
+#       PathAck or PathClose, nothing else unknown; every probe sent on
+#       the original path at 27 bytes and seen at the wire; the gaps at
+#       or above the draft's floors; smoothed_loss present and 0; one
+#       path; no frame on either second interface; no send or dial line
+#       to the second network (W)
+#   M3  short runs: the old node killed past link-dead is removed and
+#       dialled again (C2 first), nothing on the second interfaces in the
+#       outage, and the new link's probes within its bound (0 in request
+#       mode, whose candidate went with the old link)
+#   M4  --probe-hour: the count at 3610 s against capability_bound(3610),
+#       the gaps, and the bytes the old node received
+#   M5  a last marked datagram on every capture whose zero was reported
+#
+# A zero read from a log line counts only once that line is shown live in
+# this run at that node (checks.sh, mp_gates and dial_gate); otherwise it
+# is "not established", which fails the run as any other check does.
+
+# mp_record <label> [nofail]: record the last check's verdict in this
+# phase's PASSED/FAILED and the failure list. NE fails like FAIL.
+mp_record() {
+    local label="$1"
+    case "$V" in
+        PASS)
+            echo "    PASS  $label: $VD"
+            PASSED=$((PASSED + 1))
+            ;;
+        FAIL|NE)
+            echo "    $V  $label: $VD"
+            FAILED=$((FAILED + 1))
+            INTEROP_FAILURES+=("[multipath] $label: $V ($VD)")
+            ;;
+        *)
+            echo "    FAIL  $label: no verdict"
+            FAILED=$((FAILED + 1))
+            INTEROP_FAILURES+=("[multipath] $label: no verdict")
+            ;;
+    esac
+    V=""
+    VD=""
+}
+
+# mp_note <text>: a line the record reads that decides nothing.
+mp_note() { echo "    NOTE  $*"; }
+
+# mp_stop <why>: a stop condition. Record it and end the run red.
+mp_stop() {
+    echo "    STOP  $*"
+    INTEROP_FAILURES+=("[multipath] STOP: $*")
+    TOTAL_FAILED=$((TOTAL_FAILED + 1))
+    dump_diagnostics
+    echo ""
+    echo "FAIL: multipath stop condition: $*"
+    exit 1
+}
+
+# mp_now: the host's clock as epoch seconds with microseconds; the
+# containers share it, so it compares with their log stamps.
+mp_now() { date +%s.%6N; }
+
+# mp_wait_until <epoch>: sleep until the host clock passes <epoch>.
+mp_wait_until() {
+    local left
+    left="$(awk -v t="$1" -v n="$(mp_now)" 'BEGIN{d=t-n; if (d<0) d=0; printf "%.1f", d}')"
+    sleep "$left"
+}
+
+# mp_capfile <node> <iface> <start>: the capture file of that start
+# (1 for the first), from the wrapper's `captures running` lines.
+mp_capfile() {
+    local n="$1" ifc="$2" k="$3" lines tag
+    lines="$(matching_lines 'capture-entry: ' "$n")" || return 1
+    tag="$(grep -F 'capture-entry: captures running' <<<"$lines" | sed -n "${k}p" | awk '{print $NF}')"
+    [ -n "$tag" ] || return 1
+    echo "$INTEROP_CAPTURES/$n-$ifc-$tag.pcap"
+}
+
+# mp_pre <node> <start>: the checks after a container's <start>-th start:
+# its wrapper printed `captures running` with no FATAL, before the
+# daemon's first line; every capture file exists and its tcpdump runs;
+# eth0 and eth1 carry the node's two addresses.
+mp_pre() {
+    local n="$1" k="$2" ifaces="eth1" lines seq want ifc f t0 procs addr mac
+    [ "${SLOT_OF[$n]}" = "c" ] && ifaces="eth1 eth0"
+    t0=$SECONDS
+    while :; do
+        lines="$(matching_lines 'capture-entry: |starting' "$n")" || lines=""
+        if grep -qF 'capture-entry: FATAL' <<<"$lines"; then
+            verdict FAIL "$(grep -F 'capture-entry: FATAL' <<<"$lines" | tail -1)"
+            mp_record "Pre $n start $k: capture wrapper"
+            mp_stop "capture wrapper failed on $n"
+        fi
+        [ "$(grep_count 'capture-entry: captures running' "$lines")" -ge "$k" ] && break
+        if (( SECONDS - t0 > 45 )); then
+            verdict FAIL "no 'captures running' line for start $k within 45 s"
+            mp_record "Pre $n start $k: capture wrapper"
+            mp_stop "captures did not start on $n"
+        fi
+        sleep 1
+    done
+    # The order of the wrapper's line and the daemon's first line, one
+    # letter per line: R for `captures running`, S for the daemon's
+    # `FIPS <version> ... starting`. Each start must read RS.
+    sleep 2
+    lines="$(matching_lines 'capture-entry: |starting' "$n")" || lines=""
+    seq="$(awk '/capture-entry: captures running/ {printf "R"} / fips: FIPS .* starting/ {printf "S"}' <<<"$lines")"
+    want="$(printf 'RS%.0s' $(seq 1 "$k"))"
+    if [ "$seq" = "$want" ]; then
+        verdict PASS "wrapper line before the daemon's first line on each start ($seq)"
+    else
+        verdict FAIL "wrapper and daemon lines in the order $seq, expected $want"
+    fi
+    mp_record "Pre $n start $k: captures before the daemon"
+    procs="$(docker exec "${CONTAINER[$n]}" pgrep -c tcpdump 2>/dev/null || echo unreadable)"
+    for ifc in $ifaces; do
+        f="$(mp_capfile "$n" "$ifc" "$k")" || f=""
+        if [ -n "$f" ] && [ -s "$f" ]; then
+            verdict PASS "$(basename "$f") ($(stat -c %s "$f") bytes)"
+        else
+            verdict FAIL "no capture file for start $k (${f:-unnamed})"
+        fi
+        mp_record "Pre $n start $k: $ifc capture file"
+    done
+    chk_range "$procs" "$(wc -w <<<"$ifaces")" "$(wc -w <<<"$ifaces")"
+    mp_record "Pre $n start $k: tcpdump processes running"
+    addr="$(docker exec "${CONTAINER[$n]}" ip -o -4 addr show dev eth0 2>/dev/null)"
+    if [[ "$addr" == *" ${NODE_IP_OF[$n]}/24 "* ]]; then verdict PASS "eth0 ${NODE_IP_OF[$n]}"; else verdict FAIL "eth0: ${addr:-unreadable}"; fi
+    mp_record "Pre $n start $k: first-network address on eth0"
+    addr="$(docker exec "${CONTAINER[$n]}" ip -o -4 addr show dev eth1 2>/dev/null)"
+    if [[ "$addr" == *" ${NODE_IP2_OF[$n]}/24 "* ]]; then verdict PASS "eth1 ${NODE_IP2_OF[$n]}"; else verdict FAIL "eth1: ${addr:-unreadable}"; fi
+    mp_record "Pre $n start $k: second-network address on eth1"
+    # The node's MACs: a UDP datagram on a second interface is the node's
+    # only when it comes from one of them (checks.sh, pcap).
+    for ifc in eth0 eth1; do
+        mac="$(docker exec "${CONTAINER[$n]}" cat "/sys/class/net/$ifc/address" 2>/dev/null)" || mac=""
+        if [[ "$mac" =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]]; then
+            verdict PASS "$mac"
+            MP_MACS="${MP_MACS:+$MP_MACS,}$mac"
+        else
+            verdict FAIL "unreadable (${mac:-none})"
+        fi
+        mp_record "Pre $n start $k: $ifc MAC"
+    done
+}
+
+# mp_transport_check: a1's second UDP transport is up on eth1. Without
+# it the connect request's candidate resolves to no pair and the reply
+# is the same "peer live, not dialled", so M2's lower bound would fail
+# with no cause stated.
+mp_transport_check() {
+    local out
+    out="$(docker exec "${CONTAINER[a1]}" fipsctl show transports 2>/dev/null)" || out=""
+    py_verdict "$(mp_py transports "${INTEROP_MP_TRANSPORT#udp/}" "$INTEROP_MP_PORT" <<<"$out")"
+    mp_record "Pre a1: transport ${INTEROP_MP_TRANSPORT#udp/} up on port $INTEROP_MP_PORT"
+    # The device binding, as the kernel holds it: ss prints a socket
+    # bound to a device as <addr>%<device>:<port>.
+    out="$(docker exec "${CONTAINER[a1]}" ss -Hlun 2>/dev/null)" || out=""
+    if grep -qF -- "%eth1:$INTEROP_MP_PORT " <<<"$out"; then
+        verdict PASS "$(grep -F -- "%eth1:$INTEROP_MP_PORT " <<<"$out" | awk '{print $4}')"
+    else
+        verdict FAIL "no UDP socket bound to eth1 on port $INTEROP_MP_PORT (ss: $(tr -s ' \n' ' ' <<<"${out:-unreadable}"))"
+    fi
+    mp_record "Pre a1: the $INTEROP_MP_PORT socket is bound to eth1"
+}
+
+# mp_control <label> [need-arp]: one marked datagram from a1's second
+# address to c1's, port 40999 to 40999, which nothing listens on. Every
+# current second-interface capture must count it once more; with
+# need-arp, a1's must show an ARP request for c1's address before it.
+MP_CTL_TIMES="-"
+mp_control() {
+    local label="$1" need="${2:-}" fa fc ba bc t
+    fa="$(mp_capfile a1 eth1 "$MP_A1_START")" || fa=""
+    fc="$(mp_capfile c1 eth1 "$MP_C1_START")" || fc=""
+    ba="unreadable"
+    bc="unreadable"
+    if pcap_read "$fa" - - - - -; then ba="$PC_CTL"; fi
+    if pcap_read "$fc" - - - - -; then bc="$PC_CTL"; fi
+    t="$(mp_now)"
+    MP_CTL_TIMES="$MP_CTL_TIMES,$t"
+    if ! docker exec "${CONTAINER[a1]}" python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('${NODE_IP2_OF[a1]}', 40999)); s.sendto(b'fips-multipath-control', ('${NODE_IP2_OF[c1]}', 40999))"; then
+        verdict FAIL "the control datagram could not be sent"
+        mp_record "$label: send"
+        return
+    fi
+    sleep 2
+    if [ "$need" = "need-arp" ]; then
+        chk_control "$ba" "$fa" "$MP_CTL_TIMES" need-arp "${NODE_IP2_OF[a1]}" "${NODE_IP2_OF[c1]}"
+    else
+        chk_control "$ba" "$fa" "$MP_CTL_TIMES"
+    fi
+    mp_record "$label: a1 eth1 capture $(basename "${fa:-none}")"
+    chk_control "$bc" "$fc" "$MP_CTL_TIMES"
+    mp_record "$label: c1 eth1 capture $(basename "${fc:-none}")"
+}
+
+# mp_quiet <label> [from] [to]: no FIPS frame on either second interface
+# in every capture file so far (a1's with the ARP rule).
+mp_quiet() {
+    local label="$1" from="${2:--}" to="${3:--}" f
+    for f in "$INTEROP_CAPTURES"/a1-eth1-*.pcap; do
+        chk_quiet "$f" "$from" "$to" "${NODE_IP2_OF[a1]}" "${NODE_IP2_OF[c1]}" "$MP_CTL_TIMES" "$MP_MACS"
+        mp_record "$label: no FIPS frame, $(basename "$f")"
+    done
+    for f in "$INTEROP_CAPTURES"/c1-eth1-*.pcap; do
+        chk_quiet "$f" "$from" "$to" - - "$MP_CTL_TIMES" "$MP_MACS"
+        mp_record "$label: no FIPS frame, $(basename "$f")"
+    done
+}
+
+# mp_witness <label>: W, the log witness that needs no neighbour table:
+# no send line and no dial line at a1, and no dial line at c1, to a
+# second-network address. Each zero is gated on its line being live.
+mp_witness() {
+    local label="$1" net2="${INTEROP_SUBNET2}."
+    if counted_lines 'Path message sent' a1; then
+        chk_absent "$CL_LINES" " remote_addr=$net2" "send lines to the second network"
+        [ "$A1_LIVE" = 1 ] || verdict NE "not established: $A1_WHY"
+    else
+        verdict NE "not established: $CL_WHY"
+    fi
+    mp_record "$label: W, a1 Path message sent"
+    if counted_lines 'Path message not sent' a1; then
+        chk_absent "$CL_LINES" " remote_addr=$net2" "failed sends to the second network"
+        [ "$A1_LIVE" = 1 ] || verdict NE "not established: $A1_WHY"
+        [ "$CL_N" -eq 0 ] || mp_note "a1 logged $CL_N 'Path message not sent' line(s)"
+    else
+        verdict NE "not established: $CL_WHY"
+    fi
+    mp_record "$label: W, a1 Path message not sent"
+    if [ "$INTEROP_MULTIPATH" = "config" ]; then
+        mp_note "$label: a1 does not dial c1 in the configured run (manual); a1's eth1 capture alone carries its dial half of W"
+    else
+        dial_gate a1 "${NODE_IP_OF[c1]}"
+        if counted_lines 'Connection initiated' a1; then
+            chk_absent "$CL_LINES" " remote_addr=$net2" "dials to the second network"
+            [ "$DIAL_LIVE" = 1 ] || verdict NE "not established: $DIAL_WHY"
+        else
+            verdict NE "not established: $CL_WHY"
+        fi
+        mp_record "$label: W, a1 Connection initiated"
+    fi
+    dial_gate c1 "${NODE_IP_OF[a1]}"
+    if counted_lines 'Connection initiated' c1; then
+        chk_absent "$CL_LINES" " remote_addr=$net2" "dials to the second network"
+        [ "$DIAL_LIVE" = 1 ] || verdict NE "not established: $DIAL_WHY"
+    else
+        verdict NE "not established: $CL_WHY"
+    fi
+    mp_record "$label: W, c1 Connection initiated"
+}
+
+# mp_link_checks <label>: one path, the peer not capable; smoothed_loss
+# present and 0, polled up to 60 s for the first ReceiverReport interval.
+mp_link_checks() {
+    local label="$1" out t0=$SECONDS
+    out="$(docker exec "${CONTAINER[a1]}" fipsctl path show "${NPUB_OF[c1]}" 2>/dev/null)" || out=""
+    chk_paths "$out" "${NODE_IP_OF[c1]}:2121"
+    mp_record "$label: path show lists one path"
+    while :; do
+        out="$(docker exec "${CONTAINER[a1]}" fipsctl show mmp 2>/dev/null)" || out=""
+        chk_loss "$out" c1
+        if [ "$V" != "NE" ] || (( SECONDS - t0 >= 60 )); then
+            break
+        fi
+        sleep 5
+    done
+    mp_record "$label: c1's receiver reports show no loss"
+}
+
+# mp_loss_sample <when>: report smoothed_loss and loss_rate (no verdict).
+MP_LOSS_SAMPLES=0
+mp_loss_sample() {
+    local out
+    out="$(docker exec "${CONTAINER[a1]}" fipsctl show mmp 2>/dev/null)" || out=""
+    MP_LOSS_SAMPLES=$((MP_LOSS_SAMPLES + 1))
+    echo "    loss sample $1: $(mp_py mmp c1 <<<"$out")"
+}
+
+# mp_sends_since <epoch>: SS_LINES, the probe send lines to c1's first
+# address stamped at or after <epoch>, from counted lines.
+mp_sends_since() {
+    SS_LINES=""
+    if ! counted_lines 'Path message sent' a1; then
+        SS_WHY="$CL_WHY"
+        return 1
+    fi
+    SS_LINES="$(grep -F -- " msg_type=82 " <<<"$CL_LINES" | mp_py since "$1")"
+    return 0
+}
+
+# mp_offsets <lines> <epoch>: each line's offset from <epoch>, in s.
+mp_offsets() {
+    [ -n "$1" ] || { echo "-"; return; }
+    mp_py stamps <<<"$1" | awk -v u="$2" '{printf "%s%.1f", (NR>1?" ":""), $1-u}'
+}
+
+# mp_probe_checks <label> <from-epoch>: the send lines since <from-epoch>
+# against the original path and size, the wire, and the gap floors.
+mp_probe_checks() {
+    local label="$1" from="$2" eth0s f
+    if ! mp_sends_since "$from"; then
+        verdict NE "not established: $SS_WHY"
+        mp_record "$label: probe sends on the original path at 27 bytes"
+        return
+    fi
+    if [ "$A1_LIVE" = 1 ]; then
+        if counted_lines 'Path message sent' a1; then
+            chk_sends "$(mp_py since "$from" <<<"$CL_LINES")" "${NODE_IP_OF[c1]}:2121" 27
+        else
+            verdict NE "not established: $CL_WHY"
+        fi
+    else
+        verdict NE "not established: $A1_WHY"
+    fi
+    mp_record "$label: probe sends on the original path at 27 bytes"
+    eth0s=()
+    for f in "$INTEROP_CAPTURES"/c1-eth0-*.pcap; do eth0s+=("$f"); done
+    if [ "$A1_LIVE" = 1 ]; then
+        py_verdict "$(mp_py wire "${eth0s[@]}" -- "${NODE_IP_OF[a1]}" "${NODE_IP_OF[c1]}" "$MP_PROBE_WIRE" <<<"$SS_LINES")"
+        [ "$V" = PASS ] && VD="$VD (consistent with a 27-byte probe; the size is not unique to it)"
+    else
+        verdict NE "not established: $A1_WHY"
+    fi
+    mp_record "$label: each probe seen at c1's eth0 as a $MP_PROBE_WIRE-byte datagram"
+    if [ "$A1_LIVE" = 1 ]; then chk_gaps "$SS_LINES"; else verdict NE "not established: $A1_WHY"; fi
+    mp_record "$label: gaps between probes at or above the draft's floors"
+}
+
+# The UDP payload of a 27-byte link message: the 16-byte established
+# header, the 4-byte inner timestamp, the message and the 16-byte AEAD
+# tag (src/node/mod.rs, ESTABLISHED_HEADER_SIZE + inner_len + TAG_SIZE).
+MP_PROBE_WIRE=63
+
+# mp_sampler <at-epoch> <file>: in the background, at <at-epoch> count
+# c1's probe discards, then a1's probe sends to c1's first address (in
+# that order, so a probe sent between the reads can only raise a1's),
+# and write both to <file>. A sampler that dies leaves no file, which
+# the reader reports as not established.
+mp_sampler() {
+    local at="$1" file="$2"
+    (
+        mp_wait_until "$at"
+        c="$(count_log_pattern 'Unknown link message type.*msg_type=82' c1)"
+        if counted_lines 'Path message sent' a1; then
+            a="$(probe_sends "$CL_LINES" "${NODE_IP_OF[c1]}:2121")"
+        else
+            a="unreadable"
+        fi
+        printf 'c1=%s\na1=%s\nat=%s\n' "$c" "$a" "$(mp_now)" > "$file.tmp" && mv "$file.tmp" "$file"
+    ) &
+    MP_SAMPLER_PID=$!
+}
+
+# mp_delta_patterns: GLOBAL_PATTERNS counts at every node, as
+# `pattern<TAB>count` lines, for the deltas over a window. MMP link
+# teardown is left out: the kill makes one by design.
+mp_delta_patterns() {
+    local pat
+    for pat in "${!GLOBAL_PATTERNS[@]}"; do
+        [ "$pat" = "MMP link teardown" ] && continue
+        printf '%s\t%s\n' "$pat" "$(count_log_pattern "$pat")"
+    done
+}
+
+# mp_delta_check <label> <before>: every pattern's count unchanged.
+mp_delta_check() {
+    local label="$1" before="$2" pat was now
+    while IFS=$'\t' read -r pat was; do
+        [ -n "$pat" ] || continue
+        now="$(count_log_pattern "$pat")"
+        if is_count "$was" && is_count "$now"; then
+            chk_range "$((now - was))" 0 0
+        else
+            verdict NE "not established: $was -> $now"
+        fi
+        mp_record "$label: ${GLOBAL_PATTERNS[$pat]} delta"
+    done <<<"$before"
+}
+
+# ── M1: no probe before a candidate; the connect request ─────────────
+
+mp_m1() {
+    echo "Phase M1: No capability probe before a candidate is held; the candidate"
+    if [ "$INTEROP_MULTIPATH" = "request" ]; then
+        mp_wait_until "$(awk -v u="$MP_LINK_UP" 'BEGIN{printf "%.6f", u + 40}')"
+        MP_M1_C1="$(count_log_pattern 'Unknown link message type.*msg_type=82' c1)"
+        if counted_lines 'Path message sent' a1; then
+            MP_M1_A1="$(line_count "$CL_LINES")"
+        else
+            MP_M1_A1="unreadable"
+        fi
+        echo "    40 s after link-up: c1 probe discards $MP_M1_C1, a1 send lines $MP_M1_A1 (verdicts after M2's lower bounds)"
+        ping_one a1 c1 quiet 4 || true
+        local reply
+        reply="$(docker exec "${CONTAINER[a1]}" fipsctl connect "${NPUB_OF[c1]}" "${NODE_IP2_OF[c1]}:2121" "$INTEROP_MP_TRANSPORT" 2>&1)" || true
+        MP_CANDIDATE_AT="$(mp_now)"
+        echo "    fipsctl connect reply: $(tr -s ' \n' ' ' <<<"$reply")"
+        py_verdict "$(mp_py connect <<<"$reply")"
+        local v="$V"
+        mp_record "M1: connect request held the candidate without a dial"
+        [ "$v" = PASS ] || mp_stop "the connect request's reply shows a dial or an error"
+    else
+        MP_CANDIDATE_AT="$MP_LINK_UP"
+        mp_note "configured run: the candidate is the configured second address, held from link-up"
+    fi
+    MP_SAMPLE_FILE="$MP_DIR/sample-310"
+    rm -f "$MP_SAMPLE_FILE"
+    mp_sampler "$(awk -v u="$MP_LINK_UP" 'BEGIN{printf "%.6f", u + 310}')" "$MP_SAMPLE_FILE"
+    echo "    310 s sampler started (pid $MP_SAMPLER_PID)"
+    echo ""
+}
+
+# ── M2: the old node, the wire and the captures ──────────────────────
+
+mp_m2() {
+    local b out c total
+    echo "Phase M2: The old node at 310 s, the probes, the wire, the captures"
+    PASSED=0; FAILED=0
+    mp_control "C1 (capture control, first)" need-arp
+    if [ -n "${MP_SAMPLER_PID:-}" ]; then
+        wait "$MP_SAMPLER_PID" 2>/dev/null || true
+    fi
+    sampler_read "$MP_SAMPLE_FILE" || true
+    b="$(capability_bound 310)"
+    echo "    capability_bound 310 = $b (budget $CAPABILITY_PROBE_BUDGET, span ${CAPABILITY_PROBE_SPAN}s, interval max ${CAPABILITY_PROBE_INTERVAL_MAX}s)"
+    chk_range "$SAMPLE_C1" 1 "$b"
+    mp_record "M2: c1 discarded 1 to $b capability probes in the first 310 s"
+    # The gates: the old node's discard line is live once it is counted
+    # at least once; the new node's send line once it counts at least as
+    # many probe sends as the old node counted discards.
+    if is_count "$SAMPLE_C1" && [ "$SAMPLE_C1" -ge 1 ]; then C1_LIVE=1; C1_WHY=""; else C1_LIVE=0; C1_WHY="no discard line at c1 at 310 s ($SAMPLE_C1)"; fi
+    send_gate "$SAMPLE_C1" "$SAMPLE_A1" "${NODE_IP_OF[c1]}:2121"
+    if [ "$A1_LIVE" = 1 ]; then verdict PASS "a1 $SAMPLE_A1 probe sends, c1 $SAMPLE_C1 discards"; else verdict NE "not established: $A1_WHY"; fi
+    mp_record "M2: a1's probe sends at 310 s at least 1 and at least c1's discards"
+    if [ "$INTEROP_MULTIPATH" = "request" ]; then
+        chk_gated "$C1_LIVE" "$C1_WHY" "$MP_M1_C1" 0 0
+        mp_record "M1: c1 discarded no probe before the candidate (40 s after link-up)"
+        chk_gated "$A1_LIVE" "$A1_WHY" "$MP_M1_A1" 0 0
+        mp_record "M1: a1 sent no path message before the candidate (40 s after link-up)"
+    fi
+    c="$(count_log_pattern 'Unknown link message type.*msg_type=8[34]' c1)"
+    chk_gated "$C1_LIVE" "$C1_WHY" "$c" 0 0
+    mp_record "M2: no PathAck or PathClose reached c1"
+    # One read, so a probe arriving between two counts cannot split them.
+    if counted_lines 'Unknown link message type' c1; then
+        total="$CL_N"
+        c="$(grep_count " msg_type=82" "$CL_LINES")"
+        chk_gated "$C1_LIVE" "$C1_WHY" "$((total - c))" 0 0
+    else
+        total="?"; c="?"
+        verdict NE "not established: $CL_WHY"
+    fi
+    mp_record "M2: every unknown-type discard at c1 is a capability probe ($c of $total)"
+    if [ "$INTEROP_MULTIPATH" = "config" ]; then
+        mp_moves a1 "$MP_LINK_UP"
+        chk_gated "$MOVE_OK" "$MOVE_WHY" 0 0 0
+        mp_record "M2: no session move after link-up (the bound counts from link-up)"
+    else
+        mp_moves a1 "$MP_LINK_UP"
+        [ "$MOVE_OK" = 1 ] || mp_note "$MOVE_WHY (request run: a move drops the request candidate, which only lowers the count)"
+    fi
+    # From the mesh start, not the driver's link-up: the configured run's
+    # first probes go at the true link-up, before the driver sees it.
+    mp_probe_checks "M2" "$MP_MESH_EPOCH"
+    echo "    probe offsets from link-up, s: $(mp_offsets "$SS_LINES" "$MP_LINK_UP")"
+    if [ "$INTEROP_MULTIPATH" = "request" ]; then
+        echo "    predicted (draft schedule from the connect request at $(awk -v a="$MP_CANDIDATE_AT" -v u="$MP_LINK_UP" 'BEGIN{printf "%.1f", a-u}') s): +0 +10 +20 +50 +110 +230 +470 +950 +1550 +2150 +2750 +3350"
+    else
+        echo "    predicted (candidate held from link-up): 0 10 20 50 110 230 470 950 1550 2150 2750 3350"
+    fi
+    mp_link_checks "M2"
+    mp_quiet "M2"
+    mp_witness "M2"
+    phase_result "Multipath M2: old node, wire and captures"
+    echo ""
+}
+
+# ── M3: the old node killed past link-dead, and the re-dial ──────────
+
+mp_m3() {
+    local rm0 dial0 cdial0 d0 p8 t0 rm dial new bad kill_at start_at up2 d sends b f
+    echo "Phase M3: Re-dial after the old node is killed past link-dead"
+    PASSED=0; FAILED=0
+    mp_control "C2 (capture control, before the kill)"
+    docker kill --signal KILL "${CONTAINER[c1]}" >/dev/null
+    kill_at="$(mp_now)"
+    echo "    c1 killed (SIGKILL) at $kill_at"
+    # Counts after the kill, so the killed process adds nothing after them.
+    rm0="$(count_log_pattern 'Removing peer: link dead timeout' a1)"
+    dial0="$(count_log_pattern 'Connection initiated' a1)"
+    cdial0="$(count_log_pattern 'Connection initiated' c1)"
+    d0="$(count_log_pattern 'Unknown link message type.*msg_type=82' c1)"
+    p8="$(mp_delta_patterns)"
+    t0=$SECONDS
+    while (( SECONDS - t0 < 120 )); do
+        rm="$(count_log_pattern 'Removing peer: link dead timeout' a1)"
+        dial="$(count_log_pattern 'Connection initiated' a1)"
+        if is_count "$rm" && is_count "$rm0" && [ "$rm" -gt "$rm0" ]; then
+            if [ "$INTEROP_MULTIPATH" = "config" ]; then break; fi
+            if is_count "$dial" && is_count "$dial0" && [ "$dial" -gt "$dial0" ]; then break; fi
+        fi
+        sleep 2
+    done
+    echo "    after $(( SECONDS - t0 ))s: removals $rm0 -> $rm, a1 dials $dial0 -> $dial"
+    if is_count "$rm" && is_count "$rm0"; then chk_range "$((rm - rm0))" 1 1; else verdict NE "not established: $rm0 -> $rm"; fi
+    mp_record "M3: a1 removed c1 at link-dead (one removal)"
+    if [ "$INTEROP_MULTIPATH" = "request" ]; then
+        if is_count "$dial" && is_count "$dial0"; then chk_range "$((dial - dial0))" 1 99999; else verdict NE "not established: $dial0 -> $dial"; fi
+        mp_record "M3: a1 dialled c1 again after the removal"
+    fi
+    start_at="$(mp_now)"
+    docker start "${CONTAINER[c1]}" >/dev/null
+    MP_C1_START=2
+    mp_pre c1 2
+    if wait_for_peers "${CONTAINER[a1]}" 1 120; then
+        up2="$(mp_now)"
+        verdict PASS "a1 lists c1 again"
+    else
+        up2="$(mp_now)"
+        verdict FAIL "a1 did not list c1 within 120 s of the restart"
+    fi
+    mp_record "M3: link back within 120 s"
+    if [ "$INTEROP_MULTIPATH" = "request" ]; then
+        if counted_lines 'Connection initiated' a1; then
+            new="$(mp_py since "$kill_at" <<<"$CL_LINES")"
+            bad="$(grep -vcF -- " remote_addr=${NODE_IP_OF[c1]}:2121 " <<<"$new" || true)"
+            [ -n "$new" ] || bad="no line"
+            if [ "$bad" = 0 ]; then verdict PASS "$(line_count "$new") dial(s) since the kill, all to ${NODE_IP_OF[c1]}:2121"; else verdict FAIL "dials since the kill not all to the first network ($bad)"; fi
+        else
+            verdict NE "not established: $CL_WHY"
+        fi
+        mp_record "M3: every re-dial went to c1's first-network address"
+    else
+        d="$(count_log_pattern 'Connection initiated' c1)"
+        if is_count "$d" && is_count "$cdial0"; then chk_range "$((d - cdial0))" 1 99999; else verdict NE "not established: $cdial0 -> $d"; fi
+        mp_record "M3: c1 dialled a1 after its restart"
+    fi
+    # The outage: from the kill to the restart, a1's second interface
+    # carried nothing, and W did not move.
+    for f in "$INTEROP_CAPTURES"/a1-eth1-*.pcap; do
+        chk_quiet "$f" "$kill_at" "$start_at" "${NODE_IP2_OF[a1]}" "${NODE_IP2_OF[c1]}" "$MP_CTL_TIMES" "$MP_MACS"
+        mp_record "M3: no FIPS frame on a1's eth1 during the outage, $(basename "$f")"
+    done
+    # The new link's first 60 s, then its probes.
+    mp_wait_until "$(awk -v u="$up2" 'BEGIN{printf "%.6f", u + 60}')"
+    d="$(count_log_pattern 'Unknown link message type.*msg_type=82' c1)"
+    # a1's sends since c1's restart: the old link was removed before it,
+    # so each is on the new link.
+    if counted_lines 'Path message sent' a1; then
+        sends="$(line_count "$(mp_py since "$start_at" <<<"$CL_LINES")")"
+    else
+        sends="unreadable"
+    fi
+    sleep 5
+    mp_gates c1 a1 "${NODE_IP_OF[c1]}:2121"
+    if [ "$INTEROP_MULTIPATH" = "request" ]; then
+        # The request candidate belonged to the old link, and a new link
+        # re-offers only the configured and advertised feeds, so no
+        # candidate is held: no probe from link-up to the end of the run.
+        if is_count "$d" && is_count "$d0"; then chk_gated "$C1_LIVE" "$C1_WHY" "$((d - d0))" 0 0; else verdict NE "not established: $d0 -> $d"; fi
+        mp_record "M3: c1 discarded no probe on the new link (no candidate held)"
+        chk_gated "$A1_LIVE" "$A1_WHY" "$sends" 0 0
+        mp_record "M3: a1 sent no path message on the new link"
+    else
+        b="$(capability_bound 60)"
+        if is_count "$d" && is_count "$d0"; then chk_range "$((d - d0))" 0 "$b"; else verdict NE "not established: $d0 -> $d"; fi
+        mp_record "M3: c1 discarded at most capability_bound 60 = $b probes in the new link's first 60 s"
+        mp_probe_checks "M3 new link" "$start_at"
+        echo "    new-link probe offsets from link-up, s: $(mp_offsets "$SS_LINES" "$up2") (predicted 0 10 20 50)"
+    fi
+    mp_link_checks "M3"
+    mp_quiet "M3"
+    mp_witness "M3"
+    mp_delta_check "M3" "$p8"
+    phase_result "Multipath M3: re-dial"
+    echo ""
+}
+
+# ── M4: the first hour's capability probes ───────────────────────────
+
+mp_m4() {
+    local b c
+    echo "Phase M4: Capability probes over the first hour"
+    PASSED=0; FAILED=0
+    local p8
+    p8="$(mp_delta_patterns)"
+    local end
+    end="$(awk -v u="$MP_LINK_UP" 'BEGIN{printf "%.6f", u + 3610}')"
+    while awk -v e="$end" -v n="$(mp_now)" 'BEGIN{exit !(n < e)}'; do
+        check_links_round
+        sleep 30
+    done
+    for m in a1 c1; do
+        for n in a1 c1; do
+            [ "$m" = "$n" ] && continue
+            if [ -n "${LINK_LOST_AT[$m|$n]:-}" ]; then
+                verdict FAIL "$m lost $n (first ${LINK_LOST_AT[$m|$n]}s after mesh start)"
+            else
+                verdict PASS "$m listed $n in every readable round"
+            fi
+            mp_record "M4: link continuity $m -> $n"
+        done
+    done
+    b="$(capability_bound 3610)"
+    c="$(count_log_pattern 'Unknown link message type.*msg_type=82' c1)"
+    chk_range "$c" 1 "$b"
+    mp_record "M4: c1 discarded 1 to $b capability probes in the first 3610 s"
+    mp_gates c1 a1 "${NODE_IP_OF[c1]}:2121"
+    mp_probe_checks "M4" "$MP_MESH_EPOCH"
+    echo "    probe offsets from link-up, s: $(mp_offsets "$SS_LINES" "$MP_LINK_UP")"
+    echo "    predicted: see M2"
+    if is_count "$c"; then
+        echo "    bytes at c1: $c probes x (27 link message, $MP_PROBE_WIRE UDP payload, $((MP_PROBE_WIRE + 28)) IPv4 packet) = $((c * MP_PROBE_WIRE)) UDP payload bytes, $((c * (MP_PROBE_WIRE + 28))) IP bytes in the hour"
+        echo "    steady state at the cap: $((3600 / CAPABILITY_PROBE_INTERVAL_MAX)) probes an hour, $((3600 * (MP_PROBE_WIRE + 28) / CAPABILITY_PROBE_INTERVAL_MAX)) IP bytes an hour"
+    fi
+    mp_link_checks "M4"
+    mp_quiet "M4"
+    mp_witness "M4"
+    mp_delta_check "M4" "$p8"
+    phase_result "Multipath M4: the first hour"
+    echo ""
+}
+
+# ── M5: the last capture control ─────────────────────────────────────
+
+mp_m5() {
+    echo "Phase M5: Capture control, last"
+    PASSED=0; FAILED=0
+    mp_control "M5 (capture control, last)"
+    phase_result "Multipath M5: last capture control"
+    echo ""
+}
+
+# mp_handback: give the captures written as root back to this user.
+mp_handback() {
+    [ -n "${INTEROP_CAPTURES:-}" ] && [ -d "$INTEROP_CAPTURES" ] || return 0
+    docker run --rm "${CI_LABELS[@]}" -v "$INTEROP_CAPTURES:/c" \
+        --entrypoint chown "$INTEROP_IMAGE:c" \
+        -R "$(id -u):$(id -g)" /c >/dev/null 2>&1 \
+        || echo "WARN: could not hand $INTEROP_CAPTURES back to $(id -u):$(id -g)" >&2
+}
+
 compose() {
     docker compose -f "$COMPOSE_FILE" "$@"
 }
@@ -815,6 +1530,8 @@ cleanup() {
         return
     fi
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+    [ -n "$INTEROP_MULTIPATH" ] && mp_handback
+    return 0
 }
 trap cleanup EXIT
 trap 'echo ""; echo "Interrupted"; exit 130' INT
@@ -860,11 +1577,41 @@ if [ -n "${FIPS_INTEROP_NETEM:-}" ]; then
 fi
 echo "rekey.after_secs=$REKEY_AFTER_SECS"
 echo ""
+if [ -n "$INTEROP_MULTIPATH" ]; then
+    echo "Multipath mode: candidate from $INTEROP_MULTIPATH$([ "$PROBE_HOUR" -eq 1 ] && echo ', the first hour'); second network $INTEROP_SUBNET2.0/24"
+    echo "  a1 ${NODE_IP_OF[a1]} / ${NODE_IP2_OF[a1]} (udp/main 2121, $INTEROP_MP_TRANSPORT ${INTEROP_MP_PORT:-} on eth1, node.path.enabled)"
+    echo "  c1 ${NODE_IP_OF[c1]} / ${NODE_IP2_OF[c1]} (one UDP transport on 2121)"
+    echo "  captures: $INTEROP_CAPTURES"
+    echo "  host: $(uptime), $(nproc) CPUs, $(docker ps -q | wc -l) containers running"
+    echo ""
+    echo "Phase M0: Every multipath check on planted input"
+    if ! mp_controls "$INTEROP_IMAGE:c" "$MP_DIR/controls"; then
+        echo "FAIL: a control gave the wrong verdict; the harness is fixed before any run is recorded"
+        exit 1
+    fi
+    echo ""
+fi
 
 # ── Phase 0: bring up the mesh ───────────────────────────────────────
 
 echo "Phase 0: Starting mesh"
 compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+# Another run's network on the same /24 makes `compose up` fail anyway;
+# checking first says which one, and catches a host route compose would
+# not refuse.
+# A previous run's captures would be read as this run's: clear them,
+# after handing back any a killed run left owned by root.
+if [ -n "$INTEROP_MULTIPATH" ] && [ -n "$INTEROP_CAPTURES" ] && [ -d "$INTEROP_CAPTURES" ]; then
+    mp_handback
+    rm -f -- "$INTEROP_CAPTURES"/*.pcap "$INTEROP_CAPTURES"/*.err
+fi
+for _net in "$INTEROP_SUBNET" ${INTEROP_SUBNET2:+"$INTEROP_SUBNET2"}; do
+    if ! subnet_why="$(interop_subnet_free "$_net.0/24")"; then
+        echo "  FAIL  subnet $_net.0/24 is not free: ${subnet_why:-networks or routes unreadable}"
+        exit 1
+    fi
+done
+MP_MESH_EPOCH="$(date +%s.%6N)"
 if ! compose up -d; then
     echo "  FAIL  compose up failed"
     exit 1
@@ -890,6 +1637,16 @@ if [ -n "${FIPS_INTEROP_NETEM:-}" ]; then
 fi
 echo ""
 
+if [ -n "$INTEROP_MULTIPATH" ]; then
+    echo "Phase Pre: Captures, addresses"
+    PASSED=0; FAILED=0
+    mp_pre a1 1
+    mp_pre c1 1
+    phase_result "Multipath Pre"
+    [ "$FAILED" -eq 0 ] || mp_stop "a capture or an address is not as the checks need"
+    echo ""
+fi
+
 # ── Phase 1: FMP link + FSP session establishment ────────────────────
 
 echo "Phase 1: Link/session establishment + connectivity baseline"
@@ -904,6 +1661,9 @@ for n in "${NODES[@]}"; do
         echo "  $n did not reach $exp authenticated direct peer(s)"
     fi
 done
+# The multipath bounds count from link-up, which is taken here: once
+# every node lists its peers. It lags the true link-up by the poll.
+MP_LINK_UP="$(date +%s.%6N)"
 
 # The all-pairs ping over fips0 is the definitive reachability check.
 # Direct-neighbor pairs prove their FSP session; NON-adjacent pairs in a
@@ -928,6 +1688,15 @@ if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
 echo ""
+
+if [ -n "$INTEROP_MULTIPATH" ]; then
+    PASSED=0; FAILED=0
+    mp_transport_check
+    phase_result "Multipath second transport"
+    [ "$FAILED" -eq 0 ] || mp_stop "a1's second transport is not up on eth1"
+    echo ""
+    mp_m1
+fi
 
 # ── Phase 1b: data-plane control window (quiet, pre-rekey) ───────────
 #
@@ -1204,6 +1973,7 @@ while [ "$SECONDS" -lt "$ms_accept_after" ]; do
             ms_line+=" $n=${MS_EST[$n]}"
         done
         echo "    warmup, $(( ms_accept_after - SECONDS ))s to go:$ms_line"
+        [ -n "$INTEROP_MULTIPATH" ] && mp_loss_sample "at $(( SECONDS - MESH_UP_AT ))s"
         ms_next_print=$(( SECONDS + 30 ))
     fi
     sleep "$MESH_SIZE_POLL"
@@ -1292,6 +2062,17 @@ PASSED=0; FAILED=0
 scan_global_patterns
 phase_result "Whole-run log health"
 echo ""
+
+if [ -n "$INTEROP_MULTIPATH" ]; then
+    mkdir -p "$MP_DIR"
+    mp_m2
+    if [ "$PROBE_HOUR" -eq 1 ]; then
+        mp_m4
+    else
+        mp_m3
+    fi
+    mp_m5
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────
 

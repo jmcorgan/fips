@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
+from .schedule import MODES, Step
+
 # Node ids are rendered nNN by the topology generator, zero-padded to two
 # digits. Matching the shape here keeps a typo such as "no4" or "n4x" from
 # reaching an assertion as a node that simply never appears.
@@ -28,7 +30,10 @@ class Range:
             raise ValueError(f"{name}: min ({self.min}) must be >= 0")
 
 
-VALID_TRANSPORTS = ("udp", "ethernet", "tcp")
+VALID_TRANSPORTS = ("udp", "ethernet", "tcp", "udp-veth")
+# Dual edges: a veth half and a UDP-over-the-bridge half between the same
+# two nodes (see topology.py).
+DUAL_TRANSPORTS = ("ethernet+udp", "udp-veth+udp")
 
 
 @dataclass
@@ -100,6 +105,10 @@ class NetemConfig:
     default_policy: NetemPolicy = field(default_factory=NetemPolicy)
     link_policies: list[LinkPolicyOverride] = field(default_factory=list)
     mutation: NetemMutationConfig = field(default_factory=NetemMutationConfig)
+    # Policy for the bridge (UDP) half of a dual edge. The veth half takes
+    # the edge's ordinary policy. ``None`` means the bridge half gets the
+    # default policy too.
+    bridge_policy: NetemPolicy | None = None
 
 
 @dataclass
@@ -109,6 +118,9 @@ class LinkFlapsConfig:
     max_down_links: int = 2
     down_duration_secs: Range = field(default_factory=lambda: Range(10, 30))
     protect_connectivity: bool = True
+    # Only flap edges of this transport type (``ethernet``, ``udp``, ...);
+    # a dual edge counts as its veth half. ``None`` flaps any edge.
+    only_transport: str | None = None
 
 
 @dataclass
@@ -118,6 +130,12 @@ class TrafficConfig:
     interval_secs: Range = field(default_factory=lambda: Range(10, 30))
     duration_secs: Range = field(default_factory=lambda: Range(5, 15))
     parallel_streams: int = 4
+    # Cap on each stream's rate in Mbit/s (iperf3 -b); None runs uncapped.
+    rate_mbps: int | None = None
+    # When set, each session also runs a constant-rate UDP stream of this
+    # many Mbit/s beside it, same pair and length, whose receiver intervals
+    # do not depend on TCP's timers (``max_stall`` with ``stream: udp``).
+    udp_mbps: int | None = None
 
 
 @dataclass
@@ -302,6 +320,46 @@ class CongestionSignalsAssertion:
 
 
 @dataclass
+class MaxReplayRefusalsAssertion:
+    """Ceiling on the replays a node refused, over all its peers.
+
+    Read from the final congestion snapshot's ``replay_suppressed_total``,
+    which counts a peer's refusals since it was promoted, on both receive
+    paths, so a cutover does not clear what a run should see. An established
+    peer's own frames are refused only when they fall behind its replay
+    window, so a count here is a frame the node read too late.
+
+    ``min_nodes`` is how many nodes must report a count at all. A node that
+    reports none observed nothing, and reading that as zero is how this
+    assertion would come to pass on a build that never counted.
+    """
+
+    max_total: int = 0
+    min_nodes: int = 2
+
+
+@dataclass
+class MaxKernelDropsAssertion:
+    """Ceiling on the frames the kernel drops at each Ethernet socket.
+
+    Read from the final congestion snapshot, per node and Ethernet
+    transport, as dropped / (received + dropped): ``kernel_drops`` is what
+    the kernel turned away because the socket's receive buffer was full,
+    ``frames_recv`` what the node read. A lost probe or ack counts against
+    the path machine's timeout like any other loss, so a socket that
+    overflows under a suite's traffic makes path timeouts and switches the
+    suite did not cause.
+
+    ``min_nodes`` is how many nodes must report an Ethernet counter at all.
+    A node that reports none, or a build that does not count, observed
+    nothing and fails rather than passing as zero.
+    """
+
+    max_pct: float = 1.0
+    min_nodes: int = 1
+
+
+@dataclass
 class DeliveryAssertion:
     """Datagrams of each size must be delivered between each node pair.
 
@@ -371,14 +429,216 @@ class MinTrafficAssertion:
 
 
 @dataclass
+class PathSwitchesAssertion:
+    """Band on path switches: a link's active path moving, under one session.
+
+    Counted from the switch executor's "Path switched" line, one per move
+    at the node that moves. ``min_total`` proves the run moved something.
+    The ceiling is ``max_total``, or ``per_flap`` times the flaps the run
+    actually made plus ``extra``, whichever is lower, so a run that drew
+    fewer flaps gets a lower ceiling rather than a fixed one.
+    """
+
+    min_total: int | None = None
+    max_total: int | None = None
+    per_flap: int | None = None
+    extra: int = 0
+
+
+@dataclass
+class ActiveTimeoutsAssertion:
+    """A report of the active path's timeouts that no down explains.
+
+    A ``Live -> Suspect why=Timeout`` on a node's active path later than
+    ``within_ms`` after a down stamped at that node: a path that was up and
+    lost its probes under load. ``path_switches`` cannot see one, since a
+    pair of extra switches sits inside its ceiling at the lower of a suite's
+    two baselines. The default is the K-timeout bound, 3 x 200 + 400 + 50 +
+    250 ms. It reports and fails nothing, which is the operator's to change.
+    """
+
+    within_ms: int = 1300
+
+
+@dataclass
+class MaxPromotionsAssertion:
+    """Per-node ceiling on "Peer promoted to active".
+
+    A promotion is a handshake completing: the first one per peer is how a
+    pair meets, every later one is a re-peering (the session was lost and
+    rebuilt), which a switchover suite exists to catch. Counted per node,
+    because a pair re-peering shows up on both sides and a mesh-wide total
+    would hide which one started it.
+    """
+
+    per_node: int = 1
+
+
+@dataclass
+class SwitchLatencyAssertion:
+    """Ceiling on the time from a link going down to the path switch.
+
+    Read from the stamp each flap took inside the container, immediately
+    before the command that made it, against the "Path switched" lines of
+    the edge's endpoints. ``max_ms`` bounds the earliest switch at either
+    end, or with ``each_end`` the first switch at every end; a down with
+    no switch inside the bound fails. ``signalled_ms``, when set, is a
+    tighter ceiling on each end's first switch, for a down the node has a
+    signal for rather than only probe timeouts.
+    """
+
+    max_ms: int = 1000
+    each_end: bool = False
+    signalled_ms: int | None = None
+
+
+@dataclass
+class MaxStallAssertion:
+    """Ceiling on the longest run of iperf3 intervals that moved no bytes.
+
+    ``min_traffic`` passes on any session that moved any data, and a
+    switchover that blackholes traffic for ten seconds still leaves bytes
+    on either side of the hole. This reads the receiver's per-interval
+    totals from each iperf3 result and fails on the longest run of zeros
+    inside any session, and on a session it cannot read.
+
+    ``stream`` names what the ceiling holds: ``tcp`` the traffic sessions
+    themselves; ``udp`` the constant-rate UDP stream each session runs
+    beside it (``traffic.udp_mbps``). A TCP receiver can stay silent after
+    a switch for as long as its sender's retransmission timer runs, which
+    is TCP's recovery, not the node's; the UDP stream stops only while no
+    path carries it. With ``udp`` the TCP sessions' figure is reported,
+    not bounded.
+    """
+
+    max_secs: float = 2.0
+    stream: str = "tcp"
+
+
+@dataclass
+class MaxDialsAssertion:
+    """Ceiling on dials a node starts after first contact.
+
+    Counted from "Connection initiated", one per handshake the node
+    starts, after the node's first "Peer promoted to active", and from
+    "Anonymous discovery connection initiated" after the first to each
+    transport and address. A dial to a peer whose link is live is the
+    failure: with two paths the second must come through the link's path
+    machine, never a second handshake.
+    """
+
+    max_total: int = 0
+
+
+@dataclass
+class PathsLiveAssertion:
+    """Floor on the paths a node held Live to a peer: the control that a
+    second path existed.
+
+    Per node and peer, the paths, keyed by ``path_id``, that logged their
+    creation (a "Path state changed" line from ``None``) and later went
+    Live, plus one for the link's original path, which is Live from
+    link-up and logs no line. Passes when some node holds at least
+    ``min`` to some peer.
+    """
+
+    min: int = 2
+    # Count only paths Live at a pair the scenario configured (a laned
+    # edge's lane pairs at its dialler), each at a distinct pair, by
+    # ``within_secs`` after warmup.
+    configured: bool = False
+    within_secs: int | None = None
+
+
+@dataclass
+class LanesAssertion:
+    """A laned edge's controls and verdicts.
+
+    ``cross_arrival``: at the dialler, a frame arrived on a lane addressed
+    to another lane's address, so an answer could reach an instance other
+    than its probe's (the far end's crossings are reported). ``stable``:
+    no lane path Live at a configured pair later went Suspect, and the
+    sentinel address no host answers never went Live.
+    """
+
+    cross_arrival: bool = True
+    stable: bool = True
+
+
+@dataclass
+class PathFloorAssertion:
+    """The draft's floor on probes to a path that has stopped answering.
+
+    Inside every stop, probe n at least r(n) after probe n - 1 (probe 0 the
+    stop), r(1) = r(2) = 1 s and r(n) = min(2 r(n - 1), 30 s), less the
+    log-stamp allowance in paths.py. ``min_stops`` stops with at least two
+    probes must be seen, so a run in which nothing stopped cannot pass.
+    """
+
+    min_stops: int = 1
+
+
+@dataclass
+class DiscoveryLimitAssertion:
+    """At most MAX_DISCOVERY_PROBES (8) probes in any Probing episode."""
+
+    max_probes: int = 8
+
+
+@dataclass
+class ReverseHeardAssertion:
+    """The control that a one-direction step stayed one-directional.
+
+    For each ``oneway`` step: the end whose sends were not dropped logged a
+    path message to the other's veth address during the step, and the
+    capture at the other end holds at least as many frames from it as it
+    logged in the step's second half, or from its last message when the
+    half holds none; and at the step's end neither end's neighbour entry
+    for the other is FAILED or INCOMPLETE.
+    """
+
+    window_ms: int = 50
+
+
+@dataclass
+class RescueAssertion:
+    """An acked Dead standby is probed at once when the active path fails
+    with nothing Live, and carries the link.
+
+    Control first: at both ends the standby is Dead when the active path
+    goes (a standby only Suspect does not exercise the rule). Then at each
+    end a probe on the standby within ``window_ms`` of the step in which
+    the active path left Live or was released, the standby Live at both
+    ends within 2 x ``delay_ms`` + 1 s of the down, and no peer removed.
+    """
+
+    delay_ms: int = 500
+    window_ms: int = 60
+
+
+@dataclass
 class AssertionsConfig:
     """Optional post-run assertions evaluated against control-socket data."""
 
     bloom_send_rate: BloomSendRateAssertion | None = None
     min_parent_switches: MinParentSwitchesAssertion | None = None
     max_parent_switches: MaxParentSwitchesAssertion | None = None
+    path_switches: PathSwitchesAssertion | None = None
+    active_timeouts: ActiveTimeoutsAssertion | None = None
+    max_promotions: MaxPromotionsAssertion | None = None
+    switch_latency: SwitchLatencyAssertion | None = None
+    max_stall: MaxStallAssertion | None = None
+    max_dials: MaxDialsAssertion | None = None
+    paths_live: PathsLiveAssertion | None = None
+    path_floor: PathFloorAssertion | None = None
+    reverse_heard: ReverseHeardAssertion | None = None
+    rescue: RescueAssertion | None = None
+    lanes: LanesAssertion | None = None
+    discovery_limit: DiscoveryLimitAssertion | None = None
     max_errors: MaxErrorsAssertion | None = None
     congestion_signals: CongestionSignalsAssertion | None = None
+    max_kernel_drops: MaxKernelDropsAssertion | None = None
+    max_replay_refusals: MaxReplayRefusalsAssertion | None = None
     tree_parents: TreeParentsAssertion | None = None
     baseline: BaselineAssertion | None = None
     min_traffic: MinTrafficAssertion | None = None
@@ -411,6 +671,12 @@ class Scenario:
     # Allows scenarios to override any FIPS config parameter
     # (e.g., node.tree.reeval_interval_secs).
     fips_overrides: dict = field(default_factory=dict)
+    # Timed steps, offsets from the end of warmup (see schedule.py).
+    schedule: list[Step] = field(default_factory=list)
+    # Merged into each generated transport instance of a kind (``ethernet``,
+    # ``udp-veth``, ``udp``) after the harness injects it, so a scenario can
+    # set what fips_overrides, merged before, cannot reach.
+    transport_overrides: dict = field(default_factory=dict)
 
 
 # Keys each fixed-schema section understands. A key absent from these sets is a
@@ -432,7 +698,7 @@ class Scenario:
 _TOP_KEYS = {
     "scenario", "topology", "netem", "link_flaps", "traffic", "node_churn",
     "peer_churn", "bandwidth", "ingress", "link_swap", "assertions", "logging",
-    "fips_overrides",
+    "fips_overrides", "schedule", "transport_overrides",
 }
 _SECTION_KEYS = {
     "scenario": {"name", "seed", "duration_secs"},
@@ -440,16 +706,16 @@ _SECTION_KEYS = {
         "num_nodes", "algorithm", "params", "ensure_connected", "subnet",
         "ip_start", "default_transport", "transport_mix", "pin_root",
     },
-    "netem": {"enabled", "default_policy", "link_policies", "mutation"},
+    "netem": {"enabled", "default_policy", "link_policies", "mutation", "bridge_policy"},
     "netem.link_policies[]": {"edges", "policy", "policy_name"},
     "netem.mutation": {"interval_secs", "fraction", "policies", "exclude_edges"},
     "link_flaps": {
         "enabled", "interval_secs", "max_down_links", "down_duration_secs",
-        "protect_connectivity",
+        "protect_connectivity", "only_transport",
     },
     "traffic": {
         "enabled", "max_concurrent", "interval_secs", "duration_secs",
-        "parallel_streams",
+        "parallel_streams", "rate_mbps", "udp_mbps",
     },
     "node_churn": {
         "enabled", "interval_secs", "max_down_nodes", "down_duration_secs",
@@ -462,8 +728,12 @@ _SECTION_KEYS = {
     "link_swap.edges[]": {"edge", "policy"},
     "assertions": {
         "bloom_send_rate", "min_parent_switches", "max_parent_switches",
-        "max_errors", "congestion_signals", "tree_parents", "baseline",
-        "min_traffic", "delivery",
+        "path_switches", "active_timeouts", "max_promotions", "switch_latency",
+        "max_stall",
+        "max_dials", "paths_live", "path_floor", "discovery_limit", "reverse_heard",
+        "rescue", "lanes",
+        "max_errors", "congestion_signals", "max_kernel_drops",
+        "max_replay_refusals", "tree_parents", "baseline", "min_traffic", "delivery",
     },
     "logging": {"rust_log", "output_dir"},
 }
@@ -471,11 +741,24 @@ _ASSERTION_KEYS = {
     "bloom_send_rate": {"window_secs", "max_per_node"},
     "min_parent_switches": {"min_total"},
     "max_parent_switches": {"max_total", "node"},
+    "path_switches": {"min_total", "max_total", "per_flap", "extra"},
+    "active_timeouts": {"within_ms"},
+    "max_promotions": {"per_node"},
+    "switch_latency": {"max_ms", "each_end", "signalled_ms"},
+    "max_stall": {"max_secs", "stream"},
+    "paths_live": {"min", "configured", "within_secs"},
+    "lanes": {"cross_arrival", "stable"},
+    "path_floor": {"min_stops"},
+    "discovery_limit": {"max_probes"},
+    "reverse_heard": {"window_ms"},
+    "rescue": {"delay_ms", "window_ms"},
     "max_errors": {"max_total"},
     "min_traffic": {"min_sessions_ok", "min_bytes_total"},
     "congestion_signals": {
         "min_nodes_detected", "min_nodes_ce_forwarded", "min_nodes_ce_received",
     },
+    "max_kernel_drops": {"max_pct", "min_nodes"},
+    "max_replay_refusals": {"max_total", "min_nodes"},
     "baseline": {
         "min_nodes_reporting", "max_roots", "min_nodes_parented", "min_sessions",
     },
@@ -541,6 +824,62 @@ def _parse_netem_policy(data: dict, name: str = "netem policy") -> NetemPolicy:
     return policy
 
 
+def _parse_max_kernel_drops(data) -> MaxKernelDropsAssertion:
+    """Parse and range-check an ``assertions.max_kernel_drops`` block."""
+    _reject_unknown(
+        data, _ASSERTION_KEYS["max_kernel_drops"], "assertions.max_kernel_drops"
+    )
+    cfg = MaxKernelDropsAssertion()
+    if "max_pct" in data:
+        pct = data["max_pct"]
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            raise ValueError(
+                f"assertions.max_kernel_drops.max_pct: must be a number, "
+                f"got {pct!r}"
+            )
+        if not 0 <= pct < 100:
+            raise ValueError(
+                f"assertions.max_kernel_drops.max_pct: must be at least 0 and "
+                f"below 100, got {pct}"
+            )
+        cfg.max_pct = float(pct)
+    if "min_nodes" in data:
+        n = data["min_nodes"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ValueError(
+                f"assertions.max_kernel_drops.min_nodes: must be a positive "
+                f"integer, got {n!r}"
+            )
+        cfg.min_nodes = n
+    return cfg
+
+
+def _parse_max_replay_refusals(data) -> MaxReplayRefusalsAssertion:
+    """Parse and range-check an ``assertions.max_replay_refusals`` block."""
+    _reject_unknown(
+        data, _ASSERTION_KEYS["max_replay_refusals"],
+        "assertions.max_replay_refusals",
+    )
+    cfg = MaxReplayRefusalsAssertion()
+    if "max_total" in data:
+        total = data["max_total"]
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise ValueError(
+                f"assertions.max_replay_refusals.max_total: must be a "
+                f"non-negative integer, got {total!r}"
+            )
+        cfg.max_total = total
+    if "min_nodes" in data:
+        n = data["min_nodes"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ValueError(
+                f"assertions.max_replay_refusals.min_nodes: must be a "
+                f"positive integer, got {n!r}"
+            )
+        cfg.min_nodes = n
+    return cfg
+
+
 def load_scenario(path: str) -> Scenario:
     """Load and validate a scenario from a YAML file."""
     with open(path) as f:
@@ -590,6 +929,10 @@ def load_scenario(path: str) -> Scenario:
         s.netem.default_policy = _parse_netem_policy(
             nc["default_policy"], "netem.default_policy"
         )
+    if "bridge_policy" in nc:
+        s.netem.bridge_policy = _parse_netem_policy(
+            nc["bridge_policy"], "netem.bridge_policy"
+        )
     if "link_policies" in nc:
         for lp_data in nc["link_policies"]:
             _reject_unknown(
@@ -631,6 +974,12 @@ def load_scenario(path: str) -> Scenario:
             lf["down_duration_secs"], "link_flaps.down_duration_secs"
         )
     s.link_flaps.protect_connectivity = lf.get("protect_connectivity", True)
+    only = lf.get("only_transport")
+    if only is not None and str(only) not in VALID_TRANSPORTS:
+        raise ValueError(
+            f"link_flaps.only_transport: {only!r} not in {VALID_TRANSPORTS}"
+        )
+    s.link_flaps.only_transport = str(only) if only is not None else None
 
     # Traffic section
     tf = raw.get("traffic", {})
@@ -642,6 +991,10 @@ def load_scenario(path: str) -> Scenario:
     if "duration_secs" in tf:
         s.traffic.duration_secs = _parse_range(tf["duration_secs"], "traffic.duration_secs")
     s.traffic.parallel_streams = int(tf.get("parallel_streams", 4))
+    if "rate_mbps" in tf:
+        s.traffic.rate_mbps = _count(tf["rate_mbps"], "traffic.rate_mbps", 1)
+    if "udp_mbps" in tf:
+        s.traffic.udp_mbps = _count(tf["udp_mbps"], "traffic.udp_mbps", 1)
 
     # Node churn section
     nc2 = raw.get("node_churn", {})
@@ -721,6 +1074,7 @@ def load_scenario(path: str) -> Scenario:
             window_secs=int(bsr.get("window_secs", 30)),
             max_per_node=int(bsr.get("max_per_node", 30)),
         )
+    _parsepaths(asrt, s)
     if "min_parent_switches" in asrt:
         mps = asrt["min_parent_switches"]
         _reject_unknown(
@@ -855,6 +1209,14 @@ def load_scenario(path: str) -> Scenario:
                 "min_nodes_ce_received); a block with none asserts nothing"
             )
         s.assertions.congestion_signals = CongestionSignalsAssertion(**floors)
+    if "max_replay_refusals" in asrt:
+        s.assertions.max_replay_refusals = _parse_max_replay_refusals(
+            asrt["max_replay_refusals"]
+        )
+    if "max_kernel_drops" in asrt:
+        s.assertions.max_kernel_drops = _parse_max_kernel_drops(
+            asrt["max_kernel_drops"]
+        )
     if "delivery" in asrt:
         s.assertions.delivery = _parse_delivery(
             asrt["delivery"], s.topology.num_nodes
@@ -944,6 +1306,18 @@ def load_scenario(path: str) -> Scenario:
 
     # FIPS config overrides (raw YAML dict appended to node configs)
     s.fips_overrides = raw.get("fips_overrides", {})
+
+    s.schedule = _parsesteps(raw.get("schedule", []))
+
+    to = raw.get("transport_overrides", {})
+    if not isinstance(to, dict) or not set(to) <= {"ethernet", "udp-veth", "udp"} or not all(
+        isinstance(v, dict) for v in to.values()
+    ):
+        raise ValueError(
+            f"transport_overrides: a mapping of ethernet, udp-veth or udp to a "
+            f"mapping of settings, got {to!r}"
+        )
+    s.transport_overrides = to
 
     # Validation
     _validate(s)
@@ -1051,7 +1425,209 @@ def _parse_delivery(dl, num_nodes: int) -> DeliveryAssertion:
     )
 
 
+def _count(value, where: str, least: int = 0) -> int:
+    """A non-negative (or at least ``least``) integer, refusing a bool."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < least:
+        raise ValueError(f"{where}: must be an integer >= {least}, got {value!r}")
+    return value
+
+
+def _parsepaths(asrt: dict, s: Scenario):
+    """Parse the assertions a two-path suite declares."""
+    if "path_switches" in asrt:
+        ps = asrt["path_switches"]
+        where = "assertions.path_switches"
+        _reject_unknown(ps, _ASSERTION_KEYS["path_switches"], where)
+        if not {"min_total", "max_total", "per_flap"} & set(ps):
+            raise ValueError(
+                f"{where}: give min_total, max_total or per_flap "
+                "(an empty band asserts nothing)"
+            )
+        if "extra" in ps and "per_flap" not in ps:
+            raise ValueError(f"{where}: extra goes with per_flap")
+        s.assertions.path_switches = PathSwitchesAssertion(
+            min_total=_count(ps["min_total"], f"{where}.min_total") if "min_total" in ps else None,
+            max_total=_count(ps["max_total"], f"{where}.max_total") if "max_total" in ps else None,
+            per_flap=_count(ps["per_flap"], f"{where}.per_flap", 1) if "per_flap" in ps else None,
+            extra=_count(ps.get("extra", 0), f"{where}.extra"),
+        )
+    if "active_timeouts" in asrt:
+        at = asrt["active_timeouts"] or {}
+        where = "assertions.active_timeouts"
+        _reject_unknown(at, _ASSERTION_KEYS["active_timeouts"], where)
+        s.assertions.active_timeouts = ActiveTimeoutsAssertion(
+            within_ms=_count(
+                at.get("within_ms", ActiveTimeoutsAssertion.within_ms),
+                f"{where}.within_ms", 1,
+            ),
+        )
+    if "max_promotions" in asrt:
+        mp = asrt["max_promotions"]
+        where = "assertions.max_promotions"
+        if not isinstance(mp, dict):
+            raise ValueError(f"{where}: give a mapping {{per_node: n}}, got {mp!r}")
+        _reject_unknown(mp, _ASSERTION_KEYS["max_promotions"], where)
+        s.assertions.max_promotions = MaxPromotionsAssertion(
+            per_node=_count(mp.get("per_node", 1), f"{where}.per_node", 1),
+        )
+    if "switch_latency" in asrt:
+        sl = asrt["switch_latency"]
+        where = "assertions.switch_latency"
+        _reject_unknown(sl, _ASSERTION_KEYS["switch_latency"], where)
+        each = sl.get("each_end", False)
+        if not isinstance(each, bool):
+            raise ValueError(f"{where}.each_end: must be true or false, got {each!r}")
+        signalled = sl.get("signalled_ms")
+        s.assertions.switch_latency = SwitchLatencyAssertion(
+            max_ms=_count(sl.get("max_ms", 1000), f"{where}.max_ms", 1),
+            each_end=each,
+            signalled_ms=(
+                _count(signalled, f"{where}.signalled_ms", 1)
+                if signalled is not None else None
+            ),
+        )
+    if "max_stall" in asrt:
+        ms = asrt["max_stall"]
+        where = "assertions.max_stall"
+        _reject_unknown(ms, _ASSERTION_KEYS["max_stall"], where)
+        secs = ms.get("max_secs", 2.0)
+        if isinstance(secs, bool) or not isinstance(secs, (int, float)) or secs <= 0:
+            raise ValueError(f"{where}.max_secs: must be a positive number, got {secs!r}")
+        stream = ms.get("stream", "tcp")
+        if stream not in ("tcp", "udp"):
+            raise ValueError(f"{where}.stream: must be tcp or udp, got {stream!r}")
+        s.assertions.max_stall = MaxStallAssertion(max_secs=float(secs), stream=stream)
+    if "max_dials" in asrt:
+        s.assertions.max_dials = MaxDialsAssertion(
+            max_total=_count(asrt["max_dials"], "assertions.max_dials"),
+        )
+    for key, cls, field_name, least in (
+        ("path_floor", PathFloorAssertion, "min_stops", 1),
+        ("discovery_limit", DiscoveryLimitAssertion, "max_probes", 1),
+        ("reverse_heard", ReverseHeardAssertion, "window_ms", 0),
+    ):
+        if key not in asrt:
+            continue
+        raw = asrt[key]
+        if raw is True or raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"assertions.{key}: give true or a mapping, got {raw!r}")
+        _reject_unknown(raw, _ASSERTION_KEYS[key], f"assertions.{key}")
+        value = _count(raw.get(field_name, getattr(cls(), field_name)),
+                       f"assertions.{key}.{field_name}", least)
+        setattr(s.assertions, key, cls(**{field_name: value}))
+    if "rescue" in asrt:
+        rc = asrt["rescue"]
+        where = "assertions.rescue"
+        if not isinstance(rc, dict):
+            raise ValueError(f"{where}: give a mapping, got {rc!r}")
+        _reject_unknown(rc, _ASSERTION_KEYS["rescue"], where)
+        s.assertions.rescue = RescueAssertion(
+            delay_ms=_count(rc.get("delay_ms", 500), f"{where}.delay_ms"),
+            window_ms=_count(rc.get("window_ms", 60), f"{where}.window_ms", 1),
+        )
+    if "paths_live" in asrt:
+        pl = asrt["paths_live"]
+        where = "assertions.paths_live"
+        _reject_unknown(pl, _ASSERTION_KEYS["paths_live"], where)
+        configured = pl.get("configured", False)
+        if not isinstance(configured, bool):
+            raise ValueError(f"{where}.configured: must be true or false, got {configured!r}")
+        within = pl.get("within_secs")
+        s.assertions.paths_live = PathsLiveAssertion(
+            min=_count(pl.get("min", 2), f"{where}.min", 1),
+            configured=configured,
+            within_secs=_count(within, f"{where}.within_secs", 1) if within is not None else None,
+        )
+    if "lanes" in asrt:
+        ln = asrt["lanes"]
+        where = "assertions.lanes"
+        if not isinstance(ln, dict):
+            raise ValueError(f"{where}: give a mapping, got {ln!r}")
+        _reject_unknown(ln, _ASSERTION_KEYS["lanes"], where)
+        for key in ("cross_arrival", "stable"):
+            if not isinstance(ln.get(key, True), bool):
+                raise ValueError(f"{where}.{key}: must be true or false")
+        s.assertions.lanes = LanesAssertion(
+            cross_arrival=ln.get("cross_arrival", True), stable=ln.get("stable", True),
+        )
+
+
 _SUPPRESSING_LOG_LEVELS = ("off", "error", "warn")
+
+_LEVELS = ("off", "error", "warn", "info", "debug", "trace")
+
+
+def log_enables(rust_log: str, target: str, level: str) -> bool:
+    """Whether an ``EnvFilter`` directive string emits ``level`` at ``target``.
+
+    The most specific directive whose target is ``target`` or a module-path
+    prefix of it decides; a bare level is the default for every other
+    target, and with none the default is ``error``. Span and field filters
+    are not read: a directive carrying them is treated as not matching.
+    """
+    default = "error"
+    best: tuple[int, str] | None = None
+    for part in rust_log.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            if part.lower() in _LEVELS:
+                default = part.lower()
+            continue
+        name, lvl = part.rsplit("=", 1)
+        lvl = lvl.strip().lower()
+        if lvl not in _LEVELS or "[" in name or "{" in name:
+            continue
+        name = name.strip()
+        if target == name or target.startswith(name + "::"):
+            if best is None or len(name) > best[0]:
+                best = (len(name), lvl)
+    chosen = best[1] if best else default
+    return _LEVELS.index(chosen) >= _LEVELS.index(level)
+
+
+# Each assertion that reads a debug line, and the target that emits it.
+_TARGETS = [
+    ("paths_live", "fips::node::handlers::path"),
+    ("path_floor", "fips::node::handlers::path"),
+    ("discovery_limit", "fips::node::handlers::path"),
+    ("reverse_heard", "fips::node::handlers::path"),
+    ("rescue", "fips::node::handlers::path"),
+    ("lanes", "fips::node::handlers::path"),
+    ("active_timeouts", "fips::node::handlers::path"),
+    ("active_timeouts", "fips::node::dataplane::wait"),
+    ("max_dials", "fips::node::lifecycle"),
+]
+
+
+def _checklevels(s: Scenario):
+    """Refuse an assertion whose lines the log level cannot emit.
+
+    The path machine's state lines and the dial line are ``debug``; at
+    ``info`` they are never written, and an assertion counting them would
+    count zero whatever the node did: a ceiling would pass and a floor fail
+    for the wrong reason. "Path switched" is ``info`` and needs only what
+    the error guard below already refuses.
+    """
+    for key, target in _TARGETS:
+        if getattr(s.assertions, key) is None:
+            continue
+        if not log_enables(s.logging.rust_log, target, "debug"):
+            raise ValueError(
+                f"assertions.{key} reads debug lines of {target}, which "
+                f"logging.rust_log '{s.logging.rust_log}' does not emit. Add "
+                f"'{target}=debug' (or wider) to rust_log, or drop the assertion."
+            )
+    if s.assertions.path_switches or s.assertions.switch_latency:
+        if not log_enables(s.logging.rust_log, "fips::node::handlers::path", "info"):
+            raise ValueError(
+                f"logging.rust_log '{s.logging.rust_log}' suppresses the "
+                f"info-level 'Path switched' line the path_switches and "
+                f"switch_latency assertions read."
+            )
 
 
 def _validate_parent_switch_observability(s: Scenario):
@@ -1106,10 +1682,172 @@ def _validate_error_observability(s: Scenario):
         )
 
 
+_STEPKEYS = {
+    "down": {"at", "down", "mode", "end", "secs", "capture", "counters", "from", "to"},
+    "load": {"at", "load", "secs", "streams", "bidir"},
+}
+
+
+def _seconds(value, where: str, positive: bool) -> float:
+    """A number of seconds, at least 0 or above 0, refusing a bool."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where}: must be a number of seconds, got {value!r}")
+    if value < 0 or (positive and value == 0):
+        raise ValueError(f"{where}: must be {'> 0' if positive else '>= 0'}, got {value!r}")
+    return float(value)
+
+
+def _pair(value, where: str) -> tuple[str, str]:
+    """Two distinct node ids."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or value[0] == value[1]:
+        raise ValueError(f"{where}: must be two distinct node ids, got {value!r}")
+    return str(value[0]), str(value[1])
+
+
+def _parsesteps(raw) -> list[Step]:
+    """Parse ``schedule:``, a list of timed steps (see schedule.py)."""
+    if not isinstance(raw, list):
+        raise ValueError(f"schedule: must be a list of steps, got {raw!r}")
+    steps = []
+    for i, entry in enumerate(raw):
+        where = f"schedule[{i}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where}: must be a mapping, got {entry!r}")
+        kinds = [k for k in _STEPKEYS if k in entry]
+        if len(kinds) != 1:
+            raise ValueError(f"{where}: give exactly one of down or load")
+        kind = kinds[0]
+        _reject_unknown(entry, _STEPKEYS[kind], where)
+        for key in ("at", "secs"):
+            if key not in entry:
+                raise ValueError(f"{where}: {key} is required")
+        at = _seconds(entry["at"], f"{where}.at", positive=False)
+        secs = _seconds(entry["secs"], f"{where}.secs", positive=True)
+        if kind == "down":
+            a, b = _pair(entry["down"], f"{where}.down")
+            mode = entry.get("mode", "netem")
+            if mode not in MODES:
+                raise ValueError(f"{where}.mode: {mode!r} not in {MODES}")
+            end = entry.get("end")
+            src = entry.get("from")
+            if mode == "oneway":
+                if end is not None or {src, entry.get("to")} != {a, b}:
+                    raise ValueError(
+                        f"{where}: oneway names from and to, the edge's two ends, and no end"
+                    )
+                end = entry["to"]
+            elif src is not None or "to" in entry:
+                raise ValueError(f"{where}: from and to go with mode oneway")
+            if mode == "admin" and end not in (a, b):
+                raise ValueError(f"{where}.end: admin needs the end to take down, one of {a}, {b}")
+            if mode == "netem" and end is not None:
+                raise ValueError(f"{where}.end: a netem down holds both directions; drop end")
+            ends = {}
+            for key in ("capture", "counters"):
+                ends[key] = entry.get(key, [])
+                if not isinstance(ends[key], list) or any(n not in (a, b) for n in ends[key]):
+                    raise ValueError(f"{where}.{key}: a list of the edge's ends, got {ends[key]!r}")
+            steps.append(Step(at=at, kind=kind, secs=secs, edge=(min(a, b), max(a, b)),
+                              mode=mode, end=end,
+                              capture=tuple(str(n) for n in ends["capture"]),
+                              counters=tuple(str(n) for n in ends["counters"]),
+                              src=str(src) if src is not None else None))
+        else:
+            client, server = _pair(entry["load"], f"{where}.load")
+            streams = _count(entry.get("streams", 1), f"{where}.streams", 1)
+            bidir = entry.get("bidir", False)
+            if not isinstance(bidir, bool):
+                raise ValueError(f"{where}.bidir: must be true or false, got {bidir!r}")
+            steps.append(Step(at=at, kind=kind, secs=secs, pair=(client, server),
+                              streams=streams, bidir=bidir))
+    return steps
+
+
+def _checksteps(s: Scenario):
+    """Refuse a step the run could not carry out as written.
+
+    A down names an explicit edge; ``netem`` needs netem on; ``admin``
+    needs a veth edge and no node churn (a restarted node's veth comes
+    back up, ending the down early). ``admin`` is refused on a
+    ``udp-veth`` edge: interface-bound UDP reports neither carrier nor
+    presence, so the down would test nothing the netem mode does not.
+    Every step ends inside the run.
+    """
+    if not s.schedule:
+        return
+    adjacency = s.topology.params.get("adjacency") if s.topology.algorithm == "explicit" else None
+    edges: dict[tuple[str, str], str] = {}
+    for entry in adjacency or []:
+        a, b = str(entry[0]), str(entry[1])
+        transport = str(entry[2]) if len(entry) >= 3 else s.topology.default_transport
+        edges[(min(a, b), max(a, b))] = transport.split("+")[0]
+    nodes = {n for e in edges for n in e}
+    for i, step in enumerate(s.schedule):
+        where = f"schedule[{i}]"
+        if step.until > s.duration_secs:
+            raise ValueError(
+                f"{where}: ends at {step.until:g} s, after the run's {s.duration_secs} s"
+            )
+        if step.kind == "load":
+            missing = [n for n in step.pair if n not in nodes]
+            if missing:
+                raise ValueError(f"{where}.load: {missing} not in the explicit topology")
+            continue
+        if step.edge not in edges:
+            raise ValueError(f"{where}.down: {step.edge} is not an explicit edge")
+        transport = edges[step.edge]
+        if step.mode == "netem" and not s.netem.enabled:
+            raise ValueError(f"{where}: a netem down needs netem.enabled")
+        if step.mode == "oneway":
+            if transport not in ("ethernet", "udp-veth"):
+                raise ValueError(f"{where}: oneway needs a veth edge, not {transport}")
+            if s.node_churn.enabled:
+                raise ValueError(
+                    f"{where}: oneway cannot run with node_churn, whose restart "
+                    f"drops the ingress filter"
+                )
+        if step.mode == "admin":
+            if transport == "udp-veth":
+                raise ValueError(
+                    f"{where}: admin on a udp-veth edge tests nothing a netem down "
+                    f"does not; interface-bound UDP reports neither carrier nor presence"
+                )
+            if transport != "ethernet":
+                raise ValueError(f"{where}: admin needs a veth edge, not {transport}")
+            if s.node_churn.enabled:
+                raise ValueError(
+                    f"{where}: admin cannot run with node_churn, whose restart "
+                    f"brings the veth back up"
+                )
+
+
+def _checkreverse(s: Scenario):
+    """reverse_heard reads addresses and a capture: its steps must be
+    oneway steps on udp-veth edges that capture at the dropped sender."""
+    if s.assertions.reverse_heard is None:
+        return
+    adjacency = s.topology.params.get("adjacency") or []
+    veth = {
+        (min(str(e[0]), str(e[1])), max(str(e[0]), str(e[1])))
+        for e in adjacency if len(e) >= 3 and str(e[2]).split("+")[0] == "udp-veth"
+    }
+    for i, step in enumerate(s.schedule):
+        if step.kind != "down" or step.mode != "oneway":
+            continue
+        if step.edge not in veth or step.src not in step.capture:
+            raise ValueError(
+                f"schedule[{i}]: reverse_heard needs each oneway step on a udp-veth "
+                f"edge, capturing at its from end ({step.src})"
+            )
+
+
 def _validate(s: Scenario):
     """Validate scenario constraints."""
+    _checkreverse(s)
     _validate_parent_switch_observability(s)
     _validate_error_observability(s)
+    _checksteps(s)
+    _checklevels(s)
     if s.topology.num_nodes < 2:
         raise ValueError("topology.num_nodes must be >= 2")
     if s.topology.num_nodes > 250:
@@ -1141,19 +1879,45 @@ def _validate(s: Scenario):
         if not adj or not isinstance(adj, list):
             raise ValueError("explicit topology requires params.adjacency list")
         node_ids = set()
+        laned: set[str] = set()
         for i, entry in enumerate(adj):
-            if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3):
+            if not isinstance(entry, (list, tuple)) or len(entry) not in (2, 3, 4):
                 raise ValueError(
-                    f"explicit adjacency[{i}]: expected [nodeA, nodeB] or "
-                    f"[nodeA, nodeB, transport], got {entry}"
+                    f"explicit adjacency[{i}]: expected [nodeA, nodeB], "
+                    f"[nodeA, nodeB, transport] or [nodeA, nodeB, udp-veth, "
+                    f"{{lanes: n}}], got {entry}"
                 )
             node_ids.update(str(p) for p in entry[:2])
+            if len(entry) == 4:
+                opts = entry[3]
+                lanes = opts.get("lanes") if isinstance(opts, dict) else None
+                if (
+                    str(entry[2]) != "udp-veth" or set(opts) != {"lanes"}
+                    or isinstance(lanes, bool) or not isinstance(lanes, int)
+                    or not 1 <= lanes <= 4
+                ):
+                    raise ValueError(
+                        f"explicit adjacency[{i}]: only a udp-veth edge takes "
+                        f"{{lanes: n}}, n from 1 to 4, got {entry}"
+                    )
+                ends = {str(p) for p in entry[:2]}
+                if ends & laned:
+                    raise ValueError(
+                        f"explicit adjacency[{i}]: a node holds at most one laned "
+                        f"edge (its lanes are named vl<k>-<node>)"
+                    )
+                laned |= ends
+                if s.node_churn.enabled:
+                    raise ValueError(
+                        f"explicit adjacency[{i}]: lanes cannot run with node_churn, "
+                        f"whose restart does not rebuild them"
+                    )
             if len(entry) == 3:
                 transport = str(entry[2])
-                if transport not in VALID_TRANSPORTS:
+                if transport not in VALID_TRANSPORTS and transport not in DUAL_TRANSPORTS:
                     raise ValueError(
                         f"explicit adjacency[{i}]: transport '{transport}' "
-                        f"not in {VALID_TRANSPORTS}"
+                        f"not in {VALID_TRANSPORTS} or {DUAL_TRANSPORTS}"
                     )
         if len(node_ids) != s.topology.num_nodes:
             raise ValueError(
@@ -1190,6 +1954,14 @@ def _validate(s: Scenario):
     if s.traffic.enabled:
         s.traffic.interval_secs.validate("traffic.interval_secs")
         s.traffic.duration_secs.validate("traffic.duration_secs")
+    ms = s.assertions.max_stall
+    if ms is not None and ms.stream == "udp" and not (
+        s.traffic.enabled and s.traffic.udp_mbps
+    ):
+        raise ValueError(
+            "assertions.max_stall.stream: udp needs traffic enabled with "
+            "traffic.udp_mbps, or no UDP stream runs to measure"
+        )
     if s.node_churn.enabled:
         s.node_churn.interval_secs.validate("node_churn.interval_secs")
         s.node_churn.down_duration_secs.validate("node_churn.down_duration_secs")

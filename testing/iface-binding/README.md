@@ -45,8 +45,9 @@ Via the local CI runner:
 ## Notes
 
 The containers run under `FIPS_TEST_MODE=default`, **not** `chaos`. The chaos
-entrypoint waits up to 30 s for every configured Ethernet interface before
-starting the daemon — which is exactly the workaround this mechanism retires.
+entrypoint waits for every configured Ethernet interface, until the harness
+says it has set up the container's veths (600 s at most), before starting the
+daemon — which is exactly the workaround this mechanism retires.
 The daemon has to do its own waiting here or the suite proves nothing.
 
 Every `ip link` operation on the host network stack runs inside a short-lived

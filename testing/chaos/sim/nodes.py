@@ -180,7 +180,12 @@ class NodeManager:
             # adds to that set, on a docker hiccup or a crash churn did not
             # cause, and a pair deferred on that basis would never be rebuilt.
             stopped = {nid for nid, ns in self.node_states.items() if ns.is_down}
-            self.veth_mgr.setup_node(node_id, stopped)
+            try:
+                self.veth_mgr.setup_node(node_id, stopped)
+            finally:
+                # Whatever came of it, nothing more is coming for this start:
+                # the entrypoint stops waiting for a pair left deferred.
+                self.veth_mgr.mark_ready(node_id)
 
         # Re-apply netem after a brief delay for the container to initialize
         if self.netem_mgr:

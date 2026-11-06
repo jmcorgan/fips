@@ -40,7 +40,7 @@ import uuid
 
 from .docker_exec import DockerExecError, docker_exec, docker_exec_quiet
 from .naming import name_suffix
-from .topology import SimTopology, veth_interface_name
+from .topology import UDP_VETH, SimTopology, veth_interface_name
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,10 @@ HELPER_CHECK_TIMEOUT_SECS = 30
 # The namespace name `_link_place` reports for the host's own.
 HOST_NS = "host"
 
+# Where `mark_ready` tells a node's entrypoint that its veths are set up
+# (testing/docker/entrypoint.sh, VETH_READY).
+VETH_READY = "/tmp/fips-veth-ready"
+
 
 class HostOutcome(enum.Enum):
     """How one host command ended."""
@@ -101,6 +105,8 @@ class VethManager:
         self.topology = topology
         # Track created host-side temp names for cleanup
         self._host_pairs: list[tuple[str, str, str, str]] = []
+        # Each laned node's lane MACs, in lane order.
+        self.lane_macs: dict[str, list[str]] = {}
         # (node_a, node_b, host_name_a, host_name_b)
         self._ip_image: str | None = None
 
@@ -141,14 +147,14 @@ class VethManager:
         4. Rename to final names and bring up
         5. Query MACs and store in SimNode.ethernet_macs
         """
-        eth_edges = self.topology.ethernet_edges()
-        if not eth_edges:
+        edges = self.topology.veth_edges()
+        if not edges:
             return
 
         image = self._get_image()
-        log.info("Setting up %d Ethernet veth pairs (helper image: %s)...", len(eth_edges), image)
+        log.info("Setting up %d veth pairs (helper image: %s)...", len(edges), image)
 
-        for a, b in eth_edges:
+        for a, b in edges:
             self._create_veth_pair(a, b, image)
 
         log.info(
@@ -165,7 +171,7 @@ class VethManager:
         stopped, whose pairs are left for their own restart.
         """
         image = self._get_image()
-        for a, b in self.topology.ethernet_edges():
+        for a, b in self.topology.veth_edges():
             if a != node_id and b != node_id:
                 continue
             # Remove existing pair if any (host-side might still exist)
@@ -173,6 +179,26 @@ class VethManager:
             _run_host(["ip", "link", "delete", host_a], image, check=False)
             # Re-create
             self._create_veth_pair(a, b, image, down_nodes or set())
+
+    def mark_ready(self, node_id: str) -> None:
+        """Tell ``node_id``'s entrypoint that the harness has finished with
+        its veths for this start, so it stops waiting for its bound
+        interfaces even if one is still missing.
+
+        The entrypoint waits until its interfaces are up or this word
+        comes, with no bound tied to how long setup takes, since that
+        follows the host's load. The file holds the container's boot id
+        (PID 1's start time), which a restart changes, so the word for an
+        earlier start does not end a restart's wait. A failed write is
+        logged and not raised: the entrypoint then still starts the daemon
+        once its interfaces are up.
+        """
+        docker_exec_quiet(
+            self.topology.container_name(node_id),
+            f"awk '{{print $22}}' /proc/1/stat > {VETH_READY}.tmp "
+            f"&& mv -f {VETH_READY}.tmp {VETH_READY}",
+            timeout=EXEC_TIMEOUT_SECS,
+        )
 
     def teardown_all(self):
         """Clean up all veth pairs."""
@@ -252,8 +278,16 @@ class VethManager:
             image, host_b, container_b,
         )
 
-        _raise_link(container_a, host_a, final_a)
-        _raise_link(container_b, host_b, final_b)
+        # A udp-veth edge carries IP: address each end before it comes up,
+        # so the daemon's interface wait never sees the interface without
+        # its address.
+        ip_a = ip_b = None
+        laned = self.topology.lanes(node_a, node_b)
+        if self.topology.transport_for_edge(node_a, node_b) == UDP_VETH and not laned:
+            ip_a = self.topology.veth_ip(node_a, node_b)
+            ip_b = self.topology.veth_ip(node_b, node_a)
+        _raise_link(container_a, host_a, final_a, ip_a)
+        _raise_link(container_b, host_b, final_b, ip_b)
         _await_up(container_a, final_a)
         _await_up(container_b, final_b)
 
@@ -271,11 +305,81 @@ class VethManager:
         self.topology.nodes[node_b].ethernet_macs[node_a] = mac_b
 
         self._host_pairs.append((node_a, node_b, host_a, host_b))
+        if laned:
+            self._raiselanes(node_a, node_b, final_a, final_b)
 
         log.info(
             "Veth %s(%s) -- %s(%s)  MAC: %s / %s",
             node_a, final_a, node_b, final_b, mac_a, mac_b,
         )
+
+    def _raiselanes(self, node_a: str, node_b: str, final_a: str, final_b: str):
+        """Put the laned edge's lanes on its veth pair, each end's entries
+        for the other's lanes fixed to the lane that holds the address.
+
+        Each end's veth is set NOARP: with ``arp_ignore=0`` it would answer
+        ARP for every address in its namespace and take frames no lane's
+        socket is bound to (seen on the development host). Each lane is a
+        macvlan in bridge mode on the veth with its own address. The fixed
+        entries keep lane 0 from answering ARP for every address, so the
+        link comes up on the pairs it dials; ``cross_lanes`` later rebinds
+        the far end's entries to cross them.
+        """
+        macs: dict[str, list[str]] = {}
+        for node, peer, parent in ((node_a, node_b, final_a), (node_b, node_a, final_b)):
+            container = self.topology.container_name(node)
+            lanes = self.topology.lane_links(node, peer)
+            cmds = [f"ip link set dev {parent} arp off"]
+            for lane in lanes:
+                cmds.append(
+                    f"ip link add {lane.iface} link {parent} type macvlan mode bridge"
+                    f" && ip addr add {lane.local_ip}/24 dev {lane.iface}"
+                    f" && ip link set {lane.iface} up"
+                )
+            _in_container(container, " && ".join(cmds), f"raising the lanes on {parent}")
+            macs[node] = [_get_mac_in_container(container, lane.iface) for lane in lanes]
+            if not all(macs[node]):
+                raise VethSetupError(f"a lane MAC of {node} could not be read: {macs[node]}")
+        self.lane_macs.update(macs)
+        for node, peer in ((node_a, node_b), (node_b, node_a)):
+            peer_lanes = self.topology.lane_links(peer, node)
+            entries = [(l.local_ip, mac) for l, mac in zip(peer_lanes, macs[peer])]
+            self._bind(node, peer, entries, "fixing")
+        log.info("Lanes %s--%s up, MACs %s", node_a, node_b, macs)
+
+    def cross_lanes(self, node_a: str, node_b: str) -> list[tuple[str, str]]:
+        """Rebind the far end's entries for the dialler's lane addresses each
+        to the next lane's MAC, so every answer to the dialler's probe on
+        one lane arrives on another: on the development host only entries set
+        by hand produced the crossing. Done once the link is up, since a
+        handshake answered on another lane does not complete."""
+        outbound = self.topology.directed_outbound()
+        dialler, far = (node_a, node_b) if node_b in outbound[node_a] else (node_b, node_a)
+        entries = _crossing(self.topology.lane_links(dialler, far), self.lane_macs[dialler])
+        self._bind(far, dialler, entries, "crossing")
+        log.info("Lanes %s--%s crossed: %s's entries for %s's lanes: %s",
+                 node_a, node_b, far, dialler, entries)
+        return entries
+
+    def _bind(self, node: str, peer: str, entries: list[tuple[str, str]], what: str):
+        """Set ``node``'s permanent entries ``(ip, mac)`` on each of its lanes."""
+        cmds = [
+            f"ip neigh replace {ip} lladdr {mac} dev {lane.iface} nud permanent"
+            for ip, mac in entries
+            for lane in self.topology.lane_links(node, peer)
+        ]
+        _in_container(
+            self.topology.container_name(node), " && ".join(cmds),
+            f"{what} {node}'s neighbour entries for {peer}'s lanes",
+        )
+
+
+def _crossing(lanes_a: list, macs_a: list[str]) -> list[tuple[str, str]]:
+    """The neighbour entries the far end of a laned edge is given: each of
+    the dialler's lane addresses bound to the next lane's MAC, so every
+    answer to a probe from one lane arrives on another (``(ip, mac)``)."""
+    n = len(lanes_a)
+    return [(lanes_a[k].local_ip, macs_a[(k + 1) % n]) for k in range(n)]
 
 
 def _in_container(container: str, cmd: str, what: str, timeout: int = EXEC_TIMEOUT_SECS) -> str:
@@ -386,11 +490,13 @@ def _link_place(link: str, image: str, containers: list[str]) -> str:
     return "absent"
 
 
-def _raise_link(container: str, temp: str, final: str):
-    """Rename a moved veth end to its final name and set it up."""
+def _raise_link(container: str, temp: str, final: str, ip: str | None = None):
+    """Rename a moved veth end to its final name, address it if asked,
+    and set it up."""
+    addr = f" && ip addr add {ip}/24 dev {final}" if ip else ""
     _in_container(
         container,
-        f"ip link set {temp} name {final} && ip link set {final} up",
+        f"ip link set {temp} name {final}{addr} && ip link set {final} up",
         f"renaming {temp} to {final}",
     )
 

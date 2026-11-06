@@ -11,16 +11,22 @@ shows it, so this check runs the draws under several hash seeds and compares.
 
 How: the parent runs this file again as a child (`--emit <case>`) once per
 PYTHONHASHSEED in HASH_SEEDS, with one seed repeated. Each child loads
-testing/chaos/scenarios/churn-mixed.yaml, builds the topology and the netem,
-link-flap, node-churn and peer-churn managers from the simulator's own
-classes, replaces their side-effecting methods with recorders, drives a few
-rounds of each, and prints every draw. Each manager gets its own stream, so
-one site's dependence can neither hide nor be blamed on another's. Cases:
+testing/chaos/scenarios/churn-mixed.yaml (the dual case its own fixture),
+builds the topology and the netem, link-flap, node-churn and peer-churn
+managers from the simulator's own classes, replaces their side-effecting
+methods with recorders, drives a few rounds of each, and prints every draw.
+Each manager gets its own stream, so one site's dependence can neither hide
+nor be blamed on another's. Cases:
 
   ci   churn-mixed at 10 nodes, the invocation local and GitHub CI gate on;
   all  churn-mixed at its own 20 nodes, with ingress policing (four tiers)
        and peer churn turned on, so every known site is exercised. 20 nodes
        is what makes the dial-direction site reliably visible.
+  dual DUAL_FIXTURE below, an explicit topology mixing dual edges
+       (ethernet+udp, udp-veth+udp) with plain Ethernet and UDP ones, with
+       link flaps confined to Ethernet edges (only_transport), so the
+       filter that picks which edges may flap is exercised and the dial
+       direction of a dual edge's bridge half is compared.
 
 A child's printed outbound lists are sorted per node, because the generated
 config sorts them; only which node dials which reaches a run.
@@ -83,7 +89,41 @@ CHILD_TIMEOUT_SECS = 120
 CASES: dict[str, tuple[str, ...]] = {
     "ci": ("outbound", "tiers", "mutate", "flaps", "nodechurn"),
     "all": ("outbound", "tiers", "ingress", "mutate", "flaps", "nodechurn", "peerchurn"),
+    "dual": ("outbound", "flaps"),
 }
+
+# The dual case's scenario, held here rather than under scenarios/ so that
+# neither the suite list nor the excluded list needs it. Nine edges, so the
+# unsorted control's sample of five has room to differ; five of them are
+# Ethernet (three dual, two plain), so three rounds of flaps draw from a
+# filtered set of two kinds.
+DUAL_FIXTURE = """
+scenario:
+  name: "chaos-schedule-dual"
+  seed: 42
+  duration_secs: 60
+topology:
+  algorithm: explicit
+  num_nodes: 7
+  params:
+    adjacency:
+      - [n01, n02, ethernet+udp]
+      - [n02, n03, ethernet+udp]
+      - [n03, n04, ethernet+udp]
+      - [n04, n05, ethernet]
+      - [n05, n06, ethernet]
+      - [n06, n07, udp-veth+udp]
+      - [n07, n01, udp]
+      - [n01, n04, udp]
+      - [n02, n06, udp]
+netem:
+  enabled: false
+link_flaps:
+  enabled: true
+  only_transport: ethernet
+  max_down_links: 3
+  protect_connectivity: false
+"""
 
 # (module, class, method) replaced by a recorder in the child.
 STUBS = (
@@ -146,13 +186,23 @@ def emit(case: str) -> int:
     }
     _check_stubs(modules)
 
-    s = load_scenario(str(SCENARIO))
-    if case == "ci":
-        s.topology.num_nodes = 10
+    if case == "dual":
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(DUAL_FIXTURE)
+        try:
+            s = load_scenario(f.name)
+        finally:
+            os.unlink(f.name)
     else:
-        s.ingress.enabled = True
-        s.ingress.tiers_kbps = [250, 500, 1000, 2000]
-        s.peer_churn.enabled = True
+        s = load_scenario(str(SCENARIO))
+        if case == "ci":
+            s.topology.num_nodes = 10
+        else:
+            s.ingress.enabled = True
+            s.ingress.tiers_kbps = [250, 500, 1000, 2000]
+            s.peer_churn.enabled = True
 
     def stream(name: str) -> random.Random:
         """One stream per consumer, named as master's runner names them."""
