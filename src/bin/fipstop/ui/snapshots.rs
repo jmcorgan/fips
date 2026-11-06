@@ -112,6 +112,270 @@ fn bloom_peer_filters_alignment() {
     assert_eq!(cols[0], cols[1], "fill: columns align across rows");
 }
 
+/// A `paths` entry as `show_peers` sends it, live and not pinned, with the
+/// given transport, address, state and round trip.
+fn path_entry(
+    id: u64,
+    name: &str,
+    t_type: &str,
+    addr: &str,
+    state: &str,
+    active: bool,
+    rtt: Option<u64>,
+) -> serde_json::Value {
+    json!({
+        "transport_id": id, "transport": name, "transport_type": t_type,
+        "addr": addr, "state": state, "active": active,
+        "remote_active": active, "role": "normal", "pinned": false,
+        "last_rtt_ms": rtt, "min_rtt_ms": rtt,
+        "rtt_samples": if rtt.is_some() { 4 } else { 0 },
+        "etx": 1.0, "score": rtt.map(|ms| 1.0 + ms as f64 / 100.0),
+    })
+}
+
+/// The Peers tab rendered from `data` with sorted peer `selected` selected.
+fn peers_buf(data: serde_json::Value, selected: Option<usize>) -> ratatui::buffer::Buffer {
+    let mut app = app_with(Tab::Peers, data);
+    if let Some(i) = selected {
+        app.table_states
+            .entry(Tab::Peers)
+            .or_default()
+            .select(Some(i));
+    }
+    testkit::render(140, 20, |frame, area| {
+        super::peers::draw(frame, &mut app, area);
+    })
+}
+
+/// Peers multi-path: a peer with two paths renders each as a tree-drawn
+/// child row carrying the path's own columns (the peer row's Transport,
+/// SRTT and LQI go blank), the active path green and a standby dimmed; a
+/// single-path peer stays one line with its transport inline. Selection
+/// stays on peer rows: each peer's highlight lands on its own row, never on
+/// a child row.
+#[test]
+fn peers_paths_render_as_child_rows() {
+    let mut wifi = path_entry(2, "wifi", "udp", "10.0.1.2:2121", "live", false, Some(30));
+    wifi["role"] = json!("backup");
+    let data = json!({
+        "peers": [
+            {
+                "display_name": "alice", "npub": "npub1alice",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.0.2:2121",
+                "mmp": { "srtt_ms": 12.0, "lqi": 1.10 },
+                "paths": [
+                    path_entry(1, "cable", "udp", "10.0.0.2:2121", "live", true, Some(12)),
+                    wifi
+                ]
+            },
+            {
+                "display_name": "bob", "npub": "npub1bob",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.2.2:2121",
+                "mmp": { "srtt_ms": 7.0, "lqi": 2.07 },
+                "paths": [
+                    path_entry(1, "cable", "udp", "10.0.2.2:2121", "live", true, Some(7))
+                ]
+            }
+        ]
+    });
+    let buf = peers_buf(data.clone(), Some(1));
+
+    let y_alice = testkit::find(&buf, "alice").map(|(_, y)| y).unwrap();
+    let (_, y_cable) = testkit::find(&buf, "├─ cable").expect("first path row");
+    let (_, y_wifi) = testkit::find(&buf, "└─ wifi").expect("last path row");
+    let y_bob = testkit::find(&buf, "bob").map(|(_, y)| y).unwrap();
+    assert_eq!(y_cable, y_alice + 1, "active path directly under its peer");
+    assert_eq!(y_wifi, y_alice + 2, "standby path after the active one");
+    assert_eq!(y_bob, y_alice + 3, "next peer follows the last path row");
+
+    let rows = testkit::lines(&buf);
+    let cable_row = &rows[y_cable as usize];
+    assert!(
+        cable_row.contains("active") && cable_row.contains("udp/10.0.0.2:2121"),
+        "active path labelled, with its transport: {cable_row}"
+    );
+    let wifi_row = &rows[y_wifi as usize];
+    assert!(
+        wifi_row.contains("live,backup") && wifi_row.contains("udp/10.0.1.2:2121"),
+        "standby carries its state, role and transport: {wifi_row}"
+    );
+    assert_eq!(
+        testkit::fg_at(&buf, "├─ cable"),
+        Some(ratatui::style::Color::Green),
+        "active path green"
+    );
+    assert_eq!(
+        testkit::fg_at(&buf, "└─ wifi"),
+        Some(ratatui::style::Color::DarkGray),
+        "standby path dimmed"
+    );
+
+    // alice's own row carries no transport or SRTT: they moved to her paths.
+    let alice_row = &rows[y_alice as usize];
+    assert!(
+        !alice_row.contains("udp/10.0.0.2:2121") && !alice_row.contains("12.0"),
+        "multi-path peer row leaves Transport and SRTT to its child rows: {alice_row}"
+    );
+
+    // bob has one path: a single line with the transport inline, no children.
+    let bob_row = &rows[y_bob as usize];
+    assert!(
+        bob_row.contains("udp/10.0.2.2:2121") && bob_row.contains("7.0"),
+        "single-path peer keeps transport and SRTT on its own row: {bob_row}"
+    );
+    assert!(
+        !testkit::contains_row(&buf, "└─ cable"),
+        "single-path peer draws no child row"
+    );
+
+    // bob (peer index 1) selected: the highlight sits on bob's row.
+    let (_, y_sel) = testkit::find(&buf, "▶ ").expect("selection marker");
+    assert_eq!(y_sel, y_bob, "selection lands on bob's row");
+
+    // alice (peer index 0) selected: on alice's row, not on a path row.
+    let buf = peers_buf(data, Some(0));
+    let (_, y_sel) = testkit::find(&buf, "▶ ").expect("selection marker");
+    assert_eq!(y_sel, y_alice, "selection lands on alice's row");
+}
+
+/// A peer whose second path has never been acked shows it in `probing`,
+/// with no round trip or score, still as a tree row and in yellow, so the
+/// operator sees the transport is there and unproven.
+#[test]
+fn peers_probing_path_renders_unproven() {
+    let data = json!({
+        "peers": [
+            {
+                "display_name": "oldpeer", "npub": "npub1old",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.0.2:2121",
+                "paths": [
+                    path_entry(1, "cable", "udp", "10.0.0.2:2121", "live", true, None),
+                    path_entry(2, "wifi", "udp", "10.0.1.2:2121", "probing", false, None)
+                ]
+            }
+        ]
+    });
+    let buf = peers_buf(data, None);
+
+    let (_, y_wifi) = testkit::find(&buf, "└─ wifi").expect("probing path row");
+    let row = &testkit::lines(&buf)[y_wifi as usize];
+    assert!(row.contains("probing"), "unproven path labelled: {row}");
+    assert!(
+        row.contains("udp/10.0.1.2:2121"),
+        "its transport shown: {row}"
+    );
+    assert_eq!(
+        testkit::fg_at(&buf, "└─ wifi"),
+        Some(ratatui::style::Color::Yellow),
+        "probing path yellow"
+    );
+}
+
+/// Loss is measured on the link, not per path, so a multi-path peer's row
+/// keeps it in the Loss column while its per-path columns move to the
+/// child rows.
+#[test]
+fn a_multi_path_peer_row_keeps_its_loss() {
+    let data = json!({
+        "peers": [
+            {
+                "display_name": "alice", "npub": "npub1alice",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.0.2:2121",
+                "mmp": { "srtt_ms": 12.0, "smoothed_loss": 0.123, "lqi": 1.10 },
+                "paths": [
+                    path_entry(1, "cable", "udp", "10.0.0.2:2121", "live", true, Some(12)),
+                    path_entry(2, "wifi", "udp", "10.0.1.2:2121", "live", false, Some(30))
+                ]
+            }
+        ]
+    });
+    let buf = peers_buf(data, None);
+
+    let (x_loss, _) = testkit::find(&buf, "Loss").expect("Loss header");
+    let (_, y_alice) = testkit::find(&buf, "alice").expect("alice's row");
+    assert!(
+        testkit::find(&buf, "└─ wifi").is_some(),
+        "precondition: alice is drawn as a tree"
+    );
+    let cell: String = (x_loss..x_loss + 5)
+        .filter_map(|x| buf.cell((x, y_alice)).map(|c| c.symbol().to_string()))
+        .collect();
+    assert_eq!(
+        cell, "0.123",
+        "the peer row's Loss column shows the link's loss"
+    );
+}
+
+/// A row from a daemon that sends no `paths` draws as it always has, one
+/// line with its transport inline, and the same row with a one-entry
+/// `paths` array draws identically. Two renders of a one-peer payload.
+#[test]
+fn a_peer_row_with_no_paths_renders_as_one_line() {
+    let bare = json!({
+        "display_name": "carol", "npub": "npub1carol",
+        "is_parent": false, "is_child": false, "direction": "outbound",
+        "transport_type": "udp", "transport_addr": "10.0.0.2:2121",
+        "mmp": { "srtt_ms": 9.0, "smoothed_loss": 0.01, "lqi": 1.20 }
+    });
+    let mut one = bare.clone();
+    one["paths"] = json!([path_entry(
+        1,
+        "cable",
+        "udp",
+        "10.0.0.2:2121",
+        "live",
+        true,
+        Some(9)
+    )]);
+
+    let row_of = |peer: serde_json::Value| {
+        let buf = peers_buf(json!({ "peers": [peer] }), None);
+        assert!(
+            !testkit::contains_row(&buf, "├─ ") && !testkit::contains_row(&buf, "└─ "),
+            "no child rows (the table's own border has └ and ─, but no space)"
+        );
+        let (_, y) = testkit::find(&buf, "carol").expect("carol's row");
+        testkit::lines(&buf)[y as usize].clone()
+    };
+    let without = row_of(bare);
+    assert!(
+        without.contains("udp/10.0.0.2:2121") && without.contains("9.0"),
+        "transport inline with no paths key: {without}"
+    );
+    let with = row_of(one);
+    assert_eq!(without, with, "the two rows' text equal");
+}
+
+/// A one-path peer's Transport cell is its path's transport and address,
+/// not the row's `transport_type`, which names the link's original
+/// transport.
+#[test]
+fn a_one_path_peer_draws_its_transport_from_its_path() {
+    let data = json!({
+        "peers": [
+            {
+                "display_name": "dave", "npub": "npub1dave",
+                "is_parent": false, "is_child": false,
+                "transport_type": "udp", "transport_addr": "10.0.3.2:443",
+                "paths": [
+                    path_entry(2, "tunnel", "tcp", "10.0.3.2:443", "live", true, Some(20))
+                ]
+            }
+        ]
+    });
+    let buf = peers_buf(data, None);
+    let (_, y) = testkit::find(&buf, "dave").expect("dave's row");
+    let row = &testkit::lines(&buf)[y as usize];
+    assert!(
+        row.contains("tcp/10.0.3.2:443") && !row.contains("udp/"),
+        "the path's transport: {row}"
+    );
+}
+
 /// Peers group-sort: the comparator orders parent before STP children
 /// before other peers, regardless of LQI, while preserving within-group
 /// LQI order.

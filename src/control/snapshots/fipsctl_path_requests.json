@@ -1,0 +1,17 @@
+[
+  {
+    "args": ["path", "pin", "<npub>", "2", "<addr>"],
+    "request": {
+      "command": "path_pin",
+      "params": { "npub": "<npub>", "transport": "2", "address": "<addr>" }
+    }
+  },
+  {
+    "args": ["path", "show", "<npub>"],
+    "request": { "command": "path_show", "params": { "npub": "<npub>" } }
+  },
+  {
+    "args": ["path", "unpin", "<npub>"],
+    "request": { "command": "path_unpin", "params": { "npub": "<npub>" } }
+  }
+]

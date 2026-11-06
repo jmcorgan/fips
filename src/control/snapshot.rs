@@ -612,6 +612,44 @@ pub(crate) struct EntityMmp {
     pub path_mtu: Option<u16>,
 }
 
+/// One path of a peer's link in `show_peers`, as the link's path machine
+/// shows it: the transport and address it runs over, where it stands, and
+/// its measurements. Built by one projection
+/// ([`Node::peer_paths`](crate::node::Node::peer_paths)) on the loop and in
+/// the snapshot, so the two renders cannot drift.
+#[derive(Clone, PartialEq)]
+pub(crate) struct PeerPathRow {
+    /// The local transport's id.
+    pub transport_id: u32,
+    /// The transport's configured instance name, when it has one.
+    pub transport: Option<String>,
+    /// The transport's type name, absent once its handle is gone.
+    pub transport_type: Option<String>,
+    /// The peer's address on the transport.
+    pub addr: String,
+    /// `probing`, `live`, `suspect` or `dead`.
+    pub state: &'static str,
+    /// Whether this node sends on the path.
+    pub active: bool,
+    /// Whether the peer's latest probe or matched ack on the path said the
+    /// peer sends on it.
+    pub remote_active: bool,
+    /// The transport's role: `preferred`, `normal`, `backup` or `never`.
+    pub role: &'static str,
+    /// Whether the operator's pin names the path, in force or suspended.
+    pub pinned: bool,
+    /// The latest round trip, in milliseconds.
+    pub last: Option<u64>,
+    /// The least round trip in the window, in milliseconds.
+    pub least: Option<u64>,
+    /// The round-trip samples in the window.
+    pub samples: usize,
+    /// The path's smoothed ETX.
+    pub etx: f64,
+    /// The path's score, lower being better, once it has a round trip.
+    pub score: Option<f64>,
+}
+
 /// Link-layer stat counters for a peer in `show_peers`.
 #[derive(Clone, PartialEq)]
 pub(crate) struct PeerLinkStats {
@@ -694,6 +732,8 @@ pub(crate) struct PeerRow {
     pub rekey_draining: bool,
     pub current_k_bit: bool,
     pub mmp: Option<EntityMmp>,
+    /// Every path the link holds, in the path set's order.
+    pub paths: Vec<PeerPathRow>,
 }
 
 /// Traffic counters for a session in `show_sessions`.
