@@ -734,6 +734,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Source-breaking for consumers of the library crate**:
   `fips::ipv6tun::tun::TunError::Ipv6Disabled` carries the reason as a
   `String`; match it as `Ipv6Disabled(_)`.
+- **Source-breaking for consumers of the library crate**:
+  `fips::SessionFlags` no longer has the `request_ack` and `bidirectional`
+  fields, or `with_ack()` and `bidirectional()`. FRC-1501 reserves the
+  SessionSetup flags byte with no named bits, and nothing used them. The type
+  now carries the byte as it arrived.
 
 #### Packaging
 
@@ -815,6 +820,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolver drop-in, because `pkg` ended the daemon the new package started.
   An upgrade from 0.5.3 still runs 0.5.3's pre-deinstall, which stops the
   daemon, so it still needs `service fips restart`.
+
+#### OpenWrt
+
+- `fips-gateway` no longer gives the LAN the address `2001:2:f1b5::1/64`
+  unless `gateway.global_prefix: true` is in `fips.yaml`. With upstream IPv6,
+  LAN clients picked that unrouted address as the source for many global
+  destinations and those connections failed. The first start after an upgrade
+  without the key removes the address, with one network reload, and waits 15
+  seconds so that odhcpd can advertise it as withdrawn. A client that formed
+  the address itself and hears this stops choosing it. One that misses it
+  keeps the address and its connections from it time out, on OpenWrt 23.05 and
+  22.03 until its link drops. A client with a DHCPv6 lease on the address
+  keeps choosing it even when it hears the withdrawal, and its connections
+  from it to global destinations time out where they failed at once before.
+  `dhcpcd`, the only client tried, kept it for the 25 minutes measured; this is
+  inferred to last until the lease ends, about 12 hours at OpenWrt's default
+  lease time. The gateway still advertises an IPv6 default route with or
+  without the key, because on an IPv4-only uplink that route is how LAN clients
+  reach the gateway's pool; there, a LAN client's connection to a global IPv6
+  address fails at once with an unreachable error from the router. On an
+  IPv4-only uplink, set the key if Android or Chrome clients use the gateway:
+  they send AAAA queries only with a global-scope address.
 
 ### Deprecated
 
@@ -1346,6 +1373,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port-unreachable as a failed receive. A STUN server whose port is closed
   is now waited out for its timeout before the next one is tried, as on
   other platforms.
+- Stopping the TUN no longer hangs on a quiet adapter. The reader waits in the
+  Wintun session's blocking receive, which only a packet or the session's
+  shutdown ends, and nothing shut the session down, so with no host traffic the
+  stop never returned. That froze the daemon's runtime, and the Windows service
+  never reported Stopped. The stop now shuts the session down first, and logs
+  no TUN read error for it.
 
 #### OpenWrt
 
@@ -1428,6 +1461,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted increase rises again when the destination reports the higher
   value. Before, it stayed at the lowered value until the session was
   rebuilt.
+- A session endpoint now makes the checks FRC-1501 Section 5.1 requires, and
+  discards what fails them without an answer. A handshake message or routing
+  signal is dropped before dispatch if its `payload_len` is not the bytes after
+  its prefix or its prefix sets a reserved bit. A SessionSetup, SessionAck or
+  SessionMsg3 with a body flag bit set or a byte after its Noise message is
+  refused: a setup opens no session and draws no SessionAck, and an ack or msg3
+  completes nothing. A routing signal with a reserved flag bit or bytes after
+  its body is refused. An established message with a reserved prefix bit, or
+  whose `payload_len` is not its ciphertext less the tag, is dropped before any
+  key is tried. One that authenticates with a reserved `inner_flags` bit takes
+  its replay slot but is not delivered, and writes no coordinates. Before, all
+  of these were accepted. A transit node still reads the coordinates of such
+  messages, as Section 4.7 allows. FIPS senders already conform, so nothing on
+  the wire changes.
 
 #### Identity and config
 
@@ -1599,6 +1646,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   responder and REFUSED from the gateway. Names that resolvers send for
   `.fips` lookups are not affected.
 
+- Packet Too Big to the host is limited by a token bucket per source address,
+  a burst of 10 and then 10 a second, as RFC 4443 Section 2.4 (f) recommends,
+  instead of one answer per 100 ms. The limit is per source while the host
+  caches path MTU per destination, so a source that sent oversized packets to
+  two destinations in quick succession was told about the first only, and its
+  packets to the second were lost until it retried. Back-to-back oversized
+  packets are now each answered, and a flood from one source is still held to
+  the rate.
+
 #### Documentation
 
 - Reference and design documents that disagreed with the code are
@@ -1615,6 +1671,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case rule for host aliases, and the FreeBSD README, which said the TUN
   interface is destroyed when the daemon exits (the daemon takes it down,
   and the next start reuses it).
+- The design documents now cite each RFC, NIP and paper for what it says,
+  credit Yggdrasil and Ironwood for what FIPS inherits from them, and list what
+  FIPS changes with the precedent for each. A few internals they misdescribed
+  are corrected too.
+- The OpenWrt docs no longer say `stop` and `disable` delete the gateway's LAN
+  address in either order, or that removing the package does. On OpenWrt
+  23.05.6, `disable` straight after `stop` left the address, and so did package
+  removal. Run `disable` first, and see the package README for the rest.
 
 ### Security
 
@@ -1708,19 +1772,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Routing and discovery
 
-- A tree child's bloom filter that returns most of the filter this node sent
-  it is now rejected, and the child's previous filter kept. A child's filter
-  is merged into every filter the node sends, including the one to its parent,
-  so a child announcing back what it was sent made the node's upward filter
-  claim the whole mesh, which the false-positive cap cannot tell apart from an
-  honest whole-mesh view. The check compares each announce from a tree child
-  with the filter last sent to it, and leaves room for a subtree already
-  present in what was sent. It applies only when the filter sent has at least
+- A tree child's bloom filter that returns most of a filter this node recently
+  sent it is now rejected, and the child's previous filter kept. A child's
+  filter is merged into every filter the node sends, including the one to its
+  parent, so a child announcing back what it was sent made the node's upward
+  filter claim the whole mesh, which the false-positive cap cannot tell apart
+  from an honest whole-mesh view. The check compares each announce from a tree
+  child with each of the last four distinct filters sent to it, so a child
+  whose view lags cannot pass by returning an earlier one, and leaves room for
+  a subtree already present in what was sent. An echo of a filter older than
+  those four still passes. It applies only when the filter sent has at least
   128 set bits and the child already has a stored filter, so a false rejection
   never drops a child's subtree outright; parents and non-tree peers are not
-  checked. Rejections are counted as `child_role_rejected` in `show_bloom`
-  and logged at WARN. The threshold is `node.bloom.child_echo_threshold`
-  (default 0.8; 1.0 or above turns the check off).
+  checked. Rejections are counted as `child_role_rejected` in `show_bloom`;
+  the first from a peer in each five minutes is logged at WARN and the rest at
+  DEBUG. The threshold is `node.bloom.child_echo_threshold` (default 0.8; 1.0
+  or above turns the check off).
 - A `FilterAnnounce` whose hash count is not 5 is rejected as non-v1. A peer
   could announce a nearly full filter with a large hash count, pass the
   false-positive cap, and have its bits merged into every filter the node
