@@ -13,7 +13,8 @@
 # "ip link show <name>" exactly while $LINKS/<name> exists ($FIPS0 for fips0),
 # records every "ip -6 route" call to $CALLS, and passes every call it does
 # not answer to busybox. sleep is a stub that records the wait a start takes
-# after deleting the prefix ($PREFIX_SLEEP), and passes every call to busybox.
+# after deleting the prefix ($PREFIX_SLEEP) and returns at once, and passes
+# every other call to busybox.
 #
 # Seams:
 #   INIT_GATEWAY  the init script under test; default the one built into the
@@ -178,7 +179,8 @@ STUB
 }
 
 # Install the sleep stub at the path the image's sleep has, a link to busybox
-# in every pinned image, as for ip_stub.
+# in every pinned image, as for ip_stub. The cases read the wait from $CALLS,
+# so none of them pays for it; the GitHub CI step has a time limit.
 sleep_stub() {
 	local p
 	p="$(command -v sleep)"
@@ -186,7 +188,10 @@ sleep_stub() {
 	rm -f "$p"
 	cat > "$p" <<STUB
 #!/bin/sh
-[ "sleep \$*" = "$PREFIX_SLEEP" ] && echo "sleep \$*" >> $CALLS
+if [ "sleep \$*" = "$PREFIX_SLEEP" ]; then
+	echo "sleep \$*" >> $CALLS
+	exit 0
+fi
 exec /bin/busybox sleep "\$@"
 STUB
 	chmod 0755 "$p"
