@@ -468,7 +468,9 @@ impl<I: BleIo> BleTransport<I> {
 
         // Stop the writers of closed connections still finishing their
         // queues: they are out of the pool, so the drain above missed them.
-        self.draining.stop().await;
+        if !node_fault!(BleStopLeavesDrains) {
+            self.draining.stop().await;
+        }
 
         self.state = TransportState::Down;
         info!("BLE transport stopped");
@@ -915,11 +917,16 @@ impl<I: BleIo> BleTransport<I> {
         let closed: Vec<_> = {
             let mut pool = self.pool.lock().await;
             for addr in pool.addrs() {
-                if held(&addr) {
+                if held(&addr) && !node_fault!(BleUnprovenIgnoresHeld) {
                     pool.hold(&addr, now);
                 }
             }
-            pool.unproven(now, timeout)
+            let unproven = if node_fault!(BleUnprovenNeverClosed) {
+                Vec::new()
+            } else {
+                pool.unproven(now, timeout)
+            };
+            unproven
                 .into_iter()
                 .filter_map(|addr| pool.remove(&addr).map(|conn| (addr, conn)))
                 .collect()
@@ -941,7 +948,11 @@ impl<I: BleIo> BleTransport<I> {
     /// End a connection taken out of the pool by a deliberate close: abort
     /// its receive task, and let its writer finish what was queued.
     fn retire(&self, mut conn: BleConnection<Arc<I::Stream>>) {
-        let writer = conn.send_task.take();
+        let writer = if node_fault!(BleCloseAbortsWriter) {
+            None
+        } else {
+            conn.send_task.take()
+        };
         // Aborts the receive task, and drops the queue's sender, so the
         // writer ends once it has written what was queued.
         drop(conn);
@@ -1851,7 +1862,11 @@ async fn send_loop<S: BleStream + 'static>(
             Err(e) => {
                 stats.record_send_error();
                 warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
-                pool.lock().await.remove_own(&addr, id);
+                if node_fault!(BleWriterRemovesByAddress) {
+                    pool.lock().await.remove(&addr);
+                } else {
+                    pool.lock().await.remove_own(&addr, id);
+                }
                 return;
             }
         }

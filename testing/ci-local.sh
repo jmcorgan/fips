@@ -978,6 +978,19 @@ run_tests() {
         record "known-defect" 1
     fi
 
+    # The mutation lane: each switch in core/src/faults.rs, turned on in a
+    # test process of its own, must turn red the tests
+    # testing/mutations/manifest.txt names for it, at their assertion of the
+    # behaviour it breaks, and every named test must pass with no switch. It
+    # also checks that no switch reaches a normal build of fips. Mirrored in
+    # .github/workflows/ci.yml.
+    info "testing/mutations/run.sh"
+    if bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+        record "mutations" 0
+    else
+        record "mutations" 1
+    fi
+
     # The root crate's optional features add code the default-feature run
     # above never compiles: `profiling` a module, a recorder and a writer
     # thread, `test-overrides` the honoured test-only configuration keys and

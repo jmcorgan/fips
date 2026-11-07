@@ -344,6 +344,14 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
     };
 
     if admitted {
+        let ceiling = if node_fault!(ProxiedRecvBoundedByMtu) {
+            pool.lock()
+                .await
+                .get(&remote_addr)
+                .map_or(RECV_CEILING, |c| c.mtu)
+        } else {
+            RECV_CEILING
+        };
         let mut first = true;
         loop {
             let read = match deadline {
@@ -352,9 +360,7 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
                 // as it keeps the socket open.
                 Some(d) => {
                     let limit = d.for_read(first);
-                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, RECV_CEILING))
-                        .await
-                    {
+                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, ceiling)).await {
                         Ok(result) => result,
                         Err(_) => {
                             // Not a recv error: `record_recv_error` means framing
@@ -372,7 +378,7 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
                         }
                     }
                 }
-                None => read_fmp_packet(&mut reader, RECV_CEILING).await,
+                None => read_fmp_packet(&mut reader, ceiling).await,
             };
             first = false;
 

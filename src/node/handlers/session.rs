@@ -3112,7 +3112,11 @@ impl Node {
     /// process's monotonic clock, in milliseconds (`crate::time::mono_ms`).
     /// A step of the system clock does not move it.
     pub(in crate::node) fn interval_ms() -> u64 {
-        crate::time::mono_ms()
+        if node_fault!(IntervalOnWall) {
+            crate::time::wall_ms()
+        } else {
+            crate::time::mono_ms()
+        }
     }
 
     /// Now on both clocks a handshake leg keeps, read together: the wall

@@ -98,7 +98,9 @@ impl MmpPeerState {
     pub fn reset_for_rekey(&mut self, now_ms: u64) {
         self.receiver.reset_for_rekey(now_ms);
         self.metrics.reset_for_rekey();
-        self.spin_bit.restart();
+        if !node_fault!(LinkSpinKept) {
+            self.spin_bit.restart();
+        }
     }
 
     /// Current operating mode.
@@ -183,7 +185,9 @@ impl MmpSessionState {
     pub fn reset_for_rekey(&mut self, now_ms: u64) {
         self.receiver.reset_for_rekey(now_ms);
         self.metrics.reset_for_rekey();
-        self.spin_bit.restart();
+        if !node_fault!(SessionSpinKept) {
+            self.spin_bit.restart();
+        }
     }
 
     /// Current operating mode.

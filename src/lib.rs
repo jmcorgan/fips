@@ -9,6 +9,25 @@
 // distance to extracting the pure cores into a `no_std` crate later.
 extern crate alloc;
 
+/// Whether the mutation lane's switch `$f` is on (`fips_core::faults`, read
+/// from `FIPS_NODE_FAULTS`). Outside test builds it is the literal `false`,
+/// so production code has no switch to turn and the branch it guards
+/// compiles away. Defined before the modules so every one of them sees it.
+#[cfg(test)]
+macro_rules! node_fault {
+    ($f:ident) => {
+        fips_core::faults::on(fips_core::faults::Fault::$f)
+    };
+}
+
+/// Outside test builds no break can be switched on.
+#[cfg(not(test))]
+macro_rules! node_fault {
+    ($f:ident) => {
+        false
+    };
+}
+
 pub mod cache;
 pub mod config;
 pub mod control;

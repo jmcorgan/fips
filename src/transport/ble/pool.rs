@@ -359,10 +359,21 @@ impl<S> ConnectionPool<S> {
     /// `held_from`. These are the channels FRC-1301 Section 6.5.4 says to
     /// close.
     pub fn unproven(&self, now: tokio::time::Instant, timeout: Duration) -> Vec<TransportAddr> {
+        let timeout = match (
+            node_fault!(BleUnprovenAtHalfTimeout),
+            node_fault!(BleUnprovenTwoSecondsEarly),
+        ) {
+            (true, _) => timeout / 2,
+            (false, true) => timeout - Duration::from_secs(2),
+            (false, false) => timeout,
+        };
+        let ignore = node_fault!(BleUnprovenIgnoresHandshake);
         self.connections
             .iter()
             .filter(|(_, c)| {
-                !c.verified && !c.proven && now.saturating_duration_since(c.held_from) >= timeout
+                !c.verified
+                    && (ignore || !c.proven)
+                    && now.saturating_duration_since(c.held_from) >= timeout
             })
             .map(|(addr, _)| addr.clone())
             .collect()

@@ -161,7 +161,11 @@ pub(in crate::node) struct ReplayedMsg1s {
 impl ReplayedMsg1s {
     /// Drop every entry older than the interval at `now_ms`.
     fn prune(&mut self, now_ms: u64) {
-        let window = EPOCH_RESTART_MIN_INTERVAL_SECS * 1000;
+        let window = if node_fault!(MemoryNeverExpires) {
+            u64::MAX
+        } else {
+            EPOCH_RESTART_MIN_INTERVAL_SECS * 1000
+        };
         self.by_peer.retain(|_, seen| {
             seen.retain(|&(_, at)| now_ms.saturating_sub(at) < window);
             !seen.is_empty()
@@ -1072,9 +1076,15 @@ impl Node {
                     && self.peers.contains_key(&peer)
                     && let Some(ephemeral) = ephemeral.as_ref()
                 {
-                    let verdict =
-                        self.replayed_msg1s
-                            .verdict(&peer, ephemeral, Self::interval_ms());
+                    let at = match (
+                        node_fault!(MemoryOnWall),
+                        node_fault!(MemoryVerdictOnPacketStamp),
+                    ) {
+                        (true, _) => Self::now_ms(),
+                        (false, true) => packet.timestamp_ms,
+                        (false, false) => Self::interval_ms(),
+                    };
+                    let verdict = self.replayed_msg1s.verdict(&peer, ephemeral, at);
                     if verdict != ReplayVerdict::Fresh {
                         debug!(
                             peer = %self.peer_display_name(&peer),
@@ -1100,13 +1110,21 @@ impl Node {
                     .map(|p| {
                         if p.is_heard() {
                             (
-                                crate::peer::since(p.heard_at()).as_millis() as u64,
+                                if node_fault!(GateOnWall) {
+                                    p.idle_time(Self::now_ms())
+                                } else {
+                                    crate::peer::since(p.heard_at()).as_millis() as u64
+                                },
                                 p.idle_time(now_ms),
                                 EPOCH_RESTART_MIN_INTERVAL_SECS * 1000,
                             )
                         } else {
                             (
-                                crate::peer::since(p.promoted_at()).as_millis() as u64,
+                                if node_fault!(UnheardAgeOnWall) {
+                                    packet.timestamp_ms.saturating_sub(p.authenticated_at())
+                                } else {
+                                    crate::peer::since(p.promoted_at()).as_millis() as u64
+                                },
                                 packet.timestamp_ms.saturating_sub(p.authenticated_at()),
                                 UNHEARD_PEERING_MIN_AGE_MS,
                             )
@@ -1229,6 +1247,13 @@ impl Node {
                     interval_ms,
                     is_outbound: false,
                 };
+                let carried_announce = if node_fault!(TreeCarryAcrossRestart) {
+                    self.peers
+                        .get(&peer)
+                        .map(|p| p.last_tree_announce_sent_ms())
+                } else {
+                    None
+                };
                 self.execute_peer_actions(link_id, &teardown_ctx, actions)
                     .await;
 
@@ -1310,6 +1335,9 @@ impl Node {
                 };
                 self.execute_peer_actions(link_id, &ambient, promote_actions)
                     .await;
+                if let (Some(sent), Some(p)) = (carried_announce, self.peers.get_mut(&peer)) {
+                    p.set_last_tree_announce_sent_ms(sent);
+                }
 
                 // Post-`Promoted` shell tail (byte-identical to the pre-refactor
                 // Promoted arm), reached only when promotion succeeded (machine now
@@ -1561,8 +1589,12 @@ impl Node {
     fn note_unheard_promotion(&mut self, peer: &NodeAddr, ephemeral: Option<EphemeralDigest>) {
         let unheard = self.peers.get(peer).is_some_and(|p| !p.is_heard());
         if unheard && let Some(ephemeral) = ephemeral {
-            self.replayed_msg1s
-                .note(*peer, ephemeral, Self::interval_ms());
+            let at = if node_fault!(MemoryOnWall) {
+                Self::now_ms()
+            } else {
+                Self::interval_ms()
+            };
+            self.replayed_msg1s.note(*peer, ephemeral, at);
         }
     }
 
@@ -2031,6 +2063,9 @@ impl Node {
                         error = %e,
                         "msg2 did not authenticate, keeping the handshake attempt"
                     );
+                    if node_fault!(ForgetDialOnRefusedMsg2) {
+                        self.pending_outbound.remove(&key);
+                    }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                     return;
@@ -2771,6 +2806,9 @@ impl Node {
             new_peer.set_tree_announce_min_interval_ms(
                 self.config().node.tree.announce_min_interval_ms,
             );
+            if node_fault!(NewPeerStartsRateLimited) {
+                new_peer.set_last_tree_announce_sent_ms(Some(crate::time::mono_ms()));
+            }
 
             self.peers.insert(peer_node_addr, new_peer);
             self.run_link_outputs(&peer_node_addr, out);

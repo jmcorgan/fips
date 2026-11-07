@@ -378,7 +378,9 @@ impl Node {
                                 | PromotionResult::CrossConnectionWon { node_addr, .. } = result
                             {
                                 let link = (ambient.transport_id, ambient.remote_addr.clone());
-                                self.relink(&node_addr, None, Some(link)).await;
+                                if !node_fault!(DropInitiatorMark) {
+                                    self.relink(&node_addr, None, Some(link)).await;
+                                }
                             }
                             // The promoted peer's path machine is new, with an
                             // empty candidate table. Boxed: the path steps it

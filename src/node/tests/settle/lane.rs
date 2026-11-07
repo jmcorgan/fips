@@ -1,11 +1,11 @@
-//! Planted tests for the known-defect lane's self-check.
+//! Planted tests for the self-checks of the known-defect and mutation lanes.
 //!
-//! `testing/known-defect-lane.sh` runs each of these through its classifier
-//! (`testing/lib/test-verdict.sh`) before it runs any inventory entry, and
-//! fails if one is not classified as its name says. Together they show the
-//! lane tells a test that failed at its `defect:` assertion from one that
-//! failed anywhere else. They are ignored, inventoried as `helper`, and run
-//! nowhere else.
+//! `testing/known-defect-lane.sh` runs the first five through its classifier
+//! (`testing/lib/test-verdict.sh`) before any inventory entry, and fails if
+//! one is not classified as its name says, so the lane tells a failure at a
+//! `defect:` assertion from any other. `testing/mutations/run.sh` runs the
+//! last two with its self-check switches on. All are ignored, inventoried as
+//! `helper`, and run nowhere else.
 
 use std::hint::black_box;
 
@@ -50,4 +50,15 @@ fn a_planted_failure_at_its_defect_assertion() {
 fn a_planted_test_that_passes() {
     let held = planted_setup(true);
     assert_eq!(black_box(held), 1, "defect: the planted behaviour is wrong");
+}
+
+#[test]
+#[ignore = "helper: the mutation lane's self-check expects it to fail at its defect assertion with its switch on"]
+fn a_planted_switch_reds_at_its_defect_assertion() {
+    let held = planted_setup(true);
+    assert_eq!(held, 1, "precondition: the planted setup holds");
+    assert!(
+        !node_fault!(PlantedRed),
+        "defect: the planted switch turned the behaviour wrong"
+    );
 }

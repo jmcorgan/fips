@@ -251,7 +251,9 @@ impl Node {
         // above, so no reseed follows and the two go together, which is what
         // keeps a peer returning over a wider link from being clamped to the
         // one it left.
-        self.path_mtu_lookup_release(node_addr);
+        if !node_fault!(RestartKeepsClamp) {
+            self.path_mtu_lookup_release(node_addr);
+        }
         if let Some(entry) = kept_session {
             self.sessions.insert(*node_addr, entry);
         }

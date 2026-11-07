@@ -317,7 +317,11 @@ impl Node {
                 // the filter goes again on the session the peer now holds.
                 LinkOutput::Rekeyed {
                     role: Role::Responder,
-                } => self.bloom_state.mark_update_needed(*node_addr),
+                } => {
+                    if !node_fault!(ResponderCutoverSkipsFilterMark) {
+                        self.bloom_state.mark_update_needed(*node_addr);
+                    }
+                }
                 LinkOutput::Rekeyed {
                     role: Role::Initiator,
                 } => {}
@@ -403,7 +407,9 @@ impl Node {
         if let Some(mmp) = entry.as_ref().and_then(|e| e.mmp()) {
             Self::log_session_mmp_teardown(&self.peer_display_name(addr), mmp);
         }
-        self.path_mtu_lookup_release(addr);
+        if !node_fault!(ClampEntryKept) {
+            self.path_mtu_lookup_release(addr);
+        }
         entry.is_some()
     }
 

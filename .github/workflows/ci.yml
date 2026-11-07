@@ -597,6 +597,14 @@ jobs:
       - name: Run the known-defect lane
         run: bash testing/known-defect-lane.sh
 
+      # Each switch in core/src/faults.rs, turned on in a test process of its
+      # own, must turn red the tests testing/mutations/manifest.txt names for
+      # it at their assertion of the behaviour it breaks, and every named test
+      # must pass with no switch; no switch may reach a normal build of fips.
+      # Mirrored in testing/ci-local.sh.
+      - name: Run the mutation lane
+        run: bash testing/mutations/run.sh
+
       # The bind-success half. Every other unit-test leg runs unprivileged, so
       # `PacketSocket::open` cannot succeed on any of them and everything past
       # a successful bind — the post-store shutdown check, the `Present` arm of

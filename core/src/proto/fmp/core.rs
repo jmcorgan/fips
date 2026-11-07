@@ -546,7 +546,7 @@ impl Fmp {
         if epochs_differ(snap.existing_peer_epoch, epoch) {
             return OutboundDecision::RestartThenPromote;
         }
-        if snap.own_dial || snap.our_outbound_wins {
+        if (snap.own_dial && !node_fault!(IgnoreOwnDial)) || snap.our_outbound_wins {
             OutboundDecision::CrossConnectionSwap
         } else {
             OutboundDecision::CrossConnectionKeep

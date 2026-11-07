@@ -92,11 +92,17 @@ the second, and each pin has a line of its own in
   onto its new run: one session in every placement of the peer (a known
   defect), with a control inside the floor. It drives the floor with
   `crate::time::advance`.
-- `lane.rs`: five planted tests for the known-defect lane's self-check
-  (`testing/known-defect-lane.sh`). Each is ignored, inventoried as `helper`,
-  and must be classified as its name says: failing at its precondition, at a
-  bare `unwrap()`, at a plain `expect` in a setup helper, at its defect
-  assertion, or passing. They are not tests of the node.
+- `lane.rs`: six planted tests for the lanes' self-checks. The first five
+  serve the known-defect lane (`testing/known-defect-lane.sh`), and each must
+  be classified as its name says: failing at its precondition, at a bare
+  `unwrap()`, at a plain `expect` in a setup helper, at its defect
+  assertion, or passing. The mutation lane (`testing/mutations/run.sh`) runs
+  the last, `a_planted_switch_reds_at_its_defect_assertion`, with the
+  `PlantedRed` switch, which must red it at its `defect:` assertion, and the
+  passing one with `PlantedGreen`, which has no site, so the lane must call
+  it a miss. Each is ignored and inventoried as `helper`. The known-defect
+  lane pins three of the file's line numbers, so a new test goes last. They
+  are not tests of the node.
 
 ## Markers: `defect:` and `precondition:`
 

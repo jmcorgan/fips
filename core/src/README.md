@@ -13,6 +13,11 @@ changing anything here.
 - `entropy.rs`: the `EntropySource` trait, through which the host supplies
   random bytes. A type that needs them takes the source as a type
   parameter; the core never reads a random source of its own.
+- `faults.rs`: the mutation lane's switches, one list for both crates
+  (`testing/mutations/`). Each puts back one break behind a
+  `node_fault!(Name)` condition, read once per process from
+  `FIPS_NODE_FAULTS`. Compiled for tests and under the `test-hooks`
+  feature only, and hidden from the documentation.
 - `identity/`: node and peer identity types and their encodings. Its own
   README describes it.
 - `node/`: node-level bookkeeping that is not a protocol layer: the
@@ -34,6 +39,8 @@ changing anything here.
   allocator, which draws from the host's entropy source, and the hash
   map for keys a peer can choose, keyed from that source.
   Its own README describes it.
+- `tests/`: the unit tests of the files at this level, attached from
+  each file by `#[path]`. Its own README describes it.
 - `testutil.rs`: fixtures shared by the crate's unit tests
   (`make_node_addr`, `make_keypair`; `TestEntropy`, the random source
   tests build randomized types with; and `FixedEntropy`, a source that
@@ -51,7 +58,8 @@ changing anything here.
 ## Rules for this level
 
 - `lib.rs` stays `#![no_std]`. The `extern crate std;` line stays behind
-  `#[cfg(test)]`, so only the host-run tests see `std`.
+  `#[cfg(any(test, feature = "test-hooks"))]`, so only the host-run tests,
+  this crate's and the root crate's, see `std`.
 - Each module moved in from the root crate gets a `pub mod` line here,
   and its directory gets a README of its own.
 - Keep this README's list in step with the directory: a module added,
