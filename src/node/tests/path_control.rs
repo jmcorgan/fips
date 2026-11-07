@@ -722,37 +722,40 @@ async fn fipsctls_path_and_peer_requests_round_trip_through_the_control_protocol
     cleanup_nodes(&mut nodes).await;
 }
 
-/// A node left at the default setting, multipath off, still answers
-/// `path_show` through the control protocol: the link is shown with
-/// multipath disabled, the peer not capable, and its one path, the one the
-/// handshake made, active. A peer held with no path machine would be shown
+/// A node left at the default setting, multipath on, answers `path_show`
+/// through the control protocol: the link is shown with multipath enabled,
+/// the peer not yet capable, and its one path, the one the handshake made,
+/// active. A node with multipath off states it and is shown the same way
+/// with multipath disabled. A peer held with no path machine would be shown
 /// with no paths at all, so the one path tells the two apart.
 #[tokio::test]
-async fn path_show_at_the_default_setting_shows_multipath_off_and_the_links_one_active_path() {
+async fn path_show_at_the_default_shows_multipath_on_and_when_off_the_links_one_active_path() {
     assert!(
-        !Config::new().node.path.enabled,
-        "precondition: multipath is off by default"
+        Config::new().node.path.enabled,
+        "precondition: multipath is on by default"
     );
-    let mut nodes = linked_pair(Config::new(), Config::new()).await;
-    let npub = nodes[1].node.npub();
-    let b1 = nodes[1].addr.clone();
-    let t1 = nodes[0].transport_id;
-    let line = format!(
-        "{}\n",
-        json!({ "command": "path_show", "params": { "npub": npub } })
-    );
-    let reply = round_trip(&mut nodes[0].node, &line).await;
-    assert_eq!(reply["status"], "ok", "{reply}");
-    let shown = &reply["data"];
-    assert_eq!(shown["peer"], npub, "{shown}");
-    assert_eq!(shown["enabled"], false, "{shown}");
-    assert_eq!(shown["capable"], false, "{shown}");
-    assert!(shown["pin"].is_null(), "{shown}");
-    let paths = shown["paths"].as_array().expect("data.paths");
-    assert_eq!(paths.len(), 1, "the link's one path: {shown}");
-    let path = &paths[0];
-    assert_eq!(path["active"], true, "{path}");
-    assert_eq!(path["transport_id"], json!(t1.as_u32()), "{path}");
-    assert_eq!(path["addr"], b1.to_string(), "{path}");
-    cleanup_nodes(&mut nodes).await;
+    for (config, enabled) in [(Config::new(), true), (disabled(), false)] {
+        let mut nodes = linked_pair(config.clone(), config).await;
+        let npub = nodes[1].node.npub();
+        let b1 = nodes[1].addr.clone();
+        let t1 = nodes[0].transport_id;
+        let line = format!(
+            "{}\n",
+            json!({ "command": "path_show", "params": { "npub": npub } })
+        );
+        let reply = round_trip(&mut nodes[0].node, &line).await;
+        assert_eq!(reply["status"], "ok", "{reply}");
+        let shown = &reply["data"];
+        assert_eq!(shown["peer"], npub, "{shown}");
+        assert_eq!(shown["enabled"], enabled, "{shown}");
+        assert_eq!(shown["capable"], false, "{shown}");
+        assert!(shown["pin"].is_null(), "{shown}");
+        let paths = shown["paths"].as_array().expect("data.paths");
+        assert_eq!(paths.len(), 1, "the link's one path: {shown}");
+        let path = &paths[0];
+        assert_eq!(path["active"], true, "{path}");
+        assert_eq!(path["transport_id"], json!(t1.as_u32()), "{path}");
+        assert_eq!(path["addr"], b1.to_string(), "{path}");
+        cleanup_nodes(&mut nodes).await;
+    }
 }

@@ -1,8 +1,8 @@
 # One peer, several paths: switchover without a second handshake
 
 > **Status.** This describes the node's multipath as it is built: the
-> switchover feature of the FIPS multipath version 1 draft. It is off by
-> default, and `node.path.enabled: true` turns it on. Aggregation, the
+> switchover feature of the FIPS multipath version 1 draft. It is on by
+> default, and `node.path.enabled: false` turns it off. Aggregation, the
 > draft's second feature, is not implemented.
 >
 > **Conformance.** The node claims the draft's **switchover** level:

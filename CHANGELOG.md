@@ -165,9 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fipsctl path show`, `pin` and `unpin` (control commands `path_show`,
   `path_pin` and `path_unpin`) show a link's paths and pin it to a transport or
   to one path, `show_peers` lists each peer's `paths`, and fipstop shows them.
-  Multipath is off by default, and `node.path.enabled: true` on both nodes turns
-  it on. A node left off keeps every link on one path and discards path messages
-  unanswered, and its peers treat it as a node without multipath.
   See `docs/design/fips-multi-path-switchover.md`.
 
 #### Node lifecycle
@@ -353,13 +350,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- With multipath on, `connect` to a live peer that has shown it implements
-  multipath no longer dials: the address is held as a path candidate, and the
-  response carries `refreshed: false` and `detail: "peer live, address held as
-  a path candidate"`, or `"peer live, not dialled"` when it is already a path.
-  For a peer not known to implement multipath the reply is unchanged, and the
-  held address starts capability probing, so small probes now reach that peer
-  on the link's path where nothing did before: the first at once, then at most
+- Multipath is on by default (`node.path.enabled: true`). A node with two
+  paths to a peer that also has it keeps both and moves between them. Set
+  `node.path.enabled: false` to keep every link on one path. Such a node
+  discards path messages unanswered, and its peers treat it as a node without
+  multipath.
+
+- `connect` to a live peer that has shown it implements multipath no longer
+  dials: the address is held as a path candidate, and the response carries
+  `refreshed: false` and `detail: "peer live, address held as a path
+  candidate"`, or `"peer live, not dialled"` when it is already a path. For a
+  peer not known to implement multipath the reply is unchanged, and the held
+  address starts capability probing, so small probes now reach that peer on
+  the link's path where nothing did before: the first at once, then at most
   twelve in the first hour of probing and six in each hour after, while the
   address is held.
 

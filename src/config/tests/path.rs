@@ -28,18 +28,18 @@ fn load_one(text: &str) -> Result<Config, ConfigError> {
 
 /// Every `node.path` key reads from the documented shape, each of the six
 /// transports takes all four roles, UDP and TCP take both kinds, and a file
-/// that names none of them gets multipath off, kinds mixed, the draft's
+/// that names none of them gets multipath on, kinds mixed, the draft's
 /// values, the `normal` role and no kind.
 #[test]
 fn the_path_section_and_transport_roles_parse_with_their_defaults() {
     let config: Config = serde_yaml::from_str(
-        "node:\n  path:\n    enabled: true\n    min_samples: 5\n    mix_kinds: false\n    \
+        "node:\n  path:\n    enabled: false\n    min_samples: 5\n    mix_kinds: false\n    \
          switch:\n      margin: 1.5\n      dwell_secs: 7\n    \
          probe:\n      active_ms: 250\n      standby_ms: 3000\n",
     )
     .unwrap();
     let path = &config.node.path;
-    assert!(path.enabled);
+    assert!(!path.enabled);
     assert_eq!(path.min_samples, 5);
     assert!(!path.mix_kinds);
     assert_eq!(path.switch.margin, 1.5);
@@ -85,7 +85,7 @@ fn the_path_section_and_transport_roles_parse_with_their_defaults() {
 
     let bare: Config = serde_yaml::from_str("node: {}\ntransports:\n  udp: {}\n").unwrap();
     let path = &bare.node.path;
-    assert!(!path.enabled, "multipath must be off by default");
+    assert!(path.enabled, "multipath must be on by default");
     assert_eq!(path.min_samples, 2);
     assert!(path.mix_kinds, "kinds must mix by default");
     assert_eq!(path.switch.margin, 1.3);
@@ -203,19 +203,19 @@ fn the_margin_refusal_reads_as_one_sentence() {
 
 /// `node.path` layers per key across files, as the rest of `node` does: a
 /// later file that sets only `enabled` keeps an earlier file's margin and
-/// standby interval, and a third file can turn multipath off again.
+/// standby interval, and a third file can turn multipath on again.
 #[test]
 fn the_path_keys_layer_per_key_across_config_files() {
     let first = "transports:\n  udp: {}\nnode:\n  path:\n    switch:\n      margin: 1.5\n    \
                  probe:\n      standby_ms: 500\n";
-    let second = "node:\n  path:\n    enabled: true\n";
-    let third = "node:\n  path:\n    enabled: false\n";
+    let second = "node:\n  path:\n    enabled: false\n";
+    let third = "node:\n  path:\n    enabled: true\n";
     let dir = TempDir::new().unwrap();
     let paths = write_files(&dir, &[first, second, third]);
 
     let (two, _) = Config::load_from_paths(&paths[..2]).unwrap();
     let path = &two.node.path;
-    assert!(path.enabled, "the second file's enabled");
+    assert!(!path.enabled, "the second file's enabled: false");
     assert_eq!(path.switch.margin, 1.5, "the first file's margin");
     assert_eq!(
         path.probe.standby_ms, 500,
@@ -228,7 +228,7 @@ fn the_path_keys_layer_per_key_across_config_files() {
 
     let (three, _) = Config::load_from_paths(&paths).unwrap();
     let path = &three.node.path;
-    assert!(!path.enabled, "the third file's enabled: false");
+    assert!(path.enabled, "the third file's enabled: true");
     assert_eq!(path.switch.margin, 1.5);
     assert_eq!(path.probe.standby_ms, 500);
 }

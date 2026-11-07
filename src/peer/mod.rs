@@ -154,9 +154,10 @@ pub(crate) fn unbound_caps() -> PathCaps<'static> {
     }
 }
 
-/// The path machine a test's link is built with: as a node with the
-/// default configuration builds one, multipath disabled, on the facts of
-/// one plain transport.
+/// The path machine a test's link is built with: [`unbound_caps`],
+/// multipath disabled, on the facts of one plain transport. A node with the
+/// default configuration runs multipath enabled, so this is not the machine
+/// such a node builds at promotion.
 #[cfg(test)]
 pub(crate) fn test_caps() -> PathCaps<'static> {
     unbound_caps()
