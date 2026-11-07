@@ -288,6 +288,9 @@ impl Node {
                 info!("Drain complete: all peers cleared, ending drain loop");
                 break;
             }
+            // Set by a burst arm that stopped at its cap rather than on an
+            // empty channel; read after the select.
+            let mut capped = false;
             tokio::select! {
                 biased;
                 // Decrypt-worker fallback drains FIRST. Under sustained
@@ -310,6 +313,7 @@ impl Node {
                                 Err(_) => break,
                             }
                         }
+                        capped = drained == 255;
                     }
                     #[cfg(not(unix))]
                     let _ = event;
@@ -322,8 +326,8 @@ impl Node {
                     // Drain remaining ready inbound packets in a tight loop
                     // before going back to select!: at line rate the kernel
                     // UDP queue typically has several datagrams available
-                    // per wake, and each round of this loop ends in a yield.
-                    // The cap bounds how long one round runs. It gives the
+                    // per wake. The cap bounds how long one round runs, and a
+                    // round whose burst reaches it ends in a yield. It gives the
                     // later branches (tick, control) no turn: under `biased`
                     // they are reached only when this branch reads empty.
                     //
@@ -363,6 +367,7 @@ impl Node {
                             Err(_) => break,
                         }
                     }
+                    capped = drained == 256;
                     // Trailing fallback drain so the last bounced
                     // packets of the burst aren't held up by the
                     // next select! iteration.
@@ -378,6 +383,7 @@ impl Node {
                                 Err(_) => break,
                             }
                         }
+                        capped |= fb_drained == 256;
                     }
                 }
                 // Runtime child-liveness. Placed AFTER `packet_rx` so the hot
@@ -493,6 +499,7 @@ impl Node {
                             Err(_) => break,
                         }
                     }
+                    capped = drained == 256;
                 }
                 Some(ipv6_packet) = tun_outbound_rx.recv() => {
                     self.register_waiting(&mut learned_rx);
@@ -508,6 +515,7 @@ impl Node {
                             Err(_) => break,
                         }
                     }
+                    capped = drained == 256;
                 }
                 Some(report) = learned_rx.recv() => {
                     self.register_learned(report);
@@ -535,6 +543,7 @@ impl Node {
                             Err(_) => break,
                         }
                     }
+                    capped = drained == 256;
                 }
                 // Native API registry requests. Placed after the hot inbound
                 // path so a burst of client registrations cannot delay packet
@@ -702,15 +711,22 @@ impl Node {
                     break;
                 }
             }
-            // Give the runtime thread back once per round. An outside thread
-            // can keep a burst arm ready, and then this task would return to
-            // the scheduler only when its cooperative budget ran out, 128
-            // rounds on, with every spawned task waiting. A listen socket's
-            // reader is one, and a probe waiting in its socket for that long
-            // falls behind the replay window. This frees spawned tasks only:
-            // the select's later arms still wait for the ready arm to read
-            // empty.
-            tokio::task::yield_now().await;
+            // Give the runtime thread back after a burst that stopped at its
+            // cap. An outside thread can keep a burst arm ready, and then this
+            // task would return to the scheduler only when its cooperative
+            // budget ran out, 128 rounds on, with every spawned task waiting.
+            // A listen socket's reader is one, and a probe waiting in its
+            // socket for that long falls behind the replay window. A burst
+            // that ended on an empty channel needs no yield: its arm is not
+            // ready, and the loop parks once no arm is. Yielding only at the
+            // cap keeps the cost of a yield off the rounds that do not need
+            // one. The limit is a run of bursts just short of the cap, which
+            // goes unyielded until the budget ends. This frees spawned tasks
+            // only: the select's later arms still wait for the ready arm to
+            // read empty.
+            if capped {
+                tokio::task::yield_now().await;
+            }
         }
 
         info!("RX event loop stopped (channel closed)");
