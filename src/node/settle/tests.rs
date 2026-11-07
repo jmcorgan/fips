@@ -1,0 +1,384 @@
+//! Tests for the map wrappers and the link table: each writer does what the
+//! sites it transcribes did, and only the `raw` ways past the writers mark a
+//! map.
+
+use super::*;
+use crate::peer::ActivePeer;
+use crate::peer::machine::{PeerMachine, TimerKind};
+use crate::proto::fmp::LegStamp;
+use crate::transport::{Link, LinkDirection, LinkId, TransportAddr, TransportId};
+use crate::{Identity, NodeAddr, PeerIdentity};
+use std::time::Duration;
+
+/// An inbound machine for `link`, with no handshake started.
+fn machine(link: LinkId) -> PeerMachine {
+    PeerMachine::new_inbound(link, LegStamp::at(1000))
+}
+
+#[test]
+fn dropping_a_machine_drops_its_timers_and_leaves_other_links() {
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    let mut map = MachineMap::default();
+    map.add(one, machine(one));
+    map.add(two, machine(two));
+    map.arm(one, TimerKind::HandshakeTimeout, 5000);
+    map.arm(two, TimerKind::HandshakeTimeout, 6000);
+
+    map.drop(one);
+
+    assert!(!map.contains_key(&one), "the machine is dropped");
+    assert!(
+        !map.timers().contains_key(&one),
+        "its timers are dropped with it"
+    );
+    assert!(map.contains_key(&two), "another link keeps its machine");
+    assert_eq!(
+        map.timers()[&two].get(&TimerKind::HandshakeTimeout),
+        Some(&6000),
+        "another link keeps its timers"
+    );
+}
+
+#[test]
+fn arming_a_timer_again_replaces_its_deadline_and_cancelling_keeps_the_links_store() {
+    let link = LinkId::new(1);
+    let mut map = MachineMap::default();
+    map.arm(link, TimerKind::HandshakeRetransmit, 1000);
+    map.arm(link, TimerKind::HandshakeRetransmit, 2000);
+    map.arm(link, TimerKind::HandshakeTimeout, 9000);
+    assert_eq!(
+        map.timers()[&link].get(&TimerKind::HandshakeRetransmit),
+        Some(&2000),
+        "the second arm replaces the deadline"
+    );
+
+    map.cancel(link, TimerKind::HandshakeRetransmit);
+    assert_eq!(
+        map.timers()[&link].get(&TimerKind::HandshakeTimeout),
+        Some(&9000),
+        "cancelling one kind leaves the other armed"
+    );
+    map.cancel(link, TimerKind::HandshakeTimeout);
+    assert!(
+        map.timers()[&link].is_empty(),
+        "the link keeps an empty store, as the timer sites left it"
+    );
+    map.cancel(LinkId::new(2), TimerKind::HandshakeTimeout);
+    assert!(
+        !map.timers().contains_key(&LinkId::new(2)),
+        "cancelling on a link with no store makes none"
+    );
+}
+
+#[test]
+fn ensuring_a_machine_keeps_the_one_the_link_has_and_makes_one_otherwise() {
+    let link = LinkId::new(1);
+    let mut map = MachineMap::default();
+    map.ensure(link, || machine(link));
+    assert!(map.contains_key(&link), "a link with none gets a machine");
+    map.ensure(link, || panic!("the link already has a machine"));
+    assert_eq!(map.len(), 1);
+}
+
+#[test]
+fn noting_a_dial_again_replaces_its_link_and_forgetting_leaves_other_dials() {
+    let tid = TransportId::new(1);
+    let mut map = DialMap::default();
+    map.note((tid, 7), LinkId::new(1));
+    map.note((tid, 7), LinkId::new(2));
+    map.note((tid, 8), LinkId::new(3));
+    assert_eq!(map.get(&(tid, 7)), Some(&LinkId::new(2)));
+
+    map.forget(&(tid, 7));
+    assert!(!map.contains_key(&(tid, 7)), "the dial is forgotten");
+    assert_eq!(
+        map.get(&(tid, 8)),
+        Some(&LinkId::new(3)),
+        "another dial stays"
+    );
+}
+
+/// A peer with a fresh identity on `link`, and its address.
+fn peer(link: LinkId) -> (NodeAddr, ActivePeer) {
+    let identity = PeerIdentity::from_pubkey(Identity::generate().pubkey());
+    (*identity.node_addr(), ActivePeer::new(identity, link, 0))
+}
+
+#[test]
+fn installing_a_peer_at_a_held_address_replaces_it_and_taking_leaves_other_peers() {
+    let mut map = PeerMap::default();
+    let (addr, first) = peer(LinkId::new(1));
+    let (other, second) = peer(LinkId::new(2));
+    map.install(addr, first);
+    map.install(other, second);
+    let (_, replacement) = peer(LinkId::new(3));
+    map.install(addr, replacement);
+    assert_eq!(map.len(), 2);
+    assert_eq!(
+        map[&addr].link_id(),
+        LinkId::new(3),
+        "the second install replaces the peer"
+    );
+
+    let taken = map.take(&addr).expect("the peer is held");
+    assert_eq!(taken.link_id(), LinkId::new(3), "take hands back the peer");
+    assert!(!map.contains_key(&addr), "and the map no longer holds it");
+    assert!(map.contains_key(&other), "another peer stays");
+    assert!(map.take(&addr).is_none(), "a second take finds nothing");
+}
+
+#[test]
+fn binding_an_index_again_replaces_its_peer_and_unbinding_leaves_other_indices() {
+    let (one, two) = (NodeAddr::from_bytes([1; 16]), NodeAddr::from_bytes([2; 16]));
+    let mut map = BindMap::default();
+    map.bind(7, one);
+    map.bind(7, two);
+    map.bind(8, one);
+    assert_eq!(map.get(&7), Some(&two), "the second bind replaces the peer");
+
+    map.unbind(&7);
+    assert!(!map.contains_key(&7), "the index is unbound");
+    assert_eq!(map.get(&8), Some(&one), "another index stays bound");
+    map.unbind(&9);
+    assert_eq!(map.len(), 1, "unbinding an unbound index changes nothing");
+}
+
+/// The index key at `addr` on transport 1.
+fn key(addr: &str) -> (TransportId, TransportAddr) {
+    (TransportId::new(1), TransportAddr::from_string(addr))
+}
+
+/// A link `id` set up at `addr` on transport 1.
+fn link(id: u64, addr: &str) -> Link {
+    Link::connectionless(
+        LinkId::new(id),
+        TransportId::new(1),
+        TransportAddr::from_string(addr),
+        LinkDirection::Outbound,
+        Duration::from_millis(100),
+    )
+}
+
+#[test]
+fn opening_a_link_at_a_taken_key_overwrites_it_and_closing_it_leaves_the_key_empty() {
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    assert_eq!(table.index().get(&key("10.0.0.1:2121")), Some(&one));
+
+    table.open(link(2, "10.0.0.1:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&two),
+        "the second link's open overwrites the key"
+    );
+    assert!(table.contains_key(&one), "the first link stays open");
+
+    let closed = table.close(&two).expect("the link is open");
+    assert_eq!(closed.link_id(), two, "close hands back the link");
+    assert!(
+        table.index().is_empty(),
+        "closing the second link leaves the key empty, not naming the first"
+    );
+    assert!(table.contains_key(&one) && !table.contains_key(&two));
+    assert!(table.close(&two).is_none(), "a second close finds nothing");
+}
+
+#[test]
+fn closing_a_link_drops_every_entry_naming_it_and_leaves_other_links_entries() {
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    table.open(link(2, "10.0.0.2:2121"));
+    table.claim(one, key("10.0.0.3:2121"));
+    assert_eq!(table.index().len(), 3, "precondition: three entries");
+
+    table.close(&one);
+    assert!(
+        !table.index().contains_key(&key("10.0.0.1:2121")),
+        "the link's own key goes"
+    );
+    assert!(
+        !table.index().contains_key(&key("10.0.0.3:2121")),
+        "so does an entry at another pair naming it"
+    );
+    assert_eq!(
+        table.index().get(&key("10.0.0.2:2121")),
+        Some(&two),
+        "another link's entry stays"
+    );
+}
+
+#[test]
+fn forgetting_a_link_drops_the_entry_at_its_key_whichever_link_it_names() {
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    table.open(link(2, "10.0.0.1:2121"));
+    table.claim(one, key("10.0.0.3:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.1:2121")),
+        Some(&two),
+        "precondition: the key names the second link"
+    );
+
+    table.forget(&one, &key("10.0.0.1:2121"));
+    assert!(!table.contains_key(&one), "the link is dropped");
+    assert!(table.contains_key(&two), "the other link stays");
+    assert!(
+        !table.index().contains_key(&key("10.0.0.1:2121")),
+        "the entry at the key goes though it named the other link"
+    );
+    assert_eq!(
+        table.index().get(&key("10.0.0.3:2121")),
+        Some(&one),
+        "an entry at another key is left, even naming the forgotten link"
+    );
+}
+
+#[test]
+fn a_followed_path_moves_only_an_entry_that_names_the_link() {
+    let (one, two, three) = (LinkId::new(1), LinkId::new(2), LinkId::new(3));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    table.open(link(2, "10.0.0.2:2121"));
+    table.open(link(3, "10.0.0.3:2121"));
+
+    table.follow(one, &key("10.0.0.1:2121"), key("10.0.0.4:2121"));
+    assert!(
+        !table.index().contains_key(&key("10.0.0.1:2121")),
+        "the old pair's entry goes"
+    );
+    assert_eq!(
+        table.index().get(&key("10.0.0.4:2121")),
+        Some(&one),
+        "the new pair names the link"
+    );
+
+    table.follow(one, &key("10.0.0.2:2121"), key("10.0.0.5:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.2:2121")),
+        Some(&two),
+        "an old pair naming another link is left"
+    );
+    assert!(
+        !table.index().contains_key(&key("10.0.0.5:2121")),
+        "and the new pair gets no entry"
+    );
+
+    table.follow(one, &key("10.0.0.4:2121"), key("10.0.0.3:2121"));
+    assert!(
+        !table.index().contains_key(&key("10.0.0.4:2121")),
+        "the old pair's entry goes"
+    );
+    assert_eq!(
+        table.index().get(&key("10.0.0.3:2121")),
+        Some(&three),
+        "a new pair another link holds keeps naming it"
+    );
+}
+
+#[test]
+fn a_claimed_path_takes_only_a_free_key() {
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    table.open(link(2, "10.0.0.2:2121"));
+
+    table.claim(one, key("10.0.0.3:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.3:2121")),
+        Some(&one),
+        "a free key names the link"
+    );
+    table.claim(one, key("10.0.0.2:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.2:2121")),
+        Some(&two),
+        "a key another link holds keeps naming it"
+    );
+}
+
+#[test]
+fn an_unclaimed_pair_loses_only_an_entry_naming_the_link() {
+    let (one, two) = (LinkId::new(1), LinkId::new(2));
+    let mut table = LinkTable::default();
+    table.open(link(1, "10.0.0.1:2121"));
+    table.open(link(2, "10.0.0.2:2121"));
+    table.claim(one, key("10.0.0.3:2121"));
+
+    table.unclaim(one, &key("10.0.0.3:2121"));
+    assert!(
+        !table.index().contains_key(&key("10.0.0.3:2121")),
+        "an entry naming the link goes"
+    );
+    table.unclaim(one, &key("10.0.0.2:2121"));
+    assert_eq!(
+        table.index().get(&key("10.0.0.2:2121")),
+        Some(&two),
+        "an entry naming another link stays"
+    );
+    assert!(table.contains_key(&one), "the link stays open");
+}
+
+#[test]
+fn only_the_ways_past_the_writers_mark_a_map_planted() {
+    let link = LinkId::new(1);
+    let mut machines = MachineMap::default();
+    machines.add(link, machine(link));
+    machines.arm(link, TimerKind::HandshakeTimeout, 1);
+    machines.cancel(link, TimerKind::HandshakeTimeout);
+    machines.ensure(link, || machine(link));
+    machines.drop(link);
+    let mut dials = DialMap::default();
+    dials.note((TransportId::new(1), 1), link);
+    dials.forget(&(TransportId::new(1), 1));
+    let mut peers = PeerMap::default();
+    let (addr, held) = peer(link);
+    peers.install(addr, held);
+    if let Some(p) = peers.get_mut(&addr) {
+        p.touch(1);
+    }
+    peers.values_mut().for_each(|p| p.touch(2));
+    peers.iter_mut().for_each(|(_, p)| p.touch(3));
+    peers.take(&addr);
+    let mut indices = BindMap::default();
+    indices.bind(1, addr);
+    indices.unbind(&1);
+    let mut links = LinkTable::default();
+    links.open(self::link(1, "10.0.0.1:2121"));
+    links.claim(link, key("10.0.0.2:2121"));
+    links.follow(link, &key("10.0.0.2:2121"), key("10.0.0.3:2121"));
+    links.unclaim(link, &key("10.0.0.3:2121"));
+    if let Some(l) = links.get_mut(&link) {
+        l.set_connected();
+    }
+    links.close(&link);
+    links.open(self::link(1, "10.0.0.1:2121"));
+    links.forget(&link, &key("10.0.0.1:2121"));
+    assert!(
+        !machines.planted()
+            && !dials.planted()
+            && !peers.planted()
+            && !indices.planted()
+            && !links.planted(),
+        "no writer marks its map"
+    );
+
+    machines.raw();
+    dials.raw();
+    peers.raw();
+    indices.raw();
+    let mut timers = MachineMap::default();
+    timers.raw_timers();
+    links.raw();
+    let mut index = LinkTable::default();
+    index.raw_index();
+    assert!(machines.planted(), "raw marks the machines");
+    assert!(dials.planted(), "raw marks the dials");
+    assert!(peers.planted(), "raw marks the peers");
+    assert!(indices.planted(), "raw marks the indices");
+    assert!(timers.planted(), "raw_timers marks the machines");
+    assert!(links.planted(), "raw marks the link table");
+    assert!(index.planted(), "raw_index marks the link table");
+}

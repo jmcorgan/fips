@@ -110,7 +110,7 @@ by the Node-level admission gate.
 The rekey topology with `transports.udp.outbound_only: true` on node B, whose
 peer-C address is also rewritten to the Docker hostname (`node-c:2121`). Pins
 the regression where the hostname-versus-numeric mismatch made the
-`addr_to_link` lookup miss and the admission carve-out fall through.
+link-index lookup miss and the admission carve-out fall through.
 
 ## Configuration Management
 

@@ -481,7 +481,7 @@ fn compute_mesh_size_counts_each_peer_filter_once() {
         parent_filter.insert(&NodeAddr::from_bytes(bytes));
     }
     parent_peer.update_filter(parent_filter, 1, 0);
-    node.peers.insert(parent_addr, parent_peer);
+    node.peers.raw().insert(parent_addr, parent_peer);
 
     // Inject legitimate child Q with a 3-entry inbound filter.
     let child_identity = make_peer_identity();
@@ -494,7 +494,7 @@ fn compute_mesh_size_counts_each_peer_filter_once() {
         child_filter.insert(&NodeAddr::from_bytes(bytes));
     }
     child_peer.update_filter(child_filter, 1, 0);
-    node.peers.insert(child_addr, child_peer);
+    node.peers.raw().insert(child_addr, child_peer);
 
     // Seed parent ancestry first so recompute_coords can extend it and
     // flip is_root() to false; child ancestry is for completeness.
@@ -582,7 +582,7 @@ fn compute_mesh_size_unions_overlapping_filters() {
         filter_a.insert(addr);
     }
     peer_a.update_filter(filter_a, 1, 0);
-    node.peers.insert(peer_a_addr, peer_a);
+    node.peers.raw().insert(peer_a_addr, peer_a);
 
     // Peer B with a filter that overlaps A's on `shared`.
     let peer_b_identity = make_peer_identity();
@@ -593,7 +593,7 @@ fn compute_mesh_size_unions_overlapping_filters() {
         filter_b.insert(addr);
     }
     peer_b.update_filter(filter_b, 1, 0);
-    node.peers.insert(peer_b_addr, peer_b);
+    node.peers.raw().insert(peer_b_addr, peer_b);
 
     node.compute_mesh_size();
 
@@ -660,7 +660,7 @@ fn compute_mesh_size_stable_across_parent_drop_with_cross_link() {
         parent_filter.insert(addr);
     }
     parent_peer.update_filter(parent_filter, 1, 0);
-    node.peers.insert(parent_addr, parent_peer);
+    node.peers.raw().insert(parent_addr, parent_peer);
 
     // Cross-link X: a non-tree peer whose split-horizon filter also carries
     // the upward coverage (plus a little of its own).
@@ -672,7 +672,7 @@ fn compute_mesh_size_stable_across_parent_drop_with_cross_link() {
         cross_filter.insert(addr);
     }
     cross_peer.update_filter(cross_filter, 1, 0);
-    node.peers.insert(cross_addr, cross_peer);
+    node.peers.raw().insert(cross_addr, cross_peer);
 
     // Baseline estimate with both peers present.
     node.compute_mesh_size();
@@ -682,7 +682,7 @@ fn compute_mesh_size_stable_across_parent_drop_with_cross_link() {
 
     // Simulate a parent switch transient: the old parent is dropped before
     // the new parent's filter has converged. The cross-link remains.
-    node.peers.remove(&parent_addr);
+    node.peers.raw().remove(&parent_addr);
     node.compute_mesh_size();
     let after = node
         .estimated_mesh_size()

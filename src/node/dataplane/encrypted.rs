@@ -131,7 +131,7 @@ impl Node {
         };
 
         if !self.peers.contains_key(&node_addr) {
-            self.peers_by_index.remove(&key);
+            self.peers_by_index.unbind(&key);
             self.metrics()
                 .dataplane
                 .record_reject(DataplaneReject::OrphanedIndex);

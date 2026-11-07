@@ -357,7 +357,7 @@ async fn reaping_a_handshake_leg_keeps_the_peer_link_it_shares() {
             .with_source_addr(peer_addr.clone()),
     )
     .unwrap();
-    node.links.insert(
+    node.links.raw().insert(
         leg,
         Link::connectionless(
             leg,

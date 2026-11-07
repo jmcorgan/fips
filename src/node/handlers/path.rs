@@ -538,12 +538,8 @@ impl Node {
                     clear_slot(driver);
                     if let Some(link) = link {
                         let old = (from.transport, from.addr.clone());
-                        if self.addr_to_link.get(&old) == Some(&link) {
-                            self.addr_to_link.remove(&old);
-                            self.addr_to_link
-                                .entry((to.transport, to.addr.clone()))
-                                .or_insert(link);
-                        }
+                        self.links
+                            .follow(link, &old, (to.transport, to.addr.clone()));
                     }
                     debug!(
                         peer = %self.peer_display_name(node_addr),
@@ -658,9 +654,7 @@ impl Node {
         {
             slot.clear_connected_udp();
         }
-        self.addr_to_link
-            .entry((to.transport, to.addr.clone()))
-            .or_insert(link);
+        self.links.claim(link, (to.transport, to.addr.clone()));
         self.seed_mtu(node_addr, key, to.transport, &to.addr, true);
         if let Some(mtu) = self
             .transports
@@ -706,8 +700,8 @@ impl Node {
     ) {
         clear_slot(driver);
         let key = (to.transport, to.addr.clone());
-        if !removed && self.addr_to_link.get(&key) == Some(&link) {
-            self.addr_to_link.remove(&key);
+        if !removed {
+            self.links.unclaim(link, &key);
         }
         if keep || self.addr_carries_other_peer(to.transport, &to.addr, link) {
             return;

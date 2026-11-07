@@ -438,7 +438,7 @@ fn maps_agree(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Ve
             });
         }
     }
-    for ((tid, remote), link) in node.addr_to_link.iter() {
+    for ((tid, remote), link) in node.links.index().iter() {
         let right = node
             .links
             .get(link)
@@ -453,7 +453,7 @@ fn maps_agree(nodes: &[TestNode], i: usize, exempt: &[Exempt], breaches: &mut Ve
     }
     for (link, k) in node.links.iter() {
         let key = (k.transport_id(), k.remote_addr().clone());
-        if node.addr_to_link.get(&key) != Some(link) && !waived.contains(link) {
+        if node.links.index().get(&key) != Some(link) && !waived.contains(link) {
             breaches.push(Breach::MapsAgree {
                 node: i,
                 link: *link,
@@ -683,7 +683,7 @@ async fn stale_flagged(on: bool) {
     let stale = nodes[0].node.allocate_link_id();
     let remote = nodes[1].addr.clone();
     let tid = nodes[0].transport_id;
-    nodes[0].node.links.insert(
+    nodes[0].node.links.raw().insert(
         stale,
         Link::connectionless(
             stale,

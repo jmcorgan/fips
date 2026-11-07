@@ -291,15 +291,11 @@ pub(super) async fn dial_at(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    initiator.node.links.insert(link_id, link);
-    initiator
-        .node
-        .addr_to_link
-        .insert((transport_id, responder_addr.clone()), link_id);
+    initiator.node.links.open(link);
     initiator
         .node
         .pending_outbound
-        .insert((transport_id, our_index.as_u32()), link_id);
+        .note((transport_id, our_index.as_u32()), link_id);
 
     let transport = initiator.node.transports.get(&transport_id).unwrap();
     transport

@@ -2195,7 +2195,7 @@ async fn a_held_rekey_msg2_is_resent_only_on_the_peers_established_link() {
     msg1.remote_addr = third[0].addr.clone();
     let link = nodes[1].node.get_peer(&node0_addr).unwrap().link_id();
     let key = (nodes[1].transport_id, third[0].addr.clone());
-    nodes[1].node.addr_to_link.insert(key, link);
+    nodes[1].node.links.raw_index().insert(key, link);
     nodes[1].node.handle_msg1(msg1).await;
 
     assert!(
@@ -2788,7 +2788,7 @@ async fn a_rekey_msg2_answers_on_the_peers_established_link_when_the_msg1_source
     msg1.remote_addr = third[0].addr.clone();
     let link = nodes[1].node.get_peer(&node0_addr).unwrap().link_id();
     let key = (nodes[1].transport_id, third[0].addr.clone());
-    nodes[1].node.addr_to_link.insert(key, link);
+    nodes[1].node.links.raw_index().insert(key, link);
     nodes[1].node.handle_msg1(msg1).await;
 
     assert!(
@@ -2871,7 +2871,7 @@ async fn a_rekey_answered_on_the_established_link_registers_its_index() {
     msg1.transport_id = other_transport;
     let link = nodes[1].node.get_peer(&node0_addr).unwrap().link_id();
     let key = (other_transport, nodes[0].addr.clone());
-    nodes[1].node.addr_to_link.insert(key, link);
+    nodes[1].node.links.raw_index().insert(key, link);
     nodes[1].node.handle_msg1(msg1).await;
     let pending_idx = nodes[1]
         .node
@@ -4905,7 +4905,7 @@ async fn test_expired_path_mtu_keeps_the_link_peer_seed() {
     let peer_identity = PeerIdentity::from_pubkey_full(remote.pubkey_full());
     let mut peer = ActivePeer::new(peer_identity, LinkId::new(7), 0);
     peer.set_current_addr(transport_id, transport_addr);
-    node.peers.insert(remote_addr, peer);
+    node.peers.raw().insert(remote_addr, peer);
 
     assert_eq!(
         node.path_mtu_lookup_get(&remote_fips),
@@ -5652,7 +5652,7 @@ async fn test_idle_session_purge_keeps_link_peer_path_mtu_seed() {
     let peer_identity = PeerIdentity::from_pubkey_full(remote.pubkey_full());
     let mut peer = ActivePeer::new(peer_identity, LinkId::new(7), 0);
     peer.set_current_addr(transport_id, transport_addr.clone());
-    node.peers.insert(remote_addr, peer);
+    node.peers.raw().insert(remote_addr, peer);
 
     node.seed_path_mtu_for_link_peer(
         &remote_addr,

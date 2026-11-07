@@ -175,7 +175,7 @@ async fn smaller_on_its_dialed_link(on: bool, zero_smaller: bool) {
                 "the smaller node's link record is {link:?}, expected {want:?}"
             ));
         }
-        let mapped = nodes[s].node.addr_to_link.get(&(tid, at)).copied();
+        let mapped = nodes[s].node.links.index().get(&(tid, at)).copied();
         if mapped != Some(p.link_id()) {
             bad.push(format!(
                 "addr_to_link at the peer's pair is {mapped:?}, the peer's link {:?}",
@@ -348,8 +348,8 @@ async fn rewritten_then_redial(on: bool, zero_smaller: bool) {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    nodes[s].node.links.insert(link_id, link);
-    nodes[s].node.addr_to_link.insert((tid, at), link_id);
+    nodes[s].node.links.raw().insert(link_id, link);
+    nodes[s].node.links.raw_index().insert((tid, at), link_id);
     let redial = redial_after_drop(&mut nodes, s, l).await;
     cleanup_nodes(&mut nodes).await;
     assert!(redial.is_ok(), "defect: {redial:?}");

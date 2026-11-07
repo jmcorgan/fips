@@ -570,10 +570,10 @@ impl Node {
         for output in out {
             match output {
                 LinkOutput::Bind { index, .. } => {
-                    self.peers_by_index.insert(index, *node_addr);
+                    self.peers_by_index.bind(index, *node_addr);
                 }
                 LinkOutput::Unbind { index, .. } => {
-                    self.peers_by_index.remove(&index);
+                    self.peers_by_index.unbind(&index);
                 }
                 LinkOutput::Delegate {
                     tag, index, recv, ..

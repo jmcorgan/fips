@@ -1106,7 +1106,7 @@ async fn a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it() {
     let b1 = nodes[1].addr.clone();
     let link = nodes[0].node.get_peer(&b).unwrap().link_id();
     let maps = |tn: &TestNode, addr: &TransportAddr| {
-        tn.node.addr_to_link.get(&(t1, addr.clone())) == Some(&link)
+        tn.node.links.index().get(&(t1, addr.clone())) == Some(&link)
     };
     shut_p(&mut nodes, &b, &b2).await;
     assert_eq!(active_of(&nodes[0], &b), (t1, b2.clone()));
@@ -1675,7 +1675,7 @@ async fn carrier_loss_moves_the_link_and_its_mtu_to_the_standby() {
     assert!(switched[0].contains("why=\"mandatory\""), "{}", switched[0]);
     assert_eq!(active_of(&nodes[0], &b), (t2(), b2.clone()));
     let link = nodes[0].node.get_peer(&b).unwrap().link_id();
-    assert_eq!(nodes[0].node.addr_to_link.get(&(t2(), b2)), Some(&link));
+    assert_eq!(nodes[0].node.links.index().get(&(t2(), b2)), Some(&link));
     let limit = crate::node::path_mtu::payload_limit(1200);
     let replica = nodes[0]
         .node
@@ -2548,7 +2548,7 @@ async fn an_acked_standby_of_another_peer_keeps_a_handshake_links_connection_ope
             LinkDirection::Outbound,
             Duration::from_millis(100),
         );
-        a.links.insert(id, link);
+        a.links.raw().insert(id, link);
         id
     };
     let other = leg(a, &stranger);
@@ -2891,7 +2891,8 @@ async fn a_capable_links_rekey_from_a_mapped_pair_holding_no_path_is_refused_whi
     let link = nodes[1].node.get_peer(&a).unwrap().link_id();
     nodes[1]
         .node
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((t1, elsewhere.clone()), link);
     age_link(&mut nodes, 0, 1, Duration::from_secs(31));
     super::start_link_rekey(&mut nodes[0].node, &b).await;

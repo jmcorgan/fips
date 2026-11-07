@@ -127,7 +127,7 @@ struct Attempt {
 
 fn attempt(node: &Node, link: LinkId) -> Attempt {
     let machine = node.peer_machines.get(&link).expect("the dial's machine");
-    let timers = node.peer_timers.get(&link);
+    let timers = node.peer_machines.timers().get(&link);
     Attempt {
         link,
         handshake_held: machine

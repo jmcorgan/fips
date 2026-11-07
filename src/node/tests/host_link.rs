@@ -195,7 +195,7 @@ async fn the_adapter_copy_follows_a_link_seed_and_both_releases() {
     // Released while the link is up: removed, then re-seeded.
     let mut peer = crate::peer::ActivePeer::new(identity, LinkId::new(1), 0);
     peer.set_current_addr(tid, transport_addr.clone());
-    node.peers.insert(peer_addr, peer);
+    node.peers.raw().insert(peer_addr, peer);
     node.seed_path_mtu_for_link_peer(&peer_addr, key, tid, &transport_addr);
     node.path_mtu_lookup_release(&peer_addr);
     assert_replica(&mut node, &fips_addr, true, "a release that re-seeds");
@@ -223,7 +223,7 @@ async fn the_adapter_copy_follows_the_expiry_pass_and_its_re_seed() {
     let transport_addr = TransportAddr::from_string("10.0.0.13:2121");
     let mut peer = crate::peer::ActivePeer::new(identity, LinkId::new(1), 0);
     peer.set_current_addr(tid, transport_addr);
-    node.peers.insert(peer_addr, peer);
+    node.peers.raw().insert(peer_addr, peer);
     node.path_mtu_lookup
         .insert(near.address(), near, PathMtuEntry::learned(1280, now));
     assert_replica(
@@ -988,7 +988,7 @@ async fn a_send_to_a_cached_key_initiates_with_the_parity_the_cache_holds() {
     let mut peer =
         crate::peer::ActivePeer::new(crate::PeerIdentity::from_pubkey(dest.pubkey()), link, 0);
     peer.touch(1);
-    node.peers.insert(*dest.node_addr(), peer);
+    node.peers.raw().insert(*dest.node_addr(), peer);
     node.handle_tun_outbound(host_packet(&node, dest.address(), 80))
         .await;
 

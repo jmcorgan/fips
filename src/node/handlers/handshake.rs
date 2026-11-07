@@ -388,7 +388,7 @@ impl Node {
     /// for exempting traffic from stranger-class treatment. Two
     /// predicates cover "established peer at this transport+addr":
     ///
-    /// 1. `addr_to_link` has an entry for `(transport_id, remote_addr)`.
+    /// 1. The link index has an entry for `(transport_id, remote_addr)`.
     ///    This is the fast path and matches when the peer registered with
     ///    the same `TransportAddr` form we observe on inbound packets
     ///    (e.g., both numeric when peer config uses a numeric IP).
@@ -400,7 +400,7 @@ impl Node {
     ///    is not. The active path's address is `current_addr()`, which is
     ///    updated from inbound encrypted-frame source addrs (always numeric
     ///    `SocketAddr`-form), so this catches established peers whose
-    ///    `addr_to_link` key is hostname-form (because `initiate_connection`
+    ///    link index key is hostname-form (because `initiate_connection`
     ///    populated it from a hostname-bearing peer config) while inbound
     ///    rekey msg1 arrives in numeric form. Without this second
     ///    predicate, the carve-out misses any deployment that combines a
@@ -412,7 +412,7 @@ impl Node {
     /// `handle_msg1` classifies before rate limiting, predicate 2 runs on
     /// every inbound msg1 including those about to be refused, so a msg1
     /// flood costs O(peers) per dropped packet rather than O(1). Predicate 2
-    /// exists only because `addr_to_link` is keyed on the *unresolved* dial
+    /// exists only because the link index is keyed on the *unresolved* dial
     /// address; if that keying is corrected, this becomes a single O(1)
     /// lookup and the flood cost returns to O(1).
     pub(in crate::node) fn is_established_link_msg1(
@@ -421,7 +421,8 @@ impl Node {
         remote_addr: &crate::transport::TransportAddr,
     ) -> bool {
         if self
-            .addr_to_link
+            .links
+            .index()
             .contains_key(&(transport_id, remote_addr.clone()))
         {
             return true;
@@ -447,7 +448,7 @@ impl Node {
     ///
     /// The two attribution limbs are composed the same way
     /// `is_established_link_msg1` composes its own: as an OR, not as an
-    /// if/else. An `addr_to_link` entry that yields no identity must not
+    /// if/else. A link index entry that yields no identity must not
     /// short-circuit the address scan, because the two keys can be different
     /// forms of the same peer's address (the hostname-vs-numeric case that
     /// predicate 2 exists for) and the entry can outlive the link it named.
@@ -475,7 +476,7 @@ impl Node {
         }
 
         // Predicate 1: the reverse-address lookup.
-        if let Some(&link_id) = self.addr_to_link.get(&(transport_id, remote_addr.clone())) {
+        if let Some(&link_id) = self.links.index().get(&(transport_id, remote_addr.clone())) {
             if let Some(peer) = self.peers.values().find(|p| p.link_id() == link_id) {
                 return Msg1Waiver::Expect(*peer.node_addr());
             }
@@ -760,7 +761,7 @@ impl Node {
         // classification now gates on `has_existing_peer` (identity), which
         // subsumes it.
         let addr_key = (packet.transport_id, packet.remote_addr.clone());
-        if let Some(&existing_link_id) = self.addr_to_link.get(&addr_key)
+        if let Some(&existing_link_id) = self.links.index().get(&addr_key)
             && let Some(link) = self.links.get(&existing_link_id)
         {
             if link.direction() == LinkDirection::Inbound {
@@ -1307,8 +1308,7 @@ impl Node {
                     LinkDirection::Inbound,
                     Duration::from_millis(self.config().node.base_rtt_ms),
                 );
-                self.links.insert(link_id, link);
-                self.addr_to_link.insert(addr_key, link_id);
+                self.links.open(link);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
                 // Store the framed msg2 on the surviving carrier for duplicate-
                 // msg1 resend while the connection is still pending.
@@ -1316,7 +1316,7 @@ impl Node {
 
                 // Register the machine, which already carries the connection
                 // (Promote/Restart tail only).
-                self.peer_machines.insert(link_id, machine);
+                self.peer_machines.add(link_id, machine);
 
                 // Execute [SendHandshake, PromoteToActive]. The old peer was
                 // removed in Phase 1, so `promote_connection` finds no peer held
@@ -1439,8 +1439,7 @@ impl Node {
                     LinkDirection::Inbound,
                     Duration::from_millis(self.config().node.base_rtt_ms),
                 );
-                self.links.insert(link_id, link);
-                self.addr_to_link.insert(addr_key, link_id);
+                self.links.open(link);
                 let wire_msg2 = build_msg2(our_index, their_index, &msg2_payload);
                 // Store the framed msg2 on the surviving carrier for duplicate-
                 // msg1 resend while the connection is still pending.
@@ -1449,7 +1448,7 @@ impl Node {
                 // Register the machine, which already carries the connection
                 // (Promote tail only — discarded on every reject/resend/rekey
                 // arm per the insertion discipline).
-                self.peer_machines.insert(link_id, machine);
+                self.peer_machines.add(link_id, machine);
 
                 // Execute [SendHandshake, PromoteToActive]. The executor frames +
                 // sends msg2 (bytes identical to `wire_msg2`), promotes via
@@ -1620,13 +1619,13 @@ impl Node {
         // On this peer's link: from a path the peer holds that is proven at
         // this end (Live or acked; the original path is both), or, on a link
         // whose peer is not capable, from a pair the peer holds no path for
-        // that an `addr_to_link` entry maps to its link. That is FRC-1201
+        // that a link index entry maps to its link. That is FRC-1201
         // Section 5.7's setup address, such as the address the link was set
         // up at after its one path followed the peer elsewhere, or a
         // hostname-keyed dial address beside a numeric current address. On a
         // link whose peer is capable such a pair is off the link (multipath
         // draft Section 5.10). A held path still Probing is treated as no
-        // path, even where an `addr_to_link` entry maps its pair to the link:
+        // path, even where a link index entry maps its pair to the link:
         // the machine then refuses the msg1 while the established link is
         // reachable and accepts it once the link is down. `proven` keeps
         // whether the pair is a proven path, for the answer's route below;
@@ -1638,7 +1637,8 @@ impl Node {
                 Match::None => (
                     !p.bundle().is_some_and(|b| b.capable())
                         && self
-                            .addr_to_link
+                            .links
+                            .index()
                             .get(&(packet.transport_id, packet.remote_addr.clone()))
                             == Some(&p.link_id()),
                     false,
@@ -2009,7 +2009,7 @@ impl Node {
                 // carries a handshake is stale: a state-machine
                 // inconsistency, not a fresh lookup miss.
                 let reject = if setup.is_some() {
-                    self.pending_outbound.remove(&key);
+                    self.pending_outbound.forget(&key);
                     HandshakeReject::BadState
                 } else {
                     HandshakeReject::UnknownConnection
@@ -2054,7 +2054,7 @@ impl Node {
                         "msg2 did not authenticate, keeping the handshake attempt"
                     );
                     if node_fault!(ForgetDialOnRefusedMsg2) {
-                        self.pending_outbound.remove(&key);
+                        self.pending_outbound.forget(&key);
                     }
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
@@ -2106,7 +2106,7 @@ impl Node {
             )
             .is_err()
         {
-            self.pending_outbound.remove(&key);
+            self.pending_outbound.forget(&key);
             if let Some(link) = self.links.get(&link_id) {
                 let tid = link.transport_id();
                 let addr = link.remote_addr().clone();
@@ -2213,7 +2213,7 @@ impl Node {
                     interval_ms,
                     &mut self.index_allocator,
                 );
-                self.peer_machines.insert(link_id, machine);
+                self.peer_machines.add(link_id, machine);
                 actions
             }
         };
@@ -2246,7 +2246,7 @@ impl Node {
             let mut conn = match taken_conn {
                 Some(c) => c,
                 None => {
-                    self.pending_outbound.remove(&key);
+                    self.pending_outbound.forget(&key);
                     self.stats_mut()
                         .record_reject(RejectReason::Handshake(HandshakeReject::UnknownConnection));
                     return;
@@ -2269,7 +2269,7 @@ impl Node {
                     (Some(s), Some(lease)) => (s, lease),
                     _ => {
                         warn!(peer = %self.peer_display_name(&peer_node_addr), "Incomplete outbound connection");
-                        self.pending_outbound.remove(&key);
+                        self.pending_outbound.forget(&key);
                         self.stats_mut()
                             .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
                         return;
@@ -2433,7 +2433,7 @@ impl Node {
             }
 
             // Clean up outbound connection state
-            self.pending_outbound.remove(&key);
+            self.pending_outbound.forget(&key);
             // Close the losing leg's connection: a separate socket on TCP, a
             // no-op when connectionless, and left open when it is the very
             // connection the promoted peer runs on (BLE).
@@ -2461,7 +2461,7 @@ impl Node {
         //
         // The outbound Msg2 Promote step cancels the two dial-armed handshake
         // timers (the machine survives promotion, so they would otherwise linger
-        // in `peer_timers` until `drive_peer_timers` lazily discards them — the
+        // in the timer store until `drive_peer_timers` lazily discards them — the
         // promoted leg's pending connection is consumed and the machine has left
         // `SentMsg1`, so they can no longer fire) and then promotes.
         // `PromoteToActive` is what performs the promotion.
@@ -2520,7 +2520,7 @@ impl Node {
             self.peer_machines.get(&link_id).map(|m| m.state()),
             Some(PeerState::Established { .. })
         ) {
-            self.pending_outbound.remove(&key);
+            self.pending_outbound.forget(&key);
             info!(
                 peer = %self.peer_display_name(&peer_node_addr),
                 "Peer promoted to active"
@@ -2699,7 +2699,7 @@ impl Node {
             new_peer.set_last_tree_announce_sent_ms(Some(crate::time::mono_ms()));
         }
 
-        self.peers.insert(peer_node_addr, new_peer);
+        self.peers.install(peer_node_addr, new_peer);
         self.run_link_outputs(&peer_node_addr, out);
         self.peering
             .reconciler

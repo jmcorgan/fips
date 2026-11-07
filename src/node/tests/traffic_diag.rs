@@ -103,7 +103,7 @@ fn map_sizes(node: &Node) -> [usize; 6] {
         node.peers_by_index.len(),
         node.pending_outbound.len(),
         node.links.len(),
-        node.addr_to_link.len(),
+        node.links.index().len(),
         node.peer_machines.len(),
     ]
 }

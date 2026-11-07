@@ -97,7 +97,7 @@ fn sizes(node: &Node, others: &[NodeAddr]) -> Vec<(&'static str, usize)> {
         ("peer_machines", node.peer_machines.len()),
         ("pending_outbound", node.pending_outbound.len()),
         ("links", node.links.len()),
-        ("addr_to_link", node.addr_to_link.len()),
+        ("addr_to_link", node.links.index().len()),
         ("peers_by_index", node.peers_by_index.len()),
         ("index_allocator", node.index_allocator.count()),
         ("link_records", node.link_records.len()),

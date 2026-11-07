@@ -278,16 +278,18 @@ async fn a_responder_restarting_a_peering_installs_the_peer_when_its_stored_msg2
     old.test_backdate_heard(Duration::from_secs(60));
     old.set_current_addr(tid, msg1.remote_addr.clone());
     old.set_remote_epoch(Some([0xAA; 8]));
-    nodes[1].node.peers.insert(a, old);
+    nodes[1].node.peers.raw().insert(a, old);
     nodes[1]
         .node
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((tid, msg1.remote_addr.clone()), stale_link);
 
     nodes[1].node.handle_msg1(msg1.clone()).await;
     let fresh_link = nodes[1]
         .node
-        .addr_to_link
+        .links
+        .index()
         .get(&(tid, msg1.remote_addr.clone()))
         .copied();
     assert!(

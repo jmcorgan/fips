@@ -621,11 +621,8 @@ impl Node {
             )
         };
 
-        self.links.insert(link_id, link);
-
-        // Add reverse lookup for packet dispatch
-        self.addr_to_link
-            .insert((transport_id, remote_addr.clone()), link_id);
+        // The link, and its pair in the reverse lookup
+        self.links.open(link);
 
         // Persist the outbound control machine at dial, keyed by the same
         // `link_id` as the (soon-to-be-built) connection. It parks in
@@ -646,7 +643,7 @@ impl Node {
                 .get(peer_identity.node_addr())
                 .map(|p| p.link_id()),
         );
-        self.peer_machines.insert(link_id, machine);
+        self.peer_machines.add(link_id, machine);
 
         if is_connection_oriented {
             // Connection-oriented: drive the machine to open the transport. The
@@ -746,8 +743,9 @@ impl Node {
             "outbound msg1 prepared for link {link_id} with no dial-time machine"
         );
         self.peer_machines
-            .entry(link_id)
-            .or_insert_with(|| PeerMachine::new_outbound(link_id, peer_identity, at))
+            .ensure(link_id, || {
+                PeerMachine::new_outbound(link_id, peer_identity, at)
+            })
             .set_leg(HandshakeCrypto::new());
 
         // Allocate a session index for this handshake, as the lease the
@@ -756,9 +754,8 @@ impl Node {
             Some(lease) => lease,
             None => {
                 // Clean up the link and dial-time machine we just created
-                self.links.remove(&link_id);
-                self.addr_to_link
-                    .remove(&(transport_id, remote_addr.clone()));
+                self.links
+                    .forget(&link_id, &(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::IndexAllocationFailed(
                     crate::utils::index::IndexError::Exhausted.to_string(),
@@ -785,9 +782,8 @@ impl Node {
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
-                self.links.remove(&link_id);
-                self.addr_to_link
-                    .remove(&(transport_id, remote_addr.clone()));
+                self.links
+                    .forget(&link_id, &(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
@@ -818,7 +814,7 @@ impl Node {
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+            .note((transport_id, our_index.as_u32()), link_id);
 
         let machine = self
             .peer_machines
@@ -1786,7 +1782,6 @@ impl Node {
 
                 // Clean up link and dial-time machine, then schedule retry
                 self.remove_link(&pending.link_id);
-                self.links.remove(&pending.link_id);
                 self.remove_peer_machine(pending.link_id);
                 self.note_handshake_timeout(
                     *pending.peer_identity.node_addr(),

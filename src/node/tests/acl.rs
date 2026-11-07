@@ -126,12 +126,14 @@ async fn outbound_denied_at_msg2(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a, link_a);
+    node_a.links.raw().insert(link_id_a, link_a);
     node_a
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id_a);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
 
     let mut conn_b = inbound_leg(LinkId::new(2), 1000);

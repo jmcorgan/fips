@@ -653,7 +653,8 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin_when_the_peers_leg_is
     hand(&mut nodes[s].node, msg1.clone()).await;
     let leg = *nodes[s]
         .node
-        .addr_to_link
+        .links
+        .index()
         .get(&(t1, l1.clone()))
         .expect("precondition: s keeps a leg for l's msg1");
     assert!(
@@ -676,7 +677,8 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin_when_the_peers_leg_is
         .expect("precondition: s's dial starts");
     let dial = *nodes[s]
         .node
-        .addr_to_link
+        .links
+        .index()
         .get(&(t1, dialled.clone()))
         .expect("precondition: s's dial has a link");
     assert!(

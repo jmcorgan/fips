@@ -174,7 +174,7 @@ impl Node {
     /// selects an alternative or becomes root, and marks remaining peers
     /// for pending tree announce (delivered on next tick).
     pub(in crate::node) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
-        let mut peer = match self.peers.remove(node_addr) {
+        let mut peer = match self.peers.take(node_addr) {
             Some(p) => p,
             None => {
                 debug!(peer = %self.peer_display_name(node_addr), "Peer already removed");

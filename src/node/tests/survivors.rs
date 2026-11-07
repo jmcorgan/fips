@@ -3,7 +3,10 @@
 //! it, and the node's handling of the two cross-connection promotion results,
 //! once a promotion for a held identity became a refusal. The second is the
 //! same scan over a narrower directory, the node outside its tests, because
-//! the peer machine still carries those results.
+//! the peer machine still carries those results. A third keeps the per-peer
+//! map wrappers of `node/settle/` closed: what the compiler cannot refuse
+//! there is a `DerefMut` on a wrapper, or a way past the writers outside
+//! `#[cfg(test)]`.
 
 use std::path::{Path, PathBuf};
 
@@ -385,4 +388,81 @@ fn no_node_code_names_a_cross_connection_promotion_result_and_the_scan_finds_a_p
         !files.iter().any(|p| p.starts_with(node.join("tests"))),
         "the node's tests are not scanned"
     );
+}
+
+/// Each way a file of `node/settle/` would open a map wrapper to writes past
+/// its writers, as `file:line: what`: a use of `DerefMut` in code, or a
+/// `fn raw` or `fn raw_*` with no `#[cfg(test)]` among the attributes above
+/// it.
+fn wrapper_escapes(file: &str, source: &str) -> Vec<String> {
+    let idents = fips_core::proto::rekey::code_idents(source);
+    let lines: Vec<&str> = source.lines().collect();
+    let mut found = Vec::new();
+    for (i, (n, w)) in idents.iter().enumerate() {
+        if w == "DerefMut" {
+            found.push(format!("{file}:{n}: DerefMut"));
+        }
+        let raw = idents
+            .get(i + 1)
+            .is_some_and(|(m, next)| m == n && (next == "raw" || next.starts_with("raw_")));
+        if w == "fn" && raw {
+            let gated = lines[..n - 1]
+                .iter()
+                .rev()
+                .map(|l| l.trim())
+                .take_while(|l| l.starts_with("#[") || l.starts_with("//"))
+                .any(|l| l == "#[cfg(test)]");
+            if !gated {
+                found.push(format!("{file}:{n}: {} outside cfg(test)", idents[i + 1].1));
+            }
+        }
+    }
+    found
+}
+
+/// No map wrapper of the node has a `DerefMut`, and every way past a
+/// wrapper's writers is test code, so production writes each map only
+/// through its named writers. A direct write to the inner map does not
+/// compile, since the field is private; this scan checks the two things the
+/// compiler would let through. The planted lines show it finds each, and not
+/// a name in a comment.
+#[test]
+fn no_map_wrapper_opens_its_map_to_production_writes_and_the_scan_finds_a_planted_one() {
+    let planted = "    // impl DerefMut for MachineMap, once.\n\
+                   \x20   impl std::ops::DerefMut for DialMap {\n\
+                   \x20   #[cfg(test)]\n\
+                   \x20   /// The inner map.\n\
+                   \x20   pub(in crate::node) fn raw(&mut self) -> &mut Map {\n\
+                   \x20   pub(in crate::node) fn raw_timers(&mut self) -> &mut Map {\n";
+    assert_eq!(
+        wrapper_escapes("planted.rs", planted),
+        [
+            "planted.rs:2: DerefMut",
+            "planted.rs:6: raw_timers outside cfg(test)"
+        ],
+        "the scan finds a planted DerefMut and an ungated raw_timers, and passes a gated raw"
+    );
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let settle = root.join("node").join("settle");
+    let mut files = Vec::new();
+    sources(&settle, &mut files);
+    let mut found = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("the source file reads");
+        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        found.extend(wrapper_escapes(&file, &source));
+    }
+    assert!(
+        found.is_empty(),
+        "a map wrapper is open to production writes: {found:?}"
+    );
+    // The scan reaches the wrappers and the macro their reads come from.
+    for want in [
+        "node/settle/mod.rs",
+        "node/settle/maps.rs",
+        "node/settle/links.rs",
+    ] {
+        assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
+    }
 }

@@ -416,7 +416,7 @@ impl ConnectionState {
 ///
 /// Unlike [`Router`](crate::proto::routing::Router), the FMP lifecycle core
 /// owns **no** mutable state: every registry mutation (index allocation,
-/// `peers_by_index`/`addr_to_link`/`connections` insertion and removal,
+/// `peers_by_index`/link index/`connections` insertion and removal,
 /// decrypt-worker register/unregister) stays shell-side, driven by the
 /// [`ConnAction`](super::ConnAction)s the pure `poll_*` decisions emit. `Fmp`
 /// is therefore an empty namespace anchor: it exists so the maintain/teardown

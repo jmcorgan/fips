@@ -136,7 +136,7 @@ async fn chartest_a_second_own_dial_to_the_held_links_address_leaves_that_link_w
             .expect("precondition: the held link is in the link map");
         (link, (k.transport_id(), k.remote_addr().clone()))
     };
-    let entry = late.nodes[d].node.addr_to_link.get(&key).copied();
+    let entry = late.nodes[d].node.links.index().get(&key).copied();
     cleanup_nodes(&mut late.nodes).await;
     assert_eq!(
         entry, None,

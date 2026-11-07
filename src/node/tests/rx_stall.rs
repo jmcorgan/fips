@@ -357,7 +357,7 @@ async fn msg2_reply_to_dead_tcp_link_returns_without_dialing() {
     );
     assert!(node.links.is_empty(), "the half-built link is torn down");
     assert!(
-        node.addr_to_link.is_empty(),
+        node.links.index().is_empty(),
         "the half-built link is unindexed"
     );
     stop_all(&mut node).await;
@@ -412,7 +412,7 @@ fn make_link_outbound(node: &mut Node, peer: &NodeAddr) {
         LinkDirection::Outbound,
         old.base_rtt(),
     );
-    node.links.insert(link_id, link);
+    node.links.raw().insert(link_id, link);
 }
 
 /// Age `peer`'s session past the rekey trigger of a default config.
@@ -442,7 +442,7 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
         )
         .unwrap();
     let wire = build_msg1(our_index, &noise_msg1);
-    node.links.insert(
+    node.links.raw().insert(
         link_id,
         Link::new(
             link_id,
@@ -452,8 +452,11 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
             Duration::from_millis(100),
         ),
     );
-    node.addr_to_link.insert((tcp_id, addr.clone()), link_id);
+    node.links
+        .raw_index()
+        .insert((tcp_id, addr.clone()), link_id);
     node.pending_outbound
+        .raw()
         .insert((tcp_id, our_index.as_u32()), link_id);
     let mut machine = PeerMachine::new_outbound(link_id, target, LegStamp::at(now_ms));
     let _ = machine.step(
@@ -472,8 +475,9 @@ fn dial_leg(node: &mut Node, addr: &TransportAddr, now_ms: u64, due_ms: u64) -> 
     machine.set_conn_source_addr(addr.clone());
     machine.set_leg(leg.take_leg().unwrap());
     assert!(machine.is_handshaking_sent_msg1());
-    node.peer_machines.insert(link_id, machine);
-    node.peer_timers
+    node.peer_machines.raw().insert(link_id, machine);
+    node.peer_machines
+        .raw_timers()
         .entry(link_id)
         .or_default()
         .insert(TimerKind::HandshakeRetransmit, due_ms);
@@ -1029,7 +1033,7 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> (Node, std::net::TcpStream,
             let (mut node, _tx, _) = node_with_udp_and_tcp(CONNECT_TIMEOUT_MS).await;
             let far_end = prime_link(&node, bh).await;
             let link_id = node.allocate_link_id();
-            node.links.insert(
+            node.links.raw().insert(
                 link_id,
                 Link::new(
                     link_id,
@@ -1039,7 +1043,9 @@ async fn arm_site(row: ReplySite, bh: &Blackhole) -> (Node, std::net::TcpStream,
                     Duration::from_millis(100),
                 ),
             );
-            node.addr_to_link.insert((tcp_id, link.clone()), link_id);
+            node.links
+                .raw_index()
+                .insert((tcp_id, link.clone()), link_id);
             node.seed_handshake_machine(
                 HandshakeSeed::inbound(link_id, 1000)
                     .with_transport_id(tcp_id)
@@ -1413,7 +1419,7 @@ fn hold_probing_alias(node: &mut Node, peer: &NodeAddr, tid: TransportId, from: 
         "precondition: the pair is held and Probing"
     );
     let link_id = p.link_id();
-    node.addr_to_link.insert((tid, from.clone()), link_id);
+    node.links.raw_index().insert((tid, from.clone()), link_id);
 }
 
 /// [`hold_probing_alias`], with the held path then given up on: Dead, and
@@ -1692,7 +1698,7 @@ fn may_dial_allows_only_an_outbound_link_s_dial_address_on_its_transport() {
         (inb, LinkDirection::Inbound),
     ] {
         let link = Link::new(id, tcp, dialed.clone(), dir, Duration::from_millis(100));
-        node.links.insert(id, link);
+        node.links.raw().insert(id, link);
     }
 
     assert!(node.may_dial(out, tcp, &dialed), "outbound, dial address");

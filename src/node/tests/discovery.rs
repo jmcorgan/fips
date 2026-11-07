@@ -671,7 +671,7 @@ pub(super) fn register_peers(node: &mut Node, count: usize) -> Vec<crate::NodeAd
             let identity = Identity::generate();
             let addr = *identity.node_addr();
             let peer_identity = crate::PeerIdentity::from_pubkey(identity.pubkey());
-            node.peers.insert(
+            node.peers.raw().insert(
                 addr,
                 ActivePeer::new(peer_identity, LinkId::new(i as u64), 0),
             );
@@ -1793,7 +1793,7 @@ async fn test_open_discovery_sweep_queues_eligible_skips_filtered() {
     let connected_npub = crate::encode_npub(&connected_identity.pubkey());
     let connected_node_addr = *connected_identity.node_addr();
     let connected_peer_identity = crate::PeerIdentity::from_pubkey(connected_identity.pubkey());
-    node.peers.insert(
+    node.peers.raw().insert(
         connected_node_addr,
         ActivePeer::new(connected_peer_identity, LinkId::new(1), 1_000),
     );
@@ -2014,7 +2014,7 @@ async fn test_check_pending_lookups_default_sequence_unreachable() {
     let mut bloom = BloomFilter::new();
     bloom.insert(&target_addr);
     peer.update_filter(bloom, 1, 0);
-    node.peers.insert(peer_addr, peer);
+    node.peers.raw().insert(peer_addr, peer);
 
     // Make the peer a tree-peer: install a peer declaration that names us
     // as its parent. `is_tree_peer` checks both directions — the child
@@ -2740,7 +2740,7 @@ fn insert_filter_peer_as(
         bloom.insert(target);
     }
     peer.update_filter(bloom, 1, 0);
-    node.peers.insert(peer_addr, peer);
+    node.peers.raw().insert(peer_addr, peer);
     if tree {
         let our_addr = *node.node_addr();
         let decl = crate::proto::stp::ParentDeclaration::new(peer_addr, our_addr, 1, 0);
@@ -3175,9 +3175,9 @@ async fn a_node_with_no_peers_holds_a_bloom_miss_packet_and_rearms_the_hold_when
     assert_eq!(answers.len(), 1, "answered once outside the hold");
     assert_no_route(&answers[0]);
 
-    let removed: ActivePeer = node.peers.remove(&peer).unwrap();
+    let removed: ActivePeer = node.peers.raw().remove(&peer).unwrap();
     assert!(node.routing_hold_active(now()), "no peers again: inside");
-    node.peers.insert(peer, removed);
+    node.peers.raw().insert(peer, removed);
     assert!(
         node.routing_hold_active(now()),
         "regaining a peer must re-arm the hold"
@@ -3190,8 +3190,8 @@ async fn a_node_with_no_peers_holds_a_bloom_miss_packet_and_rearms_the_hold_when
     // A peer table that empties and refills between two observations is not
     // seen as a transition.
     leave_hold(&mut node);
-    let removed = node.peers.remove(&peer).unwrap();
-    node.peers.insert(peer, removed);
+    let removed = node.peers.raw().remove(&peer).unwrap();
+    node.peers.raw().insert(peer, removed);
     assert!(!node.routing_hold_active(now()));
 }
 

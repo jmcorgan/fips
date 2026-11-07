@@ -271,7 +271,7 @@ pub(super) async fn crossed_tcp(on: bool, zero_smaller: bool) -> (Vec<TestNode>,
 /// part of the key; it is kept so a test names the transport it plants
 /// for, and the planting is written once, here.
 pub(super) fn bind_index(node: &mut Node, _tid: TransportId, index: u32, peer: NodeAddr) {
-    node.peers_by_index.insert(index, peer);
+    node.peers_by_index.raw().insert(index, peer);
 }
 
 /// A second loopback address for the node listening on `existing`, for

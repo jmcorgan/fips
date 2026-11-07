@@ -26,7 +26,7 @@
 //! see its arm for the note.
 //!
 //! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
-//! store (`peer_timers`). The `HandshakeRetransmit` and `HandshakeTimeout`
+//! store (`MachineMap::timers`, on `peer_machines`). The `HandshakeRetransmit` and `HandshakeTimeout`
 //! deadlines are read and fired by `drive_peer_timers` (the handshake resend +
 //! reap home). The liveness kind is still SHADOW — driven by its own shell
 //! driver — so populating it stays behavior-neutral.
@@ -79,8 +79,8 @@ pub(in crate::node) struct PeerActionCtx {
     /// (`handle_msg1`) and outbound (`handle_msg2`) promote-Err arms were NOT
     /// byte-identical, so the executor must reproduce each. `false` = inbound
     /// (drop link + reverse map + free index), `true` = outbound (record the
-    /// reject only; leave the dead link/`addr_to_link` for the stale-connection
-    /// reaper, matching old `handle_msg2`).
+    /// reject only; leave the dead link and its index entry for the
+    /// stale-connection reaper, matching old `handle_msg2`).
     pub(in crate::node) is_outbound: bool,
 }
 
@@ -166,8 +166,7 @@ impl Node {
                                     });
                             }
                             Err(_e) => {
-                                self.links.remove(&link);
-                                self.addr_to_link.remove(&(transport_id, remote_addr));
+                                self.links.forget(&link, &(transport_id, remote_addr));
                                 self.remove_peer_machine(link);
                                 return;
                             }
@@ -238,9 +237,10 @@ impl Node {
                             // (`handle_msg1` L665): the send error text is surfaced
                             // at the executor point where the failure is now handled.
                             warn!(link_id = %link, error = %e, "Failed to send msg2");
-                            self.links.remove(&link);
-                            self.addr_to_link
-                                .remove(&(ambient.transport_id, ambient.remote_addr.clone()));
+                            self.links.forget(
+                                &link,
+                                &(ambient.transport_id, ambient.remote_addr.clone()),
+                            );
                             if let Some(idx) = ambient.our_index {
                                 let _ = self.index_allocator.free(idx);
                             }
@@ -340,8 +340,8 @@ impl Node {
                             if ambient.is_outbound {
                                 // OLD outbound (`handle_msg2` promote-Err): warn +
                                 // record_reject ONLY. NO `remove_link`, NO
-                                // `index_allocator.free`, NO `addr_to_link` removal —
-                                // the dead link/addr_to_link/pending_outbound were
+                                // `index_allocator.free`, NO link index removal —
+                                // the dead link, its index entry and pending_outbound were
                                 // left for the 30s stale-connection reaper
                                 // (`promote_connection` already handled
                                 // `connections[link]`/its index on error). Restored
@@ -442,15 +442,10 @@ impl Node {
                     // are read + fired by `drive_peer_timers`. The liveness kind
                     // is still SHADOW here — it keeps its own shell driver — so
                     // populating it stays behavior-neutral.
-                    self.peer_timers
-                        .entry(link)
-                        .or_default()
-                        .insert(kind, at_ms);
+                    self.peer_machines.arm(link, kind, at_ms);
                 }
                 PeerAction::CancelTimer { kind } => {
-                    if let Some(timers) = self.peer_timers.get_mut(&link) {
-                        timers.remove(&kind);
-                    }
+                    self.peer_machines.cancel(link, kind);
                 }
                 PeerAction::ReportLost { peer, kind } => {
                     // The single loss token, routed to the reconciler reflex the

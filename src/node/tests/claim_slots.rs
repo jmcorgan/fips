@@ -179,8 +179,10 @@ async fn victim() -> Victim {
     node.transports.insert(udp, TransportHandle::Udp(transport));
 
     node.peers
+        .raw()
         .insert(*p.node_addr(), ActivePeer::new(p, LinkId::new(900_001), 0));
     node.peers
+        .raw()
         .insert(*q.node_addr(), ActivePeer::new(q, LinkId::new(900_002), 0));
     assert!(
         !node.outbound_admission_check(),

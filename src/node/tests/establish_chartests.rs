@@ -90,7 +90,7 @@ fn inject_dummy_peers(node: &mut Node, count: usize) {
         let identity = make_peer_identity();
         let addr = *identity.node_addr();
         let peer = ActivePeer::new(identity, LinkId::new((i + 1) as u64), 0);
-        node.peers.insert(addr, peer);
+        node.peers.raw().insert(addr, peer);
     }
 }
 
@@ -125,7 +125,7 @@ async fn chartest_msg1_epoch_restart_replaces_active_peer() {
     old_peer.test_backdate_heard(Duration::from_secs(60));
     old_peer.set_remote_epoch(Some(old_epoch));
     old_peer.set_current_addr(transport_id, peer_addr.clone());
-    node.peers.insert(sender_addr, old_peer);
+    node.peers.raw().insert(sender_addr, old_peer);
     assert_eq!(
         node.get_peer(&sender_addr).unwrap().remote_epoch(),
         Some(old_epoch)
@@ -203,8 +203,9 @@ async fn chartest_msg1_duplicate_pending_resends_stored_msg2() {
         LinkDirection::Inbound,
         Duration::from_millis(100),
     );
-    node.links.insert(link_id, link);
-    node.addr_to_link
+    node.links.raw().insert(link_id, link);
+    node.links
+        .raw_index()
         .insert((transport_id, peer_addr.clone()), link_id);
     node.seed_handshake_machine(
         HandshakeSeed::inbound(link_id, 1000)
@@ -286,7 +287,7 @@ async fn chartest_msg1_duplicate_active_same_epoch_resends_stored_msg2() {
     peer.set_current_addr(transport_id, peer_addr.clone());
     peer.set_handshake_msg2(stored_msg2.clone());
     peer.note_setup(&data, &stored_msg2);
-    node.peers.insert(sender_addr, peer);
+    node.peers.raw().insert(sender_addr, peer);
     // Session age is ~0 (< 30s) → the rekey gate is false → a same-epoch msg1
     // classifies as a duplicate, not a rekey initiation.
     let _ = sender_pid;
@@ -363,10 +364,12 @@ async fn chartest_msg1_inbound_promote_defers_pending_outbound_to_same_identity(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node.links.insert(out_link, out_l);
-    node.addr_to_link
+    node.links.raw().insert(out_link, out_l);
+    node.links
+        .raw_index()
         .insert((transport_id, out_addr.clone()), out_link);
     node.pending_outbound
+        .raw()
         .insert((transport_id, out_index.as_u32()), out_link);
     assert_eq!(node.peer_count(), 0);
 
@@ -433,11 +436,13 @@ fn seed_dial(
             LinkDirection::Outbound,
             Duration::from_millis(100),
         );
-        node.links.insert(out_link, link);
-        node.addr_to_link
+        node.links.raw().insert(out_link, link);
+        node.links
+            .raw_index()
             .insert((transport_id, addr.clone()), out_link);
     }
     node.pending_outbound
+        .raw()
         .insert((transport_id, out_index.as_u32()), out_link);
     (out_link, out_index)
 }
@@ -548,7 +553,7 @@ async fn chartest_msg1_at_cap_from_the_address_we_are_dialing_leaves_our_dial_in
     );
     assert_eq!(node.peer_count(), 2, "no peer adopted at the cap");
     assert_eq!(
-        node.addr_to_link.get(&(transport_id, peer_addr.clone())),
+        node.links.index().get(&(transport_id, peer_addr.clone())),
         Some(&out_link),
         "our own dial keeps the address mapping it was registered under"
     );
@@ -635,7 +640,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
         .unwrap();
     let wire_msg1_a = build_msg1(out_index_a, &noise_msg1_a);
-    node_a.links.insert(
+    node_a.links.raw().insert(
         link_a_out,
         Link::connectionless(
             link_a_out,
@@ -646,10 +651,12 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         ),
     );
     node_a
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id_a, remote_addr_b.clone()), link_a_out);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id_a, out_index_a.as_u32()), link_a_out);
 
     // B initiates to A.
@@ -673,7 +680,7 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         .start_handshake(keypair_b, epoch_b, LegStamp::at(1000))
         .unwrap();
     let wire_msg1_b = build_msg1(out_index_b, &noise_msg1_b);
-    node_b.links.insert(
+    node_b.links.raw().insert(
         link_b_out,
         Link::connectionless(
             link_b_out,
@@ -684,10 +691,12 @@ async fn chartest_cross_connection_tiebreak_winner_and_loser() {
         ),
     );
     node_b
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id_b, remote_addr_a.clone()), link_b_out);
     node_b
         .pending_outbound
+        .raw()
         .insert((transport_id_b, out_index_b.as_u32()), link_b_out);
 
     // Both put msg1 on the wire.

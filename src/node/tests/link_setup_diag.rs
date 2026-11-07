@@ -495,8 +495,8 @@ fn pending_inbound(node: &mut Node, tid: TransportId, addr: &TransportAddr) -> L
         LinkDirection::Inbound,
         Duration::from_millis(100),
     );
-    node.links.insert(link_id, link);
-    node.addr_to_link.insert((tid, addr.clone()), link_id);
+    node.links.raw().insert(link_id, link);
+    node.links.raw_index().insert((tid, addr.clone()), link_id);
     node.seed_handshake_machine(
         HandshakeSeed::inbound(link_id, 1000)
             .with_transport_id(tid)
@@ -650,7 +650,7 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         .unwrap();
     let wire = build_msg1(our_index, &noise_msg1);
     machine.set_conn_handshake_msg1(wire.clone(), 2000);
-    from.node.links.insert(
+    from.node.links.raw().insert(
         link_id,
         Link::connectionless(
             link_id,
@@ -661,10 +661,12 @@ async fn dial(from: &mut Side, to: &Side) -> (Vec<u8>, SessionIndex) {
         ),
     );
     from.node
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((tid, to.addr.clone()), link_id);
     from.node
         .pending_outbound
+        .raw()
         .insert((tid, our_index.as_u32()), link_id);
     from.node
         .transports
