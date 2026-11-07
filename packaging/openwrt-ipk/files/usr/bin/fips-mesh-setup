@@ -13,9 +13,10 @@
 #
 # Creates a mesh-point interface on the given radio and leaves everything
 # above L2 to FIPS. Run once per radio: dual-band routers can mesh on both
-# bands at once (2.4 GHz reaches further, 5 GHz carries more). Note this is
-# failover, not multipath — FIPS keeps one active link per peer; the other
-# band stands by and reconnects the peer if the active link dies.
+# bands at once (2.4 GHz reaches further, 5 GHz carries more). FIPS sends on
+# one at a time; the other band stands by and takes over if the one in use
+# stops answering, with no new handshake where both routers set
+# node.path.enabled: true.
 #
 #   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
 #     handshake authenticates and encrypts every peer link, so SAE would
@@ -819,7 +820,7 @@ $FW_NOTE
 
 ALL routers in this backhaul must share this mesh ID AND channel
 (per band). On a dual-band router, run fips-mesh-setup for the other
-radio too — second band is a standby path (failover, not multipath).
+radio too — second band is a standby path FIPS moves to if the first fails.
 
 They must also share the basic rates, basic_rate '${RATES:-$BASIC_RATES}'.
 A router set up by an older fips package may join with other rates and

@@ -17,21 +17,19 @@
 //! | the path MTU of a BLE peer that frames move to another link | `chartest_a_ble_peer_moved_by_its_frames_keeps_the_path_mtu_of_its_first_link` |
 //! | the spin-bit role after a crossing | `chartest_after_a_crossing_both_ends_hold_the_spin_responder_role` |
 
-use super::super::crossed_dial::{Dial, cross_dials, hand};
+use super::super::crossed_dial::{Dial, cross_dials_from, hand};
 use super::super::rekey_parity::stale_session;
-use super::super::spanning_tree::{
-    TestNode, cleanup_nodes, initiate_handshake, make_test_node, restarted_node,
-};
+use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, restarted_node};
 use super::super::*;
-use super::crossed_tcp;
 use super::crossing::{Second, second_msg1_late};
+use super::{crossed_tcp, loopback_node, with_path};
 
 /// After crossed dials, right after the smaller node moves onto its own
 /// outbound handshake and before any frame of the peer's, the smaller node
 /// counts the peering as not heard from: the move does not set it.
 #[tokio::test]
 async fn chartest_a_crossing_leaves_the_smaller_node_unheard_until_the_peers_first_frame() {
-    let crossed = cross_dials(Dial::AnsweredFromFirst).await;
+    let crossed = cross_dials_from(Dial::AnsweredFromFirst, with_path(Config::new(), false)).await;
     let (s, l) = (crossed.s, crossed.l);
     let mut nodes = crossed.nodes;
     let l_addr = *nodes[l].node.node_addr();
@@ -68,7 +66,7 @@ async fn chartest_a_crossing_leaves_the_smaller_node_unheard_until_the_peers_fir
 /// peering was never heard from.
 #[tokio::test]
 async fn chartest_a_restart_seen_in_our_msg2_keeps_the_fsp_session_of_an_unheard_peering() {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
     let a1 = *nodes[1].node.node_addr();
     initiate_handshake(&mut nodes, 1, 0).await;
     let msg1 = nodes[0]
@@ -86,7 +84,7 @@ async fn chartest_a_restart_seen_in_our_msg2_keeps_the_fsp_session_of_an_unheard
     };
     stale_session(&mut nodes[0].node, a1);
 
-    let restarted = restarted_node(&nodes[1], Config::new());
+    let restarted = restarted_node(&nodes[1], with_path(Config::new(), false));
     let mut old = std::mem::replace(&mut nodes[1], restarted);
     cleanup_nodes(std::slice::from_mut(&mut old)).await;
     initiate_handshake(&mut nodes, 0, 1).await;
@@ -123,7 +121,7 @@ async fn chartest_a_restart_seen_in_our_msg2_keeps_the_fsp_session_of_an_unheard
 #[tokio::test]
 async fn chartest_a_second_own_dial_to_the_held_links_address_leaves_that_link_without_an_index_entry()
  {
-    let mut late = second_msg1_late(true, Second::InOrder).await;
+    let mut late = second_msg1_late(false, true, Second::InOrder).await;
     let (d, r) = (late.d, late.r);
     let r_addr = *late.nodes[r].node.node_addr();
     let (link, key) = {
@@ -151,7 +149,7 @@ async fn chartest_a_second_own_dial_to_the_held_links_address_leaves_that_link_w
 /// moves, and the larger node keeps its inbound session.
 #[tokio::test]
 async fn chartest_after_a_crossing_both_ends_hold_the_spin_responder_role() {
-    let (mut nodes, s, l) = crossed_tcp(true).await;
+    let (mut nodes, s, l) = crossed_tcp(false, true).await;
     let s_addr = *nodes[s].node.node_addr();
     let l_addr = *nodes[l].node.node_addr();
     let role = |tn: &TestNode, peer: &NodeAddr| {
@@ -174,7 +172,7 @@ async fn chartest_after_a_crossing_both_ends_hold_the_spin_responder_role() {
 #[cfg(ble_available)]
 #[tokio::test]
 async fn chartest_a_ble_peer_moved_by_its_frames_keeps_the_path_mtu_of_its_first_link() {
-    use super::super::ble::{base_config, ble_addr, larger_second, make_test_node_ble_with};
+    use super::super::ble::{base_config, ble_addr, larger_second, make_test_node_ble_from};
     use super::super::ble::{pooled_at, until};
     use super::super::spanning_tree::drain_all_packets;
     use crate::transport::ble::addr::BleAddr;
@@ -197,8 +195,8 @@ async fn chartest_a_ble_peer_moved_by_its_frames_keeps_the_path_mtu_of_its_first
     }
 
     let mut nodes = vec![
-        make_test_node_ble_with(1, base_config()).await,
-        make_test_node_ble_with(2, base_config()).await,
+        make_test_node_ble_from(1, base_config(), with_path(Config::new(), false)).await,
+        make_test_node_ble_from(2, base_config(), with_path(Config::new(), false)).await,
     ];
     larger_second(&mut nodes);
     let (a0, a1) = (own(&nodes[0]), own(&nodes[1]));

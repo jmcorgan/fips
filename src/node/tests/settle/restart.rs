@@ -15,7 +15,7 @@
 use super::super::rekey_parity::{deliver, linked_pair, rekey_config, trigger_age};
 use super::super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, restarted_node};
 use super::super::*;
-use super::{pump, settled};
+use super::{pump, settled, with_path};
 
 /// Past the 1 s floor below which an unheard peering is not replaced.
 const PAST_FLOOR: Duration = Duration::from_millis(1_100);
@@ -34,7 +34,11 @@ async fn late_rekey(
 ) -> Result<(), String> {
     let (d, r) = if d_dialed { (0, 1) } else { (1, 0) };
     let mut nodes: Vec<TestNode> = loop {
-        let mut nodes = linked_pair(rekey_config(60), rekey_config(60)).await;
+        let mut nodes = linked_pair(
+            with_path(rekey_config(60), false),
+            with_path(rekey_config(60), false),
+        )
+        .await;
         if (nodes[d].node.node_addr() < nodes[r].node.node_addr()) == d_smaller {
             break nodes;
         }
@@ -42,7 +46,7 @@ async fn late_rekey(
     };
     let d_addr = *nodes[d].node.node_addr();
     let r_addr = *nodes[r].node.node_addr();
-    let restarted = restarted_node(&nodes[r], rekey_config(60));
+    let restarted = restarted_node(&nodes[r], with_path(rekey_config(60), false));
     drop(std::mem::replace(&mut nodes[r], restarted));
     nodes[d]
         .node

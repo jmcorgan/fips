@@ -25,12 +25,12 @@
 //! them in.
 
 use super::super::establish_chartests::craft_msg1_wire;
-use super::super::link_setup_diag::{EPOCH, Established, established, packet, stop_transport};
+use super::super::link_setup_diag::{EPOCH, Established, established_from, packet, stop_transport};
 use super::super::spanning_tree::{
-    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, make_test_node, restarted_node,
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, restarted_node,
 };
 use super::super::*;
-use super::tap;
+use super::{loopback_node, tap, with_path};
 use crate::testutil::{LogCapture, capture_logs_scoped};
 use crate::transport::TransportId;
 
@@ -80,8 +80,8 @@ async fn dial_into_tap() -> (
     TestNode,
     tokio::sync::mpsc::UnboundedReceiver<ReceivedPacket>,
 ) {
-    let mut tn = make_test_node().await;
-    let other = make_test_node().await;
+    let mut tn = loopback_node(false).await;
+    let other = loopback_node(false).await;
     let id = PeerIdentity::from_pubkey_full(other.node.identity().pubkey_full());
     let tid = tn.transport_id;
     let (dialled, tap) = tap(tid);
@@ -143,7 +143,7 @@ async fn a_forward_wall_clock_step_sends_no_msg1_resend_early() {
 /// passing, the same must hold.
 #[tokio::test]
 async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now() {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
     initiate_handshake(&mut nodes, 0, 1).await;
     drain_all_packets(&mut nodes, false).await;
     let a = *nodes[0].node.node_addr();
@@ -207,7 +207,7 @@ async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peerin
 /// passing.
 #[tokio::test]
 async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now() {
-    let mut e = established(5).await;
+    let mut e = established_from(5, with_path(Config::new(), false)).await;
     let peer = e
         .node
         .get_peer_mut(&e.peer)
@@ -274,7 +274,9 @@ fn tree_roles(nodes: &[TestNode]) -> (usize, usize) {
 /// steps back an hour, as an NTP or RTC correction would.
 #[tokio::test]
 async fn a_backward_wall_step_does_not_hold_a_tree_announce_past_its_interval() {
-    let mut nodes = super::super::spanning_tree::run_tree_test(2, &[(0, 1)], false).await;
+    let configs = (0..2).map(|_| with_path(Config::new(), false)).collect();
+    let mut nodes =
+        super::super::spanning_tree::run_tree_test_with_configs(configs, &[(0, 1)]).await;
     let (s, r) = tree_roles(&nodes);
     let parent = *nodes[r].node.node_addr();
     let interval = nodes[s].node.config().node.tree.announce_min_interval_ms;
@@ -325,8 +327,8 @@ async fn pending_inbound_leg_holding_its_msg2() -> (Node, LinkId) {
     use crate::transport::TransportHandle;
     use crate::transport::ethernet::EthernetTransport;
 
-    let mut node = make_node();
-    let initiator = make_node();
+    let mut node = make_node_with(with_path(Config::new(), false));
+    let initiator = make_node_with(with_path(Config::new(), false));
     let transport_id = TransportId::new(1);
     node.supervisor.state = NodeState::Running;
     let config = EthernetConfig {
@@ -463,7 +465,7 @@ const PAST_THE_RESTART_INTERVAL: Duration = Duration::from_secs(15 + 1);
 /// Node 0 dials node 1 over loopback and frames flow, so node 1 holds node 0
 /// heard. Returns the nodes and node 0's address, link and index at node 1.
 async fn heard_loopback_peering() -> (Vec<TestNode>, NodeAddr, LinkId, Option<SessionIndex>) {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
     initiate_handshake(&mut nodes, 0, 1).await;
     drain_all_packets(&mut nodes, false).await;
     let a = *nodes[0].node.node_addr();
@@ -482,7 +484,7 @@ async fn restart_msg1(
     nodes: &mut [TestNode],
     a: &NodeAddr,
 ) -> Option<(LinkId, Option<SessionIndex>)> {
-    let restarted = restarted_node(&nodes[0], Config::new());
+    let restarted = restarted_node(&nodes[0], with_path(Config::new(), false));
     let mut old = std::mem::replace(&mut nodes[0], restarted);
     cleanup_nodes(std::slice::from_mut(&mut old)).await;
     initiate_handshake(nodes, 0, 1).await;
@@ -559,7 +561,7 @@ async fn a_peering_heard_just_now_after_an_old_promotion_is_not_replaced_by_a_re
 #[tokio::test]
 async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_an_unheard_peering_promoted_just_now()
  {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
     let a = *nodes[0].node.node_addr();
     initiate_handshake(&mut nodes, 0, 1).await;
     let mut first = nodes[1]
@@ -605,7 +607,7 @@ async fn a_forward_wall_clock_step_does_not_let_a_msg1_replace_an_unheard_peerin
 /// stepped time.
 #[tokio::test]
 async fn a_shown_authenticated_at_follows_a_wall_step() {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    let mut nodes = vec![loopback_node(false).await, loopback_node(false).await];
     step_wall(3_600_000);
     initiate_handshake(&mut nodes, 0, 1).await;
     let mut m = nodes[1]
@@ -677,8 +679,8 @@ async fn promotes(
 /// passing.
 #[tokio::test]
 async fn a_forward_wall_step_does_not_empty_the_replay_memory() {
-    let mut node = make_node();
-    let initiator = make_node();
+    let mut node = make_node_with(with_path(Config::new(), false));
+    let initiator = make_node_with(with_path(Config::new(), false));
     let peer = *PeerIdentity::from_pubkey_full(initiator.identity().pubkey_full()).node_addr();
     let a = genuine_msg1(&initiator, &node);
     let b = genuine_msg1(&initiator, &node);
@@ -724,8 +726,8 @@ async fn a_forward_wall_step_does_not_empty_the_replay_memory() {
 /// ephemeral remembered.
 #[tokio::test]
 async fn a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step() {
-    let mut node = make_node();
-    let initiator = make_node();
+    let mut node = make_node_with(with_path(Config::new(), false));
+    let initiator = make_node_with(with_path(Config::new(), false));
     let peer = *PeerIdentity::from_pubkey_full(initiator.identity().pubkey_full()).node_addr();
     let a = genuine_msg1(&initiator, &node);
     let b = genuine_msg1(&initiator, &node);

@@ -6,8 +6,8 @@
 //! protocol over an in-memory stream. Loopback nodes only, and no socket.
 
 use super::paths::{
-    active_of, carrier, enabled, loopback_mut, report_body, same_transport, same_transport_with,
-    second_transport, shut_p, state_at, t2, two_transports,
+    active_of, carrier, disabled, enabled, loopback_mut, report_body, same_transport,
+    same_transport_with, second_transport, shut_p, state_at, t2, two_transports,
 };
 use super::rekey_parity::{deliver, linked_pair};
 use super::spanning_tree::{TestNode, cleanup_nodes, process_available_packets};
@@ -164,7 +164,7 @@ fn paths_of(row: &Value) -> &Vec<Value> {
 /// address, live, active and unpinned, the same on the loop and off it.
 #[tokio::test]
 async fn a_one_path_peer_row_keeps_every_field_and_lists_its_one_path() {
-    let mut nodes = linked_pair(Config::new(), Config::new()).await;
+    let mut nodes = linked_pair(disabled(), disabled()).await;
     let npub = nodes[1].node.npub();
     let t1 = nodes[0].transport_id;
     let (on, off) = rows(&mut nodes[0], &npub);
@@ -584,13 +584,13 @@ async fn the_path_commands_refuse_an_unknown_peer_or_transport_and_a_pin_with_mu
     );
     cleanup_nodes(&mut nodes).await;
 
-    let mut nodes = linked_pair(Config::new(), Config::new()).await;
+    let mut nodes = linked_pair(disabled(), disabled()).await;
     let b = *nodes[1].node.node_addr();
     let npub = nodes[1].node.npub();
     let a = &mut nodes[0].node;
-    let disabled = "multipath is disabled on this node".to_string();
-    assert_eq!(a.pin_path(&npub, "1", None).await, Err(disabled.clone()));
-    assert_eq!(a.unpin_path(&npub).await, Err(disabled));
+    let refused = "multipath is disabled on this node".to_string();
+    assert_eq!(a.pin_path(&npub, "1", None).await, Err(refused.clone()));
+    assert_eq!(a.unpin_path(&npub).await, Err(refused));
     assert!(
         a.get_peer(&b).unwrap().bundle().unwrap().pin().is_none(),
         "no pin is set"

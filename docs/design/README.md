@@ -48,6 +48,7 @@ documents cover specific subsystems in detail.
 | Document | Description |
 | -------- | ----------- |
 | [fips-mesh-operation.md](fips-mesh-operation.md) | How the mesh operates: routing, discovery, error recovery |
+| [fips-multi-path-switchover.md](fips-multi-path-switchover.md) | Multipath: one link over several paths, switchover without a second handshake |
 | [fips-nostr-discovery.md](fips-nostr-discovery.md) | Optional Nostr-mediated peer discovery and UDP NAT hole-punch |
 | [port-advertisement-and-nat-traversal.md](port-advertisement-and-nat-traversal.md) | Nostr-signaled port advertisement and UDP NAT-traversal protocol; generic, with FIPS as an example implementation |
 

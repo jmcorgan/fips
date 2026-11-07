@@ -106,11 +106,12 @@ the blip if clients are connected.
 
 On dual-band routers, meshing **both** bands is worth it: 2.4 GHz
 reaches further at lower rates, 5 GHz carries more over shorter
-links. Note this is **failover, not multipath**: FIPS keeps one
-active link per peer, so traffic uses one band at a time — the other
-is a standby that re-establishes the peer if the active link dies
-(detection via keepalive timeout, so a cutover takes seconds, not
-milliseconds):
+links. FIPS sends on one band at a time, the other standing by. With
+multipath off, the default, the other band re-establishes the peer
+once the active link dies, which takes seconds. Between routers that
+both set `node.path.enabled: true`, FIPS keeps both bands as paths of
+one link, and a band that stops answering is left in about a second
+with no new handshake:
 
 ```sh
 fips-mesh-setup radio0

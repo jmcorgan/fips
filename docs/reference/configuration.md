@@ -590,6 +590,46 @@ daemon logs a warning naming it.
 | `node.rekey.after_secs` | u64 | `120` | Initiate rekey after this many seconds on a session |
 | `node.rekey.after_messages` | u64 | `65536` | Initiate rekey after this many messages sent on a session |
 
+### Multipath (`node.path.*`)
+
+A link may hold more than one path to a peer: it keeps every path it has
+proved, probes them, and moves its traffic between them with no new handshake.
+[fips-multi-path-switchover.md](../design/fips-multi-path-switchover.md) has the
+design. A peer without multipath is unaffected: it discards the probes and the
+link stays on its one path. Multipath is off by default: set
+`node.path.enabled: true` on both nodes to turn it on.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.path.enabled` | bool | `false` | Send and answer path messages. `false` keeps every link on one path, as a node without multipath does, and path messages are discarded unanswered. |
+| `node.path.min_samples` | u32 | `2` | Round-trip samples a path needs before it is chosen over the active path on its score. A failover does not wait for them. 1 to 255. |
+| `node.path.mix_kinds` | bool | `false` | Let a link hold paths of another kind than its original path's, local beside Internet. |
+| `node.path.switch.margin` | f64 | `1.3` | The factor by which another path's score must beat the active path's. A finite number of at least 1.0. |
+| `node.path.switch.dwell_secs` | u64 | `2` | How long the other path must stay better by the margin before the link moves. Not 0. A failed active path is left at once, with no dwell. |
+| `node.path.probe.active_ms` | u64 | `200` | Probe interval of a path either end sends data on. Not 0. |
+| `node.path.probe.standby_ms` | u64 | `1000` | Probe interval of a Live or Suspect standby path. Not 0. |
+
+Two per-transport settings go with these, and are read only with
+`node.path.enabled`:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `role` | string | `"normal"` | This transport's part in a link's paths, on every transport. `never`: no new path is made on it, and a path held on it from before ranks last. `backup`: carries a link only while no `normal` or `preferred` path is Live. `normal`: ranked by score. `preferred`: carries a link whenever it is Live and scores within the switch margin of the best path. |
+| `kind` | string | *(none)* | `local` or `internet`, in place of the kind the peer's address implies. UDP and TCP only: every other transport has the kind its medium fixes, and refuses the setting. |
+
+A path's kind decides which paths may share a link. Ethernet, BLE and serial are
+local, and Tor and Nym are Internet. UDP and TCP take the kind of the peer's
+address: loopback, link-local, RFC 1918 and ULA addresses are local, and every
+other address, `100.64.0.0/10` included, is Internet. So a VPN or a private WAN
+on RFC 1918 space reads as local, and such a transport should set `kind:
+internet`. A link never mixes anonymity classes, whatever these settings say: a
+link reached over Tor gains no path over a clear transport or over Nym.
+
+To put a cable ahead of Wi-Fi, whose scores are usually within the margin of
+each other on a LAN, set `role: preferred` on the cable's transport. The peer
+needs multipath too, and the two transports need addresses for each other,
+which configuration, local discovery or a Nostr advert can supply.
+
 ### Session / Data Plane (`node.session.*`)
 
 Controls end-to-end session behavior and packet queuing.
@@ -787,6 +827,9 @@ adding entries and the precedence rules:
 [../how-to/host-aliases.md](../how-to/host-aliases.md).
 
 ## Transports (`transports.*`)
+
+Every transport also takes `role`, and UDP and TCP take `kind`, which place it
+among a link's paths. See [Multipath](#multipath-nodepath).
 
 ### UDP (`transports.udp.*`)
 
@@ -1527,6 +1570,16 @@ node:
   rekey:
     after_secs: 120                  # rekey interval (seconds)
     after_messages: 65536            # rekey after N messages sent
+  path:
+    enabled: false                   # multipath: keep and move between proven paths
+    min_samples: 2                   # round trips before a move on its score
+    mix_kinds: false                 # allow local beside Internet paths in one link
+    switch:
+      margin: 1.3                    # factor another path must beat the active by
+      dwell_secs: 2                  # how long it must stay better
+    probe:
+      active_ms: 200                 # probe interval of a path carrying data
+      standby_ms: 1000               # probe interval of a standby path
   control:
     enabled: true
     socket_path: null                # null = auto (platform runtime dir → XDG → /tmp)

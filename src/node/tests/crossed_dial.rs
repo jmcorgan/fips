@@ -29,6 +29,7 @@ use super::link_index_audit;
 use super::rekey_parity::heartbeat;
 use super::spanning_tree::{
     LOOPBACK_REGISTRY, TestNode, add_loopback_alias, cleanup_nodes, loopback_tap, make_test_node,
+    make_test_node_with_config,
 };
 use super::*;
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2};
@@ -143,7 +144,15 @@ fn path_mtu(tn: &TestNode, peer: &NodeAddr) -> Option<u16> {
 /// smaller node is handed the msg2 answering its own dial, with every
 /// precondition up to that point asserted.
 pub(super) async fn cross_dials(dial: Dial) -> Crossed {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+    cross_dials_from(dial, crate::config::Config::new()).await
+}
+
+/// [`cross_dials`] between two nodes built from `config`.
+pub(super) async fn cross_dials_from(dial: Dial, config: crate::config::Config) -> Crossed {
+    let mut nodes = vec![
+        make_test_node_with_config(config.clone(), T1_MTU).await,
+        make_test_node_with_config(config, T1_MTU).await,
+    ];
     let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
         (0, 1)
     } else {
