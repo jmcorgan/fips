@@ -56,7 +56,7 @@ that file and can reach its private items.
   kept; and that a signal lifetime raised to 120 s is refused by the
   replay-window check when `replay_window_secs` is not above 240 s.
 - `path.rs`: tests for the multipath settings: `node.path` (`PathConfig`,
-  `node.rs`) reads every key and defaults to multipath off, kinds mixed
+  `node.rs`) reads every key and defaults to multipath on, kinds mixed
   and the draft's values, each transport's `role` (`transport.rs`) takes
   all four values and defaults to `normal`, `kind` is taken by UDP and TCP
   and refused elsewhere, a configuration that names none of them writes

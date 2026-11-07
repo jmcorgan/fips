@@ -13,10 +13,9 @@
 #
 # Creates a mesh-point interface on the given radio and leaves everything
 # above L2 to FIPS. Run once per radio: dual-band routers can mesh on both
-# bands at once (2.4 GHz reaches further, 5 GHz carries more). FIPS sends on
-# one at a time; the other band stands by and takes over if the one in use
-# stops answering, with no new handshake where both routers set
-# node.path.enabled: true.
+# bands at once (2.4 GHz reaches further, 5 GHz carries more). FIPS keeps
+# both as paths of one link to a peer and sends on one at a time; the other
+# band stands by and takes over if the one in use stops answering.
 #
 #   - encryption 'none'  — the mesh is OPEN on purpose. FIPS's Noise IK
 #     handshake authenticates and encrypts every peer link, so SAE would

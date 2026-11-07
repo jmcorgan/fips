@@ -106,15 +106,14 @@ the blip if clients are connected.
 
 On dual-band routers, meshing **both** bands is worth it: 2.4 GHz
 reaches further at lower rates, 5 GHz carries more over shorter
-links. FIPS sends on one band at a time, the other standing by. With
-multipath off, the default, the other band re-establishes the peer
-once the active link dies, which takes seconds. Between routers that
-both set `node.path.enabled: true`, FIPS keeps both bands as paths of
-one link, and a band that stops answering is left in about a second
-with no new handshake. A band that stops carrying this router's frames
-while the other router's traffic still arrives on it is left within
-about 3 s under load, or three round trips where the band's queue is
-longer:
+links. FIPS keeps both bands as paths of one link to a peer and sends
+on one at a time, the other standing by. Between routers that both run
+multipath, which is on by default, a band that stops answering is left
+in about a second with no new handshake, and a band that stops carrying
+this router's frames while the other router's traffic still arrives on
+it is left within about 3 s under load, or three round trips where the
+band's queue is longer. To a peer without multipath, the other band
+re-establishes the peer once the link dies, which takes seconds:
 
 ```sh
 fips-mesh-setup radio0

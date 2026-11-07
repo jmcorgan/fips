@@ -28,7 +28,7 @@ fn load_one(text: &str) -> Result<Config, ConfigError> {
 
 /// Every `node.path` key reads from the documented shape, each of the six
 /// transports takes all four roles, UDP and TCP take both kinds, and a file
-/// that names none of them gets multipath off, kinds mixed, the draft's
+/// that names none of them gets multipath on, kinds mixed, the draft's
 /// values, the `normal` role and no kind.
 #[test]
 fn the_path_section_and_transport_roles_parse_with_their_defaults() {
@@ -85,7 +85,7 @@ fn the_path_section_and_transport_roles_parse_with_their_defaults() {
 
     let bare: Config = serde_yaml::from_str("node: {}\ntransports:\n  udp: {}\n").unwrap();
     let path = &bare.node.path;
-    assert!(!path.enabled, "multipath must be off by default");
+    assert!(path.enabled, "multipath must be on by default");
     assert_eq!(path.min_samples, 2);
     assert!(path.mix_kinds, "kinds must mix by default");
     assert_eq!(path.switch.margin, 1.3);

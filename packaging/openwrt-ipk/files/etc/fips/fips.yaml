@@ -11,12 +11,12 @@ node:
     # Or set an explicit key (overrides persistent):
     # nsec: "nsec1..."
   # Multipath (node.path.*): keep every proven path to a peer and move a link
-  # between them with no new handshake. Off by default; defaults shown. A
+  # between them with no new handshake. On by default; defaults shown. A
   # transport's role (never, backup, normal, preferred) places it among a
   # link's paths, and a UDP or TCP transport on a VPN over RFC 1918 space
-  # takes kind: internet. Set enabled: true at both ends to turn it on.
+  # takes kind: internet.
   # path:
-  #   enabled: false
+  #   enabled: true
   #   min_samples: 2
   #   mix_kinds: true
   #   switch:
@@ -154,10 +154,9 @@ transports:
     # restart, and 'optional: true' keeps a stock install that never runs
     # that script quiet and un-Degraded.
     #
-    # Dual-band routers can mesh on both bands at once: FIPS sends on one at
-    # a time, the other standing by, and with node.path.enabled: true at both
-    # ends keeps both as paths of one link to a peer.
-    # The mesh runs OPEN (no SAE) with 802.11s forwarding off: FIPS's
+    # Dual-band routers can mesh on both bands at once: FIPS keeps both as
+    # paths of one link to a peer and sends on one at a time, the other
+    # standing by. The mesh runs OPEN (no SAE) with 802.11s forwarding off: FIPS's
     # Noise handshake is the encryption and authentication, and FIPS is the
     # routing layer. See docs/how-to/set-up-80211s-mesh-backhaul.md.
     mesh0:

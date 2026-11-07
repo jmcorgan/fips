@@ -11,12 +11,12 @@ node:
     # Or set an explicit key (overrides persistent):
     # nsec: "nsec1..."
   # Multipath (node.path.*): keep every proven path to a peer and move a link
-  # between them with no new handshake. Off by default; defaults shown. A
+  # between them with no new handshake. On by default; defaults shown. A
   # transport's role (never, backup, normal, preferred) places it among a
   # link's paths, and a UDP or TCP transport on a VPN over RFC 1918 space
-  # takes kind: internet. Set enabled: true at both ends to turn it on.
+  # takes kind: internet.
   # path:
-  #   enabled: false
+  #   enabled: true
   #   min_samples: 2
   #   mix_kinds: true
   #   switch:

@@ -596,12 +596,11 @@ A link may hold more than one path to a peer: it keeps every path it has
 proved, probes them, and moves its traffic between them with no new handshake.
 [fips-multi-path-switchover.md](../design/fips-multi-path-switchover.md) has the
 design. A peer without multipath is unaffected: it discards the probes and the
-link stays on its one path. Multipath is off by default: set
-`node.path.enabled: true` on both nodes to turn it on.
+link stays on its one path.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `node.path.enabled` | bool | `false` | Send and answer path messages. `false` keeps every link on one path, as a node without multipath does, and path messages are discarded unanswered. |
+| `node.path.enabled` | bool | `true` | Send and answer path messages. `false` keeps every link on one path, as a node without multipath does, and path messages are discarded unanswered. |
 | `node.path.min_samples` | u32 | `2` | Round-trip samples a path needs before it is chosen over the active path on its score. A failover does not wait for them. 1 to 255. |
 | `node.path.mix_kinds` | bool | `true` | Let a link hold paths of another kind than its original path's, local beside Internet, so a link that came up over a local medium can move onto the peer's Internet address. Applied at both ends: `false` at either end keeps the link to its original path's kind. Paths of another anonymity class (Tor, Nym) are refused either way. |
 | `node.path.switch.margin` | f64 | `1.3` | The factor by which another path's score must beat the active path's. A finite number of at least 1.0. |
@@ -1578,7 +1577,7 @@ node:
     after_secs: 120                  # rekey interval (seconds)
     after_messages: 65536            # rekey after N messages sent
   path:
-    enabled: false                   # multipath: keep and move between proven paths
+    enabled: true                    # multipath: keep and move between proven paths
     min_samples: 2                   # round trips before a move on its score
     mix_kinds: true                  # allow local beside Internet paths in one link
     switch:

@@ -53,7 +53,7 @@ fn transport_roles_map_to_the_cores_four_roles() {
 }
 
 /// Each path setting of the node's configuration reaches the core machine's
-/// parameters, and the default configuration runs multipath disabled.
+/// parameters, and the default configuration runs multipath enabled.
 #[test]
 fn the_path_settings_map_onto_the_machines_parameters() {
     let mut node = crate::config::NodeConfig::default();
@@ -75,9 +75,9 @@ fn the_path_settings_map_onto_the_machines_parameters() {
     assert_eq!(cfg.active_interval, Duration::from_millis(250));
     assert_eq!(cfg.standby_interval, Duration::from_millis(3000));
     assert_eq!(cfg.heartbeat, Duration::from_secs(15));
-    // The default configuration runs multipath disabled.
+    // The default configuration runs multipath enabled.
     assert!(
-        !path_params(&crate::config::NodeConfig::default())
+        path_params(&crate::config::NodeConfig::default())
             .config()
             .enabled
     );
