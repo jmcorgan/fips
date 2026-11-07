@@ -692,9 +692,12 @@ impl Node {
     /// Dispose of the path `to` of `node_addr`'s link `link`, which its
     /// machine handed back with its driver slot (draft Section 5.8): the
     /// slot's connected UDP socket and its drain go, drain first; while the
-    /// link lives (`removed` false) its address lookup loses `to`; and
-    /// unless `keep` says the peer may still send on it, or another peer's
-    /// link uses it, the connection at `to` is queued to close.
+    /// link lives (`removed` false) its address lookup loses `to`, unless
+    /// `to` is the link record's own pair, which keeps naming the link while
+    /// it lives, as for every live link, and which the anonymous-beacon
+    /// dedup reads; and unless `keep` says the peer may still send on it, or
+    /// another peer's link uses it, the connection at `to` is queued to
+    /// close.
     pub(in crate::node) fn release_path(
         &mut self,
         node_addr: &NodeAddr,
@@ -706,7 +709,11 @@ impl Node {
     ) {
         clear_slot(driver);
         let key = (to.transport, to.addr.clone());
-        if !removed && self.addr_to_link.get(&key) == Some(&link) {
+        let at_record = self
+            .links
+            .get(&link)
+            .is_some_and(|k| k.transport_id() == to.transport && *k.remote_addr() == to.addr);
+        if !removed && !at_record && self.addr_to_link.get(&key) == Some(&link) {
             self.addr_to_link.remove(&key);
         }
         if keep || self.addr_carries_other_peer(to.transport, &to.addr, link) {

@@ -104,26 +104,26 @@ async fn working_session(on: bool, zero_smaller: bool) {
 }
 
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair, and the larger node's live link has no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, and the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first() {
     working_session(false, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair, and the larger node's live link has no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, and the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first_with_multipath_on()
  {
     working_session(true, true).await;
 }
 
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair, and the larger node's live link has no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, and the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first() {
     working_session(false, false).await;
 }
 
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair, and the larger node's live link has no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials each node keeps both its connections open with one in use, and the larger node's link record is its outbound link at the smaller node's listen address while it holds the peer at the inbound pair"]
 async fn crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first_with_multipath_on()
  {
     working_session(true, false).await;

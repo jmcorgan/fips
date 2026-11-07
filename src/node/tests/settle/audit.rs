@@ -620,14 +620,14 @@ async fn exemption_needed(on: bool) {
 
 /// [`exemption_needed`] with multipath off.
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection, the larger node's link record at another pair, and the larger node's live link with no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection and the larger node's link record at another pair"]
 async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record() {
     exemption_needed(false).await;
 }
 
 /// [`exemption_needed`] with multipath on.
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection, the larger node's link record at another pair, and the larger node's live link with no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection and the larger node's link record at another pair"]
 async fn the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record_with_multipath_on()
  {
     exemption_needed(true).await;
@@ -655,14 +655,14 @@ async fn exemption_scoped(on: bool) {
 
 /// [`exemption_scoped`] with multipath off.
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection, the larger node's link record at another pair, and the larger node's live link with no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection and the larger node's link record at another pair"]
 async fn the_crossing_exemption_waives_only_the_named_nodes_record() {
     exemption_scoped(false).await;
 }
 
 /// [`exemption_scoped`] with multipath on.
 #[tokio::test]
-#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection, the larger node's link record at another pair, and the larger node's live link with no address-index entry at its pair (seen with the multipath path machine; next without it shows only the first two)"]
+#[ignore = "known difference on next, cause not established: after crossed TCP dials the smaller node is not left on its inbound link record, the breach this test needs; the audit flags instead each node's second open connection and the larger node's link record at another pair"]
 async fn the_crossing_exemption_waives_only_the_named_nodes_record_with_multipath_on() {
     exemption_scoped(true).await;
 }

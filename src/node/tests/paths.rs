@@ -1124,8 +1124,8 @@ async fn a_frame_on_a_standby_path_keeps_the_link_alive() {
     cleanup_nodes(&mut nodes).await;
 }
 
-/// After a switch both pairs map to the link; a released pair no longer maps to
-/// it, and a moved path's entry moves with it.
+/// After a switch both pairs map to the link; a released pair other than the
+/// link's own no longer maps to it, and a moved path's entry moves with it.
 #[tokio::test]
 async fn a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it() {
     let (mut nodes, b, b2) = same_transport().await;
@@ -1146,8 +1146,8 @@ async fn a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it() {
     nodes[0].node.step_path(&b, Input::Poll).await;
     assert_eq!(state_at(&nodes[0], &b, t1, &b1), None, "p is released");
     assert!(
-        !maps(&nodes[0], &b1),
-        "a released pair no longer maps to the link"
+        maps(&nodes[0], &b1),
+        "the link's own pair still maps to it after its path is released"
     );
     assert!(maps(&nodes[0], &b2));
 
@@ -3461,6 +3461,43 @@ async fn a_probe_from_no_path_on_a_transport_that_does_not_accept_creates_no_pat
             .count(),
         0,
         "the probe is refused, not answered"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// Releasing a path drops the link's index entry at that pair, except at
+/// the link record's own pair, which names the link for as long as it
+/// lives. Mutations: never treat the pair as the record's, which reds the
+/// record pair's assertion; never drop the entry, which reds the other's.
+#[tokio::test]
+async fn a_released_path_keeps_the_index_entry_only_at_the_links_own_pair() {
+    let (mut nodes, b, b2) = same_transport().await;
+    let t1 = nodes[0].transport_id;
+    let b1 = nodes[1].addr.clone();
+    let link = nodes[0].node.get_peer(&b).unwrap().link_id();
+    nodes[0].node.addr_to_link.insert((t1, b2.clone()), link);
+    assert_eq!(
+        nodes[0].node.addr_to_link.get(&(t1, b1.clone())),
+        Some(&link),
+        "precondition: B1, the link record's pair, is keyed"
+    );
+    for addr in [&b2, &b1] {
+        let to = PathRef {
+            transport: t1,
+            addr: addr.clone(),
+        };
+        nodes[0]
+            .node
+            .release_path(&b, link, to, crate::peer::UdpSlot::default(), true, false);
+    }
+    assert!(
+        !nodes[0].node.addr_to_link.contains_key(&(t1, b2.clone())),
+        "B2's entry is gone once its path is released"
+    );
+    assert_eq!(
+        nodes[0].node.addr_to_link.get(&(t1, b1.clone())),
+        Some(&link),
+        "B1, the link record's pair, still maps to the link"
     );
     cleanup_nodes(&mut nodes).await;
 }
