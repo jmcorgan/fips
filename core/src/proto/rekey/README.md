@@ -68,7 +68,9 @@ deployed releases, and runs the session and link nodes this release ships
   which stops the time and message triggers as the largest configured
   thresholds would; the link shell's test seams, which move a machine's
   stamps back in time, force the key-epoch bit and the peer's startup
-  epoch, start an own rekey without its trigger, offer the current epoch
+  epoch, start an own rekey without its trigger or through it (`trigger`,
+  a poll with the time trigger brought to its instant, so every other
+  condition of a start still decides), offer the current epoch
   to a worker pool started after promotion, read dampening, reserve a
   counter under any slot to forge a peer's frame, and read the observed
   key-epoch bit and the record a cross-connection move carries; and the

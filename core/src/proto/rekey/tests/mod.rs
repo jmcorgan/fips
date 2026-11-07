@@ -13,6 +13,7 @@ mod fsp;
 #[cfg(feature = "slow-tests")]
 mod legacy;
 mod next;
+pub(crate) mod oracles;
 mod regress;
 mod sim;
 pub(crate) mod stub;

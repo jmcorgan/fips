@@ -89,6 +89,12 @@ impl Local {
         mac(&[b"eph", self.key.bytes(), &n.to_le_bytes()])
     }
 
+    /// Set the counter, so the next ephemeral is a function of `n` and of
+    /// this node's key alone, whatever it drew before.
+    pub(crate) fn name(&self, n: u64) {
+        self.next.set(n);
+    }
+
     /// The same node after a restart: same key, a new startup epoch.
     pub(crate) fn restarted(&self, epoch: u8) -> Self {
         Self {
@@ -1185,6 +1191,14 @@ impl<P: Stub> Node<P> {
         self.step(now, Input::Poll)
     }
 
+    /// Fire the machine's time trigger at `now` through the hook and
+    /// execute the outputs. It may come before `next_wake`, since it is the
+    /// trigger's own instant it brings forward.
+    pub(crate) fn trigger(&mut self, now: u64) -> Vec<Ev<P::Transport>> {
+        let out = self.with(|m, env| m.as_mut().expect("machine").trigger(TestInstant(now), env));
+        self.run(now, out, None)
+    }
+
     /// Execute outputs in order, as a shell does, and record them.
     pub(crate) fn run(
         &mut self,
@@ -1677,13 +1691,32 @@ pub(crate) fn leg_frame(
     Some(seal_with(&ri, index, 0, k, plaintext))
 }
 
+/// A frame sealed by the end of the IK exchange `msg1`/`msg2` that took
+/// `role` in it, with the header fields, as that end's session would seal it
+/// at `counter`.
+pub(crate) fn seal_as(
+    role: Role,
+    msg1: &[u8],
+    msg2: &[u8],
+    index: u32,
+    counter: u64,
+    k: bool,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let ei: [u8; 8] = take(msg1, 5).unwrap_or_default();
+    let er: [u8; 8] = take(msg2, 9).unwrap_or_default();
+    let (ir, ri) = keys(&ei, &er);
+    let key = match role {
+        Role::Initiator => ir,
+        Role::Responder => ri,
+    };
+    seal_with(&key, index, counter, k, plaintext)
+}
+
 /// A frame sealed by the responder of the IK exchange `msg1`/`msg2`, as a
 /// responder that cut over on its own schedule would send it.
 pub(crate) fn ik_frame(msg1: &[u8], msg2: &[u8], index: u32, k: bool, plaintext: &[u8]) -> Vec<u8> {
-    let ei: [u8; 8] = take(msg1, 5).unwrap_or_default();
-    let er: [u8; 8] = take(msg2, 9).unwrap_or_default();
-    let (_, ri) = keys(&ei, &er);
-    seal_with(&ri, index, 0, k, plaintext)
+    seal_as(Role::Responder, msg1, msg2, index, 0, k, plaintext)
 }
 
 /// Build a machine on `node` for `peer` from what a closed machine carried,
@@ -1732,4 +1765,26 @@ pub(crate) fn rebuild<P: Stub>(
     });
     node.m = Some(m);
     node.run(now, out, None);
+}
+
+#[test]
+fn a_named_ephemeral_depends_on_its_name_alone() {
+    let (one, twin, other) = (Local::new(1, 1), Local::new(1, 1), Local::new(2, 2));
+    let msg1 = |l: &Local| Ik::initiate(l, &other.key, Some(3)).expect("writes").1;
+    twin.eph();
+    twin.eph();
+    one.name(7);
+    twin.name(7);
+    assert_eq!(
+        msg1(&one),
+        msg1(&twin),
+        "one name gives one msg1, whatever the node drew before it"
+    );
+    one.name(7);
+    let named = msg1(&one);
+    one.name(8);
+    assert_ne!(named, msg1(&one), "another name gives another ephemeral");
+    one.name(7);
+    other.name(7);
+    assert_ne!(one.eph(), other.eph(), "a name is the node's own");
 }

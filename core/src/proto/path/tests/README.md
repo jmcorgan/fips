@@ -427,7 +427,14 @@ module of that file, sees its private items and keeps its test names.
   `moves`, `probe` and `admit`; accept in `admit` only; dial in `probe`
   only); and that no check allocates, with the counter first shown to
   count.
-- `shell.rs`: the shell (`proto::path::tests::shell`). `Node` runs one
+- `shell.rs`: the shell (`proto::path::tests::shell`, crate-visible for
+  the settlement tests). `Checks` holds what the checks remember across
+  one bundle's calls and runs them around a step: `Checks::before` ahead
+  of it, `Call::stepped` straight after it, before the slots leave the
+  outputs through `keep`, and `Checks::after` over the outputs, which
+  returns the first rule broken. `Node` calls these around every step and
+  panics on the error; another shell holds a bundle to the same rules
+  with its own `Checks` and `Slot`. `Node` runs one
   `Bundle` over the test clock, `SeededEntropy` (or another source) and
   `Slot`, a driver slot with a serial number that counts its drops, the
   link's cost the host measures, `Node::cost`, 1.0 unless the test sets
