@@ -1,5 +1,9 @@
-//! The scan that keeps the deployed rekey shell code of both layers out of
-//! the root crate once each layer's rekey machine replaced it.
+//! The scans that keep removed code out of the root crate: the deployed
+//! rekey shell code of both layers, once each layer's rekey machine replaced
+//! it, and the node's handling of the two cross-connection promotion results,
+//! once a promotion for a held identity became a refusal. The second is the
+//! same scan over a narrower directory, the node outside its tests, because
+//! the peer machine still carries those results.
 
 use std::path::{Path, PathBuf};
 
@@ -224,6 +228,10 @@ const LINK: &[&str] = &[
 /// node's statistics history also uses.
 const SHELLS: &[&str] = &["Policy", "policy", "DEPLOYED", "PeerSnapshot"];
 
+/// The promotion results the node no longer produces or reads. The enum and
+/// the peer machine's arms for them stay until the machine goes.
+const PROMOTION: &[&str] = &["CrossConnectionWon", "CrossConnectionLost"];
+
 /// Each use of a name in `banned` in the code of `source` (comments and
 /// literals left out, so prose may still say what the deployed code did),
 /// as `file:line: name`.
@@ -330,4 +338,51 @@ fn no_deployed_rekey_rule_of_either_layer_survives_in_the_shells_and_the_scan_fi
     ] {
         assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
     }
+}
+
+/// Nothing in the node outside its tests names either cross-connection
+/// promotion result: `promote_connection` refuses a held identity rather than
+/// resolving it, so no code there may produce or match one. The planted lines
+/// show the scan finds a match arm and a constructor in code, and not a name
+/// in a comment.
+#[test]
+fn no_node_code_names_a_cross_connection_promotion_result_and_the_scan_finds_a_planted_one() {
+    let planted = "    // CrossConnectionLost once closed the losing link.\n\
+                   \x20   PromotionResult::CrossConnectionWon { loser_link_id, .. } => {}\n\
+                   \x20   Ok(PromotionResult::CrossConnectionLost { winner_link_id: id })\n";
+    assert_eq!(
+        uses("planted.rs", planted, PROMOTION),
+        [
+            "planted.rs:2: CrossConnectionWon",
+            "planted.rs:3: CrossConnectionLost"
+        ],
+        "the scan finds both results in code, and not one named in a comment"
+    );
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let node = root.join("node");
+    let mut files = Vec::new();
+    sources(&node, &mut files);
+    let mut found = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("the source file reads");
+        let file = path.strip_prefix(&root).unwrap().to_string_lossy();
+        found.extend(uses(&file, &source, PROMOTION));
+    }
+    assert!(
+        found.is_empty(),
+        "the node handles a cross-connection promotion result again: {found:?}"
+    );
+    // The scan reaches the promotion and the executor that runs it, and
+    // leaves the node's tests out.
+    for want in [
+        "node/handlers/handshake.rs",
+        "node/dataplane/peer_actions.rs",
+    ] {
+        assert!(files.iter().any(|p| p.ends_with(want)), "{want} is scanned");
+    }
+    assert!(
+        !files.iter().any(|p| p.starts_with(node.join("tests"))),
+        "the node's tests are not scanned"
+    );
 }

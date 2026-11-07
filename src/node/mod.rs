@@ -156,6 +156,13 @@ pub enum NodeError {
     #[error("promotion failed for link {link_id}: {reason}")]
     PromotionFailed { link_id: LinkId, reason: String },
 
+    /// A promotion of a link whose identity is already held as a peer.
+    ///
+    /// No caller reaches it: every crossing is resolved before the promotion
+    /// is asked for, so it refuses rather than overwrite the held peer.
+    #[error("identity already held as a peer; promotion of link {0} refused")]
+    IdentityHeld(LinkId),
+
     #[error("send failed to {node_addr}: {reason}")]
     SendFailed { node_addr: NodeAddr, reason: String },
 

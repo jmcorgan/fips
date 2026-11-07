@@ -629,6 +629,108 @@ fn test_node_cross_connection_resolution() {
     assert_eq!(node.peer_count(), 1);
 }
 
+/// Complete a handshake toward `remote` on `link_id`, under a fresh index of
+/// `node`'s allocator, on transport 1 at the address the other seeded
+/// connections use. Returns the identity and the index.
+fn seed_held_identity_leg(
+    node: &mut Node,
+    link_id: LinkId,
+    remote: &Identity,
+    current_time_ms: u64,
+) -> (PeerIdentity, u32) {
+    let lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
+    let index = lease.index();
+    let identity = seed_completed_connection_from(node, link_id, remote, current_time_ms, |seed| {
+        seed.with_our_index(lease)
+            .with_their_index(SessionIndex::new(42))
+            .with_transport_id(TransportId::new(1))
+            .with_source_addr(TransportAddr::from_string("127.0.0.1:5000"))
+    });
+    (identity, index)
+}
+
+/// A promotion for an identity the node already holds is refused: the held
+/// peer keeps its link and its index binding, and the refused connection's
+/// index goes back to the allocator.
+#[test]
+fn a_promotion_for_a_held_identity_is_refused_and_keeps_the_peer() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let first = LinkId::new(1);
+    let second = LinkId::new(2);
+
+    let (identity, _) = seed_held_identity_leg(&mut node, first, &remote, 1000);
+    let node_addr = *identity.node_addr();
+    node.promote_connection(first, identity, 2000).unwrap();
+    let held_index = node.get_peer(&node_addr).unwrap().our_index().unwrap();
+
+    let (again, refused_index) = seed_held_identity_leg(&mut node, second, &remote, 3000);
+    let result = node.promote_connection(second, again, 4000);
+
+    let peer = node.get_peer(&node_addr).unwrap();
+    assert_eq!(peer.link_id(), first, "the held peer stays on its own link");
+    assert_eq!(
+        peer.our_index(),
+        Some(held_index),
+        "the held peer keeps its index"
+    );
+    assert_eq!(node.peer_count(), 1);
+    assert_eq!(
+        node.peers_by_index,
+        std::collections::HashMap::from([(held_index.as_u32(), node_addr)]),
+        "peers_by_index holds the held peer's index and nothing else"
+    );
+    assert!(
+        node.index_allocator.is_allocated(held_index),
+        "the held peer's index stays allocated"
+    );
+    assert!(
+        !node
+            .index_allocator
+            .is_allocated(SessionIndex::new(refused_index)),
+        "the refused connection's index is freed"
+    );
+    assert!(
+        matches!(result, Err(NodeError::IdentityHeld(link)) if link == second),
+        "expected IdentityHeld for the second link, got {result:?}"
+    );
+}
+
+/// The executor's promotion arm asserts, in a debug build, that a refusal for
+/// a held identity never reaches it: every producer of `PromoteToActive`
+/// runs with no peer held, so one would mean a path that skipped resolving
+/// its crossing.
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[should_panic(expected = "a promotion reached the executor for an identity already held")]
+async fn the_executor_asserts_that_no_held_identity_reaches_a_promotion() {
+    let mut node = make_node();
+    let remote = Identity::generate();
+    let first = LinkId::new(1);
+    let second = LinkId::new(2);
+
+    let (identity, _) = seed_held_identity_leg(&mut node, first, &remote, 1000);
+    node.promote_connection(first, identity, 2000).unwrap();
+
+    let (again, index) = seed_held_identity_leg(&mut node, second, &remote, 3000);
+    let ambient = crate::node::dataplane::PeerActionCtx {
+        verified_identity: again,
+        transport_id: TransportId::new(1),
+        remote_addr: TransportAddr::from_string("127.0.0.1:5000"),
+        our_index: Some(SessionIndex::new(index)),
+        their_index: Some(SessionIndex::new(42)),
+        now_ms: 4000,
+        interval_ms: Node::interval_ms(),
+        is_outbound: true,
+    };
+    node.execute_peer_actions(
+        second,
+        &ambient,
+        vec![crate::peer::machine::PeerAction::PromoteToActive { link: second }],
+    )
+    .await;
+}
+
 #[test]
 fn test_node_peer_limit() {
     let mut node = make_node_with_max_peers(2);
