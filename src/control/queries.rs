@@ -249,6 +249,8 @@ pub fn show_peers(node: &Node) -> Value {
     let any_peer_has_srtt = node.peers().any(|p| p.has_srtt());
 
     let now = now_ms();
+    // One instant for every row's paths, as the snapshot's publish takes.
+    let instant = crate::peer::peer_now();
     let peers: Vec<Value> = node
         .peers()
         .map(|peer| {
@@ -323,6 +325,7 @@ pub fn show_peers(node: &Node) -> Value {
 
             // Security signals
             peer_json["replay_suppressed"] = json!(peer.replay_suppressed_count());
+            peer_json["replay_suppressed_total"] = json!(peer.replay_suppressed_total());
             peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures());
 
             // Nostr-traversal state if this peer's npub appears in
@@ -391,19 +394,45 @@ pub fn show_peers(node: &Node) -> Value {
                 if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                     mmp_json["smoothed_etx"] = json!(smoothed_etx);
                 }
-                if let Some(srtt) = mmp.metrics.srtt_ms()
-                    && let Some(setx) = mmp.metrics.smoothed_etx()
-                {
-                    mmp_json["lqi"] = json!(setx * (1.0 + srtt / 100.0));
+                if let Some(qi) = mmp.metrics.quality_index() {
+                    mmp_json["lqi"] = json!(qi);
                 }
                 peer_json["mmp"] = mmp_json;
             }
+
+            peer_json["paths"] = render_paths(&node.peer_paths(peer, instant));
 
             peer_json
         })
         .collect();
 
     json!({ "peers": peers })
+}
+
+/// Render a peer's paths as the `paths` array of its `show_peers` row, one
+/// object per path; `path_show` adds its own keys to each.
+pub(crate) fn render_paths(paths: &[super::snapshot::PeerPathRow]) -> Value {
+    paths
+        .iter()
+        .map(|p| {
+            json!({
+                "transport_id": p.transport_id,
+                "transport": p.transport,
+                "transport_type": p.transport_type,
+                "addr": p.addr,
+                "state": p.state,
+                "active": p.active,
+                "remote_active": p.remote_active,
+                "role": p.role,
+                "pinned": p.pinned,
+                "last_rtt_ms": p.last,
+                "min_rtt_ms": p.least,
+                "rtt_samples": p.samples,
+                "etx": p.etx,
+                "score": p.score,
+            })
+        })
+        .collect()
 }
 
 /// Render a snapshot [`EntityMmp`](super::snapshot::EntityMmp) into the inline
@@ -521,6 +550,7 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
             });
 
             peer_json["replay_suppressed"] = json!(peer.replay_suppressed);
+            peer_json["replay_suppressed_total"] = json!(peer.replay_suppressed_total);
             peer_json["consecutive_decrypt_failures"] = json!(peer.consecutive_decrypt_failures);
 
             let nostr = &peer.nostr_traversal;
@@ -556,6 +586,8 @@ pub(crate) fn show_peers_from_handle(handle: &super::read_handle::ControlReadHan
             if let Some(mmp) = &peer.mmp {
                 peer_json["mmp"] = render_entity_mmp(mmp, "lqi");
             }
+
+            peer_json["paths"] = render_paths(&peer.paths);
 
             peer_json
         })
@@ -815,10 +847,8 @@ pub fn show_sessions(node: &Node) -> Value {
                 if let Some(smoothed_etx) = mmp.metrics.smoothed_etx() {
                     mmp_json["smoothed_etx"] = json!(smoothed_etx);
                 }
-                if let Some(srtt) = mmp.metrics.srtt_ms()
-                    && let Some(setx) = mmp.metrics.smoothed_etx()
-                {
-                    mmp_json["sqi"] = json!(setx * (1.0 + srtt / 100.0));
+                if let Some(qi) = mmp.metrics.quality_index() {
+                    mmp_json["sqi"] = json!(qi);
                 }
                 session_json["mmp"] = mmp_json;
             }
@@ -1021,9 +1051,9 @@ pub fn show_mmp(node: &Node) -> Value {
             }
             if let Some(srtt) = metrics.srtt_ms() {
                 link_layer["srtt_ms"] = json!(srtt);
-                if let Some(setx) = metrics.smoothed_etx() {
-                    link_layer["lqi"] = json!(setx * (1.0 + srtt / 100.0));
-                }
+            }
+            if let Some(qi) = metrics.quality_index() {
+                link_layer["lqi"] = json!(qi);
             }
 
             // Trend indicators
@@ -1086,9 +1116,9 @@ pub fn show_mmp(node: &Node) -> Value {
             }
             if let Some(srtt) = metrics.srtt_ms() {
                 session_layer["srtt_ms"] = json!(srtt);
-                if let Some(setx) = metrics.smoothed_etx() {
-                    session_layer["sqi"] = json!(setx * (1.0 + srtt / 100.0));
-                }
+            }
+            if let Some(qi) = metrics.quality_index() {
+                session_layer["sqi"] = json!(qi);
             }
 
             // Session-layer trend indicators (srtt / loss / etx), mirroring the
@@ -2767,6 +2797,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: Some(false),
+            role: crate::config::TransportRole::default(),
         };
         let (tx, _rx) = crate::transport::packet_channel(8);
         let mut eth = EthernetTransport::new(TransportId::new(1), Some("lab".into()), config, tx);

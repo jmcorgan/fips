@@ -86,7 +86,7 @@ fn initiator(node: &Node, sender: &Identity, sender_index: u32) -> (PeerMachine,
     let target = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
-        .start_handshake(sender.keypair(), EPOCH, 1000)
+        .start_handshake(sender.keypair(), EPOCH, LegStamp::at(1000))
         .expect("start_handshake produces noise msg1");
     (
         leg,
@@ -110,7 +110,7 @@ fn msg3_for(
     let header = Msg2Header::parse(msg2).expect("msg2 header");
     let neg = negotiation(rekey_of);
     let (noise_msg3, _) = leg
-        .complete_handshake_accepting(header.noise_msg2(msg2), Some(&neg), 1100)
+        .complete_handshake_accepting(header.noise_msg2(msg2), Some(&neg), LegStamp::at(1100))
         .expect("the initiator reads the node's msg2");
     build_msg3(
         SessionIndex::new(sender_index),
@@ -131,7 +131,7 @@ fn msg2_for(responder: &Identity, msg1: &[u8], sender_index: u32) -> Vec<u8> {
             EPOCH,
             &msg1[header.noise_msg1_offset..],
             Some(&neg),
-            1000,
+            LegStamp::at(1000),
         )
         .expect("the responder reads the node's msg1");
     build_msg2(
@@ -326,7 +326,9 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
     let before = tcp_stats(node);
     let t0 = Instant::now();
     match trigger {
-        Trigger::Packet(packet) => node.process_packet(packet).await,
+        // Boxed, as the rows are: the packet handlers' futures outgrow the
+        // test thread's stack in a debug build when held inline.
+        Trigger::Packet(packet) => Box::pin(node.process_packet(packet)).await,
         Trigger::RekeyCheck => node.poll_link_rekeys().await,
         Trigger::RekeyResend => {
             // Past the first resend rung of the msg1 ladder.
@@ -335,7 +337,7 @@ async fn timed_fire(node: &mut Node, trigger: Trigger) -> Reply {
         }
         Trigger::PeerTimers(now_ms) => node.drive_peer_timers(now_ms).await,
         Trigger::StoredMsg1(link, addr) => {
-            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::now_ms())
+            node.send_stored_msg1(link, TransportId::new(TCP_ID), &addr, Node::interval_ms())
                 .await
         }
         Trigger::StartHandshake(link, addr) => {
@@ -547,7 +549,11 @@ fn dial_leg(
     let our_lease = fips_core::proto::rekey::allocate(&mut node.index_allocator).unwrap();
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let noise_msg1 = leg
-        .start_handshake(node.identity().keypair(), node.startup_epoch(), now_ms)
+        .start_handshake(
+            node.identity().keypair(),
+            node.startup_epoch(),
+            LegStamp::at(now_ms),
+        )
         .unwrap();
     let wire = build_msg1(our_index, &noise_msg1);
     node.links.insert(
@@ -563,7 +569,7 @@ fn dial_leg(
     node.addr_to_link.insert((tcp_id, addr.clone()), link_id);
     node.pending_outbound
         .insert((tcp_id, our_index.as_u32()), link_id);
-    let mut machine = PeerMachine::new_outbound(link_id, Some(target), now_ms);
+    let mut machine = PeerMachine::new_outbound(link_id, Some(target), LegStamp::at(now_ms));
     let _ = machine.step(
         PeerEvent::Dial {
             transport_id: tcp_id,

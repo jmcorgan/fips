@@ -296,6 +296,11 @@ impl EthernetTransport {
         self.name.as_deref()
     }
 
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
+    }
+
     /// Get the interface name.
     pub fn interface_name(&self) -> &str {
         &self.interface
@@ -337,6 +342,37 @@ impl EthernetTransport {
     /// Get a reference to the statistics.
     pub fn stats(&self) -> &Arc<EthernetStats> {
         &self.stats
+    }
+
+    /// Query transport-local congestion indicators.
+    ///
+    /// On Linux this is the one reader of the socket's kernel drop count,
+    /// which resets when read: each call takes the drops since the last one
+    /// into the stats total and reports the total. The node's congestion
+    /// sample calls it once a second. Drops on a socket torn down between
+    /// two calls are not counted. Elsewhere the transport cannot see the
+    /// kernel's drops and reports none.
+    pub fn congestion(&self) -> super::TransportCongestion {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(socket) = self.binding.socket() {
+                match socket.get_ref().take_drops() {
+                    Ok(drops) => self.stats.record_kernel_drops(drops),
+                    Err(e) => trace!(
+                        transport_id = %self.transport_id,
+                        error = %e,
+                        "Could not read the socket's kernel drop count"
+                    ),
+                }
+            }
+            super::TransportCongestion {
+                recv_drops: Some(self.stats.kernel_drops.load(Ordering::Relaxed)),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            super::TransportCongestion::default()
+        }
     }
 
     /// Start the transport asynchronously.
@@ -953,6 +989,9 @@ async fn binder_loop(ctx: Arc<BinderContext>, initial_unpublished: Option<bool>)
 
             ctx.binding.tear_down();
             ctx.presence.transition(Presence::Absent);
+            // Beacons heard on the binding just torn down name neighbours
+            // reached through it: a dial to one now cannot be sent.
+            ctx.neighbor_buffer.take();
             absence_reported = false;
 
             let outcome = churn.detached(Instant::now());
@@ -1481,6 +1520,14 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
 mod rebind_tests;
 
 #[cfg(test)]
+#[path = "tests/detach.rs"]
+mod detach_tests;
+
+#[cfg(test)]
+#[path = "tests/congestion.rs"]
+mod congestion_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1649,6 +1696,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: Some(optional),
+            role: crate::config::TransportRole::default(),
         };
         let (tx, rx) = super::super::packet_channel(8);
         (
@@ -1833,6 +1881,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: None,
+            role: crate::config::TransportRole::default(),
         };
         let (tx, _rx) = super::super::packet_channel(8);
         let mut eth = EthernetTransport::new(TransportId::new(9), None, config, tx);
@@ -2410,6 +2459,7 @@ mod tests {
             accept_connections: None,
             beacon_interval_secs: None,
             optional: Some(true),
+            role: crate::config::TransportRole::default(),
         };
         let (tx, _rx) = super::super::packet_channel(8);
         let mut eth = EthernetTransport::new(TransportId::new(11), None, config, tx);

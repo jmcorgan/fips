@@ -1,7 +1,9 @@
 //! Mutating control socket commands.
 //!
-//! Commands that modify node state (connect, disconnect) are handled here,
-//! separate from read-only queries in `queries.rs`.
+//! Commands that modify node state (connect, disconnect, the path pin) are
+//! handled here, separate from read-only queries in `queries.rs`, along with
+//! `path_show`, a read that needs the path machines at the instant of the
+//! request, which the published snapshot does not carry.
 
 use super::protocol::Response;
 use crate::node::Node;
@@ -16,6 +18,9 @@ pub async fn dispatch(node: &mut Node, command: &str, params: Option<&Value>) ->
         "probe_start" => probe_start(node, params).await,
         "probe_poll" => probe_poll(node, params),
         "probe_cancel" => probe_cancel(node, params).await,
+        "path_show" => path_show(node, params),
+        "path_pin" => path_pin(node, params).await,
+        "path_unpin" => path_unpin(node, params).await,
         _ => Response::error(format!("unknown command: {command}")),
     }
 }
@@ -118,6 +123,67 @@ async fn probe_cancel(node: &mut Node, params: Option<&Value>) -> Response {
         Ok(data) => Response::ok(data),
         Err(msg) => Response::error(msg),
     }
+}
+
+/// Show a peer's paths.
+///
+/// Params: `{"npub": "npub1..."}`
+fn path_show(node: &mut Node, params: Option<&Value>) -> Response {
+    let Some(npub) = npub_param(params) else {
+        return Response::error("missing 'npub' parameter");
+    };
+
+    match node.show_paths(npub) {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
+}
+
+/// Pin a peer's link to a transport, or to one path on it.
+///
+/// Params: `{"npub": "npub1...", "transport": "<name or id>", "address":
+/// "<addr>"}`, `address` optional.
+async fn path_pin(node: &mut Node, params: Option<&Value>) -> Response {
+    let Some(npub) = npub_param(params) else {
+        return Response::error("missing 'npub' parameter");
+    };
+    let Some(transport) = params
+        .and_then(|p| p.get("transport"))
+        .and_then(|v| v.as_str())
+    else {
+        return Response::error("missing 'transport' parameter");
+    };
+    let address = params
+        .and_then(|p| p.get("address"))
+        .and_then(|v| v.as_str());
+
+    debug!(npub = %npub, transport = %transport, address = ?address, "API path pin requested");
+
+    match node.pin_path(npub, transport, address).await {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
+}
+
+/// Lift the pin on a peer's link.
+///
+/// Params: `{"npub": "npub1..."}`
+async fn path_unpin(node: &mut Node, params: Option<&Value>) -> Response {
+    let Some(npub) = npub_param(params) else {
+        return Response::error("missing 'npub' parameter");
+    };
+
+    debug!(npub = %npub, "API path unpin requested");
+
+    match node.unpin_path(npub).await {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
+}
+
+/// The `npub` parameter, if given.
+fn npub_param(params: Option<&Value>) -> Option<&str> {
+    params?.get("npub").and_then(|v| v.as_str())
 }
 
 fn probe_id(params: Option<&Value>) -> Option<u64> {

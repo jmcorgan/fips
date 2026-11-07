@@ -1079,6 +1079,22 @@ impl Node {
         transport_id: TransportId,
         addr: &TransportAddr,
     ) {
+        self.seed_mtu(peer_addr, peer_key, transport_id, addr, false);
+    }
+
+    /// [`Self::seed_path_mtu_for_link_peer`], with `relink` true when the
+    /// peer's traffic has moved to another path of its link: the value is
+    /// then replaced outright, as for a move to another transport, since a
+    /// tighter value learned on the old path describes a path the peer's
+    /// traffic no longer takes.
+    pub(in crate::node) fn seed_mtu(
+        &mut self,
+        peer_addr: &NodeAddr,
+        peer_key: PeerKey,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+        relink: bool,
+    ) {
         let Some(transport) = self.transports.get(&transport_id) else {
             debug!(
                 peer = %self.peer_display_name(peer_addr),
@@ -1110,7 +1126,7 @@ impl Node {
         // reactive learning about the path we are seeding now, so the
         // never-loosen rule still applies to it.
         let prior_seed = self.path_mtu_seeded_by.get(&fips_addr).copied();
-        let relinked = prior_seed.is_some_and(|prior| prior != transport_id);
+        let relinked = relink || prior_seed.is_some_and(|prior| prior != transport_id);
         // Recorded whether or not the value changes: the next seed needs to
         // know which link this one described, otherwise a peer whose first
         // seed was declined never registers a link at all and a later move

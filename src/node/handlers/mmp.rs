@@ -214,6 +214,7 @@ impl Node {
         let (first_rtt, rr_log) =
             mmp.metrics
                 .process_receiver_report(&rr, our_timestamp_ms, now_ms);
+        let applied = !matches!(rr_log, RrLog::Stale { .. });
         // Re-emit the operator trace the core used to log mid-decision.
         log_rr_outcome(&rr, our_timestamp_ms, rr_log);
 
@@ -238,6 +239,15 @@ impl Node {
             etx = format_args!("{:.2}", mmp.metrics.etx),
             "Processed ReceiverReport"
         );
+
+        // A report the metrics took counts toward the hold on the link's
+        // cost after a change of active path, this node's own choice since
+        // the multipath draft leaves a bundle's cost to the node; a stale or
+        // repeated one brings no sample.
+        if applied {
+            self.step_path(from, fips_core::proto::path::Input::Report)
+                .await;
+        }
 
         // First RTT sample — peer is now eligible for a cost-based switch.
         // Trigger re-evaluation so the node doesn't wait for the next
@@ -448,6 +458,11 @@ impl Node {
             "n/a".to_string()
         };
         let jitter_ms = mmp.receiver.jitter_us() as f64 / 1000.0;
+        // The peer's count of our frames it received out of order, from its
+        // last receiver report.
+        let rr_reordered = m
+            .rr_counters()
+            .map_or_else(|| "n/a".to_string(), |(_, _, reorder)| reorder.to_string());
 
         debug!(
             peer = %peer_name,
@@ -457,6 +472,7 @@ impl Node {
             goodput = %format_throughput(m.goodput_bps()),
             tx_pkts = mmp.sender.cumulative_packets_sent(),
             rx_pkts = mmp.receiver.cumulative_packets_recv(),
+            rr_reordered = %rr_reordered,
             "MMP link metrics"
         );
     }
@@ -624,69 +640,12 @@ impl Node {
         }
     }
 
-    /// Reap every active peer reachable only through `transport_id`.
-    ///
-    /// Called on a transport's detach edge. Until this existed, losing an
-    /// interface withdrew nothing: the peers stayed in the registry, the
-    /// routes through them stayed selectable, and this node kept advertising
-    /// reachability it no longer had — so transit traffic was dropped in
-    /// silence, and other nodes kept routing toward us for those destinations,
-    /// until the liveness reaper noticed up to `link_dead_timeout_secs` later.
-    /// Measured on real hardware that was 27 seconds of routing through a link
-    /// that had already gone, with four alternative peers available the whole
-    /// time.
-    ///
-    /// The detach edge is both earlier and more certain than inactivity, so it
-    /// is the better trigger. This routes through the same
-    /// [`Self::route_link_dead`] the liveness reaper uses rather than
-    /// open-coding a second teardown — every consequence of losing a peer
-    /// (sessions, path MTU, session indices, the link, the control machine,
-    /// tree cleanup and re-announce, bloom withdrawal) already hangs off that
-    /// one path, and a parallel one would drift from it.
-    ///
-    /// Deliberately undamped. A flapping interface cannot drive a reap storm
-    /// through here, because `ChurnGuard` stops publishing presence edges
-    /// after three short-lived bindings and does not resume until one lasts —
-    /// so the edges this reacts to are already rate-limited at the source, and
-    /// a second damper here would only add a way for the two to disagree.
-    ///
-    /// Returns how many peers were reaped.
-    pub(in crate::node) async fn reap_peers_on_transport(
-        &mut self,
-        transport_id: TransportId,
-    ) -> usize {
-        let doomed: Vec<NodeAddr> = self
-            .peers
-            .iter()
-            .filter(|(_, peer)| peer.transport_id() == Some(transport_id))
-            .map(|(node_addr, _)| *node_addr)
-            .collect();
-
-        if doomed.is_empty() {
-            return 0;
-        }
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let reaped = doomed.len();
-        for node_addr in doomed {
-            debug!(
-                peer = %self.peer_display_name(&node_addr),
-                %transport_id,
-                "Removing peer: its interface went away"
-            );
-            self.route_link_dead(node_addr, now_ms).await;
-        }
-        reaped
-    }
-
     /// Route a link-dead reap through the peer machine + executor. Two callers
     /// decide: the tick sweep's `plan_heartbeats` batch emits a `ReapPeer` for a
-    /// peer that has gone quiet, and [`Self::reap_peers_on_transport`] withdraws
-    /// a transport's peers when its interface goes away. The shell has already
+    /// peer that has gone quiet, and a link's path machine, stepped by
+    /// [`Self::path_presence`], [`Self::path_removed`] or any other input,
+    /// orphans a link that has no original or acked path left, as when the
+    /// interface its one path used goes away. The shell has already
     /// decided by the time this runs, so the machine only CONSUMES the decision
     /// via [`PeerEvent::LinkDeadSuspected`]. The resulting executor arms
     /// (`InvalidateSendState` → `remove_active_peer`, `ReportLost` →
@@ -701,7 +660,7 @@ impl Node {
     /// `now_ms` is the caller's hoisted wall-clock ms; it flows to the peer
     /// machine's ambient context. The reconnect schedule itself is on the
     /// peering clock, which `note_link_dead`'s callers read.
-    async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
+    pub(in crate::node) async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
             None => return,
@@ -715,8 +674,13 @@ impl Node {
             return;
         }
         let ambient = self.link_dead_ctx(&node_addr, now_ms);
-        self.advance_peer_machine(link, PeerEvent::LinkDeadSuspected, Self::now_ms(), &ambient)
-            .await;
+        self.advance_peer_machine(
+            link,
+            PeerEvent::LinkDeadSuspected,
+            Self::interval_ms(),
+            &ambient,
+        )
+        .await;
     }
 
     /// Ambient shell facts for the routed liveness reap. The executor reads only
@@ -738,6 +702,7 @@ impl Node {
             our_index: peer.our_index(),
             their_index: peer.their_index(),
             now_ms,
+            interval_ms: Self::interval_ms(),
             is_outbound: false,
             pending_outbound_key: None,
         }

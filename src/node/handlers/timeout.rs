@@ -11,7 +11,7 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 impl LifecycleView for Node {
-    fn stale_connections(&self, now_ms: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
+    fn stale_connections(&self, interval_now: u64, timeout_ms: u64) -> Vec<ConnSnapshot> {
         // `is_failed()` legs are always reaped here (~1s), as before. The
         // idle-timeout is reaped here ONLY for legs whose timeout is not already
         // driven by a machine `HandshakeTimeout` timer — i.e. inbound legs (IK
@@ -23,7 +23,7 @@ impl LifecycleView for Node {
             .filter(|(_, machine)| machine.leg().is_some())
             .filter(|(link_id, machine)| {
                 machine.is_failed()
-                    || (machine.conn_is_timed_out(now_ms, timeout_ms)
+                    || (machine.conn_is_timed_out(interval_now, timeout_ms)
                         && !self.peer_timers.get(*link_id).is_some_and(|timers| {
                             timers.contains_key(&TimerKind::HandshakeTimeout)
                         }))
@@ -52,20 +52,24 @@ impl Node {
         // First, and not behind the connection check below: a node with no
         // handshake in progress still holds TUN packets.
         self.release_stranded_tun_packets(std::time::Instant::now());
-        self.check_timeouts_at(Self::now_ms()).await;
+        self.check_timeouts_at(Self::interval_ms()).await;
     }
 
-    /// [`check_timeouts`](Self::check_timeouts) at the time `now_ms`, so a
-    /// test can run the reaper past the handshake timeout without waiting.
-    pub(in crate::node) async fn check_timeouts_at(&mut self, now_ms: u64) {
+    /// [`check_timeouts`](Self::check_timeouts) at `interval_now`, a reading
+    /// of the interval clock (`Node::interval_ms`), so a test can run the
+    /// reaper past the handshake timeout without waiting.
+    pub(in crate::node) async fn check_timeouts_at(&mut self, interval_now: u64) {
         if self.connection_count() == 0 {
             return;
         }
 
+        // The wall reading is for the log below, whose idle time is the
+        // operator-facing one; the timeout reads the interval clock.
+        let now_ms = Self::now_ms();
         let peering_now = Self::peering_now();
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
 
-        let stale = self.stale_connections(now_ms, timeout_ms);
+        let stale = self.stale_connections(interval_now, timeout_ms);
         for action in self.fmp.poll_timeouts(stale) {
             match action {
                 ConnAction::ScheduleRetry { peer } => {
@@ -184,12 +188,16 @@ impl Node {
     /// timed-out leg is reaped rather than resent on the same tick. The
     /// rekey/liveness kinds keep their own shell drivers, so only the two
     /// handshake kinds are driven here.
-    pub(in crate::node) async fn drive_peer_timers(&mut self, now_ms: u64) {
+    ///
+    /// `interval_now` is a reading of the interval clock
+    /// (`Node::interval_ms`), which the timers' deadlines and the legs'
+    /// activity stamps are kept on.
+    pub(in crate::node) async fn drive_peer_timers(&mut self, interval_now: u64) {
         if self.peer_timers.is_empty() {
             return;
         }
-        self.drive_handshake_timeouts(now_ms).await;
-        self.drive_handshake_retransmits(now_ms).await;
+        self.drive_handshake_timeouts(interval_now).await;
+        self.drive_handshake_retransmits(interval_now).await;
     }
 
     /// Reap the outbound legs whose machine `HandshakeTimeout` timer marks them

@@ -1,0 +1,13 @@
+diff --git a/src/transport/ble/mod.rs b/src/transport/ble/mod.rs
+index fab1847f..b5ce31a4 100644
+--- a/src/transport/ble/mod.rs
++++ b/src/transport/ble/mod.rs
+@@ -910,7 +910,7 @@ impl<I: BleIo> BleTransport<I> {
+         let closed: Vec<_> = {
+             let mut pool = self.pool.lock().await;
+             for addr in pool.addrs() {
+-                if held(&addr) {
++                if held(&addr) && false {
+                     pool.hold(&addr, now);
+                 }
+             }

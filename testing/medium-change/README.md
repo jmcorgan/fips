@@ -82,6 +82,40 @@ fails rather than passing quietly.
 This is deliberate. A regression test that has never been seen to fail is a
 claim, not a test, and the claim is cheap to make and expensive to trust.
 
+## Two rounds: multipath off, then on
+
+The generator writes `node.path.enabled` at both nodes from its third
+argument, so the suite never takes the daemon's default. Round 1 runs
+Phases 1 to 3 with multipath off. Round 2 restarts both nodes with it on
+(`--force-recreate`, so round 2's log level applies) and runs Phases 1 and 2
+again, then Phase 4.
+
+Check 3 differs by round. With multipath on, a source-address change
+between two capable peers makes node-a's new address a candidate for a
+second path, not a roam, and node-b keeps sending on the path that still
+works (draft 5.3 and 5.4's Note). So round 2's Phase 2 accepts node-b's view
+of node-a at either address, keeping the gap and same-session checks. Round
+2's Phase 1 stays strict: the peers are not yet known capable when the
+first move comes, since node-b holds no candidate of node-a's other than
+the link's own pair until node-a's address moves.
+
+## Phase 4: the old interface lost
+
+With multipath on, node-b holds a path to each of node-a's addresses and
+sends on one. Phase 4 reads which, requires a Live path to node-a's other
+address (from node-b's path lines; otherwise it fails as testing nothing),
+moves node-a's default route to that other path, and takes node-a's
+interface on the one node-b sends to down, stamped inside node-a. Node-b
+has no signal, only its probes timing out, and must log `Path switched` to
+node-a's remaining address within 1300 ms (the K-timeout bound), still
+send there afterwards under the same `link_id` and `authenticated_at_ms`,
+and carry ping traffic within the gap budget. The interface is brought
+back up after.
+
+Round 2 runs both nodes at `info` with the netmon and path handlers at
+`debug`, since Phase 4 reads node-b's path lines; a caller's `MC_RUST_LOG`
+stands for both rounds.
+
 ## Diagnosing a failure
 
 On a failure the suite prints node-a's routes and UDP socket table, every
@@ -109,7 +143,7 @@ session and link lines in the node logs.
 | `MC_PIN_DEADLINE_SECS` | `15` | longest wait for the socket to be pinned |
 | `MC_CONTROL_RUNS` | `1` | how many times Phase 3 runs |
 | `MC_KEEP_DIR` | unset | keep every ping log and both node logs here |
-| `MC_RUST_LOG` | unset | replaces both nodes' `RUST_LOG` |
+| `MC_RUST_LOG` | unset | replaces both nodes' `RUST_LOG`, in both rounds |
 | `MC_PRIMARY_PREFIX` | `172.31.60` | first access path `/24` |
 | `MC_SECONDARY_PREFIX` | `172.31.61` | second access path `/24` |
 | `MC_FAR_PREFIX` | `172.31.62` | far segment `/24` |

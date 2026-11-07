@@ -2,6 +2,9 @@
 //! and the negotiation payload.
 
 use super::super::wire::{NEGOTIATION_HEADER_SIZE, TLV_REKEY_OF};
+use crate::proto::fmp::wire::{
+    ENCRYPTED_MIN_SIZE, ESTABLISHED_HEADER_SIZE, FRAME_OVERHEAD, INNER_HEADER_SIZE,
+};
 use crate::proto::fmp::{
     Disconnect, DisconnectReason, HandshakeMessageType, NegotiationPayload, NodeProfile,
 };
@@ -285,4 +288,20 @@ fn test_node_profile_try_from() {
     assert_eq!(NodeProfile::try_from(2).unwrap(), NodeProfile::Leaf);
     assert!(NodeProfile::try_from(3).is_err());
     assert!(NodeProfile::try_from(7).is_err());
+}
+
+// ===== Frame overhead =====
+
+/// An established frame carrying a link message is laid out as the 16-byte
+/// header, then under encryption the 4-byte timestamp and the message from
+/// its type byte, then the 16-byte AEAD tag. The type byte belongs to the
+/// message, so the frame adds the header, the timestamp and the tag.
+#[test]
+fn the_frame_overhead_is_the_header_the_timestamp_and_the_tag() {
+    assert_eq!(FRAME_OVERHEAD, 36);
+    assert_eq!(FRAME_OVERHEAD, ENCRYPTED_MIN_SIZE + INNER_HEADER_SIZE - 1);
+    assert_eq!(
+        FRAME_OVERHEAD,
+        ESTABLISHED_HEADER_SIZE + 4 + crate::noise::TAG_SIZE
+    );
 }

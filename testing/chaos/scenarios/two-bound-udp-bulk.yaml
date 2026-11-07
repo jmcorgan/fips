@@ -1,0 +1,89 @@
+# The two-bound-udp shape under uncapped traffic: no frame refused as a
+# replay
+#
+# Two nodes joined by one veth pair carrying two lanes, as in
+# two-bound-udp.yaml, with the rate cap removed. A session then runs at over
+# 1 Gbit/s, and its standby probes share a replay window with the bulk
+# stream. A node has to read a probe off its listen socket before the
+# stream's own frames carry the window past it, so `max_replay_refusals`
+# holds the nodes to no refusal at all.
+#
+# `lanes` is left out. The cap also guards the crossed listen socket's
+# overflow, which this suite is not about, so a lane path can go Suspect for
+# load here.
+#
+#   n01 vl0-n01 (10.222.0.1) --.            .-- vl0-n02 (10.222.0.2)
+#                                ===veth===
+#   n01 vl1-n01 (10.222.0.3) --'            '-- vl1-n02 (10.222.0.4)
+
+scenario:
+  name: "two-bound-udp-bulk"
+  seed: 42
+  duration_secs: 120
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, udp-veth, {lanes: 2}]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 0]
+    loss_pct: [0, 0]
+
+link_flaps:
+  enabled: false
+
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 10, max: 20}
+  duration_secs: {min: 10, max: 15}
+  parallel_streams: 1
+
+node_churn:
+  enabled: false
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  paths_live:
+    min: 4
+    configured: true
+    within_secs: 30
+
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+
+  max_errors:
+    max_total: 0
+
+  # A zero below means something only if the stream ran uncapped: a run at
+  # two-bound-udp's cap moves about 60 MB in all.
+  min_traffic:
+    min_sessions_ok: 2
+    min_bytes_total: 100000000
+
+  max_replay_refusals:
+    max_total: 0
+    min_nodes: 2
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug,fips::node::dataplane::wait=debug"
+  output_dir: "./sim-results"

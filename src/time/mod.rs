@@ -12,13 +12,12 @@ use std::time::{Duration, Instant as StdInstant};
 
 use fips_core::time::{Clock, Instant};
 
+/// `now + d` that never overflows, from the core, for the shell's timers.
+pub(crate) use fips_core::time::deadline;
+
 /// The process's monotonic epoch: the first read of [`mono_ms`] or of the
 /// test epoch.
 static START: LazyLock<StdInstant> = LazyLock::new(StdInstant::now);
-
-/// The furthest a [`deadline`] reaches: 100 years, which neither host instant
-/// type can overflow from a current reading.
-pub(crate) const CEILING: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
 /// Monotonic millisecond clock for the MMP time seam.
 ///
@@ -63,9 +62,13 @@ impl Clock for HostClock {
     type Instant = HostInstant;
 
     fn now(&self) -> HostInstant {
+        #[cfg(not(test))]
         let now = StdInstant::now();
         #[cfg(test)]
-        let now = now + hooks::MONO_ADVANCE.with(|a| a.get());
+        let now = hooks::FROZEN
+            .with(|f| f.get())
+            .unwrap_or_else(StdInstant::now)
+            + hooks::MONO_ADVANCE.with(|a| a.get());
         HostInstant(now)
     }
 }
@@ -123,24 +126,6 @@ impl WallStamp for HostInstant {
     }
 }
 
-/// `now + d`, with `d` capped at [`CEILING`].
-///
-/// Below the cap this is exactly `now + d`. An instant type whose range ends
-/// within the cap of `now` gets a deadline at or before that end instead of a
-/// panic: the step is halved until it fits.
-pub(crate) fn deadline<I: Instant>(now: I, d: Duration) -> I {
-    let mut step = d.min(CEILING);
-    loop {
-        if let Some(at) = now.checked_add(step) {
-            return at;
-        }
-        if step.is_zero() {
-            return now;
-        }
-        step /= 2;
-    }
-}
-
 /// Test hooks: per-thread offsets on the two clocks, so a test can step the
 /// wall clock or advance the monotonic one without waiting.
 ///
@@ -157,6 +142,8 @@ mod hooks {
         pub(super) static WALL_STEP: Cell<i64> = const { Cell::new(0) };
         /// Time added to `HostClock` and `mono_ms`.
         pub(super) static MONO_ADVANCE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+        /// The instant this thread's monotonic clock was stopped at, if it was.
+        pub(super) static FROZEN: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     }
 }
 
@@ -172,6 +159,14 @@ pub(crate) fn step_wall(ms: i64) {
 #[cfg(test)]
 pub(crate) fn advance(d: Duration) {
     hooks::MONO_ADVANCE.with(|a| a.set(a.get() + d));
+}
+
+/// Stop this thread's monotonic clock where it reads now, so that from here
+/// on [`HostClock`] and [`mono_ms`] move only by [`advance`], however long the
+/// test takes to run. Moves nothing on other threads, nor [`wall_ms`].
+#[cfg(test)]
+pub(crate) fn freeze() {
+    hooks::FROZEN.with(|f| f.set(Some(StdInstant::now())));
 }
 
 /// A clock with a fixed instant to count test times from, so a test can name

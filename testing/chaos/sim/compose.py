@@ -54,6 +54,14 @@ services:
     <<: *fips-common
     container_name: {{ topology.container_name(node.node_id) }}
     hostname: {{ node.node_id }}
+{%- if node.node_id in laned %}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv4.conf.all.rp_filter=0
+      - net.ipv4.conf.default.rp_filter=0
+      - net.ipv4.conf.all.arp_ignore=0
+      - net.ipv4.conf.default.arp_ignore=0
+{%- endif %}
     volumes:
       - ./{{ node.node_id }}.yaml:/etc/fips/fips.yaml:ro
       - {{ resolv_conf }}:/etc/resolv.conf:ro
@@ -80,6 +88,10 @@ def generate_compose(
     os.makedirs(output_dir, exist_ok=True)
 
     nodes = [topology.nodes[nid] for nid in sorted(topology.nodes)]
+    # The ends of a laned edge accept a frame on any lane for any address
+    # in their namespace and answer ARP for it; set here, so the result
+    # does not depend on the host's defaults.
+    laned = {n for edge in topology.edge_lanes for n in edge}
 
     # Absolute path to the shared resolv.conf (bind-mounted into containers
     # so Docker's runtime resolv.conf generation doesn't overwrite it).
@@ -94,6 +106,7 @@ def generate_compose(
         nodes=nodes,
         resolv_conf=resolv_conf,
         topology=topology,
+        laned=laned,
     )
 
     path = os.path.join(output_dir, "docker-compose.yml")

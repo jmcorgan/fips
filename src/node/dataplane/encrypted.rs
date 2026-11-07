@@ -2,11 +2,16 @@
 
 use crate::node::Node;
 use crate::node::diag::{KeyView, OrNone, Trial};
+use crate::node::handlers::path_intake::Feed;
 use crate::node::reject::DataplaneReject;
 use crate::noise::{NoiseError, TAG_SIZE};
-use crate::proto::fmp::wire::{EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, strip_inner_header};
+use crate::peer::{ActivePeer, PeerBundle, Roam};
+use crate::proto::fmp::wire::{
+    EncryptedHeader, FLAG_CE, FLAG_KEY_EPOCH, INNER_HEADER_SIZE, strip_inner_header,
+};
 use crate::proto::link::LinkMessageType;
 use crate::transport::{ReceivedPacket, TransportAddr, TransportId};
+use fips_core::proto::path::{Charge, Input as PathInput};
 use fips_core::proto::rekey::{FrameHint, Input, Reason, Slot};
 use std::time::Instant;
 use tracing::{debug, trace, warn};
@@ -42,7 +47,22 @@ fn frame_hint(header: &EncryptedHeader, k: bool) -> FrameHint {
 
 /// Consecutive decryption failures at which a peer's warning is logged. The
 /// peer is kept; a broken session ends at the link-dead timeout.
-const DECRYPT_FAILURE_THRESHOLD: u32 = 20;
+pub(in crate::node) const DECRYPT_FAILURE_THRESHOLD: u32 = 20;
+
+/// One authenticated frame, as the post-decrypt bookkeeping takes it from
+/// either receive path: the link session that opened it, where it arrived,
+/// when it was read (Unix milliseconds), its length on the wire, its FMP
+/// counter, the timestamp from its inner header, and its CE bit.
+struct Authentic<'a> {
+    slot: LinkSlot,
+    transport_id: TransportId,
+    remote_addr: &'a TransportAddr,
+    received_ms: u64,
+    len: usize,
+    counter: u64,
+    inner_ts: u32,
+    ce: bool,
+}
 
 /// Which of a peer's link sessions authenticated an inbound frame.
 ///
@@ -82,8 +102,10 @@ impl Node {
             None => return, // Malformed, drop silently
         };
 
-        // O(1) session lookup by our receiver index
-        let key = (packet.transport_id, header.receiver_idx.as_u32());
+        // O(1) session lookup by our receiver index alone: indices come from
+        // one allocator, so the transport that delivered the frame plays no
+        // part in finding its session.
+        let key = header.receiver_idx.as_u32();
         let node_addr = match self.peers_by_index.get(&key) {
             Some(id) => *id,
             None => {
@@ -128,7 +150,7 @@ impl Node {
         // so a frame naming one is opened by the link's rekey machine below.
         #[cfg(unix)]
         {
-            let cache_key = (packet.transport_id, header.receiver_idx.as_u32());
+            let cache_key = header.receiver_idx.as_u32();
             if let Some(workers) = self.supervisor.decrypt_workers.as_ref().cloned()
                 && self.decrypt_registered_sessions.contains(&cache_key)
             {
@@ -190,7 +212,7 @@ impl Node {
             let short = report.rejects.contains(&Reason::ShortPlaintext);
             if short {
                 if let Some(peer) = self.peers.get_mut(&node_addr) {
-                    peer.reset_decrypt_failures();
+                    peer.authentic(packet.transport_id, &packet.remote_addr);
                 }
                 debug!(
                     peer = %self.peer_display_name(&node_addr),
@@ -198,6 +220,10 @@ impl Node {
                 );
                 return;
             }
+            // A frame the anti-replay window refused is logged and counted
+            // on no path: it neither adds to nor resets the count of
+            // authentication failures (multipath draft Section 5.3).
+            let replay = report.rejects.contains(&Reason::Replay);
             let e = open_failure(&report.rejects, &header, &packet.data);
             self.log_decrypt_failure(
                 &node_addr,
@@ -207,11 +233,14 @@ impl Node {
                 &packet.remote_addr,
                 trial,
             );
-            self.handle_decrypt_failure(&node_addr);
+            if !replay && self.charge_failure(&node_addr, packet.transport_id, &packet.remote_addr)
+            {
+                self.step_path(&node_addr, PathInput::Poll).await;
+            }
             return;
         };
         if let Some(peer) = self.peers.get_mut(&node_addr) {
-            peer.reset_decrypt_failures();
+            peer.authentic(packet.transport_id, &packet.remote_addr);
         }
         let slot = match slot {
             Slot::Current | Slot::Pending => LinkSlot::Current,
@@ -238,69 +267,17 @@ impl Node {
             }
         };
 
-        // MMP per-frame processing and statistics
-        let now_ms = crate::time::mono_ms();
-        let ce_flag = header.flags & FLAG_CE != 0;
-
-        let mut address_changed = false;
-        let mut first_frame = false;
-        let mut present = false;
-        let mut prior = None;
-        if let Some(peer) = self.peers.get_mut(&node_addr) {
-            present = true;
-            if peer.transport_id() != Some(packet.transport_id)
-                || peer.current_addr() != Some(&packet.remote_addr)
-            {
-                prior = peer.transport_id().zip(peer.current_addr().cloned());
-            }
-            if slot == LinkSlot::Current
-                && let Some(mmp) = peer.mmp_mut()
-            {
-                mmp.receiver.record_recv(
-                    header.counter,
-                    timestamp,
-                    packet.data.len(),
-                    ce_flag,
-                    now_ms,
-                );
-            }
-            address_changed =
-                peer.set_current_addr(packet.transport_id, packet.remote_addr.clone());
-            peer.link_stats_mut()
-                .record_recv(packet.data.len(), packet.timestamp_ms);
-            first_frame = !peer.heard();
-            peer.touch(packet.timestamp_ms);
-            if slot == LinkSlot::Previous {
-                peer.count_previous();
-            }
-        }
-        if first_frame {
-            self.note_peer_heard(&node_addr);
-        }
-
-        // Address rotation invalidates the per-peer connect()-ed UDP socket,
-        // which is still pinned to the old 5-tuple. The decrypt-worker
-        // completion path already does this; this one discarded the flag, so a
-        // peer that roamed kept sending from a socket aimed where it used to
-        // be. `netmon`'s first-sight rule now rests on this too: it compares
-        // that socket's pinned source against a probe to the peer's *current*
-        // address, and a socket left behind makes those two disagree for as
-        // long as it survives.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if address_changed {
-            self.clear_connected_udp_for_peer(&node_addr);
-        }
-
-        // Tell the transports which link carries the peer: on a roam the old
-        // link loses it, and over BLE every frame marks the link it arrived
-        // on, so a link re-established at the same address is recognised.
-        if present && (address_changed || self.tracks_peers(packet.transport_id)) {
-            let link = (packet.transport_id, packet.remote_addr.clone());
-            self.relink(&node_addr, prior, Some(link)).await;
-        }
-
-        // Dispatch to link message handler
-        self.dispatch_authentic(&node_addr, slot, link_message, ce_flag)
+        let frame = Authentic {
+            slot,
+            transport_id: packet.transport_id,
+            remote_addr: &packet.remote_addr,
+            received_ms: packet.timestamp_ms,
+            len: packet.data.len(),
+            counter: header.counter,
+            inner_ts: timestamp,
+            ce: header.flags & FLAG_CE != 0,
+        };
+        self.account_authentic(&node_addr, frame, link_message)
             .await;
     }
 
@@ -308,13 +285,16 @@ impl Node {
     /// on the previous session reports on this node's traffic in the session
     /// a cutover retired, and is dropped rather than judged against the new
     /// session's metrics; every other message is dispatched whichever session
-    /// carried it.
+    /// carried it, with the frame's arrival (the transport it came in on and
+    /// its source address) and its length on the wire.
     async fn dispatch_authentic(
         &mut self,
         node_addr: &crate::NodeAddr,
         slot: LinkSlot,
         link_message: &[u8],
         ce_flag: bool,
+        arrival: (TransportId, &TransportAddr),
+        len: usize,
     ) {
         if slot == LinkSlot::Previous
             && link_message.first() == Some(&(LinkMessageType::ReceiverReport as u8))
@@ -325,15 +305,16 @@ impl Node {
             );
             return;
         }
-        self.dispatch_link_message(node_addr, link_message, ce_flag)
+        self.dispatch_link_message(node_addr, link_message, ce_flag, arrival, len)
             .await;
     }
 
     /// Log a decryption failure with replay suppression, with the frame's
     /// index, where it arrived, and the peer's key state for that index.
     /// Records the failing index on the peer for the excessive-failures
-    /// warning. A run of failures that has reached the warning's threshold
-    /// logs nothing more until a frame authenticates (`past_threshold`).
+    /// warning. A run of failures on the frame's path that has reached the
+    /// warning's threshold logs nothing more until a frame authenticates
+    /// there (`past_threshold`).
     fn log_decrypt_failure(
         &mut self,
         node_addr: &crate::NodeAddr,
@@ -352,7 +333,7 @@ impl Node {
                 0
             }
         });
-        if !replay && self.past_threshold(node_addr) {
+        if !replay && self.past_threshold(node_addr, transport_id, remote_addr) {
             return;
         }
         if replay && let Some(count) = replays {
@@ -385,11 +366,14 @@ impl Node {
         );
     }
 
-    /// Canonical post-FMP-decrypt side-effect site. Used by both the
-    /// inline rx_loop decrypt path and the decrypt-worker bounce path
-    /// so the per-peer bookkeeping (stats, MMP, ECN propagation,
-    /// address-rotation handling, link-message dispatch)
-    /// happens in exactly one place.
+    /// The decrypt-worker path's way into the post-decrypt bookkeeping, for
+    /// a frame the worker has authenticated and bounced back with its
+    /// plaintext. Starts the run of decryption failures on the frame's path
+    /// again first, as the inline path does when a frame authenticates,
+    /// whatever its length (multipath draft Section 5.3). A plaintext
+    /// shorter than the inner header is then dropped, as on the inline
+    /// path. Otherwise reads the inner timestamp and hands the frame to
+    /// [`account_authentic`](Self::account_authentic).
     #[allow(clippy::too_many_arguments)]
     pub(in crate::node) async fn process_authentic_fmp_plaintext(
         &mut self,
@@ -404,66 +388,172 @@ impl Node {
         fmp_plaintext: &[u8],
     ) {
         const INNER_TIMESTAMP_LEN: usize = 4;
-        let inner_ts = if fmp_plaintext.len() >= INNER_TIMESTAMP_LEN {
-            u32::from_le_bytes([
-                fmp_plaintext[0],
-                fmp_plaintext[1],
-                fmp_plaintext[2],
-                fmp_plaintext[3],
-            ])
-        } else {
+        if let Some(peer) = self.peers.get_mut(node_addr) {
+            peer.authentic(transport_id, remote_addr);
+        }
+        if fmp_plaintext.len() < INNER_HEADER_SIZE {
+            debug!(
+                peer = %self.peer_display_name(node_addr),
+                len = fmp_plaintext.len(),
+                "Decrypted payload too short for inner header"
+            );
             return;
+        }
+        let inner_ts = u32::from_le_bytes([
+            fmp_plaintext[0],
+            fmp_plaintext[1],
+            fmp_plaintext[2],
+            fmp_plaintext[3],
+        ]);
+        let frame = Authentic {
+            slot,
+            transport_id,
+            remote_addr,
+            received_ms: packet_timestamp_ms,
+            len: packet_len,
+            counter: fmp_counter,
+            inner_ts,
+            ce: ce_flag,
         };
-        let now_ms = crate::time::mono_ms();
+        let link_message = &fmp_plaintext[INNER_TIMESTAMP_LEN..];
+        self.account_authentic(node_addr, frame, link_message).await;
+    }
+
+    /// The bookkeeping for one authenticated frame, shared by the inline
+    /// path and the decrypt-worker path, then the dispatch of its link
+    /// message.
+    ///
+    /// In order: the link's path machine accounts the frame to its path,
+    /// and while the link holds one path the roaming rule follows the
+    /// frame's source ([`account`](crate::peer::ActivePeer::account)),
+    /// the link counters and the last-seen time are updated, a frame on the
+    /// previous session is counted as one, and a frame on the current
+    /// session feeds the MMP receiver. Then the identity's silent-session
+    /// record is cleared on the session's first frame, a connected UDP
+    /// socket aimed at an address the peer left is dropped, and the
+    /// transports are told which link carries the peer.
+    async fn account_authentic(
+        &mut self,
+        node_addr: &crate::NodeAddr,
+        frame: Authentic<'_>,
+        link_message: &[u8],
+    ) {
+        let now = crate::peer::peer_now();
+        let now_ms = crate::time::mono_ms_at(now);
         let mut address_changed = false;
         let mut first_frame = false;
         let mut present = false;
         let mut prior = None;
+        let mut wake = None;
+        let mut heard_from = false;
+        let intake = self.config().node.path.enabled;
         if let Some(peer) = self.peers.get_mut(node_addr) {
             present = true;
-            peer.reset_decrypt_failures();
-            if peer.transport_id() != Some(transport_id) || peer.current_addr() != Some(remote_addr)
-            {
-                prior = peer.transport_id().zip(peer.current_addr().cloned());
+            let msg_type = link_message.first().copied().unwrap_or(0);
+            let account = peer.account(
+                now,
+                frame.transport_id,
+                frame.remote_addr,
+                frame.len,
+                msg_type,
+            );
+            let roam = account.roam;
+            // An authentic frame from a pair the link holds no path at, that
+            // the one-path roam did not follow, makes the pair a candidate,
+            // not a path (multipath v1 draft, Section 5.3). A path message
+            // is left out: a probe from such a pair creates a path only
+            // where the probe's own rules allow (Sections 5.1 and 5.5), and
+            // reporting it here would admit the pair around them.
+            heard_from = intake
+                && account.path.is_none()
+                && roam == Roam::Unmoved
+                && !matches!(
+                    LinkMessageType::from_byte(msg_type),
+                    Some(
+                        LinkMessageType::PathProbe
+                            | LinkMessageType::PathAck
+                            | LinkMessageType::PathClose
+                    )
+                );
+            address_changed = roam.changed();
+            // A roam that moved an address may leave the path machine work
+            // to do, which the path tick must not sleep through.
+            if roam != Roam::Unmoved {
+                wake = peer.bundle().and_then(PeerBundle::next_wake);
             }
-            address_changed = peer.set_current_addr(transport_id, remote_addr.clone());
+            // Only a link the peer actually left loses its verification. A
+            // frame the roaming rule refuses to follow (another transport, or
+            // a peer holding several paths) leaves the peer on its link.
+            prior = roam.left();
             peer.link_stats_mut()
-                .record_recv(packet_len, packet_timestamp_ms);
+                .record_recv(frame.len, frame.received_ms);
             first_frame = !peer.heard();
-            peer.touch(packet_timestamp_ms);
-            if slot == LinkSlot::Previous {
+            peer.touch(frame.received_ms);
+            if frame.slot == LinkSlot::Previous {
                 peer.count_previous();
             }
-            if slot == LinkSlot::Current
+            if frame.slot == LinkSlot::Current
                 && let Some(mmp) = peer.mmp_mut()
             {
-                mmp.receiver
-                    .record_recv(fmp_counter, inner_ts, packet_len, ce_flag, now_ms);
+                // Jitter and the timestamp echo come only from frames on
+                // the peer's active path (multipath draft Section 5.12):
+                // a sample across two paths measures their difference, and
+                // an echo of a standby frame would give the peer that
+                // path's round trip. On a link of one path every frame is
+                // sampled. Every frame is still counted for loss.
+                mmp.receiver.record_frame(
+                    frame.counter,
+                    frame.inner_ts,
+                    frame.len,
+                    frame.ce,
+                    now_ms,
+                    account.sample,
+                );
             }
         }
+        self.paths.fold(wake);
         // A session's first authenticated frame clears its identity's
         // silent-session record: one identity has one peer entry, and a
         // record grows only when an unheard session ends.
         if first_frame {
             self.note_peer_heard(node_addr);
         }
-        // Address rotation invalidates the per-peer connect()-ed UDP
-        // socket. Drop the connected socket + drain so the wildcard
-        // listen socket takes over until the new 5-tuple settles.
+        // Address rotation invalidates the per-peer connect()-ed UDP socket,
+        // which is still pinned to the old 5-tuple. Drop the socket and its
+        // drain so the wildcard listen socket takes over until the new
+        // 5-tuple settles. `netmon`'s first-sight rule rests on this too: it
+        // compares that socket's pinned source against a probe to the peer's
+        // *current* address, and a socket left behind makes those two
+        // disagree for as long as it survives.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if address_changed {
             self.clear_connected_udp_for_peer(node_addr);
         }
-        // As on the inline path. A bounce for a peer already removed (the
-        // decrypt worker can finish after a Disconnect) marks nothing: no
-        // later removal would withdraw it.
-        if present && (address_changed || self.tracks_peers(transport_id)) {
-            let link = (transport_id, remote_addr.clone());
+        // Tell the transports which link carries the peer: on a roam the old
+        // link loses it, and over BLE every frame marks the link it arrived
+        // on, so a link re-established at the same address is recognised. A
+        // frame for a peer already removed (the decrypt worker can finish
+        // after a Disconnect) marks nothing: no later removal would withdraw
+        // it.
+        if present && (address_changed || self.tracks_peers(frame.transport_id)) {
+            let link = (frame.transport_id, frame.remote_addr.clone());
             self.relink(node_addr, prior, Some(link)).await;
         }
-        let link_message = &fmp_plaintext[INNER_TIMESTAMP_LEN..];
-        self.dispatch_authentic(node_addr, slot, link_message, ce_flag)
-            .await;
+        if heard_from {
+            let addr = frame.remote_addr.clone();
+            self.intake(node_addr, Feed::Heard, frame.transport_id, addr)
+                .await;
+        }
+        let arrival = (frame.transport_id, frame.remote_addr);
+        self.dispatch_authentic(
+            node_addr,
+            frame.slot,
+            link_message,
+            frame.ce,
+            arrival,
+            frame.len,
+        )
+        .await;
     }
 
     /// Process a decrypt-worker bounce (FMP plaintext only — the
@@ -561,8 +651,11 @@ impl Node {
         if let Some(peer) = self.peers.get_mut(&report.source_node_addr) {
             peer.record_failed(idx);
         }
-        if self.past_threshold(&report.source_node_addr) {
-            self.handle_decrypt_failure(&report.source_node_addr);
+        let (from, transport_id) = (&report.source_node_addr, report.transport_id);
+        if self.past_threshold(from, transport_id, &report.remote_addr) {
+            if self.charge_failure(from, transport_id, &report.remote_addr) {
+                self.step_path(from, PathInput::Poll).await;
+            }
             return;
         }
         let keys = KeyView::of(self.peers.get(&report.source_node_addr), Some(idx));
@@ -581,7 +674,9 @@ impl Node {
             pending_epoch = %keys.pending_epoch,
             "Worker FMP AEAD decryption failed"
         );
-        self.handle_decrypt_failure(&report.source_node_addr);
+        if self.charge_failure(from, transport_id, &report.remote_addr) {
+            self.step_path(from, PathInput::Poll).await;
+        }
     }
 
     /// Dispatch a decrypt-worker event (plaintext bounce or failure
@@ -615,38 +710,74 @@ impl Node {
     /// Node's `decrypt_registered_sessions` set would grow monotonically
     /// per rekey on long-lived peers.
     #[cfg(unix)]
-    pub(in crate::node) fn unregister_decrypt_worker_session(
-        &mut self,
-        cache_key: (crate::transport::TransportId, u32),
-    ) {
+    pub(in crate::node) fn unregister_decrypt_worker_session(&mut self, cache_key: u32) {
         if let Some(workers) = self.supervisor.decrypt_workers.as_ref() {
             workers.unregister_session(cache_key);
         }
         self.decrypt_registered_sessions.remove(&cache_key);
     }
 
-    /// Whether `node_addr`'s current run of decryption failures has already
-    /// reached the warning's threshold. A peer is kept through such a run, so
-    /// without this bound every failing frame would log a line: the per-frame
-    /// failure lines stop at the threshold, as they did when the peer was
-    /// removed there, and resume after a frame authenticates.
-    fn past_threshold(&self, node_addr: &crate::NodeAddr) -> bool {
+    /// Whether the current run of decryption failures on `node_addr`'s path
+    /// of (`transport_id`, `addr`) has already reached the warning's
+    /// threshold. A peer is kept through such a run, so without this bound
+    /// every failing frame would log a line: the per-frame failure lines
+    /// from that path stop at the threshold, as they did when the peer was
+    /// removed there, and resume after a frame authenticates on it. A frame
+    /// from a pair no path holds is never past it.
+    fn past_threshold(
+        &self,
+        node_addr: &crate::NodeAddr,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+    ) -> bool {
         self.peers
             .get(node_addr)
-            .is_some_and(|p| p.consecutive_decrypt_failures() >= DECRYPT_FAILURE_THRESHOLD)
+            .is_some_and(|p| fails_at(p, transport_id, addr) >= DECRYPT_FAILURE_THRESHOLD)
     }
 
-    /// Count a decryption failure and warn once when the count reaches the
-    /// threshold. The peer is kept: a frame that does not authenticate names
+    /// Count a decryption failure from (`transport_id`, `addr`) against the
+    /// path of `node_addr`'s link it arrived on, and return whether the
+    /// path's machine is owed a step at once.
+    ///
+    /// The demux is by index alone, so a frame naming a known `receiver_idx`
+    /// reaches this peer's session from *any* bound transport and address.
+    /// Only a failure on the link's original path, or on a path proven by a
+    /// probe exchange, counts (multipath v1 draft, Section 5.3): counting
+    /// the others would let garbage frames carrying a sniffed index, from
+    /// anywhere, run up the failure count `fipsctl` reports and trip the
+    /// warning. The same rule covers a stale in-flight frame landing on an
+    /// index the allocator has already handed to a new owner: index reuse is
+    /// immediate, with no quarantine.
+    ///
+    /// When the path's count reaches the threshold the warning is logged
+    /// once, and the peer is kept: a frame that does not authenticate names
     /// its peer only by a receiver index sent in clear, so anyone who has
-    /// seen the index can cause the failures. A genuinely broken session ends
-    /// at the link-dead timeout, which only authenticated frames hold off.
-    pub(in crate::node) fn handle_decrypt_failure(&mut self, node_addr: &crate::NodeAddr) {
-        if let Some(peer) = self.peers.get_mut(node_addr) {
-            let count = peer.increment_decrypt_failures();
-            // Only an authenticated frame resets the count, so this fires
-            // once per run of failures.
-            if count == DECRYPT_FAILURE_THRESHOLD {
+    /// seen the index can cause the failures. A genuinely broken session
+    /// ends at the link-dead timeout, which only authenticated frames hold
+    /// off. When the path has a working alternative the machine marks it
+    /// Dead at its next step, which the caller makes at once.
+    pub(in crate::node) fn charge_failure(
+        &mut self,
+        node_addr: &crate::NodeAddr,
+        transport_id: TransportId,
+        addr: &TransportAddr,
+    ) -> bool {
+        let Some(peer) = self.peers.get_mut(node_addr) else {
+            return false;
+        };
+        match peer.charge(crate::peer::peer_now(), transport_id, addr) {
+            Charge::Nothing => {
+                trace!(
+                    peer = %self.peer_display_name(node_addr),
+                    transport_id = %transport_id,
+                    remote_addr = %addr,
+                    "Decrypt failure from no proven path of the peer, not counted"
+                );
+                false
+            }
+            Charge::Counted => false,
+            Charge::Warn => {
+                let count = fails_at(peer, transport_id, addr);
                 let keys = KeyView::of(Some(peer), peer.last_failed());
                 let since_cutover_ms = OrNone(peer.since_cutover().map(|d| d.as_millis()));
                 warn!(
@@ -660,7 +791,21 @@ impl Node {
                     since_cutover_ms = %since_cutover_ms,
                     "Excessive decryption failures, peer kept"
                 );
+                false
             }
+            Charge::Tripped => true,
         }
     }
+}
+
+/// The count of consecutive failures on `peer`'s path of (`transport_id`,
+/// `addr`), or 0 when no path holds that pair.
+fn fails_at(peer: &ActivePeer, transport_id: TransportId, addr: &TransportAddr) -> u32 {
+    let Some(paths) = peer.bundle().map(|b| b.paths()) else {
+        return 0;
+    };
+    paths
+        .find(transport_id, addr)
+        .and_then(|i| paths.get(i))
+        .map_or(0, |p| p.live().fails())
 }

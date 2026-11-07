@@ -10,6 +10,8 @@ use crate::PeerIdentity;
 use crate::node::acl::PeerAclContext;
 use crate::node::dataplane::PeerActionCtx;
 use crate::node::diag::{self, HsLine, OrNone, Shown, Withheld};
+use crate::node::handlers::path::NodeFacts;
+use crate::node::handlers::path_intake::Feed;
 use crate::node::rate_limit::Msg1Class;
 use crate::node::reject::{HandshakeReject, RejectReason};
 use crate::node::{Node, NodeError};
@@ -17,13 +19,13 @@ use crate::peer::machine::{
     CrossConnOutcome, DialMsg2Step, HandshakeCrypto, LinkFinal, Msg3Error, PeerAction, PeerEvent,
     PeerMachine, TimerKind,
 };
-use crate::peer::{ActivePeer, LinkCaps, LinkOutputs};
+use crate::peer::{ActivePeer, LinkCaps, LinkOutputs, Match, PathCaps};
 use crate::proto::fmp::wire::{Msg1Header, Msg2Header, Msg3Header, build_msg2, build_msg3};
 use crate::proto::fmp::{
     DialMsg2Reject, DialMsg2Snapshot, Disconnect, DisconnectReason,
-    EPOCH_RESTART_MIN_INTERVAL_SECS, EstablishSnapshot, InboundDecision, InboundReject, Msg1Digest,
-    NegotiationPayload, NodeProfile, OutboundSnapshot, PromotionResult, RekeyClaim, WireOutcome,
-    cross_connection_winner, decide_fmp_negotiation,
+    EPOCH_RESTART_MIN_INTERVAL_SECS, EstablishSnapshot, InboundDecision, InboundReject, LegStamp,
+    Msg1Digest, NegotiationPayload, NodeProfile, OutboundSnapshot, PromotionResult, RekeyClaim,
+    WireOutcome, cross_connection_winner, decide_fmp_negotiation,
 };
 use crate::time::HostClock;
 use crate::transport::{Link, LinkDirection, LinkId, ReceivedPacket, TransportError, TransportId};
@@ -124,7 +126,7 @@ impl Node {
         if let Some(machine) = self.peer_machines.get_mut(&link) {
             let acts = machine.step(
                 PeerEvent::CrossConnResolved { outcome },
-                Self::now_ms(),
+                Self::interval_ms(),
                 &mut self.index_allocator,
             );
             debug_assert!(
@@ -161,12 +163,13 @@ impl Node {
     /// 1. `addr_to_link` maps the tuple to a link that some entry in `peers`
     ///    owns. Catches the peer whose registered `TransportAddr` form matches
     ///    the form inbound packets carry.
-    /// 2. A peer's `current_addr()` matches the tuple. `current_addr` is
-    ///    seeded at promotion from the handshake's source address and updated
-    ///    from inbound encrypted frames, so it is always numeric
-    ///    `SocketAddr`-form; this catches the peer whose `addr_to_link` key is
-    ///    hostname-form because `initiate_connection` populated it from a
-    ///    hostname-bearing peer config.
+    /// 2. The tuple is a peer's active path (`path_match` answers
+    ///    `Proven { active: true, .. }`), whose address is `current_addr()`.
+    ///    `current_addr` is seeded at promotion from the handshake's source
+    ///    address and updated from inbound encrypted frames, so it is always
+    ///    numeric `SocketAddr`-form; this catches the peer whose
+    ///    `addr_to_link` key is hostname-form because `initiate_connection`
+    ///    populated it from a hostname-bearing peer config.
     ///
     /// Cost: one O(1) map lookup plus one O(peers) scan covering both limbs,
     /// run on every inbound msg1 including those about to be refused. The scan
@@ -183,7 +186,10 @@ impl Node {
             .copied();
         self.peers.values().any(|p| {
             Some(p.link_id()) == link_at_addr
-                || (p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr))
+                || matches!(
+                    p.path_match(transport_id, remote_addr),
+                    Match::Proven { active: true, .. }
+                )
         })
     }
 
@@ -200,9 +206,10 @@ impl Node {
     ///    the same `TransportAddr` form we observe on inbound packets
     ///    (e.g., both numeric when peer config uses a numeric IP).
     ///
-    /// 2. An active peer's `current_addr()` matches `(transport_id,
-    ///    remote_addr)`. `current_addr` is updated from inbound encrypted-
-    ///    frame source addrs (always numeric `SocketAddr`-form), so this
+    /// 2. `(transport_id, remote_addr)` is an active peer's active path
+    ///    (`path_match` answers `Proven { active: true, .. }`), whose
+    ///    address is `current_addr()`. `current_addr` is updated from inbound
+    ///    encrypted-frame source addrs (always numeric `SocketAddr`-form), so this
     ///    catches established peers whose `addr_to_link` key is hostname-
     ///    form (because `initiate_connection` populated it from a
     ///    hostname-bearing peer config) while inbound rekey msg1 arrives
@@ -237,7 +244,10 @@ impl Node {
             return true;
         }
         if self.peers.values().any(|p| {
-            p.transport_id() == Some(transport_id) && p.current_addr() == Some(remote_addr)
+            matches!(
+                p.path_match(transport_id, remote_addr),
+                Match::Proven { active: true, .. }
+            )
         }) {
             return true;
         }
@@ -423,12 +433,20 @@ impl Node {
 
         // === CRYPTO COST PAID HERE ===
         let link_id = self.allocate_link_id();
+        // The packet's wall stamp for what operators are shown, and the
+        // interval clock, read once here, for the handshake's timers and
+        // timeout.
+        let interval_ms = Self::interval_ms();
+        let leg_at = LegStamp {
+            wall_ms: packet.timestamp_ms,
+            interval_ms,
+        };
 
         // The control machine drives the handshake, so it is built here, above
         // the crypto. It stays a local: it enters `peer_machines` only at the
         // promote tails, so a rejected msg1 still leaves no registry trace and
         // allocates no index.
-        let mut machine = PeerMachine::new_inbound(link_id, packet.timestamp_ms);
+        let mut machine = PeerMachine::new_inbound(link_id, leg_at);
         // Seed the carrier with the transport and address msg1 arrived on, so
         // the promotion hand-off reads them from it.
         machine.set_conn_transport_id(packet.transport_id);
@@ -447,7 +465,7 @@ impl Node {
             self.startup_epoch(),
             noise_msg1,
             Some(&neg_payload),
-            packet.timestamp_ms,
+            leg_at,
         );
         our_keypair.non_secure_erase();
         let msg2_response = match init_result {
@@ -803,6 +821,17 @@ impl Node {
         // `pending_outbound`, whose control machine still carries the
         // handshake; a link rekey's attempt index is bound to its peer in
         // `peers_by_index`, and its peer's link machine reads the msg2.
+        //
+        // A fresh handshake is bound to the transport its msg1 went out on:
+        // `pending_outbound` is keyed by (transport, index), so a msg2 from
+        // any other transport misses and, unless it names a rekey, is
+        // discarded before any state changes. A relayed copy of the genuine
+        // msg2 therefore cannot complete the dial at a foreign address. A
+        // forgery carrying the sniffed index cannot spoil the dial on any
+        // transport, for another reason: a msg2 that does not authenticate
+        // leaves the attempt in place. A rekey msg2 is accepted from any
+        // transport: the link is established, and `peers_by_index` is keyed
+        // by the index alone.
         let key = (packet.transport_id, header.receiver_idx.as_u32());
         let setup = self.pending_outbound.get(&key).copied();
         let link_id = match setup {
@@ -815,7 +844,7 @@ impl Node {
                 id
             }
             _ => {
-                if let Some(&peer) = self.peers_by_index.get(&key)
+                if let Some(&peer) = self.peers_by_index.get(&key.1)
                     && self.peers.contains_key(&peer)
                 {
                     self.msg2_to_link(&peer, &packet).await;
@@ -843,6 +872,9 @@ impl Node {
         };
 
         let our_profile = self.node_profile();
+        // The leg is stamped on the interval clock from here, beside the
+        // wall stamp it keeps.
+        let interval_ms = Self::interval_ms();
         let (peer_identity, dialed_peer, msg3_bytes, our_index) = {
             let Some(machine) = self.peer_machines.get_mut(&link_id) else {
                 warn!(link_id = %link_id, "Connection removed during msg2 processing");
@@ -881,7 +913,10 @@ impl Node {
             let (msg3_bytes, received_negotiation) = match machine.complete_handshake(
                 noise_msg2,
                 Some(&neg_payload),
-                packet.timestamp_ms,
+                LegStamp {
+                    wall_ms: packet.timestamp_ms,
+                    interval_ms,
+                },
                 decide,
             ) {
                 Ok(DialMsg2Step::Completed(msg3, negotiation)) => (msg3, negotiation),
@@ -1153,7 +1188,7 @@ impl Node {
                         their_index: header.sender_idx,
                         out: out_snap,
                     },
-                    packet.timestamp_ms,
+                    interval_ms,
                     &mut self.index_allocator,
                 )
             }
@@ -1166,14 +1201,20 @@ impl Node {
                     false,
                     "outbound leg {link_id} reached msg2 without a control machine"
                 );
-                let mut machine =
-                    PeerMachine::new_outbound(link_id, Some(peer_identity), packet.timestamp_ms);
+                let mut machine = PeerMachine::new_outbound(
+                    link_id,
+                    Some(peer_identity),
+                    LegStamp {
+                        wall_ms: packet.timestamp_ms,
+                        interval_ms,
+                    },
+                );
                 let actions = machine.step(
                     PeerEvent::OutboundMsg2 {
                         their_index: header.sender_idx,
                         out: out_snap,
                     },
-                    packet.timestamp_ms,
+                    interval_ms,
                     &mut self.index_allocator,
                 );
                 self.peer_machines.insert(link_id, machine);
@@ -1243,6 +1284,7 @@ impl Node {
                 let local = self.session_node_keys();
                 let me = *self.identity().node_addr();
                 let params = crate::node::handlers::rekey::link_params(&self.config().node);
+                let path_params = crate::node::handlers::path::path_params(&self.config().node);
                 let workers = self.link_workers();
                 let profile = self.node_profile();
                 let prior = self.peer_link(&peer_node_addr);
@@ -1253,10 +1295,16 @@ impl Node {
                     // The peer's link machine is closed and rebuilt on the
                     // outbound session: what it held is unbound and freed.
                     // The peer is taken at the msg2's transport and source
-                    // address (FRC-2201, Section 5.7), and the outbound
-                    // index is bound on the transport the msg2 came on,
-                    // which is where the peer's frames on that session
-                    // arrive and are looked up.
+                    // address (FRC-2201, Section 5.7), and the rebuilt
+                    // machine records the outbound index's binding on the
+                    // transport the msg2 came on. The path machine starts
+                    // again with that pair as the new link's original path
+                    // (multipath v1 draft, Section 5.4), for a peer whose
+                    // handshake the ACL has passed; no probe is stepped here.
+                    let facts = NodeFacts {
+                        transports: &self.transports,
+                        denied: false,
+                    };
                     let mut caps = LinkCaps {
                         indices: &mut self.index_allocator,
                         local: &local,
@@ -1265,8 +1313,12 @@ impl Node {
                         record: Record::new(),
                         workers,
                         profile,
+                        path: PathCaps {
+                            params: path_params,
+                            facts: &facts,
+                        },
                     };
-                    let out = peer.move_session(
+                    let (out, paths) = peer.move_session(
                         outbound_session,
                         outbound_lease,
                         header.sender_idx,
@@ -1274,6 +1326,22 @@ impl Node {
                         &mut caps,
                     );
                     self.run_link_outputs(&peer_node_addr, out);
+                    self.run_renewed(&peer_node_addr, paths);
+                    // The path machine started again with an empty
+                    // candidate table.
+                    self.paths_renewed(&peer_node_addr).await;
+                    // The pair the link left carried its frames until now,
+                    // and nothing else offers it again: without it the
+                    // peer's next beacon there reads as a stranger's. The
+                    // heard feed offers it, so it is unlisted again once
+                    // the peer goes unheard there for the feed's silence.
+                    let moved = self.peer_link(&peer_node_addr);
+                    if let Some((transport, addr)) = prior.clone()
+                        && moved != prior
+                    {
+                        self.intake(&peer_node_addr, Feed::Heard, transport, addr)
+                            .await;
+                    }
                     self.follow_move(&peer_identity, prior).await;
 
                     if suppressed > 0 {
@@ -1405,6 +1473,7 @@ impl Node {
             our_index: Some(our_index),
             their_index: Some(header.sender_idx),
             now_ms: packet.timestamp_ms,
+            interval_ms,
             is_outbound: true,
             pending_outbound_key: Some(key),
         };
@@ -1438,8 +1507,10 @@ impl Node {
                 // peer under the new session, so copies keep arriving after
                 // the leg handed the first to the peer's link rekey machine,
                 // which binds the leg's index for the peer. Such a copy changes
-                // nothing and is not counted against the peer.
-                if let Some(peer) = self.peers_by_index.get(&key).copied() {
+                // nothing and is not counted against the peer. The binding is
+                // keyed by the index alone, so a copy is recognised whichever
+                // transport it arrives on.
+                if let Some(peer) = self.peers_by_index.get(&key.1).copied() {
                     debug!(
                         peer = %self.peer_display_name(&peer),
                         receiver_idx = %header.receiver_idx,
@@ -1459,6 +1530,9 @@ impl Node {
         };
 
         let our_profile = self.node_profile();
+        // The leg is stamped on the interval clock from here, beside the
+        // wall stamp it keeps.
+        let interval_ms = Self::interval_ms();
         let (peer_identity, our_index, remote_epoch, declared_rekey_of) = {
             // Get the pending connection
             let machine = match self.peer_machines.get_mut(&link_id) {
@@ -1493,7 +1567,13 @@ impl Node {
 
             // Read msg3 on a fork of the leg's handshake: it learns the
             // initiator's identity, epoch and negotiation payload.
-            match machine.read_final(&packet.data, packet.timestamp_ms) {
+            match machine.read_final(
+                &packet.data,
+                LegStamp {
+                    wall_ms: packet.timestamp_ms,
+                    interval_ms,
+                },
+            ) {
                 Ok(()) => {}
                 Err(Msg3Error::Unreadable) => {
                     // The leg and its lease are untouched; put its
@@ -1699,7 +1779,9 @@ impl Node {
                 different_link: existing_peer.link_id() != link_id,
                 rekey_claim,
                 our_node_addr,
-                peering_idle_ms: existing_peer.idle_time(Self::now_ms()),
+                // On the peer clock, which a step of the system clock does
+                // not move.
+                peering_idle_ms: crate::peer::since(existing_peer.heard_at()).as_millis() as u64,
                 epoch_restart_dampened: self
                     .restart_dampener
                     .get(&peer_node_addr)
@@ -1734,7 +1816,7 @@ impl Node {
             // Disjoint field borrow: `self.peer_machines` (the map entry) and
             // `self.index_allocator` (the capability) are separate fields.
             Some(machine) => {
-                machine.inbound_msg3(wire, snap, packet.timestamp_ms, &mut self.index_allocator)
+                machine.inbound_msg3(wire, snap, interval_ms, &mut self.index_allocator)
             }
             None => {
                 // The machine was read a few lines above and nothing between
@@ -1755,6 +1837,7 @@ impl Node {
             our_index: Some(our_index),
             their_index: Some(header.sender_idx),
             now_ms: packet.timestamp_ms,
+            interval_ms,
             is_outbound: false,
             pending_outbound_key: None,
         };
@@ -2189,14 +2272,6 @@ impl Node {
                 });
             }
 
-            // Preserve tree announce rate-limit state from old peer (if reconnecting).
-            // Without this, reconnection resets the rate limit window to zero,
-            // allowing an immediate announce that can feed an announce loop.
-            let old_announce_ts = self
-                .peers
-                .get(&peer_node_addr)
-                .map(|p| p.last_tree_announce_sent_ms());
-
             self.seed_path_mtu_for_link_peer(
                 &peer_node_addr,
                 peer_key,
@@ -2227,9 +2302,6 @@ impl Node {
             new_peer.set_tree_announce_min_interval_ms(
                 self.config().node.tree.announce_min_interval_ms,
             );
-            if let Some(ts) = old_announce_ts {
-                new_peer.set_last_tree_announce_sent_ms(ts);
-            }
 
             self.peers.insert(peer_node_addr, new_peer);
             // The promoted leg's machine (born at msg1 for inbound, at dial for
@@ -2297,7 +2369,14 @@ impl Node {
         let me = *self.identity().node_addr();
         let mmp = self.config().node.mmp.clone();
         let params = crate::node::handlers::rekey::link_params(&self.config().node);
+        let path_params = crate::node::handlers::path::path_params(&self.config().node);
         let workers = self.link_workers();
+        // A machine built at promotion, for a peer whose handshake the ACL
+        // has passed; no probe is stepped here.
+        let facts = NodeFacts {
+            transports: &self.transports,
+            denied: false,
+        };
         let mut caps = LinkCaps {
             indices: &mut self.index_allocator,
             local: &local,
@@ -2306,6 +2385,10 @@ impl Node {
             record: Record::new(),
             workers,
             profile: our_profile,
+            path: PathCaps {
+                params: path_params,
+                facts: &facts,
+            },
         };
         ActivePeer::with_session(
             verified_identity,

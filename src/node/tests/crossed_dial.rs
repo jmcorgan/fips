@@ -15,7 +15,10 @@
 //! and check where each link sits after the move and where its next frame
 //! goes. A third case has the msg2 answered from the address the larger
 //! node's own msg1 came from rather than the one dialled, so a fix that took
-//! the dialled address instead of the msg2's source is caught.
+//! the dialled address instead of the msg2's source is caught. Two more
+//! check that the operator's pin is kept across the move: the smaller
+//! node's at its msg2 and the larger node's at its msg3.
+//! Two others read the path lines each node's renewal writes.
 //!
 //! Every packet is taken from its queue and handed on by the test, so each
 //! precondition is asserted between the steps. The address the smaller node
@@ -166,28 +169,27 @@ fn path_mtu(tn: &TestNode, peer: &NodeAddr) -> Option<u16> {
         .path_mtu_lookup_get(&crate::Ipv6Address::from_node_addr(peer))
 }
 
-/// Check that `tn` binds its current session index for `peer` under `tid`
-/// and under no other transport: `tid` is where the peer's frames on that
-/// session arrive and are looked up.
+/// Check that `tn` binds its current session index for `peer`, and that the
+/// peer's link machine records that binding under `tid` and under no other
+/// transport: `tid` is the transport the moved link was built on.
 fn check_bound(tn: &TestNode, peer: &NodeAddr, tid: TransportId, who: &str) {
-    let index = tn
-        .node
-        .get_peer(peer)
-        .and_then(|p| p.our_index())
+    let held = tn.node.get_peer(peer).expect("the node holds the peer");
+    let index = held
+        .our_index()
         .expect("the node holds the peer on a session");
-    let elsewhere = tn
-        .node
-        .peers_by_index
-        .keys()
-        .filter(|(t, i)| *i == index.as_u32() && *t != tid)
-        .count();
+    let recorded: Vec<_> = held
+        .link_bindings()
+        .into_iter()
+        .filter(|((_, i), _)| *i == index.as_u32())
+        .map(|((t, _), _)| t)
+        .collect();
     assert_eq!(
         (
-            tn.node.peers_by_index.get(&(tid, index.as_u32())).copied(),
-            elsewhere
+            tn.node.peers_by_index.get(&index.as_u32()).copied(),
+            recorded
         ),
-        (Some(*peer), 0),
-        "{who} binds the moved session's index under {tid:?} and under no other transport"
+        (Some(*peer), vec![tid]),
+        "{who} binds the moved session's index, recorded under {tid:?}"
     );
 }
 
@@ -204,18 +206,25 @@ async fn dial_both(dial: Dial) -> Dials {
     let t1 = nodes[s].transport_id;
     let s1 = nodes[s].addr.clone();
     let l1 = nodes[l].addr.clone();
-    // The larger node's address the smaller node dials: what is sent there
-    // lands in `tap`, and the test hands it to the larger node.
-    let (dialled, mut tap) = loopback_tap();
-    // The transport the smaller node dials on, and its own address there.
-    let (s_tid, source) = match dial {
+    // The transport the smaller node dials on.
+    let s_tid = if dial == Dial::OtherTransport {
+        t2()
+    } else {
+        t1
+    };
+    // The larger node's address the smaller node dials, on that transport:
+    // what is sent there lands in `tap`, and the test hands it to the
+    // larger node.
+    let (dialled, mut tap) = loopback_tap(s_tid);
+    // The smaller node's own address on the transport it dials on.
+    let source = match dial {
         Dial::OtherTransport => {
-            let s2 = add_loopback_alias(&s1);
+            let s2 = add_loopback_alias(&s1, t2());
             add_transport(&mut nodes[s], t2(), s2.clone(), T2_MTU);
             add_transport(&mut nodes[l], t2(), dialled.clone(), T2_MTU);
-            (t2(), s2)
+            s2
         }
-        Dial::OtherAddress | Dial::AnsweredFromFirst => (t1, s1.clone()),
+        Dial::OtherAddress | Dial::AnsweredFromFirst => s1.clone(),
     };
     let l_id = PeerIdentity::from_pubkey_full(nodes[l].node.identity().pubkey_full());
     let s_id = PeerIdentity::from_pubkey_full(nodes[s].node.identity().pubkey_full());
@@ -572,6 +581,145 @@ async fn a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_tra
     check_move(cross_dials(Dial::OtherTransport).await).await;
 }
 
+/// The path lines a renewal wrote into `logs`.
+fn renewal_lines(logs: &crate::testutil::LogCapture) -> Vec<String> {
+    logs.lines_with("Path state changed")
+        .into_iter()
+        .filter(|line| line.split_whitespace().any(|f| f == "why=Renewed"))
+        .collect()
+}
+
+/// Whether `lines` hold one for the path at this pair going from `from` to
+/// `next`. Whole fields are matched, so `loopback:1` cannot match
+/// `loopback:10`.
+fn renewal_written(
+    lines: &[String],
+    transport: TransportId,
+    addr: &TransportAddr,
+    from: &str,
+    next: &str,
+) -> bool {
+    let fields = [
+        format!("transport_id={transport}"),
+        format!("remote_addr={addr}"),
+        format!("from={from}"),
+        format!("next={next}"),
+    ];
+    lines.iter().any(|line| {
+        fields
+            .iter()
+            .all(|field| line.split_whitespace().any(|f| f == field))
+    })
+}
+
+/// A crossed dial's renewal writes the path lines the chaos harness keys paths
+/// by, through the node's log: the old path's ending at the pair the link
+/// left, and the new original's beginning at the msg2's pair. This renewal
+/// keeps no path; `Bundle::renew`'s core tests hold that case.
+#[tokio::test]
+async fn a_crossed_dials_renewal_writes_the_old_paths_ending_and_the_new_originals_beginning() {
+    // The tap stays open: on this line the msg3 goes out before the move, and
+    // a failed send ends the handling there.
+    let Crossed {
+        mut nodes,
+        s,
+        l,
+        msg2,
+        tap: _tap,
+        to,
+        ..
+    } = cross_dials(Dial::OtherTransport).await;
+    let l_addr = *nodes[l].node.node_addr();
+    let (Some(left_transport), Some(left_addr)) = pair(&nodes[s], &l_addr) else {
+        panic!("precondition: the link sits at a pair");
+    };
+    assert_ne!(
+        (left_transport, &left_addr),
+        (to.0, &to.1),
+        "precondition: the msg2 came on another pair"
+    );
+
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    hand(&mut nodes[s].node, msg2).await;
+    drop(guard);
+    cleanup_nodes(&mut nodes).await;
+
+    let lines = renewal_lines(&logs);
+    assert!(
+        renewal_written(&lines, left_transport, &left_addr, "Some(Live)", "None"),
+        "the old path's ending is written at the pair the link left: {lines:#?}"
+    );
+    assert!(
+        renewal_written(&lines, to.0, &to.1, "None", "Some(Live)"),
+        "the new original's beginning is written at the msg2's pair: {lines:#?}"
+    );
+    assert_eq!(lines.len(), 2, "no other renewal line: {lines:#?}");
+}
+
+/// A crossed dial settled at msg3 renews the larger node's link through the
+/// msg3 swap, the other caller of the node's renewal, and that writes the same
+/// lines there: the old path's ending at the pair the link left, and the new
+/// original's beginning at the msg3's pair.
+#[tokio::test]
+async fn a_crossed_dial_settled_at_msg3_writes_the_larger_nodes_renewal_lines() {
+    let Crossed {
+        mut nodes,
+        s,
+        l,
+        msg2,
+        mut tap,
+        to,
+        source,
+        ..
+    } = cross_dials(Dial::OtherTransport).await;
+    let s_addr = *nodes[s].node.node_addr();
+    let (Some(left_transport), Some(left_addr)) = pair(&nodes[l], &s_addr) else {
+        panic!("precondition: the larger node's link sits at a pair");
+    };
+    assert_ne!(
+        (left_transport, &left_addr),
+        (to.0, &source),
+        "precondition: the msg3 will come on another pair"
+    );
+
+    hand(&mut nodes[s].node, msg2).await;
+    let at_l: Vec<_> = take(&mut nodes[l].packet_rx)
+        .into_iter()
+        .chain(take(&mut tap))
+        .collect();
+    assert_eq!(
+        at_l.iter()
+            .filter(|p| phase(p) == Some(PHASE_MSG3))
+            .map(|p| (p.transport_id, p.remote_addr.clone()))
+            .collect::<Vec<_>>(),
+        vec![(to.0, source.clone())],
+        "precondition: the smaller node's move sent one msg3 from its address on the msg2's transport"
+    );
+
+    let (logs, guard) = crate::testutil::capture_logs_scoped();
+    for packet in at_l {
+        hand(&mut nodes[l].node, packet).await;
+    }
+    drop(guard);
+    assert_eq!(
+        pair(&nodes[l], &s_addr),
+        (Some(to.0), Some(source.clone())),
+        "precondition: the msg3 moved the larger node's link to its pair"
+    );
+    cleanup_nodes(&mut nodes).await;
+
+    let lines = renewal_lines(&logs);
+    assert!(
+        renewal_written(&lines, left_transport, &left_addr, "Some(Live)", "None"),
+        "the old path's ending is written at the pair the link left: {lines:#?}"
+    );
+    assert!(
+        renewal_written(&lines, to.0, &source, "None", "Some(Live)"),
+        "the new original's beginning is written at the msg3's pair: {lines:#?}"
+    );
+    assert_eq!(lines.len(), 2, "no other renewal line: {lines:#?}");
+}
+
 /// A crossed dial whose winning msg2 comes from a second address of the
 /// peer's on the same transport moves the smaller node's link to that
 /// address.
@@ -744,6 +892,139 @@ async fn a_crossed_dial_settled_at_msg3_moves_the_larger_nodes_link_to_the_msg3s
         ),
         (0, received + 1),
         "s's heartbeat after the move authenticates at l"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The smaller node pins its link before the msg2 answering its one dial
+/// arrives. That msg2 wins the crossed handshake on the tie-break, not as
+/// the answer to a second dial of the smaller node's, so the link moves to
+/// its session and the pin is kept.
+#[tokio::test]
+async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin() {
+    use fips_core::proto::path::{Input, Pin};
+
+    let Crossed {
+        mut nodes,
+        s,
+        l,
+        outbound,
+        msg2,
+        to,
+        ..
+    } = cross_dials(Dial::AnsweredFromFirst).await;
+    let l_addr = *nodes[l].node.node_addr();
+    let pin = Pin {
+        transport: to.0,
+        addr: Some(to.1.clone()),
+    };
+    nodes[s]
+        .node
+        .step_path(
+            &l_addr,
+            Input::Pin {
+                transport: pin.transport,
+                addr: pin.addr.clone(),
+            },
+        )
+        .await;
+    assert_eq!(
+        nodes[s]
+            .node
+            .get_peer(&l_addr)
+            .and_then(|p| p.bundle())
+            .and_then(|b| b.pin().cloned()),
+        Some(pin.clone()),
+        "precondition: s holds l and pinned its link"
+    );
+    assert_eq!(
+        nodes[s].node.pending_outbound.len(),
+        1,
+        "precondition: s dialled l once"
+    );
+    hand(&mut nodes[s].node, msg2).await;
+    let peer = nodes[s].node.get_peer(&l_addr).expect("s keeps l");
+    assert_eq!(
+        peer.our_index(),
+        Some(outbound),
+        "precondition: s moved to its own dial's session"
+    );
+    assert_eq!(
+        peer.bundle().and_then(|b| b.pin().cloned()),
+        Some(pin),
+        "the pin is kept across a crossed handshake won on the tie-break"
+    );
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// The larger node pins its link before the smaller node's msg3 settles a
+/// crossed handshake at msg3 and moves the larger node onto its inbound
+/// session: the same peering moves to another pair, and the pin is kept.
+#[tokio::test]
+async fn a_crossed_dial_settled_at_msg3_keeps_the_larger_nodes_pin() {
+    use fips_core::proto::path::{Input, Pin};
+
+    let Dials {
+        mut nodes,
+        s,
+        l,
+        msg1,
+        msg2,
+        mut tap,
+        source,
+        ..
+    } = dial_both(Dial::OtherTransport).await;
+    let s_addr = *nodes[s].node.node_addr();
+    hand(&mut nodes[s].node, msg1).await;
+    hand(&mut nodes[s].node, msg2).await;
+    for packet in take(&mut nodes[l].packet_rx) {
+        hand(&mut nodes[l].node, packet).await;
+    }
+    let pin = Pin {
+        transport: t2(),
+        addr: Some(source.clone()),
+    };
+    nodes[l]
+        .node
+        .step_path(
+            &s_addr,
+            Input::Pin {
+                transport: pin.transport,
+                addr: pin.addr.clone(),
+            },
+        )
+        .await;
+    let before = nodes[l].node.get_peer(&s_addr).and_then(|p| p.our_index());
+    assert_eq!(
+        nodes[l]
+            .node
+            .get_peer(&s_addr)
+            .and_then(|p| p.bundle())
+            .and_then(|b| b.pin().cloned()),
+        Some(pin.clone()),
+        "precondition: l holds s and pinned its link"
+    );
+    let msg3 = take(&mut tap)
+        .into_iter()
+        .next()
+        .expect("precondition: s's msg3 at the tap");
+    assert_eq!(phase(&msg3), Some(PHASE_MSG3), "precondition: a msg3");
+    hand(&mut nodes[l].node, msg3).await;
+    let peer = nodes[l].node.get_peer(&s_addr).expect("l keeps s");
+    assert_eq!(
+        pair(&nodes[l], &s_addr),
+        (Some(t2()), Some(source)),
+        "precondition: l moved to the msg3's transport and address"
+    );
+    assert_ne!(
+        peer.our_index(),
+        before,
+        "precondition: l moved onto its inbound session"
+    );
+    assert_eq!(
+        peer.bundle().and_then(|b| b.pin().cloned()),
+        Some(pin),
+        "the pin is kept across a crossed handshake settled at msg3"
     );
     cleanup_nodes(&mut nodes).await;
 }

@@ -39,6 +39,11 @@ rest) at its own crate root.
 - `fsp/`: the end-to-end session layer.
 - `lookup/`: mesh lookups for a destination's coordinates.
 - `mmp/`: link and session metrics and their reports.
+- `path/`: the paths a node holds to one peer and the rules for holding
+  them, generic over the host's instant type and a per-path driver slot,
+  the codec of the path messages, `PathProbe`, `PathAck` and `PathClose`
+  (link types `0x52` to `0x54`), in `path/wire.rs`, and `Bundle`, the
+  machine of one link's paths, which nothing calls yet.
 - `probe/`: the diagnostic path probe.
 - `rekey/`: the key-rotation state machine one link peer or one session
   runs, shared by the link and session layers. Each layer binds it to its
@@ -49,6 +54,10 @@ rest) at its own crate root.
   deployed link rekey decisions act on through state moves; see its
   README.
 - `routing/`: next-hop selection and routing error signals.
+- `settle/`: peer settlement, how crossed dials, restarts and rekeys
+  settle on one session on one link. Its core is compiled in every build
+  and called by nothing yet; its reference model is compiled for tests
+  and `test-hooks` alone; hidden from the docs.
 - `stp/`: the spanning tree.
 
 Each subdirectory has its own README.
@@ -58,11 +67,13 @@ Each subdirectory has its own README.
 - **Sans-IO.** Inputs in, actions out. No sockets, no clock reads (time
   is a `u64` millisecond argument), no randomness of its own, no logging
   and no async. A decision that used to log returns a value the caller
-  logs. `rekey/` is the first module here to take time as instants of a
-  host clock (`C: time::Clock`) instead of milliseconds, and the only one
-  that holds keys: it owns its handshake states and transport sessions,
-  so that a read is a transaction and an epoch exists only for the bonded
-  peer.
+  logs. `rekey/` and `path/` take time as instants of a host clock
+  instead of milliseconds (`rekey/` and `path/`'s machine take the
+  clock, `C: time::Clock`; `path/`'s set only its instant type,
+  `I: time::Instant`), and `rekey/` is the
+  only module that holds keys: it owns its handshake states and transport
+  sessions, so that a read is a transaction and an epoch exists only for
+  the bonded peer.
 - **Wire formats are protocol.** Every codec here encodes what other
   nodes decode. A change to one changes the protocol and does not happen
   on the deployed lines.

@@ -185,6 +185,9 @@ async fn a_flood_of_bad_version_frames_from_many_sources_logs_a_bounded_number_o
 /// A link message type no specification assigns.
 const UNASSIGNED_TYPE: u8 = 0x7F;
 
+/// Where the frames carrying [`UNASSIGNED_TYPE`] arrive from.
+const UNASSIGNED_FROM: &str = "10.0.0.1:2121";
+
 #[tokio::test]
 async fn a_flood_of_unknown_link_message_types_logs_a_bounded_number_of_lines() {
     const MESSAGES: u64 = 2_000;
@@ -192,14 +195,21 @@ async fn a_flood_of_unknown_link_message_types_logs_a_bounded_number_of_lines() 
     let mut node = make_node();
     let sizes = map_sizes(&node);
 
+    let at = TransportAddr::from_string(UNASSIGNED_FROM);
     let (logs, guard) = capture_logs_scoped();
     for i in 0..=MESSAGES {
         if i == MESSAGES {
             tokio::time::sleep(REFILL).await;
         }
         let from = make_node_addr((i % 251) as u8);
-        node.dispatch_link_message(&from, &[UNASSIGNED_TYPE, 0, 0], false)
-            .await;
+        node.dispatch_link_message(
+            &from,
+            &[UNASSIGNED_TYPE, 0, 0],
+            false,
+            (TransportId::new(1), &at),
+            3,
+        )
+        .await;
     }
     drop(guard);
 
@@ -211,9 +221,16 @@ async fn a_flood_of_unknown_link_message_types_logs_a_bounded_number_of_lines() 
 async fn an_unknown_link_message_type_names_the_peer_that_sent_it() {
     let mut node = make_node();
     let from = make_node_addr(0x42);
+    let at = TransportAddr::from_string(UNASSIGNED_FROM);
     let (logs, guard) = capture_logs_scoped();
-    node.dispatch_link_message(&from, &[UNASSIGNED_TYPE, 0, 0], false)
-        .await;
+    node.dispatch_link_message(
+        &from,
+        &[UNASSIGNED_TYPE, 0, 0],
+        false,
+        (TransportId::new(1), &at),
+        3,
+    )
+    .await;
     drop(guard);
 
     let line = expect_line(&logs, "Unknown link message type");

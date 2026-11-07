@@ -1,7 +1,8 @@
 //! Tests for the clock traits: the arithmetic contract on the millisecond
-//! test instant and on a tick-count instant shaped like an embedded timer's.
+//! test instant and on a tick-count instant shaped like an embedded timer's,
+//! and the deadline and backoff helpers.
 
-use super::{Clock, Duration, Instant};
+use super::{CEILING, Clock, Duration, Instant, backoff, deadline};
 use crate::testutil::{TestClock, TestInstant};
 
 /// Ticks per second of [`TickInstant`]: a 32 768 Hz crystal, the rate of a
@@ -137,4 +138,78 @@ fn the_test_clock_reads_what_the_test_advanced_it_to() {
     assert_eq!(clock.now(), TestInstant(1_500));
     clock.advance(500);
     assert_eq!(clock.now(), TestInstant(2_000));
+}
+
+/// Below the ceiling and inside the clock's range, a deadline is `now` plus
+/// the delay, on the millisecond instant and on the tick-count one.
+#[test]
+fn a_deadline_is_now_plus_the_delay_below_the_ceiling() {
+    assert_eq!(
+        deadline(TestInstant(5_000), Duration::from_millis(2_500)),
+        TestInstant(7_500)
+    );
+    assert_eq!(
+        deadline(TickInstant(0), Duration::from_secs(2)),
+        TickInstant(2 * TICK_HZ)
+    );
+}
+
+/// A delay of the ceiling or more, up to `Duration::MAX`, gives `now` plus
+/// the ceiling.
+#[test]
+fn a_deadline_is_capped_at_the_ceiling() {
+    let now = TestInstant(1_700_000_000_000);
+    let capped = now.checked_add(CEILING).unwrap();
+    assert_eq!(deadline(now, CEILING), capped);
+    assert_eq!(deadline(now, CEILING + Duration::from_secs(1)), capped);
+    assert_eq!(deadline(now, Duration::MAX), capped);
+}
+
+/// Near the end of the clock's range the step halves until it fits, so the
+/// deadline still moves forward, and at the very end it is `now`.
+#[test]
+fn a_deadline_past_the_end_of_the_range_stops_short_of_it_without_panicking() {
+    let now = TestInstant(u64::MAX - 10);
+    let at = deadline(now, Duration::from_secs(60));
+    assert!(at > now, "a halved step of 10 ms or less still fits");
+    assert_eq!(
+        deadline(TestInstant(u64::MAX), Duration::from_secs(60)),
+        TestInstant(u64::MAX)
+    );
+}
+
+/// Below the cap, each step of the exponent doubles the base once.
+#[test]
+fn a_backoff_doubles_the_base_once_per_step_of_the_exponent() {
+    let base = Duration::from_secs(1);
+    let cap = Duration::from_secs(600);
+    assert_eq!(backoff(0, base, cap), base);
+    assert_eq!(backoff(1, base, cap), Duration::from_secs(2));
+    assert_eq!(backoff(4, base, cap), Duration::from_secs(16));
+}
+
+/// A doubling that would pass the cap gives the cap, however large the
+/// exponent.
+#[test]
+fn a_backoff_never_exceeds_its_cap() {
+    let base = Duration::from_secs(30);
+    let cap = Duration::from_secs(600);
+    assert_eq!(backoff(4, base, cap), Duration::from_secs(480));
+    assert_eq!(backoff(5, base, cap), cap, "960 s is capped at 600 s");
+    assert_eq!(backoff(31, base, cap), cap);
+}
+
+/// An exponent past the factor's range and a product past `Duration::MAX`
+/// both saturate instead of wrapping or panicking.
+#[test]
+fn a_backoff_saturates_rather_than_wrapping_for_any_exponent_and_base() {
+    let cap = Duration::MAX;
+    let base = Duration::from_secs(1);
+    assert_eq!(
+        backoff(32, base, cap),
+        Duration::from_secs(u64::from(u32::MAX)),
+        "a factor past the u32 range stays at its largest value"
+    );
+    assert_eq!(backoff(u32::MAX, base, cap), backoff(32, base, cap));
+    assert_eq!(backoff(3, Duration::MAX, cap), Duration::MAX);
 }

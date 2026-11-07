@@ -68,7 +68,11 @@ pub(super) fn node0_initiator(
     let target = PeerIdentity::from_pubkey_full(nodes[1].node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
-        .start_handshake(nodes[0].node.identity().keypair(), epoch, 1000)
+        .start_handshake(
+            nodes[0].node.identity().keypair(),
+            epoch,
+            LegStamp::at(1000),
+        )
         .expect("start_handshake produces noise msg1");
     (leg, build_msg1(SessionIndex::new(index), &noise_msg1))
 }
@@ -79,7 +83,7 @@ fn msg3_for(leg: &mut PeerMachine, msg2: &[u8], index: u32) -> Vec<u8> {
     let header = Msg2Header::parse(msg2).expect("msg2 header");
     let neg = NegotiationPayload::fmp(1, 1, crate::proto::fmp::NodeProfile::Full).encode();
     let (noise_msg3, _) = leg
-        .complete_handshake_accepting(header.noise_msg2(msg2), Some(&neg), 1100)
+        .complete_handshake_accepting(header.noise_msg2(msg2), Some(&neg), LegStamp::at(1100))
         .expect("the initiator reads node 1's msg2");
     build_msg3(SessionIndex::new(index), header.sender_idx, &noise_msg3)
 }

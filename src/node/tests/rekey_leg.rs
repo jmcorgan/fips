@@ -276,7 +276,7 @@ async fn every_leg_exit_releases_its_lease() {
             * 1000;
         nodes[b]
             .node
-            .check_timeouts_at(Node::now_ms() + timeout_ms + 1_000)
+            .check_timeouts_at(Node::interval_ms() + timeout_ms + 1_000)
             .await;
         exited(&nodes, b, a, "expiry");
 
@@ -473,10 +473,7 @@ async fn abandon_releases_the_attempt_index() {
         "the abandoned rekey's index goes back to the allocator"
     );
     assert!(
-        !nodes[0]
-            .node
-            .peers_by_index
-            .contains_key(&(nodes[0].transport_id, attempt.as_u32())),
+        !nodes[0].node.peers_by_index.contains_key(&attempt.as_u32()),
         "and is unbound"
     );
     audit(&nodes[0].node, "an abandoned rekey");

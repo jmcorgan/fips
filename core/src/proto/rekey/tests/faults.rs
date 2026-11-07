@@ -510,6 +510,10 @@ const ROWS: &[Row] = &[
         &[(FMP, "every_ik_msg1_cell_takes_its_rows_action")],
     ),
     (
+        &[Fault::ResendEstablished],
+        &[(FMP, "a_resent_answer_follows_the_route_of_the_first_answer")],
+    ),
+    (
         &[Fault::RespondRefreshes],
         &[
             (

@@ -28,8 +28,8 @@
 //!   refusal it drives.
 //! - `state.rs` — [`ConnectionState`], the pure handshake-phase connection
 //!   bookkeeping (owned by the per-peer control machine beside its Noise
-//!   crypto carrier), plus [`Fmp`], the (stateless) lifecycle anchor owned by
-//!   `Node`.
+//!   crypto carrier), its two-clock activity stamp [`LegStamp`], plus
+//!   [`Fmp`], the (stateless) lifecycle anchor owned by `Node`.
 //!   The handshake phase itself lives on the per-peer control machine.
 //! - `wire.rs` — the FMP wire codec: XX handshake message types, disconnect
 //!   reasons, the orderly disconnect message, and the negotiation payload.
@@ -57,6 +57,6 @@ pub use core::{
 pub use core::{PromotionResult, cross_connection_winner};
 pub use limits::backoff_ms;
 pub use silent::SilentSessions;
-pub use state::{ConnectionState, Fmp};
+pub use state::{ConnectionState, Fmp, LegStamp};
 pub use wire::{Disconnect, DisconnectReason};
 pub use wire::{HandshakeMessageType, NegotiationPayload, NodeProfile, TlvEntry};

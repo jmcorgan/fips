@@ -1,0 +1,89 @@
+# The pairings of the settlement core with a model of a deployed node
+# found not to converge (legacy/explore.rs), one per line: the run, the
+# property and the node of its first breach, separated by tabs. Each is a
+# finding reported with its schedule, not fixed here. The runs fail on a
+# breach this file does not list, and on a listed one that no longer
+# shows.
+crossing during a rekey's drain: core at n0 against maint, flipped	OneSession	1
+crossing during a rekey's drain: core at n1 against maint, flipped	OneSession	0
+crossing during a rekey's drain: core at n1 against maint, flipped	OneSession	1
+crossing during a rekey: core at n0 against maint, flipped	OneSession	0
+crossing during a rekey: core at n0 against maint, flipped	OneSession	1
+crossing during a rekey: core at n0 against master, as written	OneSession	0
+crossing during a rekey: core at n0 against master, as written	OneSession	1
+crossing during a rekey: core at n0 against master, flipped	OneSession	0
+crossing during a rekey: core at n0 against master, flipped	OneSession	1
+crossing during a rekey: core at n1 against maint, flipped	OneSession	0
+crossing during a rekey: core at n1 against maint, flipped	OneSession	1
+crossing during a rekey: core at n1 against master, as written	OneSession	0
+crossing during a rekey: core at n1 against master, as written	OneSession	1
+crossing during a rekey: core at n1 against master, flipped	OneSession	0
+crossing during a rekey: core at n1 against master, flipped	OneSession	1
+crossing, BLE: core at n0 against maint, as written	OneSession	0
+crossing, BLE: core at n0 against maint, as written	OneSession	1
+crossing, BLE: core at n0 against master, as written	OneSession	0
+crossing, BLE: core at n0 against master, as written	OneSession	1
+crossing, BLE: core at n1 against maint, flipped	OneSession	0
+crossing, BLE: core at n1 against maint, flipped	OneSession	1
+crossing, BLE: core at n1 against master, flipped	OneSession	0
+crossing, BLE: core at n1 against master, flipped	OneSession	1
+crossing, connection-oriented: core at n0 against maint, as written	ConnectionsInUse	0
+crossing, connection-oriented: core at n0 against maint, as written	OneSession	0
+crossing, connection-oriented: core at n0 against maint, flipped	ConnectionsInUse	0
+crossing, connection-oriented: core at n0 against maint, flipped	OneSession	0
+crossing, connection-oriented: core at n0 against maint, flipped	OneSession	1
+crossing, connection-oriented: core at n0 against master, as written	ConnectionsInUse	0
+crossing, connection-oriented: core at n0 against master, as written	OneSession	0
+crossing, connection-oriented: core at n0 against master, flipped	ConnectionsInUse	0
+crossing, connection-oriented: core at n0 against master, flipped	OneSession	0
+crossing, connection-oriented: core at n0 against master, flipped	OneSession	1
+crossing, connection-oriented: core at n1 against maint, as written	ConnectionsInUse	1
+crossing, connection-oriented: core at n1 against maint, as written	OneSession	0
+crossing, connection-oriented: core at n1 against maint, as written	OneSession	1
+crossing, connection-oriented: core at n1 against maint, flipped	ConnectionsInUse	1
+crossing, connection-oriented: core at n1 against maint, flipped	OneSession	1
+crossing, connection-oriented: core at n1 against master, as written	ConnectionsInUse	1
+crossing, connection-oriented: core at n1 against master, as written	OneSession	0
+crossing, connection-oriented: core at n1 against master, as written	OneSession	1
+crossing, connection-oriented: core at n1 against master, flipped	ConnectionsInUse	1
+crossing, connection-oriented: core at n1 against master, flipped	OneSession	1
+crossing, connectionless: core at n0 against maint, flipped	OneSession	0
+crossing, connectionless: core at n0 against maint, flipped	OneSession	1
+crossing, connectionless: core at n1 against maint, as written	OneSession	0
+crossing, connectionless: core at n1 against maint, as written	OneSession	1
+crossing, two transports: core at n0 against maint, as written	ConnectionsInUse	0
+crossing, two transports: core at n0 against maint, as written	OneSession	0
+crossing, two transports: core at n0 against maint, flipped	ConnectionsInUse	0
+crossing, two transports: core at n0 against maint, flipped	OneSession	0
+crossing, two transports: core at n0 against maint, flipped	OneSession	1
+crossing, two transports: core at n0 against master, as written	ConnectionsInUse	0
+crossing, two transports: core at n0 against master, as written	OneSession	0
+crossing, two transports: core at n0 against master, flipped	ConnectionsInUse	0
+crossing, two transports: core at n0 against master, flipped	OneSession	0
+crossing, two transports: core at n0 against master, flipped	OneSession	1
+crossing, two transports: core at n1 against maint, as written	OneSession	0
+crossing, two transports: core at n1 against maint, as written	OneSession	1
+crossing, two transports: core at n1 against maint, flipped	OneSession	0
+crossing, two transports: core at n1 against maint, flipped	OneSession	1
+crossing, two transports: core at n1 against master, as written	OneSession	0
+crossing, two transports: core at n1 against master, as written	OneSession	1
+crossing, two transports: core at n1 against master, flipped	OneSession	0
+crossing, two transports: core at n1 against master, flipped	OneSession	1
+dial on the peer's aged link, then own rekey: core at n0 against maint, as written	OneSession	0
+dial on the peer's aged link, then own rekey: core at n0 against maint, as written	OneSession	1
+dial on the peer's aged link, then own rekey: core at n0 against maint, flipped	OneSession	0
+dial on the peer's aged link, then own rekey: core at n0 against maint, flipped	OneSession	1
+dial on the peer's aged link, then own rekey: core at n0 against master, as written	OneSession	0
+dial on the peer's aged link, then own rekey: core at n0 against master, as written	OneSession	1
+dial on the peer's aged link, then own rekey: core at n0 against master, flipped	OneSession	0
+dial on the peer's aged link, then own rekey: core at n0 against master, flipped	OneSession	1
+dial on the peer's aged link, then own rekey: core at n1 against maint, flipped	Classified	1
+dial on the peer's aged link, then own rekey: core at n1 against master, flipped	Classified	1
+late second dial in order, larger dialer: core at n1 against maint, as written	OneSession	0
+late second dial in order, larger dialer: core at n1 against maint, as written	OneSession	1
+late second dial, second msg2 first, larger dialer: core at n1 against maint, as written	OneSession	0
+late second dial, second msg2 first, larger dialer: core at n1 against maint, as written	OneSession	1
+three nodes: core at n1 against maint, as written	OneSession	0
+three nodes: core at n1 against maint, as written	OneSession	1
+wall step inside the heard floor: core at n1 against maint, flipped	OneSession	0
+wall step inside the heard floor: core at n1 against maint, flipped	OneSession	1

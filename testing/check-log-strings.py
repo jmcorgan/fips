@@ -58,10 +58,20 @@ ALLOWED = {
     "panicked at": "the Rust runtime's panic hook writes this, not our code",
     "RUST_BACKTRACE": "the runtime's backtrace hint, printed alongside a panic",
     "fatal runtime error": "emitted by the Rust runtime on an abort",
+    "capture-entry:": (
+        "printed by testing/interop/capture-entry.sh, the multipath mode's "
+        "container entrypoint wrapper, before it execs the daemon"
+    ),
+    "Second dial answered": (
+        "emitted only on master, when the answer to a node's own later dial "
+        "moves the link (src/node/handlers/handshake.rs there); next settles "
+        "that as a crossed handshake and logs the Cross-connection line the "
+        "same pattern also matches, and it has the harness by merge"
+    ),
 }
 
 # Shell helpers whose first argument is a pattern matched against daemon logs.
-SHELL_HELPERS = ("count_log_pattern", "assert_zero_count")
+SHELL_HELPERS = ("count_log_pattern", "assert_zero_count", "matching_lines", "counted_lines")
 
 # A literal run shorter than this is too weak to search for meaningfully.
 MIN_ANCHOR = 8

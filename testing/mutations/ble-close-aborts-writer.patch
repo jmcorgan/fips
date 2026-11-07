@@ -1,0 +1,13 @@
+diff --git a/src/transport/ble/mod.rs b/src/transport/ble/mod.rs
+index fab1847f..712321a3 100644
+--- a/src/transport/ble/mod.rs
++++ b/src/transport/ble/mod.rs
+@@ -936,7 +936,7 @@ impl<I: BleIo> BleTransport<I> {
+     /// End a connection taken out of the pool by a deliberate close: abort
+     /// its receive task, and let its writer finish what was queued.
+     fn retire(&self, mut conn: BleConnection<Arc<I::Stream>>) {
+-        let writer = conn.send_task.take();
++        let writer: Option<JoinHandle<()>> = None;
+         // Aborts the receive task, and drops the queue's sender, so the
+         // writer ends once it has written what was queued.
+         drop(conn);

@@ -24,6 +24,16 @@ const PREFIX_SIZE: usize = 4;
 const ESTABLISHED_REMAINING_HEADER: usize = 12;
 const AEAD_TAG_SIZE: usize = 16;
 
+/// The largest established frame a stream receive loop accepts: the largest
+/// `mtu` any peer can be configured with, since `mtu` is a `u16`, and so the
+/// largest frame any peer's `check_mtu` admits.
+///
+/// Nothing tells a stream sender its peer's configured `mtu`, so bounding
+/// receives by the local value closes the connection on every frame
+/// between two peers' differing values. The bound guards allocation only:
+/// a stream does not tie a frame to a segment or to the local `mtu`.
+pub(crate) const RECV_CEILING: u16 = u16::MAX;
+
 /// Errors from the FMP stream reader.
 #[derive(Debug)]
 pub enum StreamError {

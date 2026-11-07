@@ -7,6 +7,7 @@ Unit tests for the metrics protocol, declared from `mmp/mod.rs` as
 - `algorithms.rs`: the estimators.
 - `core.rs`: the `plan_*` decisions.
 - `path_mtu.rs`: the path-MTU state machine.
-- `state.rs`: the aggregates, and `MmpMode`'s configuration spelling
-  through `serde_yaml`.
+- `state.rs`: the aggregates, the sampled and unsampled halves of a
+  received frame, and `MmpMode`'s configuration spelling through
+  `serde_yaml`.
 - `wire.rs`: the report codecs.

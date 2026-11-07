@@ -168,11 +168,12 @@ async fn crossed_dials_after_a_restart(
     let (mut nodes, d, r) = restarted_pair(d_smaller, d_dialled).await;
     let r_addr = *nodes[r].node.node_addr();
     if silent {
-        nodes[d]
+        let p = nodes[d]
             .node
             .get_peer_mut(&r_addr)
-            .expect("D holds R's previous run")
-            .touch(Node::now_ms() - 16_000);
+            .expect("D holds R's previous run");
+        p.touch(Node::now_ms() - 16_000);
+        p.test_backdate_heard(std::time::Duration::from_secs(16));
     }
     initiate_handshake(&mut nodes, d, r).await;
     initiate_handshake(&mut nodes, r, d).await;
@@ -253,7 +254,7 @@ async fn a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_whe
     for d_dialled in [true, false] {
         failures.extend(crossed_dials_after_a_restart(false, true, false, d_dialled, false).await);
     }
-    assert!(failures.is_empty(), "{failures:#?}");
+    assert!(failures.is_empty(), "defect: {failures:#?}");
 }
 
 /// Control for the test above, with no restart: two nodes that have never

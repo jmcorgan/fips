@@ -301,6 +301,13 @@ impl Handles {
         self.tun_tx = Some(tun_tx);
     }
 
+    /// Stand a channel in for an embedder's TUN, so a test can feed the
+    /// receive loop's arm for it.
+    #[cfg(test)]
+    pub(crate) fn install_outbound(&mut self, packets: TunOutboundRx) {
+        self.tun_outbound_rx = Some(packets);
+    }
+
     /// Record `name` as the TUN device this node created, for tests of
     /// what reads the name, which run on unix only.
     #[cfg(all(test, unix))]

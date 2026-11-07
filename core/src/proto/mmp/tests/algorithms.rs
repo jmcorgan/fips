@@ -1,7 +1,7 @@
 //! Tests for the MMP algorithmic building blocks.
 
 use crate::proto::mmp::algorithms::{
-    DualEwma, JitterEstimator, OwdTrendDetector, SrttEstimator, compute_etx,
+    DualEwma, JitterEstimator, OwdTrendDetector, SrttEstimator, compute_etx, quality_index,
 };
 
 #[test]
@@ -120,4 +120,20 @@ fn test_etx_lossy_link() {
 fn test_etx_zero_delivery() {
     assert_eq!(compute_etx(0.0, 1.0), 100.0);
     assert_eq!(compute_etx(1.0, 0.0), 100.0);
+}
+
+#[test]
+fn quality_index_weights_etx_by_rtt() {
+    assert!(
+        (quality_index(1.0, 0.0) - 1.0).abs() < f64::EPSILON,
+        "ideal link"
+    );
+    assert!(
+        (quality_index(1.0, 100.0) - 2.0).abs() < f64::EPSILON,
+        "100 ms doubles it"
+    );
+    assert!((quality_index(2.0, 50.0) - 3.0).abs() < f64::EPSILON);
+    // Lower is better, and both inputs move it the same way.
+    assert!(quality_index(1.0, 10.0) < quality_index(1.0, 20.0));
+    assert!(quality_index(1.0, 10.0) < quality_index(1.5, 10.0));
 }

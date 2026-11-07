@@ -2,7 +2,8 @@
 //!
 //! Tests that the TCP transport works end-to-end at the node level:
 //! handshake, spanning tree convergence, mixed-transport routing,
-//! MMP link-dead detection, and reconnection after link death.
+//! MMP link-dead detection, reconnection after link death, and a TCP
+//! path joining a multipath link made on loopback.
 //! All tests use 127.0.0.1:0 (ephemeral ports) and need no privileges.
 
 use super::heartbeat::set_link_dead_timeout;
@@ -844,7 +845,7 @@ async fn leg_expiry_emits_no_close() {
         * 1000;
     nodes[1]
         .node
-        .check_timeouts_at(Node::now_ms() + timeout_ms + 1_000)
+        .check_timeouts_at(Node::interval_ms() + timeout_ms + 1_000)
         .await;
     assert!(
         nodes[1].node.pending_inbound.is_empty(),
@@ -864,5 +865,217 @@ async fn leg_expiry_emits_no_close() {
     assert!(nodes[1].node.get_peer(&addr0).is_some(), "the peer is kept");
     super::link_index_audit::audit(&nodes[1].node, "a leg's expiry");
 
+    cleanup_nodes(&mut nodes).await;
+}
+
+/// How long a TCP hop of the path tests may take in real time before the
+/// test fails: the connect and each frame cross the loopback interface,
+/// which `crate::time::advance` does not move.
+const HOP: Duration = Duration::from_secs(5);
+
+/// Give `tn`, a loopback test node, a started TCP transport `t2()` listening
+/// on an ephemeral port of 127.0.0.1, whose paths are of the Internet kind
+/// as the loopback link's are, so a path on it may join that link. What it
+/// receives is forwarded into the channel `tn`'s loopback address delivers
+/// to, stamped with `t2()` as the transport stamps it, so the test takes
+/// TCP and loopback frames from one queue. Returns its listen address.
+async fn second_tcp(tn: &mut TestNode) -> TransportAddr {
+    use super::paths::t2;
+    let config = TcpConfig {
+        bind_addr: Some("127.0.0.1:0".to_string()),
+        mtu: Some(1400),
+        kind: Some(crate::config::PathKind::Internet),
+        ..Default::default()
+    };
+    let (packet_tx, mut packet_rx) = packet_channel(256);
+    let mut transport = TcpTransport::new(t2(), None, config, packet_tx);
+    transport.start_async().await.unwrap();
+    let listen = TransportAddr::from_string(&transport.local_addr().unwrap().to_string());
+    let (_, into_node) = spanning_tree::LOOPBACK_REGISTRY
+        .lock()
+        .unwrap()
+        .get(&tn.addr)
+        .expect("the node's loopback address is registered")
+        .clone();
+    tokio::spawn(async move {
+        while let Some(packet) = packet_rx.recv().await {
+            if into_node.send(packet).is_err() {
+                break;
+            }
+        }
+    });
+    tn.node
+        .transports
+        .insert(t2(), TransportHandle::Tcp(transport));
+    listen
+}
+
+/// The path `tn` holds to `peer` on `transport`, with its address and
+/// state, if it holds one there.
+fn path_on(
+    tn: &TestNode,
+    peer: &NodeAddr,
+    transport: TransportId,
+) -> Option<(TransportAddr, crate::peer::PathState)> {
+    let bundle = tn.node.get_peer(peer)?.bundle()?;
+    bundle
+        .paths()
+        .paths()
+        .iter()
+        .find(|p| p.transport_id() == transport)
+        .map(|p| (p.addr().clone(), p.state()))
+}
+
+/// A path candidate on TCP, a connection-oriented transport, is connected
+/// before it is probed, its probe goes over that connection as its first
+/// frame, and the peer takes the probe on its inbound connection with no
+/// handshake on it, by the session index alone, and answers on the pair it
+/// arrived on (multipath draft, Section 5.1); when the path is
+/// discarded, its connection is closed, since the peer does not send on it
+/// (Section 5.8). Each hop crosses a real socket, so each is awaited with a
+/// bound in real time around a polling loop that yields, never a sleep.
+#[tokio::test]
+async fn a_tcp_candidate_is_connected_probed_and_its_connection_closed_with_its_path() {
+    use super::paths::{enabled, exchange, hand, phase, state_at, t2, take_packets};
+    use crate::peer::PathState;
+    use crate::proto::fmp::wire::PHASE_ESTABLISHED;
+
+    let mut nodes = super::rekey_parity::linked_pair(enabled(), enabled()).await;
+    let (a, b) = (*nodes[0].node.node_addr(), *nodes[1].node.node_addr());
+    second_tcp(&mut nodes[0]).await;
+    let b_tcp = second_tcp(&mut nodes[1]).await;
+    let state = |nodes: &[TestNode]| {
+        nodes[0]
+            .node
+            .transports
+            .get(&t2())
+            .unwrap()
+            .connection_state(&b_tcp)
+    };
+
+    // The capability exchange on the loopback path makes B capable at A and
+    // admits the candidate, which asks for its connection and is not probed.
+    nodes[0].node.offer_path(&b, t2(), b_tcp.clone()).await;
+    exchange(&mut nodes).await;
+    let outstanding = {
+        let paths = nodes[0]
+            .node
+            .get_peer(&b)
+            .unwrap()
+            .bundle()
+            .unwrap()
+            .paths();
+        let q = paths
+            .get(paths.find(t2(), &b_tcp).expect("q admitted"))
+            .unwrap();
+        q.live().outstanding()
+    };
+    assert_eq!(outstanding, 0, "no probe on q before its connection");
+    assert!(
+        matches!(
+            state(&nodes),
+            ConnectionState::Connecting | ConnectionState::Connected
+        ),
+        "A asked for q's connection: {:?}",
+        state(&nodes)
+    );
+
+    // The path tick that finds the connection open probes q over it. The
+    // loop reads only the probe count: `connection_state` would move a
+    // finished connect into the pool itself, ahead of the node's tick.
+    let probes = |nodes: &[TestNode]| {
+        let paths = nodes[0]
+            .node
+            .get_peer(&b)
+            .unwrap()
+            .bundle()
+            .unwrap()
+            .paths();
+        paths
+            .get(paths.find(t2(), &b_tcp).unwrap())
+            .unwrap()
+            .live()
+            .outstanding()
+    };
+    let opened = tokio::time::timeout(HOP, async {
+        loop {
+            nodes[0].node.path_tick().await;
+            if probes(&nodes) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(opened.is_ok(), "q probed within {HOP:?}");
+    assert_eq!(
+        state(&nodes),
+        ConnectionState::Connected,
+        "q's connection open"
+    );
+    assert_eq!(probes(&nodes), 1, "q probed once its connection opened");
+
+    // B's first frame on TCP is that probe, with no handshake before it: B
+    // takes it by its index alone and holds a path at its source.
+    let first = tokio::time::timeout(HOP, async {
+        loop {
+            let mut queued = take_packets(&mut nodes[1]);
+            if let Some(i) = queued.iter().position(|p| p.transport_id == t2()) {
+                let packet = queued.remove(i);
+                for other in queued {
+                    hand(&mut nodes[1], other).await;
+                }
+                return packet;
+            }
+            for other in queued {
+                hand(&mut nodes[1], other).await;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("A's probe reached B over TCP");
+    assert_eq!(phase(&first), Some(PHASE_ESTABLISHED), "no handshake on it");
+    let source = first.remote_addr.clone();
+    hand(&mut nodes[1], first).await;
+    assert_eq!(
+        path_on(&nodes[1], &a, t2()).map(|(addr, _)| addr),
+        Some(source),
+        "B holds a path at the probe's source"
+    );
+
+    // B's answer, on that pair, makes q Live at A.
+    let live = tokio::time::timeout(HOP, async {
+        loop {
+            for packet in take_packets(&mut nodes[0]) {
+                hand(&mut nodes[0], packet).await;
+            }
+            if state_at(&nodes[0], &b, t2(), &b_tcp) == Some(PathState::Live) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        live.is_ok(),
+        "q Live at A within {HOP:?}: {:?}",
+        state_at(&nodes[0], &b, t2(), &b_tcp)
+    );
+
+    // q's interface goes: q is discarded and, B's active path being p, its
+    // connection is closed.
+    assert_eq!(state(&nodes), ConnectionState::Connected, "precondition");
+    assert_eq!(
+        nodes[0].node.path_presence(t2(), false).await,
+        0,
+        "A keeps B"
+    );
+    assert_eq!(state_at(&nodes[0], &b, t2(), &b_tcp), None, "q discarded");
+    assert_ne!(
+        state(&nodes),
+        ConnectionState::Connected,
+        "q's connection closed with it"
+    );
     cleanup_nodes(&mut nodes).await;
 }

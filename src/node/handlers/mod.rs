@@ -6,6 +6,13 @@ mod mmp;
 mod native;
 pub(in crate::node) use native::PendingNative;
 pub(in crate::node) mod netmon;
+// The node's side of each link's path machine: facts, parameters, release.
+pub(in crate::node) mod path;
+// What the operator is shown of each link's paths, and the pin.
+mod path_control;
+// What the node's sources say about where a linked peer may be reachable,
+// as the path machines' candidates.
+pub(in crate::node) mod path_intake;
 // The node's end of the link to the IPv6 adapter.
 pub(in crate::node) mod host_link;
 pub(crate) mod probe;

@@ -102,10 +102,7 @@ impl Node {
         if self.node_profile() == crate::proto::fmp::NodeProfile::Leaf {
             return Ok(());
         }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::time::mono_ms();
 
         // Check rate limit
         let peer = match self.peers.get_mut(peer_addr) {
@@ -189,10 +186,7 @@ impl Node {
     /// Send pending tree announces (rate-limited or failed) whose cooldown
     /// has expired.
     pub(super) async fn send_pending_tree_announces(&mut self) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::time::mono_ms();
 
         let ready: Vec<NodeAddr> = self
             .peers

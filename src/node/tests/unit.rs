@@ -455,7 +455,7 @@ fn test_peer_maps_coherence_detects_orphaned_machine() {
     // A machine with no connection, no active peer, and no pending connect
     // has no live carrier; the check must panic on it.
     let link_id = LinkId::new(7);
-    let machine = crate::peer::machine::PeerMachine::new_inbound(link_id, 1000);
+    let machine = crate::peer::machine::PeerMachine::new_inbound(link_id, LegStamp::at(1000));
     node.peer_machines.insert(link_id, machine);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -536,8 +536,10 @@ fn test_promote_connection_error_order_and_leg_detach() {
     ));
 
     let link_id = LinkId::new(2);
-    node.peer_machines
-        .insert(link_id, PeerMachine::new_inbound(link_id, 1000));
+    node.peer_machines.insert(
+        link_id,
+        PeerMachine::new_inbound(link_id, LegStamp::at(1000)),
+    );
     assert!(matches!(
         node.promote_connection(link_id, identity, 2000),
         Err(NodeError::ConnectionNotFound(_))
@@ -596,7 +598,7 @@ fn test_node_promote_connection() {
     // Verify peers_by_index is populated
     let our_index = peer.our_index().unwrap();
     assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_index.as_u32())),
+        node.peers_by_index.get(&our_index.as_u32()),
         Some(&node_addr)
     );
 }
@@ -623,10 +625,7 @@ fn test_node_cross_connection_resolution() {
     // Verify first promotion populated peers_by_index
     let peer = node.get_peer(&node_addr).unwrap();
     let our_idx = peer.our_index().unwrap();
-    assert_eq!(
-        node.peers_by_index.get(&(transport_id, our_idx.as_u32())),
-        Some(&node_addr)
-    );
+    assert_eq!(node.peers_by_index.get(&our_idx.as_u32()), Some(&node_addr));
 
     // Still only one peer
     assert_eq!(node.peer_count(), 1);
@@ -758,22 +757,20 @@ fn test_node_pending_outbound_tracking() {
 #[test]
 fn test_node_peers_by_index_tracking() {
     let mut node = make_node();
-    let transport_id = TransportId::new(1);
     let node_addr = make_node_addr(42);
 
     // Allocate an index
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in peers_by_index
-    node.peers_by_index
-        .insert((transport_id, index.as_u32()), node_addr);
+    node.peers_by_index.insert(index.as_u32(), node_addr);
 
     // Verify lookup
-    let found = node.peers_by_index.get(&(transport_id, index.as_u32()));
+    let found = node.peers_by_index.get(&index.as_u32());
     assert_eq!(found, Some(&node_addr));
 
     // Clean up
-    node.peers_by_index.remove(&(transport_id, index.as_u32()));
+    node.peers_by_index.remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert!(node.peers_by_index.is_empty());
@@ -866,7 +863,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         .peer_machines
         .get_mut(&pending_link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, pending_time_ms)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(pending_time_ms))
         .unwrap();
 
     let pending_link = Link::connectionless(
@@ -910,7 +907,7 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         .peer_machines
         .get_mut(&completing_link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, completing_time_ms)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(completing_time_ms))
         .unwrap();
 
     // B responds
@@ -919,17 +916,23 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
     let mut resp_epoch = [0u8; 8];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut resp_epoch);
     let msg2 = resp_conn
-        .receive_handshake_init(peer_keypair, resp_epoch, &msg1, None, completing_time_ms)
+        .receive_handshake_init(
+            peer_keypair,
+            resp_epoch,
+            &msg1,
+            None,
+            LegStamp::at(completing_time_ms),
+        )
         .unwrap();
 
     let (msg3, _neg) = node
         .peer_machines
         .get_mut(&completing_link_id)
         .unwrap()
-        .complete_handshake_accepting(&msg2, None, completing_time_ms)
+        .complete_handshake_accepting(&msg2, None, LegStamp::at(completing_time_ms))
         .unwrap();
     resp_conn
-        .complete_handshake_msg3(&msg3, completing_time_ms)
+        .complete_handshake_msg3(&msg3, LegStamp::at(completing_time_ms))
         .unwrap();
 
     // Now 2 connections, 1 link (pending has link, completing doesn't yet need one for this test)
@@ -1508,6 +1511,67 @@ async fn an_instance_qualified_candidate_matches_only_its_own_instance() {
     );
 
     node.stop().await.unwrap();
+}
+
+/// A configured address matches the peer's current path only at its active
+/// pair: a standby path the link holds at another address is still an
+/// alternative, as the address comparison it replaces also said.
+/// Mutation: match any proven path, not only the active one.
+#[test]
+fn a_candidate_at_a_standby_paths_pair_is_an_alternative_and_one_at_the_active_pair_is_not() {
+    let mut node = make_node();
+    for (id, name) in [(1, "main"), (2, "backup")] {
+        let (packet_tx, _packet_rx) = packet_channel(8);
+        let udp = UdpTransport::new(
+            TransportId::new(id),
+            Some(name.to_string()),
+            crate::config::UdpConfig {
+                bind_addr: Some("127.0.0.1:0".to_string()),
+                ..Default::default()
+            },
+            packet_tx,
+        );
+        node.transports
+            .insert(TransportId::new(id), TransportHandle::Udp(udp));
+    }
+    let peer_full = Identity::generate();
+    let peer_identity = PeerIdentity::from_pubkey_full(peer_full.pubkey_full());
+    let peer_node_addr = *peer_identity.node_addr();
+    let active = TransportAddr::from_string("192.0.2.1:2121");
+    let standby = TransportAddr::from_string("192.0.2.2:2121");
+    let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
+    active_peer.set_current_addr(TransportId::new(1), active);
+    active_peer.admit_path(TransportId::new(2), standby.clone());
+    active_peer.ack_path(TransportId::new(2), &standby);
+    assert!(
+        matches!(
+            active_peer.path_match(TransportId::new(2), &standby),
+            crate::peer::Match::Proven { active: false, .. }
+        ),
+        "precondition: the standby is a proven path that is not active"
+    );
+    node.peers.insert(peer_node_addr, active_peer);
+
+    let matches = |transport: &str, addr: &str| {
+        let candidate = crate::config::PeerAddress::new(transport, addr);
+        node.active_peer_matches_candidate(&peer_node_addr, &candidate)
+    };
+    assert!(
+        matches("udp", "192.0.2.1:2121"),
+        "the active pair is the current path"
+    );
+    assert!(
+        matches("udp/main", "192.0.2.1:2121"),
+        "so is the active pair named with its instance"
+    );
+    assert!(
+        !matches("udp", "192.0.2.2:2121"),
+        "the standby's pair is an alternative"
+    );
+    assert!(
+        !matches("udp/backup", "192.0.2.2:2121"),
+        "and so is the standby's pair named with its instance"
+    );
 }
 
 #[tokio::test]
@@ -2471,6 +2535,7 @@ async fn test_ipv6_shortfall_is_none_when_the_only_transport_is_an_ethernet_one_
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = packet_channel(8);
     let mut eth = EthernetTransport::new(TransportId::new(1), Some("lab".into()), config, tx);
@@ -3248,7 +3313,7 @@ async fn drive_xx_handshake(
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
 
@@ -4475,7 +4540,7 @@ fn test_failed_connection_is_retained_and_reaped() {
     node.peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, 1000)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
         .unwrap();
 
     // The send of that stored initiation fails.
@@ -4600,7 +4665,7 @@ fn handshake_presence_tracks_the_carrier_not_the_noise_handles() {
     let startup_epoch = node.startup_epoch();
     let machine = node.peer_machines.get_mut(&link_id).unwrap();
     machine
-        .start_handshake(our_keypair, startup_epoch, 1000)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(1000))
         .unwrap();
     assert!(
         machine.leg().unwrap().noise_handshake.is_some(),
@@ -4678,10 +4743,16 @@ fn xx_handshake_records_each_learned_identity_on_the_carrier() {
     let mut conn_r = inbound_leg(LinkId::new(2), 1000);
 
     let noise_msg1 = conn_i
-        .start_handshake(initiator.keypair(), [0x11; 8], 1000)
+        .start_handshake(initiator.keypair(), [0x11; 8], LegStamp::at(1000))
         .unwrap();
     let noise_msg2 = conn_r
-        .receive_handshake_init(responder.keypair(), [0x22; 8], &noise_msg1, None, 1100)
+        .receive_handshake_init(
+            responder.keypair(),
+            [0x22; 8],
+            &noise_msg1,
+            None,
+            LegStamp::at(1100),
+        )
         .unwrap();
 
     // The responder is still anonymous: msg1 revealed nothing about who dialed.
@@ -4692,7 +4763,7 @@ fn xx_handshake_records_each_learned_identity_on_the_carrier() {
     );
 
     let (noise_msg3, _) = conn_i
-        .complete_handshake_accepting(&noise_msg2, None, 1200)
+        .complete_handshake_accepting(&noise_msg2, None, LegStamp::at(1200))
         .unwrap();
     assert_eq!(
         conn_i.conn_expected_identity(),
@@ -4711,7 +4782,9 @@ fn xx_handshake_records_each_learned_identity_on_the_carrier() {
         "an inbound leg dialed nobody"
     );
 
-    conn_r.complete_handshake_msg3(&noise_msg3, 1300).unwrap();
+    conn_r
+        .complete_handshake_msg3(&noise_msg3, LegStamp::at(1300))
+        .unwrap();
     assert_eq!(
         conn_r.conn_expected_identity(),
         Some(&initiator_identity),
@@ -4736,15 +4809,23 @@ fn xx_handshake_rejected_by_the_dial_decision_leaves_the_carrier_as_dialed() {
     let mut conn_r = inbound_leg(LinkId::new(2), 1000);
 
     let noise_msg1 = conn_i
-        .start_handshake(initiator.keypair(), [0x11; 8], 1000)
+        .start_handshake(initiator.keypair(), [0x11; 8], LegStamp::at(1000))
         .unwrap();
     let noise_msg2 = conn_r
-        .receive_handshake_init(responder.keypair(), [0x22; 8], &noise_msg1, None, 1100)
+        .receive_handshake_init(
+            responder.keypair(),
+            [0x22; 8],
+            &noise_msg1,
+            None,
+            LegStamp::at(1100),
+        )
         .unwrap();
 
     let step = conn_i
-        .complete_handshake(&noise_msg2, None, 1200, |_| DialMsg2Decision::Reject {
-            reason: DialMsg2Reject::StaticMismatch,
+        .complete_handshake(&noise_msg2, None, LegStamp::at(1200), |_| {
+            DialMsg2Decision::Reject {
+                reason: DialMsg2Reject::StaticMismatch,
+            }
         })
         .expect("a rejected msg2 leaves the leg able to continue");
     assert!(
@@ -4820,7 +4901,7 @@ async fn test_failed_msg1_preparation_unwinds_the_dial_machine() {
     // Stand in for the dial: the machine exists before msg1 is prepared.
     node.peer_machines.insert(
         link_id,
-        PeerMachine::new_outbound(link_id, Some(peer_identity), 1000),
+        PeerMachine::new_outbound(link_id, Some(peer_identity), LegStamp::at(1000)),
     );
     // Force the index allocation inside msg1 preparation to fail.
     node.index_allocator = crate::utils::index::IndexAllocator::with_max_attempts(0);
@@ -4855,7 +4936,7 @@ async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
     let peer_identity = make_peer_identity();
     node.peer_machines.insert(
         link_id,
-        PeerMachine::new_outbound(link_id, Some(peer_identity), 1000),
+        PeerMachine::new_outbound(link_id, Some(peer_identity), LegStamp::at(1000)),
     );
     node.prepare_outbound_msg1(link_id, transport_id, &remote_addr, peer_identity)
         .unwrap();
@@ -4880,7 +4961,7 @@ async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
         .start_handshake(
             initiator.identity().keypair(),
             initiator.startup_epoch(),
-            1000,
+            LegStamp::at(1000),
         )
         .unwrap();
     let inbound_addr = TransportAddr::from_string("127.0.0.1:6000");
@@ -5003,7 +5084,7 @@ async fn pump_one_msg1(
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
 

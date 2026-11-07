@@ -183,14 +183,20 @@ def query_transports(container: str) -> dict | None:
 def snapshot_all_congestion(topology: SimTopology) -> dict[str, dict]:
     """Query show_routing on all nodes to capture congestion counters.
 
-    Returns {node_id: {"congestion": {...}, "kernel_drops": [...]}}.
-    Nodes that fail to respond are omitted from the result.
+    Returns {node_id: {"congestion": {...}, "kernel_drops": [...],
+    "replay_refusals": [...]}}, one ``kernel_drops`` entry per transport with
+    its type and, where the transport counts them, the frames it received,
+    so a drop count can be read as a share of what reached the socket, and
+    one ``replay_refusals`` entry per peer with the replays refused from it
+    since it was promoted. Nodes that fail to respond are omitted from the
+    result.
     """
     result = {}
     for node_id in sorted(topology.nodes):
         container = topology.container_name(node_id)
         routing = query_routing(container)
         transports = query_transports(container)
+        peers = query_peers(container)
         if routing is not None:
             entry = {"congestion": routing.get("congestion", {})}
             if transports is not None:
@@ -200,9 +206,19 @@ def snapshot_all_congestion(topology: SimTopology) -> dict[str, dict]:
                     drops.append({
                         "transport_id": t.get("transport_id"),
                         "name": t.get("name"),
+                        "type": t.get("type"),
                         "kernel_drops": stats.get("kernel_drops"),
+                        "frames_recv": stats.get("frames_recv"),
                     })
                 entry["kernel_drops"] = drops
+            if peers is not None:
+                entry["replay_refusals"] = [
+                    {
+                        "peer": p.get("display_name"),
+                        "total": p.get("replay_suppressed_total"),
+                    }
+                    for p in peers.get("peers", [])
+                ]
             result[node_id] = entry
         else:
             log.warning("No routing data from %s", node_id)

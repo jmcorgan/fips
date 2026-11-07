@@ -20,8 +20,11 @@
 #   --slow-tests         Also run fips-core's slow test suite (the
 #                        guard-switch meta-test) in the core's own test run.
 #                        Off by default: it takes minutes, and GitHub CI's
-#                        Linux job runs it on every push. FIPS_CI_SLOW_TESTS=1
-#                        in the environment turns it on too.
+#                        Linux job runs it on every push. The settlement
+#                        explorers against the deployed models and the
+#                        candidate rules run with it here and nowhere else.
+#                        FIPS_CI_SLOW_TESTS=1 in the environment turns it on
+#                        too.
 #   --cross-check        Also compile the macOS, Windows and FreeBSD targets in
 #                        the build stage (testing/cross-check/check.sh). Off
 #                        by default: it needs zig. When asked for, a missing
@@ -68,7 +71,9 @@
 #   nat-lan, nostr-publish-consume, stun-faults,
 #   chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-ethernet-churn, chaos-tcp-mesh,
-#   chaos-congestion-stress,
+#   chaos-congestion-stress, chaos-dual-path-flap, chaos-dual-udp-flap,
+#   chaos-dual-path-carrier, chaos-forward-only, chaos-loaded-standby,
+#   chaos-two-bound-udp, chaos-two-bound-udp-bulk, chaos-steady-dual-path,
 #   sidecar, native-api, mdns, dns-resolver, deb-install, rpm-install,
 #   medium-change
 #
@@ -139,12 +144,14 @@
 #                    the leaf root-election gate reds it in roughly a third of
 #                    runs — rather than on a green run alone. Still runnable by
 #                    hand: bash testing/static/scripts/mixed-profile-test.sh
-#   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse
+#   ecn-ab-on, ecn-ab-off, maelstrom, maelstrom-sparse, dead-grace-long
 #                    Chaos scenarios excluded from CHAOS_SUITES. The two
 #                    ecn-ab ones are halves of the manual comparison above.
 #                    The two maelstrom ones are 600 s stress runs kept for
-#                    manual investigation. All four still load-check and
-#                    carry the default max_errors ceiling if run by hand.
+#                    manual investigation. dead-grace-long holds a path down
+#                    past its 600 s grace (780 s) and is run by hand for the
+#                    figures over a whole grace. All five still load-check
+#                    and carry the default max_errors ceiling if run by hand.
 #
 # Exit codes:
 #   0   — all stages passed
@@ -222,14 +229,25 @@ ONLY_GIVEN=false
 
 # All integration suites matching ci.yml
 STATIC_SUITES=(static-mesh static-chain)
-# Each entry: "display-name scenario [--flag value ...]"
+# Each entry: "display-name scenario [--flag value ...]". Longest expected
+# run first (scenario length plus about 45 s of setup and teardown), so the
+# slots, four by default, finish close together rather than one long
+# scenario starting last.
 CHAOS_SUITES=(
-    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
-    "ethernet-mesh ethernet-mesh"
-    "ethernet-only ethernet-only"
+    "steady-dual-path steady-dual-path"
     "ethernet-churn ethernet-churn"
+    "dual-path-flap dual-path-flap"
+    "dual-udp-flap dual-udp-flap"
+    "dual-path-carrier dual-path-carrier"
+    "forward-only forward-only"
+    "two-bound-udp two-bound-udp"
+    "two-bound-udp-bulk two-bound-udp-bulk"
+    "ethernet-mesh ethernet-mesh"
+    "churn-mixed-10 churn-mixed --nodes 10 --duration 120"
     "tcp-mesh tcp-mesh"
     "congestion-stress congestion-stress"
+    "loaded-standby loaded-standby"
+    "ethernet-only ethernet-only"
 )
 # Scenarios retired 2026-07-23 because their subject was a pure decision the
 # Docker harness could not test reliably, now covered by sans-IO unit tests
@@ -946,10 +964,14 @@ run_tests() {
     # The no_std core's tests under the core's own feature resolution, so a
     # test whose result depends on a feature only the root crate enables runs
     # at least once without it. Mirrored in .github/workflows/ci.yml, which
-    # always runs the slow suite here; locally it needs --slow-tests.
+    # always runs the slow suite here; locally it needs --slow-tests. The
+    # settlement explorers against the deployed models and the candidate
+    # rules (`slow-explorers`, which turns `slow-tests` on too) run only
+    # here, under --slow-tests or FIPS_CI_SLOW_TESTS=1, which the internal
+    # builder sets.
     local core_test=(cargo test -p fips-core)
     if [[ "$SLOW_TESTS" == true ]]; then
-        core_test+=(--features slow-tests)
+        core_test+=(--features slow-explorers)
     fi
     info "${core_test[*]}"
     if "${core_test[@]}" 2>&1; then
@@ -2248,6 +2270,19 @@ run_chaos_schedule() {
     return 0
 }
 
+# The chaos assertions that read path lines, flap stamps and iperf3 results,
+# each fed planted input and checked for its verdict, so every one is shown
+# able to fail and to pass without a container. Hermetic and a few seconds.
+# Mirrored in ci.yml's ci-parity job by hand. Not named chaos-*, which this
+# script and the load annotation read as a scenario suite.
+run_simassert() {
+    local rc=0
+    info "[sim-assertions] Checking the chaos path assertions against planted input"
+    python3 "$SCRIPT_DIR/chaos/sim-assert-test.py" || rc=$?
+    record "sim-assertions" $rc
+    return 0
+}
+
 # Unit tests for the convergence gate every static suite waits on. Hermetic —
 # synthetic ping functions against the same SECONDS clock, no containers — but
 # it drives real timeouts, so it costs about 45 seconds rather than the "few
@@ -2389,6 +2424,7 @@ run_guards() {
     run_log_strings
     run_trailing_log
     run_chaos_schedule
+    run_simassert
     run_image_scoping
     run_action_pins
     run_comment_refs

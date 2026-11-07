@@ -7,7 +7,7 @@ from copy import deepcopy
 
 import yaml
 
-from .topology import SimTopology
+from .topology import UDP_VETH, SimTopology
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -33,6 +33,7 @@ def _load_template() -> str:
 
 _TRANSPORT_PORTS = {
     "udp": 2121,
+    "udp-veth": 2122,
     "tcp": 443,
 }
 
@@ -49,16 +50,54 @@ def generate_peers_block(
     if not outbound_peers:
         return "  []"
 
+    # With interface-bound UDP instances the UDP transport is named, and a
+    # bare ``udp`` address would resolve to the lowest instance id, which
+    # may be the one bound to a veth: qualify the bridge half.
+    bridge = "udp/main" if topology.veth_links(node_id) else "udp"
     lines = []
     for peer_id in sorted(outbound_peers):
         peer = topology.nodes[peer_id]
         transport = topology.transport_for_edge(node_id, peer_id)
-        port = _TRANSPORT_PORTS.get(transport, 2121)
+        dual = topology.is_dual(node_id, peer_id)
+        # (transport, addr, priority) per address; the priority is written
+        # only on a dual edge, so every other edge renders as it always has.
+        # A dual edge's Ethernet half is found by beacon, so only its bridge
+        # half is listed. A dual udp-veth edge lists both halves, the bridge
+        # first: the bridge is dialled and carries the link up, and the
+        # veth address is offered to the link's path machine as a
+        # configured candidate.
+        addresses = []
+        if transport == UDP_VETH and topology.lanes(node_id, peer_id):
+            # Every (own lane, peer lane) pair, each lane's own peer lane
+            # first, then the sentinel no host answers on lane 0. Priorities
+            # fix the dial order; only a laned edge writes them here.
+            lanes = topology.lane_links(node_id, peer_id)
+            pairs = []
+            for k, lane in enumerate(lanes):
+                order = [lanes[k]] + [l for j, l in enumerate(lanes) if j != k]
+                pairs += [(f"udp/{lane.instance}", other.peer_addr) for other in order]
+            pairs.append((f"udp/{lanes[0].instance}", topology.sentinel(node_id, peer_id)))
+            addresses = [(t, a, n + 1) for n, (t, a) in enumerate(pairs)]
+        elif transport == UDP_VETH:
+            link = next(l for l in topology.veth_links(node_id) if l.peer_id == peer_id)
+            if dual:
+                addresses.append((bridge, f"{peer.docker_ip}:{_TRANSPORT_PORTS['udp']}", 1))
+            addresses.append((f"udp/{link.instance}", link.peer_addr, 10 if dual else None))
+        else:
+            if dual:
+                transport = "udp"
+            addr = f"{peer.docker_ip}:{_TRANSPORT_PORTS.get(transport, 2121)}"
+            if transport == "udp":
+                transport = bridge
+            addresses.append((transport, addr, 1 if dual else None))
         lines.append(f'  - npub: "{peer.npub}"')
         lines.append(f'    alias: "{peer_id}"')
         lines.append(f"    addresses:")
-        lines.append(f"      - transport: {transport}")
-        lines.append(f'        addr: "{peer.docker_ip}:{port}"')
+        for transport, addr, priority in addresses:
+            lines.append(f"      - transport: {transport}")
+            lines.append(f'        addr: "{addr}"')
+            if priority is not None:
+                lines.append(f"        priority: {priority}")
         lines.append(f"    connect_policy: auto_connect")
     return "\n".join(lines)
 
@@ -110,6 +149,55 @@ def _inject_ethernet_transports(parsed: dict, eth_ifaces: list[str]):
         }
 
 
+def _bindudp(parsed: dict, topology: SimTopology, node_id: str, has_udp: bool):
+    """Turn the template's single UDP transport into named instances: ``main``
+    (the bridge, kept only if the node has bridge-UDP peers) plus one
+    interface-bound instance per ``udp-veth`` edge, named after its veth.
+    """
+    links = topology.veth_links(node_id)
+    if not links:
+        return
+    transports = parsed.setdefault("transports", {})
+    main = transports.pop("udp", None) or {"bind_addr": "0.0.0.0:2121"}
+    instances = {}
+    if has_udp:
+        instances["main"] = main
+    for link in links:
+        instances[link.instance] = {
+            "bind_addr": f"0.0.0.0:{_TRANSPORT_PORTS['udp-veth']}",
+            "interface": link.iface,
+            "mtu": main.get("mtu", 1472),
+        }
+    transports["udp"] = instances
+
+
+def _override(parsed: dict, topology: SimTopology, node_id: str,
+                         overrides: dict) -> None:
+    """Merge ``overrides[kind]`` into each generated transport instance of
+    that kind: ``ethernet``, ``udp-veth`` (the interface-bound UDP
+    instances) or ``udp`` (the bridge instance, bare or ``main``)."""
+    transports = parsed.get("transports", {})
+    eth = transports.get("ethernet")
+    if "ethernet" in overrides and isinstance(eth, dict):
+        if "interface" in eth:
+            transports["ethernet"] = _deep_merge(eth, overrides["ethernet"])
+        else:
+            for name in list(eth):
+                eth[name] = _deep_merge(eth[name], overrides["ethernet"])
+    udp = transports.get("udp")
+    if not isinstance(udp, dict):
+        return
+    bound = {link.instance for link in topology.veth_links(node_id)}
+    if not bound:
+        if "udp" in overrides:
+            transports["udp"] = _deep_merge(udp, overrides["udp"])
+        return
+    for name in list(udp):
+        kind = UDP_VETH if name in bound else "udp"
+        if kind in overrides:
+            udp[name] = _deep_merge(udp[name], overrides[kind])
+
+
 def _inject_tcp_transport(parsed: dict):
     """Inject TCP transport config into a parsed FIPS config."""
     transports = parsed.setdefault("transports", {})
@@ -124,6 +212,7 @@ def generate_node_config(
     outbound_peers: list[str],
     fips_overrides: dict | None = None,
     ephemeral: bool = False,
+    transport_overrides: dict | None = None,
 ) -> str:
     """Generate a complete FIPS config YAML for one node.
 
@@ -152,9 +241,13 @@ def generate_node_config(
     eth_ifaces = topology.ethernet_interfaces(node_id)
     has_tcp = bool(topology.tcp_peers(node_id))
     has_udp = _has_transport_peers(topology, node_id, "udp")
+    has_bound = bool(topology.veth_links(node_id))
 
     # Inject non-UDP transport configs and handle pure-transport nodes
-    needs_yaml_rewrite = eth_ifaces or has_tcp or not has_udp or fips_overrides
+    needs_yaml_rewrite = (
+        eth_ifaces or has_tcp or has_bound or not has_udp or fips_overrides
+        or transport_overrides
+    )
 
     if needs_yaml_rewrite:
         parsed = yaml.safe_load(config)
@@ -164,10 +257,14 @@ def generate_node_config(
             _inject_ethernet_transports(parsed, eth_ifaces)
         if has_tcp:
             _inject_tcp_transport(parsed)
-        if not has_udp:
+        if has_bound:
+            _bindudp(parsed, topology, node_id, has_udp)
+        elif not has_udp:
             # No UDP edges: remove UDP transport
             transports = parsed.get("transports", {})
             transports.pop("udp", None)
+        if transport_overrides:
+            _override(parsed, topology, node_id, transport_overrides)
         config = yaml.dump(parsed, default_flow_style=False, sort_keys=False)
 
     return config
@@ -178,6 +275,8 @@ def _has_transport_peers(topology: SimTopology, node_id: str, transport: str) ->
     for peer_id in topology.nodes[node_id].peers:
         edge = (min(node_id, peer_id), max(node_id, peer_id))
         if topology.edge_transport.get(edge, "udp") == transport:
+            return True
+        if transport == "udp" and edge in topology.dual_edges:
             return True
     return False
 
@@ -197,6 +296,7 @@ def write_configs(
     output_dir: str,
     fips_overrides: dict | None = None,
     ephemeral_nodes: set[str] | None = None,
+    transport_overrides: dict | None = None,
 ):
     """Write all node configs and npubs.env to the output directory."""
     os.makedirs(output_dir, exist_ok=True)
@@ -207,6 +307,7 @@ def write_configs(
         config = generate_node_config(
             topology, node_id, outbound[node_id], fips_overrides,
             ephemeral=(node_id in ephemeral_nodes),
+            transport_overrides=transport_overrides,
         )
         path = os.path.join(output_dir, f"{node_id}.yaml")
         with open(path, "w") as f:

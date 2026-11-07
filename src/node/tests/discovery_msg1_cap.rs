@@ -58,7 +58,7 @@ async fn msg1s_of_one_discovery_attempt(config: Config, npub: String) -> usize {
         "control: the advert started one handshake"
     );
 
-    let start = Node::now_ms();
+    let start = Node::interval_ms();
     let mut count = 0;
     for s in 0..=29u64 {
         node.drive_peer_timers(start + s * 1_000).await;

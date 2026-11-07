@@ -104,6 +104,10 @@ jobs:
       # only pyyaml. Kept in step with ci-local.sh's run_chaos_schedule by hand.
       - name: Check the chaos draws do not depend on Python's hash seed
         run: python3 testing/check-chaos-schedule.py
+      # Hermetic: planted lines and results, no containers; needs only
+      # pyyaml. Kept in step with ci-local.sh's run_simassert by hand.
+      - name: Check the chaos path assertions against planted input
+        run: python3 testing/chaos/sim-assert-test.py
       - name: Check nothing resolves the shared mutable test image
         run: bash testing/check-image-scoping.sh
       - name: Check every action is pinned to a commit SHA
@@ -578,7 +582,11 @@ jobs:
       # runs at least once without it. This is the one place the slow suite
       # (the guard-switch meta-test) runs on every push; the other platforms'
       # jobs skip it. Mirrored in testing/ci-local.sh, where it runs with
-      # --slow-tests.
+      # --slow-tests. The settlement explorers against the deployed models
+      # and the candidate rules (the core's `slow-explorers` feature) are
+      # left to local CI and the internal builder, which run them under
+      # --slow-tests (the builder sets FIPS_CI_SLOW_TESTS=1); the
+      # --all-features clippy step lints them.
       - name: Run the no_std core's tests on their own, with its slow suite
         run: cargo test -p fips-core --features slow-tests
 
@@ -624,7 +632,7 @@ jobs:
             exit 1
           fi
           echo "running $BIN as root"
-          sudo -E env FIPS_TEST_PRIVILEGED=1 "$BIN" transport::ethernet --test-threads=1 \
+          sudo -E env FIPS_TEST_PRIVILEGED=1 "$BIN" transport::ethernet transport::sockbuf --test-threads=1 \
             | tee "$RUNNER_TEMP/privileged-tests.log"
           grep -qE '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/privileged-tests.log"
 
@@ -1155,6 +1163,30 @@ jobs:
           - suite: ethernet-churn
             type: chaos
             scenario: ethernet-churn
+          - suite: dual-path-flap
+            type: chaos
+            scenario: dual-path-flap
+          - suite: dual-udp-flap
+            type: chaos
+            scenario: dual-udp-flap
+          - suite: dual-path-carrier
+            type: chaos
+            scenario: dual-path-carrier
+          - suite: forward-only
+            type: chaos
+            scenario: forward-only
+          - suite: loaded-standby
+            type: chaos
+            scenario: loaded-standby
+          - suite: two-bound-udp
+            type: chaos
+            scenario: two-bound-udp
+          - suite: two-bound-udp-bulk
+            type: chaos
+            scenario: two-bound-udp-bulk
+          - suite: steady-dual-path
+            type: chaos
+            scenario: steady-dual-path
           - suite: tcp-mesh
             type: chaos
             scenario: tcp-mesh

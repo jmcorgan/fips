@@ -35,6 +35,30 @@ use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, Transpor
 use crate::utils::index::SessionIndex;
 use alloc::vec::Vec;
 
+/// One handshake event's time on the two clocks a leg keeps: the wall clock,
+/// for the start and idle times operators are shown, and the caller's
+/// interval clock, a monotonic reading, for the handshake timeout. The two
+/// are taken together, at the same event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegStamp {
+    /// Unix time in milliseconds.
+    pub wall_ms: u64,
+    /// Milliseconds on the caller's interval clock.
+    pub interval_ms: u64,
+}
+
+impl LegStamp {
+    /// A stamp reading `ms` on both clocks, for a test that cares about one
+    /// of them only.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn at(ms: u64) -> Self {
+        Self {
+            wall_ms: ms,
+            interval_ms: ms,
+        }
+    }
+}
+
 /// Pure, runtime-agnostic bookkeeping for a connection in the handshake phase.
 ///
 /// Owns every non-crypto field of the handshake-phase connection. The Noise
@@ -75,8 +99,13 @@ pub struct ConnectionState {
     /// When the connection attempt started (Unix milliseconds).
     started_at: u64,
 
-    /// When the last handshake message was sent/received.
+    /// When the last handshake message was sent/received (Unix
+    /// milliseconds).
     last_activity: u64,
+
+    /// When the last handshake message was sent or received, on the
+    /// caller's interval clock. The handshake timeout reads this.
+    active_at: u64,
 
     // === Statistics ===
     /// Link statistics during handshake.
@@ -127,18 +156,15 @@ impl ConnectionState {
     /// Create the pure state for a new outbound connection (we initiate).
     ///
     /// For outbound, we know who we're trying to reach from configuration.
-    pub fn outbound(
-        link_id: LinkId,
-        expected_identity: PeerIdentity,
-        current_time_ms: u64,
-    ) -> Self {
+    pub fn outbound(link_id: LinkId, expected_identity: PeerIdentity, at: LegStamp) -> Self {
         Self {
             link_id,
             direction: LinkDirection::Outbound,
             expected_identity: Some(expected_identity),
             dialed_identity: Some(expected_identity),
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
+            started_at: at.wall_ms,
+            last_activity: at.wall_ms,
+            active_at: at.interval_ms,
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -158,14 +184,15 @@ impl ConnectionState {
     /// Used for anonymous discovery on shared-media transports (Ethernet, BLE)
     /// where the beacon doesn't carry identity. The peer's identity is learned
     /// from XX msg2 during the handshake.
-    pub fn outbound_anonymous(link_id: LinkId, current_time_ms: u64) -> Self {
+    pub fn outbound_anonymous(link_id: LinkId, at: LegStamp) -> Self {
         Self {
             link_id,
             direction: LinkDirection::Outbound,
             expected_identity: None,
             dialed_identity: None,
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
+            started_at: at.wall_ms,
+            last_activity: at.wall_ms,
+            active_at: at.interval_ms,
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -183,14 +210,15 @@ impl ConnectionState {
     ///
     /// For inbound, we don't know who they are until we decrypt their identity
     /// from Noise message 1.
-    pub fn inbound(link_id: LinkId, current_time_ms: u64) -> Self {
+    pub fn inbound(link_id: LinkId, at: LegStamp) -> Self {
         Self {
             link_id,
             direction: LinkDirection::Inbound,
             expected_identity: None,
             dialed_identity: None,
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
+            started_at: at.wall_ms,
+            last_activity: at.wall_ms,
+            active_at: at.interval_ms,
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -212,15 +240,16 @@ impl ConnectionState {
         link_id: LinkId,
         transport_id: TransportId,
         source_addr: TransportAddr,
-        current_time_ms: u64,
+        at: LegStamp,
     ) -> Self {
         Self {
             link_id,
             direction: LinkDirection::Inbound,
             expected_identity: None,
             dialed_identity: None,
-            started_at: current_time_ms,
-            last_activity: current_time_ms,
+            started_at: at.wall_ms,
+            last_activity: at.wall_ms,
+            active_at: at.interval_ms,
             link_stats: LinkStats::new(),
             our_index: None,
             their_index: None,
@@ -276,9 +305,14 @@ impl ConnectionState {
         self.started_at
     }
 
-    /// When the last activity occurred.
+    /// When the last activity occurred (Unix milliseconds).
     pub fn last_activity(&self) -> u64 {
         self.last_activity
+    }
+
+    /// When the last activity occurred, on the caller's interval clock.
+    pub fn active_at(&self) -> u64 {
+        self.active_at
     }
 
     /// Connection duration so far.
@@ -287,9 +321,10 @@ impl ConnectionState {
         current_time_ms.saturating_sub(self.started_at)
     }
 
-    /// Time since last activity.
-    pub fn idle_time(&self, current_time_ms: u64) -> u64 {
-        current_time_ms.saturating_sub(self.last_activity)
+    /// Time since last activity, at `interval_now`, a reading of the
+    /// caller's interval clock.
+    pub fn idle_time(&self, interval_now: u64) -> u64 {
+        interval_now.saturating_sub(self.active_at)
     }
 
     /// Get link statistics.
@@ -427,14 +462,16 @@ impl ConnectionState {
         self.started_at = started_at_ms;
     }
 
-    /// Update last activity timestamp.
-    pub fn touch(&mut self, current_time_ms: u64) {
-        self.last_activity = current_time_ms;
+    /// Record handshake activity at `at`, on both clocks.
+    pub fn touch(&mut self, at: LegStamp) {
+        self.last_activity = at.wall_ms;
+        self.active_at = at.interval_ms;
     }
 
-    /// Check if the connection has timed out.
-    pub fn is_timed_out(&self, current_time_ms: u64, timeout_ms: u64) -> bool {
-        self.idle_time(current_time_ms) > timeout_ms
+    /// Whether the connection has been idle longer than `timeout_ms` at
+    /// `interval_now`, a reading of the caller's interval clock.
+    pub fn is_timed_out(&self, interval_now: u64, timeout_ms: u64) -> bool {
+        self.idle_time(interval_now) > timeout_ms
     }
 }
 

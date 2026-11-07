@@ -8,3 +8,6 @@ generated-configs/
 
 # Netem stress-loop artifacts (interop-stress.sh)
 .stress-runs/
+
+# Per-run directories of named runs (FIPS_INTEROP_NAME; names.sh)
+runs/

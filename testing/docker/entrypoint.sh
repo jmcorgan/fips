@@ -3,7 +3,8 @@
 #
 # Mode is selected via FIPS_TEST_MODE environment variable:
 #   default        — dnsmasq + sshd + iperf3 + http server + fips
-#   chaos          — above + TCP ECN + ethernet interface wait
+#   chaos          — above + TCP ECN + ethernet interface wait + a second
+#                    iperf3 server (port 5202) for UDP streams
 #   sidecar        — generate config from env + iptables isolation + fips
 #   tor-socks5     — dnsmasq + sshd + fips (tor daemon is separate)
 #   tor-directory  — dnsmasq + tor + wait for .onion hostname + fips
@@ -23,47 +24,90 @@ start_dnsmasq() {
 
 start_services() {
     /usr/sbin/sshd
-    iperf3 -s -D
+    # --json so a client asking for --get-server-output gets the receiver's
+    # per-second intervals as JSON (the chaos stall check reads them).
+    iperf3 -s -J -D
     python3 -m http.server 8000 -d /root -b :: &>/dev/null &
 }
 
 # ── Chaos: TCP ECN + ethernet wait ──────────────────────────────────────
+
+start_udpserver() {
+    # A second iperf3 server, for the constant-rate UDP stream the chaos
+    # traffic generator can run beside a TCP session (traffic.udp_mbps):
+    # one server runs one test at a time.
+    iperf3 -s -J -p 5202 -D
+}
+
+# The chaos harness writes this container's boot id (below) to VETH_READY
+# when it has finished setting up the container's veths, after the first
+# start and after every restart. The file outlives a restart, so the id is
+# what tells this start's word from an earlier one's.
+VETH_READY=/tmp/fips-veth-ready
+IFACE_WAIT_SECS=600
+
+# This start of the container: PID 1's start time, in clock ticks since the
+# host booted (field 22 of /proc/1/stat). The harness reads the same field.
+bootid() {
+    awk '{print $22}' /proc/1/stat
+}
 
 enable_ecn() {
     sysctl -w net.ipv4.tcp_ecn=1 >/dev/null 2>&1 || true
 }
 
 wait_for_ethernet() {
-    # If config references ethernet transports, wait for interfaces to appear.
-    # Veth pairs are created from the host after the container starts.
+    # If config binds any transport to an interface (Ethernet, or a UDP
+    # instance with `interface:`), wait for those interfaces to be up. Veth
+    # pairs are created from the host after the container starts, and a UDP
+    # instance bound to an interface that is not there yet fails to start.
+    #
+    # Ready means `ip link show dev <name> up` lists it, not that
+    # /sys/class/net/<name> exists. The harness renames a veth end to its
+    # final name, and sysfs shows the new name several milliseconds before
+    # the kernel can bind a socket to it by that name (SO_BINDTODEVICE gets
+    # ENODEV meanwhile); `ip` looks the name up as the bind does. The
+    # harness sets the interface up last, after the rename and the address.
+    #
+    # The wait ends early when the harness says it has finished with this
+    # container's veths (VETH_READY, above), since an interface still
+    # missing then is not coming: a restored node whose neighbour churn has
+    # stopped. It has no fixed bound tied to how long setup takes, because
+    # setup is a run of docker calls whose time follows the host's load
+    # (37 to 41 s for one pair has been seen against the 30 s this wait
+    # used to allow). IFACE_WAIT_SECS is a backstop for a harness that
+    # never says, not a bound on setup.
     local eth_ifaces=""
-    if grep -q 'ethernet:' "$CONFIG" 2>/dev/null; then
-        eth_ifaces=$(grep '^\s*interface:' "$CONFIG" \
-            | sed 's/.*interface:\s*//' \
-            | tr -d ' ' || true)
-    fi
+    eth_ifaces=$(grep '^\s*interface:' "$CONFIG" 2>/dev/null \
+        | sed 's/.*interface:\s*//' \
+        | tr -d ' "' || true)
 
     if [ -n "$eth_ifaces" ]; then
-        echo "Waiting for Ethernet interfaces: $eth_ifaces"
-        local deadline=$((SECONDS + 30))
-        local all_found=false
-        while [ $SECONDS -lt $deadline ]; do
-            all_found=true
+        echo "Waiting for interfaces to be up: $eth_ifaces"
+        local boot missing iface
+        boot=$(bootid)
+        local deadline=$((SECONDS + IFACE_WAIT_SECS))
+        while true; do
+            missing=""
             for iface in $eth_ifaces; do
-                if [ ! -e "/sys/class/net/$iface" ]; then
-                    all_found=false
-                    break
+                if [ -z "$(ip -o link show dev "$iface" up 2>/dev/null)" ]; then
+                    missing="$missing $iface"
                 fi
             done
-            if $all_found; then
-                echo "All Ethernet interfaces ready"
-                break
+            if [ -z "$missing" ]; then
+                echo "All interfaces up after ${SECONDS}s"
+                return 0
+            fi
+            if [ "$(cat "$VETH_READY" 2>/dev/null)" = "$boot" ]; then
+                echo "Veth setup finished with interfaces not up:$missing"
+                return 0
+            fi
+            if [ $SECONDS -ge $deadline ]; then
+                echo "WARNING: Timed out waiting for interfaces to be up:$missing"
+                return 0
             fi
             sleep 0.2
         done
-        if ! $all_found; then
-            echo "WARNING: Timed out waiting for Ethernet interfaces"
-        fi
     fi
 }
 
@@ -259,6 +303,7 @@ case "$MODE" in
         enable_ecn
         start_dnsmasq
         start_services
+        start_udpserver
         wait_for_ethernet
         exec fips --config "$CONFIG"
         ;;

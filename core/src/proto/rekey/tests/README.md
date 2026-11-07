@@ -44,10 +44,12 @@ sleep.
     thread's stub sessions failed to open, which shows the order epochs
     were tried in.
 - `fmp.rs`: the two-message tables: trigger, attempt and ladder, every
-  IK msg1 and msg2 cell, the poll cutover, adoption by frame, the drain,
-  restart in a msg2, decrypt workers, the counter limits, the abandon
-  backoff, the record, a cross-connection move and `close` in every
-  cycle state.
+  IK msg1 and msg2 cell, the answer's route with arrival replies on and
+  off (a msg1 accepted off an unreachable link is answered on the link,
+  one on the link on its arrival path, and a resend follows the first
+  answer), the poll cutover, adoption by frame, the drain, restart in a
+  msg2, decrypt workers, the counter limits, the abandon backoff, the
+  record, a cross-connection move and `close` in every cycle state.
 - `fsp.rs`: the three-message tables: setups, acks and the msg3
   dispatcher, probes and the confirmation deadline, the assumed cutover
   and its revert, prompts answering probes, Karn's rule, the silence

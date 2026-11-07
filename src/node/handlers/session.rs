@@ -64,21 +64,16 @@ use tracing::{debug, info, trace, warn};
 pub(in crate::node) const PATH_MTU_RELEASE_MIN_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(1000);
 
-/// Bytes the link layer adds to an encoded `SessionDatagram` on its way to the
-/// wire: the established FMP header, the 4-byte session-relative timestamp and
-/// the AEAD tag. Mirrors the buffer `send_encrypted_link_message_with_ce`
-/// builds.
+/// Wire size of an encoded `SessionDatagram` of `encoded_len` bytes: the
+/// datagram is a link message, so the link layer adds the established frame's
+/// overhead around it, as the buffer `send_encrypted_link_message_with_ce`
+/// builds does.
 ///
-/// Spelled out in full rather than through the `crate::proto::fmp::wire`
-/// import above, which is `#[cfg(unix)]`. This constant feeds `link_wire_len`,
-/// whose caller `send_session_datagram` is compiled on every platform, so
-/// taking the name from that import fails to build on Windows.
-const LINK_FRAME_OVERHEAD: usize =
-    crate::proto::fmp::wire::ESTABLISHED_HEADER_SIZE + 4 + crate::noise::TAG_SIZE;
-
-/// Wire size of an encoded `SessionDatagram` of `encoded_len` bytes.
+/// The constant is named by its full path rather than through the
+/// `crate::proto::fmp::wire` import above, which is `#[cfg(unix)]`: the caller
+/// `send_session_datagram` is compiled on every platform.
 fn link_wire_len(encoded_len: usize) -> usize {
-    encoded_len + LINK_FRAME_OVERHEAD
+    encoded_len + crate::proto::fmp::wire::FRAME_OVERHEAD
 }
 
 /// Divisor giving the share of the session table that unauthenticated
@@ -2857,6 +2852,7 @@ impl Node {
             }),
             socket,
             dest_addr: socket_addr,
+            transport: transport_id,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             connected_socket,
             stats,
@@ -3126,6 +3122,22 @@ impl Node {
     /// Now on the session table's clock, [`SessionClock`].
     pub(crate) fn session_now() -> SessionInstant {
         SessionClock::default().now()
+    }
+
+    /// Now on the clock link handshake intervals are measured on: the
+    /// process's monotonic clock, in milliseconds (`crate::time::mono_ms`).
+    /// A step of the system clock does not move it.
+    pub(in crate::node) fn interval_ms() -> u64 {
+        crate::time::mono_ms()
+    }
+
+    /// Now on both clocks a handshake leg keeps, read together: the wall
+    /// clock for what operators are shown, the interval clock for timeouts.
+    pub(in crate::node) fn leg_stamp() -> crate::proto::fmp::LegStamp {
+        crate::proto::fmp::LegStamp {
+            wall_ms: Self::now_ms(),
+            interval_ms: Self::interval_ms(),
+        }
     }
 
     /// The parameters of this node's session rekey machines.

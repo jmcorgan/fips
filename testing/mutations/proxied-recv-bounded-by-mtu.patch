@@ -1,0 +1,165 @@
+diff --git a/src/transport/nym/mod.rs b/src/transport/nym/mod.rs
+index c7d27aa9..08ee86c6 100644
+--- a/src/transport/nym/mod.rs
++++ b/src/transport/nym/mod.rs
+@@ -426,6 +426,7 @@ impl NymTransport {
+                 id,
+                 packet_tx,
+                 pool,
++                mtu,
+                 recv_stats,
+             )
+             .await;
+@@ -620,6 +621,7 @@ impl NymTransport {
+                 id,
+                 packet_tx,
+                 pool,
++                mtu,
+                 recv_stats,
+             )
+             .await;
+@@ -814,6 +816,7 @@ async fn nym_receive_loop(
+     id: ConnId,
+     packet_tx: PacketTx,
+     pool: ProxiedPool<()>,
++    mtu: u16,
+     stats: Arc<NymStats>,
+ ) {
+     proxied_receive_loop(
+@@ -823,6 +826,7 @@ async fn nym_receive_loop(
+         id,
+         packet_tx,
+         pool,
++        mtu,
+         stats,
+         "Nym",
+         None,
+diff --git a/src/transport/socks5/pool.rs b/src/transport/socks5/pool.rs
+index 3126b420..c65bf3bd 100644
+--- a/src/transport/socks5/pool.rs
++++ b/src/transport/socks5/pool.rs
+@@ -19,7 +19,7 @@ use tracing::{debug, trace};
+ 
+ use tokio::io::AsyncWriteExt;
+ 
+-use crate::transport::framing::{RECV_CEILING, read_fmp_packet};
++use crate::transport::framing::read_fmp_packet;
+ use crate::transport::stream::{ConnId, PooledConn, remove_own};
+ use crate::transport::tcp::InboundDeadline;
+ use crate::transport::{
+@@ -279,11 +279,6 @@ pub(crate) async fn proxied_send_loop<S: ProxiedStats, M>(
+ /// per-transport teardown accounting. The `label` is the in-loop log word
+ /// ("Nym" / "Tor").
+ ///
+-/// Every frame is read up to `RECV_CEILING`, whatever the local `mtu`, as
+-/// the TCP receive loop reads: nothing tells a sender its peer's `mtu`, so a
+-/// peer configured higher sends frames above it, and bounding receives by
+-/// the local value would drop the connection on the first of them.
+-///
+ /// Teardown/cleanup contract (reproduced exactly to stay behavior-neutral):
+ /// the pool entry is removed, and `on_remove` fires **only** when the removal
+ /// returned `Some`, taking the metadata from the removed entry, and after the
+@@ -322,6 +317,7 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
+     id: ConnId,
+     packet_tx: PacketTx,
+     pool: ProxiedPool<M>,
++    mtu: u16,
+     stats: Arc<S>,
+     label: &'static str,
+     deadline: Option<InboundDeadline>,
+@@ -352,9 +348,7 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
+                 // as it keeps the socket open.
+                 Some(d) => {
+                     let limit = d.for_read(first);
+-                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, RECV_CEILING))
+-                        .await
+-                    {
++                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, mtu)).await {
+                         Ok(result) => result,
+                         Err(_) => {
+                             // Not a recv error: `record_recv_error` means framing
+@@ -372,7 +366,7 @@ pub(crate) async fn proxied_receive_loop<S: ProxiedStats, M>(
+                         }
+                     }
+                 }
+-                None => read_fmp_packet(&mut reader, RECV_CEILING).await,
++                None => read_fmp_packet(&mut reader, mtu).await,
+             };
+             first = false;
+ 
+@@ -581,6 +575,7 @@ mod tests {
+                     id,
+                     packet_tx,
+                     pool,
++                    1400,
+                     stats,
+                     "Test",
+                     None,
+@@ -672,6 +667,7 @@ mod tests {
+             next_conn_id(),
+             packet_tx,
+             pool.clone(),
++            1400,
+             stats.clone(),
+             "Test",
+             None,
+diff --git a/src/transport/tor/mod.rs b/src/transport/tor/mod.rs
+index 3c755ab7..1bbff133 100644
+--- a/src/transport/tor/mod.rs
++++ b/src/transport/tor/mod.rs
+@@ -866,6 +866,7 @@ impl TorTransport {
+                 id,
+                 packet_tx,
+                 pool,
++                mtu,
+                 recv_stats,
+                 Direction::Outbound,
+                 // An outbound connection holds no capped inbound slot and is
+@@ -1081,6 +1082,7 @@ impl TorTransport {
+                 id,
+                 packet_tx,
+                 pool,
++                mtu,
+                 recv_stats,
+                 Direction::Outbound,
+                 // An outbound connection holds no capped inbound slot and is
+@@ -1266,6 +1268,7 @@ async fn tor_receive_loop(
+     id: ConnId,
+     packet_tx: PacketTx,
+     pool: ProxiedPool<Direction>,
++    mtu: u16,
+     stats: Arc<TorStats>,
+     direction: Direction,
+     deadline: Option<InboundDeadline>,
+@@ -1278,6 +1281,7 @@ async fn tor_receive_loop(
+         id,
+         packet_tx,
+         pool,
++        mtu,
+         stats,
+         "Tor",
+         deadline,
+@@ -1413,6 +1417,7 @@ async fn tor_accept_loop(
+                 id,
+                 recv_tx,
+                 recv_pool,
++                mtu,
+                 recv_stats,
+                 Direction::Inbound,
+                 Some(deadline),
+@@ -2358,6 +2363,7 @@ mod tests {
+             id,
+             tx,
+             pool.clone(),
++            1400,
+             stats.clone(),
+             Direction::Inbound,
+             Some(InboundDeadline {
+@@ -2416,6 +2422,7 @@ mod tests {
+                 id,
+                 tx,
+                 recv_pool,
++                1400,
+                 recv_stats,
+                 Direction::Inbound,
+                 Some(InboundDeadline {

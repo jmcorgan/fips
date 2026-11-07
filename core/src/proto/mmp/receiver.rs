@@ -166,10 +166,10 @@ pub struct ReceiverState {
     ecn_ce_count: u32,
 
     // --- Timestamp echo ---
-    /// Sender timestamp from the most recent frame (for echo).
+    /// Sender timestamp from the most recent sampled frame (for echo).
     last_sender_timestamp: u32,
-    /// Local time (injected `u64` ms) when the most recent frame was received
-    /// (for dwell / jitter computation).
+    /// Local time (injected `u64` ms) when the most recent sampled frame was
+    /// received (for dwell / jitter computation).
     last_recv_ms: Option<u64>,
 
     // --- Rekey grace ---
@@ -244,9 +244,11 @@ impl ReceiverState {
         // Keep last_report_ms, report_interval_ms (report scheduling)
     }
 
-    /// Record a received frame from this peer.
+    /// Record a received frame from this peer, sampling its timing.
     ///
     /// Called on the RX path after AEAD decryption, before message dispatch.
+    /// The same as [`record_frame`](Self::record_frame) with the frame
+    /// sampled, which every frame of a link of one path is.
     ///
     /// - `counter`: AEAD counter from outer header
     /// - `sender_timestamp_ms`: session-relative timestamp from inner header (ms)
@@ -261,6 +263,41 @@ impl ReceiverState {
         ce_flag: bool,
         now_ms: u64,
     ) {
+        self.record_frame(counter, sender_timestamp_ms, bytes, ce_flag, now_ms, true);
+    }
+
+    /// Record a received frame from this peer, and sample its timing only
+    /// when `sampled`.
+    ///
+    /// Every frame is counted: packets and bytes, reordering, loss bursts
+    /// and ECN describe the link, whichever path carried the frame. Only a
+    /// sampled frame feeds jitter, the one-way-delay trend and the
+    /// timestamp echo. On a link of several paths a frame is sampled only
+    /// when it arrived on the peer's active path (multipath draft Section
+    /// 5.12), because a transit difference taken across two paths measures
+    /// the paths' difference, not the queue, and an echo of a standby
+    /// probe would hand the peer a round trip of that standby. The trend
+    /// follows the same flag, as a local choice: its delay samples from
+    /// several paths would mix their delays, and it reads the receive
+    /// instant the echo keeps.
+    pub fn record_frame(
+        &mut self,
+        counter: u64,
+        sender_timestamp_ms: u32,
+        bytes: usize,
+        ce_flag: bool,
+        now_ms: u64,
+        sampled: bool,
+    ) {
+        self.count(counter, bytes, ce_flag);
+        if sampled {
+            self.sample(sender_timestamp_ms, now_ms);
+        }
+    }
+
+    /// The counting half of a frame: interval and cumulative counts,
+    /// reordering, loss bursts and ECN.
+    fn count(&mut self, counter: u64, bytes: usize, ce_flag: bool) {
         self.interval_has_data = true;
         self.cumulative_packets_recv += 1;
         self.cumulative_bytes_recv += bytes as u64;
@@ -281,7 +318,11 @@ impl ReceiverState {
         if ce_flag {
             self.ecn_ce_count = self.ecn_ce_count.saturating_add(1);
         }
+    }
 
+    /// The sampling half of a frame: jitter, the one-way-delay trend and
+    /// the state the timestamp echo reads.
+    fn sample(&mut self, sender_timestamp_ms: u32, now_ms: u64) {
         // Jitter: compute transit time delta
         // Transit = recv_local - sender_timestamp (in µs for precision)
         // We use the injected monotonic ms clock for the local reference.
@@ -426,8 +467,9 @@ impl ReceiverState {
         self.report_interval_ms
     }
 
-    /// Local monotonic time (injected `u64` ms) of the most recent received
-    /// frame, or `None` if none has been received.
+    /// Local monotonic time (injected `u64` ms) of the most recent sampled
+    /// frame, or `None` if none has been received. On a link of one path
+    /// that is the most recent frame.
     pub fn last_recv_ms(&self) -> Option<u64> {
         self.last_recv_ms
     }

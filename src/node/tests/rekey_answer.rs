@@ -61,13 +61,9 @@ async fn peer_rekey_is_answered_and_drains_complete() {
         !p.is_draining() && p.previous_session().is_none(),
         "A's rekey tick must complete the drain once its window has passed"
     );
-    let tid = p.transport_id().unwrap();
     let old = old_index.expect("precondition: A had an index before the rekey");
     assert!(
-        !nodes[1]
-            .node
-            .peers_by_index
-            .contains_key(&(tid, old.as_u32())),
+        !nodes[1].node.peers_by_index.contains_key(&old.as_u32()),
         "completing the drain must release the replaced session's index"
     );
     cleanup_nodes(&mut nodes).await;

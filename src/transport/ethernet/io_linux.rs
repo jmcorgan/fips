@@ -1,7 +1,9 @@
 //! AF_PACKET socket creation, binding, and ioctl helpers (Linux).
 
 use crate::transport::TransportError;
+use crate::transport::sockbuf::{self, Buffer};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use tracing::warn;
 
 /// Wrapper around an AF_PACKET SOCK_DGRAM file descriptor.
 ///
@@ -116,45 +118,62 @@ impl PacketSocket {
     }
 
     /// Set the socket receive buffer size.
+    ///
+    /// Forced past `net.core.rmem_max` where the process may: the kernel's
+    /// default ceiling holds a few milliseconds of frames at the rates a
+    /// cable carries, and a full buffer drops the rest before the node reads
+    /// them. Warns when the kernel grants less than asked, and fails only
+    /// when no size could be set at all.
     pub fn set_recv_buffer_size(&self, size: usize) -> Result<(), TransportError> {
-        let size = size as libc::c_int;
-        let ret = unsafe {
-            libc::setsockopt(
-                self.fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &size as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if ret < 0 {
-            return Err(TransportError::StartFailed(format!(
-                "setsockopt(SO_RCVBUF) failed: {}",
-                std::io::Error::last_os_error()
-            )));
+        self.set_buffer(Buffer::Recv, size, "net.core.rmem_max")
+    }
+
+    /// Set the socket send buffer size, as [`Self::set_recv_buffer_size`]
+    /// does the receive buffer.
+    pub fn set_send_buffer_size(&self, size: usize) -> Result<(), TransportError> {
+        self.set_buffer(Buffer::Send, size, "net.core.wmem_max")
+    }
+
+    /// Size one buffer through the shared helper and warn when clamped.
+    fn set_buffer(&self, which: Buffer, size: usize, ceiling: &str) -> Result<(), TransportError> {
+        let granted = sockbuf::set_buffer(self.fd, which, size).map_err(|e| {
+            TransportError::StartFailed(format!("setsockopt({which:?} buffer) failed: {e}"))
+        })?;
+        if granted.clamped() {
+            warn!(
+                buffer = ?which,
+                requested = granted.requested,
+                actual = granted.actual,
+                "Ethernet socket buffer clamped by kernel (grant CAP_NET_ADMIN \
+                 or increase {ceiling})"
+            );
         }
         Ok(())
     }
 
-    /// Set the socket send buffer size.
-    pub fn set_send_buffer_size(&self, size: usize) -> Result<(), TransportError> {
-        let size = size as libc::c_int;
+    /// Take the count of frames the kernel dropped at this socket since the
+    /// previous call, because its receive buffer was full.
+    ///
+    /// `PACKET_STATISTICS` resets the kernel's counters on every read, so the
+    /// count belongs to whoever reads it. The transport reads it once per
+    /// congestion sample and adds it to its running total; a second reader
+    /// would take drops the first one never sees.
+    pub fn take_drops(&self) -> std::io::Result<u64> {
+        let mut stats: libc::tpacket_stats = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::tpacket_stats>() as libc::socklen_t;
         let ret = unsafe {
-            libc::setsockopt(
+            libc::getsockopt(
                 self.fd,
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &size as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                libc::SOL_PACKET,
+                libc::PACKET_STATISTICS,
+                &mut stats as *mut libc::tpacket_stats as *mut libc::c_void,
+                &mut len,
             )
         };
         if ret < 0 {
-            return Err(TransportError::StartFailed(format!(
-                "setsockopt(SO_SNDBUF) failed: {}",
-                std::io::Error::last_os_error()
-            )));
+            return Err(std::io::Error::last_os_error());
         }
-        Ok(())
+        Ok(u64::from(stats.tp_drops))
     }
 
     /// Send a payload to a destination MAC address.
@@ -354,6 +373,10 @@ fn get_if_mtu(fd: RawFd, if_index: i32) -> Result<u16, TransportError> {
     let mtu = unsafe { ifr.ifr_ifru.ifru_mtu } as u16;
     Ok(mtu)
 }
+
+#[cfg(test)]
+#[path = "tests/io_linux.rs"]
+mod drop_tests;
 
 #[cfg(test)]
 mod tests {

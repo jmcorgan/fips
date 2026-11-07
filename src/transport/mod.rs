@@ -42,6 +42,11 @@ pub(crate) mod watcher;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod presence;
 
+/// Kernel socket buffer sizing for the transports that own a descriptor:
+/// forced past the `net.core` ceiling where the process may, plain otherwise.
+#[cfg(unix)]
+pub(crate) mod sockbuf;
+
 #[cfg(ble_available)]
 pub mod ble;
 
@@ -66,6 +71,9 @@ use udp::UdpTransport;
 pub(crate) mod framing;
 pub(crate) mod stream;
 
+#[cfg(test)]
+#[path = "tests/conformance/mod.rs"]
+mod conformance;
 mod stats_common;
 pub(crate) use stats_common::PoolCounters;
 
@@ -225,6 +233,13 @@ pub enum TransportError {
     #[error("send failed: {0}")]
     SendFailed(String),
 
+    /// A send failed because the destination cannot be reached from here:
+    /// the network or the host is unreachable, or the interface is down.
+    /// It reads as [`Self::SendFailed`] does; the variant keeps the class
+    /// apart so a link's path machine can treat the path as unreachable.
+    #[error("send failed: {0}")]
+    Unreachable(String),
+
     #[error("receive failed: {0}")]
     RecvFailed(String),
 
@@ -285,6 +300,7 @@ impl TransportError {
             | Self::ShutdownFailed(_)
             | Self::LinkFailed(_)
             | Self::SendFailed(_)
+            | Self::Unreachable(_)
             | Self::RecvFailed(_)
             | Self::InvalidAddress(_)
             | Self::MtuExceeded { .. }
@@ -297,6 +313,57 @@ impl TransportError {
             | Self::NotSupported(_)
             | Self::Io(_) => false,
         }
+    }
+
+    /// Whether this failure says the destination cannot be reached from
+    /// this node: a transport's [`Self::Unreachable`], or an I/O error of
+    /// kind `NetworkUnreachable`, `HostUnreachable` or `NetworkDown`. UDP
+    /// over an interface that is administratively down fails with the
+    /// first, and an Ethernet transport's raw send with the third. A
+    /// connection-oriented transport that has no connection to the address
+    /// ([`Self::NotConnected`]) is not unreachable: the connection is gone,
+    /// not the route.
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Unreachable(_) => true,
+            Self::Io(e) => unreachable_kind(e),
+            Self::NotStarted
+            | Self::AlreadyStarted
+            | Self::StartFailed(_)
+            | Self::InterfaceUnavailable { .. }
+            | Self::ShutdownFailed(_)
+            | Self::LinkFailed(_)
+            | Self::SendFailed(_)
+            | Self::RecvFailed(_)
+            | Self::InvalidAddress(_)
+            | Self::MtuExceeded { .. }
+            | Self::Timeout
+            | Self::ConnectionRefused
+            | Self::NotConnected
+            | Self::NotSupported(_) => false,
+        }
+    }
+}
+
+/// Whether `e` is of a kind that says the destination cannot be reached.
+pub(crate) fn unreachable_kind(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::NetworkDown
+    )
+}
+
+/// The error a transport's send reports for the I/O error `e`:
+/// [`TransportError::Unreachable`] when the destination cannot be reached
+/// from here, and [`TransportError::SendFailed`] otherwise, both with `e`'s
+/// text.
+pub(crate) fn send_error(e: std::io::Error) -> TransportError {
+    if unreachable_kind(&e) {
+        TransportError::Unreachable(e.to_string())
+    } else {
+        TransportError::SendFailed(e.to_string())
     }
 }
 
@@ -964,6 +1031,40 @@ impl TransportHandle {
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.name(),
             #[cfg(test)]
+            TransportHandle::Loopback(t) => t.name(),
+        }
+    }
+
+    /// This transport's configured part in a link's paths: its config's
+    /// `role`, and for the test loopback the role a test set, `normal` by
+    /// default.
+    pub fn role(&self) -> crate::config::TransportRole {
+        match self {
+            TransportHandle::Udp(t) => t.role(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(t) => t.role(),
+            TransportHandle::Tcp(t) => t.role(),
+            TransportHandle::Tor(t) => t.role(),
+            TransportHandle::Nym(t) => t.role(),
+            #[cfg(ble_available)]
+            TransportHandle::Ble(t) => t.role(),
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.role(),
+        }
+    }
+
+    /// The kind configured for this transport's paths: UDP's and TCP's
+    /// `kind`, and `None` for every other transport, whose medium fixes it.
+    pub fn kind(&self) -> Option<crate::config::PathKind> {
+        match self {
+            TransportHandle::Udp(t) => t.kind(),
+            TransportHandle::Tcp(t) => t.kind(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => None,
+            TransportHandle::Tor(_) | TransportHandle::Nym(_) => None,
+            #[cfg(ble_available)]
+            TransportHandle::Ble(_) => None,
+            #[cfg(test)]
             TransportHandle::Loopback(_) => None,
         }
     }
@@ -1092,6 +1193,17 @@ impl TransportHandle {
                     failed_attempts: state.attempts(),
                 })
             }
+            // A test's stand-in for an interface-bound transport, while it
+            // has set a carrier.
+            #[cfg(test)]
+            TransportHandle::Loopback(t) => t.carrier().map(|carrier| InterfacePresence {
+                presence: "present",
+                carrier,
+                policy: "required",
+                since_secs: 0,
+                binds: 1,
+                failed_attempts: 0,
+            }),
             _ => None,
         }
     }
@@ -1227,6 +1339,24 @@ impl TransportHandle {
         }
     }
 
+    /// Whether a connection to `addr` is already pooled. Changes nothing.
+    /// Connectionless transports have no connection to look up and report
+    /// true. A test hook: this line's node does not ask.
+    #[cfg(test)]
+    pub(crate) async fn has_connection(&self, addr: &TransportAddr) -> bool {
+        match self {
+            TransportHandle::Udp(_) => true,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            TransportHandle::Ethernet(_) => true,
+            TransportHandle::Tcp(t) => t.has_connection(addr).await,
+            TransportHandle::Tor(t) => t.has_connection(addr).await,
+            TransportHandle::Nym(t) => t.has_connection(addr).await,
+            #[cfg(ble_available)]
+            TransportHandle::Ble(t) => t.has_connection(addr).await,
+            TransportHandle::Loopback(_) => true,
+        }
+    }
+
     /// Query the state of a connection attempt to a remote address.
     ///
     /// For connectionless transports, always returns `ConnectionState::Connected`
@@ -1262,7 +1392,7 @@ impl TransportHandle {
             #[cfg(ble_available)]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
             #[cfg(test)]
-            TransportHandle::Loopback(_) => {} // connectionless no-op
+            TransportHandle::Loopback(t) => t.record_close(addr),
         }
     }
 
@@ -1357,7 +1487,7 @@ impl TransportHandle {
         match self {
             TransportHandle::Udp(t) => t.congestion(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            TransportHandle::Ethernet(_) => TransportCongestion::default(),
+            TransportHandle::Ethernet(t) => t.congestion(),
             TransportHandle::Tcp(_) => TransportCongestion::default(),
             TransportHandle::Tor(_) => TransportCongestion::default(),
             TransportHandle::Nym(_) => TransportCongestion::default(),
@@ -1497,6 +1627,10 @@ pub(crate) async fn resolve_socket_addrs(
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "tests/error.rs"]
+mod error_tests;
 
 #[cfg(test)]
 mod tests {

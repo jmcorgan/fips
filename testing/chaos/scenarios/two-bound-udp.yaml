@@ -1,0 +1,99 @@
+# Two interface-bound UDP instances at each end, on one subnet: answers
+# that cross instances
+#
+# Two nodes joined by one veth pair carrying two lanes: macvlan interfaces
+# on the pair, each its own interface, MAC and address on 10.222.0.0/24,
+# with an interface-bound UDP instance on each lane at each end, all on
+# port 2122. No bridge peer. The dialler (n01) lists every pair of its own
+# lane and the peer's lane, and a sentinel address on lane 0 that no host
+# answers.
+#
+# The trigger: an answer arriving on an instance other than its probe's.
+# Over point-to-point pairs it never does (seen on the development host);
+# on one segment it does when ARP binds an address to another lane's MAC.
+# The runner makes it deterministic: n02's neighbour entries bind each of
+# n01's lane addresses to the other lane's MAC, so every answer to a probe
+# from one of n01's lanes arrives on the other. A node must credit an
+# answer by the echoed path_id, not by the instance it arrived on, or it
+# marks the wrong path Live.
+#
+# The control is that a frame did arrive on a lane addressed to the other
+# lane's address at the dialler (`lanes.cross_arrival`). Then all four lane
+# pairs are Live there by 30 s after warmup (three created during the run
+# plus the link's original, `paths_live` with `configured`), none goes
+# Suspect afterwards, and the sentinel never goes Live (`lanes.stable`).
+#
+#   n01 vl0-n01 (10.222.0.1) --.            .-- vl0-n02 (10.222.0.2)
+#                                ===veth===
+#   n01 vl1-n01 (10.222.0.3) --'            '-- vl1-n02 (10.222.0.4)
+
+scenario:
+  name: "two-bound-udp"
+  seed: 42
+  duration_secs: 120
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, udp-veth, {lanes: 2}]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 0]
+    loss_pct: [0, 0]
+
+link_flaps:
+  enabled: false
+
+# Light traffic, capped at 8 Mbit/s (about 700 frames a second). Uncapped,
+# a session runs at over 1 Gbit/s, and then the dialler's crossed listen
+# socket overflows, so a lane path goes Suspect for load, not for the
+# crediting rule `stable` is there to test. two-bound-udp-bulk runs the same
+# lanes uncapped.
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 10, max: 20}
+  duration_secs: {min: 10, max: 15}
+  parallel_streams: 1
+  rate_mbps: 8
+
+node_churn:
+  enabled: false
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  lanes:
+    cross_arrival: true
+    stable: true
+  paths_live:
+    min: 4
+    configured: true
+    within_secs: 30
+
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug"
+  output_dir: "./sim-results"

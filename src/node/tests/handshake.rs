@@ -75,7 +75,7 @@ async fn test_two_node_handshake_udp() {
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     // Build wire msg1 and track in node state
@@ -152,9 +152,7 @@ async fn test_two_node_handshake_udp() {
         "Peer B on A should have our_index matching what we allocated"
     );
     assert!(
-        node_a
-            .peers_by_index
-            .contains_key(&(transport_id_a, our_index_a.as_u32())),
+        node_a.peers_by_index.contains_key(&our_index_a.as_u32()),
         "Node A peers_by_index should be populated"
     );
 
@@ -182,9 +180,7 @@ async fn test_two_node_handshake_udp() {
     );
     let our_index_b = peer_a_on_b.our_index().expect("B should have our_index");
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id_b, our_index_b.as_u32())),
+        node_b.peers_by_index.contains_key(&our_index_b.as_u32()),
         "Node B peers_by_index should be populated"
     );
 
@@ -329,7 +325,7 @@ async fn test_run_rx_loop_handshake() {
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
@@ -422,9 +418,7 @@ async fn test_run_rx_loop_handshake() {
         "A should know B's index"
     );
     assert!(
-        node_a
-            .peers_by_index
-            .contains_key(&(transport_id_a, our_index_a.as_u32())),
+        node_a.peers_by_index.contains_key(&our_index_a.as_u32()),
         "Node A peers_by_index should be populated"
     );
 
@@ -522,7 +516,7 @@ async fn test_cross_connection_both_initiate() {
         .peer_machines
         .get_mut(&link_id_a_out)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1_a = build_msg1(our_index_a, &noise_msg1_a);
@@ -560,7 +554,7 @@ async fn test_cross_connection_both_initiate() {
         .peer_machines
         .get_mut(&link_id_b_out)
         .unwrap()
-        .start_handshake(our_keypair_b, startup_epoch_b, 1000)
+        .start_handshake(our_keypair_b, startup_epoch_b, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1_b = build_msg1(our_index_b, &noise_msg1_b);
@@ -761,7 +755,7 @@ async fn test_stale_connection_cleanup() {
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, past_time_ms)
+        .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
         .unwrap();
 
     // Set up all the state that initiate_peer_connection would create
@@ -787,8 +781,11 @@ async fn test_stale_connection_cleanup() {
     );
     assert_eq!(node.index_allocator.count(), 1);
 
-    // Connection was created at time 1000ms. check_timeouts uses SystemTime::now(),
-    // which is far beyond the 30s timeout. The connection should be cleaned up.
+    // The leg's last activity was its msg1, just now. Once the handshake
+    // timeout has passed on the monotonic clock, the connection is cleaned
+    // up.
+    let timeout_ms = node.config().node.rate_limit.handshake_timeout_secs * 1000;
+    crate::time::advance(Duration::from_millis(timeout_ms + 1_000));
     node.check_timeouts().await;
 
     // Verify everything was cleaned up
@@ -846,7 +843,7 @@ async fn test_failed_connection_cleanup() {
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, now_ms)
+        .start_handshake(our_keypair, startup_epoch, Node::leg_stamp())
         .unwrap();
 
     let link = Link::connectionless(
@@ -873,7 +870,7 @@ async fn test_failed_connection_cleanup() {
         let alloc = &mut node.index_allocator;
         let actions = machine.step(
             crate::peer::machine::PeerEvent::HandshakeSendFailed,
-            now_ms,
+            Node::interval_ms(),
             alloc,
         );
         assert!(actions.is_empty());
@@ -920,7 +917,7 @@ async fn test_msg1_stored_for_resend() {
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), now_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), LegStamp::at(now_ms))
         .unwrap();
     let _ = conn.set_conn_our_index(our_lease);
     conn.set_conn_transport_id(transport_id);
@@ -952,7 +949,7 @@ async fn test_resend_scheduling() {
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let noise_msg1 = conn
-        .start_handshake(our_keypair, node.startup_epoch(), now_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), LegStamp::at(now_ms))
         .unwrap();
     conn.set_conn_source_addr(remote_addr.clone());
 
@@ -976,8 +973,11 @@ async fn test_resend_scheduling() {
     // which also carries the pending connection. Dial it to `SentMsg1`
     // (connectionless: no connect step) and arm its retransmit timer at
     // now + 1000ms, mirroring what a real dial arms.
-    let mut machine =
-        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), now_ms);
+    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+        link_id,
+        Some(peer_identity),
+        LegStamp::at(now_ms),
+    );
     let _ = machine.step(
         crate::peer::machine::PeerEvent::Dial {
             transport_id,
@@ -1037,7 +1037,7 @@ async fn test_handshake_timeout_drive() {
     let our_index = crate::utils::index::SessionIndex::new(our_lease.index());
     let our_keypair = node.identity().keypair();
     let _ = conn
-        .start_handshake(our_keypair, node.startup_epoch(), dial_ms)
+        .start_handshake(our_keypair, node.startup_epoch(), LegStamp::at(dial_ms))
         .unwrap();
     conn.set_conn_source_addr(remote_addr.clone());
 
@@ -1056,8 +1056,11 @@ async fn test_handshake_timeout_drive() {
 
     // Machine in SentMsg1, carrying the pending connection, with a
     // HandshakeTimeout timer armed at dial + 30s.
-    let mut machine =
-        crate::peer::machine::PeerMachine::new_outbound(link_id, Some(peer_identity), dial_ms);
+    let mut machine = crate::peer::machine::PeerMachine::new_outbound(
+        link_id,
+        Some(peer_identity),
+        LegStamp::at(dial_ms),
+    );
     let _ = machine.step(
         crate::peer::machine::PeerEvent::Dial {
             transport_id,
@@ -1101,7 +1104,8 @@ async fn test_handshake_timeout_drive() {
 /// Test that msg2 is stored on the control machine's carrier for responder resend.
 #[test]
 fn test_msg2_stored_on_connection() {
-    let mut machine = crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), 1000);
+    let mut machine =
+        crate::peer::machine::PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(1000));
 
     assert!(machine.conn_handshake_msg2().is_none());
 
@@ -1469,6 +1473,66 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
     assert!(!node.is_established_link_msg1(transport_id, &stranger_addr));
 }
 
+/// Only a peer's active path makes a msg1 from its pair an established
+/// link's: a held path still Probing, one Dead and never acked, and one acked
+/// but not active are each refused by the gate and drawn on the stranger
+/// bucket, as a pair the peer holds no path for is.
+#[tokio::test]
+async fn a_msg1_from_a_held_path_other_than_the_active_one_is_not_from_an_established_link() {
+    use crate::config::UdpConfig;
+    use crate::peer::{ActivePeer, Match};
+    use crate::transport::udp::UdpTransport;
+
+    let mut node = make_node();
+    let transport_id = TransportId::new(1);
+    let cfg = UdpConfig {
+        outbound_only: Some(true),
+        ..Default::default()
+    };
+    let (tx, _rx) = packet_channel(64);
+    let udp = UdpTransport::new(transport_id, None, cfg, tx);
+    node.transports
+        .insert(transport_id, TransportHandle::Udp(udp));
+
+    let peer_full = crate::Identity::generate();
+    let peer_identity = PeerIdentity::from_pubkey(peer_full.pubkey());
+    let peer_node_addr = *peer_identity.node_addr();
+    let mut peer = ActivePeer::new(peer_identity, node.allocate_link_id(), 1000);
+    let active = TransportAddr::from_string("100.64.0.5:2121");
+    let probing = TransportAddr::from_string("100.64.0.6:2121");
+    let dead = TransportAddr::from_string("100.64.0.7:2121");
+    let acked = TransportAddr::from_string("100.64.0.8:2121");
+    peer.set_current_addr(transport_id, active.clone());
+    for addr in [&probing, &dead, &acked] {
+        peer.admit_path(transport_id, addr.clone());
+    }
+    peer.kill_path(transport_id, &dead);
+    peer.ack_path(transport_id, &acked);
+    assert_eq!(peer.path_match(transport_id, &probing), Match::Unproven);
+    assert_eq!(peer.path_match(transport_id, &dead), Match::Unproven);
+    assert!(
+        matches!(
+            peer.path_match(transport_id, &acked),
+            Match::Proven { active: false, .. }
+        ),
+        "precondition: the acked path is proven and not active"
+    );
+    node.peers.insert(peer_node_addr, peer);
+
+    assert!(node.is_established_link_msg1(transport_id, &active));
+    assert!(node.should_admit_msg1(transport_id, &active));
+    for (name, addr) in [("probing", &probing), ("dead", &dead), ("acked", &acked)] {
+        assert!(
+            !node.is_established_link_msg1(transport_id, addr),
+            "a msg1 from the {name} path is not an established link's"
+        );
+        assert!(
+            !node.should_admit_msg1(transport_id, addr),
+            "a msg1 from the {name} path is not admitted past the gate"
+        );
+    }
+}
+
 /// `is_established_link_msg1` and `should_admit_msg1` are deliberately
 /// independent on this branch, and this asserts the three cases where they
 /// must disagree.
@@ -1750,7 +1814,7 @@ async fn drive_to_msg3(
         .peer_machines
         .get_mut(&link_id)
         .unwrap()
-        .start_handshake(our_keypair, startup_epoch, now_ms)
+        .start_handshake(our_keypair, startup_epoch, LegStamp::at(now_ms))
         .unwrap();
 
     let wire_msg1 = build_msg1(our_index, &noise_msg1);
@@ -2125,6 +2189,125 @@ async fn test_fresh_dial_crossing_our_rekey_converges() {
     #[cfg(debug_assertions)]
     initiator.node.debug_assert_peer_maps_coherent();
 
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// A crossed handshake the larger node resolves at msg3 starts its link again
+/// with a new original `path_id` at the same pair, and the path's count of
+/// failures carries over, as the resolution at msg2 does.
+#[tokio::test]
+async fn a_crossed_handshake_resolved_at_msg3_starts_the_link_with_a_new_bundle() {
+    let mut initiator = make_hs_node(Config::new()).await;
+    // The larger responder's inbound wins the tie-break, so it moves at msg3.
+    let mut responder = loop {
+        let cand = make_hs_node(Config::new()).await;
+        if cand.node.node_addr() > initiator.node.node_addr() {
+            break cand;
+        }
+    };
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    let a = *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let path_of = |n: &HsNode| {
+        let peer = n
+            .node
+            .get_peer(&a)
+            .expect("the responder holds the initiator");
+        let paths = peer.bundle().expect("a promoted peer has a bundle").paths();
+        assert_eq!(paths.len(), 1, "a link of one path");
+        let path = paths.get(0).unwrap();
+        (path.path_id(), path.live().fails(), peer.our_index())
+    };
+    {
+        let peer = responder.node.get_peer_mut(&a).unwrap();
+        let (tid, addr) = (
+            peer.transport_id().unwrap(),
+            peer.current_addr().unwrap().clone(),
+        );
+        let bundle = peer.bundle_mut().unwrap();
+        for _ in 0..3 {
+            bundle.charge(crate::peer::peer_now(), tid, &addr);
+        }
+    }
+    let (before, fails, index) = path_of(&responder);
+    assert_eq!(fails, 3, "precondition: three failures");
+
+    let fresh = drive_to_msg3(&mut initiator, &mut responder, 5000).await;
+    responder.node.handle_msg3(fresh).await;
+
+    let (after, fails, moved) = path_of(&responder);
+    assert_ne!(moved, index, "precondition: the link moved at msg3");
+    assert_ne!(after, before, "a new link's original path");
+    assert_eq!(fails, 3, "the failure count carried");
+    stop_hs(&mut initiator).await;
+    stop_hs(&mut responder).await;
+}
+
+/// A crossed handshake the larger node resolves at msg3 starts its path
+/// machine again with an empty candidate table; the initiator's configured
+/// second address is offered to the new machine at once, as at the
+/// resolution at msg2. Mutation: no renewal after the move at msg3.
+#[tokio::test]
+async fn a_crossed_handshake_resolved_at_msg3_offers_the_configured_addresses_again() {
+    use fips_core::proto::path::Source;
+
+    let mut initiator = make_hs_node(Config::new()).await;
+    let mut enabled = Config::new();
+    enabled.node.path.enabled = true;
+    // The larger responder's inbound wins the tie-break, so it moves at msg3.
+    let mut responder = loop {
+        let cand = make_hs_node(enabled.clone()).await;
+        if cand.node.node_addr() > initiator.node.node_addr() {
+            break cand;
+        }
+    };
+    // A second address of the initiator's, never dialled: the offer is
+    // what is checked, not a probe's answer.
+    let second = TransportAddr::from_string("127.0.0.1:9");
+    let peer = crate::config::PeerConfig {
+        npub: initiator.node.npub(),
+        alias: None,
+        addresses: vec![
+            crate::config::PeerAddress::new("udp", initiator.addr.to_string()),
+            crate::config::PeerAddress::new("udp", second.to_string()),
+        ],
+        connect_policy: crate::config::ConnectPolicy::Manual,
+        auto_reconnect: false,
+        via_nostr: false,
+    };
+    responder
+        .node
+        .update_peers(vec![peer])
+        .await
+        .expect("the peer list is accepted");
+    let a = *PeerIdentity::from_pubkey_full(initiator.node.identity().pubkey_full()).node_addr();
+    let tid = responder.transport_id;
+    let offered = |n: &HsNode| {
+        let peer = n
+            .node
+            .get_peer(&a)
+            .expect("the responder holds the initiator");
+        let bundle = peer.bundle().expect("a promoted peer has a bundle");
+        let held = bundle
+            .candidates()
+            .iter()
+            .find(|e| e.transport() == tid && *e.addr() == second)
+            .is_some_and(|e| e.sources().has(Source::Config));
+        (held, peer.our_index())
+    };
+
+    let msg3 = drive_to_msg3(&mut initiator, &mut responder, 1000).await;
+    responder.node.handle_msg3(msg3).await;
+    let (held, index) = offered(&responder);
+    assert!(held, "precondition: offered at promotion");
+
+    let fresh = drive_to_msg3(&mut initiator, &mut responder, 5000).await;
+    responder.node.handle_msg3(fresh).await;
+
+    let (held, moved) = offered(&responder);
+    assert_ne!(moved, index, "precondition: the link moved at msg3");
+    assert!(held, "the new machine holds the configured address");
     stop_hs(&mut initiator).await;
     stop_hs(&mut responder).await;
 }
@@ -2545,7 +2728,7 @@ async fn test_rekey_msg2_that_fails_to_authenticate_keeps_the_cycle() {
         initiator
             .node
             .peers_by_index
-            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
+            .contains_key(&rekey_index.as_u32()),
         "the kept rekey cycle keeps its dispatch entry"
     );
 
@@ -2649,7 +2832,7 @@ async fn test_rekey_msg2_with_a_corrupt_negotiation_payload_keeps_the_cycle() {
         initiator
             .node
             .peers_by_index
-            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
+            .contains_key(&rekey_index.as_u32()),
         "the kept rekey cycle keeps its dispatch entry"
     );
 
@@ -2723,7 +2906,7 @@ async fn test_rekey_msg2_matching_static_installs() {
         initiator
             .node
             .peers_by_index
-            .contains_key(&(initiator.transport_id, rekey_index.as_u32())),
+            .contains_key(&rekey_index.as_u32()),
         "the rekey index maps to the peer, awaiting K-bit cutover"
     );
     #[cfg(debug_assertions)]
@@ -2958,7 +3141,7 @@ async fn test_dial_msg2_foreign_static_reschedules_dial() {
         .rate_limit
         .handshake_timeout_secs
         * 1000;
-    let deadline = initiator.node.connection_last_activity(leg_link) + timeout_ms;
+    let deadline = initiator.node.peer_machines[&leg_link].conn_active_at() + timeout_ms;
     initiator.node.drive_peer_timers(deadline + 1).await;
 
     assert!(
@@ -3118,7 +3301,7 @@ async fn park_inbound_leg(
     let peer_b_identity = PeerIdentity::from_pubkey_full(node_b.identity().pubkey_full());
     let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
     let noise_msg1 = conn_a
-        .start_handshake(initiator_keypair, initiator_epoch, 1000)
+        .start_handshake(initiator_keypair, initiator_epoch, LegStamp::at(1000))
         .unwrap();
 
     node_b
@@ -3164,7 +3347,11 @@ fn answer_with_msg3(
         .to_vec();
     let msg2_header = Msg2Header::parse(&wire_msg2).unwrap();
     let (noise_msg3, _) = conn_a
-        .complete_handshake_accepting(msg2_header.noise_msg2(&wire_msg2), negotiation, 1100)
+        .complete_handshake_accepting(
+            msg2_header.noise_msg2(&wire_msg2),
+            negotiation,
+            LegStamp::at(1100),
+        )
         .unwrap();
     noise_msg3
 }
@@ -3338,9 +3525,7 @@ async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
         .expect("a promoted peer holds a session index");
     let victim_link = node_b.get_peer(&peer_addr).unwrap().link_id();
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id, victim_idx.as_u32())),
+        node_b.peers_by_index.contains_key(&victim_idx.as_u32()),
         "control: the live session index is registered for dispatch"
     );
 
@@ -3373,9 +3558,7 @@ async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
         "nothing at all was freed"
     );
     assert!(
-        node_b
-            .peers_by_index
-            .contains_key(&(transport_id, victim_idx.as_u32())),
+        node_b.peers_by_index.contains_key(&victim_idx.as_u32()),
         "the victim's dispatch entry survives"
     );
     assert_eq!(node_b.peer_count(), 1, "the victim peer survives");
@@ -3448,13 +3631,15 @@ async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
 /// S3/T2c — the same hostile shape delivered on a DIFFERENT transport from the
 /// one the victim's index is registered under.
 ///
-/// `index_allocator` is a single node-global `HashSet<u32>` while every
-/// registry is keyed `(TransportId, u32)`, so a cleanup that looked the index
-/// up on the transport the msg3 arrived on would find nothing there and hand
-/// a live session's index back to the allocator. The victim is an in-flight
-/// REKEY index, the one live index held by no `PeerMachine`: it is bound in
-/// `peers_by_index` under the peer's transport and held by the peer's link
-/// rekey machine. The two controls below pin that.
+/// `index_allocator` is a single node-global `HashSet<u32>` while
+/// `pending_inbound` is keyed `(TransportId, u32)`, so an orphaned entry can
+/// be planted there on another transport, and a cleanup that looked the
+/// index up only on the transport the msg3 arrived on would find nothing
+/// holding it and hand a live session's index back to the allocator. The
+/// victim is an in-flight REKEY index, the one live index held by no
+/// `PeerMachine`: it is bound in `peers_by_index`, which is keyed by the
+/// index alone, and held by the peer's link rekey machine. The two controls
+/// below pin that.
 #[tokio::test]
 async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
     use crate::proto::fmp::wire::build_msg3;
@@ -3491,13 +3676,13 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
         .rekey_our_index()
         .expect("the poll started a cycle and allocated its index");
 
-    // Control 1: the victim is registered under the peer's OWN transport only.
+    // Control 1: the victim is bound for dispatch, by its index alone.
     assert!(
         initiator
             .node
             .peers_by_index
-            .contains_key(&(initiator.transport_id, victim_idx.as_u32())),
-        "control: the rekey index is registered under the peer's transport"
+            .contains_key(&victim_idx.as_u32()),
+        "control: the rekey index is registered for dispatch"
     );
     // Control 2: no handshake machine holds it; only the peer's link rekey
     // machine does.
@@ -3507,8 +3692,8 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
             .peer_machines
             .values()
             .any(|m| m.our_index() == Some(victim_idx)),
-        "control: no PeerMachine holds the rekey index, so only the \
-         transport-keyed limbs can answer for it"
+        "control: no PeerMachine holds the rekey index, so only \
+         peers_by_index and the peer's rekey machine can answer for it"
     );
 
     // The hostile msg3: a different transport, an orphaned pending-inbound entry
@@ -3551,7 +3736,7 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
         initiator
             .node
             .peers_by_index
-            .contains_key(&(initiator.transport_id, victim_idx.as_u32())),
+            .contains_key(&victim_idx.as_u32()),
         "the in-flight rekey's dispatch entry survives"
     );
     assert_eq!(initiator.node.peer_count(), 1, "the victim peer survives");
@@ -4384,6 +4569,7 @@ async fn absent_node(transport_id: TransportId, config: Config) -> Node {
         accept_connections: Some(true),
         beacon_interval_secs: None,
         optional: Some(true),
+        role: crate::config::TransportRole::default(),
     };
     let (tx, _rx) = packet_channel(8);
     let mut eth = EthernetTransport::new(transport_id, Some("lab".into()), eth_config, tx);
@@ -4703,7 +4889,7 @@ mod dead_encrypt_worker {
             .peer_machines
             .get_mut(&link_id)
             .unwrap()
-            .start_handshake(keypair, epoch, 1000)
+            .start_handshake(keypair, epoch, LegStamp::at(1000))
             .unwrap();
         node_a.links.insert(
             link_id,

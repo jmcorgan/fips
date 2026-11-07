@@ -28,10 +28,10 @@ fn dial() -> Dial {
     let responder = Identity::generate();
     let dialed = PeerIdentity::from_pubkey_full(responder.pubkey_full());
 
-    let mut ini = PeerMachine::new_outbound(LinkId::new(1), Some(dialed), 1000);
+    let mut ini = PeerMachine::new_outbound(LinkId::new(1), Some(dialed), LegStamp::at(1000));
     ini.set_leg(HandshakeCrypto::new());
     let msg1 = ini
-        .start_handshake(initiator.keypair(), [1; 8], 1100)
+        .start_handshake(initiator.keypair(), [1; 8], LegStamp::at(1100))
         .expect("msg1 is written");
     Dial {
         ini,
@@ -43,9 +43,9 @@ fn dial() -> Dial {
 
 /// The msg2 `answerer` sends in reply to `msg1`, with epoch `epoch`.
 fn answer(answerer: &Identity, msg1: &[u8], epoch: [u8; 8]) -> Vec<u8> {
-    let mut res = PeerMachine::new_inbound(LinkId::new(2), 1000);
+    let mut res = PeerMachine::new_inbound(LinkId::new(2), LegStamp::at(1000));
     res.set_leg(HandshakeCrypto::new());
-    res.receive_handshake_init(answerer.keypair(), epoch, msg1, None, 1200)
+    res.receive_handshake_init(answerer.keypair(), epoch, msg1, None, LegStamp::at(1200))
         .expect("the answerer reads msg1 and writes msg2")
 }
 
@@ -82,7 +82,7 @@ fn unreadable_then_genuine(refused: impl FnOnce(&[u8]) -> Vec<u8>) {
 
     let step = d
         .ini
-        .complete_handshake(&refused, None, 1300, gate(&d.dialed))
+        .complete_handshake(&refused, None, LegStamp::at(1300), gate(&d.dialed))
         .expect("a refused msg2 leaves the leg able to continue");
     assert!(
         matches!(step, DialMsg2Step::Unreadable(_)),
@@ -101,7 +101,7 @@ fn unreadable_then_genuine(refused: impl FnOnce(&[u8]) -> Vec<u8>) {
 fn genuine_completes(d: &mut Dial, genuine: &[u8]) {
     let step = d
         .ini
-        .complete_handshake(genuine, None, 1400, gate(&d.dialed))
+        .complete_handshake(genuine, None, LegStamp::at(1400), gate(&d.dialed))
         .expect("the genuine msg2 completes the handshake");
     assert!(
         matches!(step, DialMsg2Step::Completed(..)),
@@ -160,7 +160,7 @@ fn an_impostor_msg2_is_rejected_and_keeps_the_dialed_identity() {
 
     let step = d
         .ini
-        .complete_handshake(&forged, None, 1300, gate(&d.dialed))
+        .complete_handshake(&forged, None, LegStamp::at(1300), gate(&d.dialed))
         .expect("a rejected msg2 leaves the leg able to continue");
     match step {
         DialMsg2Step::Rejected {
@@ -189,7 +189,7 @@ fn several_refused_msg2s_in_a_row_still_leave_the_genuine_one_readable() {
     for refused in [&impostor[..], &garbage[..], &[0u8; 3][..], &impostor[..]] {
         let step = d
             .ini
-            .complete_handshake(refused, None, 1300, gate(&d.dialed))
+            .complete_handshake(refused, None, LegStamp::at(1300), gate(&d.dialed))
             .expect("a refused msg2 leaves the leg able to continue");
         assert!(!matches!(step, DialMsg2Step::Completed(..)));
         assert!(d.ini.leg().is_some_and(|leg| leg.noise_handshake.is_some()));
@@ -202,15 +202,15 @@ fn an_anonymous_dial_accepts_whoever_answers() {
     let initiator = Identity::generate();
     let answerer = Identity::generate();
     let answerer_addr = *PeerIdentity::from_pubkey_full(answerer.pubkey_full()).node_addr();
-    let mut ini = PeerMachine::new_outbound(LinkId::new(1), None, 1000);
+    let mut ini = PeerMachine::new_outbound(LinkId::new(1), None, LegStamp::at(1000));
     ini.set_leg(HandshakeCrypto::new());
     let msg1 = ini
-        .start_handshake(initiator.keypair(), [1; 8], 1100)
+        .start_handshake(initiator.keypair(), [1; 8], LegStamp::at(1100))
         .expect("msg1 is written");
     let msg2 = answer(&answerer, &msg1, [2; 8]);
 
     let step = ini
-        .complete_handshake(&msg2, None, 1300, move |learned_peer| {
+        .complete_handshake(&msg2, None, LegStamp::at(1300), move |learned_peer| {
             Fmp::new().dial_outbound(&DialMsg2Snapshot {
                 dialed_peer: None,
                 learned_peer,

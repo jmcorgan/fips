@@ -341,6 +341,15 @@ impl MmpMetrics {
         }
     }
 
+    /// The quality index, [`quality_index`](super::quality_index) of the
+    /// smoothed ETX and the smoothed RTT. `None` until both are measured.
+    pub fn quality_index(&self) -> Option<f64> {
+        match (self.srtt_ms(), self.smoothed_etx()) {
+            (Some(srtt), Some(setx)) => Some(super::quality_index(setx, srtt)),
+            _ => None,
+        }
+    }
+
     /// Smoothed ETX (long-term EWMA), or `None` if not yet initialized.
     pub fn smoothed_etx(&self) -> Option<f64> {
         if self.etx_trend.initialized() {

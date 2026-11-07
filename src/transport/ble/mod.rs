@@ -433,9 +433,22 @@ impl<I: BleIo> BleTransport<I> {
         self.name.as_deref()
     }
 
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
+    }
+
     /// Get the transport statistics.
     pub fn stats(&self) -> &Arc<BleStats> {
         &self.stats
+    }
+
+    /// Whether the pool holds a connection to `addr`. Reads only: no
+    /// background connect is started or promoted, and the pool lock is
+    /// awaited rather than tried. A test hook: this line's node does not ask.
+    #[cfg(test)]
+    pub(crate) async fn has_connection(&self, addr: &TransportAddr) -> bool {
+        self.pool.lock().await.contains(addr)
     }
 
     /// Get the I/O implementation (for test injection).

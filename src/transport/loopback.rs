@@ -15,6 +15,7 @@
 //! making delivery provably lossless and deadlock-free.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -24,12 +25,16 @@ use super::{
     TransportState, TransportType,
 };
 
-/// Shared registry mapping each loopback address to the receiver-side
-/// channel sender for the node listening on that address.
+/// Shared registry mapping each loopback address to the transport listening
+/// on it: that transport's id and the channel sender of the node it belongs
+/// to.
 ///
 /// One registry instance is shared by all loopback transports in a given
-/// test run so they can locate each other by address.
-pub type LoopbackRegistry = Arc<Mutex<HashMap<TransportAddr, UnboundedSender<ReceivedPacket>>>>;
+/// test run so they can locate each other by address. A delivered packet
+/// carries the receiving transport's id from here, as a packet a real
+/// transport reads carries the id of the transport that read it.
+pub type LoopbackRegistry =
+    Arc<Mutex<HashMap<TransportAddr, (TransportId, UnboundedSender<ReceivedPacket>)>>>;
 
 /// Create a fresh, empty loopback registry.
 pub fn new_registry() -> LoopbackRegistry {
@@ -50,6 +55,38 @@ pub struct LoopbackTransport {
     mtu: u16,
     /// Shared address-to-receiver registry.
     registry: LoopbackRegistry,
+    /// The type the transport reports, `LOOPBACK` unless a test set
+    /// another, to stand in for that transport's class, kind and
+    /// connection orientation.
+    ty: TransportType,
+    /// Whether the transport accepts inbound handshakes, as a test set.
+    accepts: AtomicBool,
+    /// Every `close_connection` the node asked for, in order. Loopback is
+    /// connectionless, so the close itself does nothing; the record lets a
+    /// test say whether a connection a connection-oriented transport would
+    /// hold was kept or closed.
+    closed: Mutex<Vec<TransportAddr>>,
+    /// Carrier a test has set, standing in for an interface-bound
+    /// transport's `IFF_RUNNING`. `None`, the default: not bound to an
+    /// interface, so no presence is reported.
+    carrier: Mutex<Option<bool>>,
+    /// While set, every send fails with [`TransportError::NotConnected`], as
+    /// a connection-oriented transport's does once its connection is gone.
+    unconnected: AtomicBool,
+    /// While set, every send fails with [`TransportError::Unreachable`], as
+    /// one over an interface that is down does.
+    unreachable: AtomicBool,
+    /// Beacons a test queued, handed out by the next `discover()`.
+    discovered: Mutex<Vec<DiscoveredPeer>>,
+    /// Whether the node dials the peers `discover()` hands out, as a test
+    /// set; off by default, as on Ethernet and BLE.
+    autoconnect: AtomicBool,
+    /// The part the transport plays in a link's paths, standing in for a
+    /// configured `role`; `normal` unless a test set another.
+    role: crate::config::TransportRole,
+    /// The instance name the transport reports, standing in for a
+    /// configured instance's name; none unless a test set one.
+    name: Option<String>,
 }
 
 impl LoopbackTransport {
@@ -75,7 +112,116 @@ impl LoopbackTransport {
             my_addr,
             mtu,
             registry,
+            ty: TransportType::LOOPBACK,
+            accepts: AtomicBool::new(true),
+            closed: Mutex::new(Vec::new()),
+            carrier: Mutex::new(None),
+            unconnected: AtomicBool::new(false),
+            unreachable: AtomicBool::new(false),
+            discovered: Mutex::new(Vec::new()),
+            autoconnect: AtomicBool::new(false),
+            role: crate::config::TransportRole::Normal,
+            name: None,
         }
+    }
+
+    /// Report `ty` as this transport's type from now on.
+    pub fn typed(&mut self, ty: TransportType) {
+        self.ty = ty;
+    }
+
+    /// Play `role` in a link's paths from now on, as a transport configured
+    /// with that `role` does.
+    pub fn set_role(&mut self, role: crate::config::TransportRole) {
+        self.role = role;
+    }
+
+    /// Report `name` as this transport's instance name from now on, as a
+    /// transport configured under that name does.
+    pub fn set_name(&mut self, name: &str) {
+        self.name = Some(name.to_string());
+    }
+
+    /// The instance name a test gave this transport, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The part this transport plays in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.role
+    }
+
+    /// Report this transport bound to an interface with carrier (`Some(true)`)
+    /// or without it (`Some(false)`); `None` returns it to reporting no
+    /// presence at all.
+    pub fn set_carrier(&self, carrier: Option<bool>) {
+        *self.carrier.lock().unwrap() = carrier;
+    }
+
+    /// The carrier a test set, if any.
+    pub fn carrier(&self) -> Option<bool> {
+        *self.carrier.lock().unwrap()
+    }
+
+    /// Make every send fail as one with no connection to its address does
+    /// (`true`), or stop doing so.
+    pub fn set_unconnected(&self, unconnected: bool) {
+        self.unconnected.store(unconnected, Ordering::Relaxed);
+    }
+
+    /// Make every send fail as one to an unreachable address does (`true`),
+    /// or stop doing so.
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable.store(unreachable, Ordering::Relaxed);
+    }
+
+    /// Accept inbound handshakes (`true`, the default) or refuse them.
+    pub fn set_accepts(&self, accepts: bool) {
+        self.accepts.store(accepts, Ordering::Relaxed);
+    }
+
+    /// Queue a beacon for the next `discover()` drain, as if this transport
+    /// had heard `addr` announce `pubkey_hint`.
+    pub fn inject_discovered(&self, addr: TransportAddr, pubkey_hint: secp256k1::XOnlyPublicKey) {
+        let mut peer = DiscoveredPeer::new(self.transport_id, addr);
+        peer.pubkey_hint = Some(pubkey_hint);
+        self.discovered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(peer);
+    }
+
+    /// Queue a beacon that names no key for the next `discover()` drain, as
+    /// if this transport had heard an anonymous announce from `addr`.
+    pub fn inject_anonymous(&self, addr: TransportAddr) {
+        self.discovered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(DiscoveredPeer::new(self.transport_id, addr));
+    }
+
+    /// Have the node dial the peers this transport discovers (`true`), as a
+    /// transport configured with `auto_connect` does, or not (the default).
+    pub fn set_autoconnect(&self, on: bool) {
+        self.autoconnect.store(on, Ordering::Relaxed);
+    }
+
+    /// Record a `close_connection` call for `addr`.
+    pub fn record_close(&self, addr: &TransportAddr) {
+        self.closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(addr.clone());
+    }
+
+    /// The addresses the node has asked to close on this transport, in
+    /// order.
+    pub fn closed(&self) -> Vec<TransportAddr> {
+        self.closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// This transport's synthetic loopback address.
@@ -89,12 +235,22 @@ impl LoopbackTransport {
     /// `ReceivedPacket` to its receiver. The packet's `remote_addr` is set to
     /// the sender's own address (`my_addr`), mirroring how UDP sets
     /// `remote_addr` from the datagram source, so the receiver's handlers
-    /// learn the peer source.
+    /// learn the peer source. Its `transport_id` is the one registered for
+    /// `dest_addr`, the receiving transport's, so a node with two transports
+    /// sees which one a packet came in on.
     pub async fn send_async(
         &self,
         dest_addr: &TransportAddr,
         data: &[u8],
     ) -> Result<usize, TransportError> {
+        if self.unconnected.load(Ordering::Relaxed) {
+            return Err(TransportError::NotConnected);
+        }
+        if self.unreachable.load(Ordering::Relaxed) {
+            return Err(TransportError::Unreachable(
+                "Network is unreachable (os error 101)".into(),
+            ));
+        }
         if data.len() > self.mtu as usize {
             return Err(TransportError::MtuExceeded {
                 packet_size: data.len(),
@@ -110,9 +266,8 @@ impl LoopbackTransport {
         };
 
         match dest_tx {
-            Some(tx) => {
-                let packet =
-                    ReceivedPacket::new(self.transport_id, self.my_addr.clone(), data.to_vec());
+            Some((receiver, tx)) => {
+                let packet = ReceivedPacket::new(receiver, self.my_addr.clone(), data.to_vec());
                 tx.send(packet).map_err(|_| {
                     TransportError::SendFailed(format!("loopback receiver gone for {}", dest_addr))
                 })?;
@@ -142,7 +297,7 @@ impl Transport for LoopbackTransport {
     }
 
     fn transport_type(&self) -> &TransportType {
-        &TransportType::LOOPBACK
+        &self.ty
     }
 
     fn state(&self) -> TransportState {
@@ -169,6 +324,16 @@ impl Transport for LoopbackTransport {
     }
 
     fn discover(&self) -> Result<Vec<DiscoveredPeer>, TransportError> {
-        Ok(Vec::new())
+        Ok(std::mem::take(
+            &mut *self.discovered.lock().unwrap_or_else(|e| e.into_inner()),
+        ))
+    }
+
+    fn auto_connect(&self) -> bool {
+        self.autoconnect.load(Ordering::Relaxed)
+    }
+
+    fn accept_connections(&self) -> bool {
+        self.accepts.load(Ordering::Relaxed)
     }
 }

@@ -169,3 +169,38 @@ pub(crate) fn seeded_keypair(seed: u64) -> secp256k1::Keypair {
     let key = secp256k1::SecretKey::from_slice(&secret).expect("a valid secret key");
     secp256k1::Keypair::from_secret_key(crate::identity::secp(), &key)
 }
+
+std::thread_local! {
+    /// Allocations this thread has made, for tests that a method allocates
+    /// nothing.
+    static ALLOCATIONS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// The test binary's allocator: the system's, counting each thread's
+/// allocations.
+struct Counting;
+
+// SAFETY: every call is passed to the system allocator unchanged.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // A thread whose counter is already gone, as it exits, counts
+        // nothing.
+        let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
+        // SAFETY: the caller's contract is the system allocator's.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: as above.
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// Allocations this thread has made so far, through any of the
+/// allocator's entry points: `alloc_zeroed` and `realloc` reach `alloc`.
+pub(crate) fn allocations() -> u64 {
+    ALLOCATIONS.with(core::cell::Cell::get)
+}

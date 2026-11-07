@@ -7,14 +7,35 @@
 
 mod active;
 pub(crate) mod machine;
+mod udp_slot;
 
 pub use active::{ActivePeer, ConnectivityState};
+pub use fips_core::proto::path::{
+    Match, Medium, PATH_MAX_PER_PEER, PATH_MAX_PER_TRANSPORT, PathRefused, PathState, Rebind, Roam,
+};
+pub(crate) use udp_slot::UdpSlot;
+
+/// The machine of one link's paths, timed on [`PeerClock`], drawing from the
+/// host's entropy, with each path's connected UDP socket in its [`UdpSlot`].
+pub(crate) type PeerBundle = fips_core::proto::path::Bundle<PeerClock, OsEntropy, UdpSlot>;
+
+/// The paths to one peer, as a [`PeerBundle`] holds them.
+#[cfg(test)]
+pub(crate) type PathSet = fips_core::proto::path::PathSet<PeerInstant, UdpSlot>;
+
+/// One path to a peer, as [`PathSet`] holds it.
+pub(crate) type PeerPath = fips_core::proto::path::PeerPath<PeerInstant, UdpSlot>;
+
+/// How [`PathSet::admit`] placed a path.
+#[cfg(test)]
+pub(crate) type Admission = fips_core::proto::path::Admission<PeerInstant, UdpSlot>;
 
 use crate::NodeAddr;
 use crate::identity::OsEntropy;
-use crate::transport::LinkId;
+use crate::transport::{LinkId, TransportAddr, TransportId};
 use crate::utils::index::IndexAllocator;
 use fips_core::proto::fmp::rekey::FmpProfile;
+use fips_core::proto::path::{Class, Facts, Kind, Role};
 use fips_core::proto::rekey::{Config, NodeKeys, Output, Outputs, Params, Record, Rekey};
 use fips_core::time::{Clock, Instant};
 use std::time::Duration;
@@ -70,11 +91,81 @@ pub(crate) fn test_link_params() -> Params {
     Params::fmp()
 }
 
+/// What building a link's path machine reads from the node: the parameters
+/// its configuration gives and the facts it knows about its transports.
+pub(crate) struct PathCaps<'a> {
+    /// The parameters a new link's path machine is built with.
+    pub(crate) params: fips_core::proto::path::Params,
+    /// The facts about the node's transports.
+    pub(crate) facts: &'a dyn Facts,
+}
+
+/// The facts of a link built without a node: one clear transport of the
+/// IPv6 minimum MTU, no setting restricting it, that accepts and dials.
+struct Plain;
+
+impl Facts for Plain {
+    fn mtu(&self, _transport: TransportId, _addr: &TransportAddr) -> usize {
+        1280
+    }
+
+    fn medium(&self, _transport: TransportId) -> Medium {
+        Medium::Other
+    }
+
+    fn oriented(&self, _transport: TransportId) -> bool {
+        false
+    }
+
+    fn class(&self, _transport: TransportId) -> Class {
+        Class::Clear
+    }
+
+    fn kind(&self, _transport: TransportId) -> Option<Kind> {
+        None
+    }
+
+    fn role(&self, _transport: TransportId) -> Role {
+        Role::Normal
+    }
+
+    fn accepts(&self, _transport: TransportId) -> bool {
+        true
+    }
+
+    fn dials(&self, _transport: TransportId) -> bool {
+        true
+    }
+}
+
+/// The path machine of a peer bound by its first frame rather than by a
+/// promotion: multipath disabled, the draft's other values, and the facts
+/// of [`Plain`]. Production builds every bundle at promotion from the
+/// node's configuration instead.
+pub(crate) fn unbound_caps() -> PathCaps<'static> {
+    let cfg = fips_core::proto::path::Config {
+        enabled: false,
+        ..fips_core::proto::path::Config::draft()
+    };
+    PathCaps {
+        params: fips_core::proto::path::Params::new(cfg).expect("the draft's values are valid"),
+        facts: &Plain,
+    }
+}
+
+/// The path machine a test's link is built with: as a node with the
+/// default configuration builds one, multipath disabled, on the facts of
+/// one plain transport.
+#[cfg(test)]
+pub(crate) fn test_caps() -> PathCaps<'static> {
+    unbound_caps()
+}
+
 /// What building a link's rekey machine borrows from the node: its index
 /// allocator, its static keys, its address, the parameters a new link's
 /// machine is built with, the replay record it starts from, whether a
 /// decrypt-worker pool runs and the node's profile, which a rekey's msg3
-/// carries.
+/// carries; and what building its path machine reads.
 pub(crate) struct LinkCaps<'a> {
     /// The node's session-index allocator.
     pub(crate) indices: &'a mut IndexAllocator,
@@ -94,6 +185,8 @@ pub(crate) struct LinkCaps<'a> {
     pub(crate) workers: bool,
     /// The node's profile.
     pub(crate) profile: crate::proto::fmp::NodeProfile,
+    /// What the link's path machine is built with.
+    pub(crate) path: PathCaps<'a>,
 }
 
 // ============================================================================

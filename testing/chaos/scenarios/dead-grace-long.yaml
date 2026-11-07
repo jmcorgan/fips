@@ -1,0 +1,90 @@
+# One peer, two paths: the cable held down past the Dead path's grace
+#
+# Run by hand, not in CI (780 s): the figures over a whole PATH_DEAD_GRACE
+# (600 s) that the draft's question 4 asks for. dual-path-carrier's pair,
+# with the cable taken down administratively at n01 for 660 s.
+#
+# At the far end (n02) the cable path goes Dead at once on n01's close and
+# is probed at the draft's floor until its grace runs out: by the floor's
+# arithmetic 24 probes, at 1, 2, 4, 8, 16 and 32 s, then every 30 s to
+# 600 s, and then discarded (`why=Grace`). The figures give those probes
+# and their bytes, all inside the floor (`path_floor`, its stop placed at
+# the Dead entry: the stop began there, though the outage is far longer
+# than PATH_SILENCE_MAX), and the recovery after the return: n01 probes
+# its returning interface at once, and n02, its path gone, takes n01's
+# probe as a new path.
+#
+#   n01 ===eth=== n02      (admin down at n01 at 30 s for 660 s)
+#   n01 ---udp--- n02
+
+scenario:
+  name: "dead-grace-long"
+  seed: 42
+  duration_secs: 780
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, ethernet+udp]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+  bridge_policy:
+    delay_ms: [40, 40]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0]
+
+link_flaps:
+  enabled: false
+
+schedule:
+  - {at: 30, down: [n01, n02], mode: admin, end: n01, secs: 660, capture: [n02], counters: [n02]}
+
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 20, max: 40}
+  duration_secs: {min: 10, max: 20}
+  parallel_streams: 1
+
+node_churn:
+  enabled: false
+
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  switch_latency:
+    max_ms: 1000
+    each_end: true
+    signalled_ms: 500
+  path_floor: true
+  discovery_limit: true
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+  paths_live:
+    min: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug"
+  output_dir: "./sim-results"

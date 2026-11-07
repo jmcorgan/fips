@@ -92,7 +92,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(keypair_a, epoch_a, 1000)
+        .start_handshake(keypair_a, epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let link_a = Link::connectionless(
@@ -118,7 +118,7 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
             responder_epoch,
             &noise_msg1,
             None,
-            1000,
+            LegStamp::at(1000),
         )
         .unwrap();
     let our_index_b = SessionIndex::new(9);
@@ -240,7 +240,7 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
         .peer_machines
         .get_mut(&link_id_a)
         .unwrap()
-        .start_handshake(our_keypair_a, startup_epoch_a, 1000)
+        .start_handshake(our_keypair_a, startup_epoch_a, LegStamp::at(1000))
         .unwrap();
 
     let wire_msg1 = build_msg1(our_index_a, &noise_msg1);
@@ -403,7 +403,11 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
     let our_index_a = SessionIndex::new(7);
     let mut conn_a = outbound_leg(LinkId::new(1), peer_b_identity, 1000);
     let noise_msg1 = conn_a
-        .start_handshake(node_a.identity().keypair(), node_a.startup_epoch(), 1000)
+        .start_handshake(
+            node_a.identity().keypair(),
+            node_a.startup_epoch(),
+            LegStamp::at(1000),
+        )
         .unwrap();
 
     node_b
@@ -441,7 +445,7 @@ async fn test_acl_rejected_msg3_leaves_no_registry_trace() {
     // and therefore the denial — first reaches B.
     let msg2_header = Msg2Header::parse(&wire_msg2).unwrap();
     let (noise_msg3, _) = conn_a
-        .complete_handshake_accepting(msg2_header.noise_msg2(&wire_msg2), None, 1100)
+        .complete_handshake_accepting(msg2_header.noise_msg2(&wire_msg2), None, LegStamp::at(1100))
         .unwrap();
 
     node_b

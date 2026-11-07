@@ -27,8 +27,10 @@ it out. Handshake message bytes are opaque here.
 - `state.rs`: `ConnectionState`, the bookkeeping of a connection in its
   handshake phase, which holds this node's index for the handshake as an
   `IndexLease` from the rekey machine's `lease::allocate`, so promotion
-  hands that lease to the link's machine; and `Fmp`, the stateless
-  lifecycle anchor `Node` holds.
+  hands that lease to the link's machine, and stamps its activity with a
+  `LegStamp`: a wall-clock reading for the start and idle times operators
+  are shown, and the caller's interval-clock reading, which the handshake
+  timeout reads; and `Fmp`, the stateless lifecycle anchor `Node` holds.
 - `silent.rs`: `SilentSessions`, the record of link sessions that ended
   without an authenticated frame, and the handshake refusal it drives,
   applied at msg3, where the XX handshake first names the initiator.
@@ -39,7 +41,10 @@ it out. Handshake message bytes are opaque here.
   their link's sessions in a machine on it. Its README describes it.
 - `wire.rs`: the link framing codec: the common prefix, the encrypted,
   msg1, msg2 and msg3 headers, the handshake message types, the
-  negotiation payload, disconnect reasons and the disconnect message.
+  negotiation payload, disconnect reasons and the disconnect message,
+  and `FRAME_OVERHEAD`, the bytes an established frame adds around a
+  link message, which the node's wire length accounting and the path
+  ack size rule both use.
 - `tests/`: the unit tests; its README describes it.
 
 ## Invariants

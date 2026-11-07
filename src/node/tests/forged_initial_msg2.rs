@@ -265,10 +265,10 @@ async fn an_impostor_initial_msg2_leaves_the_resend_schedule_as_it_was() {
 
 /// Returns whether the dial is still in progress just at its handshake
 /// timeout and just after it, measured from the dial's last activity before
-/// any forgery.
+/// any forgery, on the interval clock the timeout reads.
 async fn alive_at_and_after_deadline(forge: Option<Forge>) -> (bool, bool) {
     let (mut nodes, link, msg1, observed) = dial_unanswered().await;
-    let last_activity = nodes[0].node.connection_last_activity(link);
+    let last_activity = nodes[0].node.peer_machines[&link].conn_active_at();
     let timeout_ms = nodes[0]
         .node
         .config()

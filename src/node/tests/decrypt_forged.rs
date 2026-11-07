@@ -1,12 +1,14 @@
 //! Forged frames on a live peer's receiver index.
 //!
-//! An established frame is matched to its peer by transport and receiver
-//! index alone, and the receiver index travels in clear. These tests send
-//! frames that carry a live peer's index but do not authenticate, from an
-//! address that is not the peer's, and assert the peer is kept on each path
-//! a frame can take to the failure count: the inline decrypt, the decrypt
-//! worker, and a second TCP connection to a node holding the peer over TCP.
-//! A last test checks the forged frames do not keep a dead link alive.
+//! An established frame is matched to its peer by receiver index alone, and
+//! the receiver index travels in clear. These tests send frames that carry
+//! a live peer's index but do not authenticate, and assert the peer is kept
+//! on each path a frame can take to the failure count: the inline decrypt
+//! and a second TCP connection to a node holding the peer over TCP, both
+//! from an address no path of the link holds, which counts nothing, and the
+//! decrypt worker, from the peer's own address, where each failure counts.
+//! A last test checks that forged frames, counted, do not keep a dead link
+//! alive.
 //!
 //! Every forged frame enters through `process_packet`, the real entry point,
 //! and declares the payload length its size implies, so the framing check
@@ -37,7 +39,7 @@ const FIRST_COUNTER: u64 = 1_000_000;
 
 /// A correctly framed established frame on `index` whose ciphertext is
 /// random, so it fails the AEAD tag on every session.
-fn forged_frame(index: SessionIndex, counter: u64) -> Vec<u8> {
+pub(super) fn forged_frame(index: SessionIndex, counter: u64) -> Vec<u8> {
     let mut body = vec![0u8; BODY + TAG_SIZE];
     rand::rng().fill_bytes(&mut body);
     build_encrypted(
@@ -88,7 +90,7 @@ async fn twenty_five_forged_frames_on_a_live_peers_index_from_another_address_le
     let addr0 = *nodes[0].node.node_addr();
     let addr1 = *nodes[1].node.node_addr();
     let index = index_at_1(&nodes);
-    let key = (nodes[1].transport_id, index.as_u32());
+    let key = index.as_u32();
     // Windows has no decrypt worker pool, so it always decrypts inline.
     #[cfg(unix)]
     assert!(
@@ -115,9 +117,14 @@ async fn twenty_five_forged_frames_on_a_live_peers_index_from_another_address_le
             .get_peer(&addr0)
             .unwrap_or_else(|| panic!("node 0 is still a peer after forged frame {n}"));
         assert_eq!(
+            peer.last_failed(),
+            Some(index),
+            "forged frame {n} reached the decrypt and failed there"
+        );
+        assert_eq!(
             peer.consecutive_decrypt_failures(),
-            n,
-            "each forged frame counts one failure"
+            0,
+            "a forged frame from an address no path of the link holds counts nothing"
         );
         assert_eq!(
             nodes[1].node.peers_by_index.get(&key),
@@ -126,7 +133,13 @@ async fn twenty_five_forged_frames_on_a_live_peers_index_from_another_address_le
         );
     }
 
-    // The real peer's next frame still authenticates and clears the count.
+    // The real peer's next frame still authenticates.
+    let received = nodes[1]
+        .node
+        .get_peer(&addr0)
+        .unwrap()
+        .link_stats()
+        .packets_recv;
     nodes[0]
         .node
         .send_encrypted_link_message(&addr1, &[LinkMessageType::Heartbeat.to_byte()])
@@ -142,11 +155,11 @@ async fn twenty_five_forged_frames_on_a_live_peers_index_from_another_address_le
         .node
         .get_peer(&addr0)
         .expect("node 0 is still a peer after its heartbeat");
-    assert_eq!(
-        peer.consecutive_decrypt_failures(),
-        0,
-        "an authenticated frame resets the failure count"
+    assert!(
+        peer.link_stats().packets_recv > received,
+        "the heartbeat authenticated"
     );
+    assert_eq!(peer.consecutive_decrypt_failures(), 0);
 
     cleanup_nodes(&mut nodes).await;
 }
@@ -169,7 +182,7 @@ async fn twenty_five_forged_frames_failing_in_the_decrypt_worker_leave_the_peer_
         nodes[1]
             .node
             .decrypt_registered_sessions
-            .contains(&(nodes[1].transport_id, index.as_u32())),
+            .contains(&index.as_u32()),
         "precondition: node 0's session is registered with the worker"
     );
     let mut events = nodes[1]
@@ -179,10 +192,13 @@ async fn twenty_five_forged_frames_failing_in_the_decrypt_worker_leave_the_peer_
         .expect("node 1 holds its worker event receiver");
 
     // All frames are queued on the worker before any report is handled, so
-    // every one reaches the worker whatever the reports do to the peer.
+    // every one reaches the worker whatever the reports do to the peer. They
+    // claim node 0's own address, the link's original pair, where a failure
+    // counts.
+    let original = nodes[0].addr.clone();
     for n in 1..=FORGED {
         let frame = forged_frame(index, FIRST_COUNTER + u64::from(n));
-        let packet = ReceivedPacket::new(nodes[1].transport_id, foreign_addr(), frame);
+        let packet = ReceivedPacket::new(nodes[1].transport_id, original.clone(), frame);
         nodes[1].node.process_packet(packet).await;
     }
 
@@ -269,7 +285,7 @@ async fn twenty_five_forged_frames_on_a_second_tcp_connection_leave_a_tcp_held_p
     let target = PeerIdentity::from_pubkey_full(node.identity().pubkey_full());
     let mut leg = outbound_leg(LinkId::new(0x5EED), target, 1000);
     let noise_msg1 = leg
-        .start_handshake(sender.keypair(), [7u8; 8], 1000)
+        .start_handshake(sender.keypair(), [7u8; 8], LegStamp::at(1000))
         .expect("start_handshake produces noise msg1");
     let mut peer_conn = tokio::net::TcpStream::connect(listen).await.unwrap();
     peer_conn
@@ -292,7 +308,7 @@ async fn twenty_five_forged_frames_on_a_second_tcp_connection_leave_a_tcp_held_p
     };
     let msg2_header = Msg2Header::parse(&wire_msg2).expect("a msg2 header");
     let (noise_msg3, _) = leg
-        .complete_handshake_accepting(msg2_header.noise_msg2(&wire_msg2), None, 1100)
+        .complete_handshake_accepting(msg2_header.noise_msg2(&wire_msg2), None, LegStamp::at(1100))
         .expect("the peer completes the node's msg2");
     peer_conn
         .write_all(&build_msg3(
@@ -336,7 +352,12 @@ async fn twenty_five_forged_frames_on_a_second_tcp_connection_leave_a_tcp_held_p
         .get_peer(&peer_addr)
         .expect("the TCP-held peer is still a peer after the forged frames");
     assert_eq!(peer.current_addr(), Some(&peer_remote));
-    assert_eq!(peer.consecutive_decrypt_failures(), FORGED);
+    assert_eq!(peer.last_failed(), Some(index), "they reached the decrypt");
+    assert_eq!(
+        peer.consecutive_decrypt_failures(),
+        0,
+        "frames from a connection no path of the link holds count nothing"
+    );
 
     for (_, t) in node.transports.iter_mut() {
         t.stop().await.ok();
@@ -358,9 +379,11 @@ async fn forged_frames_do_not_hold_a_dead_link_alive() {
     tokio::time::sleep(Duration::from_millis(1_200)).await;
 
     // Below the threshold, so no build removes the peer for that reason.
+    // From node 0's own address, the link's original pair, so they count.
+    let original = nodes[0].addr.clone();
     for n in 1..THRESHOLD {
         let frame = forged_frame(index, FIRST_COUNTER + u64::from(n));
-        let packet = ReceivedPacket::new(nodes[1].transport_id, foreign_addr(), frame);
+        let packet = ReceivedPacket::new(nodes[1].transport_id, original.clone(), frame);
         nodes[1].node.process_packet(packet).await;
     }
     assert_eq!(
@@ -380,4 +403,78 @@ async fn forged_frames_do_not_hold_a_dead_link_alive() {
     );
 
     cleanup_nodes(&mut nodes).await;
+}
+
+/// Section 5.3 of the multipath draft: the node resets a path's count when
+/// an authentic frame of the link arrives on that path. On the decrypt-worker
+/// path, three forged frames on the original pair count 3; an authentic
+/// frame whose plaintext is shorter than the inner header then resets the
+/// count, as the inline path does
+/// (`a_short_authentic_frame_starts_the_original_paths_count_again`). One
+/// more forged frame follows, so the worker has handled the short frame when
+/// its report arrives: the count is 1, not 4.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_short_authentic_frame_resets_the_count_on_the_worker_path() {
+    use super::connected_udp::{PROMOTED_ADDR, promoted_peer_with_the_far_side_session};
+    use crate::node::decrypt_worker::{DecryptWorkerEvent, DecryptWorkerPool};
+    let tid = TransportId::new(1);
+    let (mut node, peer, index, mut far_side) = promoted_peer_with_the_far_side_session(tid);
+    let original = TransportAddr::from_string(PROMOTED_ADDR);
+    node.supervisor.decrypt_workers = Some(DecryptWorkerPool::spawn(1));
+    let offer = node.get_peer(&peer).unwrap().offer_to_workers();
+    node.run_link_outputs(&peer, offer);
+    assert!(
+        node.decrypt_registered_sessions.contains(&index.as_u32()),
+        "precondition: the session is registered with the worker"
+    );
+    let mut events = node
+        .decrypt_fallback_rx
+        .take()
+        .expect("the node holds its worker event receiver");
+    for n in 1..=3u64 {
+        let frame = forged_frame(index, FIRST_COUNTER + n);
+        node.handle_encrypted_frame(ReceivedPacket::new(tid, original.clone(), frame))
+            .await;
+    }
+    for k in 0..3 {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("worker event {k} never arrived"))
+            .expect("worker event channel closed");
+        node.process_decrypt_worker_event(event).await;
+    }
+    assert_eq!(
+        node.get_peer(&peer).unwrap().consecutive_decrypt_failures(),
+        3,
+        "precondition: three worker failures counted"
+    );
+    let inner = [0u8; 3];
+    let counter = far_side.current_send_counter();
+    let header = build_established_header(index, counter, 0, inner.len() as u16);
+    let sealed = far_side.encrypt_with_aad(&inner, &header).unwrap();
+    let short = build_encrypted(&header, &sealed);
+    node.handle_encrypted_frame(ReceivedPacket::new(tid, original.clone(), short))
+        .await;
+    let frame = forged_frame(index, FIRST_COUNTER + 100);
+    node.handle_encrypted_frame(ReceivedPacket::new(tid, original.clone(), frame))
+        .await;
+    // Take events until the forged frame's failure report has been handled;
+    // the short frame's bounce, if any, comes first.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the forged frame's report never arrived")
+            .expect("worker event channel closed");
+        let failure = matches!(event, DecryptWorkerEvent::DecryptFailure(_));
+        node.process_decrypt_worker_event(event).await;
+        if failure {
+            break;
+        }
+    }
+    assert_eq!(
+        node.get_peer(&peer).unwrap().consecutive_decrypt_failures(),
+        1,
+        "the short authentic frame did not reset the count on the worker path"
+    );
 }

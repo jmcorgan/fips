@@ -836,6 +836,17 @@ impl NostrRendezvous {
         Ok(advert.endpoints)
     }
 
+    /// `peer_npub`'s advert endpoints from the cache alone, without asking
+    /// the relays: `None` when no current advert is cached or the npub does
+    /// not parse. For callers on the node's event loop, which must not wait
+    /// on a relay.
+    pub fn cached_endpoints(&self, peer_npub: &str) -> Option<Vec<OverlayEndpointAdvert>> {
+        let canonical = PublicKey::parse(peer_npub).ok()?.to_bech32().ok()?;
+        self.advert
+            .cached_advert(&canonical, now_ms())
+            .map(|advert| advert.endpoints)
+    }
+
     /// Replace the set of authors whose cached adverts survive a full cache:
     /// the configured peers and the authors with an established link.
     pub fn set_advert_protection(&self, npubs: HashSet<String>) {

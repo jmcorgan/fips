@@ -73,9 +73,14 @@ pub(in crate::node) struct PeerActionCtx {
     pub(in crate::node) our_index: Option<SessionIndex>,
     /// The peer's session index for this exchange (msg2 framing receiver_idx).
     pub(in crate::node) their_index: Option<SessionIndex>,
-    /// The wire timestamp driving this step (promotion ts). A loss report does
-    /// not use it: the retry schedule reads the peering clock.
+    /// The wire timestamp driving this step (promotion ts), Unix
+    /// milliseconds. A loss report does not use it: the retry schedule reads
+    /// the peering clock.
     pub(in crate::node) now_ms: u64,
+    /// The interval-clock reading (`Node::interval_ms`) driving this step:
+    /// the machine steps the executor runs read it, so the timers they arm
+    /// are deadlines on the monotonic clock.
+    pub(in crate::node) interval_ms: u64,
     /// Establish direction for this exchange. `false` = inbound, `true` =
     /// outbound. `PromoteToActive` reads this to pick the direction-specific
     /// promote tail: the outbound branch logs a `Peer promoted to active` line
@@ -90,8 +95,9 @@ pub(in crate::node) struct PeerActionCtx {
 }
 
 impl Node {
-    /// Advance the machine for `link` by one event and execute the resulting
-    /// actions.
+    /// Advance the machine for `link` by one event at `interval_now`, a
+    /// reading of the interval clock (`Node::interval_ms`), and execute the
+    /// resulting actions.
     ///
     /// The borrow structure the whole seam turns on: the machine needs
     /// `&mut IndexAllocator` as a synchronous capability *while it is itself
@@ -103,13 +109,13 @@ impl Node {
         &mut self,
         link: LinkId,
         event: PeerEvent,
-        now: u64,
+        interval_now: u64,
         ambient: &PeerActionCtx,
     ) {
         let actions = match self.peer_machines.get_mut(&link) {
             // Disjoint field borrow: `self.peer_machines` (the map entry) and
             // `self.index_allocator` (the capability) are separate fields.
-            Some(machine) => machine.step(event, now, &mut self.index_allocator),
+            Some(machine) => machine.step(event, interval_now, &mut self.index_allocator),
             None => return,
         };
         self.execute_peer_actions(link, ambient, actions).await;
@@ -223,7 +229,7 @@ impl Node {
                             link,
                             ambient.transport_id,
                             &ambient.remote_addr,
-                            ambient.now_ms,
+                            ambient.interval_ms,
                         )
                         .await;
                     }
@@ -284,6 +290,10 @@ impl Node {
                         ambient.verified_identity,
                         ambient.now_ms,
                     );
+                    let renewed = promote_result
+                        .as_ref()
+                        .ok()
+                        .and_then(PromotionResult::node_addr);
                     match &promote_result {
                         Ok(PromotionResult::Promoted(node_addr)) => {
                             let node_addr = *node_addr;
@@ -490,12 +500,18 @@ impl Node {
                         let follow = match self.peer_machines.get_mut(&promote_link) {
                             Some(machine) => machine.step(
                                 PeerEvent::PromotionResolved { result },
-                                ambient.now_ms,
+                                ambient.interval_ms,
                                 &mut self.index_allocator,
                             ),
                             None => Vec::new(),
                         };
                         queue.extend(follow);
+                    }
+                    // The promoted peer's path machine is new, with an
+                    // empty candidate table. Boxed: the path steps it
+                    // runs can lead back into this executor.
+                    if let Some(node_addr) = renewed {
+                        Box::pin(self.paths_renewed(&node_addr)).await;
                     }
                 }
                 PeerAction::ResolveCrossConnection { .. } => {
@@ -548,17 +564,24 @@ impl Node {
                             // ends converge on the link the smaller node dialed
                             // (FRC-2201, Section 5.7), which this msg3 came over,
                             // so the peer is taken at the msg3's transport and
-                            // source address and the leg's lease is bound on that
-                            // transport, where the peer's frames on the session
-                            // arrive and are looked up.
+                            // source address, and the rebuilt machine records the
+                            // leg's binding on that transport. The path machine
+                            // starts again with that pair as the new link's
+                            // original path (multipath v1 draft, Section 5.4).
                             let prior = self.peer_link(&peer);
                             let local = self.session_node_keys();
                             let me = *self.identity().node_addr();
                             let params =
                                 crate::node::handlers::rekey::link_params(&self.config().node);
+                            let path_params =
+                                crate::node::handlers::path::path_params(&self.config().node);
                             let workers = self.link_workers();
                             let profile = self.node_profile();
-                            let out = match self.peers.get_mut(&peer) {
+                            let facts = crate::node::handlers::path::NodeFacts {
+                                transports: &self.transports,
+                                denied: false,
+                            };
+                            let (out, paths) = match self.peers.get_mut(&peer) {
                                 Some(peer_ref) => {
                                     let mut caps = crate::peer::LinkCaps {
                                         indices: &mut self.index_allocator,
@@ -568,6 +591,10 @@ impl Node {
                                         record: fips_core::proto::rekey::Record::new(),
                                         workers,
                                         profile,
+                                        path: crate::peer::PathCaps {
+                                            params: path_params,
+                                            facts: &facts,
+                                        },
                                     };
                                     peer_ref.move_session(
                                         session,
@@ -577,9 +604,16 @@ impl Node {
                                         &mut caps,
                                     )
                                 }
-                                None => vec![crate::peer::LinkOutput::Release(lease)],
+                                None => (vec![crate::peer::LinkOutput::Release(lease)], Vec::new()),
                             };
                             self.run_link_outputs(&peer, out);
+                            let held = self.peers.get(&peer).map(|p| p.link_id());
+                            self.run_renewed(&peer, paths);
+                            // The path machine started again with an empty
+                            // candidate table. Boxed as at the promotion.
+                            if held.is_some() {
+                                Box::pin(self.paths_renewed(&peer)).await;
+                            }
                             self.follow_move(&ambient.verified_identity, prior).await;
                             debug!(
                                 peer = %self.peer_display_name(&peer),
@@ -637,10 +671,10 @@ impl Node {
                     // `index` payload.
                 }
                 PeerAction::UnregisterDecryptSession { index } => {
-                    // Executor supplies `transport_id` from ambient; keyed by
-                    // (tid, index) like `remove_active_peer` / the rekey drain path.
+                    // Keyed by index alone, like the link machine's `Revoke`
+                    // outputs that `remove_active_peer` and a drain carry out.
                     #[cfg(unix)]
-                    self.unregister_decrypt_worker_session((ambient.transport_id, index.as_u32()));
+                    self.unregister_decrypt_worker_session(index.as_u32());
                     #[cfg(not(unix))]
                     let _ = index;
                 }

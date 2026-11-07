@@ -10,6 +10,21 @@ node:
     #
     # Or set an explicit key (overrides persistent):
     # nsec: "nsec1..."
+  # Multipath (node.path.*): keep every proven path to a peer and move a link
+  # between them with no new handshake. Off by default; defaults shown. A
+  # transport's role (never, backup, normal, preferred) places it among a
+  # link's paths, and a UDP or TCP transport on a VPN over RFC 1918 space
+  # takes kind: internet. Set enabled: true at both ends to turn it on.
+  # path:
+  #   enabled: false
+  #   min_samples: 2
+  #   mix_kinds: false
+  #   switch:
+  #     margin: 1.3
+  #     dwell_secs: 2
+  #   probe:
+  #     active_ms: 200
+  #     standby_ms: 1000
   # Mesh-lookup protocol (node.lookup.*): the overlay coordinate-lookup engine
   # (mesh address -> coordinates). Defaults shown; uncomment to override.
   # lookup:

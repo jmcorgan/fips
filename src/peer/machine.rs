@@ -82,8 +82,8 @@ use crate::identity::OsEntropy;
 use crate::noise::{self, NoiseError, NoiseSession};
 use crate::proto::fmp::{
     ConnAction, ConnSnapshot, ConnectionState, DialMsg2Decision, DialMsg2Reject, EstablishSnapshot,
-    Fmp, InboundDecision, NodeProfile, OutboundDecision, OutboundSnapshot, PromotionResult,
-    WireOutcome,
+    Fmp, InboundDecision, LegStamp, NodeProfile, OutboundDecision, OutboundSnapshot,
+    PromotionResult, WireOutcome,
 };
 use crate::proto::link::LinkMessageType;
 use crate::transport::{LinkDirection, LinkId, LinkStats, TransportAddr, TransportId};
@@ -616,7 +616,7 @@ impl PeerMachine {
     /// machine is born identity-less and [`crystallize_identity`]
     /// (Self::crystallize_identity) fills it in when the XX msg2 reveals who
     /// answered.
-    pub(crate) fn new_outbound(link: LinkId, identity: Option<PeerIdentity>, now: u64) -> Self {
+    pub(crate) fn new_outbound(link: LinkId, identity: Option<PeerIdentity>, at: LegStamp) -> Self {
         Self {
             state: PeerState::Discovered,
             link,
@@ -624,8 +624,8 @@ impl PeerMachine {
             node_addr: identity.map(|id| *id.node_addr()),
             leg: None,
             conn: match identity {
-                Some(id) => ConnectionState::outbound(link, id, now),
-                None => ConnectionState::outbound_anonymous(link, now),
+                Some(id) => ConnectionState::outbound(link, id, at),
+                None => ConnectionState::outbound_anonymous(link, at),
             },
             send_failed: false,
             last_heartbeat_sent_ms: 0,
@@ -634,7 +634,7 @@ impl PeerMachine {
     }
 
     /// New inbound machine (they dialed us). Starts at `Handshaking{Initial}`.
-    pub(crate) fn new_inbound(link: LinkId, now: u64) -> Self {
+    pub(crate) fn new_inbound(link: LinkId, at: LegStamp) -> Self {
         Self {
             state: PeerState::Handshaking {
                 link,
@@ -644,7 +644,7 @@ impl PeerMachine {
             identity: None,
             node_addr: None,
             leg: None,
-            conn: ConnectionState::inbound(link, now),
+            conn: ConnectionState::inbound(link, at),
             send_failed: false,
             last_heartbeat_sent_ms: 0,
             origin: DialOrigin::Addressed,
@@ -660,8 +660,8 @@ impl PeerMachine {
     /// state that event's handler would have left behind, minus the timers —
     /// no timer is armed on inbound legs (the stale-connection reaper owns
     /// their timeout).
-    pub(crate) fn inbound_msg2_sent(link: LinkId, our_index: IndexLease, now: u64) -> Self {
-        let mut machine = Self::new_inbound(link, now);
+    pub(crate) fn inbound_msg2_sent(link: LinkId, our_index: IndexLease, at: LegStamp) -> Self {
+        let mut machine = Self::new_inbound(link, at);
         machine.park_inbound_msg2_sent(our_index);
         machine
     }
@@ -726,7 +726,7 @@ impl PeerMachine {
         &mut self,
         mut our_keypair: Keypair,
         epoch: [u8; 8],
-        current_time_ms: u64,
+        at: LegStamp,
     ) -> Result<Vec<u8>, NoiseError> {
         // The parameter is this frame's own copy of the node's long-term
         // private key, and the state checks below return before it is used.
@@ -761,7 +761,7 @@ impl PeerMachine {
 
             msg1
         };
-        self.conn.touch(current_time_ms);
+        self.conn.touch(at);
 
         Ok(msg1)
     }
@@ -780,7 +780,7 @@ impl PeerMachine {
         epoch: [u8; 8],
         message: &[u8],
         negotiation_payload: Option<&[u8]>,
-        current_time_ms: u64,
+        at: LegStamp,
     ) -> Result<Vec<u8>, NoiseError> {
         // Same as `start_handshake`: the parameter copy outlives two early
         // returns, so the guard clears it in place rather than an erase per
@@ -824,7 +824,7 @@ impl PeerMachine {
 
             msg2
         };
-        self.conn.touch(current_time_ms);
+        self.conn.touch(at);
 
         Ok(msg2)
     }
@@ -863,7 +863,7 @@ impl PeerMachine {
         &mut self,
         message: &[u8],
         negotiation_payload: Option<&[u8]>,
-        current_time_ms: u64,
+        at: LegStamp,
         decide: impl FnOnce(NodeAddr) -> DialMsg2Decision,
     ) -> Result<DialMsg2Step, NoiseError> {
         let (msg3, received_negotiation, learned_identity, remote_epoch) = {
@@ -931,7 +931,7 @@ impl PeerMachine {
         };
         self.conn.set_expected_identity(learned_identity);
         self.conn.set_remote_epoch(remote_epoch);
-        self.conn.touch(current_time_ms);
+        self.conn.touch(at);
 
         Ok(DialMsg2Step::Completed(msg3, received_negotiation))
     }
@@ -945,9 +945,9 @@ impl PeerMachine {
         &mut self,
         message: &[u8],
         negotiation_payload: Option<&[u8]>,
-        current_time_ms: u64,
+        at: LegStamp,
     ) -> Result<(Vec<u8>, Option<Vec<u8>>), NoiseError> {
-        match self.complete_handshake(message, negotiation_payload, current_time_ms, |_| {
+        match self.complete_handshake(message, negotiation_payload, at, |_| {
             DialMsg2Decision::Accept
         })? {
             DialMsg2Step::Completed(msg3, negotiation) => Ok((msg3, negotiation)),
@@ -975,11 +975,7 @@ impl PeerMachine {
     /// lease, stays on the leg ([`final_read`](Self::final_read)) until the
     /// establish decision settles it; the learned identity and epoch land on
     /// the carrier.
-    pub(crate) fn read_final(
-        &mut self,
-        msg3: &[u8],
-        current_time_ms: u64,
-    ) -> Result<(), Msg3Error> {
+    pub(crate) fn read_final(&mut self, msg3: &[u8], at: LegStamp) -> Result<(), Msg3Error> {
         let (learned_identity, remote_epoch) = {
             let leg = self.leg.as_mut().ok_or_else(no_pending_connection)?;
             // The responder holds its handshake from msg1 until msg3.
@@ -1011,7 +1007,7 @@ impl PeerMachine {
         };
         self.conn.set_expected_identity(learned_identity);
         self.conn.set_remote_epoch(Some(remote_epoch));
-        self.conn.touch(current_time_ms);
+        self.conn.touch(at);
         Ok(())
     }
 
@@ -1056,11 +1052,11 @@ impl PeerMachine {
     pub(crate) fn complete_handshake_msg3(
         &mut self,
         message: &[u8],
-        current_time_ms: u64,
+        at: LegStamp,
     ) -> Result<Option<Vec<u8>>, Msg3Error> {
         let zero = SessionIndex::new(0);
         let framed = crate::proto::fmp::wire::build_msg3(zero, zero, message);
-        self.read_final(&framed, current_time_ms)?;
+        self.read_final(&framed, at)?;
         let payload = self
             .final_read()
             .and_then(|fin| fin.payload().map(<[u8]>::to_vec));
@@ -1173,15 +1169,22 @@ impl PeerMachine {
         self.conn.started_at()
     }
 
-    /// Last-activity timestamp of the surviving carrier — the home for the
-    /// operator-visible `last_activity_ms`/`idle_ms` and the idle-timeout check.
+    /// Last-activity timestamp of the surviving carrier, on the wall clock —
+    /// the home for the operator-visible `last_activity_ms`/`idle_ms`.
     pub(crate) fn conn_last_activity(&self) -> u64 {
         self.conn.last_activity()
     }
 
-    /// Whether the carrier has been idle past `timeout_ms`.
-    pub(crate) fn conn_is_timed_out(&self, now_ms: u64, timeout_ms: u64) -> bool {
-        self.conn.is_timed_out(now_ms, timeout_ms)
+    /// Last activity of the surviving carrier on the interval clock, which
+    /// the idle-timeout check reads.
+    pub(crate) fn conn_active_at(&self) -> u64 {
+        self.conn.active_at()
+    }
+
+    /// Whether the carrier has been idle past `timeout_ms` at
+    /// `interval_now`, a reading of the interval clock.
+    pub(crate) fn conn_is_timed_out(&self, interval_now: u64, timeout_ms: u64) -> bool {
+        self.conn.is_timed_out(interval_now, timeout_ms)
     }
 
     /// Expected peer identity of the surviving carrier — the home for the
@@ -1342,8 +1345,8 @@ impl PeerMachine {
 
     /// Advance the carrier's last-activity timestamp — the machine-tier paired
     /// write for the leg's handshake `touch`.
-    pub(crate) fn touch_conn(&mut self, now_ms: u64) {
-        self.conn.touch(now_ms);
+    pub(crate) fn touch_conn(&mut self, at: LegStamp) {
+        self.conn.touch(at);
     }
 
     /// Whether this is an outbound leg parked at `SentMsg1` — the only state in
@@ -1408,6 +1411,9 @@ impl PeerMachine {
     /// control state. `index_allocator` is a synchronous capability (the
     /// handshake/rekey need an index mid-transition), never moved in, never an
     /// action.
+    ///
+    /// `now` is a reading of the interval clock (`Node::interval_ms`): the
+    /// timers the machine arms are deadlines on it.
     pub(crate) fn step(
         &mut self,
         event: PeerEvent,
@@ -2137,7 +2143,7 @@ mod tests {
         let id = peer_identity();
         let addr = *id.node_addr();
         let link = LinkId::new(3);
-        let mut m = PeerMachine::new_outbound(link, Some(id), 0);
+        let mut m = PeerMachine::new_outbound(link, Some(id), LegStamp::at(0));
         let their_index = SessionIndex::new(0x77);
 
         let actions = m.step(
@@ -2178,7 +2184,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let link = LinkId::new(4);
-        let mut m = PeerMachine::new_outbound(link, Some(id), 0);
+        let mut m = PeerMachine::new_outbound(link, Some(id), LegStamp::at(0));
         let their_index = SessionIndex::new(0x88);
 
         let actions = m.step(
@@ -2220,7 +2226,7 @@ mod tests {
         // Cross-connection SWAP: our outbound wins -> decision only; the
         // shell's inline resolution owns the index frees and session
         // replacement.
-        let mut m2 = PeerMachine::new_outbound(LinkId::new(2), Some(peer), 0);
+        let mut m2 = PeerMachine::new_outbound(LinkId::new(2), Some(peer), LegStamp::at(0));
         m2.state = PeerState::Handshaking {
             link: LinkId::new(2),
             phase: HandshakePhase::SentMsg1,
@@ -2259,7 +2265,7 @@ mod tests {
 
         // Cross-connection KEEP: our outbound loses -> decision only; the
         // shell's inline resolution frees the unused outbound index.
-        let mut m3 = PeerMachine::new_outbound(LinkId::new(3), Some(peer), 0);
+        let mut m3 = PeerMachine::new_outbound(LinkId::new(3), Some(peer), LegStamp::at(0));
         m3.state = PeerState::Handshaking {
             link: LinkId::new(3),
             phase: HandshakePhase::SentMsg1,
@@ -2408,7 +2414,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
-        let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
 
         // msg1: allocate our index, send msg2, park at SentMsg2.
         let msg1 = m.step(
@@ -2478,7 +2484,7 @@ mod tests {
         let our = *peer_identity().node_addr();
 
         // Winner leg (link 1): net-new inbound promote -> Established.
-        let mut winner = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let mut winner = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
         let _ = winner.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(1),
@@ -2515,7 +2521,7 @@ mod tests {
 
         // Loser leg (link 2): same identity, loses cross-connection at
         // promote_connection -> Failed + FreeIndex.
-        let mut loser = PeerMachine::new_inbound(LinkId::new(2), 0);
+        let mut loser = PeerMachine::new_inbound(LinkId::new(2), LegStamp::at(0));
         let _ = loser.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(2),
@@ -2567,7 +2573,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
         let peer_addr = *peer.node_addr();
-        let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
         assert_eq!(
             m.state(),
             PeerState::Handshaking {
@@ -2635,7 +2641,7 @@ mod tests {
         // a small bounded range, so it cannot be drained by repeated calls).
         let mut alloc = IndexAllocator::with_max_attempts(0);
 
-        let mut m = PeerMachine::new_inbound(LinkId::new(1), 0);
+        let mut m = PeerMachine::new_inbound(LinkId::new(1), LegStamp::at(0));
         let actions = m.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(1),
@@ -2663,7 +2669,7 @@ mod tests {
         let peer_addr = *smaller.node_addr();
 
         let mut alloc = IndexAllocator::new();
-        let mut m = PeerMachine::new_inbound(LinkId::new(2), 0);
+        let mut m = PeerMachine::new_inbound(LinkId::new(2), LegStamp::at(0));
         let _ = m.step(
             PeerEvent::InboundMsg1 {
                 link: LinkId::new(2),
@@ -2708,7 +2714,7 @@ mod tests {
         let our = *peer_identity().node_addr();
 
         let mut alloc = IndexAllocator::new();
-        let mut m = PeerMachine::new_inbound(LinkId::new(4), 0);
+        let mut m = PeerMachine::new_inbound(LinkId::new(4), LegStamp::at(0));
         let seed = SessionIndex::new(0xCD);
         let _ = m.conn.set_our_index(IndexLease::for_test(seed.as_u32()));
 
@@ -2746,7 +2752,7 @@ mod tests {
         let our = *peer_identity().node_addr();
 
         let mut alloc = IndexAllocator::new();
-        let mut m = PeerMachine::new_inbound(LinkId::new(5), 0);
+        let mut m = PeerMachine::new_inbound(LinkId::new(5), LegStamp::at(0));
         let seed = SessionIndex::new(0xEF);
         let _ = m.conn.set_our_index(IndexLease::for_test(seed.as_u32()));
         let stored_msg2 = vec![1u8, 2, 3, 4];
@@ -2789,7 +2795,7 @@ mod tests {
 
         // Persisted at dial: Discovered, with the carrier index written by the
         // shell at msg1 preparation.
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), LegStamp::at(0));
         let _ = m
             .conn
             .set_our_index(IndexLease::for_test(dial_index.as_u32()));
@@ -2872,7 +2878,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), LegStamp::at(0));
         // Connectionless dial: no OpenTransport, straight to Handshaking{SentMsg1}.
         let dial = m.step(
             PeerEvent::Dial {
@@ -2945,7 +2951,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let peer = peer_identity();
 
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), LegStamp::at(0));
         // Connection-oriented dial: open the transport first, no msg1 yet.
         let dial = m.step(
             PeerEvent::Dial {
@@ -3010,7 +3016,7 @@ mod tests {
 
         // Dial-persisted outbound machine carrying a prepared leg, driven to
         // Handshaking{SentMsg1} via the connectionless dial.
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(peer), LegStamp::at(0));
         let _ = m.step(
             PeerEvent::Dial {
                 transport_id: TransportId::new(1),
@@ -3129,7 +3135,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), LegStamp::at(0));
         m.state = PeerState::Active { addr };
         let _ = m.conn.set_our_index(IndexLease::for_test(0x4242));
 
@@ -3173,7 +3179,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), LegStamp::at(0));
         m.state = PeerState::Active { addr };
         let _ = m.conn.set_our_index(IndexLease::for_test(0x1111));
         m.conn.set_their_index(SessionIndex::new(0x2222));
@@ -3204,7 +3210,7 @@ mod tests {
         let mut alloc = IndexAllocator::new();
         let id = peer_identity();
         let addr = *id.node_addr();
-        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), 0);
+        let mut m = PeerMachine::new_outbound(LinkId::new(1), Some(id), LegStamp::at(0));
         m.state = PeerState::Active { addr };
         let _ = m.conn.set_our_index(IndexLease::for_test(0x1111));
         m.conn.set_their_index(SessionIndex::new(0x2222));
@@ -3249,14 +3255,17 @@ mod tests {
         expected_identity: PeerIdentity,
         current_time_ms: u64,
     ) -> PeerMachine {
-        let mut machine =
-            PeerMachine::new_outbound(link_id, Some(expected_identity), current_time_ms);
+        let mut machine = PeerMachine::new_outbound(
+            link_id,
+            Some(expected_identity),
+            LegStamp::at(current_time_ms),
+        );
         machine.set_leg(HandshakeCrypto::new());
         machine
     }
 
     fn inbound_leg(link_id: LinkId, current_time_ms: u64) -> PeerMachine {
-        let mut machine = PeerMachine::new_inbound(link_id, current_time_ms);
+        let mut machine = PeerMachine::new_inbound(link_id, LegStamp::at(current_time_ms));
         machine.set_leg(HandshakeCrypto::new());
         machine
     }
@@ -3304,14 +3313,20 @@ mod tests {
 
         // Initiator starts XX handshake
         let msg1 = initiator_conn
-            .start_handshake(initiator_keypair, initiator_epoch, 1100)
+            .start_handshake(initiator_keypair, initiator_epoch, LegStamp::at(1100))
             .unwrap();
         // Post-msg1 the initiator holds an in-flight handshake, not yet a session.
         assert!(!initiator_conn.has_session());
 
         // Responder processes msg1 and sends msg2 (XX: does NOT complete yet)
         let msg2 = responder_conn
-            .receive_handshake_init(responder_keypair, responder_epoch, &msg1, None, 1200)
+            .receive_handshake_init(
+                responder_keypair,
+                responder_epoch,
+                &msg1,
+                None,
+                LegStamp::at(1200),
+            )
             .unwrap();
         // XX: the responder parks awaiting msg3 — it holds an in-flight
         // handshake, not yet a session (the deleted phase was `ReceivedMsg1`).
@@ -3321,7 +3336,7 @@ mod tests {
 
         // Initiator processes msg2 and generates msg3
         let (msg3, _neg) = initiator_conn
-            .complete_handshake_accepting(&msg2, None, 1300)
+            .complete_handshake_accepting(&msg2, None, LegStamp::at(1300))
             .unwrap();
         // The initiator completes at msg3 generation: it now holds a session.
         assert!(initiator_conn.has_session());
@@ -3332,7 +3347,9 @@ mod tests {
         assert_eq!(initiator_conn.conn_remote_epoch(), Some(responder_epoch));
 
         // Responder processes msg3 (completes handshake): it now holds a session.
-        let _neg = responder_conn.complete_handshake_msg3(&msg3, 1400).unwrap();
+        let _neg = responder_conn
+            .complete_handshake_msg3(&msg3, LegStamp::at(1400))
+            .unwrap();
         assert!(responder_conn.has_session());
 
         // Responder learned initiator's identity from msg3
@@ -3377,13 +3394,22 @@ mod tests {
         let mut ini = outbound_leg(LinkId::new(1), responder_id, 1000);
         let mut res = Box::new(inbound_leg(LinkId::new(2), 1000));
         let msg1 = ini
-            .start_handshake(initiator.keypair(), make_epoch(), 1100)
+            .start_handshake(initiator.keypair(), make_epoch(), LegStamp::at(1100))
             .unwrap();
         let msg2 = res
-            .receive_handshake_init(responder.keypair(), make_epoch(), &msg1, None, 1200)
+            .receive_handshake_init(
+                responder.keypair(),
+                make_epoch(),
+                &msg1,
+                None,
+                LegStamp::at(1200),
+            )
             .unwrap();
-        let (msg3, _) = ini.complete_handshake_accepting(&msg2, None, 1300).unwrap();
-        res.complete_handshake_msg3(&msg3, 1400).unwrap();
+        let (msg3, _) = ini
+            .complete_handshake_accepting(&msg2, None, LegStamp::at(1300))
+            .unwrap();
+        res.complete_handshake_msg3(&msg3, LegStamp::at(1400))
+            .unwrap();
         assert!(res.has_session(), "the responder's leg holds the session");
         assert!(leg_slot_nonzero_bytes(&res.leg) > 64);
 
@@ -3405,13 +3431,14 @@ mod tests {
         let identity = make_peer_identity();
         let keypair = make_keypair();
         let mut conn = outbound_leg(LinkId::new(1), identity, 1000);
-        conn.start_handshake(keypair, make_epoch(), 1100).unwrap();
+        conn.start_handshake(keypair, make_epoch(), LegStamp::at(1100))
+            .unwrap();
 
         conn.mark_failed();
 
         assert!(!conn.has_session());
         assert!(
-            conn.complete_handshake_accepting(&[0u8; 96], None, 1200)
+            conn.complete_handshake_accepting(&[0u8; 96], None, LegStamp::at(1200))
                 .is_err()
         );
     }
@@ -3425,7 +3452,7 @@ mod tests {
         let mut outbound = outbound_leg(LinkId::new(1), identity, 1000);
         assert!(
             outbound
-                .receive_handshake_init(keypair, make_epoch(), &[0u8; 33], None, 1100)
+                .receive_handshake_init(keypair, make_epoch(), &[0u8; 33], None, LegStamp::at(1100))
                 .is_err()
         );
 
@@ -3433,7 +3460,7 @@ mod tests {
         let mut inbound = inbound_leg(LinkId::new(2), 1000);
         assert!(
             inbound
-                .start_handshake(keypair, make_epoch(), 1100)
+                .start_handshake(keypair, make_epoch(), LegStamp::at(1100))
                 .is_err()
         );
     }

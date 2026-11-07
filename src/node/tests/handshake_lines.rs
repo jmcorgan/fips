@@ -30,7 +30,7 @@ fn msg3(leg: &mut PeerMachine, msg2: &[u8], index: u32, rekey_of: Option<Session
         None => payload.encode(),
     };
     let (noise_msg3, _) = leg
-        .complete_handshake_accepting(header.noise_msg2(msg2), Some(&neg), 1100)
+        .complete_handshake_accepting(header.noise_msg2(msg2), Some(&neg), LegStamp::at(1100))
         .expect("the initiator reads node 1's msg2");
     build_msg3(SessionIndex::new(index), header.sender_idx, &noise_msg3)
 }

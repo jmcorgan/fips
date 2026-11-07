@@ -21,6 +21,9 @@ The FMP link layer defines the following message types, dispatched by the
 | 0x31 | LookupResponse | Forwarded — reverse-path via `recent_requests` |
 | 0x50 | Disconnect | Peer-to-peer (orderly link teardown) |
 | 0x51 | Heartbeat | Peer-to-peer (link liveness) |
+| 0x52 | PathProbe | Peer-to-peer (multipath: proves and watches a path) |
+| 0x53 | PathAck | Peer-to-peer (multipath: answers a probe) |
+| 0x54 | PathClose | Peer-to-peer (multipath: a path is going away) |
 
 Handshake messages travel before encryption is established and are identified
 by the FMP common-prefix `phase` field rather than a `msg_type` byte
@@ -156,6 +159,9 @@ the 1-byte message type and message-specific fields.
 | 0x31 | LookupResponse | Coordinate discovery response |
 | 0x50 | Disconnect | Orderly link teardown |
 | 0x51 | Heartbeat | Link liveness probe |
+| 0x52 | PathProbe | Proves and watches one path of a link |
+| 0x53 | PathAck | Answers a PathProbe |
+| 0x54 | PathClose | Says a path of the link is going away |
 
 ### Noise XX Message 1 (phase 0x1)
 

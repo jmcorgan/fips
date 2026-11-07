@@ -1,0 +1,131 @@
+# One peer, two paths: a netem flap of the cable, the K-timeout bound
+#
+# Two nodes joined twice: a raw-Ethernet veth (the cable) and the Docker
+# bridge over UDP. The bridge half is dialled from static config and
+# carries link-up; the cable is found by beacon and becomes a second path
+# through the link's path machine. The cable scores better (1 to 3 ms
+# against 40 ms each way on the bridge), so each end moves onto it once it
+# is Live, and every flap hits the active path.
+#
+# What a down is here: `link_flaps` sets 100% netem loss on the veth in
+# both directions. The interface stays up and keeps carrier, so neither
+# end has a signal: each detects the loss only by its probes timing out,
+# and must switch within the K-timeout bound, 3 x 200 ms + 400 ms + 50 ms
+# + 250 ms = 1300 ms from the stamp the flap took inside the container.
+# The 1 s bound for a switch with a signal is dual-path-carrier's, not
+# this suite's.
+#
+# Recovery: a restored cable path is stopped (Dead), so its next probe
+# waits for the floor's next slot, unless the peer's own floor probe
+# revives it first; then the dwell (2 s) passes before the fail-back. By
+# arithmetic the path is Live again within about 4 s of a restore after an
+# 18 s outage.
+#
+#   n01 ===eth=== n02      (flapped)
+#   n01 ---udp--- n02      (never touched)
+
+scenario:
+  name: "dual-path-flap"
+  seed: 42
+  duration_secs: 180
+
+topology:
+  algorithm: explicit
+  num_nodes: 2
+  default_transport: udp
+  params:
+    adjacency:
+      - [n01, n02, ethernet+udp]
+
+netem:
+  enabled: true
+  default_policy:
+    delay_ms: [1, 3]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.2]
+  bridge_policy:
+    delay_ms: [40, 40]
+    jitter_ms: [0, 1]
+    loss_pct: [0, 0.2]
+
+# Only the cable flaps; the bridge path is the standby that has to be warm
+# when it does. protect_connectivity is off because the harness counts the
+# dual edge once and would refuse to flap the "only" link; the bridge half
+# keeps the pair connected throughout.
+link_flaps:
+  enabled: true
+  only_transport: ethernet
+  interval_secs: {min: 35, max: 45}
+  max_down_links: 1
+  down_duration_secs: {min: 12, max: 18}
+  protect_connectivity: false
+
+# Each TCP session runs a 1 Mbit/s UDP stream beside it, which max_stall
+# holds to its ceiling.
+traffic:
+  enabled: true
+  max_concurrent: 1
+  interval_secs: {min: 5, max: 10}
+  duration_secs: {min: 20, max: 30}
+  parallel_streams: 2
+  udp_mbps: 1
+
+node_churn:
+  enabled: false
+
+# Multipath is off by default until it is turned on for every node; the
+# MMP line once a second gives the peer's reorder count at a resolution
+# a switch can be put against.
+fips_overrides:
+  node:
+    path:
+      enabled: true
+    mmp:
+      log_interval_secs: 1
+
+assertions:
+  baseline:
+    min_nodes_reporting: 2
+    max_roots: 1
+    min_nodes_parented: 1
+
+  min_traffic:
+    min_sessions_ok: 2
+
+  # Every flap, at both ends, within the K-timeout bound,
+  # 3 x 200 + 400 + 50 + 250 = 1300 ms.
+  switch_latency:
+    max_ms: 1300
+    each_end: true
+
+  # Each flap moves both ends off the cable and back (4); the first move
+  # onto the cable at each end (2). Three or four flaps in 180 s, so the
+  # ceiling follows the flaps the run made.
+  path_switches:
+    min_total: 4
+    per_flap: 4
+    extra: 2
+  # A timeout of the active path that no down explains, which a switch count
+  # cannot see. Reported, not held.
+  active_timeouts: {}
+
+  max_promotions:
+    per_node: 1
+  max_dials: 0
+  # Held on the UDP streams, at the receiver: they stop only while no
+  # path carries them. A TCP receiver can stay silent after a switch for
+  # as long as its sender's retransmission timer runs, which is TCP's own
+  # recovery, so the TCP sessions' figure is reported, not bounded.
+  max_stall:
+    max_secs: 2
+    stream: udp
+  # The control: both ends held the cable as a second path.
+  paths_live:
+    min: 2
+
+  max_errors:
+    max_total: 0
+
+logging:
+  rust_log: "info,fips::node::handlers::path=debug,fips::node::handlers::mmp=debug,fips::node::bloom=debug,fips::node::lifecycle=debug,fips::node::dataplane::wait=debug"
+  output_dir: "./sim-results"

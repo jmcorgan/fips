@@ -20,6 +20,9 @@ pub struct EthernetStats {
     pub beacons_dropped: AtomicU64,
     pub frames_too_short: AtomicU64,
     pub frames_too_long: AtomicU64,
+    /// Frames the kernel dropped at the socket because its receive buffer
+    /// was full, summed over every binding since the transport started.
+    pub kernel_drops: AtomicU64,
 }
 
 impl EthernetStats {
@@ -37,6 +40,7 @@ impl EthernetStats {
             beacons_dropped: AtomicU64::new(0),
             frames_too_short: AtomicU64::new(0),
             frames_too_long: AtomicU64::new(0),
+            kernel_drops: AtomicU64::new(0),
         }
     }
 
@@ -77,6 +81,14 @@ impl EthernetStats {
         self.beacons_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Add frames the kernel dropped at the socket since the last reading.
+    ///
+    /// The kernel's own count resets each time it is read, so the transport
+    /// adds every reading here and this counter is the running total.
+    pub fn record_kernel_drops(&self, drops: u64) {
+        self.kernel_drops.fetch_add(drops, Ordering::Relaxed);
+    }
+
     /// Take a snapshot of all counters.
     pub fn snapshot(&self) -> EthernetStatsSnapshot {
         EthernetStatsSnapshot {
@@ -91,6 +103,7 @@ impl EthernetStats {
             beacons_dropped: self.beacons_dropped.load(Ordering::Relaxed),
             frames_too_short: self.frames_too_short.load(Ordering::Relaxed),
             frames_too_long: self.frames_too_long.load(Ordering::Relaxed),
+            kernel_drops: self.kernel_drops.load(Ordering::Relaxed),
         }
     }
 }
@@ -115,4 +128,9 @@ pub struct EthernetStatsSnapshot {
     pub beacons_dropped: u64,
     pub frames_too_short: u64,
     pub frames_too_long: u64,
+    pub kernel_drops: u64,
 }
+
+#[cfg(test)]
+#[path = "tests/stats.rs"]
+mod tests;

@@ -18,6 +18,9 @@
 
 # fips-core
 benchmark     fips-core  proto::link::tests::bench_session_datagram_decode_owned_vs_ref  core/src/proto/tests/link.rs
+known-defect  fips-core  proto::settle::tests::regress::after_a_dial_on_the_peers_aged_link_the_peer_answers_the_larger_nodes_rekey  core/src/proto/settle/tests/regress.rs
+known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_larger_dialer  core/src/proto/settle/tests/regress.rs
+known-defect  fips-core  proto::settle::tests::regress::after_a_late_second_dial_answered_in_the_other_order_both_ends_hold_one_session_smaller_dialer  core/src/proto/settle/tests/regress.rs
 
 # fips-mesh
 environment   fips-mesh  gateway::nat::tests::kernel_rejection_retries_latest_state_without_another_mapping_event  src/gateway/nat.rs
@@ -77,5 +80,26 @@ long-running  fips-mesh  node::tests::discovery::test_discovery_100_nodes  src/n
 benchmark     fips-mesh  node::tests::app_tun::app_owned_tun_throughput_between_two_nodes  src/node/tests/app_tun.rs
 benchmark     fips-mesh  transport::udp::io::tests::bench_udp_recv_amortization  src/transport/udp/io/mod.rs
 benchmark     fips-mesh  transport::udp::io::tests::measure_duplicate_ephemeral_ports_for_reuse_flags_set_before_and_after_bind  src/transport/udp/io/mod.rs
+known-defect  fips-mesh  node::tests::path_accept::a_switch_between_rekey_msg1_and_msg2_leaves_the_rekey_to_complete_on_the_new_path  src/node/tests/path_accept.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_precondition  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_bare_unwrap  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_a_plain_expect_in_a_setup_helper  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_failure_at_its_defect_assertion  src/node/tests/settle/lane.rs
+helper        fips-mesh  node::tests::settle::lane::a_planted_test_that_passes  src/node/tests/settle/lane.rs
 known-defect  fips-mesh  transport::ethernet::io::tests::blocking_send_parks_past_a_shutdown_request_when_the_channel_is_full  src/transport/ethernet/io.rs
 known-defect  fips-mesh  node::tests::restart_dial::a_larger_node_still_hearing_a_restarted_peer_settles_on_one_session_when_both_dial_and_the_peer_reads_its_own_answer_first  src/node/tests/restart_dial.rs
+# The next eight are known differences on next whose cause is not established,
+# each pin once with multipath off and once with it on:
+# after crossed TCP dials each node keeps both its connections open, the larger
+# node's link record is at another pair than the one it holds the peer at, and
+# the larger node's live link has no address-index entry at its pair. The
+# missing entry is seen with the multipath path machine; next without it shows
+# only the first two. See src/node/tests/settle/README.md, "On this line".
+known-defect  fips-mesh  node::tests::settle::audit::the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record  src/node/tests/settle/audit.rs
+known-defect  fips-mesh  node::tests::settle::audit::the_audit_without_its_crossing_exemption_flags_the_smaller_nodes_inbound_link_record_with_multipath_on  src/node/tests/settle/audit.rs
+known-defect  fips-mesh  node::tests::settle::audit::the_crossing_exemption_waives_only_the_named_nodes_record  src/node/tests/settle/audit.rs
+known-defect  fips-mesh  node::tests::settle::audit::the_crossing_exemption_waives_only_the_named_nodes_record_with_multipath_on  src/node/tests/settle/audit.rs
+known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first_with_multipath_on  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first  src/node/tests/settle/crossing.rs
+known-defect  fips-mesh  node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first_with_multipath_on  src/node/tests/settle/crossing.rs

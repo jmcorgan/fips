@@ -1,0 +1,12 @@
+diff --git a/src/node/handlers/handshake.rs b/src/node/handlers/handshake.rs
+index ec96c179..91cbcfdf 100644
+--- a/src/node/handlers/handshake.rs
++++ b/src/node/handlers/handshake.rs
+@@ -1947,6 +1947,7 @@ impl Node {
+                         error = %e,
+                         "msg2 did not authenticate, keeping the handshake attempt"
+                     );
++                    self.pending_outbound.remove(&key);
+                     self.stats_mut()
+                         .record_reject(RejectReason::Handshake(HandshakeReject::BadState));
+                     return;

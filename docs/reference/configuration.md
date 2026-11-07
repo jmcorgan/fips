@@ -600,6 +600,47 @@ daemon logs a warning naming it.
 | `node.rekey.after_secs` | u64 | `120` | Initiate rekey after this many seconds on a session |
 | `node.rekey.after_messages` | u64 | `65536` | Initiate rekey after this many messages sent on a session |
 
+### Multipath (`node.path.*`)
+
+A link may hold more than one path to a peer: it keeps every path it has
+proved, probes them, and moves its traffic between them with no new handshake.
+[fips-multi-path-switchover.md](../design/fips-multi-path-switchover.md) has the
+design. A peer without multipath is unaffected: it discards the probes and the
+link stays on its one path. Multipath is off by default: set
+`node.path.enabled: true` on both nodes to turn it on.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node.path.enabled` | bool | `false` | Send and answer path messages. `false` keeps every link on one path, as a node without multipath does, and path messages are discarded unanswered. |
+| `node.path.min_samples` | u32 | `2` | Round-trip samples a path needs before it is chosen over the active path on its score. A failover does not wait for them. 1 to 255. |
+| `node.path.mix_kinds` | bool | `false` | Let a link hold paths of another kind than its original path's, local beside Internet. |
+| `node.path.switch.margin` | f64 | `1.3` | The factor by which another path's score must beat the active path's. A finite number of at least 1.0. |
+| `node.path.switch.dwell_secs` | u64 | `2` | How long the other path must stay better by the margin before the link moves. Not 0. A failed active path is left at once, with no dwell. |
+| `node.path.probe.active_ms` | u64 | `200` | Probe interval of a path either end sends data on. Not 0. |
+| `node.path.probe.standby_ms` | u64 | `1000` | Probe interval of a Live or Suspect standby path. Not 0. |
+
+Two per-transport settings go with these, and are read only with
+`node.path.enabled`:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `role` | string | `"normal"` | This transport's part in a link's paths, on every transport. `never`: no new path is made on it, and a path held on it from before ranks last. `backup`: carries a link only while no `normal` or `preferred` path is Live. `normal`: ranked by score. `preferred`: carries a link whenever it is Live and scores within the switch margin of the best path. |
+| `kind` | string | *(none)* | `local` or `internet`, in place of the kind the peer's address implies. UDP and TCP only: every other transport has the kind its medium fixes, and refuses the setting. |
+
+A path's kind decides which paths may share a link. Ethernet, BLE and serial are
+local, and Tor and Nym are Internet. UDP and TCP take the kind of the peer's
+address: loopback, link-local, RFC 1918 and ULA addresses are local, and every
+other address, `100.64.0.0/10` included, is Internet. So a VPN or a private WAN
+on RFC 1918 space reads as local, and such a transport should set `kind:
+internet`. A link never mixes anonymity classes, whatever these settings say: a
+link reached over Tor gains no path over a clear transport or over Nym.
+
+To put a cable ahead of Wi-Fi, whose scores are usually within the margin of
+each other on a LAN, set `role: preferred` on the cable's transport. The peer
+needs multipath too, and the two transports need addresses for each other,
+which configuration, mDNS or a Nostr advert can supply. An Ethernet or BLE
+beacon carries no key, so it names no peer and supplies no address on its own.
+
 ### Session / Data Plane (`node.session.*`)
 
 Controls end-to-end session behavior and packet queuing.
@@ -798,14 +839,17 @@ adding entries and the precedence rules:
 
 ## Transports (`transports.*`)
 
+Every transport also takes `role`, and UDP and TCP take `kind`, which place it
+among a link's paths. See [Multipath](#multipath-nodepath).
+
 ### UDP (`transports.udp.*`)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.udp.bind_addr` | string | `"0.0.0.0:2121"` | UDP bind address and port. Ignored when `outbound_only: true` (kernel-assigned ephemeral port is used regardless). |
 | `transports.udp.mtu` | u16 | `1357` | Transport MTU; the default is the smallest that carries a 1280-byte IPv6 packet |
-| `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Host `net.core.rmem_max` must be >= this value. |
-| `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Host `net.core.wmem_max` must be >= this value. |
+| `transports.udp.recv_buf_size` | usize | `2097152` | UDP socket receive buffer size in bytes (2 MB). Linux kernel doubles the requested value internally. Granted in full to a process with `CAP_NET_ADMIN` (`SO_RCVBUFFORCE`); without it the kernel clamps to `net.core.rmem_max`, which must then be >= this value, and the daemon warns when clamped. See [../how-to/tune-udp-buffers.md](../how-to/tune-udp-buffers.md). |
+| `transports.udp.send_buf_size` | usize | `2097152` | UDP socket send buffer size in bytes (2 MB). Granted in full to a process with `CAP_NET_ADMIN` (`SO_SNDBUFFORCE`); without it the kernel clamps to `net.core.wmem_max`, which must then be >= this value, and the daemon warns when clamped. |
 | `transports.udp.advertise_on_nostr` | bool | `false` | Include this UDP transport in Nostr endpoint adverts. Implicitly forced false when `outbound_only: true`. |
 | `transports.udp.public` | bool | `false` | If advertised: `true` publishes direct `host:port`; `false` publishes `udp:nat` rendezvous |
 | `transports.udp.external_addr` | string | *(none)* | Explicit advertise-as override. Bare IP (`"203.0.113.45"` — bind port is appended) or full `host:port`. Takes precedence over the bound address and STUN autodiscovery. Useful when the public IP isn't on a local interface (cloud 1:1 NAT, EIP) or to skip STUN for a deterministic value. |
@@ -825,8 +869,8 @@ root; on macOS it requires read/write access to a `/dev/bpf*` device.
 | `interface` | string | *(required)* | Network interface name (e.g., `"eth0"`, `"enp3s0"`) |
 | `ethertype` | u16 | `0x2121` | EtherType |
 | `mtu` | u16 | *(auto)* | Override MTU. Default: interface MTU minus 3 (for frame type + length prefix) |
-| `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB) |
-| `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB) |
+| `recv_buf_size` | usize | `2097152` | Socket receive buffer size in bytes (2 MB). On Linux it is granted in full with `CAP_NET_ADMIN` and otherwise clamped to `net.core.rmem_max` with a warning, as for UDP |
+| `send_buf_size` | usize | `2097152` | Socket send buffer size in bytes (2 MB). On Linux it is granted in full with `CAP_NET_ADMIN` and otherwise clamped to `net.core.wmem_max` with a warning, as for UDP |
 | `listen` | bool | `true` | Listen for neighbor beacons from other nodes. Renamed from `discovery` in v0.5.0; the old key is still accepted as an alias, so a deployed config loads unchanged |
 | `announce` | bool | `false` | Broadcast announcement beacons on the LAN |
 | `auto_connect` | bool | `false` | Auto-connect to discovered peers |
@@ -1534,6 +1578,16 @@ node:
   rekey:
     after_secs: 120                  # rekey interval (seconds)
     after_messages: 65536            # rekey after N messages sent
+  path:
+    enabled: false                   # multipath: keep and move between proven paths
+    min_samples: 2                   # round trips before a move on its score
+    mix_kinds: false                 # allow local beside Internet paths in one link
+    switch:
+      margin: 1.3                    # factor another path must beat the active by
+      dwell_secs: 2                  # how long it must stay better
+    probe:
+      active_ms: 200                 # probe interval of a path carrying data
+      standby_ms: 1000               # probe interval of a standby path
   control:
     enabled: true
     socket_path: null                # null = auto (platform runtime dir → XDG → /tmp)

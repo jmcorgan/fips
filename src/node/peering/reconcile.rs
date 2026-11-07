@@ -781,12 +781,14 @@ impl PeeringReconciler {
                 // Anonymous first-contact leg (next-only XX path): it has no
                 // NodeAddr to key admission or the per-path dedupe below, and
                 // — matching next's OLD `poll_transport_discovery` — it
-                // consumes NO connect_budget. The driver already applied the
-                // sole gate (the `addr_to_link` dedup) when building the pool,
-                // so emit unconditionally. On master this branch is inert (IK
-                // discovery always yields `Some`), so master-line behavior is
-                // unchanged; this only re-adds next's dial-every-anonymous-beacon
-                // behavior. Named legs follow the per-path rule after it.
+                // consumes NO connect_budget. The driver already applied its
+                // gates (the `addr_to_link` dedup, and the dial gate of a
+                // capable linked peer holding the beacon's pair as a proven
+                // path) when building the pool, so emit unconditionally. On
+                // master this branch is inert (IK discovery always yields
+                // `Some`), so master-line behavior is unchanged; this only
+                // re-adds next's dial-every-anonymous-beacon behavior. Named
+                // legs follow the per-path rule after it.
                 actions.push(PeeringAction::Connect(cand.clone()));
                 continue;
             };

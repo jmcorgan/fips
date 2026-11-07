@@ -43,7 +43,10 @@ changing anything here.
   draws from, so a run replays byte for byte from its seed;
   `SeededEntropy`, an entropy source on a per-thread `SplitMix64` that
   `seed_entropy` reseeds, and `seeded_keypair`, so a simulation with real
-  Noise handshakes replays too). Compiled for tests only.
+  Noise handshakes replays too; and the test binary's global allocator,
+  the system's with a per-thread count of allocations that
+  `allocations()` reads, so a test can show a call allocates nothing).
+  Compiled for tests only.
 
 ## Rules for this level
 

@@ -145,6 +145,25 @@ impl Node {
         };
 
         let mut tick = tokio::time::interval(self.tick_period());
+        // The links' path machines run on their own, faster tick, armed only
+        // while some link has work, and a tick missed is skipped, not run
+        // twice.
+        let mut path_tick = tokio::time::interval(crate::node::handlers::path::PATH_TICK);
+        path_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Kernel link events wake the carrier read between path ticks. Only a
+        // node with multipath enabled watches them for this; it is built here,
+        // inside the runtime, because the watcher needs one.
+        let watch = crate::node::handlers::path::carrier_watch(self.config().node.path.enabled);
+        // The encrypt workers' reports of unreachable sends, or a dummy
+        // channel when no pool was started: the same pattern, for the same
+        // reason, as the child-liveness receiver above.
+        let (mut report_rx, _report_guard) = match self.paths.reports.take() {
+            Some(rx) => (rx, None),
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                (rx, Some(tx))
+            }
+        };
 
         // Set up control socket channel
         let (control_tx, mut control_rx) =
@@ -258,6 +277,8 @@ impl Node {
         info!("RX event loop started");
         // Optional per-stage perf profiler (FIPS_PERF=1). No-op otherwise.
         crate::perf_profile::maybe_spawn_reporter();
+        // Ends with this loop.
+        let _task_wait = super::wait::watch();
 
         loop {
             // Bounded drain mode: break as soon as all peers have cleared. In
@@ -299,12 +320,12 @@ impl Node {
                         None => break, // channel closed
                     }
                     // Drain remaining ready inbound packets in a tight loop
-                    // before yielding back to select! — every yield is a
-                    // futex hop on tokio's multi-thread scheduler, and at
-                    // line rate the kernel UDP queue typically has several
-                    // datagrams available per wake. Caps at a batch
-                    // boundary so other branches (tick, control) eventually
-                    // get a turn even under sustained load.
+                    // before going back to select!: at line rate the kernel
+                    // UDP queue typically has several datagrams available
+                    // per wake, and each round of this loop ends in a yield.
+                    // The cap bounds how long one round runs. It gives the
+                    // later branches (tick, control) no turn: under `biased`
+                    // they are reached only when this branch reads empty.
                     //
                     // **Interleave fallback drain** every N packets so
                     // bounced FMP plaintexts (heartbeats, post-FMP-
@@ -441,16 +462,18 @@ impl Node {
                         // Not policy-filtered: whether an interface's absence
                         // is normal is a statement about node *health*, not
                         // about whether the routes over it still work.
-                        if !edge.present {
-                            let reaped =
-                                self.reap_peers_on_transport(edge.transport_id).await;
-                            if reaped > 0 {
-                                info!(
-                                    transport_id = %edge.transport_id,
-                                    peers = reaped,
-                                    "Withdrew peers whose interface went away"
-                                );
-                            }
+                        //
+                        // Every link's path machine hears both edges: a loss
+                        // discards the paths on the interface, and a return
+                        // releases the addresses held back on it.
+                        let reaped =
+                            self.path_presence(edge.transport_id, edge.present).await;
+                        if reaped > 0 {
+                            info!(
+                                transport_id = %edge.transport_id,
+                                peers = reaped,
+                                "Withdrew peers whose interface went away"
+                            );
                         }
                     }
                 }
@@ -522,8 +545,11 @@ impl Node {
                     self.handle_native(message);
                 }
                 Some((request, response_tx)) = control_rx.recv() => {
-                    // Only mutating COMMAND requests (`connect` / `disconnect`)
-                    // reach the rx_loop now. Every pure-read `show_*` query is
+                    // Only mutating COMMAND requests (`connect` / `disconnect`,
+                    // the probe commands, `path_pin` / `path_unpin`) and
+                    // `path_show`, which reads the live path machines the
+                    // snapshot does not carry, reach the rx_loop now. Every
+                    // pure-read `show_*` query is
                     // served off-loop from the read handle in the control accept
                     // task (`snapshot_dispatch`), so it never round-trips here —
                     // the data-plane dispatch path carries no `show_*` arm. A
@@ -535,6 +561,15 @@ impl Node {
                         request.params.as_ref(),
                     ).await;
                     let _ = response_tx.send(response);
+                }
+                _ = path_tick.tick(), if self.paths.armed() => {
+                    self.path_tick().await;
+                }
+                _ = crate::node::handlers::path::changed(&watch), if watch.is_some() => {
+                    self.read_carrier().await;
+                }
+                Some(report) = report_rx.recv() => {
+                    self.path_unreachable(report.transport, report.dest).await;
                 }
                 deadline = tick.tick() => {
                     // Tick-body instrumentation. The gate is read ONCE per tick
@@ -589,7 +624,7 @@ impl Node {
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollLanRendezvous,
                         self.poll_lan_rendezvous().await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::DrivePeerTimers,
-                        self.drive_peer_timers(now_ms).await);
+                        self.drive_peer_timers(Self::interval_ms()).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PollSessionRekeys,
                         self.poll_session_rekeys(session_now).await);
                         instr_step!(instr_on, crate::instr::Domain::Tick, crate::instr::Step::PurgeIdleSessions,
@@ -667,6 +702,15 @@ impl Node {
                     break;
                 }
             }
+            // Give the runtime thread back once per round. An outside thread
+            // can keep a burst arm ready, and then this task would return to
+            // the scheduler only when its cooperative budget ran out, 128
+            // rounds on, with every spawned task waiting. A listen socket's
+            // reader is one, and a probe waiting in its socket for that long
+            // falls behind the replay window. This frees spawned tasks only:
+            // the select's later arms still wait for the ready arm to read
+            // empty.
+            tokio::task::yield_now().await;
         }
 
         info!("RX event loop stopped (channel closed)");

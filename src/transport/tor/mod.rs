@@ -159,6 +159,9 @@ pub struct TorTransport {
     /// Defaults to `INBOUND_IDLE_TIMEOUT`; the node sets it from its
     /// liveness timers.
     idle_timeout: Duration,
+    /// Deadline from accept to the first complete inbound onion frame.
+    /// Defaults to `INBOUND_FIRST_FRAME_TIMEOUT`; overridable only from tests.
+    first_frame_timeout: Duration,
 }
 
 impl TorTransport {
@@ -185,6 +188,7 @@ impl TorTransport {
             cached_monitoring: Arc::new(std::sync::RwLock::new(None)),
             monitoring_task: None,
             idle_timeout: INBOUND_IDLE_TIMEOUT,
+            first_frame_timeout: INBOUND_FIRST_FRAME_TIMEOUT,
         }
     }
 
@@ -205,9 +209,25 @@ impl TorTransport {
         self.idle_timeout
     }
 
+    /// Override the onion listener's accept-to-first-frame deadline.
+    ///
+    /// Test-only, as `TcpTransport::set_first_frame_timeout` is: the accept
+    /// loop reads this field when `start_async()` builds its deadline, so
+    /// there is no other way to drive the deadline at a duration a unit test
+    /// can wait for.
+    #[cfg(test)]
+    pub(crate) fn set_first_frame_timeout(&mut self, d: Duration) {
+        self.first_frame_timeout = d;
+    }
+
     /// Get the instance name (if configured as a named instance).
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// This transport's configured part in a link's paths.
+    pub fn role(&self) -> crate::config::TransportRole {
+        self.config.role
     }
 
     /// Get the onion service address (if active).
@@ -218,6 +238,14 @@ impl TorTransport {
     /// Get the transport statistics.
     pub fn stats(&self) -> &Arc<TorStats> {
         &self.stats
+    }
+
+    /// Whether the pool holds a connection to `addr`. Reads only: no
+    /// background connect is started or promoted, and the pool lock is
+    /// awaited rather than tried. A test hook: this line's node does not ask.
+    #[cfg(test)]
+    pub(crate) async fn has_connection(&self, addr: &TransportAddr) -> bool {
+        self.pool.lock().await.contains_key(addr)
     }
 
     /// Get the cached Tor daemon monitoring info (if available).
@@ -387,7 +415,7 @@ impl TorTransport {
         let max_inbound = self.config.max_inbound_connections();
         let stats = self.stats.clone();
         let deadline = InboundDeadline {
-            first_frame: INBOUND_FIRST_FRAME_TIMEOUT,
+            first_frame: self.first_frame_timeout,
             idle: self.idle_timeout,
         };
 
@@ -841,7 +869,6 @@ impl TorTransport {
                 id,
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // An outbound connection holds no capped inbound slot and is
@@ -1057,7 +1084,6 @@ impl TorTransport {
                 id,
                 packet_tx,
                 pool,
-                mtu,
                 recv_stats,
                 Direction::Outbound,
                 // An outbound connection holds no capped inbound slot and is
@@ -1136,6 +1162,37 @@ impl TorTransport {
             );
         }
     }
+
+    /// Pool an outbound connection to `remote` whose writer never finishes,
+    /// and return a receiver whose sender the writer holds, so it sees the
+    /// sender dropped only once the writer task has ended.
+    ///
+    /// Test-only: the conformance suite's stop rule needs a writer still
+    /// draining after a close, and cannot reach the private pool.
+    #[cfg(test)]
+    pub(crate) async fn stuck_writer(
+        &self,
+        remote: &TransportAddr,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (guard_tx, guard_rx) = tokio::sync::oneshot::channel::<()>();
+        self.pool.lock().await.insert(
+            remote.clone(),
+            ProxiedConnection {
+                send_tx: tokio::sync::mpsc::channel(1).0,
+                send_task: tokio::spawn(async move {
+                    let _guard = guard_tx;
+                    std::future::pending::<()>().await
+                }),
+                recv_task: tokio::spawn(std::future::pending::<()>()),
+                mtu: 1400,
+                established_at: Instant::now(),
+                meta: Direction::Outbound,
+                id: next_conn_id(),
+            },
+        );
+        self.stats.record_pool_outbound_added();
+        guard_rx
+    }
 }
 
 impl Transport for TorTransport {
@@ -1212,7 +1269,6 @@ async fn tor_receive_loop(
     id: ConnId,
     packet_tx: PacketTx,
     pool: ProxiedPool<Direction>,
-    mtu: u16,
     stats: Arc<TorStats>,
     direction: Direction,
     deadline: Option<InboundDeadline>,
@@ -1225,7 +1281,6 @@ async fn tor_receive_loop(
         id,
         packet_tx,
         pool,
-        mtu,
         stats,
         "Tor",
         deadline,
@@ -1361,7 +1416,6 @@ async fn tor_accept_loop(
                 id,
                 recv_tx,
                 recv_pool,
-                mtu,
                 recv_stats,
                 Direction::Inbound,
                 Some(deadline),
@@ -2141,39 +2195,6 @@ mod tests {
         (pool, stats, handle)
     }
 
-    /// Mirror of the TCP case: a silent onion-side socket must lose its
-    /// inbound slot at the deadline. Break-check: with the timeout wrapper
-    /// removed from the shared loop the count stays at 1 and the second
-    /// assertion fails.
-    #[tokio::test]
-    async fn idle_inbound_onion_socket_releases_its_slot() {
-        let (tx, _rx) = packet_channel(32);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listen = listener.local_addr().unwrap();
-        let (pool, stats, accept) = spawn_onion_accept_loop(
-            listener,
-            tx,
-            Duration::from_millis(200),
-            Duration::from_secs(5),
-        );
-
-        // Held open for the whole test: any release is the deadline's doing.
-        let squatter = TcpStream::connect(listen).await.unwrap();
-
-        assert!(
-            wait_until(|| stats.pool_inbound_count() == 1, Duration::from_secs(2)).await,
-            "an accepted onion socket should take an inbound slot"
-        );
-        assert!(
-            wait_until(|| stats.pool_inbound_count() == 0, Duration::from_secs(2)).await,
-            "a silent onion socket should lose its slot at the first-frame deadline"
-        );
-        assert!(pool.lock().await.is_empty());
-
-        drop(squatter);
-        accept.abort();
-    }
-
     /// The deadline covers a *complete* first frame, not merely the first
     /// byte: a remote that dribbles a prefix inside the deadline and the
     /// remainder after it must still lose its slot, and the late frame must
@@ -2292,42 +2313,6 @@ mod tests {
         accept.abort();
     }
 
-    /// An established onion connection quiet for longer than the first-frame
-    /// deadline, but not the idle deadline, keeps its slot.
-    #[tokio::test]
-    async fn established_onion_connection_quiet_past_the_first_frame_deadline_is_kept() {
-        let (tx, mut rx) = packet_channel(32);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listen = listener.local_addr().unwrap();
-        let (pool, stats, accept) = spawn_onion_accept_loop(
-            listener,
-            tx,
-            Duration::from_millis(200),
-            Duration::from_secs(5),
-        );
-
-        let mut peer = TcpStream::connect(listen).await.unwrap();
-        peer.write_all(&build_msg1_frame()).await.unwrap();
-        let packet = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("timeout")
-            .expect("packet channel closed");
-        assert_eq!(packet.data, build_msg1_frame());
-
-        // Four first-frame deadlines' worth of silence after the first frame.
-        tokio::time::sleep(Duration::from_millis(800)).await;
-
-        assert_eq!(
-            stats.pool_inbound_count(),
-            1,
-            "an established onion connection must not be dropped by the first-frame deadline"
-        );
-        assert!(!pool.lock().await.is_empty());
-
-        drop(peer);
-        accept.abort();
-    }
-
     // ========================================================================
     // Accept-loop readiness barrier
     // ========================================================================
@@ -2376,7 +2361,6 @@ mod tests {
             id,
             tx,
             pool.clone(),
-            1400,
             stats.clone(),
             Direction::Inbound,
             Some(InboundDeadline {
@@ -2435,7 +2419,6 @@ mod tests {
                 id,
                 tx,
                 recv_pool,
-                1400,
                 recv_stats,
                 Direction::Inbound,
                 Some(InboundDeadline {
@@ -2749,110 +2732,6 @@ mod tests {
 
         accept.abort();
         drop(sock);
-    }
-
-    // ========================================================================
-    // Deliberate close finishes the frames already queued
-    // ========================================================================
-
-    /// A frame queued immediately before a deliberate close must still reach
-    /// the peer through the proxy, and the close must still end the
-    /// connection at the far side.
-    #[tokio::test]
-    async fn tor_frame_queued_just_before_close_still_reaches_the_peer() {
-        let (dest_tx, mut dest_rx) = packet_channel(32);
-        let dest_config = TcpConfig {
-            bind_addr: Some("127.0.0.1:0".to_string()),
-            ..Default::default()
-        };
-        let mut dest = TcpTransport::new(TransportId::new(100), None, dest_config, dest_tx);
-        dest.start_async().await.unwrap();
-        let dest_addr = dest.local_addr().unwrap();
-
-        let mock = MockSocks5Server::new(dest_addr).await.unwrap();
-        let proxy_addr = mock.addr();
-        let _proxy_handle = mock.spawn();
-
-        let (tor_tx, _tor_rx) = packet_channel(32);
-        let tor_config = TorConfig {
-            socks5_addr: Some(proxy_addr.to_string()),
-            ..Default::default()
-        };
-        let mut tor = TorTransport::new(TransportId::new(200), None, tor_config, tor_tx);
-        tor.start_async().await.unwrap();
-
-        let target = TransportAddr::from_string(&dest_addr.to_string());
-        let frame = build_msg1_frame();
-        tor.send_async(&target, &frame).await.unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(2), dest_rx.recv())
-            .await
-            .expect("timeout waiting for the first frame")
-            .expect("channel closed");
-        assert_eq!(first.data, frame);
-
-        tor.send_async(&target, &frame).await.unwrap();
-        tor.close_connection_async(&target).await;
-
-        let second = tokio::time::timeout(Duration::from_secs(2), dest_rx.recv())
-            .await
-            .expect("a frame queued just before close was never written")
-            .expect("channel closed");
-        assert_eq!(second.data, frame);
-        assert!(
-            wait_until(
-                || dest.stats().snapshot().pool_inbound == 0,
-                Duration::from_secs(5)
-            )
-            .await,
-            "the close must still end the connection once the queue is written"
-        );
-
-        tor.stop_async().await.unwrap();
-        dest.stop_async().await.unwrap();
-    }
-
-    /// Stopping the transport must stop a writer that is still draining after
-    /// a deliberate close, rather than leave it to its drain timer.
-    ///
-    /// The writer holds a oneshot sender and never finishes, so the sender is
-    /// dropped only once the task has been aborted.
-    #[tokio::test]
-    async fn tor_stop_ends_a_writer_still_draining_after_a_close() {
-        let (tx, _rx) = packet_channel(32);
-        let mut tor = TorTransport::new(TransportId::new(1), None, make_config(), tx);
-        tor.start_async().await.unwrap();
-        let remote = TransportAddr::from_string("abcdef1234567890.onion:2121");
-        let (guard_tx, mut guard_rx) = tokio::sync::oneshot::channel::<()>();
-        tor.pool.lock().await.insert(
-            remote.clone(),
-            ProxiedConnection {
-                send_tx: tokio::sync::mpsc::channel(1).0,
-                send_task: tokio::spawn(async move {
-                    let _guard = guard_tx;
-                    std::future::pending::<()>().await
-                }),
-                recv_task: tokio::spawn(std::future::pending::<()>()),
-                mtu: 1400,
-                established_at: Instant::now(),
-                meta: Direction::Outbound,
-                id: next_conn_id(),
-            },
-        );
-        tor.stats.record_pool_outbound_added();
-
-        tor.close_connection_async(&remote).await;
-        tokio::time::timeout(Duration::from_secs(2), tor.stop_async())
-            .await
-            .expect("stop waited on a draining writer")
-            .unwrap();
-
-        assert!(
-            matches!(
-                guard_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-            ),
-            "a writer still draining after a close outlived the transport's stop"
-        );
     }
 
     /// A destination TCP transport behind a mock SOCKS5 proxy, and a

@@ -822,9 +822,11 @@ pub struct Node {
     // === Index-Based Session Dispatch ===
     /// Allocator for session indices.
     index_allocator: IndexAllocator,
-    /// O(1) lookup: (transport_id, our_index) → NodeAddr.
+    /// O(1) lookup: our_index → NodeAddr. Keyed by index alone: indices come
+    /// from one global allocator, so a frame carrying a known `receiver_idx`
+    /// resolves to its peer no matter which transport delivered it.
     /// This maps our session index to the peer that uses it.
-    peers_by_index: HashMap<(TransportId, u32), NodeAddr>,
+    peers_by_index: HashMap<u32, NodeAddr>,
     /// Budget for the line logged for a frame naming an index that is not in
     /// `peers_by_index`; its sender is not authenticated.
     index_budget: diag::LogBudget,
@@ -852,6 +854,9 @@ pub struct Node {
     /// on `ActivePeer`, for the same reason as `restart_dampener`: the
     /// removal it counts destroys the peer entry.
     silent_sessions: SilentSessions,
+    /// The node's side of the links' path machines: the connections a
+    /// machine asked for and the connections left to close.
+    paths: handlers::path::PathDriver,
 
     // === Rate Limiting ===
     /// Rate limiter for msg1 processing (DoS protection).
@@ -956,7 +961,7 @@ pub struct Node {
     /// fall through to the legacy synchronous decrypt (test mode +
     /// not-yet-registered first packets).
     #[cfg(unix)]
-    pub(crate) decrypt_registered_sessions: std::collections::HashSet<(TransportId, u32)>,
+    pub(crate) decrypt_registered_sessions: std::collections::HashSet<u32>,
 
     /// Decrypt worker fallback channel: workers bounce
     /// authenticated-FMP-plaintext back here for the rx_loop to
@@ -1192,6 +1197,7 @@ impl Node {
             pending_inbound: HashMap::new(),
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
+            paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
             setup_rate_limiter,
             #[cfg(test)]
@@ -1381,6 +1387,7 @@ impl Node {
             pending_inbound: HashMap::new(),
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
+            paths: handlers::path::PathDriver::default(),
             msg1_rate_limiter,
             setup_rate_limiter,
             #[cfg(test)]
@@ -2754,6 +2761,11 @@ impl Node {
         let any_peer_has_srtt = self.peers().any(|p| p.has_srtt());
 
         let now_ms = Self::now_ms();
+        // One instant for every row's paths. Each row's `paths` is a fresh
+        // allocation per peer per publish, and a changing round trip makes
+        // a row unequal to its predecessor, so `reconcile_rows` reuses it
+        // less often on a link whose paths are measured.
+        let instant = crate::peer::peer_now();
         let peer_rows: Vec<snap::PeerRow> = self
             .peers()
             .map(|peer| {
@@ -2843,6 +2855,7 @@ impl Node {
                         bytes_recv: stats.bytes_recv,
                     },
                     replay_suppressed: peer.replay_suppressed_count(),
+                    replay_suppressed_total: peer.replay_suppressed_total(),
                     consecutive_decrypt_failures: peer.consecutive_decrypt_failures(),
                     nostr_traversal,
                     noise,
@@ -2851,6 +2864,7 @@ impl Node {
                     rekey_draining: peer.is_draining(),
                     current_k_bit: peer.current_k_bit(),
                     mmp,
+                    paths: self.peer_paths(peer, instant),
                 }
             })
             .collect();
@@ -3000,10 +3014,7 @@ impl Node {
                 let metrics = &mmp.metrics;
                 let srtt_ms = metrics.srtt_ms();
                 let smoothed_etx = metrics.smoothed_etx();
-                let lqi = match (srtt_ms, smoothed_etx) {
-                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-                    _ => None,
-                };
+                let lqi = metrics.quality_index();
                 let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
@@ -3040,10 +3051,7 @@ impl Node {
                 let metrics = &mmp.metrics;
                 let srtt_ms = metrics.srtt_ms();
                 let smoothed_etx = metrics.smoothed_etx();
-                let sqi = match (srtt_ms, smoothed_etx) {
-                    (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-                    _ => None,
-                };
+                let sqi = metrics.quality_index();
                 let trend = |dual: &crate::proto::mmp::DualEwma| {
                     dual.initialized()
                         .then(|| crate::control::queries::trend_label(dual.short(), dual.long()))
@@ -3230,7 +3238,8 @@ impl Node {
     }
 
     /// Close the transport connection under handshake link `link_id`, unless
-    /// an active peer on another link sends over the same connection.
+    /// an active peer on another link sends or is proven over the same
+    /// connection ([`Self::addr_carries_other_peer`]).
     ///
     /// A transport that keys its connections by remote address alone — BLE,
     /// whose pool holds one L2CAP link per peer address — carries both legs
@@ -3258,8 +3267,9 @@ impl Node {
         }
     }
 
-    /// Whether an active peer on a link other than `link_id` sends over
-    /// `(transport_id, addr)`.
+    /// Whether an active peer on a link other than `link_id` sends or is
+    /// proven over `(transport_id, addr)`: the pair is one of its paths
+    /// that is Live or acked in its link, the active one among them.
     pub(in crate::node) fn addr_carries_other_peer(
         &self,
         transport_id: TransportId,
@@ -3268,8 +3278,10 @@ impl Node {
     ) -> bool {
         self.peers.values().any(|peer| {
             peer.link_id() != link_id
-                && peer.transport_id() == Some(transport_id)
-                && peer.current_addr() == Some(addr)
+                && matches!(
+                    peer.path_match(transport_id, addr),
+                    crate::peer::Match::Proven { .. }
+                )
         })
     }
 
@@ -3420,6 +3432,10 @@ impl Node {
             .map_or("initial", |machine| machine.displayed_handshake_state())
     }
 
+    /// Drop the bootstrap transport `transport_id` once nothing uses it: no
+    /// link, handshake or pending dial, and no path of any peer's link,
+    /// active or not, is on it. A transport some path uses is kept, so no
+    /// path is ever left on a transport dropped here.
     pub(crate) fn cleanup_bootstrap_transport_if_unused(&mut self, transport_id: TransportId) {
         if !self
             .supervisor
@@ -3436,10 +3452,7 @@ impl Node {
             || self.peer_machines.values().any(|machine| {
                 machine.leg().is_some() && machine.conn_transport_id() == Some(transport_id)
             })
-            || self
-                .peers
-                .values()
-                .any(|peer| peer.transport_id() == Some(transport_id))
+            || self.peers.values().any(|peer| peer.uses(transport_id))
             || self
                 .peering
                 .pending_connects
@@ -3520,8 +3533,15 @@ impl Node {
             self.peer_machines
                 .entry(link_id)
                 .or_insert_with(|| match expected_identity {
-                    Some(_) => PeerMachine::new_outbound(link_id, expected_identity, started_at_ms),
-                    None => PeerMachine::new_inbound(link_id, started_at_ms),
+                    Some(_) => PeerMachine::new_outbound(
+                        link_id,
+                        expected_identity,
+                        crate::proto::fmp::LegStamp::at(started_at_ms),
+                    ),
+                    None => PeerMachine::new_inbound(
+                        link_id,
+                        crate::proto::fmp::LegStamp::at(started_at_ms),
+                    ),
                 });
         if let Some(index) = seed.our_index {
             let _ = machine.set_conn_our_index(index);
@@ -4489,6 +4509,48 @@ impl Node {
         plaintext: &[u8],
         ce_flag: bool,
     ) -> Result<(), NodeError> {
+        self.send_via(node_addr, plaintext, ce_flag, None).await
+    }
+
+    /// Send a link message to `node_addr` on the path `via`, or on the
+    /// active path when `via` is `None`.
+    ///
+    /// The frame is sealed under the link's keys on its one counter, with
+    /// the link's K-bit and inner timestamp, and counted in the link's
+    /// statistics and MMP sender state, whichever path carries it. The
+    /// peer's connected UDP socket is used only when the frame goes on the
+    /// active path, the one it was opened for. A send that fails because
+    /// its address is unreachable tells the link's path machine so, when
+    /// the link holds more than one path, before the error is returned.
+    pub(in crate::node) async fn send_via(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        ce_flag: bool,
+        via: Option<&fips_core::proto::path::PathRef>,
+    ) -> Result<(), NodeError> {
+        let mut failed = None;
+        let sent = self
+            .send_frame(node_addr, plaintext, ce_flag, via, &mut failed)
+            .await;
+        if let Some(to) = failed {
+            // Boxed: the step may send path messages through here again.
+            Box::pin(self.send_unreachable(node_addr, to)).await;
+        }
+        sent
+    }
+
+    /// The send of [`Self::send_via`]. A transport error that says the
+    /// address is unreachable leaves the pair the frame went to in
+    /// `failed`.
+    async fn send_frame(
+        &mut self,
+        node_addr: &NodeAddr,
+        plaintext: &[u8],
+        ce_flag: bool,
+        via: Option<&fips_core::proto::path::PathRef>,
+        failed: &mut Option<fips_core::proto::path::PathRef>,
+    ) -> Result<(), NodeError> {
         let peer = self
             .peers
             .get_mut(node_addr)
@@ -4509,7 +4571,23 @@ impl Node {
                 node_addr: *node_addr,
                 reason: "no current_addr".into(),
             })?;
+        let on_active = via.is_none_or(|to| to.transport == transport_id && to.addr == remote_addr);
+        let (transport_id, remote_addr) = match via {
+            Some(to) if !on_active => (to.transport, to.addr.clone()),
+            Some(_) | None => (transport_id, remote_addr),
+        };
         let link_id = peer.link_id();
+        // A transport error is the link's, and one that says the address is
+        // unreachable also names the pair it was sent to.
+        let mut send_err = |e: TransportError| {
+            if e.is_unreachable() {
+                *failed = Some(fips_core::proto::path::PathRef {
+                    transport: transport_id,
+                    addr: remote_addr.clone(),
+                });
+            }
+            link_send_error(*node_addr, e)
+        };
 
         // Prepend 4-byte session-relative timestamp (inner header)
         let timestamp_ms = peer.session_elapsed_ms();
@@ -4526,7 +4604,7 @@ impl Node {
         // session borrow so the encrypt-worker dispatch can refcount-
         // clone the Arc without re-borrowing self.peers later.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let connected_socket = peer.connected_udp();
+        let connected_socket = peer.connected_udp().filter(|_| on_active);
 
         if !peer.has_session() {
             return Err(NodeError::SendFailed {
@@ -4626,6 +4704,7 @@ impl Node {
                         fsp_seal: None,
                         socket,
                         dest_addr: dest_socket_addr,
+                        transport: transport_id,
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         connected_socket,
                         stats: udp.stats().clone(),
@@ -4645,7 +4724,7 @@ impl Node {
                             transport
                                 .send_existing(&remote_addr, &wire)
                                 .await
-                                .map_err(|e| link_send_error(*node_addr, e))?
+                                .map_err(&mut send_err)?
                         }
                     };
 
@@ -4718,7 +4797,7 @@ impl Node {
         let bytes_sent = self
             .send_nowait(transport, link_id, &remote_addr, &wire_packet)
             .await
-            .map_err(|e| link_send_error(*node_addr, e))?;
+            .map_err(&mut send_err)?;
 
         // Update send statistics
         if let Some(peer) = self.peers.get_mut(node_addr) {
@@ -4964,10 +5043,7 @@ fn project_entity_mmp(
 ) -> crate::control::snapshot::EntityMmp {
     let srtt_ms = metrics.srtt_ms();
     let smoothed_etx = metrics.smoothed_etx();
-    let quality_index = match (srtt_ms, smoothed_etx) {
-        (Some(srtt), Some(setx)) => Some(setx * (1.0 + srtt / 100.0)),
-        _ => None,
-    };
+    let quality_index = metrics.quality_index();
     crate::control::snapshot::EntityMmp {
         mode,
         srtt_ms,
