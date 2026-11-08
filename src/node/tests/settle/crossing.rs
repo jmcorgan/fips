@@ -29,7 +29,7 @@ use super::super::spanning_tree::{
     process_available_packets,
 };
 use super::super::*;
-use super::audit::{Exempt, assert_coherent};
+use super::audit::assert_coherent;
 use super::{
     alias, crossed_tcp, heartbeat_reaches, pool, pump, received, resolve_connect, settled,
 };
@@ -94,12 +94,10 @@ async fn working_session(on: bool, zero_smaller: bool) {
         bad.is_empty(),
         "defect: crossed TCP dials lost the peering: {bad:#?}"
     );
-    assert_coherent(
-        &mut nodes,
-        &[Exempt::CrossedInbound { node: s, peer: l }],
-        "the end of crossed TCP dials",
-    )
-    .await;
+    // No exemption: this line's smaller node keeps the link it dialed, so it
+    // records no waiver, and a passed one would keep this test failing after a
+    // fix of the breach it is here to report.
+    assert_coherent(&mut nodes, &[], "the end of crossed TCP dials").await;
     cleanup_nodes(&mut nodes).await;
 }
 

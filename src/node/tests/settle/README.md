@@ -46,14 +46,15 @@ the second, and each pin has a line of its own in
   genuine msg2 still completes the dial. How many forged msg2s are read is
   not asserted.
 - `carry.rs`: per-peer state across a change of the peer's link: a peer
-  promoted for an identity announced to just now is sent a TreeAnnounce at
-  once.
+  promoted for an identity announced to just now, or replaced by a restart at
+  a msg3 or a msg2, is sent a TreeAnnounce at once.
 - `clock.rs`: settlement intervals against steps of the wall clock:
   handshake timers against forward and backward steps, an inbound leg
   holding its msg2 reaped at its timeout, the shown start and idle times of
-  a pending handshake left on the wall clock, and the TreeAnnounce rate
-  limit against a backward step and at the monotonic clock's first
-  instants. They step the wall clock with the thread-local
+  a pending handshake left on the wall clock, the restart gate on the peer
+  clock and what a real frame refreshes, and the TreeAnnounce rate limit
+  against a backward step and at the monotonic clock's first instants. They
+  step the wall clock with the thread-local
   `crate::time::step_wall` and advance the monotonic one with
   `crate::time::advance`, so they run safely beside other tests.
 - `crossing.rs`: crossed TCP dials (one working session by the audit, a

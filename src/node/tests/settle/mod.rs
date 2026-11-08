@@ -43,6 +43,19 @@ pub(super) async fn loopback_node(on: bool) -> TestNode {
     make_test_node_with_config(with_path(Config::new(), on), 1280).await
 }
 
+/// Node 1 restarts on `config` and dials node 0, and the msg1, the msg2 and
+/// the msg3 are delivered: node 0 replaces its peer at the msg3 if the restart
+/// gate lets it. The restarted node takes the old one's place in `nodes`.
+pub(super) async fn restart_dial(nodes: &mut [TestNode], config: Config) {
+    let restarted = super::spanning_tree::restarted_node(&nodes[1], config);
+    let mut old = std::mem::replace(&mut nodes[1], restarted);
+    cleanup_nodes(std::slice::from_mut(&mut old)).await;
+    super::spanning_tree::initiate_handshake(nodes, 1, 0).await;
+    super::rekey_parity::deliver(&mut nodes[0]).await;
+    super::rekey_parity::deliver(&mut nodes[1]).await;
+    super::rekey_parity::deliver(&mut nodes[0]).await;
+}
+
 /// A node with one real TCP transport, transport id 1, listening on an
 /// ephemeral port of 127.0.0.1, with multipath set as `on`.
 pub(super) async fn tcp_node(on: bool) -> TestNode {

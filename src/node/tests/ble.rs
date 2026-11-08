@@ -1856,3 +1856,36 @@ async fn a_ble_transport_holds_its_paths_as_ble() {
     assert_eq!(facts.medium(loopback), Medium::Other);
     cleanup_nodes(std::slice::from_mut(&mut tn)).await;
 }
+
+/// A dialer that promotes the peer on its msg2 marks its own link verified
+/// then, before it has handled any frame of the responder's: the msg2 answers
+/// its own fresh ephemeral key, which a replayed capture cannot.
+#[tokio::test]
+async fn the_ble_initiators_link_is_verified_before_any_responder_frame() {
+    let mut nodes = vec![make_test_node_ble(1).await, make_test_node_ble(2).await];
+    let _bank = link_genuinely(&nodes).await;
+    let dialled = nodes[1].addr.clone();
+    let a1 = *nodes[1].node.node_addr();
+    initiate_handshake(&mut nodes, 0, 1).await;
+    let mut held = Vec::new();
+    let msg1 = next_phase(&mut nodes[1], PHASE_MSG1, &mut held).await;
+    hand(&mut nodes[1].node, msg1).await;
+    let msg2 = next_phase(&mut nodes[0], PHASE_MSG2, &mut held).await;
+    assert_eq!(
+        verified_at(&nodes[0], &dialled).await,
+        Some(false),
+        "precondition: node 0's link is pooled and not yet verified"
+    );
+    hand(&mut nodes[0].node, msg2).await;
+    assert!(
+        nodes[0].node.get_peer(&a1).is_some(),
+        "precondition: node 0 promoted node 1 on its msg2"
+    );
+    let marked = verified_at(&nodes[0], &dialled).await;
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        marked,
+        Some(true),
+        "defect: the initiator's link is not verified after it promoted the peer on the msg2"
+    );
+}

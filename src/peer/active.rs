@@ -1404,7 +1404,9 @@ impl ActivePeer {
     /// Record an authenticated frame from this peer: refresh the last-seen
     /// time and mark the peer as heard.
     pub fn touch(&mut self, current_time_ms: u64) {
-        self.heard_at = peer_now();
+        if !node_fault!(TouchKeepsHeardInstant) {
+            self.heard_at = peer_now();
+        }
         self.send.last_seen = current_time_ms;
         self.send.heard = true;
     }

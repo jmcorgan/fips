@@ -74,8 +74,14 @@ faults! {
     /// A rekey machine that yields to a peer's completed attempt keeps its
     /// own attempt instead of abandoning it.
     YieldKeepsOwnAttempt,
+    /// The restart gate measures a heard peering's idle time on the wall
+    /// clock instead of the peer clock.
+    GateOnWall,
     /// The node's interval clock reads the wall clock.
     IntervalOnWall,
+    /// An authenticated frame marks the peer heard without moving the
+    /// instant it was last heard.
+    TouchKeepsHeardInstant,
     /// A peer never sent a tree announce counts as sent one at instant 0.
     TreeNoneAsZero,
     /// The tree announce rate limit reads the wall clock.
@@ -87,12 +93,19 @@ faults! {
     /// Removing a peer at a restart keeps the path MTU clamp entry its
     /// promotion seeded.
     RestartKeepsClamp,
+    /// An initiator's promotion does not tell the transport which link the
+    /// new peer uses, so on BLE the link stays unverified until the
+    /// responder's first frame.
+    DropInitiatorMark,
     /// A msg2 that does not authenticate ends the pending dial instead of
     /// keeping the attempt for the genuine msg2.
     ForgetDialOnRefusedMsg2,
     /// A newly promoted peer starts as if a tree announce had just been
     /// sent to it, so the rate limit holds back its first one.
     NewPeerStartsRateLimited,
+    /// A peer replaced by a restart keeps the old peer's record of when it
+    /// was last sent a tree announce.
+    TreeCarryAcrossRestart,
     /// A stream transport's close aborts the connection's writer at once
     /// instead of letting it write what was queued.
     DrainAbortsAtOnce,
@@ -111,6 +124,9 @@ faults! {
     /// The Tor and Nym receive loop bounds frames by the connection's own
     /// `mtu` instead of the receive ceiling.
     ProxiedRecvBoundedByMtu,
+    /// A BLE writer whose write fails removes every channel pooled at its
+    /// address, not only its own.
+    BleWriterRemovesByAddress,
     /// Following a moved path keeps the link's index entry at the pair the
     /// path left, beside the one at the pair it moved to.
     MovedLeavesEntry,

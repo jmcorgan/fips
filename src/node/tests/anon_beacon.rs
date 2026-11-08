@@ -939,6 +939,38 @@ async fn late_with(cfg_s: fn() -> Config, cfg_l: fn() -> Config) -> (Vec<TestNod
     (nodes, s)
 }
 
+/// [`late_answer`]'s crossing settles at the larger node's msg3 holding an
+/// inbound link off the msg3's pair. `SettledAtMsg3` names the link a node
+/// dialed, so that link does not carry it.
+#[tokio::test]
+async fn a_crossing_settled_at_msg3_on_a_held_inbound_link_records_no_settled_at_msg3_waiver() {
+    let (mut nodes, s) = late_answer().await;
+    let l = 1 - s;
+    let link = nodes[l]
+        .node
+        .get_peer(&other(&nodes, l))
+        .expect("precondition: the larger node holds the peer")
+        .link_id();
+    let inbound = nodes[l]
+        .node
+        .links
+        .get(&link)
+        .is_some_and(|k| k.direction() == LinkDirection::Inbound);
+    let waived = nodes[l]
+        .node
+        .links
+        .carries(&link, crate::node::settle::Waiver::SettledAtMsg3);
+    cleanup_nodes(&mut nodes).await;
+    assert!(
+        inbound,
+        "precondition: the larger node holds an inbound link"
+    );
+    assert!(
+        !waived,
+        "defect: SettledAtMsg3 was recorded on a link the node did not dial"
+    );
+}
+
 /// After [`late_answer`]'s move, the pair the link left is offered to the
 /// new path machine as heard, so the peer is capable again at both ends with
 /// the beacon's pair proven, and the next beacon from it is not dialled.

@@ -720,9 +720,6 @@ impl Node {
                                     link_id = %link_id,
                                     "Transport connect initiated (anonymous discovery)"
                                 );
-                                #[cfg(any(test, debug_assertions))]
-                                self.links
-                                    .waive(link_id, crate::node::settle::Waiver::AnonymousConnect);
                                 self.peering.pending_connects.push(super::PendingConnect {
                                     link_id,
                                     transport_id,
@@ -983,9 +980,6 @@ impl Node {
         // this same stamp `at`, so its `started_at`/`last_activity` and its
         // interval-clock activity already carry the msg1-prep provenance.
         self.peer_machines.add(link_id, machine);
-        #[cfg(any(test, debug_assertions))]
-        self.links
-            .lift(&link_id, crate::node::settle::Waiver::AnonymousConnect);
 
         // Send the wire format handshake message. It never dials: if the
         // connection the dial resolved to has gone, the send fails at once

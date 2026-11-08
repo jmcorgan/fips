@@ -4,15 +4,18 @@
 //! - A peer promoted for an identity announced to just now, by a fresh dial,
 //!   is sent a TreeAnnounce at once: no stamp of the peer it replaces is
 //!   carried over to rate-limit it.
+//! - A peer replaced by a restart, at the msg3 of the restart's own dial or at
+//!   the msg2 of a dial to it, likewise.
 //!
-//! The master line's cases of a restart's msg1 and a redial answered as a
-//! rekey rest on its msg1 promotion, which this line's handshake does not
-//! have, and are not run here.
+//! The master line's case of a redial answered as a rekey rests on its msg1
+//! promotion, which this line's handshake does not have, and is not run here.
 
-use super::super::rekey_parity::deliver;
-use super::super::spanning_tree::{TestNode, cleanup_nodes, drain_all_packets, initiate_handshake};
+use super::super::rekey_parity::{deliver, linked_pair};
+use super::super::spanning_tree::{
+    TestNode, cleanup_nodes, drain_all_packets, initiate_handshake, restarted_node,
+};
 use super::super::*;
-use super::loopback_node;
+use super::{loopback_node, restart_dial, with_path};
 
 /// Milliseconds on the clock the TreeAnnounce rate-limit stamp is kept in.
 fn stamp_ms() -> u64 {
@@ -100,5 +103,83 @@ async fn a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_an
     nodes[0].node.handle_msg2(msg2).await;
     let result = sent_at_once(&nodes, 0, &a1, since);
     cleanup_nodes(&mut nodes).await;
+    assert!(result.is_ok(), "defect: {result:?}");
+}
+
+/// Multipath off and a minute between a peer's TreeAnnounces, so a stamp the
+/// old peer left holds the new peer's first one back however slowly a test
+/// runs.
+fn minute_interval() -> Config {
+    let mut config = with_path(Config::new(), false);
+    config.node.tree.announce_min_interval_ms = 60_000;
+    config
+}
+
+/// Whether `nodes[at]`'s peer `peer` holds a TreeAnnounce stamp at or after
+/// `since`, with the stamp seen. It reads the stamp alone: at a minute's
+/// interval a later trigger may leave a second announce pending, which says
+/// nothing of the first.
+fn stamped_since(nodes: &[TestNode], at: usize, peer: &NodeAddr, since: u64) -> Result<(), String> {
+    let stamp = nodes[at]
+        .node
+        .get_peer(peer)
+        .expect("precondition: the node holds the new peer")
+        .last_tree_announce_sent_ms();
+    if stamp.is_some_and(|s| s >= since) {
+        Ok(())
+    } else {
+        Err(format!(
+            "last TreeAnnounce stamp {stamp:?} against {since} after the old peer's"
+        ))
+    }
+}
+
+/// The restart's own dial replaces the peer at its msg3, and the new peer is
+/// sent a TreeAnnounce at once, although the old one was sent one just now.
+#[tokio::test]
+async fn a_peer_replaced_by_a_restart_at_msg3_after_an_announce_just_now_is_sent_a_tree_announce_at_once()
+ {
+    let mut nodes = linked_pair(minute_interval(), minute_interval()).await;
+    let a1 = *nodes[1].node.node_addr();
+    let since = announced_just_now(&mut nodes, 0, &a1).await;
+    let peer = nodes[0]
+        .node
+        .get_peer_mut(&a1)
+        .expect("precondition: node 0 holds node 1");
+    let before = peer.link_id();
+    peer.touch(Node::now_ms().saturating_sub(60_000));
+    peer.test_backdate_heard(std::time::Duration::from_secs(60));
+    restart_dial(&mut nodes, minute_interval()).await;
+    let after = nodes[0].node.get_peer(&a1).map(|p| p.link_id());
+    let result = stamped_since(&nodes, 0, &a1, since);
+    cleanup_nodes(&mut nodes).await;
+    assert_ne!(
+        after,
+        Some(before),
+        "precondition: the restart replaced the peer"
+    );
+    assert!(result.is_ok(), "defect: {result:?}");
+}
+
+/// Our own dial shows the peer restarted at its msg2, which replaces the peer,
+/// and the new peer is sent a TreeAnnounce at once, although the old one was
+/// sent one just now.
+#[tokio::test]
+async fn a_peer_replaced_by_a_restart_at_msg2_after_an_announce_just_now_is_sent_a_tree_announce_at_once()
+ {
+    let mut nodes = linked_pair(minute_interval(), minute_interval()).await;
+    let a1 = *nodes[1].node.node_addr();
+    let before = nodes[0].node.get_peer(&a1).map(|p| p.link_id());
+    let since = announced_just_now(&mut nodes, 0, &a1).await;
+    let restarted = restarted_node(&nodes[1], minute_interval());
+    let mut old = std::mem::replace(&mut nodes[1], restarted);
+    cleanup_nodes(std::slice::from_mut(&mut old)).await;
+    initiate_handshake(&mut nodes, 0, 1).await;
+    deliver(&mut nodes[1]).await;
+    deliver(&mut nodes[0]).await;
+    let after = nodes[0].node.get_peer(&a1).map(|p| p.link_id());
+    let result = stamped_since(&nodes, 0, &a1, since);
+    cleanup_nodes(&mut nodes).await;
+    assert_ne!(after, before, "precondition: the restart replaced the peer");
     assert!(result.is_ok(), "defect: {result:?}");
 }

@@ -1025,7 +1025,11 @@ async fn send_loop<S: BleStream + 'static>(
             Err(e) => {
                 stats.record_send_error();
                 warn!(addr = %addr, error = %e, "BLE send failed, connection removed");
-                pool.lock().await.remove_channel(&addr, id);
+                if node_fault!(BleWriterRemovesByAddress) {
+                    pool.lock().await.remove(&addr);
+                } else {
+                    pool.lock().await.remove_channel(&addr, id);
+                }
                 return;
             }
         }
@@ -1400,6 +1404,10 @@ async fn scan_probe_loop<I: io::BleIo>(
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+#[path = "tests/close.rs"]
+mod close_tests;
 
 #[cfg(test)]
 mod tests {

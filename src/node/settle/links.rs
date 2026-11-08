@@ -33,12 +33,6 @@ pub(in crate::node) enum Waiver {
     /// Removed when retiring the dial's link leaves the held link's entry in
     /// place.
     HeldLinkEntry,
-    /// An anonymous dial on a connection-oriented transport: its link waits
-    /// for the transport's connect with no machine or dial naming it, only a
-    /// pending connect, so `link-named` lets it off until the connect resolves
-    /// and the leg's machine names it. Removed when a link's pending connect
-    /// names it, as it does an identified dial's.
-    AnonymousConnect,
     /// Crossed dials settled at msg3 moved the larger node's session onto the
     /// msg3's pair and kept the link it dialed as the peer's record, off that
     /// pair. Waives no live clause: it answers the quiescent audit's check
@@ -242,17 +236,6 @@ impl LinkTable {
     #[cfg(any(test, debug_assertions))]
     pub(in crate::node) fn waive(&mut self, id: LinkId, waiver: Waiver) {
         self.waivers.entry(id).or_default().insert(waiver);
-    }
-
-    /// Take `waiver` off the link `id`: the state it covers has ended.
-    #[cfg(any(test, debug_assertions))]
-    pub(in crate::node) fn lift(&mut self, id: &LinkId, waiver: Waiver) {
-        if let Some(set) = self.waivers.get_mut(id) {
-            set.remove(&waiver);
-            if set.is_empty() {
-                self.waivers.remove(id);
-            }
-        }
     }
 
     /// Whether the link `id` is let off `held-entry`.

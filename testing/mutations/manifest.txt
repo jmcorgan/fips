@@ -20,6 +20,12 @@ ClampEntryKept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_cla
 ClampEntryKept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
 RestartKeepsClamp	red	fips-mesh	node::tests::peer_restart::outbound_completion_with_a_changed_epoch_replaces_the_machine	the clamp entry the ended session tightened goes with it
 NewPeerStartsRateLimited	red	fips-mesh	node::tests::settle::carry::a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_announce_at_once
+TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_at_msg3_after_an_announce_just_now_is_sent_a_tree_announce_at_once
+TreeCarryAcrossRestart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_at_msg2_after_an_announce_just_now_is_sent_a_tree_announce_at_once
+DropInitiatorMark	red	fips-mesh	node::tests::ble::the_ble_initiators_link_is_verified_before_any_responder_frame
+GateOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_restart_replace_a_peering_heard_just_now
+GateOnWall	red	fips-mesh	node::tests::settle::clock::a_peering_quiet_on_the_peer_clock_is_replaced_by_a_restart_whatever_the_wall_clock_read
+TouchKeepsHeardInstant	red	fips-mesh	node::tests::settle::clock::a_frame_after_a_quiet_spell_keeps_the_peering_from_being_replaced_by_a_restart
 TreeOnWall	red	fips-mesh	node::tests::settle::clock::a_backward_wall_step_does_not_hold_a_tree_announce_past_its_interval
 TreeNoneAsZero	red	fips-mesh	node::tests::settle::clock::a_peer_never_sent_a_tree_announce_may_be_sent_one_at_the_clocks_first_instants
 IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
@@ -45,6 +51,7 @@ ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_above
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
 ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+BleWriterRemovesByAddress	red	fips-mesh	transport::ble::close_tests::a_writer_whose_write_fails_leaves_the_other_channel_at_its_address_pooled
 MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
 RemoveKeepsLink	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	link-named
 RemoveKeepsLink	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	link-named

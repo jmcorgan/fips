@@ -1846,7 +1846,11 @@ impl Node {
                 our_node_addr,
                 // On the peer clock, which a step of the system clock does
                 // not move.
-                peering_idle_ms: crate::peer::since(existing_peer.heard_at()).as_millis() as u64,
+                peering_idle_ms: if node_fault!(GateOnWall) {
+                    existing_peer.idle_time(Self::now_ms())
+                } else {
+                    crate::peer::since(existing_peer.heard_at()).as_millis() as u64
+                },
                 epoch_restart_dampened: self
                     .restart_dampener
                     .get(&peer_node_addr)

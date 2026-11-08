@@ -4,7 +4,11 @@
 //! the monotonic `Node::interval_ms`: a forward step of the wall clock does
 //! not time out a dial or resend early, a backward one does not keep a
 //! stalled handshake past its timeout, and the start and idle times shown
-//! for a pending handshake stay on the wall clock. The tests step the wall clock
+//! for a pending handshake stay on the wall clock. The restart gate measures a
+//! peering's quiet time on the peer clock, so a forward wall step does not let
+//! a restart replace a peering heard just now, a quiet peering is replaced
+//! whatever the wall clock read when it was last touched, and a real frame
+//! refreshes the instant the gate measures from. The tests step the wall clock
 //! with the thread-local test hook `crate::time::step_wall` and advance the
 //! monotonic one with `crate::time::advance`, so they are safe beside other
 //! tests.
@@ -17,9 +21,10 @@
 //! `drive_peer_timers(Node::interval_ms())`, the order the receive loop runs
 //! them in.
 
+use super::super::rekey_parity::{deliver, heartbeat, linked_pair};
 use super::super::spanning_tree::{TestNode, cleanup_nodes};
 use super::super::*;
-use super::{loopback_node, tap, with_path};
+use super::{loopback_node, restart_dial, tap, with_path};
 use crate::transport::TransportId;
 
 /// Step the wall clock `Node::now_ms` reads forward by `ms`, on this thread.
@@ -307,5 +312,91 @@ async fn a_pending_handshakes_shown_start_and_idle_do_not_move_with_the_monotoni
         start == first_start && wall.abs_diff(start) < 60_000 && idle < 1000,
         "defect: the shown start {start} (first {first_start}, wall {wall}) or idle {idle} ms \
          moved with the monotonic clock"
+    );
+}
+
+/// Two nodes peered with multipath off, the address of node 1, and the link
+/// node 0 holds it on.
+async fn peered_pair() -> (Vec<TestNode>, NodeAddr, LinkId) {
+    let config = with_path(Config::new(), false);
+    let nodes = linked_pair(config.clone(), config).await;
+    let a1 = *nodes[1].node.node_addr();
+    let link = held_link(&nodes, &a1);
+    (nodes, a1, link)
+}
+
+/// The link node 0 holds `peer` on.
+fn held_link(nodes: &[TestNode], peer: &NodeAddr) -> LinkId {
+    nodes[0]
+        .node
+        .get_peer(peer)
+        .expect("precondition: node 0 holds the peer")
+        .link_id()
+}
+
+/// A forward step of the wall clock does not make a peering heard just now
+/// look quiet: the restart gate reads the peer clock, so the restart's dial
+/// does not replace the peer.
+#[tokio::test]
+async fn a_forward_wall_clock_step_does_not_let_a_restart_replace_a_peering_heard_just_now() {
+    let (mut nodes, a1, before) = peered_pair().await;
+    nodes[0]
+        .node
+        .get_peer_mut(&a1)
+        .expect("precondition: node 0 holds the peer")
+        .touch(Node::now_ms());
+    step_wall(60_000);
+    restart_dial(&mut nodes, with_path(Config::new(), false)).await;
+    let after = held_link(&nodes, &a1);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        after, before,
+        "defect: a forward wall clock step let a restart replace a peering heard just now"
+    );
+}
+
+/// A peering quiet past the restart interval on the peer clock is replaced by
+/// a restart, although the wall clock reading of its last frame is fresh.
+#[tokio::test]
+async fn a_peering_quiet_on_the_peer_clock_is_replaced_by_a_restart_whatever_the_wall_clock_read() {
+    let (mut nodes, a1, before) = peered_pair().await;
+    let peer = nodes[0]
+        .node
+        .get_peer_mut(&a1)
+        .expect("precondition: node 0 holds the peer");
+    peer.touch(Node::now_ms());
+    peer.test_backdate_heard(Duration::from_secs(60));
+    restart_dial(&mut nodes, with_path(Config::new(), false)).await;
+    let after = held_link(&nodes, &a1);
+    cleanup_nodes(&mut nodes).await;
+    assert_ne!(
+        after, before,
+        "defect: a restart did not replace a peering quiet on the peer clock"
+    );
+}
+
+/// A real frame after a quiet spell refreshes the instant the restart gate
+/// measures from, so a restart's dial does not replace the peer.
+#[tokio::test]
+async fn a_frame_after_a_quiet_spell_keeps_the_peering_from_being_replaced_by_a_restart() {
+    let (mut nodes, a1, before) = peered_pair().await;
+    let a0 = *nodes[0].node.node_addr();
+    let peer = nodes[0]
+        .node
+        .get_peer_mut(&a1)
+        .expect("precondition: node 0 holds the peer");
+    peer.touch(Node::now_ms().saturating_sub(60_000));
+    peer.test_backdate_heard(Duration::from_secs(60));
+    heartbeat(&mut nodes[1], &a0).await;
+    assert!(
+        deliver(&mut nodes[0]).await > 0,
+        "precondition: node 1's frame reached node 0"
+    );
+    restart_dial(&mut nodes, with_path(Config::new(), false)).await;
+    let after = held_link(&nodes, &a1);
+    cleanup_nodes(&mut nodes).await;
+    assert_eq!(
+        after, before,
+        "defect: a restart replaced a peering heard just now after a quiet spell"
     );
 }

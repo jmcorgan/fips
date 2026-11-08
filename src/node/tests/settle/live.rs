@@ -355,13 +355,14 @@ async fn two_started_nodes_on_a_real_pool_pass_the_live_audit() {
 }
 
 /// An anonymous dial on a connection-oriented transport leaves its link named
-/// by nothing but its pending connect, which no clause reads: the dial records
-/// the waiver `link-named` honours on that link, the audit passes while the
-/// connect is pending, and the waiver goes once the leg's machine names the
-/// link.
+/// by nothing but its pending connect: `link-named` reads that, so the link
+/// passes while the connect is pending, is flagged if the pending connect goes
+/// and the link stays, and is named by the leg's machine once the connect
+/// resolves.
 #[cfg(debug_assertions)]
 #[tokio::test]
-async fn an_anonymous_connect_is_waived_on_its_link_until_its_leg_names_it() {
+async fn an_anonymous_connects_link_is_named_by_its_pending_connect_until_its_leg_names_it() {
+    use crate::node::settle::audit::link_named;
     let mut nodes = tcp_pair(false, true).await;
     let (tid, addr) = (nodes[0].transport_id, nodes[1].addr.clone());
     nodes[0]
@@ -370,19 +371,30 @@ async fn an_anonymous_connect_is_waived_on_its_link_until_its_leg_names_it() {
         .await
         .expect("precondition: the dial starts");
     let link = nodes[0].node.peering.pending_connects[0].link_id;
-    let named = nodes[0].node.peer_machines.contains_key(&link);
-    let waived = nodes[0].node.links.carries(&link, Waiver::AnonymousConnect);
+    let machine = nodes[0].node.peer_machines.contains_key(&link);
+    let pending = link_named(&nodes[0].node);
+    let connects = std::mem::take(&mut nodes[0].node.peering.pending_connects);
+    let dropped = link_named(&nodes[0].node);
+    nodes[0].node.peering.pending_connects = connects;
     resolve_connect(&mut nodes[0]).await;
-    let lifted = !nodes[0].node.links.carries(&link, Waiver::AnonymousConnect);
     let leg = nodes[0].node.peer_machines.contains_key(&link);
+    let resolved = link_named(&nodes[0].node);
     let count = audits(&nodes[0]);
     cleanup_nodes(&mut nodes).await;
-    assert!(!named, "precondition: no machine names the pending link");
+    assert!(!machine, "precondition: no machine names the pending link");
     assert!(
-        waived,
-        "defect: the anonymous dial recorded no waiver on its link"
+        pending.is_empty(),
+        "defect: link-named flagged a link its pending connect names: {pending:?}"
+    );
+    assert_eq!(
+        dropped,
+        vec![link],
+        "defect: link-named passed a link with no pending connect left to name it"
     );
     assert!(leg, "precondition: the resolved connect has a leg");
-    assert!(lifted, "defect: the waiver outlived the pending connect");
+    assert!(
+        resolved.is_empty(),
+        "defect: link-named flagged a link its leg's machine names: {resolved:?}"
+    );
     assert!(count > 0, "defect: the live audit never checked the dialer");
 }

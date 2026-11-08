@@ -425,28 +425,10 @@ fn awarding_a_key_points_it_at_the_winner_whatever_it_named() {
 }
 
 #[test]
-fn a_lifted_waiver_leaves_the_links_others() {
-    let mut table = LinkTable::default();
-    table.open(link(1, "a"));
-    table.waive(LinkId::new(1), Waiver::AnonymousConnect);
-    table.waive(LinkId::new(1), Waiver::HeldLinkEntry);
-
-    table.lift(&LinkId::new(1), Waiver::AnonymousConnect);
-
-    assert!(!table.carries(&LinkId::new(1), Waiver::AnonymousConnect));
-    assert!(table.carries(&LinkId::new(1), Waiver::HeldLinkEntry));
-    assert!(
-        table.waived(&LinkId::new(1)),
-        "held-entry's own waiver stays"
-    );
-}
-
-#[test]
 fn only_the_held_entry_waiver_lets_a_link_off_held_entry() {
     let mut table = LinkTable::default();
     table.open(link(1, "a"));
     for waiver in [
-        Waiver::AnonymousConnect,
         Waiver::CrossedInbound,
         Waiver::MovedOwnDial,
         Waiver::SettledAtMsg3,

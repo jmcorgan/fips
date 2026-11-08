@@ -134,6 +134,7 @@ impl Node {
         actions: Vec<PeerAction>,
     ) {
         let mut queue: VecDeque<PeerAction> = actions.into();
+        let mut carried_announce: Option<Option<u64>> = None;
         while let Some(action) = queue.pop_front() {
             match action {
                 PeerAction::OpenTransport {
@@ -332,6 +333,11 @@ impl Node {
                                 // ("Connection promoted to active peer"); no separate
                                 // inbound-path line.
                             }
+                            if let Some(sent) = carried_announce
+                                && let Some(p) = self.peers.get_mut(&node_addr)
+                            {
+                                p.set_last_tree_announce_sent_ms(sent);
+                            }
                             // Send initial tree announce to new peer
                             if let Err(e) = self.send_tree_announce_to_peer(&node_addr).await {
                                 debug!(peer = %self.peer_display_name(&node_addr), error = %e, "Failed to send initial TreeAnnounce");
@@ -353,7 +359,9 @@ impl Node {
                             // promotion at once.
                             if ambient.is_outbound {
                                 let link = (ambient.transport_id, ambient.remote_addr.clone());
-                                self.relink(&node_addr, None, Some(link)).await;
+                                if !node_fault!(DropInitiatorMark) {
+                                    self.relink(&node_addr, None, Some(link)).await;
+                                }
                             }
                         }
                         Ok(PromotionResult::CrossConnectionWon {
@@ -535,6 +543,12 @@ impl Node {
                     // there is no double-free.
                     let gone = *ambient.verified_identity.node_addr();
                     let held = self.peer_link(&gone);
+                    if node_fault!(TreeCarryAcrossRestart) {
+                        carried_announce = self
+                            .peers
+                            .get(&gone)
+                            .map(|p| p.last_tree_announce_sent_ms());
+                    }
                     self.remove_active_peer(&gone);
                     self.relink(&gone, held, None).await;
                 }
@@ -607,11 +621,16 @@ impl Node {
                             };
                             self.run_link_outputs(&peer, out);
                             let held = self.peers.get(&peer).map(|p| p.link_id());
+                            // Only on a link this node dialed, the state the
+                            // waiver names. A crossing answered late reaches
+                            // this arm holding an inbound link too, and no
+                            // exemption asks for it there.
                             #[cfg(any(test, debug_assertions))]
                             if let Some(held) = held
                                 && self.links.get(&held).is_some_and(|l| {
-                                    l.transport_id() != ambient.transport_id
-                                        || *l.remote_addr() != ambient.remote_addr
+                                    l.direction() == crate::transport::LinkDirection::Outbound
+                                        && (l.transport_id() != ambient.transport_id
+                                            || *l.remote_addr() != ambient.remote_addr)
                                 })
                             {
                                 self.links

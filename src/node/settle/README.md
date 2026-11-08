@@ -31,12 +31,10 @@ field, at once.
   test and debug builds it also holds each link's waivers (`Waiver`), the
   states the audit lets off, recorded at the event: `close` and `forget`
   record the one `held-entry` honours, on a link their removed entry
-  shadowed; `initiate_connection_from` records the one `link-named` honours,
-  on an anonymous dial's link until its machine names it; and the two
-  crossing arms, in `handle_msg2` and at msg3 in the executor, record the
-  ones the quiescent audit asks for. Under `cfg(test)` it carries the
-  node's audit count and `plant_entry`, a write past the table that does
-  not mark it, for the test that the audit catches one.
+  shadowed; and the two crossing arms, in `handle_msg2` and at msg3 in the
+  executor, record the ones the quiescent audit asks for. Under `cfg(test)` it
+  carries the node's audit count and `plant_entry`, a write past the table that
+  does not mark it, for the test that the audit catches one.
 - `maps.rs`: `MachineMap`, the per-peer control machines with their timer
   store (`add`, `ensure`, `drop`, `get_mut`; `timers`, `arm`, `cancel`);
   `DialMap`, the dials waiting for their msg2 (`note`, `forget`); `LegMap`,

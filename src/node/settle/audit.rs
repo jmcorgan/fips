@@ -17,7 +17,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::Waiver;
 use crate::node::{AddrKey, Node};
 use crate::transport::LinkId;
 
@@ -31,16 +30,17 @@ pub(in crate::node) fn peer_link(node: &Node) -> Vec<LinkId> {
         .collect()
 }
 
-/// `link-named`: every link is named by a peer, a handshake machine or a
-/// pending dial, or waits for an anonymous dial's connect (`Waiver`). The
-/// links no one names.
+/// `link-named`: every link is named by a peer, a handshake machine, a
+/// pending dial, or a pending connect, which is all an anonymous dial's link
+/// has until its connect resolves. The links no one names.
 pub(in crate::node) fn link_named(node: &Node) -> Vec<LinkId> {
     let mut named: HashSet<LinkId> = node.peers.values().map(|p| p.link_id()).collect();
     named.extend(node.peer_machines.keys().copied());
     named.extend(node.pending_outbound.values().copied());
+    named.extend(node.peering.pending_connects.iter().map(|p| p.link_id));
     node.links
         .keys()
-        .filter(|link| !named.contains(link) && !node.links.carries(link, Waiver::AnonymousConnect))
+        .filter(|link| !named.contains(link))
         .copied()
         .collect()
 }
