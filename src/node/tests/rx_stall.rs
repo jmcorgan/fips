@@ -837,6 +837,36 @@ fn snapshot_stat(
 /// runs every second, so a longer gap means a tick was held.
 const SNAPSHOT_LAG: Duration = Duration::from_millis(1500);
 
+/// How long the rx loop's first tick may take to publish the entity
+/// snapshot. The tick arm is polled last and publishes only after a dozen
+/// awaited steps, so on a loaded host the first publish can come well after
+/// the loop starts.
+const FIRST_PUBLISH: Duration = Duration::from_secs(10);
+
+/// Wait for the first entity snapshot that lists both transports. Until
+/// then the off-loop view has no row to read. Polls with a short sleep so
+/// the rx loop running beside it in the same `select!` keeps going.
+async fn first_snapshot(handle: &crate::control::read_handle::ControlReadHandle) {
+    let start = Instant::now();
+    loop {
+        let listed: Vec<u32> = handle
+            .entities()
+            .transports
+            .iter()
+            .map(|t| t.transport_id)
+            .collect();
+        if listed.contains(&UDP_ID) && listed.contains(&TCP_ID) {
+            return;
+        }
+        assert!(
+            start.elapsed() < FIRST_PUBLISH,
+            "the rx loop published no entity snapshot listing both transports within \
+             {FIRST_PUBLISH:?}; the last one listed {listed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// What the off-loop view and the tick did during a burst of UDP traffic.
 #[derive(Debug)]
 struct TickProgress {
@@ -884,8 +914,7 @@ async fn tick_progress(poisoned: usize) -> TickProgress {
     let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
     let measure = async {
-        // The interval's first tick fires at once and publishes a snapshot.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        first_snapshot(&handle).await;
         for p in poison {
             tx.send(p).await.unwrap();
         }
