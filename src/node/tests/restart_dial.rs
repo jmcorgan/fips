@@ -10,6 +10,7 @@
 //! node the smaller address.
 
 use super::rekey_parity::{deliver, heartbeat, linked_pair, pump, stale_session};
+use super::settle::audit::assert_coherent;
 use super::spanning_tree::{TestNode, cleanup_nodes, initiate_handshake, restarted_node};
 use super::*;
 use crate::proto::fmp::wire::{CommonPrefix, PHASE_MSG1, PHASE_MSG2};
@@ -130,6 +131,7 @@ async fn one_dial_after_a_peer_restart_leaves_both_ends_on_one_session_with_end_
                 "D smaller {d_smaller}, D dialled the original link {d_dialled}: {f}"
             ));
         }
+        assert_coherent(&mut nodes, &[], "the end of the test").await;
         cleanup_nodes(&mut nodes).await;
     }
     assert!(failures.is_empty(), "{failures:#?}");

@@ -99,3 +99,8 @@ BleUnprovenTwoSecondsEarly	red	fips-mesh	transport::conformance::ble::a_channel_
 BleUnprovenIgnoresHandshake	red	fips-mesh	transport::conformance::ble::a_channel_that_completed_a_handshake_and_was_left_unverified_is_kept
 BleUnprovenIgnoresHeld	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
 BleUnprovenIgnoresHeld	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose_first_msg1_comes_late_is_kept_a_full_timeout_after_it	defect: a channel was closed 15 s after its first msg1
+MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
+RemoveKeepsLink	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	link-named
+RemoveKeepsLink	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	link-named
+UnbindKept	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	peers_by_index must map exactly
+UnbindKept	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	peers_by_index must map exactly

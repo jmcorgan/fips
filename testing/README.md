@@ -347,6 +347,23 @@ job, after the known-defect lane. On a host whose build has no BLE
 transport the lines behind `ble_available` are skipped and counted. It
 prints each break's wall time and the total.
 
+### The live audit's reach (`check-audit-reach.py`)
+
+In a debug test build every node entry that can change a per-peer map audits
+the maps on its way out (`src/node/settle/audit.rs`), except on a node a test
+wrote past the map writers, which it skips for the rest of the test. A test
+helper that marks a node it need not would turn the audit off in every test
+that uses it, with the suite still green. So the unit-test stage that runs
+the root lib suite as threads in one process (`unit-tests-profiling` here,
+the optional-features step in GitHub CI) sets `FIPS_AUDIT_REACH` to a file,
+into which each audit writes one row per test thread, node and outcome, and
+[`check-audit-reach.py`](check-audit-reach.py) then counts the (test, node)
+pairs (recorded here as `audit-reach`). It exits 1 when fewer than 97.0% of
+the pairs that reach an audit are audited, or fewer than 2300 are, and 2 on
+an empty or unreadable file. The floors are constants at the top of the
+script; lowering one is an edit a review sees. Under nextest a test's thread
+does not name it, so the check does not read nextest runs.
+
 ### Root-only tests (`root-tests.sh`)
 
 The unit tests that need root and network namespaces are `#[ignore]`d, so the

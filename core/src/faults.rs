@@ -171,6 +171,15 @@ faults! {
     /// The BLE transport does not restart the timeout of a channel the
     /// node holds.
     BleUnprovenIgnoresHeld,
+    /// Following a moved path keeps the link's index entry at the pair the
+    /// path left, beside the one at the pair it moved to.
+    MovedLeavesEntry,
+    /// Removing an active peer leaves its link in the link table, with
+    /// every index entry naming it.
+    RemoveKeepsLink,
+    /// An index the link machine unbinds stays in the session-index map,
+    /// naming the peer that held it.
+    UnbindKept,
 }
 
 impl Fault {

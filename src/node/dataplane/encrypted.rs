@@ -97,6 +97,13 @@ impl Node {
     /// cuts over to it, and one under the previous session is delivered
     /// while the drain holds it.
     pub(in crate::node) async fn handle_encrypted_frame(&mut self, packet: ReceivedPacket) {
+        self.frame_body(packet).await;
+        self.audit_live("handle_encrypted_frame");
+    }
+
+    /// The work of [`Self::handle_encrypted_frame`], which audits the per-peer maps
+    /// after it.
+    async fn frame_body(&mut self, packet: ReceivedPacket) {
         // Parse header (fail fast)
         let header = match EncryptedHeader::parse(&packet.data) {
             Some(h) => h,
@@ -702,6 +709,14 @@ impl Node {
         &mut self,
         event: crate::node::decrypt_worker::DecryptWorkerEvent,
     ) {
+        self.worker_body(event).await;
+        self.audit_live("process_decrypt_worker_event");
+    }
+
+    /// The work of [`Self::process_decrypt_worker_event`], which audits the per-peer maps
+    /// after it.
+    #[cfg(unix)]
+    async fn worker_body(&mut self, event: crate::node::decrypt_worker::DecryptWorkerEvent) {
         match event {
             crate::node::decrypt_worker::DecryptWorkerEvent::Plaintext(fallback) => {
                 self.process_decrypt_fallback(fallback).await;

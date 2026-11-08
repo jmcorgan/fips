@@ -410,6 +410,9 @@ pub(super) fn seed_completed_connection_from(
         .unwrap()
         .complete_handshake(&msg2, LegStamp::at(current_time_ms))
         .unwrap();
+    // The leg has no link, and its tests promote it, which no production
+    // path does.
+    node.plant();
 
     peer_identity
 }

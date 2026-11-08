@@ -1644,11 +1644,11 @@ impl ActivePeer {
         })
     }
 
-    /// Test-only: every index this peer's link rekey machine binds, with
-    /// the transport recorded at the binding and whether a decrypt worker
-    /// holds that session's receive half, for the audit of the node's index
-    /// map and worker table against the machine.
-    #[cfg(test)]
+    /// Every index this peer's link rekey machine binds, with the transport
+    /// recorded at the binding and whether a decrypt worker holds that
+    /// session's receive half, for the audit of the node's index map and
+    /// worker table against the machine. In test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn link_bindings(&self) -> Vec<((TransportId, u32), bool)> {
         use fips_core::proto::rekey::{Purpose, RecvHome};
         let Some(rekey) = self.rekey.as_ref() else {

@@ -51,6 +51,8 @@ macro_rules! reads {
     };
 }
 
+#[cfg(any(test, debug_assertions))]
+pub(in crate::node) mod audit;
 mod links;
 mod maps;
 #[cfg(test)]
@@ -58,3 +60,39 @@ mod tests;
 
 pub(in crate::node) use links::LinkTable;
 pub(in crate::node) use maps::{BindMap, DialMap, MachineMap, PeerMap};
+
+#[cfg(any(test, debug_assertions))]
+pub(in crate::node) use links::Waiver;
+
+impl crate::node::Node {
+    /// Audit the per-peer maps as the node entry `site` returns, panicking
+    /// on a breach, in a debug build; nothing in a release build. Every
+    /// node entry that can change one of the maps calls it on its way out.
+    #[inline]
+    pub(in crate::node) fn audit_live(&self, site: &str) {
+        #[cfg(debug_assertions)]
+        audit::live(self, site);
+        #[cfg(not(debug_assertions))]
+        let _ = site;
+    }
+
+    /// Mark the node as built past its writers, for a test helper that makes
+    /// a state no production path makes. The live audit skips the node for
+    /// the rest of the test.
+    #[cfg(test)]
+    pub(in crate::node) fn plant(&mut self) {
+        self.links.plant();
+    }
+
+    /// Whether a test has written any of the node's per-peer maps past its
+    /// writers, or marked the node so.
+    #[cfg(test)]
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(in crate::node) fn planted(&self) -> bool {
+        self.links.planted()
+            || self.peers.planted()
+            || self.peers_by_index.planted()
+            || self.pending_outbound.planted()
+            || self.peer_machines.planted()
+    }
+}

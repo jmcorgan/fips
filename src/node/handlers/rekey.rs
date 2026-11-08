@@ -207,6 +207,13 @@ impl Node {
     /// one machine runs before its start pass, so its frees come before its
     /// allocations.
     pub(in crate::node) async fn poll_link_rekeys(&mut self) {
+        self.rekeys_body().await;
+        self.audit_live("poll_link_rekeys");
+    }
+
+    /// The work of [`Self::poll_link_rekeys`], which audits the per-peer maps
+    /// after it.
+    async fn rekeys_body(&mut self) {
         let addrs: Vec<NodeAddr> = self
             .peers
             .iter()
@@ -573,7 +580,9 @@ impl Node {
                     self.peers_by_index.bind(index, *node_addr);
                 }
                 LinkOutput::Unbind { index, .. } => {
-                    self.peers_by_index.unbind(&index);
+                    if !node_fault!(UnbindKept) {
+                        self.peers_by_index.unbind(&index);
+                    }
                 }
                 LinkOutput::Delegate {
                     tag, index, recv, ..

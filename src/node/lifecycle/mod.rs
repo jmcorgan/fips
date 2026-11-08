@@ -1675,6 +1675,13 @@ impl Node {
     /// marks the link as Connected and starts the Noise handshake.
     /// Failed connections are cleaned up and scheduled for retry.
     pub(super) async fn poll_pending_connects(&mut self) {
+        self.connects_body().await;
+        self.audit_live("poll_pending_connects");
+    }
+
+    /// The work of [`Self::poll_pending_connects`], which audits the per-peer maps
+    /// after it.
+    async fn connects_body(&mut self) {
         if self.peering.pending_connects.is_empty() {
             return;
         }
@@ -3646,6 +3653,14 @@ impl Node {
     /// Notifies the peer, removes it locally, closes the transport connection
     /// it was using, and suppresses auto-reconnect.
     pub(crate) async fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
+        let result = self.disconnect_body(npub).await;
+        self.audit_live("api_disconnect");
+        result
+    }
+
+    /// The work of [`Self::api_disconnect`], which audits the per-peer maps
+    /// after it.
+    async fn disconnect_body(&mut self, npub: &str) -> Result<serde_json::Value, String> {
         let peer_identity =
             PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
         let node_addr = *peer_identity.node_addr();

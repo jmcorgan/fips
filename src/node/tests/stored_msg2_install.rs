@@ -12,6 +12,7 @@
 //! the resend reaches A.
 
 use super::rekey_parity::{deliver, heartbeat, linked_pair};
+use super::settle::audit::assert_coherent;
 use super::spanning_tree::cleanup_nodes;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::spanning_tree::{TestNode, initiate_handshake, make_test_node};
@@ -171,6 +172,7 @@ async fn a_responder_whose_stored_msg2_send_succeeds_installs_the_peer() {
     let records_setup =
         nodes[1].node.get_peer(&a).and_then(|p| p.setup_ephemeral()) == ephemeral_of(&msg1.data);
     let heard = heard_at_b(&mut nodes).await;
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
     assert!(
         installed,
@@ -229,6 +231,7 @@ async fn a_responder_installs_the_peer_with_the_msg1_its_stored_msg2_answers_whe
     let installed = nodes[1].node.get_peer(&a).is_some();
     let recorded = nodes[1].node.get_peer(&a).and_then(|p| p.setup_ephemeral());
     let heard = heard_at_b(&mut nodes).await;
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
     assert!(
         installed,
@@ -319,6 +322,7 @@ async fn a_responder_restarting_a_peering_installs_the_peer_when_its_stored_msg2
         .get_peer(&a)
         .is_some_and(|p| Some(p.link_id()) == fresh_link);
     let heard = heard_at_b(&mut nodes).await;
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
     assert!(
         on_fresh,
@@ -338,6 +342,7 @@ async fn a_responder_whose_first_msg2_send_succeeds_installs_the_peer() {
     heartbeat(&mut nodes[0], &b).await;
     deliver(&mut nodes[1]).await;
     let heard = nodes[1].node.get_peer(&a).is_some_and(|p| p.is_heard());
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
     assert!(heard, "B installs A and authenticates its frames");
 }

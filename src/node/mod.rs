@@ -3283,16 +3283,8 @@ impl Node {
     /// direction exists to check.)
     #[cfg(debug_assertions)]
     pub(in crate::node) fn debug_assert_peer_maps_coherent(&self) {
-        for (link, machine) in &self.peer_machines {
-            let has_carrier = machine.leg().is_some()
-                || self.peers.values().any(|peer| peer.link_id() == *link)
-                || self
-                    .peering
-                    .pending_connects
-                    .iter()
-                    .any(|pending| pending.link_id == *link);
-            assert!(
-                has_carrier,
+        if let Some(link) = settle::audit::carrier(self).first() {
+            panic!(
                 "control machine for link {link} has no live carrier \
                  (no pending connection, active peer, or pending connect)"
             );

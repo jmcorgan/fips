@@ -36,7 +36,11 @@ the second, and each pin has a line of its own in
   `assert_coherent` fails the test, marked `defect:`, on any breach. The
   file's doc names each property and what it can and cannot see. Its tests
   show the audit passes coherent states and fires on a planted breach of
-  each property it reports.
+  each property it reports. Where a property is also a clause of the node's
+  live audit (`src/node/settle/audit.rs`), it calls that clause.
+  `assert_coherent` and `Exempt` are visible to the rest of `node::tests`:
+  the crossing, restart, rekey-move, stored-msg2 and BLE crossing tests
+  call it at their end, where both nodes hold each other and are quiet.
 - `bounds.rs`: a pending dial sprayed with 1000 forged msg2s, garbage or
   replayed: the dial is kept, no handshake or per-peer map grows, and the
   genuine msg2 still completes the dial. How many forged msg2s are read is
@@ -103,6 +107,14 @@ the second, and each pin has a line of its own in
   it a miss. Each is ignored and inventoried as `helper`. The known-defect
   lane pins three of the file's line numbers, so a new test goes last. They
   are not tests of the node.
+- `live.rs`: the node's live map audit on real nodes. A loopback and a TCP
+  dial audit both nodes; a node a test wrote past the map writers is not
+  audited and one written through them is; an index entry put in past the
+  table fails at the next frame; the crossing's waiver is recorded at the
+  crossing on that link only, and a crossing that keeps the link's entry
+  records none; a session a degraded decrypt-worker pool refused, and two
+  started nodes on real pools, pass. Tests that need the audit to run carry
+  `#[cfg(debug_assertions)]`.
 
 ## Markers: `defect:` and `precondition:`
 
@@ -131,7 +143,10 @@ elsewhere would go unseen.
 
 An exemption waives one property for one node, and applies only when the
 test passes it; the audit never infers one from state. Each is listed in
-`audit.rs`'s `Exempt` with its reason and the change that removes it. A new
+`audit.rs`'s `Exempt` with its reason and the change that removes it. The
+node records its own waiver for the same state at the event that makes it
+(`settle::Waiver`, in test and debug builds), and `assert_coherent` fails
+on a passed exemption its node did not record, so the two cannot drift. A new
 one needs a test that constructs it in the same change (an enum variant no
 code constructs fails clippy), and a test showing it waives only what it
 names. A green test that the audit reds is a finding to report, not a

@@ -667,6 +667,13 @@ impl Node {
     /// restart traffic from an established link stops competing with
     /// stranger admission, while still being metered.
     pub(in crate::node) async fn handle_msg1(&mut self, packet: ReceivedPacket) {
+        self.msg1_body(packet).await;
+        self.audit_live("handle_msg1");
+    }
+
+    /// The work of [`Self::handle_msg1`], which audits the per-peer maps
+    /// after it.
+    async fn msg1_body(&mut self, packet: ReceivedPacket) {
         // === CLASSIFY, THEN RATE LIMIT (both before any crypto) ===
         // Classification is two map lookups; the second is O(peers) and now
         // runs on every inbound msg1, including refused ones. See the
@@ -1954,6 +1961,13 @@ impl Node {
     ///
     /// This completes an outbound handshake we initiated.
     pub(in crate::node) async fn handle_msg2(&mut self, packet: ReceivedPacket) {
+        self.msg2_body(packet).await;
+        self.audit_live("handle_msg2");
+    }
+
+    /// The work of [`Self::handle_msg2`], which audits the per-peer maps
+    /// after it.
+    async fn msg2_body(&mut self, packet: ReceivedPacket) {
         // Parse header
         let header = match Msg2Header::parse(&packet.data) {
             Some(h) => h,
@@ -2383,6 +2397,21 @@ impl Node {
                             "Cross-connection: swapped to outbound session (our outbound wins)"
                         }
                     );
+
+                    // A move that left the peer's link with no index entry
+                    // is let off the live audit's entry check for that link,
+                    // naming which move made the state.
+                    #[cfg(any(test, debug_assertions))]
+                    if let Some(held) = self.peers.get(&peer_node_addr).map(|p| p.link_id())
+                        && !self.links.index().values().any(|named| *named == held)
+                    {
+                        let waiver = if own_dial || later_dial {
+                            crate::node::settle::Waiver::MovedOwnDial
+                        } else {
+                            crate::node::settle::Waiver::CrossedInbound
+                        };
+                        self.links.waive(held, waiver);
+                    }
 
                     cross_conn_outcome = Some(CrossConnOutcome::Swap {
                         our_index: outbound_our_index,

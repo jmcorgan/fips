@@ -1,9 +1,37 @@
 //! The link table: the node's links and the address index over them.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashMap;
+#[cfg(any(test, debug_assertions))]
+use std::collections::HashSet;
 
 use crate::node::AddrKey;
 use crate::transport::{Link, LinkId};
+
+/// Why a link is let off the live audit's `held-entry` clause: a state the
+/// node makes today that the clause would otherwise call a breach. Each is
+/// recorded by the code that makes the state, at the event, on the link it
+/// concerns, and dropped with the link. In test and debug builds only.
+#[cfg(any(test, debug_assertions))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(in crate::node) enum Waiver {
+    /// After crossed dials the node moved to its own outbound session but
+    /// kept the inbound link it promoted the peer on, and the move's renewal
+    /// of the link's paths released that link's only index entry. Removed
+    /// when a crossing moves the node onto the link it dialed.
+    CrossedInbound,
+    /// The node's own later dial to a held peer completed and moved the
+    /// session onto it, keeping the link the peer was promoted on, whose
+    /// only index entry the move's renewal released. Removed when that move
+    /// re-keys the peer's link record to the dial's link.
+    MovedOwnDial,
+    /// A later dial to the held link's own pair overwrote the link's entry,
+    /// and closing or abandoning the dial's link took the entry with it.
+    /// Removed when retiring the dial's link leaves the held link's entry in
+    /// place.
+    HeldLinkEntry,
+}
 
 /// The node's links, keyed by `LinkId`, and the index from a
 /// `(transport, address)` pair to the link at it.
@@ -34,8 +62,14 @@ use crate::transport::{Link, LinkId};
 pub(in crate::node) struct LinkTable {
     links: HashMap<LinkId, Link>,
     index: HashMap<AddrKey, LinkId>,
+    /// The waivers each link carries.
+    #[cfg(any(test, debug_assertions))]
+    waivers: HashMap<LinkId, HashSet<Waiver>>,
     #[cfg(test)]
     planted: bool,
+    /// How many times the live audit has checked the node this table is in.
+    #[cfg(test)]
+    audits: Cell<u64>,
 }
 
 reads!(LinkTable, links, HashMap<LinkId, Link>);
@@ -54,7 +88,21 @@ impl LinkTable {
     /// names it. Entries another link has claimed are left alone.
     pub(in crate::node) fn close(&mut self, id: &LinkId) -> Option<Link> {
         let link = self.links.remove(id)?;
+        #[cfg(any(test, debug_assertions))]
+        let taken: Vec<AddrKey> = self
+            .index
+            .iter()
+            .filter(|(_, mapped)| **mapped == *id)
+            .map(|(key, _)| key.clone())
+            .collect();
         self.index.retain(|_, mapped| *mapped != *id);
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.waivers.remove(id);
+            for key in &taken {
+                self.shadowed(key);
+            }
+        }
         Some(link)
     }
 
@@ -62,7 +110,16 @@ impl LinkTable {
     /// at `key`, whichever link that entry names.
     pub(in crate::node) fn forget(&mut self, id: &LinkId, key: &AddrKey) {
         self.links.remove(id);
-        self.index.remove(key);
+        let taken = self.index.remove(key).is_some();
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.waivers.remove(id);
+            if taken {
+                self.shadowed(key);
+            }
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        let _ = taken;
     }
 
     /// The link's path moved from `from` to `to`. Only if `from` names the
@@ -70,7 +127,9 @@ impl LinkTable {
     /// another link holds it.
     pub(in crate::node) fn follow(&mut self, id: LinkId, from: &AddrKey, to: AddrKey) {
         if self.index.get(from) == Some(&id) {
-            self.index.remove(from);
+            if !node_fault!(MovedLeavesEntry) {
+                self.index.remove(from);
+            }
             self.index.entry(to).or_insert(id);
         }
     }
@@ -105,5 +164,71 @@ impl LinkTable {
     pub(in crate::node) fn raw_index(&mut self) -> &mut HashMap<AddrKey, LinkId> {
         self.planted = true;
         &mut self.index
+    }
+
+    /// Record `waiver` on the link `id`.
+    #[cfg(any(test, debug_assertions))]
+    pub(in crate::node) fn waive(&mut self, id: LinkId, waiver: Waiver) {
+        self.waivers.entry(id).or_default().insert(waiver);
+    }
+
+    /// Whether the link `id` carries any waiver.
+    #[cfg(any(test, debug_assertions))]
+    pub(in crate::node) fn waived(&self, id: &LinkId) -> bool {
+        self.waivers.contains_key(id)
+    }
+
+    /// Whether the link `id` carries `waiver`.
+    #[cfg(test)]
+    pub(in crate::node) fn carries(&self, id: &LinkId, waiver: Waiver) -> bool {
+        self.waivers
+            .get(id)
+            .is_some_and(|set| set.contains(&waiver))
+    }
+
+    /// The entry at `key` has just been taken from the index: every other
+    /// live link set up at `key` was shadowed by it and is left with no
+    /// entry at its own pair.
+    #[cfg(any(test, debug_assertions))]
+    fn shadowed(&mut self, key: &AddrKey) {
+        let at: Vec<LinkId> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.transport_id() == key.0 && link.remote_addr() == &key.1)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in at {
+            self.waive(id, Waiver::HeldLinkEntry);
+        }
+    }
+
+    /// Mark the table planted: the node it is in was built past its
+    /// writers.
+    #[cfg(test)]
+    pub(in crate::node) fn plant(&mut self) {
+        self.planted = true;
+    }
+
+    /// Put `key` in the index naming `id`, past the writers and without
+    /// marking the table: the shape of a write that bypasses the table, for
+    /// the test that the live audit catches one.
+    #[cfg(test)]
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(in crate::node) fn plant_entry(&mut self, key: AddrKey, id: LinkId) {
+        self.index.insert(key, id);
+    }
+
+    /// Count one live audit of the node this table is in.
+    #[cfg(test)]
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(in crate::node) fn count_audit(&self) {
+        self.audits.set(self.audits.get() + 1);
+    }
+
+    /// How many times the live audit has checked the node this table is in.
+    #[cfg(test)]
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub(in crate::node) fn audits(&self) -> u64 {
+        self.audits.get()
     }
 }

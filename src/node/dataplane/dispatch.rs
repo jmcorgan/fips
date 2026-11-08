@@ -274,7 +274,9 @@ impl Node {
         self.release_peer_indices(node_addr, &mut peer);
 
         // Remove link and address mapping
-        self.remove_link(&link_id);
+        if !node_fault!(RemoveKeepsLink) {
+            self.remove_link(&link_id);
+        }
         // Bound `peer_machines`: drop this peer's machine
         // entry, keyed by the `link_id` derived above BEFORE the `peers` removal.
         // This cleans up the OLD peer's machine on an inbound restart and prevents

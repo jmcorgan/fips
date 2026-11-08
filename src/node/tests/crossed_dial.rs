@@ -27,6 +27,7 @@
 
 use super::link_index_audit;
 use super::rekey_parity::heartbeat;
+use super::settle::audit::{Exempt, assert_coherent};
 use super::spanning_tree::{
     LOOPBACK_REGISTRY, TestNode, add_loopback_alias, cleanup_nodes, loopback_tap, make_test_node,
     make_test_node_with_config,
@@ -460,6 +461,23 @@ async fn check_move(crossed: Crossed) {
         (0, received + 1),
         "l's heartbeat after the move authenticates at s"
     );
+    // The smaller node keeps the inbound link it was promoted on as the
+    // larger node's record: off the pair it moved to when the msg2 came from
+    // another address, at it when it came from the first. Frames the smaller
+    // node sends on another transport land in `tap`, which the audit's
+    // delivery does not read, so that move is not audited here.
+    match dial {
+        Dial::OtherAddress => {
+            assert_coherent(
+                &mut nodes,
+                &[Exempt::CrossedInbound { node: s, peer: l }],
+                "the end of the move",
+            )
+            .await
+        }
+        Dial::AnsweredFromFirst => assert_coherent(&mut nodes, &[], "the end of the move").await,
+        Dial::OtherTransport => {}
+    }
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -603,6 +621,7 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin() {
         Some(pin),
         "the pin is kept across a crossed handshake won on the tie-break"
     );
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -783,5 +802,6 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin_when_the_peers_leg_is
         "the pin is kept across a crossed handshake won on the tie-break, also when the \
          peer's leg was promoted after our dial started"
     );
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }

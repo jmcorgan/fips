@@ -53,6 +53,13 @@ impl Node {
     /// the retry-then-teardown choreography is the pure
     /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
     pub(in crate::node) async fn check_timeouts(&mut self) {
+        self.timeouts_body().await;
+        self.audit_live("check_timeouts");
+    }
+
+    /// The work of [`Self::check_timeouts`], which audits the per-peer maps
+    /// after it.
+    async fn timeouts_body(&mut self) {
         // First, and not behind the connection check below: a node with no
         // handshake in progress still holds TUN packets.
         self.release_stranded_tun_packets(std::time::Instant::now());
@@ -226,6 +233,13 @@ impl Node {
     /// (`Node::interval_ms`), which the timers' deadlines and the legs'
     /// activity stamps are kept on.
     pub(in crate::node) async fn drive_peer_timers(&mut self, interval_now: u64) {
+        self.timers_body(interval_now).await;
+        self.audit_live("drive_peer_timers");
+    }
+
+    /// The work of [`Self::drive_peer_timers`], which audits the per-peer maps
+    /// after it.
+    async fn timers_body(&mut self, interval_now: u64) {
         if self.peer_machines.timers().is_empty() {
             return;
         }

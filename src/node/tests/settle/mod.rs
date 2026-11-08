@@ -11,7 +11,7 @@
 //! 127.0.0.1, a crossed TCP dial, delivery until the nodes are idle, and
 //! the check that two nodes are left on one working session.
 
-mod audit;
+pub(super) mod audit;
 mod bounds;
 mod carry;
 mod cells;
@@ -19,6 +19,7 @@ mod clock;
 mod crossing;
 mod fsp;
 mod lane;
+mod live;
 mod restart;
 
 use super::spanning_tree::{

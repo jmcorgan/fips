@@ -382,3 +382,118 @@ fn only_the_ways_past_the_writers_mark_a_map_planted() {
     assert!(links.planted(), "raw marks the link table");
     assert!(index.planted(), "raw_index marks the link table");
 }
+
+// Each clause of the live audit against a state that breaks it alone,
+// written through the writers, so the node is not marked planted.
+
+/// A node with no links, peers, machines or dials.
+#[cfg(debug_assertions)]
+fn bare() -> crate::node::Node {
+    crate::node::tests::make_node()
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: peer-link")]
+fn the_live_audit_fails_a_peer_whose_link_is_not_in_the_link_map() {
+    let mut node = bare();
+    let (addr, held) = peer(LinkId::new(1));
+    node.peers.install(addr, held);
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: link-named")]
+fn the_live_audit_fails_a_link_no_peer_machine_or_dial_names() {
+    let mut node = bare();
+    node.links.open(link(1, "10.0.0.1:2121"));
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: dial-link")]
+fn the_live_audit_fails_a_pending_dial_whose_link_is_not_in_the_link_map() {
+    let mut node = bare();
+    node.pending_outbound
+        .note((TransportId::new(1), 5), LinkId::new(1));
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: entry-live")]
+fn the_live_audit_fails_an_index_entry_naming_no_live_link() {
+    let mut node = bare();
+    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.forget(&LinkId::new(1), &key("10.0.0.2:2121"));
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: entry-pair")]
+fn the_live_audit_fails_an_index_entry_off_its_links_pair_and_every_path() {
+    let mut node = bare();
+    let one = LinkId::new(1);
+    node.links.open(link(1, "10.0.0.1:2121"));
+    node.pending_outbound.note((TransportId::new(1), 5), one);
+    node.links.claim(one, key("10.0.0.9:2121"));
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: held-entry")]
+fn the_live_audit_fails_a_held_link_no_index_entry_names() {
+    let mut node = bare();
+    let one = LinkId::new(1);
+    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.unclaim(one, &key("10.0.0.1:2121"));
+    let (addr, held) = peer(one);
+    node.peers.install(addr, held);
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: leg-entry")]
+fn the_live_audit_fails_a_handshake_leg_whose_pair_names_no_live_link() {
+    let mut node = bare();
+    let one = LinkId::new(1);
+    let identity = PeerIdentity::from_pubkey(Identity::generate().pubkey());
+    node.seed_handshake_machine(crate::node::HandshakeSeed::outbound(one, identity, 1000))
+        .expect("precondition: the leg is seeded");
+    node.links.open(link(1, "10.0.0.1:2121"));
+    node.links.unclaim(one, &key("10.0.0.1:2121"));
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: index: peers_by_index must map exactly")]
+fn the_live_audit_fails_a_session_index_no_link_machine_binds() {
+    let mut node = bare();
+    let (addr, _) = peer(LinkId::new(1));
+    node.peers_by_index.bind(7, addr);
+    audit::live(&node, "test");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "audit_live: test: carrier")]
+fn the_live_audit_fails_a_handshake_machine_with_no_carrier() {
+    let mut node = bare();
+    let one = LinkId::new(1);
+    node.peer_machines.add(one, machine(one));
+    audit::live(&node, "test");
+}
+
+/// A node with nothing in its maps passes every clause, so each test above
+/// fails at its own clause alone.
+#[cfg(debug_assertions)]
+#[test]
+fn the_live_audit_passes_a_bare_node() {
+    audit::live(&bare(), "test");
+}
