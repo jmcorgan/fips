@@ -8,6 +8,11 @@
 # known state, runs install.sh a second time (the upgrade), and checks that
 # exactly the units that were running before are running after.
 #
+# A unit counts as running only when systemd has not restarted it: each check
+# reads ActiveState, SubState, Result and NRestarts, holds an active unit for
+# a few seconds, and fails at once on auto-restart, a restart count or a
+# failed result. Every failed check prints the unit's status and journal.
+#
 # The tarball is staged from the real packaging/systemd/install.sh and unit
 # files, and the real packaging/common configuration, the same file set
 # build-tarball.sh ships. The binaries and DNS helpers are stubs: the fips and
@@ -51,6 +56,13 @@ BOOT_TIMEOUT=60
 # are stubs, so none of them waits for anything before it is started.
 INSTALL_TIMEOUT=120
 UNIT_START_TIMEOUT=60
+# A unit expected active may take this long to finish a start in progress,
+# and must then stay up this long. The fips and fips-gateway stubs cannot exit
+# by themselves, so a main process that dies within the hold failed to start.
+STATE_SETTLE=10
+STATE_HOLD=3
+# Journal lines printed under a failed state check.
+DUMP_LINES=50
 TARBALL_DIR=/opt/fips-tarball
 
 PASS=0
@@ -175,29 +187,178 @@ run_install() {
     return 0
 }
 
-# Print a unit's active state ("unknown" when the container cannot be asked).
-unit_state() {
-    local name="$1" unit="$2" state
-    state=$(docker exec "$name" systemctl is-active "$unit" 2>/dev/null)
-    echo "${state:-unknown}"
-    return 0
-}
-
 # Print a unit's InvocationID, which changes on every start.
 invocation_id() {
     docker exec "$1" systemctl show -p InvocationID --value "$2" 2>/dev/null
     return
 }
 
-# Record a PASS when a unit is in the wanted state, a FAIL otherwise.
-expect_state() {
-    local name="$1" label="$2" unit="$3" want="$4" got
-    got=$(unit_state "$name" "$unit")
-    if [ "$got" = "$want" ]; then
-        pass "$label: $unit is $got"
-    else
-        fail "$label: $unit is $got (want $want)"
+# Read a unit's state into UNIT_ACTIVE, UNIT_SUB, UNIT_RESULT, UNIT_RESTARTS
+# and UNIT_INVOCATION. Each is "unknown" when the container cannot be asked,
+# and the function then returns 1. The query is bounded inside the container,
+# as systemd_state is, so a hung systemctl cannot hold the suite.
+read_unit() {
+    local name="$1" unit="$2" out key value
+    UNIT_ACTIVE=unknown UNIT_SUB=unknown UNIT_RESULT=unknown
+    UNIT_RESTARTS=unknown UNIT_INVOCATION=unknown
+    out=$(docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" systemctl show \
+        -p ActiveState -p SubState -p Result -p NRestarts -p InvocationID \
+        "$unit" 2>/dev/null) || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ActiveState) UNIT_ACTIVE=$value ;;
+            SubState) UNIT_SUB=$value ;;
+            Result) UNIT_RESULT=$value ;;
+            NRestarts) UNIT_RESTARTS=$value ;;
+            InvocationID) UNIT_INVOCATION=$value ;;
+        esac
+    done <<<"$out"
+    [ "$UNIT_ACTIVE" != unknown ]
+}
+
+# Print the state read_unit last read, for a PASS or FAIL line.
+unit_detail() {
+    echo "SubState=$UNIT_SUB Result=$UNIT_RESULT NRestarts=$UNIT_RESTARTS"
+}
+
+# Print why the state read_unit last read is a failed start, or nothing when
+# it is not one. A unit in auto-restart, one that systemd has restarted, and
+# one whose last run did not end in success have each failed. Such a unit
+# reads active again once a restart is through, so this is checked on every
+# read and never waited out.
+restart_reason() {
+    if [ "$UNIT_SUB" = auto-restart ]; then
+        echo "its main process exited and systemd is waiting to restart it"
+    elif [ "$UNIT_RESTARTS" != 0 ]; then
+        echo "systemd has restarted it $UNIT_RESTARTS time(s) since it was started"
+    elif [ "$UNIT_RESULT" != success ]; then
+        echo "its last run ended with result $UNIT_RESULT"
     fi
+}
+
+# Print a unit's status and the end of its journal for this boot, indented
+# under the FAIL line, so a rare red carries its own diagnosis. Each probe is
+# bounded inside the container and keeps its own stderr, since a container
+# that cannot be asked is itself the finding.
+dump_unit() {
+    local name="$1" unit="$2"
+    {
+        echo "== systemctl show $unit"
+        docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" systemctl show \
+            -p ActiveState -p SubState -p Result -p NRestarts -p InvocationID \
+            -p ExecMainPID -p ExecMainCode -p ExecMainStatus "$unit" 2>&1
+        echo "== systemctl status $unit"
+        docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" systemctl status \
+            --no-pager -l "$unit" 2>&1
+        echo "== journalctl -u $unit -b (last $DUMP_LINES lines)"
+        docker exec "$name" timeout "$SYSTEMD_STATE_TIMEOUT" journalctl -u "$unit" -b \
+            --no-pager -o short-precise -n "$DUMP_LINES" 2>&1
+    } | sed 's/^/    /'
+    return 0
+}
+
+# Record a FAIL for a unit state check and print the unit's evidence.
+fail_unit() {
+    local name="$1" unit="$2"
+    fail "$3"
+    dump_unit "$name" "$unit"
+    return 0
+}
+
+# Record a PASS when a unit is active and stays so, a FAIL otherwise.
+#
+# A start in progress (activating in start, start-pre, start-post or
+# condition, or reloading) is read again, twice a second, for up to
+# STATE_SETTLE seconds. The unit must then be running, or exited for a oneshot
+# unit that remains after exit, and keep that state and its InvocationID for
+# STATE_HOLD seconds. A main process that dies straight after `systemctl
+# start` returns leaves the unit active for a moment and then in auto-restart,
+# so a single read can miss it, and a settled read five seconds on would see it
+# running again. Any read that restart_reason objects to fails at once.
+expect_active() {
+    local name="$1" label="$2" unit="$3" reason invocation note="" i=0
+    while :; do
+        if ! read_unit "$name" "$unit"; then
+            fail_unit "$name" "$unit" "$label: could not read $unit's state (want active)"
+            return 0
+        fi
+        reason=$(restart_reason)
+        if [ -n "$reason" ]; then
+            fail_unit "$name" "$unit" \
+                "$label: $unit is $UNIT_ACTIVE ($(unit_detail); want active): $reason"
+            return 0
+        fi
+        case "$UNIT_ACTIVE/$UNIT_SUB" in
+            active/running | active/exited) break ;;
+            activating/start | activating/start-pre | activating/start-post \
+                | activating/condition | reloading/*)
+                if [ "$i" -ge $((STATE_SETTLE * 2)) ]; then
+                    fail_unit "$name" "$unit" \
+                        "$label: $unit is still $UNIT_ACTIVE ($(unit_detail); want active) after ${STATE_SETTLE}s"
+                    return 0
+                fi
+                i=$((i + 1))
+                note=", after a start in progress"
+                sleep 0.5
+                ;;
+            *)
+                fail_unit "$name" "$unit" \
+                    "$label: $unit is $UNIT_ACTIVE ($(unit_detail); want active)"
+                return 0
+                ;;
+        esac
+    done
+    invocation=$UNIT_INVOCATION
+    for ((i = 0; i < STATE_HOLD * 2; i++)); do
+        sleep 0.5
+        if ! read_unit "$name" "$unit"; then
+            fail_unit "$name" "$unit" "$label: could not read $unit's state while it held active"
+            return 0
+        fi
+        reason=$(restart_reason)
+        if [ -z "$reason" ] && [ "$UNIT_INVOCATION" != "$invocation" ]; then
+            reason="its InvocationID changed from $invocation to $UNIT_INVOCATION, so it was started again"
+        fi
+        if [ -z "$reason" ]; then
+            case "$UNIT_ACTIVE/$UNIT_SUB" in
+                active/running | active/exited) ;;
+                *) reason="it left the active state within ${STATE_HOLD}s" ;;
+            esac
+        fi
+        if [ -n "$reason" ]; then
+            fail_unit "$name" "$unit" \
+                "$label: $unit is $UNIT_ACTIVE ($(unit_detail); want active): $reason"
+            return 0
+        fi
+    done
+    pass "$label: $unit is active ($(unit_detail); held ${STATE_HOLD}s$note)"
+    return 0
+}
+
+# Record a PASS when a unit is inactive and its last run, if any, succeeded;
+# a FAIL otherwise. A failed unit reads failed, not inactive, and fails here.
+expect_inactive() {
+    local name="$1" label="$2" unit="$3"
+    if ! read_unit "$name" "$unit"; then
+        fail_unit "$name" "$unit" "$label: could not read $unit's state (want inactive)"
+    elif [ "$UNIT_ACTIVE" != inactive ]; then
+        fail_unit "$name" "$unit" "$label: $unit is $UNIT_ACTIVE ($(unit_detail); want inactive)"
+    elif [ "$UNIT_RESULT" != success ]; then
+        fail_unit "$name" "$unit" \
+            "$label: $unit is inactive ($(unit_detail); want inactive): its last run ended with result $UNIT_RESULT"
+    else
+        pass "$label: $unit is inactive ($(unit_detail))"
+    fi
+    return 0
+}
+
+# Check a unit against the wanted state, active or inactive.
+expect_state() {
+    case "$4" in
+        active) expect_active "$@" ;;
+        inactive) expect_inactive "$@" ;;
+        *) fail "$2: no check for state $4 of $3" ;;
+    esac
     return 0
 }
 
@@ -250,11 +411,13 @@ scenario_all_active() {
             expect_state "$name" "$label: after" fips-gateway.service active
             after=$(invocation_id "$name" fips.service)
             if [ -z "$before" ] || [ -z "$after" ]; then
-                fail "$label: could not read fips.service's InvocationID (before '${before}', after '${after}')"
+                fail_unit "$name" fips.service \
+                    "$label: could not read fips.service's InvocationID (before '${before}', after '${after}')"
             elif [ "$before" != "$after" ]; then
                 pass "$label: the upgrade restarted fips.service"
             else
-                fail "$label: fips.service kept InvocationID $before, so the upgrade did not stop and restart it"
+                fail_unit "$name" fips.service \
+                    "$label: fips.service kept InvocationID $before, so the upgrade did not stop and restart it"
             fi
         fi
     fi
