@@ -49,7 +49,6 @@ const REKEYSIDE: &str = "proto::settle::tests::rekeyside::checks::";
 const SHADOW: &str = "proto::settle::tests::shadow::checks::";
 const SHAPES: &str = "proto::settle::tests::shapes::";
 const SIM: &str = "proto::settle::tests::sim::";
-const STUB: &str = "proto::settle::tests::stub::";
 const WORLD: &str = "proto::settle::tests::world::checks::";
 const JOINT_MACHINES: &str = "proto::settle::tests::joint::machines::";
 const JOINT_PARTY: &str = "proto::settle::tests::joint::party::";
@@ -62,11 +61,6 @@ const JOINT_STARTS: &str = "proto::settle::tests::joint::starts::";
 /// One test, by the prefix of its file and its name.
 type Test = (&'static str, &'static str);
 
-/// The core explored in the world, at both ends and against the model.
-const CORE_EXPLORED: Test = (
-    STUB,
-    "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
-);
 /// The model explored as both ends of every start.
 const MODEL_SETTLES: Test = (ORACLE, "model_parties_settle_on_every_start");
 /// The model's histories through the core.
@@ -121,7 +115,7 @@ const YOUNG_LINK: Test = (
     REGRESS,
     "after_a_dial_on_the_peers_young_link_the_peer_answers_the_larger_nodes_rekey",
 );
-/// The model of `master`'s four defects, one finding test each.
+/// The aged-link defect of the model of `master`.
 const AGED: Test = (
     FINDINGS,
     "against_a_model_of_master_a_dial_on_the_peers_aged_link_leaves_a_pending_the_peer_cannot_adopt",
@@ -294,7 +288,6 @@ pub const ROWS: &[Row] = &[
                 GATES,
                 "the_dampener_refuses_until_its_ceiling_after_the_last_accepted_restart",
             ),
-            CORE_EXPLORED,
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
@@ -461,7 +454,6 @@ pub const ROWS: &[Row] = &[
                 SIM,
                 "seeded_clean_runs_on_every_transport_model_keep_the_properties_and_heal",
             ),
-            CORE_EXPLORED,
             SCRIPTED_OFF,
             SCRIPTED_ON,
         ],
@@ -488,11 +480,7 @@ pub const ROWS: &[Row] = &[
             IN_ORDER_LARGER,
             (
                 LEGACY,
-                "the_core_against_a_model_of_master_converges_on_every_start_in_both_address_orders",
-            ),
-            (
-                LEGACY,
-                "the_core_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
+                "a_joint_node_off_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
             ),
             SCRIPTED_OFF,
             SCRIPTED_ON,
@@ -698,7 +686,6 @@ pub const ROWS: &[Row] = &[
                 "a_replacement_over_another_connection_closes_the_replaced_links_connection",
             ),
             MODEL_SETTLES,
-            CORE_EXPLORED,
         ],
     ),
     (
@@ -753,10 +740,6 @@ pub const ROWS: &[Row] = &[
                 FINDINGS,
                 "against_a_model_of_master_crossed_dials_on_a_connection_oriented_transport_leave_the_smaller_node_on_the_wrong_link_larger_first",
             ),
-            (
-                FINDINGS,
-                "the_model_of_master_against_itself_on_every_start_shows_the_four_defects",
-            ),
         ],
     ),
     (
@@ -804,19 +787,16 @@ pub const ROWS: &[Row] = &[
     (
         Fault::ClassifiedNoRefusal,
         &[(
-            FINDINGS,
-            "against_a_model_of_master_a_forward_wall_step_lets_a_msg1_replace_a_peering_heard_just_now",
+            ORACLE,
+            "classified_fires_on_a_refusal_the_model_does_not_make",
         )],
     ),
     (
         Fault::PendingAnswers,
-        &[
-            (
-                REKEYSIDE,
-                "the_rekey_side_agrees_with_the_model_on_every_rule_3_and_4_history",
-            ),
-            AGED,
-        ],
+        &[(
+            REKEYSIDE,
+            "the_rekey_side_agrees_with_the_model_on_every_rule_3_and_4_history",
+        )],
     ),
     (
         Fault::ResyncKeepsAll,
@@ -828,13 +808,10 @@ pub const ROWS: &[Row] = &[
     (Fault::ModelDropsFallback, &[MODEL_SETTLES]),
     (
         Fault::PacketStamp,
-        &[
-            (
-                REGRESS,
-                "a_restart_dial_inside_the_heard_floor_is_judged_on_one_clock",
-            ),
-            CORE_EXPLORED,
-        ],
+        &[(
+            REGRESS,
+            "a_restart_dial_inside_the_heard_floor_is_judged_on_one_clock",
+        )],
     ),
     (
         Fault::StoredByBytes,
@@ -1030,13 +1007,93 @@ const COLD: &str = "the cold start's reach at its stated depth, through the reac
 const HAND: &str =
     "its break is a scratch edit with no switch of its own, run by hand and logged with the commit";
 
+/// Why a run of a joint node against a model of a deployed node beside the
+/// one on `IgnoreOwnDial`'s row is characterisation.
+const LEGACY_RUN: &str = "the same oracles and list as the run on `IgnoreOwnDial`'s row, a whole set of sweeps past a row's cost; the list's own check is run by hand and logged";
+
 /// The tests that characterise behaviour no switch breaks, each with why.
 pub const CHARACTERISATION: &[(&str, &str)] = &[
+    (
+        "every_explored_interleaving_of_the_core_keeps_the_properties_and_heals",
+        "a whole sweep of 44 runs, over a minute a child on two cores and four rows of it past the meta-test's limit; each of its switches reds a cheaper test of its row",
+    ),
+    (
+        "against_a_model_of_master_a_forward_wall_step_does_not_let_a_msg1_replace_a_peering_heard_just_now",
+        HAND,
+    ),
     ("the_cold_start_reaches_its_stated_depth_off_with_off", COLD),
     ("the_cold_start_reaches_its_stated_depth_on_with_on", COLD),
     (
         "the_cold_start_is_explored_as_deep_as_the_reach_budget_allows_at_off_and_at_on",
         "a measurement run by hand and ignored, which asserts nothing: it prints how deep the cold start is explored within a time limit, and the depth it gives is asserted by the cold start's reach tests",
+    ),
+    (
+        "the_model_of_master_against_itself_on_every_start_shows_the_three_defects",
+        "a whole sweep of the model on machines at each setting, past a row's cost; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_of_two_transports",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "the_model_of_master_with_multipath_on_shows_the_wrong_link_on_a_connection_oriented_crossing",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "the_model_of_master_with_multipath_on_against_itself_on_a_crossing_during_a_rekey",
+        "the rest of that sweep at multipath on, in the slow explorers' lane, one start each; the crossing tests carry `RightLinkOff`",
+    ),
+    (
+        "an_abstract_far_ends_frame_opens_at_the_machine_holding_its_session",
+        HAND,
+    ),
+    (
+        "a_path_message_reaches_the_model_as_a_frame_and_draws_no_answer",
+        HAND,
+    ),
+    (
+        "a_joint_node_holds_the_model_on_the_models_frames_alone",
+        HAND,
+    ),
+    (
+        "a_copy_of_the_models_msg2_to_a_dial_is_no_reply_to_an_own_rekey",
+        HAND,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_off_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_off_against_a_model_of_master_on_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_the_quicker_starts",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_of_two_transports",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_connection_oriented_crossing",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_during_a_rekey",
+        LEGACY_RUN,
+    ),
+    (
+        "a_joint_node_on_against_a_model_of_master_on_converges_on_the_starts_on_real_bundles",
+        LEGACY_RUN,
     ),
     (
         "the_stub_keys_keep_the_worlds_address_order_in_both_flips",

@@ -202,6 +202,23 @@ pub fn off_on() -> Vec<Start> {
 /// start with two paths rebuilt on real bundles, and the starts only
 /// joint nodes run.
 fn with(maker: Maker, caps: &[(&str, usize)], pairing: &str) -> Vec<Start> {
+    uncapped(maker)
+        .into_iter()
+        .map(|mut st| {
+            st.cap = caps
+                .iter()
+                .find(|(n, _)| *n == st.name)
+                .map(|(_, c)| *c)
+                .unwrap_or_else(|| panic!("{} has a cap at {pairing}", st.name));
+            st
+        })
+        .collect()
+}
+
+/// Every named start with nodes made by `maker` and no cap, as a sweep
+/// takes it: the runs against the models of deployed nodes are not reach
+/// tests, and are measured by the lines they print.
+pub fn uncapped(maker: Maker) -> Vec<Start> {
     named()
         .into_iter()
         .map(|mut st| {
@@ -215,11 +232,6 @@ fn with(maker: Maker, caps: &[(&str, usize)], pairing: &str) -> Vec<Start> {
         .chain(added())
         .map(|mut st| {
             st.maker = maker;
-            st.cap = caps
-                .iter()
-                .find(|(n, _)| *n == st.name)
-                .map(|(_, c)| *c)
-                .unwrap_or_else(|| panic!("{} has a cap at {pairing}", st.name));
             st
         })
         .collect()

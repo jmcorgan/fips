@@ -1,22 +1,27 @@
-//! The settlement core explored against the models of deployed nodes:
-//! the current node (`master.rs`) and the deployed one (`maint.rs`).
+//! A joint node explored against the models of deployed nodes: the current
+//! node (`master.rs`), at either multipath setting, and the deployed one
+//! (`maint.rs`), which has no setting.
 //!
-//! Each run is a named start with the core at one node and a legacy model
-//! at the others, explored to the start's depth and healed at each leaf.
-//! Every start but the two paths runs, which the legacy models do not
-//! know, with the core at node 0 and at node 1, and in both address
-//! orders: a two-node start runs once as written and once with its
-//! identities exchanged ([`flipped`]), so the core is the smaller and the
-//! larger node in each role the start gives. The late second dial carries
-//! both orders as its two variants already, and the three-node start is
-//! not built as a pair, so neither is flipped.
+//! Each run is a named start with a joint node at one node and a model at
+//! the others, explored to the start's depth and healed at each leaf, at
+//! each pairing of a setting at the joint node with a model. Every start
+//! runs, the ones on real bundles included: a model of the deployed node
+//! never answers a capability probe, so its peer's link keeps its one path,
+//! and the model of the current node does what its setting says. The joint
+//! node runs at node 0 and at node 1, and in both address orders: a two-node
+//! start runs once as written and once with its identities exchanged
+//! ([`flipped`]), so the joint node is the smaller and the larger node in
+//! each role the start gives. The late second dial carries both orders as
+//! its two variants already, and the three-node start is not built as a
+//! pair, so neither is flipped.
 //!
 //! What must hold:
 //!
 //! - one session (`OneSession`) at every node, except on a path that
 //!   showed a known shape, the two defects left for later included
 //!   ([`by_any_shape`]);
-//! - every other property at the core's node;
+//! - every other property at the joint node, a proven path left with no
+//!   connection aside ([`lapsed`], which `../joint/pins.rs` holds);
 //! - at a legacy node, the other properties' breaches are that node's
 //!   known defects and its named differences from the model, and are
 //!   counted by property and printed, not asserted.
@@ -26,6 +31,12 @@
 //! one found is listed in `not-converging.txt`, and the tests fail when a
 //! run shows a breach the file does not list, or a listed one no longer
 //! shows, so the list cannot go stale.
+//!
+//! A pairing's starts run one thread each, so a test takes as long as its
+//! longest run on an idle host. At multipath on against the model at
+//! multipath on, the links of [`CAPABLE`] and [`DOUBLED`] turn capable and
+//! each healed leaf steps a minute of probes, so those run one test per
+//! start group, and everything here is in the slow explorers' lane.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -34,81 +45,91 @@ use alloc::vec::Vec;
 
 use super::super::super::model::history::Node;
 use super::super::explore::Act;
+use super::super::joint::explore::{CAPABLE, DOUBLED, lapsed};
+use super::super::joint::starts::uncapped;
+use super::super::joint::{self, Mode};
 use super::super::oracle::{Breach, Oracle, Swept, by_any_shape, sweep};
 use super::super::party::Configured;
-use super::super::starts::{Maker, Start, flipped, starts};
-use super::super::stub::core;
-use super::super::world::Party;
+use super::super::starts::{Maker, Start, flipped};
+use super::super::world::{Party, World};
 use super::maint::maint;
-use super::master::master;
+use super::master::{master, master_on};
 
-fn core_master(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
-    if ix == 0 {
-        core(ix, me, configured)
-    } else {
-        master(ix, me, configured)
-    }
-}
-
-fn master_core(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
-    if ix == 1 {
-        core(ix, me, configured)
-    } else {
-        master(ix, me, configured)
-    }
-}
-
-fn core_maint(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
-    if ix == 0 {
-        core(ix, me, configured)
-    } else {
-        maint(ix, me, configured)
-    }
-}
-
-fn maint_core(ix: usize, me: Node, configured: Vec<Configured>) -> Box<dyn Party> {
-    if ix == 1 {
-        core(ix, me, configured)
-    } else {
-        maint(ix, me, configured)
-    }
-}
-
-/// Which deployed node the core runs against.
+/// Which deployed node the joint node runs against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Legacy {
-    /// The current node.
-    Master,
+    /// The current node, at its multipath setting.
+    Master(Mode),
     /// The deployed node.
     Maint,
 }
 
+/// A joint node at node index `AT`, at multipath on when `ON`, and at every
+/// other index the model `MODEL` names: 0 for the current node at multipath
+/// off, 1 for it at multipath on, and otherwise the deployed node.
+fn node<const ON: bool, const AT: usize, const MODEL: u8>(
+    ix: usize,
+    me: Node,
+    configured: Vec<Configured>,
+) -> Box<dyn Party> {
+    if ix == AT {
+        if ON {
+            joint::on(ix, me, configured)
+        } else {
+            joint::off(ix, me, configured)
+        }
+    } else {
+        match MODEL {
+            0 => master(ix, me, configured),
+            1 => master_on(ix, me, configured),
+            _ => maint(ix, me, configured),
+        }
+    }
+}
+
 impl Legacy {
-    /// The maker with the core at node `at` and this model elsewhere.
-    fn maker(self, at: usize) -> Maker {
-        match (self, at) {
-            (Self::Master, 0) => core_master,
-            (Self::Master, _) => master_core,
-            (Self::Maint, 0) => core_maint,
-            (Self::Maint, _) => maint_core,
+    /// The maker with a joint node at `mode` at node `at` and this model
+    /// elsewhere.
+    fn maker(self, mode: Mode, at: usize) -> Maker {
+        match (self, mode, at) {
+            (Self::Master(Mode::Off), Mode::Off, 0) => node::<false, 0, 0>,
+            (Self::Master(Mode::Off), Mode::Off, _) => node::<false, 1, 0>,
+            (Self::Master(Mode::Off), Mode::On, 0) => node::<true, 0, 0>,
+            (Self::Master(Mode::Off), Mode::On, _) => node::<true, 1, 0>,
+            (Self::Master(Mode::On), Mode::Off, 0) => node::<false, 0, 1>,
+            (Self::Master(Mode::On), Mode::Off, _) => node::<false, 1, 1>,
+            (Self::Master(Mode::On), Mode::On, 0) => node::<true, 0, 1>,
+            (Self::Master(Mode::On), Mode::On, _) => node::<true, 1, 1>,
+            (Self::Maint, Mode::Off, 0) => node::<false, 0, 2>,
+            (Self::Maint, Mode::Off, _) => node::<false, 1, 2>,
+            (Self::Maint, Mode::On, 0) => node::<true, 0, 2>,
+            (Self::Maint, Mode::On, _) => node::<true, 1, 2>,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
-            Self::Master => "master",
+            Self::Master(Mode::Off) => "master off",
+            Self::Master(Mode::On) => "master on",
             Self::Maint => "maint",
         }
     }
 }
 
-/// One run: a start with the core at node `at`, in the start's address
+/// One run: a start with a joint node at node `at`, in the start's address
 /// order or the other.
 struct Run {
     st: Start,
+    mode: Mode,
     legacy: Legacy,
     at: usize,
     flip: bool,
+}
+
+/// What a run exempts: what `by_any_shape` does, and the breach
+/// `../joint/pins.rs` holds of a proven path left with no connection.
+fn exempt(w: &World, b: &Breach) -> bool {
+    by_any_shape(w, b) || lapsed(w, b)
 }
 
 impl Run {
@@ -116,41 +137,41 @@ impl Run {
     fn name(&self) -> String {
         let order = if self.flip { "flipped" } else { "as written" };
         format!(
-            "{}: core at n{} against {}, {order}",
+            "{}: joint {} at n{} against {}, {order}",
             self.st.name,
+            self.mode.name(),
             self.at,
             self.legacy.name()
         )
     }
 
     fn sweep(&self) -> Swept {
-        let go = || sweep(&self.st, self.st.depth, &by_any_shape);
+        let go = || sweep(&self.st, self.st.depth, &exempt);
         if self.flip { flipped(go) } else { go() }
     }
 }
 
-/// The runs against `legacy` on the starts `numbers` admits, with the core
-/// at each node of `ends`, in each address order when `orders`.
-fn runs(legacy: Legacy, numbers: impl Fn(u8) -> bool, ends: &[usize], orders: bool) -> Vec<Run> {
+/// The runs of a joint node at `mode` against `legacy` on the starts `keep`
+/// takes, with the joint node at node 0 and at node 1, in each address
+/// order.
+fn runs(mode: Mode, legacy: Legacy, keep: impl Fn(&Start) -> bool) -> Vec<Run> {
     let mut out = Vec::new();
-    for st in starts() {
-        if st.number == 12 || !numbers(st.number) {
-            continue;
-        }
-        let flips: &[bool] = if orders && !matches!(st.number, 5 | 6 | 11) {
-            &[false, true]
-        } else {
-            &[false]
-        };
-        for &at in ends {
+    for &at in &[0, 1] {
+        let maker = legacy.maker(mode, at);
+        for st in uncapped(maker).into_iter().filter(|s| keep(s)) {
+            let flips: &[bool] = if matches!(st.number, 5 | 6 | 11) {
+                &[false]
+            } else {
+                &[false, true]
+            };
             for &flip in flips {
-                let mut st = starts()
+                let st = uncapped(maker)
                     .into_iter()
                     .find(|s| s.name == st.name)
                     .expect("the start exists");
-                st.maker = legacy.maker(at);
                 out.push(Run {
                     st,
+                    mode,
                     legacy,
                     at,
                     flip,
@@ -285,14 +306,79 @@ fn check(found: &Found, runs: &[Run], label: &str) {
     );
 }
 
-#[test]
-fn the_core_against_a_model_of_master_converges_on_every_start_in_both_address_orders() {
-    let runs = runs(Legacy::Master, |_| true, &[0, 1], true);
-    check(&sweep_all(&runs), &runs, "against master");
+/// Sweep and check `runs`, under the name `label`.
+fn swept(runs: &[Run], label: &str) {
+    check(&sweep_all(runs), runs, label);
+}
+
+/// A start whose sweep takes minutes at multipath on against the model at
+/// multipath on, where [`CAPABLE`]'s and [`DOUBLED`]'s take longer.
+fn quick(st: &Start) -> bool {
+    !CAPABLE.contains(&st.name) && !DOUBLED.contains(&st.name)
 }
 
 #[test]
-fn the_core_against_a_model_of_maint_converges_on_every_start_in_both_address_orders() {
-    let runs = runs(Legacy::Maint, |_| true, &[0, 1], true);
-    check(&sweep_all(&runs), &runs, "against maint");
+fn a_joint_node_off_against_a_model_of_maint_converges_on_every_start_in_both_address_orders() {
+    let runs = runs(Mode::Off, Legacy::Maint, |_| true);
+    swept(&runs, "off against maint");
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_maint_converges_on_every_start_in_both_address_orders() {
+    let runs = runs(Mode::On, Legacy::Maint, |_| true);
+    swept(&runs, "on against maint");
+}
+
+#[test]
+fn a_joint_node_off_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders()
+{
+    let runs = runs(Mode::Off, Legacy::Master(Mode::Off), |_| true);
+    swept(&runs, "off against master off");
+}
+
+#[test]
+fn a_joint_node_off_against_a_model_of_master_on_converges_on_every_start_in_both_address_orders() {
+    let runs = runs(Mode::Off, Legacy::Master(Mode::On), |_| true);
+    swept(&runs, "off against master on");
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_master_off_converges_on_every_start_in_both_address_orders() {
+    let runs = runs(Mode::On, Legacy::Master(Mode::Off), |_| true);
+    swept(&runs, "on against master off");
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_master_on_converges_on_the_quicker_starts() {
+    let runs = runs(Mode::On, Legacy::Master(Mode::On), quick);
+    swept(&runs, "on against master on, the quicker starts");
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_of_two_transports() {
+    let runs = runs(Mode::On, Legacy::Master(Mode::On), |s| s.name == CAPABLE[0]);
+    swept(&runs, "on against master on, a crossing of two transports");
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_master_on_converges_on_a_connection_oriented_crossing() {
+    let runs = runs(Mode::On, Legacy::Master(Mode::On), |s| s.name == CAPABLE[1]);
+    swept(
+        &runs,
+        "on against master on, a connection-oriented crossing",
+    );
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_master_on_converges_on_a_crossing_during_a_rekey() {
+    let runs = runs(Mode::On, Legacy::Master(Mode::On), |s| s.name == CAPABLE[2]);
+    swept(&runs, "on against master on, a crossing during a rekey");
+}
+
+#[test]
+fn a_joint_node_on_against_a_model_of_master_on_converges_on_the_starts_on_real_bundles() {
+    let runs = runs(Mode::On, Legacy::Master(Mode::On), |s| {
+        DOUBLED.contains(&s.name)
+    });
+    swept(&runs, "on against master on, the starts on real bundles");
 }

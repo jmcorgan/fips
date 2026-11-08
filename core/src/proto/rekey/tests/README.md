@@ -29,7 +29,7 @@ oracles.
     the counter, for a shell whose ephemerals must follow from a name
     and not from the order of events. `read_msg1` stands
     for the node-level IK msg1 read; `leg_answer` and `leg_done` for a
-    leg table; `forge3`, `ik_frame`, `seal_as` and `leg_frame` build
+    leg table; `forge3`, `ik_frame`, `seal_as`, `seal_to` and `leg_frame` build
     messages a peer or a third identity would send.
   - `Node`, the test shell: it owns one machine and the capabilities its
     `Env` lends, executes outputs as a shell does (returning leases to

@@ -287,10 +287,11 @@ can rebuild any state by replaying the path that reached it.
   clock moves and when a node restarts (switch `DelayUnbounded`), and a
   restart drops what is addressed to the restarting node.
 - The `slow-tests` feature gates the model of `master` explored against
-  itself on every start but 12 (`legacy/findings.rs`), the candidate
+  itself at each multipath setting on every start but 12
+  (`legacy/findings.rs`), the candidate
   rules' two scripted tests (`candidates.rs`) and the switches' meta-test
   (`faults.rs`); GitHub CI's Linux job runs them. The `slow-explorers`
-  feature, which turns `slow-tests` on too, also gates the core explored
+  feature, which turns `slow-tests` on too, also gates a joint node explored
   against the models of `master` and `maint` (`legacy/explore.rs`) and
   the candidate rules explored (`candidates.rs`), and in the joint world
   the sweeps that take tens of minutes (`joint/explore.rs`); only local

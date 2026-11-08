@@ -1713,6 +1713,13 @@ pub(crate) fn seal_as(
     seal_with(&key, index, counter, k, plaintext)
 }
 
+/// A frame sealed by the far end of the session `s`, whose receive key is
+/// the far end's send key, toward this end's index `index`: what an end
+/// that sends no bytes of its own would have sent.
+pub(crate) fn seal_to(s: &Sess, index: u32, counter: u64, k: bool, plaintext: &[u8]) -> Vec<u8> {
+    seal_with(&s.rx, index, counter, k, plaintext)
+}
+
 /// A frame sealed by the responder of the IK exchange `msg1`/`msg2`, as a
 /// responder that cut over on its own schedule would send it.
 pub(crate) fn ik_frame(msg1: &[u8], msg2: &[u8], index: u32, k: bool, plaintext: &[u8]) -> Vec<u8> {

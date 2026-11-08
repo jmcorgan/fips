@@ -23,7 +23,7 @@ use core::ops::Range;
 use crate::identity::NodeAddr;
 use crate::proto::path::tests::shell::Out;
 use crate::proto::path::{Output as PathOutput, PathRef, PathState};
-use crate::proto::rekey::tests::stub::{Ik, Msg1};
+use crate::proto::rekey::tests::stub::{Ik, Kid, Msg1};
 use crate::proto::rekey::{
     Abandon, Authentic, EpochTag, MsgKind, Output, Reason, Replayable, Route, Wire,
 };
@@ -31,6 +31,7 @@ use crate::proto::settle::input::Input as In;
 use crate::proto::settle::links::{LinkNo, Pair, Proven};
 
 use super::super::super::model::history::{Addr, Node};
+use super::super::super::model::judge::Class;
 use super::super::drive;
 use super::machines::{Event, Machines};
 
@@ -121,6 +122,11 @@ pub fn pair(p: &PathRef) -> Pair {
     }
 }
 
+/// The world address of path `p`.
+pub fn at(p: &PathRef) -> Addr {
+    drive::addr(&pair(p))
+}
+
 /// What the core is told of the path to `p`, read from the bundle: `Live`
 /// for a Live path, `Acked` for another acked one, `Probing` otherwise,
 /// and for one the bundle no longer holds.
@@ -135,6 +141,69 @@ pub fn proven(m: &Machines, p: &PathRef) -> Proven {
         Proven::Acked
     } else {
         Proven::Probing
+    }
+}
+
+/// The model's class for what a peer's machine did with a msg1, from what
+/// the call routed: `before` and `after` are the pending session around the
+/// call, `eligible` whether the link was past its floors. `Err` names a
+/// refusal no msg1 can draw, a broken promise.
+pub fn class(
+    r: &Routed,
+    before: Option<Kid>,
+    after: Option<Kid>,
+    eligible: bool,
+) -> Result<Option<Class>, Reason> {
+    if r.replace.is_some() {
+        return Ok(Some(Class::Replacement));
+    }
+    if r.sends.iter().any(|s| matches!(s, Send::Msg2 { .. })) {
+        return Ok(Some(if r.yielded {
+            Class::Simultaneous
+        } else if after.is_some() && after != before {
+            Class::Rekey
+        } else if before.is_some() {
+            Class::Pending
+        } else {
+            Class::Resend
+        }));
+    }
+    let Some(why) = r.reject else {
+        return Ok(None);
+    };
+    match why {
+        Reason::OffLink => Ok(Some(Class::OffLink)),
+        Reason::PendingHeld => Ok(Some(Class::Pending)),
+        Reason::DualInitWon => Ok(Some(Class::Simultaneous)),
+        Reason::AnsweredBefore if eligible => Ok(Some(Class::Recorded)),
+        Reason::AnsweredBefore => Ok(Some(Class::Copy)),
+        Reason::EpochChanged => Ok(None),
+        why @ (Reason::IndexExhausted
+        | Reason::HandshakeWrite
+        | Reason::ReplyUnauthenticated
+        | Reason::LateReply
+        | Reason::UnknownAttempt
+        | Reason::UnknownIndex
+        | Reason::SetupMalformed
+        | Reason::TieBreakKept
+        | Reason::CandidatesFull
+        | Reason::FinalNoAttempt
+        | Reason::FinalUnauthenticated
+        | Reason::KeyMismatch
+        | Reason::StaleIncarnation
+        | Reason::Replay
+        | Reason::FrameUnauthenticated
+        | Reason::ShortPlaintext
+        | Reason::DelegatedEpoch
+        | Reason::NotEstablished
+        | Reason::StaleTag
+        | Reason::NotDelegated
+        | Reason::AlreadyDelegated
+        | Reason::NotOffered
+        | Reason::AttemptInFlight
+        | Reason::AlreadyEstablished
+        | Reason::CandidateExpired
+        | Reason::NotRekey) => Err(why),
     }
 }
 

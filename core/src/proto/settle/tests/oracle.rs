@@ -688,4 +688,47 @@ mod checks {
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
+
+    #[test]
+    fn classified_fires_on_a_refusal_the_model_does_not_make() {
+        use super::super::super::model::history::{Binding, Bytes, Epoch, Event, LinkId};
+        use super::super::super::model::judge::{Class, Gate};
+        use super::super::shadow::{Entry, Rec, Refusal};
+        // A first msg1 of a peer the node does not hold, the same class the
+        // model gives it, and a refusal the model does not make.
+        let msg1 = Event::Msg1 {
+            hs: Hs(1),
+            bytes: Bytes(1),
+            epoch: Epoch(1),
+            link: LinkId(1),
+            from: home(1, UDP),
+            binding: Binding::Connectionless,
+            sent: true,
+        };
+        let mut view = View::empty(A);
+        view.log.push(Entry::Ev {
+            at: 0,
+            peer: B,
+            ev: msg1,
+            rec: Rec {
+                class: Some(Class::NotHeld),
+                refused: Some(Refusal::Gate(Gate::Heard)),
+                ..Rec::default()
+            },
+        });
+        let parties: Vec<Box<dyn Party>> = alloc::vec![Box::new(Planted {
+            view,
+            keys: Vec::new()
+        })];
+        let w = World::new(
+            parties,
+            alloc::vec![A],
+            Net::new(&[(UDP, Kind::Datagram)], alloc::vec![Vec::new()]),
+        );
+        let found = every_step(&w);
+        assert!(
+            found.iter().any(|b| b.oracle == Oracle::Classified),
+            "a refusal the model does not make is a difference of class: {found:?}"
+        );
+    }
 }

@@ -347,7 +347,7 @@ fn spared(w: &World, b: &Breach) -> Option<Spared> {
 /// so a proven path whose connection failed is not connected again and
 /// stays acknowledged, and counted, until its Dead grace ends. A finding
 /// about the bundle, pinned in `pins.rs`.
-pub(super) fn lapsed(w: &World, b: &Breach) -> bool {
+pub fn lapsed(w: &World, b: &Breach) -> bool {
     b.oracle == Oracle::ConnectionsInUse
         && w.parties[b.node]
             .lapsed()
@@ -480,7 +480,7 @@ pub(super) fn chosen(starts: Vec<Start>, keep: impl Fn(&Start) -> bool) -> Vec<S
 /// leaf steps both bundles' probes for a minute: their sweeps at that
 /// pairing take tens of minutes each and run in the slow explorers' lane,
 /// one test per start.
-const CAPABLE: &[&str] = &[
+pub const CAPABLE: &[&str] = &[
     "crossing, two transports",
     "crossing, connection-oriented",
     "crossing during a rekey",
@@ -490,7 +490,7 @@ const CAPABLE: &[&str] = &[
 /// that each healed leaf steps a minute of probes and each sweep there
 /// takes minutes: they run in the slow explorers' lane, together in one
 /// test, each on a thread of its own.
-const DOUBLED: &[&str] = &[
+pub const DOUBLED: &[&str] = &[
     "crossing while capability probes are out",
     "restart on a two-path link",
     "late second dial at a capable peer",

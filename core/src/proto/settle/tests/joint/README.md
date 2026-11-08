@@ -76,6 +76,12 @@ builds, and changes no line of the core, the machine or the bundle.
   age and starting the bundle again (switches `MoveBuildsFresh`,
   `RenewSkipped`), and a disabled bundle taking a candidate as a poll
   where an enabled one holds it (switch `ModeIgnored`).
+  `sealed` and `written` write what an abstract far end's frame is on the
+  wire, with a counter per handshake the receiving node keeps (`party.rs`
+  reads a model of the deployed node's frames this way), `matched` reads a
+  pair as the node's `path_match` does and `eligible` the start floors.
+  `../legacy/master.rs`, the model of the current node, runs its peers on
+  the same `Machines` and `route`.
 - `feeds.rs`: the node's feeds of path candidates and its rule on
   dialling a held peer. With multipath on, a held peer's configured
   addresses are offered to its bundle whenever the bundle starts again

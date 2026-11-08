@@ -1,5 +1,7 @@
-//! A model of the deployed node's settlement, transcribed from `maint` at
-//! `9fc10516` (the line ranges are in this directory's README).
+//! A model of the deployed node's settlement, pinned to the tag `v0.5.3`
+//! (`f4a5b4a8`): its line references are at that tag, and this directory's
+//! README has the ranges and the verdict on the tag's difference from
+//! `9fc10516`, the commit it was first transcribed from.
 //!
 //! `maint` has no rekey machine: its rekey rules are inline in
 //! `establish_inbound`'s same-epoch arm and in `ActivePeer`'s pending slot,
@@ -39,7 +41,7 @@ const INTERVAL: Ms = 15_000;
 const UNHEARD: i64 = 1_000;
 /// `MAX_REPLAYED_MSG1S` (`handshake.rs:91`).
 const REPLAYS: usize = 8;
-/// `REKEY_MIN_LINK_AGE_SECS` (`fmp/core.rs:627`), in ms.
+/// `REKEY_MIN_LINK_AGE_SECS` (`fmp/core.rs:630`), in ms.
 const LINKAGE: Ms = 30_000;
 /// `REKEY_MIN_CUTOVER_AGE_SECS`, the drain window (`fsp/limits.rs:9`).
 const SESSIONAGE: Ms = 10_000;
@@ -165,7 +167,7 @@ impl Rekey {
             && now.saturating_sub(self.started) >= SESSIONAGE
     }
 
-    /// `establish_inbound`'s same-epoch arm (`fmp/core.rs:827-948`): a
+    /// `establish_inbound`'s same-epoch arm (`fmp/core.rs:830-948`): a
     /// msg1 of `bytes` from the held peer, its class and the answer.
     /// `on_link` and `reachable` are `msg1_on_link` and `link_reachable`;
     /// `answerable` is whether `answer_msg1` can send, since a rekey
@@ -219,7 +221,7 @@ impl Rekey {
         (Class::Rekey, self.respond(now, hs, bytes, answerable))
     }
 
-    /// The `RekeyRespond` arm (`handshake.rs:948-1068`): a drain in
+    /// The `RekeyRespond` arm (`handshake.rs:954-1074`): a drain in
     /// progress is completed, the answer sent, and the pending armed with
     /// it when the send went out.
     fn respond(&mut self, now: Ms, hs: Hs, bytes: Bytes, answerable: bool) -> Answer {
@@ -260,7 +262,7 @@ impl Rekey {
         true
     }
 
-    /// The rekey arm of `handle_msg2` (`handshake.rs:1599-1735`): the msg2
+    /// The rekey arm of `handle_msg2` (`handshake.rs:1605-1741`): the msg2
     /// of this node's own rekey `hs`, carrying the peer's `epoch`, which is
     /// put on record at once; false when it answers nothing in flight.
     pub fn msg2(&mut self, now: Ms, hs: Hs, epoch: Epoch) -> bool {
@@ -308,7 +310,7 @@ impl Rekey {
     }
 
     /// `check_rekey` and the rekey resends (`rekey.rs:148-345`, `:511-540`;
-    /// `poll_rekey` and `poll_rekey_resends`, `fmp/core.rs:738`, `:784`): the drain's
+    /// `poll_rekey` and `poll_rekey_resends`, `fmp/core.rs:741`, `:787`): the drain's
     /// end, the own rekey's resends and its abandon once they are spent,
     /// the initiator's cutover at the tick, and a responder pending
     /// retired at its hold.
@@ -471,7 +473,7 @@ impl MaintParty {
         id
     }
 
-    /// `remove_link` (`node/mod.rs:2925`): the record and every index
+    /// `remove_link` (`node/mod.rs:2883`): the record and every index
     /// entry naming it.
     fn unlink(&mut self, id: u32) {
         self.s.links.remove(&id);
@@ -510,7 +512,7 @@ impl MaintParty {
         });
     }
 
-    /// `close_handshake_link_connection` (`node/mod.rs:2878-2897`): close a
+    /// `close_handshake_link_connection` (`node/mod.rs:2836-2855`): close a
     /// leg's connection unless `addr_carries_other_peer`.
     fn close_leg(&mut self, net: &mut Net, id: u32) {
         let Some(l) = self.s.links.get(&id).copied() else {
@@ -542,7 +544,7 @@ impl MaintParty {
         }
     }
 
-    /// Where `answer_msg1` (`handshake.rs:533-576`) sends a reply to a held
+    /// Where `answer_msg1` (`handshake.rs:539-582`) sends a reply to a held
     /// peer's msg1 from `src`: its established link, or the msg1's own
     /// connection when that link's connection is gone and the msg1 came on
     /// the same connection-oriented transport; `None` when neither can.
@@ -608,7 +610,7 @@ impl MaintParty {
         self.note(net.now, d.peer, Event::Timeout { hs }, Rec::default());
     }
 
-    /// `handle_msg1` (`handshake.rs:578-1535`).
+    /// `handle_msg1` (`handshake.rs:584-1541`).
     #[allow(clippy::too_many_arguments)]
     fn msg1(
         &mut self,
@@ -622,7 +624,7 @@ impl MaintParty {
     ) {
         let (ix, now) = (self.s.ix, net.now);
         let bind = binding(net.kind(src.transport));
-        // The pre-crypto duplicate short circuit (`:667-716`): an inbound
+        // The pre-crypto duplicate short circuit (`:673-722`): an inbound
         // link from this address with no peer on it resends its stored
         // msg2. A failed msg2 send removes the link with its machine, so
         // no such link holds one, and the msg1 is dropped.
@@ -653,13 +655,13 @@ impl MaintParty {
             binding: bind,
             sent,
         };
-        // `establish_inbound` (`fmp/core.rs:827-948`).
+        // `establish_inbound` (`fmp/core.rs:830-948`).
         let class = match self.s.peers.get(&id.0) {
             None => Class::NotHeld,
             Some(p) if p.rekey.epoch != epoch => Class::Restart,
             Some(p) => {
-                // `msg1_on_link` and `link_reachable` (`handshake.rs:220-265`,
-                // `:501-520`).
+                // `msg1_on_link` and `link_reachable` (`handshake.rs:220-271`,
+                // `:507-526`).
                 let on_link = p.current == src || self.s.index.get(&key(src)) == Some(&p.link);
                 let cur = p.current;
                 let reachable =
@@ -710,7 +712,7 @@ impl MaintParty {
             }
         };
         if class != Class::NotHeld {
-            // The replay memory and the gates (`handshake.rs:1069-1225`).
+            // The replay memory and the gates (`handshake.rs:1075-1231`).
             let old = self
                 .s
                 .peers
@@ -813,7 +815,7 @@ impl MaintParty {
         seen.iter().any(|(e, _)| *e == hs) || seen.len() >= REPLAYS
     }
 
-    /// The responder's promotion tails (`handshake.rs:1380-1395`, `:1514-1530`): the peer
+    /// The responder's promotion tails (`handshake.rs:1386-1401`, `:1520-1536`): the peer
     /// with its stored msg2 and setup msg1, and `note_unheard_promotion`.
     #[allow(clippy::too_many_arguments)]
     fn install(
@@ -853,7 +855,7 @@ impl MaintParty {
         self.s.retry.remove(&id.0);
     }
 
-    /// `handle_msg2` (`handshake.rs:1576-2120`) and `establish_outbound`
+    /// `handle_msg2` (`handshake.rs:1582-2126`) and `establish_outbound`
     /// (`fmp/core.rs:950-959`).
     fn msg2(&mut self, net: &mut Net, src: Addr, id: Node, hs: Hs, epoch: Epoch, stamp: i64) {
         let now = net.now;
@@ -1276,4 +1278,150 @@ impl Party for MaintParty {
         }
         v
     }
+}
+
+/// A joint node at multipath on at index 0 and the model elsewhere.
+fn joint_first(ix: usize, me: Node, configured: Vec<Configured>) -> alloc::boxed::Box<dyn Party> {
+    if ix == 0 {
+        super::super::joint::on(ix, me, configured)
+    } else {
+        maint(ix, me, configured)
+    }
+}
+
+/// A joint node at multipath off at index 1 and the model elsewhere.
+fn joint_second(ix: usize, me: Node, configured: Vec<Configured>) -> alloc::boxed::Box<dyn Party> {
+    if ix == 1 {
+        super::super::joint::off(ix, me, configured)
+    } else {
+        maint(ix, me, configured)
+    }
+}
+
+/// A joint node at multipath on, node 0, settled with the model, node 1, on
+/// UDP, then, if `candidate`, told of the model's second address, and a
+/// minute run with everything delivered: the world, and how many frames
+/// reached node 1 and node 0.
+fn probed(candidate: bool) -> (super::super::world::World, u32, u32) {
+    use super::super::starts::{A, B, UDP, dial_home, second, settle, world_of};
+    use super::super::world::PathEv;
+    let mut w = world_of(joint_first, &[A, B], &[&[(1, UDP)], &[]]);
+    dial_home(&mut w, 0, 1, UDP);
+    settle(&mut w);
+    if candidate {
+        w.input(
+            0,
+            Input::Path(PathEv::Candidate {
+                peer: B,
+                at: second(1, UDP),
+                from: None,
+                source: crate::proto::path::Source::Discovery,
+            }),
+        );
+    }
+    let (mut heard, mut sent, end) = (0, 0, w.net.now + 60_000);
+    loop {
+        while let Some(f) = w.net.flight.iter().find(|f| w.net.deliverable(f)).copied() {
+            if matches!(f.pkt, Pkt::Frame { .. }) {
+                if f.to == 1 {
+                    heard += 1;
+                } else {
+                    sent += 1;
+                }
+            }
+            w.deliver(f.id);
+        }
+        if w.wake().is_none_or(|t| t > end) {
+            return (w, heard, sent);
+        }
+        w.advance();
+    }
+}
+
+#[test]
+fn a_path_message_reaches_the_model_as_a_frame_and_draws_no_answer() {
+    use super::super::starts::{UDP, home};
+    let (_, plain, answers) = probed(false);
+    let (w, heard, sent) = probed(true);
+    assert!(
+        heard > plain,
+        "precondition: told of a candidate, node 0 sends the model path messages: {heard} frames against {plain}"
+    );
+    assert_eq!(
+        sent, answers,
+        "the model sends the same frames whatever path messages it reads"
+    );
+    let mut needs = w.parties[0].view().needs;
+    needs.sort_unstable_by_key(|a| (a.transport, a.at));
+    needs.dedup();
+    assert_eq!(
+        needs,
+        [home(1, UDP)],
+        "node 0's link keeps its one path: the model never answered"
+    );
+}
+
+#[test]
+fn a_joint_node_holds_the_model_on_the_models_frames_alone() {
+    use super::super::joint::off;
+    use super::super::starts::{A, B, UDP, age, dial_home, settle, world_of};
+    fn modelled(ix: usize, me: Node, configured: Vec<Configured>) -> alloc::boxed::Box<dyn Party> {
+        if ix == 0 {
+            off(ix, me, configured)
+        } else {
+            maint(ix, me, configured)
+        }
+    }
+    let mut w = world_of(modelled, &[A, B], &[&[(1, UDP)], &[]]);
+    dial_home(&mut w, 0, 1, UDP);
+    settle(&mut w);
+    let first = w.parties[0].view().peers[0].cur;
+    // Past the 30 s link-dead timeout, delivering everything: the model's
+    // heartbeats are all that the joint node's timer can hear.
+    age(&mut w, 45_000);
+    let held = w.parties[0].view().peers;
+    assert_eq!(
+        held.iter().map(|p| p.cur).collect::<Vec<_>>(),
+        [first],
+        "the joint node still holds the model on its session"
+    );
+    assert!(w.ended.is_empty(), "no timer ended a split: {:?}", w.ended);
+}
+
+#[test]
+fn a_copy_of_the_models_msg2_to_a_dial_is_no_reply_to_an_own_rekey() {
+    use super::super::explore::{Act, apply, replay};
+    use super::super::starts::starts;
+    let mut st = starts()
+        .into_iter()
+        .find(|s| s.number == 7)
+        .expect("the aged-link start exists");
+    st.maker = joint_second;
+    // The model answers node 1's dial on its aged link; node 1 keeps its
+    // link, starts its own rekey, and then a copy of that answer arrives.
+    let mut w = replay(
+        &st,
+        &[
+            Act::Deliver(12),
+            Act::Dup(13),
+            Act::Deliver(13),
+            Act::Rekey(1, 0),
+        ],
+    );
+    let before = w.parties[1].view().peers[0].clone();
+    assert!(
+        before.rekey.is_some() && before.dials.is_empty(),
+        "precondition: node 1's own rekey is out and its dial has ended: {before:?}"
+    );
+    assert!(
+        w.net.flight.iter().any(|f| f.id == 14 && f.copy),
+        "precondition: the copy is in flight"
+    );
+    apply(&mut w, Act::Deliver(14));
+    apply(&mut w, Act::Advance);
+    assert_eq!(
+        w.parties[1].view().peers[0].cur,
+        before.cur,
+        "a reply of another handshake does not open under the own rekey's keys, so nothing cuts over"
+    );
 }

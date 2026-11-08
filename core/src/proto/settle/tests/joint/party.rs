@@ -44,8 +44,8 @@ use crate::proto::fmp::EphemeralDigest;
 use crate::proto::path::{Input as PathInput, PathState, Source};
 use crate::proto::rekey::tests::stub::{Hs as Attempt, Ik, Kid, Msg1, hint, kid, read_msg1};
 use crate::proto::rekey::{
-    self, Authentic, Completed, CycleView, EpochTag, Msg1Read, Profile, Reason, Record,
-    RecordStore, Replayable, Role as Side, Route, allocate, leaked,
+    self, Authentic, Completed, CycleView, EpochTag, Msg1Read, Profile, Record, RecordStore,
+    Replayable, Role as Side, Route, allocate, leaked,
 };
 use crate::proto::settle::input::{Dial as Dialed, Hello, Input as In};
 use crate::proto::settle::links::{Dir as LinkDir, Holder, LinkNo, Proven};
@@ -77,7 +77,7 @@ use crate::transport::TransportId;
 
 /// The plaintext of every frame the shell sends: the stub link's
 /// heartbeat, as long as the link's floor.
-const BEAT: &[u8] = &[0x51, 0, 0, 0, 0];
+pub const BEAT: &[u8] = &[0x51, 0, 0, 0, 0];
 
 /// What a link's handshake is to this node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,6 +197,9 @@ struct State {
     names: Names,
     /// Which peer each bound index routes to.
     bound: BTreeMap<u32, u8>,
+    /// The frames an abstract far end has sealed, per handshake: such an
+    /// end sends no bytes, so this node writes each frame as it arrives.
+    counters: BTreeMap<u32, u64>,
     /// The connections the peers' bundles asked for that have not yet
     /// been seen to settle: the peer, and its pair. An entry leaves when it
     /// is reported settled or when the peer is removed, and stays across a
@@ -257,7 +260,7 @@ fn at(a: Addr) -> (u8, u16) {
 
 /// The node's record store, sized as `link_records` sizes it at the
 /// default `max_peers` of 128.
-fn store() -> RecordStore {
+pub fn store() -> RecordStore {
     RecordStore::new(256)
 }
 
@@ -285,7 +288,7 @@ fn discard(kit: &mut Kit, out: Vec<Output>) {
 }
 
 /// The session the epoch `tag` of `m` holds.
-fn session(m: &Machines, tag: EpochTag) -> Option<Kid> {
+pub fn session(m: &Machines, tag: EpochTag) -> Option<Kid> {
     let (v, p) = (m.rekey().view(), m.rekey().peek());
     [
         (v.current.map(|e| e.tag), p.current),
@@ -306,7 +309,7 @@ fn session(m: &Machines, tag: EpochTag) -> Option<Kid> {
 /// for a session with no base, whose age the node reads as zero. The node
 /// checks on its one-second tick; the world removes the peer at the
 /// deadline itself, at most a tick before the node would.
-fn deadline(m: &Machines) -> Option<Ms> {
+pub fn deadline(m: &Machines) -> Option<Ms> {
     let v = m.rekey().view();
     if v.cycle == CycleView::Init {
         return None;
@@ -353,6 +356,7 @@ impl JointParty {
                 store: store(),
                 names: Names::default(),
                 bound: BTreeMap::new(),
+                counters: BTreeMap::new(),
                 connecting: Vec::new(),
                 audit: Vec::new(),
                 known: BTreeSet::new(),
@@ -1258,16 +1262,6 @@ impl JointParty {
         self.note(net.now, peer, ev, Rec::default());
     }
 
-    /// Whether the held peer's link and session are past the two start
-    /// floors at `now`, as the machine's start reads them.
-    fn eligible(&self, m: &Machines, now: Ms) -> bool {
-        let v = m.rekey().view();
-        let (link, session) = self.s.floors;
-        now.saturating_sub(v.link_since.0) >= link
-            && v.current
-                .is_some_and(|c| now.saturating_sub(c.started.0) >= session)
-    }
-
     /// The model's class for what the peer's machine did with a msg1:
     /// `pending` is the pending session before the call, `eligible`
     /// whether the link was past its floors.
@@ -1278,58 +1272,14 @@ impl JointParty {
         pending: Option<Kid>,
         eligible: bool,
     ) -> Option<Class> {
-        if r.replace.is_some() {
-            return Some(Class::Replacement);
-        }
-        if r.sends.iter().any(|s| matches!(s, Send::Msg2 { .. })) {
-            let now = self
-                .s
-                .peers
-                .get(&peer.0)
-                .and_then(|p| p.machines.rekey().peek().pending.map(|e| kid(e.session)));
-            return Some(if r.yielded {
-                Class::Simultaneous
-            } else if now.is_some() && now != pending {
-                Class::Rekey
-            } else if pending.is_some() {
-                Class::Pending
-            } else {
-                Class::Resend
-            });
-        }
-        match r.reject? {
-            Reason::OffLink => Some(Class::OffLink),
-            Reason::PendingHeld => Some(Class::Pending),
-            Reason::DualInitWon => Some(Class::Simultaneous),
-            Reason::AnsweredBefore if eligible => Some(Class::Recorded),
-            Reason::AnsweredBefore => Some(Class::Copy),
-            Reason::EpochChanged => None,
-            why @ (Reason::IndexExhausted
-            | Reason::HandshakeWrite
-            | Reason::ReplyUnauthenticated
-            | Reason::LateReply
-            | Reason::UnknownAttempt
-            | Reason::UnknownIndex
-            | Reason::SetupMalformed
-            | Reason::TieBreakKept
-            | Reason::CandidatesFull
-            | Reason::FinalNoAttempt
-            | Reason::FinalUnauthenticated
-            | Reason::KeyMismatch
-            | Reason::StaleIncarnation
-            | Reason::Replay
-            | Reason::FrameUnauthenticated
-            | Reason::ShortPlaintext
-            | Reason::DelegatedEpoch
-            | Reason::NotEstablished
-            | Reason::StaleTag
-            | Reason::NotDelegated
-            | Reason::AlreadyDelegated
-            | Reason::NotOffered
-            | Reason::AttemptInFlight
-            | Reason::AlreadyEstablished
-            | Reason::CandidateExpired
-            | Reason::NotRekey) => {
+        let now = self
+            .s
+            .peers
+            .get(&peer.0)
+            .and_then(|p| p.machines.rekey().peek().pending.map(|e| kid(e.session)));
+        match route::class(r, pending, now, eligible) {
+            Ok(c) => c,
+            Err(why) => {
                 self.s
                     .audit
                     .push(format!("{peer:?}: a msg1 refused {why:?}"));
@@ -1413,7 +1363,7 @@ impl JointParty {
                 .s
                 .peers
                 .get(&id.0)
-                .is_some_and(|p| self.eligible(&p.machines, now));
+                .is_some_and(|p| p.machines.eligible(self.s.floors, now));
             self.named(id, Some(hs));
             let link = self.link(id);
             let r = self.route(id, link, None, events);
@@ -1745,15 +1695,16 @@ impl JointParty {
     /// routed by its index to the machine that bound it.
     fn reply2(&mut self, net: &mut Net, id: Node, hs: Hs, e: Epoch, wire: u32) {
         let now = net.now;
-        let Some(own) = self
-            .s
-            .peers
-            .get(&id.0)
-            .and_then(|p| p.own.as_ref().map(|(_, b)| b.clone()))
-        else {
+        let Some((asked, own)) = self.s.peers.get(&id.0).and_then(|p| p.own.clone()) else {
             return;
         };
         let bytes = if wire == 0 {
+            // An abstract far end's reply is written here from its name, so
+            // it answers the own rekey only if it names that rekey: a reply
+            // of another handshake does not open under this one's keys.
+            if asked != hs {
+                return;
+            }
             match names::msg2(id, e, hs, &own, names::index(hs)) {
                 Some((w, _)) => w,
                 None => return,
@@ -1805,6 +1756,17 @@ impl JointParty {
         }
     }
 
+    /// What an abstract far end's frame under the session of `hs` is on the
+    /// wire (a model of a deployed node sends no bytes), so that its frames
+    /// open at the machine as any other's do.
+    fn sealed(&mut self, id: Node, hs: Hs) -> Option<Vec<u8>> {
+        let want = self.s.names.kid(hs)?;
+        let copy = self.s.copy;
+        let p = self.s.peers.get(&id.0)?;
+        p.machines
+            .written(&mut self.s.counters, (hs, want), copy, BEAT)
+    }
+
     /// A frame from `id` under the session of `hs`, which the world let
     /// through because this node holds it: demultiplexed by its receiver
     /// index to the peer's machine, opened there, accounted to the bundle,
@@ -1820,11 +1782,14 @@ impl JointParty {
         stamp: i64,
     ) {
         let (now, at) = (net.now, Self::at(net, Some(stamp)));
-        if wire == 0 {
-            // A frame of an abstract far end; no joint world holds one yet.
-            return;
-        }
-        let bytes = net.bytes(wire).to_vec();
+        let bytes = if wire == 0 {
+            match self.sealed(id, hs) {
+                Some(b) => b,
+                None => return,
+            }
+        } else {
+            net.bytes(wire).to_vec()
+        };
         let index = hint(&bytes).index;
         match self.s.bound.get(&index) {
             Some(k) if *k == id.0 => {}
@@ -2251,6 +2216,7 @@ impl JointParty {
         s.retry.clear();
         s.idle.clear();
         s.names = Names::default();
+        s.counters.clear();
         s.store = store();
         let epoch = Epoch((u32::from(s.me.0) << 8) | s.life);
         s.kit = Kit::new(s.me, epoch, &super::kinds());
@@ -2299,6 +2265,7 @@ impl JointParty {
             store,
             names,
             bound,
+            counters,
             connecting,
             audit,
             known,
@@ -2347,7 +2314,7 @@ impl JointParty {
         } = kit;
         let _ = write!(
             out,
-            " {local:?} {pool:?} {tags:?} {jitter:?} {draws:?} {facts:?} {store:?} {names:?} {bound:?} {connecting:?} {audit:?} {known:?} {rekeys:?} {floors:?} {found:?} {limits:?}"
+            " {local:?} {pool:?} {tags:?} {jitter:?} {draws:?} {facts:?} {store:?} {names:?} {bound:?} {counters:?} {connecting:?} {audit:?} {known:?} {rekeys:?} {floors:?} {found:?} {limits:?}"
         );
         out
     }
@@ -2672,7 +2639,7 @@ impl Party for JointParty {
         self.s.table.held(&key(peer)).is_some()
             && self.s.peers.get(&peer.0).is_some_and(|p| {
                 matches!(p.machines.rekey().view().cycle, CycleView::Idle)
-                    && self.eligible(&p.machines, self.s.now)
+                    && p.machines.eligible(self.s.floors, self.s.now)
             })
     }
 

@@ -30,7 +30,9 @@ use crate::proto::link::LinkMessageType;
 use crate::proto::path::tests::shell::{Checks, Out, Slot, keep};
 use crate::proto::path::wire::{PathAck, PathClose, PathProbe};
 use crate::proto::path::{self, Bundle, Input as PathInput, Output as PathOutput, PathRef, Roam};
-use crate::proto::rekey::tests::stub::{Ik, Local, Mid, Pool, frame, hint, read_msg1};
+use crate::proto::rekey::tests::stub::{
+    Ik, Kid, Local, Mid, Pool, frame, hint, kid, read_msg1, seal_to,
+};
 use crate::proto::rekey::{
     self, Arrival, Bond, Carry, Close, Completed, Ids, IndexLease, Input, Output, Record, Rekey,
     SetupFacts, TagSource, Wire,
@@ -629,6 +631,12 @@ impl Machines {
             .map(|p| super::facts::addr(p.transport_id(), p.addr()))
     }
 
+    /// What the peer's pair `at` is to the bundle's paths (`path_match`).
+    pub fn matched(&self, at: Addr) -> path::Match {
+        let q = pair(at);
+        self.bundle.paths().classify(q.transport, &q.addr)
+    }
+
     /// This node's own address on the path to the peer's pair `at`.
     pub fn local(&self, at: Addr) -> Option<Addr> {
         self.locals.iter().find(|(p, _)| *p == at).map(|(_, l)| *l)
@@ -660,6 +668,58 @@ impl Machines {
     /// The rekey machine.
     pub fn rekey(&self) -> &Machine {
         &self.rekey
+    }
+
+    /// Whether the link and the session are past the two start floors
+    /// `floors` at `now`, as the rekey machine's start reads them.
+    pub fn eligible(&self, floors: (Ms, Ms), now: Ms) -> bool {
+        let v = self.rekey.view();
+        let (link, session) = floors;
+        now.saturating_sub(v.link_since.0) >= link
+            && v.current
+                .is_some_and(|c| now.saturating_sub(c.started.0) >= session)
+    }
+
+    /// What an abstract far end's frame of `plaintext` at `counter` is on
+    /// the wire, under the session `want` this machine holds: sealed with
+    /// the far end's key, toward this node's index, with the key-epoch bit
+    /// the machine holds for that session. `None` when it holds no such
+    /// session. This is stub crypto, with no decision in it.
+    pub fn sealed(&self, want: Kid, counter: u64, plaintext: &[u8]) -> Option<Wire> {
+        let (v, pk) = (self.rekey.view(), self.rekey.peek());
+        [
+            (pk.current, v.current.map(|e| e.k)),
+            (pk.pending, v.pending.map(|e| e.k)),
+            (pk.previous, v.previous.map(|e| e.k)),
+        ]
+        .into_iter()
+        .find_map(|(e, k)| {
+            let e = e.filter(|e| kid(e.session) == want)?;
+            let index = e.ours?;
+            Some(seal_to(e.session, index, counter, k?, plaintext))
+        })
+    }
+
+    /// What an abstract far end's frame under the session `want` of the
+    /// handshake `hs` is on the wire: the next frame of that session by
+    /// `counters`, which this node keeps per handshake since such an end
+    /// keeps none, or, for a copy the explorer made, the last one again,
+    /// which the machine refuses as a replay.
+    pub fn written(
+        &self,
+        counters: &mut BTreeMap<u32, u64>,
+        (hs, want): (Hs, Kid),
+        copy: bool,
+        plaintext: &[u8],
+    ) -> Option<Wire> {
+        let next = counters.entry(hs.0).or_insert(0);
+        let counter = if copy && *next > 0 {
+            *next - 1
+        } else {
+            *next += 1;
+            *next - 1
+        };
+        self.sealed(want, counter, plaintext)
     }
 
     /// The bundle.
@@ -836,7 +896,6 @@ fn build(
 }
 
 use crate::proto::path::Source;
-use crate::proto::rekey::tests::stub::{Kid, kid};
 use crate::proto::rekey::{Msg1Read, MsgKind, Profile, allocate};
 
 use super::super::starts::{A, B, BLE, TCP, UDP, home};
@@ -1101,6 +1160,38 @@ fn a_move_keeps_the_record_the_link_age_and_renews_the_bundle() {
         Some(record),
         "the record goes to the store at the close"
     );
+}
+
+#[test]
+fn an_abstract_far_ends_frame_opens_at_the_machine_holding_its_session() {
+    let (mut ka, mut kb) = kits();
+    let ((sa, ra), (sb, _), _) = exchange(&mut ka, &mut kb, B, H0);
+    unused(&mut kb, sb);
+    let (ua, ub) = (home(0, UDP), home(1, UDP));
+    let (mut a, _) = Machines::fresh(&mut ka, 0, B, Mode::Off, sa, ra, ub, ua);
+    let session = current(&a);
+    let first = a.sealed(session, 0, DATA).expect("the machine holds it");
+    let (ev, buf) = a.frame(&mut ka, 10, &first);
+    let got = ev.iter().find_map(|e| {
+        if let Event::Rekey(Output::Deliver { range, .. }) = e {
+            buf.get(range.clone())
+        } else {
+            None
+        }
+    });
+    assert_eq!(got, Some(DATA), "the frame opens to what was sealed");
+    let (ev, _) = a.frame(&mut ka, 10, &first);
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Rekey(Output::Reject(rekey::Reason::Replay)))),
+        "the same counter again is a replay: {ev:?}"
+    );
+    assert_eq!(
+        a.sealed(([0; 8], [1; 8]), 1, DATA),
+        None,
+        "nothing is sealed under a session the machine does not hold"
+    );
+    a.close(&mut ka, 10, Close::Admin);
 }
 
 #[test]
