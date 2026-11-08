@@ -639,11 +639,8 @@ impl Node {
             )
         };
 
-        self.links.insert(link_id, link);
-
-        // Add reverse lookup for packet dispatch
-        self.addr_to_link
-            .insert((transport_id, remote_addr.clone()), link_id);
+        // The link, and its pair in the reverse lookup
+        self.links.open(link);
 
         match peer_identity {
             Some(identity) => {
@@ -663,7 +660,7 @@ impl Node {
                 let mut machine =
                     PeerMachine::new_outbound(link_id, Some(identity), Self::leg_stamp());
                 machine.set_dial_origin(origin);
-                self.peer_machines.insert(link_id, machine);
+                self.peer_machines.add(link_id, machine);
 
                 if !is_connection_oriented {
                     // Connectionless: no connect step. Prepare msg1 in the shell —
@@ -723,6 +720,9 @@ impl Node {
                                     link_id = %link_id,
                                     "Transport connect initiated (anonymous discovery)"
                                 );
+                                #[cfg(any(test, debug_assertions))]
+                                self.links
+                                    .waive(link_id, crate::node::settle::Waiver::AnonymousConnect);
                                 self.peering.pending_connects.push(super::PendingConnect {
                                     link_id,
                                     transport_id,
@@ -733,8 +733,7 @@ impl Node {
                             }
                             Err(e) => {
                                 // Clean up link
-                                self.links.remove(&link_id);
-                                self.addr_to_link.remove(&(transport_id, remote_addr));
+                                self.links.forget(&link_id, &(transport_id, remote_addr));
                                 return Err(NodeError::TransportError(e.to_string()));
                             }
                         }
@@ -781,8 +780,9 @@ impl Node {
             "outbound msg1 prepared for link {link_id} with no dial-time machine"
         );
         self.peer_machines
-            .entry(link_id)
-            .or_insert_with(|| PeerMachine::new_outbound(link_id, Some(peer_identity), at))
+            .ensure(link_id, || {
+                PeerMachine::new_outbound(link_id, Some(peer_identity), at)
+            })
             .set_leg(HandshakeCrypto::new());
 
         // Allocate a session index for this handshake, as the lease the
@@ -791,9 +791,8 @@ impl Node {
             Some(lease) => lease,
             None => {
                 // Clean up the link and dial-time machine we just created
-                self.links.remove(&link_id);
-                self.addr_to_link
-                    .remove(&(transport_id, remote_addr.clone()));
+                self.links
+                    .forget(&link_id, &(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::IndexAllocationFailed(
                     crate::utils::index::IndexError::Exhausted.to_string(),
@@ -820,9 +819,8 @@ impl Node {
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
-                self.links.remove(&link_id);
-                self.addr_to_link
-                    .remove(&(transport_id, remote_addr.clone()));
+                self.links
+                    .forget(&link_id, &(transport_id, remote_addr.clone()));
                 self.remove_peer_machine(link_id);
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
@@ -853,7 +851,7 @@ impl Node {
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+            .note((transport_id, our_index.as_u32()), link_id);
 
         let machine = self
             .peer_machines
@@ -914,8 +912,7 @@ impl Node {
         // promoted link's rekey machine takes over.
         let Some(our_lease) = fips_core::proto::rekey::allocate(&mut self.index_allocator) else {
             // Clean up the link we just created
-            self.links.remove(&link_id);
-            self.addr_to_link.remove(&(transport_id, remote_addr));
+            self.links.forget(&link_id, &(transport_id, remote_addr));
             return Err(NodeError::IndexAllocationFailed(
                 crate::utils::index::IndexError::Exhausted.to_string(),
             ));
@@ -931,8 +928,7 @@ impl Node {
                 let _ = self
                     .index_allocator
                     .free(crate::utils::index::SessionIndex::new(our_lease.release()));
-                self.links.remove(&link_id);
-                self.addr_to_link.remove(&(transport_id, remote_addr));
+                self.links.forget(&link_id, &(transport_id, remote_addr));
                 return Err(NodeError::HandshakeFailed(e.to_string()));
             }
         };
@@ -972,7 +968,7 @@ impl Node {
 
         // Track in pending_outbound for msg2 dispatch
         self.pending_outbound
-            .insert((transport_id, our_index.as_u32()), link_id);
+            .note((transport_id, our_index.as_u32()), link_id);
         // The persistent control machine enters the registry here, after all
         // fallible setup. Both production callers dial anonymously (identified
         // dials persist their machine at dial and go through
@@ -986,7 +982,10 @@ impl Node {
         // machine parks at `Discovered` until msg2. The carrier was born on
         // this same stamp `at`, so its `started_at`/`last_activity` and its
         // interval-clock activity already carry the msg1-prep provenance.
-        self.peer_machines.insert(link_id, machine);
+        self.peer_machines.add(link_id, machine);
+        #[cfg(any(test, debug_assertions))]
+        self.links
+            .lift(&link_id, crate::node::settle::Waiver::AnonymousConnect);
 
         // Send the wire format handshake message. It never dials: if the
         // connection the dial resolved to has gone, the send fails at once
@@ -1149,7 +1148,7 @@ impl Node {
         // from XX msg2. They carry `active_refresh = false`, have no NodeAddr to
         // key admission or the per-path dedupe, and — matching next's
         // poll_transport_discovery — bypass the discovery connect budget in the
-        // core. The driver-only gates below are theirs: the `addr_to_link`
+        // core. The driver-only gates below are theirs: the link index
         // dedup, and with multipath enabled the dial gate of a capable linked
         // peer that holds the beacon's pair as a proven path or as a path
         // still Probing.
@@ -1203,7 +1202,8 @@ impl Node {
                         continue;
                     }
                     if self
-                        .addr_to_link
+                        .links
+                        .index()
                         .contains_key(&(*transport_id, peer.addr.clone()))
                     {
                         continue;
@@ -1935,6 +1935,13 @@ impl Node {
     /// marks the link as Connected and starts the Noise handshake.
     /// Failed connections are cleaned up and scheduled for retry.
     pub(super) async fn poll_pending_connects(&mut self) {
+        self.connects_body().await;
+        self.audit_live("poll_pending_connects");
+    }
+
+    /// The work of [`Self::poll_pending_connects`], which audits the per-peer maps
+    /// after it.
+    async fn connects_body(&mut self) {
         if self.peering.pending_connects.is_empty() {
             return;
         }
@@ -2074,7 +2081,6 @@ impl Node {
                 // identity) don't retry — they'll be rediscovered via the
                 // shared-medium beacon.
                 self.remove_link(&pending.link_id);
-                self.links.remove(&pending.link_id);
                 if let Some(id) = &pending.peer_identity {
                     self.remove_peer_machine(pending.link_id);
                     self.note_handshake_timeout(*id.node_addr(), Self::peering_now());
@@ -3979,6 +3985,14 @@ impl Node {
     /// Notifies the peer, removes it locally, closes the transport connection
     /// it was using, and suppresses auto-reconnect.
     pub(crate) async fn api_disconnect(&mut self, npub: &str) -> Result<serde_json::Value, String> {
+        let result = self.disconnect_body(npub).await;
+        self.audit_live("api_disconnect");
+        result
+    }
+
+    /// The work of [`Self::api_disconnect`], which audits the per-peer maps
+    /// after it.
+    async fn disconnect_body(&mut self, npub: &str) -> Result<serde_json::Value, String> {
         let peer_identity =
             PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
         let node_addr = *peer_identity.node_addr();

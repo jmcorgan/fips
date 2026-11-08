@@ -1037,7 +1037,17 @@ impl InboundDeadline {
     /// The deadline for the next read: `first` is true until a frame has
     /// been received.
     pub(crate) fn for_read(&self, first: bool) -> Duration {
-        if first { self.first_frame } else { self.idle }
+        if !first {
+            return self.idle;
+        }
+        match (
+            node_fault!(FirstFrameDeadlineIgnored),
+            node_fault!(FirstFrameAtHalf),
+        ) {
+            (true, _) => Duration::from_secs(365 * 24 * 3600),
+            (false, true) => self.first_frame / 2,
+            (false, false) => self.first_frame,
+        }
     }
 
     /// The log word for an expiry of the deadline `for_read(first)` gave.
@@ -1518,6 +1528,11 @@ async fn tcp_receive_loop(
     };
 
     if admitted {
+        let ceiling = if node_fault!(TcpRecvBoundedByMtu) {
+            pool.lock().await.get(&key).map_or(RECV_CEILING, |c| c.mtu)
+        } else {
+            RECV_CEILING
+        };
         let mut first = true;
         loop {
             let read = match deadline {
@@ -1526,9 +1541,7 @@ async fn tcp_receive_loop(
                 // long as it keeps the socket open.
                 Some(d) => {
                     let limit = d.for_read(first);
-                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, RECV_CEILING))
-                        .await
-                    {
+                    match tokio::time::timeout(limit, read_fmp_packet(&mut reader, ceiling)).await {
                         Ok(result) => result,
                         Err(_) => {
                             // Not a recv error: `record_recv_error` means
@@ -1546,7 +1559,7 @@ async fn tcp_receive_loop(
                         }
                     }
                 }
-                None => read_fmp_packet(&mut reader, RECV_CEILING).await,
+                None => read_fmp_packet(&mut reader, ceiling).await,
             };
             first = false;
 

@@ -139,7 +139,8 @@ fn exited(nodes: &[TestNode], at: usize, peer: usize, exit: &str) {
     let peer_addr = *nodes[peer].node.node_addr();
     let link = node.get_peer(&peer_addr).map(|p| p.link_id());
     assert_eq!(
-        node.addr_to_link
+        node.links
+            .index()
             .get(&(nodes[at].transport_id, nodes[peer].addr.clone()))
             .copied(),
         link,

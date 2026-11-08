@@ -511,6 +511,13 @@ impl Node {
     /// whose heartbeat interval has elapsed, and removes any peer that
     /// hasn't sent us a frame within the link dead timeout.
     pub(in crate::node) async fn check_link_heartbeats(&mut self) {
+        self.heartbeats_body().await;
+        self.audit_live("check_link_heartbeats");
+    }
+
+    /// The work of [`Self::check_link_heartbeats`], which audits the per-peer maps
+    /// after it.
+    async fn heartbeats_body(&mut self) {
         let now = Instant::now();
         // Monotonic ms for the MMP receiver's injected-`u64` liveness clock; the
         // Instant `now` is still used for the shell-owned heartbeat timing. The
@@ -661,6 +668,13 @@ impl Node {
     /// machine's ambient context. The reconnect schedule itself is on the
     /// peering clock, which `note_link_dead`'s callers read.
     pub(in crate::node) async fn route_link_dead(&mut self, node_addr: NodeAddr, now_ms: u64) {
+        self.linkdead_body(node_addr, now_ms).await;
+        self.audit_live("route_link_dead");
+    }
+
+    /// The work of [`Self::route_link_dead`], which audits the per-peer maps
+    /// after it.
+    async fn linkdead_body(&mut self, node_addr: NodeAddr, now_ms: u64) {
         let link = match self.peers.get(&node_addr) {
             Some(peer) => peer.link_id(),
             None => return,

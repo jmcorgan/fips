@@ -28,6 +28,7 @@ mod rate_limit;
 pub(crate) mod reject;
 mod reloadable;
 pub(crate) mod session;
+mod settle;
 pub(crate) use handlers::probe::ProbeJob;
 pub(crate) use handlers::rekey::REKEY_HANDSHAKE;
 
@@ -80,7 +81,7 @@ use crate::cache::{CoordCache, Funding, Placed};
 use crate::hosts::HostMap;
 use crate::ipv6tun::tun::{TunError, TunOutboundTx, TunState, TunTx};
 use crate::node::session::SessionEntry;
-use crate::peer::machine::{DialOrigin, PeerMachine, TimerKind};
+use crate::peer::machine::{DialOrigin, PeerMachine};
 use crate::peer::{ActivePeer, ConnectivityState};
 use crate::proto::bloom::{BloomFilter, BloomState};
 use crate::proto::fmp::wire::{
@@ -354,7 +355,7 @@ pub struct AppOwnedUdpSocket {
     pub fd: std::os::unix::io::RawFd,
 }
 
-/// Key for addr_to_link reverse lookup.
+/// Key for the link table's reverse lookup.
 type AddrKey = (TransportId, TransportAddr);
 
 /// Per-transport kernel drop tracking for congestion detection.
@@ -547,26 +548,9 @@ mod bound_log_tests {
 ///    carried by its per-peer control machine (`peer_machines`), indexed by LinkId
 /// 2. **Active phase** (`peers`): Authenticated, indexed by NodeAddr
 ///
-/// The `addr_to_link` map is a reverse lookup from `(transport, address)` to
-/// link. It is **not** a packet-dispatch path, despite what this comment used
-/// to say: `find_link_by_addr` has no callers outside its own tests, and
-/// encrypted frames are dispatched by session index. Its live readers are the
-/// `should_admit_msg1` fast path, the duplicate-inbound-handshake check in
-/// `handle_msg1`, and the anonymous-beacon dial dedup in
-/// `poll_transport_discovery`.
-///
-/// **Do not key a peer-identity question on it.** The address form is not
-/// canonical: an outbound dial registers the literal configured string, which
-/// may be a hostname (`"node-b:2121"`), while an inbound packet carries the
-/// resolved form (`"10.128.2.4:2121"`). `TransportAddr` compares byte-wise, so
-/// those never match, and a lookup keyed on an inbound address silently returns
-/// "no such link" for every hostname-configured peer rather than failing. The
-/// entry is also single-valued per key, so an inbound handshake overwrites an
-/// outbound dial's entry for the same address. The readers above tolerate this
-/// because each compares a key written in the same form it reads; a new reader
-/// that does not will be quietly wrong. An inbound handshake that overwrites a
-/// key records the link it displaced, and the key returns to that link, if it
-/// is still live, when the handshake's leg is disposed.
+/// The links and the reverse lookup from `(transport, address)` to link are
+/// one table, `links`; `settle::LinkTable` says what the lookup is for and
+/// why no peer-identity question may be keyed on it.
 // Discovery lookup constants moved to config: node.lookup.attempt_timeouts_secs, node.lookup.ttl
 pub struct Node {
     // === Immutable Context ===
@@ -635,14 +619,10 @@ pub struct Node {
     transports: HashMap<TransportId, TransportHandle>,
     /// Per-transport kernel drop tracking for congestion detection.
     transport_drops: HashMap<TransportId, TransportDropState>,
-    /// Active links.
-    links: HashMap<LinkId, Link>,
-    /// Reverse lookup: (transport_id, remote_addr) -> link_id.
-    addr_to_link: HashMap<AddrKey, LinkId>,
-    /// For an inbound handshake leg that took over an `addr_to_link` key at
-    /// msg1, the key and the link it named before. `remove_link` hands the key
-    /// back to that link, if it is still live, when the leg goes.
-    displaced_links: HashMap<LinkId, (AddrKey, LinkId)>,
+    /// Active links, with the reverse lookup from (transport_id, remote_addr)
+    /// to link_id, and for an inbound handshake leg that took over a key at
+    /// msg1, the key and the link it named before.
+    links: settle::LinkTable,
 
     // === Packet Channel ===
     /// Packet receiver (for event loop).
@@ -686,10 +666,10 @@ pub struct Node {
     /// and the lifecycle paths, with the executor (`dataplane/peer_actions.rs`)
     /// performing the returned actions. Timer FIRING decisions remain
     /// shell-side: `PeerEvent::Timeout` is never dispatched in production.
-    peer_machines: HashMap<LinkId, PeerMachine>,
-
-    /// Per-peer timer store, keyed by `LinkId` then `TimerKind`, holding each
-    /// armed timer's absolute deadline (ms). The sans-IO time-as-input backing
+    ///
+    /// The same map holds the per-peer timer store, keyed by `LinkId` then
+    /// `TimerKind`, holding each armed timer's absolute deadline (ms)
+    /// (`MachineMap::timers`). The sans-IO time-as-input backing
     /// for `PeerEvent::Timeout`: populated/cleared by the machine's
     /// `SetTimer`/`CancelTimer` actions (`dataplane/peer_actions.rs`) and dropped
     /// alongside the machine through the `remove_peer_machine` choke-point. The
@@ -699,12 +679,12 @@ pub struct Node {
     /// config); the rekey/liveness kinds are still SHADOWS of their
     /// own shell drivers, and the machine's `on_timeout` handlers stay dormant
     /// (`PeerEvent::Timeout` is never dispatched in production).
-    peer_timers: HashMap<LinkId, HashMap<TimerKind, u64>>,
+    peer_machines: settle::MachineMap,
 
     // === Peers (Active Phase) ===
     /// Authenticated peers.
     /// Indexed by NodeAddr (verified identity).
-    peers: HashMap<NodeAddr, ActivePeer>,
+    peers: settle::PeerMap,
 
     // === End-to-End Sessions ===
     /// Session table for end-to-end encrypted sessions.
@@ -826,7 +806,7 @@ pub struct Node {
     /// from one global allocator, so a frame carrying a known `receiver_idx`
     /// resolves to its peer no matter which transport delivered it.
     /// This maps our session index to the peer that uses it.
-    peers_by_index: HashMap<u32, NodeAddr>,
+    peers_by_index: settle::BindMap,
     /// Budget for the line logged for a frame naming an index that is not in
     /// `peers_by_index`; its sender is not authenticated.
     index_budget: diag::LogBudget,
@@ -838,11 +818,11 @@ pub struct Node {
     msgtype_budget: diag::LogBudget,
     /// Pending outbound handshakes by our sender_idx.
     /// Tracks which LinkId corresponds to which session index.
-    pending_outbound: HashMap<(TransportId, u32), LinkId>,
+    pending_outbound: settle::DialMap,
     /// Pending inbound connections awaiting msg3 (XX pattern), keyed by
     /// (transport_id, our_index). The responder stores the connection here
     /// after sending msg2 and awaits msg3 to learn the initiator's identity.
-    pending_inbound: HashMap<(TransportId, u32), LinkId>,
+    pending_inbound: settle::LegMap,
     /// When each peer identity's last ACCEPTED epoch change tore down its
     /// peering. Keyed on identity rather than address, and held here rather
     /// than on `ActivePeer`, because the teardown being dampened destroys
@@ -1146,17 +1126,14 @@ impl Node {
             coord_cache,
             transports: HashMap::new(),
             transport_drops: HashMap::new(),
-            links: HashMap::new(),
-            addr_to_link: HashMap::new(),
-            displaced_links: HashMap::new(),
+            links: settle::LinkTable::default(),
             packet_rx: None,
             child_exit_tx: None,
             child_exit_rx: None,
             transport_presence_tx: None,
             transport_presence_rx: None,
-            peer_machines: HashMap::new(),
-            peer_timers: HashMap::new(),
-            peers: HashMap::new(),
+            peer_machines: settle::MachineMap::default(),
+            peers: settle::PeerMap::default(),
             sessions: HashMap::new(),
             identity_cache: identities::IdentityCache::new(),
             pending_tun_packets: HashMap::new(),
@@ -1189,12 +1166,12 @@ impl Node {
             #[cfg(all(ble_available, any(target_os = "android", test)))]
             ble_radio: None,
             index_allocator: IndexAllocator::new(),
-            peers_by_index: HashMap::new(),
+            peers_by_index: settle::BindMap::default(),
             index_budget: diag::LogBudget::new(std::time::Instant::now()),
             version_budget: diag::LogBudget::new(std::time::Instant::now()),
             msgtype_budget: diag::LogBudget::new(std::time::Instant::now()),
-            pending_outbound: HashMap::new(),
-            pending_inbound: HashMap::new(),
+            pending_outbound: settle::DialMap::default(),
+            pending_inbound: settle::LegMap::default(),
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
             paths: handlers::path::PathDriver::default(),
@@ -1336,17 +1313,14 @@ impl Node {
             coord_cache,
             transports: HashMap::new(),
             transport_drops: HashMap::new(),
-            links: HashMap::new(),
-            addr_to_link: HashMap::new(),
-            displaced_links: HashMap::new(),
+            links: settle::LinkTable::default(),
             packet_rx: None,
             child_exit_tx: None,
             child_exit_rx: None,
             transport_presence_tx: None,
             transport_presence_rx: None,
-            peer_machines: HashMap::new(),
-            peer_timers: HashMap::new(),
-            peers: HashMap::new(),
+            peer_machines: settle::MachineMap::default(),
+            peers: settle::PeerMap::default(),
             sessions: HashMap::new(),
             identity_cache: identities::IdentityCache::new(),
             pending_tun_packets: HashMap::new(),
@@ -1379,12 +1353,12 @@ impl Node {
             #[cfg(all(ble_available, any(target_os = "android", test)))]
             ble_radio: None,
             index_allocator: IndexAllocator::new(),
-            peers_by_index: HashMap::new(),
+            peers_by_index: settle::BindMap::default(),
             index_budget: diag::LogBudget::new(std::time::Instant::now()),
             version_budget: diag::LogBudget::new(std::time::Instant::now()),
             msgtype_budget: diag::LogBudget::new(std::time::Instant::now()),
-            pending_outbound: HashMap::new(),
-            pending_inbound: HashMap::new(),
+            pending_outbound: settle::DialMap::default(),
+            pending_inbound: settle::LegMap::default(),
             restart_dampener: HashMap::new(),
             silent_sessions: SilentSessions::new(),
             paths: handlers::path::PathDriver::default(),
@@ -3206,13 +3180,7 @@ impl Node {
                 max: self.max_links(),
             });
         }
-        let link_id = link.link_id();
-        let transport_id = link.transport_id();
-        let remote_addr = link.remote_addr().clone();
-
-        self.links.insert(link_id, link);
-        self.addr_to_link
-            .insert((transport_id, remote_addr), link_id);
+        self.links.open(link);
         Ok(())
     }
 
@@ -3232,7 +3200,8 @@ impl Node {
         transport_id: TransportId,
         addr: &TransportAddr,
     ) -> Option<LinkId> {
-        self.addr_to_link
+        self.links
+            .index()
             .get(&(transport_id, addr.clone()))
             .copied()
     }
@@ -3287,7 +3256,7 @@ impl Node {
 
     /// Remove a link.
     ///
-    /// Drops every `addr_to_link` entry that still maps to this link, rather
+    /// Drops every index entry that still maps to this link, rather
     /// than only the key rebuilt from the link's own remote address. A link can
     /// be registered under more than one address form: the cross-connection
     /// arms key the winner on the *packet's* source address, which need not
@@ -3305,23 +3274,7 @@ impl Node {
     /// harmless: `LinkId`s come from a monotonic counter, so a dead link's id
     /// never names a new one.
     pub fn remove_link(&mut self, link_id: &LinkId) -> Option<Link> {
-        let displaced = self.displaced_links.remove(link_id);
-        let link = self.links.remove(link_id)?;
-        self.addr_to_link.retain(|_, mapped| *mapped != *link_id);
-        if let Some((key, prior)) = displaced {
-            // A newer leg at the same address displaced this one; it now
-            // displaces what this one did, or its disposal would find a dead
-            // link and drop the key from a link that is still live.
-            for (newer_key, newer_prior) in self.displaced_links.values_mut() {
-                if *newer_prior == *link_id && *newer_key == key {
-                    *newer_prior = prior;
-                }
-            }
-            if self.links.contains_key(&prior) {
-                self.addr_to_link.entry(key).or_insert(prior);
-            }
-        }
-        Some(link)
+        self.links.close(link_id)
     }
 
     /// Single choke-point for dropping a per-peer control machine. Also drops the
@@ -3333,7 +3286,7 @@ impl Node {
     pub(in crate::node) fn remove_peer_machine(&mut self, link: LinkId) {
         if let Some(lease) = self
             .peer_machines
-            .remove(&link)
+            .drop(link)
             .as_mut()
             .and_then(PeerMachine::take_our_index)
         {
@@ -3341,7 +3294,6 @@ impl Node {
                 .index_allocator
                 .free(crate::utils::index::SessionIndex::new(lease.release()));
         }
-        self.peer_timers.remove(&link);
     }
 
     /// Debug-build coherence sweep over the peer-lifecycle maps, run once per
@@ -3355,21 +3307,13 @@ impl Node {
     /// direction exists to check.)
     #[cfg(debug_assertions)]
     pub(in crate::node) fn debug_assert_peer_maps_coherent(&self) {
-        for (link, machine) in &self.peer_machines {
-            let has_carrier = machine.leg().is_some()
-                || self.peers.values().any(|peer| peer.link_id() == *link)
-                || self
-                    .peering
-                    .pending_connects
-                    .iter()
-                    .any(|pending| pending.link_id == *link);
-            assert!(
-                has_carrier,
+        if let Some(link) = settle::audit::carrier(self).first() {
+            panic!(
                 "control machine for link {link} has no live carrier \
                  (no pending connection, active peer, or pending connect)"
             );
         }
-        for leg in self.displaced_links.keys() {
+        for leg in self.links.displaced() {
             assert!(
                 self.links.contains_key(leg),
                 "displaced-key record for link {leg} outlived its link \
@@ -3509,7 +3453,7 @@ impl Node {
     /// The machine is chosen the way the establish paths choose it — outbound
     /// when the seed names a peer, inbound otherwise — and its carrier is
     /// seeded with every field a promotion reads. Built through
-    /// `entry(..).or_insert_with(..)`, so an existing handshake-less machine
+    /// `MachineMap::ensure`, so an existing handshake-less machine
     /// keeps its constructor-side fields rather than being rebuilt.
     /// Post-construction `started_at` and the stored handshake bytes are not
     /// seeded; the establish paths write those at their own points.
@@ -3529,20 +3473,19 @@ impl Node {
 
         let started_at_ms = seed.started_at_ms;
         let expected_identity = seed.expected_identity;
-        let machine =
-            self.peer_machines
-                .entry(link_id)
-                .or_insert_with(|| match expected_identity {
-                    Some(_) => PeerMachine::new_outbound(
-                        link_id,
-                        expected_identity,
-                        crate::proto::fmp::LegStamp::at(started_at_ms),
-                    ),
-                    None => PeerMachine::new_inbound(
-                        link_id,
-                        crate::proto::fmp::LegStamp::at(started_at_ms),
-                    ),
-                });
+        let machine = self
+            .peer_machines
+            .ensure(link_id, || match expected_identity {
+                Some(_) => PeerMachine::new_outbound(
+                    link_id,
+                    expected_identity,
+                    crate::proto::fmp::LegStamp::at(started_at_ms),
+                ),
+                None => PeerMachine::new_inbound(
+                    link_id,
+                    crate::proto::fmp::LegStamp::at(started_at_ms),
+                ),
+            });
         if let Some(index) = seed.our_index {
             let _ = machine.set_conn_our_index(index);
         }
@@ -3597,7 +3540,7 @@ impl Node {
     /// wired to remove established peers, mirror the `remove_active_peer` cleanup
     /// (`self.peer_machines.remove(&peer.link_id())`) here.
     pub fn remove_peer(&mut self, node_addr: &NodeAddr) -> Option<ActivePeer> {
-        self.peers.remove(node_addr)
+        self.peers.take(node_addr)
     }
 
     /// Iterate over all peers.

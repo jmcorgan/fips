@@ -322,14 +322,14 @@ fn remove_link_clears_a_reverse_lookup_entry_keyed_on_a_second_address_form() {
 
     // The cross-connection arms key the surviving link on the *packet's*
     // source address, which need not be the form the link itself carries.
-    node.addr_to_link.insert(
+    node.links.raw_index().insert(
         (transport_id, TransportAddr::from_string("node-b:2121")),
         link_id,
     );
 
     // An entry another link has claimed is not this link's to remove.
     let other_link_id = node.allocate_link_id();
-    node.addr_to_link.insert(
+    node.links.raw_index().insert(
         (transport_id, TransportAddr::from_string("10.128.2.5:2121")),
         other_link_id,
     );
@@ -456,7 +456,7 @@ fn test_peer_maps_coherence_detects_orphaned_machine() {
     // has no live carrier; the check must panic on it.
     let link_id = LinkId::new(7);
     let machine = crate::peer::machine::PeerMachine::new_inbound(link_id, LegStamp::at(1000));
-    node.peer_machines.insert(link_id, machine);
+    node.peer_machines.raw().insert(link_id, machine);
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         node.debug_assert_peer_maps_coherent();
@@ -536,7 +536,7 @@ fn test_promote_connection_error_order_and_leg_detach() {
     ));
 
     let link_id = LinkId::new(2);
-    node.peer_machines.insert(
+    node.peer_machines.raw().insert(
         link_id,
         PeerMachine::new_inbound(link_id, LegStamp::at(1000)),
     );
@@ -739,6 +739,7 @@ fn test_node_pending_outbound_tracking() {
 
     // Track in pending_outbound
     node.pending_outbound
+        .raw()
         .insert((transport_id, index.as_u32()), link_id);
 
     // Verify we can look it up
@@ -747,6 +748,7 @@ fn test_node_pending_outbound_tracking() {
 
     // Clean up
     node.pending_outbound
+        .raw()
         .remove(&(transport_id, index.as_u32()));
     let _ = node.index_allocator.free(index);
 
@@ -763,14 +765,14 @@ fn test_node_peers_by_index_tracking() {
     let index = node.index_allocator.allocate().unwrap();
 
     // Track in peers_by_index
-    node.peers_by_index.insert(index.as_u32(), node_addr);
+    node.peers_by_index.raw().insert(index.as_u32(), node_addr);
 
     // Verify lookup
     let found = node.peers_by_index.get(&index.as_u32());
     assert_eq!(found, Some(&node_addr));
 
     // Clean up
-    node.peers_by_index.remove(&index.as_u32());
+    node.peers_by_index.raw().remove(&index.as_u32());
     let _ = node.index_allocator.free(index);
 
     assert!(node.peers_by_index.is_empty());
@@ -873,10 +875,12 @@ fn test_promote_cleans_up_pending_outbound_to_same_peer() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node.links.insert(pending_link_id, pending_link);
-    node.addr_to_link
+    node.links.raw().insert(pending_link_id, pending_link);
+    node.links
+        .raw_index()
         .insert((transport_id, pending_addr.clone()), pending_link_id);
     node.pending_outbound
+        .raw()
         .insert((transport_id, pending_index.as_u32()), pending_link_id);
 
     // Verify pending state
@@ -1365,7 +1369,7 @@ fn a_peer_heard_from_within_the_heartbeat_interval_has_a_live_link() {
     let current_addr = TransportAddr::from_string("127.0.0.1:9");
     let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
     active_peer.set_current_addr(transport_id, current_addr.clone());
-    node.peers.insert(peer_node_addr, active_peer);
+    node.peers.raw().insert(peer_node_addr, active_peer);
 
     // A link heard from just now is live, so discovery must not dial this
     // peer at all — on this path or on any other.
@@ -1389,7 +1393,7 @@ fn a_peer_quiet_past_the_heartbeat_interval_no_longer_has_a_live_link() {
     );
     let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), stale_at);
     active_peer.set_current_addr(transport_id, current_addr.clone());
-    node.peers.insert(peer_node_addr, active_peer);
+    node.peers.raw().insert(peer_node_addr, active_peer);
 
     // Gone quiet past the heartbeat interval: every path is dialable again,
     // which is what keeps failover working now that a live link is never
@@ -1433,7 +1437,7 @@ fn a_bootstrap_held_peer_is_never_its_own_configured_candidate() {
 
     let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
     active_peer.set_current_addr(transport_id, current_addr);
-    node.peers.insert(peer_node_addr, active_peer);
+    node.peers.raw().insert(peer_node_addr, active_peer);
     node.supervisor.nostr_rendezvous.insert_bootstrap_transport(
         transport_id,
         npub,
@@ -1488,7 +1492,7 @@ async fn an_instance_qualified_candidate_matches_only_its_own_instance() {
     let peer_node_addr = *peer_identity.node_addr();
     let mut active_peer = ActivePeer::new(peer_identity, LinkId::new(7), Node::now_ms());
     active_peer.set_current_addr(main_id, TransportAddr::from_string("127.0.0.1:9"));
-    node.peers.insert(peer_node_addr, active_peer);
+    node.peers.raw().insert(peer_node_addr, active_peer);
 
     // Path matching, which still gates the *configured-peer* refresh even
     // though beacon discovery now gates on liveness alone.
@@ -1550,7 +1554,7 @@ fn a_candidate_at_a_standby_paths_pair_is_an_alternative_and_one_at_the_active_p
         ),
         "precondition: the standby is a proven path that is not active"
     );
-    node.peers.insert(peer_node_addr, active_peer);
+    node.peers.raw().insert(peer_node_addr, active_peer);
 
     let matches = |transport: &str, addr: &str| {
         let candidate = crate::config::PeerAddress::new(transport, addr);
@@ -1659,8 +1663,8 @@ async fn held_peer_with_new_address(last_seen_ms: u64) -> HeldPeerUpdate {
     let link_id = LinkId::new(7);
     let mut active_peer = ActivePeer::new(peer_identity, link_id, last_seen_ms);
     active_peer.set_current_addr(transport_id, current_addr.clone());
-    node.peers.insert(peer_node_addr, active_peer);
-    node.links.insert(
+    node.peers.raw().insert(peer_node_addr, active_peer);
+    node.links.raw().insert(
         link_id,
         Link::connectionless(
             link_id,
@@ -2930,7 +2934,7 @@ async fn test_releasing_a_path_for_a_still_linked_peer_reseeds_both_stores() {
 
     let mut peer = crate::peer::ActivePeer::new(identity, LinkId::new(1), 0);
     peer.set_current_addr(TransportId::new(1), transport_addr.clone());
-    node.peers.insert(peer_addr, peer);
+    node.peers.raw().insert(peer_addr, peer);
 
     node.seed_path_mtu_for_link_peer(&peer_addr, peer_key, TransportId::new(1), &transport_addr);
     node.path_mtu_lookup_release(&peer_addr);
@@ -2962,7 +2966,7 @@ fn inject_dummy_peers(node: &mut Node, count: usize) {
         let identity = make_peer_identity();
         let addr = *identity.node_addr();
         let peer = ActivePeer::new(identity, LinkId::new((i + 1) as u64), 0);
-        node.peers.insert(addr, peer);
+        node.peers.raw().insert(addr, peer);
     }
 }
 
@@ -3324,9 +3328,10 @@ async fn drive_xx_handshake(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a, link_a);
+    node_a.links.raw().insert(link_id_a, link_a);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
 
     let transport = node_a.transports.get(&transport_id).unwrap();
@@ -3481,7 +3486,7 @@ async fn handle_msg3_admits_existing_peer_at_cap() {
     {
         use crate::peer::ActivePeer;
         let peer = ActivePeer::new(existing_pid, LinkId::new(7777), 0);
-        node_b.peers.insert(existing_node_addr, peer);
+        node_b.peers.raw().insert(existing_node_addr, peer);
     }
     assert_eq!(
         node_b.peer_count(),
@@ -4899,7 +4904,7 @@ async fn test_failed_msg1_preparation_unwinds_the_dial_machine() {
     let peer_identity = make_peer_identity();
 
     // Stand in for the dial: the machine exists before msg1 is prepared.
-    node.peer_machines.insert(
+    node.peer_machines.raw().insert(
         link_id,
         PeerMachine::new_outbound(link_id, Some(peer_identity), LegStamp::at(1000)),
     );
@@ -4934,7 +4939,7 @@ async fn test_machine_carries_link_direction_and_address_on_dial_and_inbound() {
     let transport_id = TransportId::new(1);
     let remote_addr = TransportAddr::from_string("127.0.0.1:5000");
     let peer_identity = make_peer_identity();
-    node.peer_machines.insert(
+    node.peer_machines.raw().insert(
         link_id,
         PeerMachine::new_outbound(link_id, Some(peer_identity), LegStamp::at(1000)),
     );
@@ -5001,6 +5006,7 @@ fn test_peer_display_name_uses_cached_short_npub() {
     let peer_addr = *peer_identity_full.node_addr();
     let peer_identity = PeerIdentity::from_pubkey(peer_identity_full.pubkey());
     node.peers
+        .raw()
         .insert(peer_addr, ActivePeer::new(peer_identity, LinkId::new(1), 0));
 
     assert_eq!(
@@ -5020,6 +5026,7 @@ fn test_peer_display_name_tracks_alias_change() {
     let peer_addr = *peer_identity_full.node_addr();
     let peer_identity = PeerIdentity::from_pubkey(peer_identity_full.pubkey());
     node.peers
+        .raw()
         .insert(peer_addr, ActivePeer::new(peer_identity, LinkId::new(1), 0));
 
     assert_eq!(
@@ -5276,7 +5283,7 @@ async fn pending_inbound_stranger_msg1_stays_stranger_class() {
         "XX promotes nobody at msg1: the link must still be pending"
     );
     assert_eq!(
-        node_b.addr_to_link.len(),
+        node_b.links.index().len(),
         1,
         "msg1 must have left an addr_to_link entry for the pending link"
     );
@@ -5462,7 +5469,7 @@ async fn msg1_reject_arms_do_not_release_another_handshakes_slot() {
         // An inbound link at this address with no control machine behind it,
         // so find_stored_msg2 misses and the arm fires.
         let link_id = node.allocate_link_id();
-        node.links.insert(
+        node.links.raw().insert(
             link_id,
             Link::connectionless(
                 link_id,
@@ -5472,7 +5479,8 @@ async fn msg1_reject_arms_do_not_release_another_handshakes_slot() {
                 Duration::from_millis(100),
             ),
         );
-        node.addr_to_link
+        node.links
+            .raw_index()
             .insert((transport_id, addr.clone()), link_id);
 
         let seed = node

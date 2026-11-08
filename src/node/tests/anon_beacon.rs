@@ -202,7 +202,7 @@ async fn an_anonymous_beacon_at_a_proven_standby_of_a_live_capable_peer_is_not_d
     );
     // The link record's own pair stays keyed; dropping the entry stands for
     // a standby at a pair other than the link's own.
-    nodes[s].node.addr_to_link.remove(&(t1, from.clone()));
+    nodes[s].node.links.raw_index().remove(&(t1, from.clone()));
     loopback(&nodes[s], t1).inject_anonymous(from);
     nodes[s].node.poll_transport_discovery().await;
     assert!(
@@ -254,7 +254,7 @@ async fn an_anonymous_beacon_at_a_proven_dead_path_of_a_live_capable_peer_is_not
     );
     // The link record's own pair stays keyed; dropping the entry stands for
     // a Dead path at a pair other than the link's own.
-    nodes[s].node.addr_to_link.remove(&(t1, from.clone()));
+    nodes[s].node.links.raw_index().remove(&(t1, from.clone()));
     assert!(capable_at(&nodes[s], &peer), "precondition: capable");
     loopback(&nodes[s], t1).inject_anonymous(from);
     nodes[s].node.poll_transport_discovery().await;
@@ -547,7 +547,11 @@ fn assert_returned(nodes: &[TestNode], s: usize, a2: &TransportAddr) {
     assert_eq!(held(nodes, s), Match::Unproven, "precondition: unproven");
     assert_window(nodes, s, a2);
     assert!(
-        !nodes[s].node.addr_to_link.contains_key(&(t2(), a2.clone())),
+        !nodes[s]
+            .node
+            .links
+            .index()
+            .contains_key(&(t2(), a2.clone())),
         "precondition: the pair is not keyed in addr_to_link"
     );
 }
@@ -1027,7 +1031,7 @@ async fn left_quiet(name: &str, cfg_s: fn() -> Config, cfg_l: fn() -> Config) {
         .map(|k| (k.transport_id(), k.remote_addr().clone()))
         .expect("the link record is held");
     assert_eq!(
-        nodes[s].node.addr_to_link.get(&record),
+        nodes[s].node.links.index().get(&record),
         Some(&link),
         "{name}: the link record's own pair is keyed to the link after the move"
     );

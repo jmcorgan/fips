@@ -34,7 +34,7 @@
 //! see its arm for the note.
 //!
 //! The timer arms (`SetTimer`/`CancelTimer`) populate/clear the per-peer timer
-//! store (`peer_timers`). The `HandshakeRetransmit` and `HandshakeTimeout`
+//! store (`MachineMap::timers`, on `peer_machines`). The `HandshakeRetransmit` and `HandshakeTimeout`
 //! deadlines are read and fired by `drive_peer_timers` (the handshake resend +
 //! reap home). The liveness kind is still SHADOW — driven by its own shell
 //! driver — so populating it stays behavior-neutral.
@@ -174,8 +174,7 @@ impl Node {
                                     });
                             }
                             Err(_e) => {
-                                self.links.remove(&link);
-                                self.addr_to_link.remove(&(transport_id, remote_addr));
+                                self.links.forget(&link, &(transport_id, remote_addr));
                                 self.remove_peer_machine(link);
                                 return;
                             }
@@ -344,7 +343,7 @@ impl Node {
                             // only; a failed promote leaves it for the stale-
                             // connection reaper.
                             if let Some(k) = ambient.pending_outbound_key {
-                                self.pending_outbound.remove(&k);
+                                self.pending_outbound.forget(&k);
                             }
 
                             // Tell the transport which link the new peer uses.
@@ -416,8 +415,8 @@ impl Node {
                             }
                             // This connection lost — clean up its link
                             self.remove_link(&promote_link);
-                            // Restore addr_to_link for the winner's link
-                            self.addr_to_link.insert(
+                            // Restore the link index entry for the winner's link
+                            self.links.award(
                                 (ambient.transport_id, ambient.remote_addr.clone()),
                                 winner_link_id,
                             );
@@ -608,6 +607,16 @@ impl Node {
                             };
                             self.run_link_outputs(&peer, out);
                             let held = self.peers.get(&peer).map(|p| p.link_id());
+                            #[cfg(any(test, debug_assertions))]
+                            if let Some(held) = held
+                                && self.links.get(&held).is_some_and(|l| {
+                                    l.transport_id() != ambient.transport_id
+                                        || *l.remote_addr() != ambient.remote_addr
+                                })
+                            {
+                                self.links
+                                    .waive(held, crate::node::settle::Waiver::SettledAtMsg3);
+                            }
                             self.run_renewed(&peer, paths);
                             // The path machine started again with an empty
                             // candidate table. Boxed as at the promotion.
@@ -650,7 +659,7 @@ impl Node {
                     }
 
                     // Both branches tear down the temporary inbound link via
-                    // `remove_link`, which hands its `addr_to_link` key back to
+                    // `remove_link`, which hands its link index key back to
                     // the link the leg displaced at msg1 if that link is still
                     // live, disposing the leg's machine (and its embedded
                     // connection) with it.
@@ -691,15 +700,10 @@ impl Node {
                     // are read + fired by `drive_peer_timers`. The liveness kind
                     // is still SHADOW here — it keeps its own shell driver — so
                     // populating it stays behavior-neutral.
-                    self.peer_timers
-                        .entry(link)
-                        .or_default()
-                        .insert(kind, at_ms);
+                    self.peer_machines.arm(link, kind, at_ms);
                 }
                 PeerAction::CancelTimer { kind } => {
-                    if let Some(timers) = self.peer_timers.get_mut(&link) {
-                        timers.remove(&kind);
-                    }
+                    self.peer_machines.cancel(link, kind);
                 }
                 PeerAction::ReportLost { peer, kind } => {
                     // The single loss token, routed to the reconciler reflex the

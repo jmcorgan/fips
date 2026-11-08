@@ -685,7 +685,7 @@ async fn show_links_reports_the_traffic_counters_of_the_peer_bound_to_each_link(
 fn insert_peer_last_seen_at(node: &mut Node, link: u64, last_seen_ms: u64) -> NodeAddr {
     let identity = PeerIdentity::from_pubkey_full(Identity::generate().pubkey_full());
     let addr = *identity.node_addr();
-    node.peers.insert(
+    node.peers.raw().insert(
         addr,
         ActivePeer::new(identity, LinkId::new(link), last_seen_ms),
     );

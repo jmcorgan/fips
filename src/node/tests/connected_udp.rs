@@ -125,6 +125,8 @@ pub(super) fn promoted_peer_with_the_far_side_session(
         .get_peer(&node_addr)
         .and_then(|p| p.our_index())
         .expect("a promoted peer carries the index it was allocated");
+    // The peer is promoted with no link, which no production path does.
+    node.plant();
 
     (node, node_addr, our_index, far_side_session)
 }

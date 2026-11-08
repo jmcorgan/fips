@@ -31,8 +31,10 @@
 
 use super::link_index_audit;
 use super::rekey_parity::heartbeat;
+use super::settle::audit::{Exempt, assert_coherent};
 use super::spanning_tree::{
-    LOOPBACK_REGISTRY, TestNode, add_loopback_alias, cleanup_nodes, loopback_tap, make_test_node,
+    LOOPBACK_REGISTRY, TestNode, add_loopback_alias, cleanup_nodes, loopback_tap,
+    make_test_node_with_config,
 };
 use super::*;
 use crate::proto::fmp::wire::{
@@ -196,8 +198,11 @@ fn check_bound(tn: &TestNode, peer: &NodeAddr, tid: TransportId, who: &str) {
 /// Start both nodes' dials as `dial` says, let the larger node answer the
 /// smaller node's msg1, and stop before the smaller node is handed
 /// anything, with every precondition up to that point asserted.
-async fn dial_both(dial: Dial) -> Dials {
-    let mut nodes = vec![make_test_node().await, make_test_node().await];
+async fn dial_both(dial: Dial, config: crate::config::Config) -> Dials {
+    let mut nodes = vec![
+        make_test_node_with_config(config.clone(), T1_MTU).await,
+        make_test_node_with_config(config, T1_MTU).await,
+    ];
     let (s, l) = if nodes[0].node.node_addr() < nodes[1].node.node_addr() {
         (0, 1)
     } else {
@@ -334,6 +339,11 @@ async fn dial_both(dial: Dial) -> Dials {
 /// held until then, so the smaller node's outbound half completes second
 /// and settles the crossing on that msg2.
 pub(super) async fn cross_dials(dial: Dial) -> Crossed {
+    cross_dials_from(dial, crate::config::Config::new()).await
+}
+
+/// [`cross_dials`] with both nodes built from `config`.
+pub(super) async fn cross_dials_from(dial: Dial, config: crate::config::Config) -> Crossed {
     let Dials {
         mut nodes,
         s,
@@ -344,7 +354,7 @@ pub(super) async fn cross_dials(dial: Dial) -> Crossed {
         tap,
         to,
         source,
-    } = dial_both(dial).await;
+    } = dial_both(dial, config).await;
     let s_addr = *nodes[s].node.node_addr();
     let l_addr = *nodes[l].node.node_addr();
     let t1 = nodes[s].transport_id;
@@ -570,6 +580,23 @@ async fn check_move(crossed: Crossed) {
         (0, received + 1),
         "l's heartbeat after the move authenticates at s"
     );
+    // The smaller node keeps the inbound link it was promoted on as the
+    // larger node's record: off the pair it moved to when the msg2 came from
+    // another address, at it when it came from the first. Frames the smaller
+    // node sends on another transport land in `tap`, which the audit's
+    // delivery does not read, so that move is not audited here.
+    match dial {
+        Dial::OtherAddress => {
+            assert_coherent(
+                &mut nodes,
+                &[Exempt::CrossedInbound { node: s, peer: l }],
+                "the end of the move",
+            )
+            .await
+        }
+        Dial::AnsweredFromFirst => assert_coherent(&mut nodes, &[], "the end of the move").await,
+        Dial::OtherTransport => {}
+    }
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -754,7 +781,7 @@ async fn a_crossed_dial_settled_at_msg3_moves_the_larger_nodes_link_to_the_msg3s
         mut tap,
         to,
         source,
-    } = dial_both(Dial::OtherTransport).await;
+    } = dial_both(Dial::OtherTransport, crate::config::Config::new()).await;
     let s_addr = *nodes[s].node.node_addr();
     let l_addr = *nodes[l].node.node_addr();
     let t1 = nodes[s].transport_id;
@@ -954,6 +981,9 @@ async fn a_crossed_dial_won_on_the_tie_break_keeps_the_pin() {
         Some(pin),
         "the pin is kept across a crossed handshake won on the tie-break"
     );
+    // The smaller node's msg3 is still on its way to the larger node.
+    super::settle::pump(&mut nodes).await;
+    assert_coherent(&mut nodes, &[], "the end of the test, delivered until idle").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -973,7 +1003,7 @@ async fn a_crossed_dial_settled_at_msg3_keeps_the_larger_nodes_pin() {
         mut tap,
         source,
         ..
-    } = dial_both(Dial::OtherTransport).await;
+    } = dial_both(Dial::OtherTransport, crate::config::Config::new()).await;
     let s_addr = *nodes[s].node.node_addr();
     hand(&mut nodes[s].node, msg1).await;
     hand(&mut nodes[s].node, msg2).await;

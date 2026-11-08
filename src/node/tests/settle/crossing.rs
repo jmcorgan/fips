@@ -159,7 +159,7 @@ async fn smaller_on_its_dialed_link(on: bool, zero_smaller: bool) {
                 "the smaller node's link record is {link:?}, expected {want:?}"
             ));
         }
-        let mapped = nodes[s].node.addr_to_link.get(&(tid, at)).copied();
+        let mapped = nodes[s].node.links.index().get(&(tid, at)).copied();
         if mapped != Some(p.link_id()) {
             bad.push(format!(
                 "addr_to_link at the peer's pair is {mapped:?}, the peer's link {:?}",

@@ -782,7 +782,7 @@ impl PeeringReconciler {
                 // NodeAddr to key admission or the per-path dedupe below, and
                 // — matching next's OLD `poll_transport_discovery` — it
                 // consumes NO connect_budget. The driver already applied its
-                // gates (the `addr_to_link` dedup, and the dial gate of a
+                // gates (the link index dedup, and the dial gate of a
                 // capable linked peer holding the beacon's pair as a proven
                 // path) when building the pool, so emit unconditionally. On
                 // master this branch is inert (IK discovery always yields
@@ -1457,7 +1457,7 @@ mod tests {
         // Anonymous (None-identity) first-contact beacons must be dialed even
         // when the named-leg connect budget is fully exhausted — reproducing
         // next's OLD poll_transport_discovery, where the anonymous branch checked
-        // only the driver-side addr_to_link dedup and neither consumed
+        // only the driver-side link index dedup and neither consumed
         // connect_budget nor applied the per-peer cap. (next-only XX path; inert
         // on master, where discovery always yields Some.)
         let anon = |i: u8| Candidate {

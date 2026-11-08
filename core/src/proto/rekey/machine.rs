@@ -1698,12 +1698,15 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
         env: &mut Env<'_, P>,
         out: &mut Outputs<P>,
     ) {
+        // The mutation lane's break: the yielding node keeps its own attempt.
+        let mut kept = None;
         match core::mem::replace(&mut self.cycle, Cycle::Idle) {
             Cycle::Idle => {
                 if let Some(cur) = self.cur.as_mut() {
                     cur.fin = None;
                 }
             }
+            Cycle::Init(a) if node_fault!(YieldKeepsOwnAttempt) => kept = Some(a),
             Cycle::Init(a) => abandon(a, Abandon::Yielded, out),
             Cycle::PendI(p) => retire(p.ep, out),
             Cycle::PendR(p) => {
@@ -1728,6 +1731,11 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
             let mut ep = Epoch::new(tag, done, ids, false, Role::Responder, now);
             ep.route = route;
             self.install(now, ep, env, out);
+            if let Some(a) = kept.take()
+                && matches!(self.cycle, Cycle::Idle)
+            {
+                self.cycle = Cycle::Init(a);
+            }
             return;
         };
         let k = if restart { false } else { !cur_k };
@@ -1751,6 +1759,11 @@ impl<P: Profile, C: Clock> Rekey<P, C> {
                     answer: None,
                 });
             }
+        }
+        if let Some(a) = kept.take()
+            && matches!(self.cycle, Cycle::Idle)
+        {
+            self.cycle = Cycle::Init(a);
         }
     }
 

@@ -24,9 +24,13 @@ impl LifecycleView for Node {
             .filter(|(link_id, machine)| {
                 machine.is_failed()
                     || (machine.conn_is_timed_out(interval_now, timeout_ms)
-                        && !self.peer_timers.get(*link_id).is_some_and(|timers| {
-                            timers.contains_key(&TimerKind::HandshakeTimeout)
-                        }))
+                        && !self
+                            .peer_machines
+                            .timers()
+                            .get(*link_id)
+                            .is_some_and(|timers| {
+                                timers.contains_key(&TimerKind::HandshakeTimeout)
+                            }))
             })
             .map(|(link_id, machine)| ConnSnapshot {
                 link: *link_id,
@@ -49,6 +53,13 @@ impl Node {
     /// the retry-then-teardown choreography is the pure
     /// [`Fmp::poll_timeouts`](crate::proto::fmp::Fmp::poll_timeouts) decision.
     pub(in crate::node) async fn check_timeouts(&mut self) {
+        self.timeouts_body().await;
+        self.audit_live("check_timeouts");
+    }
+
+    /// The work of [`Self::check_timeouts`], which audits the per-peer maps
+    /// after it.
+    async fn timeouts_body(&mut self) {
         // First, and not behind the connection check below: a node with no
         // handshake in progress still holds TUN packets.
         self.release_stranded_tun_packets(std::time::Instant::now());
@@ -151,8 +162,8 @@ impl Node {
         if let Some(lease) = our_index {
             let idx = lease.release();
             if let Some(tid) = transport_id {
-                self.pending_outbound.remove(&(tid, idx));
-                self.pending_inbound.remove(&(tid, idx));
+                self.pending_outbound.forget(&(tid, idx));
+                self.pending_inbound.forget(&(tid, idx));
             }
             let _ = self
                 .index_allocator
@@ -172,7 +183,7 @@ impl Node {
         // open: it is that peer's, not the stale handshake's.
         self.close_handshake_link_connection(link_id).await;
 
-        // Remove link and addr_to_link
+        // Remove the link and its index entries
         self.remove_link(&link_id);
         if let Some(transport_id) = transport_id {
             self.cleanup_bootstrap_transport_if_unused(transport_id);
@@ -181,9 +192,9 @@ impl Node {
 
     /// Act on the per-peer machine timers this tick.
     ///
-    /// The sans-IO machine arms `SetTimer`/`CancelTimer` actions into
-    /// [`peer_timers`](Node::peer_timers); this is the shell driver that acts on
-    /// them: timeout reaps idle-timed-out outbound legs, retransmit resends the
+    /// The sans-IO machine arms `SetTimer`/`CancelTimer` actions into the
+    /// timer store on [`peer_machines`](Node::peer_machines); this is the
+    /// shell driver that acts on them: timeout reaps idle-timed-out outbound legs, retransmit resends the
     /// due msg1s. Handshake-TIMEOUT is driven before handshake-RETRANSMIT so a
     /// timed-out leg is reaped rather than resent on the same tick. The
     /// rekey/liveness kinds keep their own shell drivers, so only the two
@@ -193,7 +204,14 @@ impl Node {
     /// (`Node::interval_ms`), which the timers' deadlines and the legs'
     /// activity stamps are kept on.
     pub(in crate::node) async fn drive_peer_timers(&mut self, interval_now: u64) {
-        if self.peer_timers.is_empty() {
+        self.timers_body(interval_now).await;
+        self.audit_live("drive_peer_timers");
+    }
+
+    /// The work of [`Self::drive_peer_timers`], which audits the per-peer maps
+    /// after it.
+    async fn timers_body(&mut self, interval_now: u64) {
+        if self.peer_machines.timers().is_empty() {
             return;
         }
         self.drive_handshake_timeouts(interval_now).await;
@@ -218,7 +236,8 @@ impl Node {
     async fn drive_handshake_timeouts(&mut self, now_ms: u64) {
         let timeout_ms = self.config().node.rate_limit.handshake_timeout_secs * 1000;
         let timer_links: Vec<LinkId> = self
-            .peer_timers
+            .peer_machines
+            .timers()
             .iter()
             .filter(|(_, timers)| timers.contains_key(&TimerKind::HandshakeTimeout))
             .map(|(link, _)| *link)
@@ -251,9 +270,7 @@ impl Node {
                 true => (false, None),
                 false => {
                     // Orphan timer (connection already reaped elsewhere) — drop it.
-                    if let Some(timers) = self.peer_timers.get_mut(&link) {
-                        timers.remove(&TimerKind::HandshakeTimeout);
-                    }
+                    self.peer_machines.cancel(link, TimerKind::HandshakeTimeout);
                     (false, None)
                 }
             };
@@ -287,7 +304,8 @@ impl Node {
 
         // Collect due retransmit timers (kind-filtered).
         let due: Vec<LinkId> = self
-            .peer_timers
+            .peer_machines
+            .timers()
             .iter()
             .filter(|(_, timers)| {
                 timers
@@ -356,9 +374,8 @@ impl Node {
             }
         }
         for link in drop_timers {
-            if let Some(timers) = self.peer_timers.get_mut(&link) {
-                timers.remove(&TimerKind::HandshakeRetransmit);
-            }
+            self.peer_machines
+                .cancel(link, TimerKind::HandshakeRetransmit);
         }
 
         for action in self
@@ -412,17 +429,13 @@ impl Node {
                         "Resent handshake msg1"
                     );
                 }
-                self.peer_timers
-                    .entry(link)
-                    .or_default()
-                    .insert(TimerKind::HandshakeRetransmit, next_resend_at_ms);
+                self.peer_machines
+                    .arm(link, TimerKind::HandshakeRetransmit, next_resend_at_ms);
             } else {
                 // Failed send: keep retrying at the tick cadence (the old shell
                 // left next_resend_at_ms unchanged so the connection stayed due).
-                self.peer_timers
-                    .entry(link)
-                    .or_default()
-                    .insert(TimerKind::HandshakeRetransmit, now_ms);
+                self.peer_machines
+                    .arm(link, TimerKind::HandshakeRetransmit, now_ms);
             }
         }
     }

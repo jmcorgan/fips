@@ -326,19 +326,43 @@ copy.
 
 ### The mutation lane (`mutations/run.sh`)
 
-[`mutations/`](mutations/) holds patches that each put back the shape a
+[`mutations/`](mutations/) holds breaks that each put back the shape a
 real defect took, or make the smallest change that fixes a known defect,
-and [`mutations/run.sh`](mutations/run.sh), which applies each to a clean
-tree, runs the tests [`mutations/manifest.txt`](mutations/manifest.txt)
-names for it one per process, classifies each run with
-[`lib/test-verdict.sh`](lib/test-verdict.sh), and reverts the patch. A
-`red` line holds only at the test's assertion of the behaviour the patch
-breaks (its `defect:` assertion, or an anchor for a test that predates the
-marker); a `pass` line holds when the test passes. A patch that no longer
-applies reds the lane. It is a named gate run by hand at the finished tip
-of each settlement increment, not a CI stage, because a refactor of the
-patched code stops the patches applying. It prints each patch's wall time
-and the total.
+and [`mutations/run.sh`](mutations/run.sh), which runs the tests
+[`mutations/manifest.txt`](mutations/manifest.txt) names for each break one
+per process and classifies each run with
+[`lib/test-verdict.sh`](lib/test-verdict.sh). A break is a switch, a
+variant of `Fault` in `core/src/faults.rs` behind `node_fault!(Name)` and
+turned on by `FIPS_NODE_FAULTS`, and every line runs against one build. A
+new break is a switch, never a patch. A `red` line holds only at the
+test's assertion of the behaviour the break breaks (its `defect:`
+assertion, or an anchor for a test that predates the marker); a
+`pass` line holds when the test passes. Every named test must also pass
+with no switch. Before any line, a preflight checks that every switch has a
+manifest line and a site, a fence requires the switches to be absent
+from a normal build of `fips`, and a self-check on two planted switches
+shows the script tells a red test from a green one. It runs in the
+unit-test stage, here (recorded as `mutations`) and in GitHub CI's Linux
+job, after the known-defect lane. On a host whose build has no BLE
+transport the lines behind `ble_available` are skipped and counted. It
+prints each break's wall time and the total.
+
+### The live audit's reach (`check-audit-reach.py`)
+
+In a debug test build every node entry that can change a per-peer map audits
+the maps on its way out (`src/node/settle/audit.rs`), except on a node a test
+wrote past the map writers, which it skips for the rest of the test. A test
+helper that marks a node it need not would turn the audit off in every test
+that uses it, with the suite still green. So the unit-test stage that runs
+the root lib suite as threads in one process (`unit-tests-profiling` here,
+the optional-features step in GitHub CI) sets `FIPS_AUDIT_REACH` to a file,
+into which each audit writes one row per test thread, node and outcome, and
+[`check-audit-reach.py`](check-audit-reach.py) then counts the (test, node)
+pairs (recorded here as `audit-reach`). It exits 1 when fewer than 97.0% of
+the pairs that reach an audit are audited, or fewer than 2300 are, and 2 on
+an empty or unreadable file. The floors are constants at the top of the
+script; lowering one is an edit a review sees. Under nextest a test's thread
+does not name it, so the check does not read nextest runs.
 
 ### Root-only tests (`root-tests.sh`)
 

@@ -760,6 +760,9 @@ impl ActivePeer {
     ) -> (LinkOutputs, Outputs<UdpSlot>) {
         self.reset_replay_suppressed();
         self.hs_lines.roll();
+        // The mutation lane's break: the link stays on its old transport and
+        // its bundle is not renewed.
+        let kept = node_fault!(MoveKeepsOldPair).then(|| self.bound_transport());
         let Some(old) = self.rekey.take() else {
             return (vec![LinkOutput::Release(ours)], Vec::new());
         };
@@ -779,7 +782,8 @@ impl ActivePeer {
             return (out, Vec::new());
         };
         let mut paths = Vec::new();
-        match link_machine(bond, session, ours, theirs, to.0, carry.into(), caps) {
+        let transport = kept.unwrap_or(to.0);
+        match link_machine(bond, session, ours, theirs, transport, carry.into(), caps) {
             Ok((rekey, built)) => {
                 out.extend(built);
                 self.rekey = Some(rekey);
@@ -788,7 +792,9 @@ impl ActivePeer {
                     facts: caps.path.facts,
                     cost: self.live_cost(),
                 };
-                if let Some(bundle) = self.send.bundle.as_mut() {
+                if kept.is_none()
+                    && let Some(bundle) = self.send.bundle.as_mut()
+                {
                     paths = bundle.renew(peer_now(), &env, to);
                 }
             }
@@ -1460,6 +1466,10 @@ impl ActivePeer {
     /// `now_ms`, a monotonic reading: always for a peer never sent one,
     /// otherwise once the interval has passed since the last.
     pub fn can_send_tree_announce(&self, now_ms: u64) -> bool {
+        if node_fault!(TreeNoneAsZero) {
+            return now_ms.saturating_sub(self.last_tree_announce_sent_ms.unwrap_or(0))
+                >= self.tree_announce_min_interval_ms;
+        }
         self.last_tree_announce_sent_ms
             .is_none_or(|t| now_ms.saturating_sub(t) >= self.tree_announce_min_interval_ms)
     }
@@ -1625,11 +1635,11 @@ impl ActivePeer {
         })
     }
 
-    /// Test-only: every index this peer's link rekey machine binds, with
-    /// the transport recorded at the binding and whether a decrypt worker
-    /// holds that session's receive half, for the audit of the node's index
-    /// map and worker table against the machine.
-    #[cfg(test)]
+    /// Every index this peer's link rekey machine binds, with the transport
+    /// recorded at the binding and whether a decrypt worker holds that
+    /// session's receive half, for the audit of the node's index map and
+    /// worker table against the machine. In test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn link_bindings(&self) -> Vec<((TransportId, u32), bool)> {
         use fips_core::proto::rekey::{Purpose, RecvHome};
         let Some(rekey) = self.rekey.as_ref() else {

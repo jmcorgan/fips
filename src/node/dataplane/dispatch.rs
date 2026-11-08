@@ -168,7 +168,7 @@ impl Node {
     /// selects an alternative or becomes root, and marks remaining peers
     /// for pending tree announce (delivered on next tick).
     pub(in crate::node) fn remove_active_peer(&mut self, node_addr: &NodeAddr) {
-        let mut peer = match self.peers.remove(node_addr) {
+        let mut peer = match self.peers.take(node_addr) {
             Some(p) => p,
             None => {
                 debug!(peer = %self.peer_display_name(node_addr), "Peer already removed");
@@ -232,7 +232,9 @@ impl Node {
         // above, so no reseed follows and the two go together, which is what
         // keeps a peer returning over a wider link from being clamped to the
         // one it left.
-        self.path_mtu_lookup_release(node_addr);
+        if !node_fault!(RestartKeepsClamp) {
+            self.path_mtu_lookup_release(node_addr);
+        }
 
         let link_id = peer.link_id();
         let transport_id = peer.transport_id();
@@ -250,7 +252,9 @@ impl Node {
         self.release_peer_indices(node_addr, &mut peer);
 
         // Remove link and address mapping
-        self.remove_link(&link_id);
+        if !node_fault!(RemoveKeepsLink) {
+            self.remove_link(&link_id);
+        }
         // Drop this peer's inert machine, keyed by the link_id
         // derived above (a peer's link_id is immutable, so the key never
         // moved). Keeps peers <-> peer_machines in exact correspondence on

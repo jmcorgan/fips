@@ -9,6 +9,7 @@
 //! new link. Each test drives a restart over loopback and asserts that both
 //! ends end up on one session with that state reset and announced again.
 
+use super::settle::audit::assert_coherent;
 use super::*;
 use crate::node::tests::rekey_parity::{
     deliver, deliver_held, failures, heartbeat, linked_pair, pump, rekey_config, reveal_restart,
@@ -149,6 +150,7 @@ async fn restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions() {
         "A holds the restarted B's tree declaration and filter"
     );
 
+    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -200,6 +202,7 @@ async fn a_restart_seen_in_a_rekey_msg2_keeps_the_tun_packets_held_behind_the_se
         "the packet held behind the ended session must stay held for the next session"
     );
 
+    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }
 
@@ -283,6 +286,7 @@ async fn outbound_completion_with_a_changed_epoch_replaces_the_machine() {
             "the dialer decrypts the restarted node's frames (dialer smaller: {dialer_smaller})"
         );
 
+        assert_coherent(&mut nodes, &[], "the end of the test").await;
         cleanup_nodes(&mut nodes).await;
     }
 }
@@ -340,5 +344,6 @@ async fn a_pin_ends_when_a_rekey_msg2_reveals_the_peer_restarted() {
         peer.bundle().unwrap().pin().is_none(),
         "the pin ends when the peer restarted"
     );
+    assert_coherent(&mut r.nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut r.nodes).await;
 }

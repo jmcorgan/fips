@@ -991,6 +991,19 @@ run_tests() {
         record "known-defect" 1
     fi
 
+    # The mutation lane: each switch in core/src/faults.rs, turned on in a
+    # test process of its own, must turn red the tests
+    # testing/mutations/manifest.txt names for it, at their assertion of the
+    # behaviour it breaks, and every named test must pass with no switch. It
+    # also checks that no switch reaches a normal build of fips. Mirrored in
+    # .github/workflows/ci.yml.
+    info "testing/mutations/run.sh"
+    if bash "$SCRIPT_DIR/mutations/run.sh" 2>&1; then
+        record "mutations" 0
+    else
+        record "mutations" 1
+    fi
+
     # The root crate's optional features add code the default-feature run
     # above never compiles: `profiling` a module, a recorder and a writer
     # thread, `test-overrides` the honoured test-only configuration keys and
@@ -1001,12 +1014,27 @@ run_tests() {
     # nextest, this stage is also the only run of the root lib suite as
     # threads in one process, a mode the code relies on, so it keeps the whole
     # root suite. Mirrored in .github/workflows/ci.yml.
+    #
+    # Being that run, it also records the reach of the node's live map audit:
+    # each test thread names its test, so FIPS_AUDIT_REACH's rows say which
+    # (test, node) pairs were audited and which a test had written past the
+    # map writers. check-audit-reach.py holds them to its floors.
+    local reach_rows
+    reach_rows=$(mktemp "/tmp/ci-audit-reach.XXXXXX")
     info "cargo test -p fips-mesh --lib --features profiling,test-overrides"
-    if cargo test -p fips-mesh --lib --features profiling,test-overrides 2>&1; then
+    if FIPS_AUDIT_REACH="$reach_rows" \
+        cargo test -p fips-mesh --lib --features profiling,test-overrides 2>&1; then
         record "unit-tests-profiling" 0
     else
         record "unit-tests-profiling" 1
     fi
+    info "testing/check-audit-reach.py"
+    if python3 "$SCRIPT_DIR/check-audit-reach.py" "$reach_rows" 2>&1; then
+        record "audit-reach" 0
+    else
+        record "audit-reach" 1
+    fi
+    rm -f "$reach_rows"
 
     # Debug-only helpers (anything behind #[cfg(debug_assertions)]) vanish in a
     # release build, so a test calling one without the same gate breaks a build

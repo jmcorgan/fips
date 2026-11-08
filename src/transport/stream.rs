@@ -103,6 +103,9 @@ impl DrainingWriters {
     /// drains still running.
     pub(crate) fn drain(&self, send_task: JoinHandle<()>, bound: Duration) {
         let writer = send_task.abort_handle();
+        if node_fault!(DrainAbortsAtOnce) {
+            send_task.abort();
+        }
         let timer = drain_writer(send_task, bound);
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|(_, timer)| !timer.is_finished());
@@ -116,6 +119,10 @@ impl DrainingWriters {
     /// and usable.
     pub(crate) async fn stop(&self) {
         let entries = std::mem::take(&mut *self.entries.lock().unwrap_or_else(|e| e.into_inner()));
+        if node_fault!(DrainStopLeavesWriters) {
+            drop(entries);
+            return;
+        }
         for (writer, _) in &entries {
             writer.abort();
         }

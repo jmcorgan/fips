@@ -195,7 +195,7 @@ async fn frames_naming_unknown_or_orphaned_indices_are_counted_and_served_and_to
 
     let orphaned = our_index.as_u32().wrapping_add(2);
     let gone = NodeAddr::from_bytes([0x77; 16]);
-    node.peers_by_index.insert(orphaned, gone);
+    node.peers_by_index.raw().insert(orphaned, gone);
     node.handle_encrypted_frame(frame_naming(transport_id, orphaned))
         .await;
     assert_eq!(

@@ -4,6 +4,7 @@
 //! handshake, spanning tree convergence, mixed-transport routing.
 //! All tests use MockBleIo (in-memory channels, no hardware needed).
 
+use super::settle::audit::{Exempt, assert_coherent};
 use super::*;
 use crate::config::BleConfig;
 use crate::proto::fmp::wire::{PHASE_ESTABLISHED, PHASE_MSG1, PHASE_MSG2, PHASE_MSG3};
@@ -631,7 +632,7 @@ async fn reaping_a_handshake_leg_keeps_the_peer_link_it_shares() {
             .with_source_addr(peer_addr.clone()),
     )
     .unwrap();
-    node.links.insert(
+    node.links.raw().insert(
         leg,
         Link::connectionless(
             leg,
@@ -818,6 +819,7 @@ async fn crossed_handshakes_on_one_of_two_links_keep_the_pair_peered() {
         verified_at(&nodes[1], &a0x.to_transport_addr()).await,
         Some(false)
     );
+    assert_coherent(&mut nodes, &[], "the end of the test").await;
     cleanup_nodes(&mut nodes).await;
 }
 
@@ -1215,6 +1217,15 @@ async fn a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification
         "node 1's L1 is no longer node 0's link"
     );
     drop(held);
+    assert_coherent(
+        &mut nodes,
+        &[
+            Exempt::CrossedInbound { node: 0, peer: 1 },
+            Exempt::SettledAtMsg3 { node: 1, peer: 0 },
+        ],
+        "the end of the test",
+    )
+    .await;
     cleanup_nodes(&mut nodes).await;
 }
 

@@ -19,7 +19,7 @@ const PACKET_TOO_BIG: u8 = 2;
 /// A node configuration with one loopback UDP transport, the TUN enabled
 /// (so only the app-owned channels keep a system device from being made),
 /// and no DNS responder or control socket.
-fn app_tun_config() -> Config {
+pub(super) fn app_tun_config() -> Config {
     let mut config = Config::new();
     config.transports.udp = crate::config::TransportInstances::Single(crate::config::UdpConfig {
         bind_addr: Some("127.0.0.1:0".to_string()),
@@ -32,14 +32,14 @@ fn app_tun_config() -> Config {
 }
 
 /// The address of the node's first UDP transport.
-fn udp_addr(node: &Node) -> std::net::SocketAddr {
+pub(super) fn udp_addr(node: &Node) -> std::net::SocketAddr {
     node.transport_ids()
         .find_map(|id| node.get_transport(id).and_then(|t| t.local_addr()))
         .expect("the node has a bound UDP transport")
 }
 
 /// An IPv6 packet of `len` bytes, No Next Header, from `src` to `dst`.
-fn ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr, len: usize) -> Vec<u8> {
+pub(super) fn ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr, len: usize) -> Vec<u8> {
     let mut packet = vec![0u8; len];
     packet[0] = 0x60;
     packet[4..6].copy_from_slice(&((len - 40) as u16).to_be_bytes());

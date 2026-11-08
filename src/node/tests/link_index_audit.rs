@@ -26,58 +26,20 @@ use super::*;
 /// carrier) and nothing else, and, when it
 /// runs a decrypt-worker pool, that the workers hold exactly the sessions
 /// the machines recorded as delegated, every peer's current session among
-/// them.
+/// them. The node's `index` clause states all but the last; the last holds
+/// only for a quiet node whose pool refused nothing.
 pub(super) fn audit(node: &Node, step: &str) {
-    let mut bound = std::collections::HashMap::new();
-    let mut delegated = std::collections::HashSet::new();
-    let mut leased = 0;
-    for (addr, peer) in node.peers.iter() {
-        for ((_, key), held) in peer.link_bindings() {
-            assert!(
-                bound.insert(key, *addr).is_none(),
-                "{step}: index {key:?} bound twice"
-            );
-            if held {
-                delegated.insert(key);
-            }
-        }
-        leased += peer.link_bindings().len();
-    }
-    leased += node
-        .peer_machines
-        .values()
-        .filter(|machine| machine.our_index().is_some())
-        .count();
-    let mapped: std::collections::HashMap<_, _> = node
-        .peers_by_index
-        .iter()
-        .map(|(key, addr)| (*key, *addr))
-        .collect();
-    assert_eq!(
-        mapped, bound,
-        "{step}: peers_by_index must map exactly the indices the link machines bind"
-    );
-    assert_eq!(
-        node.index_allocator.count(),
-        leased,
-        "{step}: the allocator must hold exactly the leased indices"
-    );
+    crate::node::settle::audit::index(node, step);
     #[cfg(unix)]
     if node.supervisor.decrypt_workers.is_some() {
-        assert_eq!(
-            node.decrypt_registered_sessions, delegated,
-            "{step}: the workers must hold exactly the sessions the machines delegated"
-        );
         for peer in node.peers.values() {
             let current = peer.our_index().unwrap().as_u32();
             assert!(
-                delegated.contains(&current),
+                node.decrypt_registered_sessions.contains(&current),
                 "{step}: the workers must hold every current session"
             );
         }
     }
-    #[cfg(not(unix))]
-    let _ = delegated;
 }
 
 /// Carry out what `tn`'s decrypt workers report of the frames dispatched to

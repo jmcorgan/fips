@@ -88,9 +88,10 @@ async fn test_two_node_handshake_udp() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a, link_a);
+    node_a.links.raw().insert(link_id_a, link_a);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
 
     // Send msg1 from A to B over UDP
@@ -337,9 +338,10 @@ async fn test_run_rx_loop_handshake() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a, link_a);
+    node_a.links.raw().insert(link_id_a, link_a);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
 
     // Send msg1 from A to B over real UDP
@@ -528,12 +530,14 @@ async fn test_cross_connection_both_initiate() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a_out, link_a_out);
+    node_a.links.raw().insert(link_id_a_out, link_a_out);
     node_a
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id_a, remote_addr_b.clone()), link_id_a_out);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a_out);
 
     // Node B initiates to Node A
@@ -566,12 +570,14 @@ async fn test_cross_connection_both_initiate() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_b.links.insert(link_id_b_out, link_b_out);
+    node_b.links.raw().insert(link_id_b_out, link_b_out);
     node_b
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id_b, remote_addr_a.clone()), link_id_b_out);
     node_b
         .pending_outbound
+        .raw()
         .insert((transport_id_b, our_index_b.as_u32()), link_id_b_out);
 
     // Both send msg1 over UDP
@@ -766,10 +772,12 @@ async fn test_stale_connection_cleanup() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node.links.insert(link_id, link);
-    node.addr_to_link
+    node.links.raw().insert(link_id, link);
+    node.links
+        .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
+        .raw()
         .insert((transport_id, our_index.as_u32()), link_id);
 
     // Verify state before timeout check
@@ -807,7 +815,10 @@ async fn test_stale_connection_cleanup() {
         "Session index should be freed"
     );
     assert!(
-        !node.addr_to_link.contains_key(&(transport_id, remote_addr)),
+        !node
+            .links
+            .index()
+            .contains_key(&(transport_id, remote_addr)),
         "addr_to_link should be cleaned up"
     );
 }
@@ -853,10 +864,12 @@ async fn test_failed_connection_cleanup() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node.links.insert(link_id, link);
-    node.addr_to_link
+    node.links.raw().insert(link_id, link);
+    node.links
+        .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
+        .raw()
         .insert((transport_id, our_index.as_u32()), link_id);
 
     // Simulate a stored-handshake send failure through the control machine —
@@ -963,10 +976,12 @@ async fn test_resend_scheduling() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node.links.insert(link_id, link);
-    node.addr_to_link
+    node.links.raw().insert(link_id, link);
+    node.links
+        .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
+        .raw()
         .insert((transport_id, our_index.as_u32()), link_id);
 
     // The msg1-resend counter and its due timer live on the per-peer machine,
@@ -994,11 +1009,15 @@ async fn test_resend_scheduling() {
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.insert(link_id, machine);
-    node.peer_timers.entry(link_id).or_default().insert(
-        crate::peer::machine::TimerKind::HandshakeRetransmit,
-        now_ms + 1000,
-    );
+    node.peer_machines.raw().insert(link_id, machine);
+    node.peer_machines
+        .raw_timers()
+        .entry(link_id)
+        .or_default()
+        .insert(
+            crate::peer::machine::TimerKind::HandshakeRetransmit,
+            now_ms + 1000,
+        );
 
     // Before the scheduled time the timer isn't due, so nothing fires.
     node.drive_peer_timers(now_ms + 500).await;
@@ -1048,10 +1067,12 @@ async fn test_handshake_timeout_drive() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node.links.insert(link_id, link);
-    node.addr_to_link
+    node.links.raw().insert(link_id, link);
+    node.links
+        .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id);
     node.pending_outbound
+        .raw()
         .insert((transport_id, our_index.as_u32()), link_id);
 
     // Machine in SentMsg1, carrying the pending connection, with a
@@ -1074,11 +1095,15 @@ async fn test_handshake_timeout_drive() {
     let _ = machine.set_conn_our_index(our_lease);
     machine.set_conn_transport_id(transport_id);
     machine.set_leg(conn.take_leg().unwrap());
-    node.peer_machines.insert(link_id, machine);
-    node.peer_timers.entry(link_id).or_default().insert(
-        crate::peer::machine::TimerKind::HandshakeTimeout,
-        dial_ms + 30_000,
-    );
+    node.peer_machines.raw().insert(link_id, machine);
+    node.peer_machines
+        .raw_timers()
+        .entry(link_id)
+        .or_default()
+        .insert(
+            crate::peer::machine::TimerKind::HandshakeTimeout,
+            dial_ms + 30_000,
+        );
 
     assert_eq!(node.connection_count(), 1);
 
@@ -1096,7 +1121,7 @@ async fn test_handshake_timeout_drive() {
         "Control machine dropped with the reaped connection"
     );
     assert!(
-        !node.peer_timers.contains_key(&link_id),
+        !node.peer_machines.timers().contains_key(&link_id),
         "Timer store dropped with the reaped connection"
     );
 }
@@ -1344,7 +1369,8 @@ async fn test_should_admit_msg1_admits_rekey_when_accept_off() {
     // Pre-populate addr_to_link as if a session were established for this
     // peer on this transport (rekey msg1 will arrive against this entry).
     let link_id = node.allocate_link_id();
-    node.addr_to_link
+    node.links
+        .raw_index()
         .insert((transport_id, addr.clone()), link_id);
 
     assert!(node.should_admit_msg1(transport_id, &addr));
@@ -1383,7 +1409,8 @@ async fn test_should_admit_msg1_admits_rekey_when_udp_accept_off() {
     // rekey carve-out admits the msg1 even though the transport still
     // says accept_connections() == false.
     let link_id = node.allocate_link_id();
-    node.addr_to_link
+    node.links
+        .raw_index()
         .insert((transport_id, addr.clone()), link_id);
 
     assert!(node.should_admit_msg1(transport_id, &addr));
@@ -1432,7 +1459,8 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
     // numeric-form.
     let hostname_addr = TransportAddr::from_string("core-vm.example:2121");
     let link_id = node.allocate_link_id();
-    node.addr_to_link
+    node.links
+        .raw_index()
         .insert((transport_id, hostname_addr.clone()), link_id);
 
     // Promote a peer at the hostname's resolved numeric form
@@ -1443,7 +1471,7 @@ async fn test_should_admit_msg1_admits_rekey_when_addr_form_differs() {
     let mut peer = ActivePeer::new(peer_identity, link_id, 1000);
     let numeric_addr = TransportAddr::from_string("100.64.0.5:2121");
     peer.set_current_addr(transport_id, numeric_addr.clone());
-    node.peers.insert(peer_node_addr, peer);
+    node.peers.raw().insert(peer_node_addr, peer);
 
     // Sanity: legacy carve-out still works for the hostname-form lookup.
     assert!(node.should_admit_msg1(transport_id, &hostname_addr));
@@ -1517,7 +1545,7 @@ async fn a_msg1_from_a_held_path_other_than_the_active_one_is_not_from_an_establ
         ),
         "precondition: the acked path is proven and not active"
     );
-    node.peers.insert(peer_node_addr, peer);
+    node.peers.raw().insert(peer_node_addr, peer);
 
     assert!(node.is_established_link_msg1(transport_id, &active));
     assert!(node.should_admit_msg1(transport_id, &active));
@@ -1592,7 +1620,7 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
 
         let addr = TransportAddr::from_string("10.0.0.2:2121");
         let link_id = node.allocate_link_id();
-        node.links.insert(
+        node.links.raw().insert(
             link_id,
             Link::connectionless(
                 link_id,
@@ -1602,7 +1630,8 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
                 Duration::from_millis(100),
             ),
         );
-        node.addr_to_link
+        node.links
+            .raw_index()
             .insert((transport_id, addr.clone()), link_id);
 
         assert!(
@@ -1636,7 +1665,7 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
 
         let addr = TransportAddr::from_string("10.0.0.3:2121");
         let link_id = node.allocate_link_id();
-        node.links.insert(
+        node.links.raw().insert(
             link_id,
             Link::connectionless(
                 link_id,
@@ -1646,7 +1675,8 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
                 Duration::from_millis(100),
             ),
         );
-        node.addr_to_link
+        node.links
+            .raw_index()
             .insert((transport_id, addr.clone()), link_id);
 
         assert!(
@@ -1674,7 +1704,8 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
 
         let hostname_addr = TransportAddr::from_string("core-vm.example:2121");
         let link_id = node.allocate_link_id();
-        node.addr_to_link
+        node.links
+            .raw_index()
             .insert((transport_id, hostname_addr.clone()), link_id);
 
         let peer_full = crate::Identity::generate();
@@ -1683,7 +1714,7 @@ async fn established_predicate_is_independent_of_should_admit_msg1() {
         let mut peer = ActivePeer::new(peer_identity, link_id, 1000);
         let numeric_addr = TransportAddr::from_string("100.64.0.5:2121");
         peer.set_current_addr(transport_id, numeric_addr.clone());
-        node.peers.insert(peer_node_addr, peer);
+        node.peers.raw().insert(peer_node_addr, peer);
 
         // Limb 1: addr_to_link maps the hostname form to a link a peer owns.
         assert!(node.should_admit_msg1(transport_id, &hostname_addr));
@@ -1825,14 +1856,16 @@ async fn drive_to_msg3(
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    initiator.node.links.insert(link_id, link);
+    initiator.node.links.raw().insert(link_id, link);
     initiator
         .node
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((initiator.transport_id, responder.addr.clone()), link_id);
     initiator
         .node
         .pending_outbound
+        .raw()
         .insert((initiator.transport_id, our_index.as_u32()), link_id);
 
     initiator
@@ -2539,7 +2572,7 @@ async fn test_anonymous_self_connect_drop_disposes_machine() {
     // bare `links.remove` plus `addr_to_link.remove` would take down the live
     // inbound leg's routing, and this is where that shows up.
     assert_eq!(
-        node.node.addr_to_link.get(&(transport_id, self_addr)),
+        node.node.links.index().get(&(transport_id, self_addr)),
         Some(&inbound_link),
         "the surviving inbound leg keeps the address mapping; the dropped \
          outbound leg must not take it down"
@@ -3452,6 +3485,7 @@ async fn wire_index_is_never_freed() {
     let dead_link = LinkId::new(4242);
     assert!(!node.peer_machines.contains_key(&dead_link));
     node.pending_inbound
+        .raw()
         .insert((transport_id, idx.as_u32()), dead_link);
 
     let baseline = node.index_allocator.count();
@@ -3535,6 +3569,7 @@ async fn test_msg3_orphaned_entry_naming_live_peer_index_does_not_free() {
     assert!(!node_b.peer_machines.contains_key(&dead_link));
     node_b
         .pending_inbound
+        .raw()
         .insert((transport_id, victim_idx.as_u32()), dead_link);
 
     let baseline = node_b.index_allocator.count();
@@ -3603,6 +3638,7 @@ async fn test_msg3_orphaned_entry_naming_pending_leg_index_does_not_free() {
     assert!(!node_b.peer_machines.contains_key(&dead_link));
     node_b
         .pending_inbound
+        .raw()
         .insert((transport_id, victim_idx.as_u32()), dead_link);
 
     let baseline = node_b.index_allocator.count();
@@ -3705,6 +3741,7 @@ async fn test_msg3_orphan_on_other_transport_does_not_free_live_index() {
     initiator
         .node
         .pending_inbound
+        .raw()
         .insert((other_transport, victim_idx.as_u32()), dead_link);
 
     let baseline = initiator.node.index_allocator.count();
@@ -4049,7 +4086,8 @@ async fn test_outbound_msg2_acl_reject_reschedules_dial() {
 /// The `addr_to_link` entry for `addr` on `node`'s handshake transport.
 fn link_at(node: &HsNode, addr: &TransportAddr) -> Option<LinkId> {
     node.node
-        .addr_to_link
+        .links
+        .index()
         .get(&(node.transport_id, addr.clone()))
         .copied()
 }
@@ -4599,7 +4637,7 @@ fn seed_peer(
             .with_transport_id(transport_id)
             .with_source_addr(addr.clone())
     });
-    node.links.insert(
+    node.links.raw().insert(
         link,
         Link::connectionless(
             link,
@@ -4609,7 +4647,9 @@ fn seed_peer(
             std::time::Duration::from_millis(100),
         ),
     );
-    node.addr_to_link.insert((transport_id, addr.clone()), link);
+    node.links
+        .raw_index()
+        .insert((transport_id, addr.clone()), link);
     node.promote_connection(link, identity, 2_000).unwrap();
     (*identity.node_addr(), link, index)
 }
@@ -4622,7 +4662,8 @@ fn deferred_leg(node: &Node, transport_id: TransportId, addr: &TransportAddr) ->
     use crate::peer::machine::{HandshakePhase, PeerState};
 
     let leg = node
-        .addr_to_link
+        .links
+        .index()
         .get(&(transport_id, addr.clone()))
         .copied()
         .expect("the address key must name the kept leg");
@@ -4730,7 +4771,7 @@ async fn a_transient_msg2_failure_from_an_established_peer_address_leaves_the_fr
     let leg = deferred_leg(&node, transport_id, &source_addr);
     assert_ne!(leg, peer_link, "the msg1 built a fresh leg");
     assert_eq!(
-        node.displaced_links.get(&leg).map(|(_, prior)| *prior),
+        node.links.prior(&leg),
         Some(peer_link),
         "the fresh leg records the peer's link it displaced"
     );
@@ -4891,7 +4932,7 @@ mod dead_encrypt_worker {
             .unwrap()
             .start_handshake(keypair, epoch, LegStamp::at(1000))
             .unwrap();
-        node_a.links.insert(
+        node_a.links.raw().insert(
             link_id,
             Link::connectionless(
                 link_id,
@@ -4903,6 +4944,7 @@ mod dead_encrypt_worker {
         );
         node_a
             .pending_outbound
+            .raw()
             .insert((tid, our_index.as_u32()), link_id);
         node_a
             .transports

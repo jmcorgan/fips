@@ -11,13 +11,14 @@
 //! 127.0.0.1, a crossed TCP dial, delivery until the nodes are idle, and
 //! the check that two nodes are left on one working session.
 
-mod audit;
+pub(super) mod audit;
 mod bounds;
 mod carry;
 mod clock;
 mod crossing;
 mod fsp;
 mod lane;
+mod live;
 
 use super::spanning_tree::{
     TestNode, add_loopback_alias, bridge_to_unbounded, cleanup_nodes, loopback_tap,
@@ -269,7 +270,7 @@ pub(super) async fn crossed_tcp(on: bool, zero_smaller: bool) -> (Vec<TestNode>,
 /// part of the key; it is kept so a test names the transport it plants
 /// for, and the planting is written once, here.
 pub(super) fn bind_index(node: &mut Node, _tid: TransportId, index: u32, peer: NodeAddr) {
-    node.peers_by_index.insert(index, peer);
+    node.peers_by_index.raw().insert(index, peer);
 }
 
 /// A second loopback address for the node listening on `existing`, for

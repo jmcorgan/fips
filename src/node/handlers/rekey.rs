@@ -192,6 +192,13 @@ impl Node {
     /// one machine runs before its start pass, so its frees come before its
     /// allocations.
     pub(in crate::node) async fn poll_link_rekeys(&mut self) {
+        self.rekeys_body().await;
+        self.audit_live("poll_link_rekeys");
+    }
+
+    /// The work of [`Self::poll_link_rekeys`], which audits the per-peer maps
+    /// after it.
+    async fn rekeys_body(&mut self) {
         let addrs: Vec<NodeAddr> = self
             .peers
             .iter()
@@ -408,7 +415,9 @@ impl Node {
         if let Some(mmp) = entry.as_ref().and_then(|e| e.mmp()) {
             Self::log_session_mmp_teardown(&self.peer_display_name(addr), mmp);
         }
-        self.path_mtu_lookup_release(addr);
+        if !node_fault!(ClampEntryKept) {
+            self.path_mtu_lookup_release(addr);
+        }
         entry.is_some()
     }
 
@@ -608,10 +617,12 @@ impl Node {
         for output in out {
             match output {
                 LinkOutput::Bind { index, .. } => {
-                    self.peers_by_index.insert(index, *node_addr);
+                    self.peers_by_index.bind(index, *node_addr);
                 }
                 LinkOutput::Unbind { index, .. } => {
-                    self.peers_by_index.remove(&index);
+                    if !node_fault!(UnbindKept) {
+                        self.peers_by_index.unbind(&index);
+                    }
                 }
                 LinkOutput::Delegate {
                     tag, index, recv, ..

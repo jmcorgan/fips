@@ -1,100 +1,52 @@
 # The mutation lane's manifest: one line per test, tab-separated.
-#   <patch> <red|pass> <crate> <test path> [<anchor>]
-# <patch> names <patch>.patch in this directory; a patch's lines are
-# consecutive. A red line with no anchor needs the test's own `defect:`
-# assertion; an anchor (a substring of the first panic message line, or the
-# file:line the panic must be at) is for a test that predates the marker, or
-# picks one `defect:` assertion of a test that has more than one. See run.sh.
-move-keeps-old-pair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	s takes the msg2's transport and source address as l's
-move-keeps-old-pair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	s takes the msg2's transport and source address as l's
-move-keeps-old-pair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 keeps L2, the link its winning handshake ran on, pooled
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_smaller_first	defect: crossed TCP dials lost the peering
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::crossed_tcp_dials_leave_a_working_session_on_one_connection_larger_first	defect: crossed TCP dials lost the peering
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_on_another_transport_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_crossed_dial_won_from_another_address_leaves_a_coherent_pair	defect: the smaller node holds the larger at the winning msg2's transport and source
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: the audit finds only the dialer's documented breach
-move-keeps-old-pair	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_smaller_dialer	defect: the audit finds only the dialer's documented breach
-ignore-own-dial	red	fips-mesh	node::tests::handshake::heard::a_second_msg1_after_the_replaceable_age_from_the_larger_address_leaves_a_working_peering	the responder must have decrypted the dialer's frames on the peering that replaced the first
-ignore-own-dial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_leaves_a_working_peering_larger_dialer	defect: Err(
-ignore-own-dial	red	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_on_another_transport_leaves_a_working_peering_larger_dialer	defect: Err(
-ignore-own-dial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_a_working_peering_larger_dialer
-ignore-own-dial	pass	fips-mesh	node::tests::settle::crossing::a_second_msg1_more_than_1s_later_with_its_msg2_first_leaves_one_session_by_the_audit_larger_dialer
-forget-dial-on-refused-msg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
-forget-dial-on-refused-msg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
-yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
-yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
-yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
-yield-keeps-own-attempt	red	fips-core	proto::rekey::tests::sim::clean_runs_rotate_on_cadence_with_no_reject_abandon_revert_or_assumed_cutover	reported FinalNoAttempt
-yield-keeps-own-attempt	red	fips-mesh	node::tests::session::simultaneous_initiation_converges_with_no_rekey_armed	no setup may reach an established end
-responder-cutover-skips-filter-mark	red	fips-mesh	node::tests::bloom::redial_answered_as_a_rekey_resends_the_filter	A must hold B's filter after B answered its redial as a rekey
-responder-cutover-skips-filter-mark	red	fips-mesh	node::tests::settle::carry::redial_from_the_smaller_node_answered_as_a_rekey_resends_the_filter
-responder-cutover-skips-filter-mark	red	fips-mesh	node::tests::settle::carry::redial_from_the_larger_node_answered_as_a_rekey_resends_the_filter
-clamp-entry-kept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_clamp_entry_the_probes_session_tightened	must not outlive the session
-clamp-entry-kept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
-restart-keeps-clamp	red	fips-mesh	node::tests::settle::carry::a_restart_msg1_releases_the_clamp_entry_of_the_session_it_clears
-session-spin-kept	red	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
-session-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-session-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_session_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-session-spin-kept	pass	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
-session-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_link_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-session-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_link_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-link-spin-kept	red	fips-core	proto::mmp::tests::spin_rekey::link_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
-link-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_link_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-link-spin-kept	red	fips-core	proto::mmp::tests::rekey_reset::a_link_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-link-spin-kept	pass	fips-core	proto::mmp::tests::spin_rekey::session_spin_bit_keeps_spinning_after_a_rekey_cutover_whose_counters_start_again
-link-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_initiators_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-link-spin-kept	pass	fips-core	proto::mmp::tests::rekey_reset::a_session_responders_rekey_reset_restarts_its_spin_bit_and_keeps_the_role
-tree-carry-across-restart	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
-new-peer-starts-rate-limited	red	fips-mesh	node::tests::settle::carry::a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_announce_at_once
-new-peer-starts-rate-limited	red	fips-mesh	node::tests::settle::carry::a_peer_replaced_by_a_restart_after_an_announce_just_now_is_sent_a_tree_announce_at_once
-drop-initiator-mark	red	fips-mesh	node::tests::settle::carry::the_ble_initiators_link_is_verified_before_any_responder_frame
-tree-on-wall	red	fips-mesh	node::tests::settle::clock::a_backward_wall_step_does_not_hold_a_tree_announce_past_its_interval
-tree-none-as-zero	red	fips-mesh	node::tests::settle::clock::a_peer_never_sent_a_tree_announce_may_be_sent_one_at_the_clocks_first_instants
-interval-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
-interval-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early
-gate-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_loopback_peering_heard_just_now
-gate-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_a_peering_heard_just_now
-gate-on-wall	red	fips-mesh	node::tests::settle::clock::a_heard_peering_quiet_past_the_restart_interval_is_replaced_by_a_restart_msg1
-unheard-age-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_let_a_msg1_replace_an_unheard_peering_promoted_just_now
-touch-keeps-heard-instant	red	fips-mesh	node::tests::settle::clock::a_peering_heard_just_now_after_an_old_promotion_is_not_replaced_by_a_restart_msg1
-memory-on-wall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
-memory-on-wall	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
-memory-verdict-on-packet-stamp	red	fips-mesh	node::tests::settle::clock::a_forward_wall_step_does_not_empty_the_replay_memory
-memory-verdict-on-packet-stamp	red	fips-mesh	node::tests::handshake::nine_distinct_captures_in_fifteen_seconds_promote_at_most_eight	every promotion of an unheard peering is remembered
-memory-never-expires	red	fips-mesh	node::tests::settle::clock::a_replay_memory_entry_ages_out_after_the_interval_across_a_backward_wall_step
+#   <break> <red|pass> <crate> <test path> [<anchor>]
+# <break> is a switch, a variant of `Fault` in core/src/faults.rs; a
+# break's lines are consecutive. A red line with no anchor needs the test's
+# own `defect:` assertion; an anchor (a substring of the first panic message
+# line, or the file:line the panic must be at) is for a test that predates
+# the marker, or picks one `defect:` assertion of a test that has more than
+# one. See run.sh.
+MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_on_another_transport_moves_the_link_to_the_msg2s_transport_and_address	s takes the msg2's transport and source address as l's
+MoveKeepsOldPair	red	fips-mesh	node::tests::crossed_dial::a_crossed_dial_won_from_another_address_moves_the_link_to_the_msg2s_address	s takes the msg2's transport and source address as l's
+MoveKeepsOldPair	red	fips-mesh	node::tests::ble::a_crossed_dial_won_on_a_second_link_moves_the_peer_and_its_verification_onto_that_link	node 0 keeps L2, the link its winning handshake ran on, pooled
+ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_garbage_msg2s
+ForgetDialOnRefusedMsg2	red	fips-mesh	node::tests::settle::bounds::a_pending_dial_keeps_its_attempt_and_bounded_state_through_replayed_msg2s
+YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::every_xk_final_cell_takes_its_rows_action	core/src/proto/rekey/tests/fsp.rs:353
+YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::fsp::late_first_handshake_setup_copy_never_moves_the_smaller_node_off_its_confirmed_epoch	core/src/proto/rekey/tests/fsp.rs:1477
+YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::crossing_runs_converge_with_only_the_tie_break_outcomes	reported FinalNoAttempt
+YieldKeepsOwnAttempt	red	fips-core	proto::rekey::tests::sim::clean_runs_rotate_on_cadence_with_no_reject_abandon_revert_or_assumed_cutover	reported FinalNoAttempt
+YieldKeepsOwnAttempt	red	fips-mesh	node::tests::session::simultaneous_initiation_converges_with_no_rekey_armed	no setup may reach an established end
+ClampEntryKept	red	fips-mesh	node::tests::probe::probe_teardown_releases_the_clamp_entry_the_probes_session_tightened	must not outlive the session
+ClampEntryKept	red	fips-mesh	node::tests::peer_restart::restart_seen_in_a_rekey_msg2_resets_tree_bloom_and_sessions	the clamp entry the ended session tightened goes with it
+RestartKeepsClamp	red	fips-mesh	node::tests::peer_restart::outbound_completion_with_a_changed_epoch_replaces_the_machine	the clamp entry the ended session tightened goes with it
+NewPeerStartsRateLimited	red	fips-mesh	node::tests::settle::carry::a_peer_promoted_for_an_identity_announced_to_just_now_is_sent_a_tree_announce_at_once
+TreeOnWall	red	fips-mesh	node::tests::settle::clock::a_backward_wall_step_does_not_hold_a_tree_announce_past_its_interval
+TreeNoneAsZero	red	fips-mesh	node::tests::settle::clock::a_peer_never_sent_a_tree_announce_may_be_sent_one_at_the_clocks_first_instants
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_does_not_time_out_a_fresh_dial
+IntervalOnWall	red	fips-mesh	node::tests::settle::clock::a_forward_wall_clock_step_sends_no_msg1_resend_early
 # Transport lifecycle rules (src/transport/tests/conformance and the BLE node tests).
-drain-aborts-at-once	red	fips-mesh	transport::conformance::tcp::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
-drain-aborts-at-once	red	fips-mesh	transport::conformance::tor::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
-drain-aborts-at-once	red	fips-mesh	transport::conformance::nym::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
-drain-aborts-at-once	red	fips-mesh	transport::conformance::ble::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
-drain-stop-leaves-writers	red	fips-mesh	transport::conformance::tcp::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
-drain-stop-leaves-writers	red	fips-mesh	transport::conformance::tor::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
-drain-stop-leaves-writers	red	fips-mesh	transport::conformance::nym::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
-drain-stop-leaves-writers	red	fips-mesh	transport::conformance::ble::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
-first-frame-deadline-ignored	red	fips-mesh	transport::conformance::tcp::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
-first-frame-deadline-ignored	red	fips-mesh	transport::conformance::tor::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
-first-frame-at-half	red	fips-mesh	transport::conformance::tcp::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
-first-frame-at-half	red	fips-mesh	transport::conformance::tor::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
-tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_an_accepted_connection	defect: (delivered, receive errors, connection kept)
-tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_connect_on_send_connection	defect: (delivered, receive errors, connection kept)
-tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_background_connection	defect: (delivered, receive errors, connection kept)
-tcp-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tcp::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
-proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_the_onion_listener	defect: (delivered, receive errors, connection kept)
-proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_dialled_connection	defect: (delivered, receive errors, connection kept)
-proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
-proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::tor::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
-proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::nym::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
-proxied-recv-bounded-by-mtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
-ble-writer-removes-by-address	red	fips-mesh	transport::ble::close_tests::a_writer_whose_write_fails_leaves_a_newer_connection_at_its_address_pooled
-ble-writer-removes-by-address	red	fips-mesh	transport::ble::close_tests::a_closed_connections_failed_write_leaves_the_newer_connection_at_its_address_pooled
-ble-close-aborts-writer	red	fips-mesh	transport::conformance::ble::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
-ble-close-aborts-writer	red	fips-mesh	node::tests::ble_lifecycle::api_disconnect_over_ble_delivers_the_disconnect_before_closing
-ble-stop-leaves-drains	red	fips-mesh	transport::conformance::ble::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
-ble-unproven-never-closed	red	fips-mesh	node::tests::ble_lifecycle::an_unverified_ble_channel_with_no_msg1_is_closed_after_the_handshake_timeout
-ble-unproven-never-closed	red	fips-mesh	transport::conformance::ble::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
-ble-unproven-at-half-timeout	red	fips-mesh	transport::conformance::ble::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
-ble-unproven-two-seconds-early	red	fips-mesh	transport::conformance::ble::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
-ble-unproven-two-seconds-early	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
-ble-unproven-ignores-handshake	red	fips-mesh	transport::conformance::ble::a_channel_that_completed_a_handshake_and_was_left_unverified_is_kept
-ble-unproven-ignores-held	red	fips-mesh	transport::conformance::ble::a_channel_the_node_holds_is_kept_a_full_timeout_after_it_lets_go	defect: a channel was closed less than a timeout after the node last held it
-ble-unproven-ignores-held	red	fips-mesh	node::tests::ble_lifecycle::a_channel_whose_first_msg1_comes_late_is_kept_a_full_timeout_after_it	defect: a channel was closed 15 s after its first msg1
+DrainAbortsAtOnce	red	fips-mesh	transport::conformance::tcp::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+DrainAbortsAtOnce	red	fips-mesh	transport::conformance::tor::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+DrainAbortsAtOnce	red	fips-mesh	transport::conformance::nym::a_frame_queued_just_before_a_close_reaches_the_peer	defect: a frame queued just before a close never reached the peer
+DrainStopLeavesWriters	red	fips-mesh	transport::conformance::tcp::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+DrainStopLeavesWriters	red	fips-mesh	transport::conformance::tor::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+DrainStopLeavesWriters	red	fips-mesh	transport::conformance::nym::stopping_the_transport_ends_a_writer_still_draining_after_a_close	defect: a writer still draining after a close outlived the transport
+FirstFrameDeadlineIgnored	red	fips-mesh	transport::conformance::tcp::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
+FirstFrameDeadlineIgnored	red	fips-mesh	transport::conformance::tor::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection that sent nothing was held past its deadline
+FirstFrameAtHalf	red	fips-mesh	transport::conformance::tcp::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
+FirstFrameAtHalf	red	fips-mesh	transport::conformance::tor::an_accepted_connection_that_sends_nothing_is_closed_within_the_deadline	defect: an accepted connection was closed before its deadline
+TcpRecvBoundedByMtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_an_accepted_connection	defect: (delivered, receive errors, connection kept)
+TcpRecvBoundedByMtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_connect_on_send_connection	defect: (delivered, receive errors, connection kept)
+TcpRecvBoundedByMtu	red	fips-mesh	transport::conformance::tcp::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_background_connection	defect: (delivered, receive errors, connection kept)
+TcpRecvBoundedByMtu	red	fips-mesh	transport::conformance::tcp::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_the_onion_listener	defect: (delivered, receive errors, connection kept)
+ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_on_a_dialled_connection	defect: (delivered, receive errors, connection kept)
+ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
+ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::tor::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_above_the_receivers_mtu_from_a_sender_configured_higher_is_delivered_from_a_tcp_listener	defect: (delivered, receive errors, connection kept)
+ProxiedRecvBoundedByMtu	red	fips-mesh	transport::conformance::nym::a_frame_of_the_receive_ceiling_is_delivered_and_one_claiming_more_closes	defect: a 65535-byte frame must be delivered
+MovedLeavesEntry	red	fips-mesh	node::tests::paths::a_switch_points_addr_to_link_at_the_new_pair_and_releases_follow_it	entry-pair
+RemoveKeepsLink	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	link-named
+RemoveKeepsLink	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	link-named
+UnbindKept	red	fips-mesh	node::tests::disconnect::test_disconnect_clears_session	peers_by_index must map exactly
+UnbindKept	red	fips-mesh	node::tests::ble::a_verified_link_stops_being_protected_when_its_peer_is_reaped	peers_by_index must map exactly

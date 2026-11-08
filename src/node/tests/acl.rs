@@ -102,12 +102,14 @@ async fn test_outbound_msg2_denied_after_acl_reload() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a, link_a);
+    node_a.links.raw().insert(link_id_a, link_a);
     node_a
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id, remote_addr.clone()), link_id_a);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id, our_index_a.as_u32()), link_id_a);
 
     let mut conn_b = inbound_leg(LinkId::new(2), 1000);
@@ -251,12 +253,14 @@ async fn test_inbound_msg3_denied_triggers_disconnect() {
         LinkDirection::Outbound,
         Duration::from_millis(100),
     );
-    node_a.links.insert(link_id_a, link_a);
+    node_a.links.raw().insert(link_id_a, link_a);
     node_a
-        .addr_to_link
+        .links
+        .raw_index()
         .insert((transport_id_a, addr_b.clone()), link_id_a);
     node_a
         .pending_outbound
+        .raw()
         .insert((transport_id_a, our_index_a.as_u32()), link_id_a);
 
     let transport = node_a.transports.get(&transport_id_a).unwrap();

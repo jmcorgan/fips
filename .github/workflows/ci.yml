@@ -596,6 +596,14 @@ jobs:
       - name: Run the known-defect lane
         run: bash testing/known-defect-lane.sh
 
+      # Each switch in core/src/faults.rs, turned on in a test process of its
+      # own, must turn red the tests testing/mutations/manifest.txt names for
+      # it at their assertion of the behaviour it breaks, and every named test
+      # must pass with no switch; no switch may reach a normal build of fips.
+      # Mirrored in testing/ci-local.sh.
+      - name: Run the mutation lane
+        run: bash testing/mutations/run.sh
+
       # The bind-success half. Every other unit-test leg runs unprivileged, so
       # `PacketSocket::open` cannot succeed on any of them and everything past
       # a successful bind — the post-store shutdown check, the `Present` arm of
@@ -660,8 +668,18 @@ jobs:
       # has these features: fips-core's lib test binary is the same with or
       # without them, and the run above already ran it. Mirrored in
       # testing/ci-local.sh.
+      #
+      # Being the one run of the root suite as threads in a process, where
+      # each test's thread names it, it also records the reach of the node's
+      # live map audit, which the next step holds to its floors. Mirrored in
+      # testing/ci-local.sh.
       - name: Run library tests with the optional root features enabled
+        env:
+          FIPS_AUDIT_REACH: ${{ runner.temp }}/audit-reach.txt
         run: cargo test -p fips-mesh --lib --features profiling,test-overrides
+
+      - name: Check the reach of the live map audit
+        run: python3 testing/check-audit-reach.py "${{ runner.temp }}/audit-reach.txt"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Job 2a – Library tests in release mode

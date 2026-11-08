@@ -93,7 +93,8 @@ async fn dialled_pair() -> (Vec<TestNode>, ReceivedPacket) {
         .expect("node 0's msg1 is queued at node 1");
     let leg = *nodes[0]
         .node
-        .addr_to_link
+        .links
+        .index()
         .get(&(nodes[0].transport_id, nodes[1].addr.clone()))
         .expect("node 0 holds its outbound leg");
     nodes[0]
@@ -109,7 +110,8 @@ async fn dialled_pair() -> (Vec<TestNode>, ReceivedPacket) {
 fn leg_link(nodes: &[TestNode], msg1: &ReceivedPacket) -> LinkId {
     *nodes[1]
         .node
-        .addr_to_link
+        .links
+        .index()
         .get(&(msg1.transport_id, msg1.remote_addr.clone()))
         .expect("node 1 holds a leg for the msg1's address")
 }
@@ -283,7 +285,8 @@ async fn crossed_at_msg2(r: usize) -> (Vec<TestNode>, LogCapture, Vec<u8>) {
             .expect("each dial's msg1 is queued at the other node");
         let leg = *nodes[from]
             .node
-            .addr_to_link
+            .links
+            .index()
             .get(&(nodes[from].transport_id, nodes[to].addr.clone()))
             .expect("the dialling node holds its outbound leg");
         nodes[from]

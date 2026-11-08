@@ -428,6 +428,13 @@ impl Node {
     /// due, take the wake again from the rest, and close the connections
     /// left to close.
     pub(in crate::node) async fn path_tick(&mut self) {
+        self.pathtick_body().await;
+        self.audit_live("path_tick");
+    }
+
+    /// The work of [`Self::path_tick`], which audits the per-peer maps
+    /// after it.
+    async fn pathtick_body(&mut self) {
         self.read_carrier().await;
         self.poll_connects().await;
         let now = peer_now();
@@ -538,12 +545,8 @@ impl Node {
                     clear_slot(driver);
                     if let Some(link) = link {
                         let old = (from.transport, from.addr.clone());
-                        if self.addr_to_link.get(&old) == Some(&link) {
-                            self.addr_to_link.remove(&old);
-                            self.addr_to_link
-                                .entry((to.transport, to.addr.clone()))
-                                .or_insert(link);
-                        }
+                        self.links
+                            .follow(link, &old, (to.transport, to.addr.clone()));
                     }
                     debug!(
                         peer = %self.peer_display_name(node_addr),
@@ -658,9 +661,7 @@ impl Node {
         {
             slot.clear_connected_udp();
         }
-        self.addr_to_link
-            .entry((to.transport, to.addr.clone()))
-            .or_insert(link);
+        self.links.claim(link, (to.transport, to.addr.clone()));
         self.seed_mtu(node_addr, key, to.transport, &to.addr, true);
         if let Some(mtu) = self
             .transports
@@ -713,8 +714,8 @@ impl Node {
             .links
             .get(&link)
             .is_some_and(|k| k.transport_id() == to.transport && *k.remote_addr() == to.addr);
-        if !removed && !at_record && self.addr_to_link.get(&key) == Some(&link) {
-            self.addr_to_link.remove(&key);
+        if !removed && !at_record {
+            self.links.unclaim(link, &key);
         }
         if keep || self.addr_carries_other_peer(to.transport, &to.addr, link) {
             return;

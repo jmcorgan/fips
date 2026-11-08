@@ -276,7 +276,18 @@ pub(super) fn seed_completed_connection_with(
     current_time_ms: u64,
     shape: impl FnOnce(HandshakeSeed) -> HandshakeSeed,
 ) -> PeerIdentity {
-    let peer_identity_full = Identity::generate();
+    seed_completed_connection_from(node, link_id, &Identity::generate(), current_time_ms, shape)
+}
+
+/// [`seed_completed_connection_with`] toward a given remote, for tests that
+/// complete more than one handshake with the same identity.
+pub(super) fn seed_completed_connection_from(
+    node: &mut Node,
+    link_id: LinkId,
+    peer_identity_full: &Identity,
+    current_time_ms: u64,
+    shape: impl FnOnce(HandshakeSeed) -> HandshakeSeed,
+) -> PeerIdentity {
     // Must use from_pubkey_full to preserve parity for ECDH
     let peer_identity = PeerIdentity::from_pubkey_full(peer_identity_full.pubkey_full());
 
@@ -324,6 +335,9 @@ pub(super) fn seed_completed_connection_with(
     resp_conn
         .complete_handshake_msg3(&msg3, LegStamp::at(current_time_ms))
         .unwrap();
+    // The leg has no link, and its tests promote it, which no production
+    // path does.
+    node.plant();
 
     peer_identity
 }

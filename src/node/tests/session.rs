@@ -3679,7 +3679,7 @@ async fn test_expired_path_mtu_keeps_the_link_peer_seed() {
     let peer_identity = PeerIdentity::from_pubkey_full(remote.pubkey_full());
     let mut peer = ActivePeer::new(peer_identity, LinkId::new(7), 0);
     peer.set_current_addr(transport_id, transport_addr);
-    node.peers.insert(remote_addr, peer);
+    node.peers.raw().insert(remote_addr, peer);
 
     assert_eq!(
         node.path_mtu_lookup_get(&remote_fips),
@@ -4426,7 +4426,7 @@ async fn test_idle_session_purge_keeps_link_peer_path_mtu_seed() {
     let peer_identity = PeerIdentity::from_pubkey_full(remote.pubkey_full());
     let mut peer = ActivePeer::new(peer_identity, LinkId::new(7), 0);
     peer.set_current_addr(transport_id, transport_addr.clone());
-    node.peers.insert(remote_addr, peer);
+    node.peers.raw().insert(remote_addr, peer);
 
     node.seed_path_mtu_for_link_peer(
         &remote_addr,

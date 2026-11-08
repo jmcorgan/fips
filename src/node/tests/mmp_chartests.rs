@@ -46,7 +46,7 @@ fn insert_link_peer(node: &mut Node, mode: MmpMode) -> NodeAddr {
     let addr = *identity.node_addr();
     let mut peer = ActivePeer::new(identity, LinkId::new(1), 0);
     peer.test_init_mmp(mode);
-    node.peers.insert(addr, peer);
+    node.peers.raw().insert(addr, peer);
     addr
 }
 
@@ -366,7 +366,7 @@ async fn session_backoff_all_reports_fail_records_single_failure() {
 fn setup_smaller_root_peer(node: &mut Node) -> NodeAddr {
     let my_addr = *node.node_addr();
     let (peer, addr) = aged_keyed_peer(node, |a| *a < my_addr);
-    node.peers.insert(addr, peer);
+    node.peers.raw().insert(addr, peer);
 
     // Register the peer as a self-root in the tree at its (smaller) address.
     node.tree_state_mut().update_peer(
@@ -467,7 +467,7 @@ async fn non_first_receiver_report_does_not_retrigger_tree() {
 fn insert_larger_unmeasured_peer(node: &mut Node) -> NodeAddr {
     let my_addr = *node.node_addr();
     let (peer, addr) = aged_keyed_peer(node, |a| *a > my_addr);
-    node.peers.insert(addr, peer);
+    node.peers.raw().insert(addr, peer);
     addr
 }
 
