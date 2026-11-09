@@ -806,8 +806,8 @@ fn a_peer_is_unheard_until_its_first_frame_and_stays_heard_across_both_cutovers(
         let name = if initiator { "initiator" } else { "responder" };
         let (mut a, mut b) = ends();
         for end in [&mut a, &mut b] {
-            end.peer.heard = false;
-            end.peer.send.heard = false;
+            end.peer.data.heard = false;
+            end.peer.data.frame_heard = false;
             assert!(!end.peer.heard(), "{name}: a promoted peer starts unheard");
             end.peer.touch(2000);
             assert!(end.peer.heard(), "{name}: a frame marks the peer heard");

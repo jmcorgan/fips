@@ -20,6 +20,11 @@ items.
   cutover does, and that the rekey dampening, the pending hold and the drain
   run on the peer clock, which `crate::time::advance` moves, and that a
   path's Dead time is stamped on that clock.
+- `data.rs`: tests for `PeerData` (`src/peer/data.rs`), declared from that
+  file as `#[cfg(test)] #[path = "tests/data.rs"] mod tests;`. They cover what
+  a new record holds, read through `ActivePeer`, which is the only way in to a
+  peer's record, for each of its constructors, and read from the record itself
+  for the fields no accessor tells apart.
 - `machine.rs`: tests for `PeerMachine` (`src/peer/machine.rs`), declared as
   `mod msg2_tests` because `machine.rs` already has an inline `tests` module.
   They cover an initial (IK) dial receiving a msg2 that does not authenticate:

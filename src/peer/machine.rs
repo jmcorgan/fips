@@ -28,9 +28,9 @@
 //! ## Control / send-state split
 //!
 //! The machine holds **control-tier** state only. The hot send-critical state
-//! (transport target, connected-UDP handle, hot counters) becomes
-//! `PeerSendState`, and an established link's epochs, keys and indices live in
-//! the active peer's link rekey machine; neither is built here. The machine
+//! (transport target, connected-UDP handle) becomes `PeerSendState`, the hot
+//! counters the active peer's record, and an established link's epochs, keys
+//! and indices live in its link rekey machine; none is built here. The machine
 //! emits actions (`PromoteToActive`, `RegisterDecryptSession`, …) that the
 //! driver applies. The remote startup epoch is establish-path-only, hence
 //! control-tier, and lives on `conn` as the sole carrier (`conn_remote_epoch`).
