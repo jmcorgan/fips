@@ -554,7 +554,16 @@ impl CoreParty {
         if let Some(p) = self.s.peers.get_mut(&peer.0) {
             p.beat = now;
             let hs = p.rekey.cur;
-            net.send(ix, None, to, Pkt::Frame { id: me, hs });
+            net.send(
+                ix,
+                None,
+                to,
+                Pkt::Frame {
+                    id: me,
+                    hs,
+                    wire: 0,
+                },
+            );
         }
     }
 
@@ -580,6 +589,7 @@ impl CoreParty {
             id: self.s.me,
             hs,
             epoch: self.epoch(),
+            wire: 0,
         };
         if net.kind(cur.transport) == Kind::Datagram || net.conn(ix, cur).is_some() {
             net.send(ix, None, cur, pkt);
@@ -609,6 +619,7 @@ impl CoreParty {
             hs,
             bytes: b,
             epoch: self.epoch(),
+            wire: 0,
         };
         net.send(self.s.ix, from, to, pkt);
         let d = Dialed {
@@ -711,6 +722,7 @@ impl CoreParty {
                     id: self.s.me,
                     hs,
                     epoch: self.epoch(),
+                    wire: 0,
                 };
                 net.send(ix, None, src, pkt);
                 In::Sent { link }
@@ -776,6 +788,8 @@ impl CoreParty {
             refused: fx.refused,
             change: fx.change,
             heard: false,
+            // The stand-in holds no bundle.
+            proven: false,
         };
         self.note(now, id, ev, rec);
         self.closes(now, &fx.closes);
@@ -800,6 +814,7 @@ impl CoreParty {
             id: self.s.me,
             hs: run.hs,
             epoch: self.epoch(),
+            wire: 0,
         };
         net.send(self.s.ix, None, to, pkt);
         let out = self.core(In::Sent { link }, TestInstant(net.now));
@@ -1129,6 +1144,7 @@ impl CoreParty {
                     hs,
                     bytes: b,
                     epoch,
+                    wire: 0,
                 };
                 net.send(ix, from, to, pkt);
                 let out = self.core(In::Sent { link }, at);
@@ -1166,6 +1182,7 @@ impl CoreParty {
                                 hs,
                                 bytes: Bytes(hs.0),
                                 epoch,
+                                wire: 0,
                             };
                             net.send(ix, None, to, pkt);
                         }
@@ -1233,6 +1250,12 @@ impl CoreParty {
             | PathEv::Switched { peer, .. }
             | PathEv::Released { peer, .. }
             | PathEv::State { peer, .. } => peer,
+            // A candidate, a carrier change and a transport's removal are
+            // for a real bundle, which the stand-in has not.
+            PathEv::Candidate { .. }
+            | PathEv::Carrier { .. }
+            | PathEv::Gone { .. }
+            | PathEv::Rebound { .. } => return,
         };
         let held = self.s.table.held(&node(peer)).map(|h| h.link);
         let dialed = self
@@ -1285,6 +1308,10 @@ impl CoreParty {
                 pair: pair(at),
                 proven: if live { Proven::Live } else { Proven::Probing },
             },
+            PathEv::Candidate { .. }
+            | PathEv::Carrier { .. }
+            | PathEv::Gone { .. }
+            | PathEv::Rebound { .. } => return,
         };
         let out = self.core(input, at);
         let mut fx = Fx::default();
@@ -1354,9 +1381,10 @@ impl Party for CoreParty {
                     hs,
                     bytes: b,
                     epoch,
+                    ..
                 } => self.msg1(net, src, id, hs, b, epoch, stamp),
-                Pkt::Msg2 { id, hs, epoch } => self.msg2(net, src, id, hs, epoch, stamp),
-                Pkt::Frame { id, hs } => self.frame(net, src, id, hs, stamp),
+                Pkt::Msg2 { id, hs, epoch, .. } => self.msg2(net, src, id, hs, epoch, stamp),
+                Pkt::Frame { id, hs, .. } => self.frame(net, src, id, hs, stamp),
                 Pkt::Eof => self.closed(net, src),
             },
             Input::Closed { at } | Input::ConnectFailed { to: at } => self.closed(net, at),
@@ -1390,6 +1418,7 @@ impl Party for CoreParty {
                             hs,
                             bytes: Bytes(hs.0),
                             epoch,
+                            wire: 0,
                         };
                         net.send(ix, None, to, pkt);
                         self.note(now, peer, Event::RekeyStart { hs }, Rec::default());
@@ -1591,6 +1620,10 @@ pub fn unseen_path(w: &super::world::World, b: &super::oracle::Breach) -> bool {
         w.paths.iter().any(|(_, ev)| match *ev {
             PathEv::Moved { to, .. } | PathEv::Switched { to, .. } => to == at,
             PathEv::State { at: a, .. } | PathEv::Released { at: a, .. } => a == at,
+            PathEv::Candidate { .. }
+            | PathEv::Carrier { .. }
+            | PathEv::Gone { .. }
+            | PathEv::Rebound { .. } => false,
         }) && !w
             .net
             .conns
@@ -1602,8 +1635,13 @@ pub fn unseen_path(w: &super::world::World, b: &super::oracle::Breach) -> bool {
         && w.paths
             .iter()
             .flat_map(|(_, ev)| match *ev {
-                PathEv::Moved { to, from, .. } | PathEv::Switched { to, from, .. } => [to, from],
-                PathEv::State { at, .. } | PathEv::Released { at, .. } => [at, at],
+                PathEv::Moved { to, from, .. } | PathEv::Switched { to, from, .. } => {
+                    alloc::vec![to, from]
+                }
+                PathEv::State { at, .. }
+                | PathEv::Released { at, .. }
+                | PathEv::Candidate { at, .. } => alloc::vec![at],
+                PathEv::Carrier { .. } | PathEv::Gone { .. } | PathEv::Rebound { .. } => Vec::new(),
             })
             .any(|a| abstract_path(a) && b.what.starts_with(&format!("{a:?} in use")))
 }

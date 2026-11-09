@@ -228,6 +228,7 @@ impl MasterParty {
             let pkt = Pkt::Frame {
                 id: me,
                 hs: p.rekey.cur,
+                wire: 0,
             };
             let to = p.current;
             net.send(ix, None, to, pkt);
@@ -260,6 +261,7 @@ impl MasterParty {
             hs,
             bytes: Bytes(hs.0),
             epoch: self.epoch(),
+            wire: 0,
         };
         net.send(self.s.ix, from, to, pkt);
         self.s.dials.insert(
@@ -352,6 +354,7 @@ impl MasterParty {
                     id: self.s.me,
                     hs: lhs,
                     epoch: self.epoch(),
+                    wire: 0,
                 };
                 net.send(ix, None, src, pkt);
                 self.s.legs.remove(&lhs.0);
@@ -406,6 +409,7 @@ impl MasterParty {
                                 id: me,
                                 hs: h,
                                 epoch: mine,
+                                wire: 0,
                             },
                         );
                         self.note(
@@ -498,6 +502,7 @@ impl MasterParty {
                 id: self.s.me,
                 hs,
                 epoch: self.epoch(),
+                wire: 0,
             };
             net.send(ix, None, src, pkt);
             self.install(net, id, hs, bytes, epoch, link, src, stamp);
@@ -757,6 +762,7 @@ impl MasterParty {
                     hs: Hs(*k),
                     bytes: Bytes(*k),
                     epoch,
+                    wire: 0,
                 };
                 net.send(ix, d.from, d.to, pkt);
             }
@@ -799,6 +805,7 @@ impl MasterParty {
                                 hs,
                                 bytes: Bytes(hs.0),
                                 epoch,
+                                wire: 0,
                             },
                         );
                     }
@@ -871,12 +878,13 @@ impl Party for MasterParty {
                     hs,
                     bytes,
                     epoch,
+                    ..
                 } => {
                     self.msg1(net, src, id, hs, bytes, epoch, stamp);
                     self.unused(net, src);
                 }
-                Pkt::Msg2 { id, hs, epoch } => self.msg2(net, src, id, hs, epoch, stamp),
-                Pkt::Frame { id, hs } => self.frame(net, src, id, hs, stamp),
+                Pkt::Msg2 { id, hs, epoch, .. } => self.msg2(net, src, id, hs, epoch, stamp),
+                Pkt::Frame { id, hs, .. } => self.frame(net, src, id, hs, stamp),
                 Pkt::Eof => self.closed(net, src),
             },
             Input::Closed { at } => self.closed(net, at),
@@ -932,6 +940,7 @@ impl Party for MasterParty {
                             hs,
                             bytes: Bytes(hs.0),
                             epoch,
+                            wire: 0,
                         },
                     );
                     self.note(now, peer, Event::RekeyStart { hs }, Rec::default());

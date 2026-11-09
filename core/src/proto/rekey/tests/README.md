@@ -69,6 +69,9 @@ oracles.
   as predicates, each with its message: O1, O3, O4, O5's comparison and
   the list of what a record owes, O6, O8 and O10. `sim.rs` and the
   settlement tests' joint world call them; `sim.rs` says what each means.
+  The list says whether it owes an ephemeral, which a shell that cannot
+  tell a copy's original reads to know a copy for a repeat, and the
+  machine's `Peek` is re-exported from here for a shell that plants one.
 - `sim.rs`: the deterministic two-party simulator. `World` holds two
   shells and the datagrams between them, executes outputs as a shell
   does, models a decrypt worker (indexed profiles) and next's leg table

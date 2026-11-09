@@ -21,15 +21,50 @@
 //!   says.
 //! - [`Oracle::Bounded`]: what a party keeps stays within its bounds.
 //!
-//! `RightLink`, `MapsAgree`, `Fresh`, `Classified` and `Bounded` hold at
-//! every step. `OneSession` and `ConnectionsInUse` hold once the world is
+//! A joint node (`joint/`) is held to more, which the stand-in core's
+//! party holds by construction or does not model, each checked at every
+//! step over what the node gives in [`super::world::Party::joint`]
+//! (`joint/oracle.rs`):
+//!
+//! - [`Oracle::OneView`]: one rekey machine for each peer the core holds,
+//!   built or carried at the install of the link the core holds it on, for
+//!   that peer, with the core's record of the peer's startup epoch, and,
+//!   until its first cutover, running the session of that install's
+//!   handshake.
+//! - [`Oracle::Leases`]: every session index the node's pool has handed
+//!   out is held by a handshake leg or a rekey machine.
+//! - [`Oracle::NoOrphan`]: a rekey machine and bundle for every peer the
+//!   core holds, and for no other.
+//! - [`Oracle::Mirrored`]: the core's record of each held link's paths is
+//!   its bundle's, and the index is derived from the records.
+//! - [`Oracle::Delivered`]: every replacement request, restart and
+//!   teardown of a rekey machine and every orphaning of a bundle reached
+//!   the core in the step that emitted it, and nothing else fed those
+//!   inputs.
+//! - [`Oracle::Attributed`]: each msg1 the core took as a held peer's is
+//!   on that peer's link exactly where the node's rule puts it.
+//! - [`Oracle::Machine`]: the rekey machines' and the bundles' own
+//!   oracles, from their simulators' predicates, the text naming which;
+//!   among them, once healed, the two machines of each pair converged on
+//!   one session with nothing in progress, which a sweep exempts where it
+//!   exempts a split.
+//!
+//! Three clauses of those, where the core is known to part from the
+//! bundle or the node, are pinned, not asserted: counted, printed by a
+//! sweep and held by the failing tests of `joint/pins.rs`.
+//!
+//! `RightLink`, `MapsAgree`, `Fresh`, `Classified`, `Bounded` and a joint
+//! node's own hold at every step. `OneSession` and `ConnectionsInUse` hold once the world is
 //! healed ([`heal`]): every connect window opened, everything in flight
 //! delivered, and the clocks run wake by wake for [`HEAL`] with no fault.
 //! The horizon is shorter than the rekey machine's pending hold, so a
-//! pending left for its hold to clear is still seen. No link-dead timer
-//! runs in the world, so two ends left on different sessions stay that
-//! way; a node holding a peer the other end has forgotten is left to that
-//! timer and is not a breach.
+//! pending left for its hold to clear is still seen. The model and the
+//! stand-in core's party run no link-dead timer, so there two ends left on
+//! different sessions stay that way, and a node holding a peer the other
+//! end has forgotten is left to that timer and is not a breach. A joint
+//! node runs the node's liveness timer (`joint/party.rs`), so a peer whose
+//! link authenticates nothing for the link-dead timeout is removed within
+//! the heal.
 
 use alloc::format;
 use alloc::string::String;
@@ -60,6 +95,20 @@ pub enum Oracle {
     Classified,
     /// Bounds.
     Bounded,
+    /// One rekey machine for each held peer, agreeing with the core.
+    OneView,
+    /// Every index lease held by a leg or a machine.
+    Leases,
+    /// No machine without a held peer, and no held peer without one.
+    NoOrphan,
+    /// Each held link's paths in the core are its bundle's.
+    Mirrored,
+    /// Each machine output the core must hear of reached it.
+    Delivered,
+    /// Each held peer's msg1 attributed to its link as the node does.
+    Attributed,
+    /// A rekey machine's or a bundle's own oracle.
+    Machine,
 }
 
 /// One breach.
@@ -93,6 +142,11 @@ pub fn every_step(w: &World) -> Vec<Breach> {
                     x,
                     format!("{name}: {size}, over {bound}"),
                 ));
+            }
+        }
+        if let Some(f) = p.joint() {
+            for (oracle, what) in super::joint::oracle::check(&f) {
+                out.push(breach(oracle, x, what));
             }
         }
         if !v.log.is_empty() {
@@ -187,6 +241,13 @@ pub fn healed(w: &World) -> Vec<Breach> {
                     ),
                 ));
             }
+            if x < y
+                && let (Some(a), Some(b)) = (w.parties[x].rekey(p.peer), w.parties[y].rekey(v.me))
+                && let Err(m) =
+                    crate::proto::rekey::tests::oracles::converged(Some(a), Some(b), w.net.now)
+            {
+                out.push(breach(Oracle::Machine, x, format!("{m} ({:?})", p.peer)));
+            }
             if let Some((hs, false)) = p.pending
                 && !fault!(OneSessionNoPending)
                 && q.rekey != Some(hs)
@@ -200,6 +261,17 @@ pub fn healed(w: &World) -> Vec<Breach> {
                     format!("pending: {:?}: {hs:?}, which the peer cannot adopt", p.peer),
                 ));
             }
+        }
+    }
+    if !fault!(OneSessionNoSplit) {
+        for &(x, peer) in &w.ended {
+            out.push(breach(
+                Oracle::OneSession,
+                x,
+                format!(
+                    "split: {peer:?}: held there on another session, removed here by the link-dead timer"
+                ),
+            ));
         }
     }
     for c in &w.net.conns {
@@ -216,8 +288,19 @@ pub fn healed(w: &World) -> Vec<Breach> {
             }
         }
     }
-    for (x, v) in views.iter().enumerate() {
-        for &at in &v.needs {
+    out.extend(needs_open(w));
+    out
+}
+
+/// The second clause of [`Oracle::ConnectionsInUse`]: every connection a
+/// live link of its node uses is open. [`healed`] checks it once healed;
+/// a test may read it at a step it names, where a sweep cannot see a
+/// connection a live link still needed being closed, since by the heal
+/// the link that needed it is gone.
+pub fn needs_open(w: &World) -> Vec<Breach> {
+    let mut out = Vec::new();
+    for (x, p) in w.parties.iter().enumerate() {
+        for at in p.view().needs {
             if w.net.kind(at.transport) != Kind::Datagram && w.net.conn(x, at).is_none() {
                 out.push(breach(
                     Oracle::ConnectionsInUse,
@@ -253,7 +336,14 @@ pub type Exempt<'a> = &'a (dyn Fn(&World, &Breach) -> bool + Sync);
 /// breach on a path where a known shape other than the two defects left
 /// for later was seen. Nothing else is exempt.
 pub fn by_shape(w: &World, b: &Breach) -> bool {
-    b.oracle == Oracle::OneSession && w.shapes.iter().any(|s| !s.pinned())
+    converging(b) && w.shapes.iter().any(|s| !s.pinned())
+}
+
+/// Whether `b` is a breach of convergence: a split or another clause of
+/// one session, or a joint pair's machines not converged.
+fn converging(b: &Breach) -> bool {
+    b.oracle == Oracle::OneSession
+        || (b.oracle == Oracle::Machine && b.what.starts_with(super::joint::oracle::CONVERGED))
 }
 
 /// The exemption of the runs against the models of deployed nodes: a
@@ -261,12 +351,13 @@ pub fn by_shape(w: &World, b: &Breach) -> bool {
 /// defects left for later included.
 #[cfg(feature = "slow-explorers")]
 pub fn by_any_shape(w: &World, b: &Breach) -> bool {
-    b.oracle == Oracle::OneSession && !w.shapes.is_empty()
+    converging(b) && !w.shapes.is_empty()
 }
 
 /// What a sweep found: the explorer's statistics, the first breach of each
-/// oracle at each node with its path, and how many healed leaves had a
-/// breach exempted, per shape.
+/// oracle at each node with its path, how many healed leaves had a breach
+/// exempted, per shape, and how many explored states showed each pinned
+/// clause of the joint world's oracles.
 pub struct Swept {
     /// The explorer's statistics.
     pub stats: Stats,
@@ -274,6 +365,8 @@ pub struct Swept {
     pub found: Vec<(Breach, Vec<super::explore::Act>)>,
     /// Leaves with an exempted breach, by the shapes their path showed.
     pub exempted: Vec<(Vec<super::world::Shape>, usize)>,
+    /// Explored states showing each pinned clause, by clause.
+    pub pinned: Vec<(super::joint::oracle::Pin, usize)>,
 }
 
 /// Every breach on the path of `st` to depth `depth`, and at its leaves
@@ -281,10 +374,27 @@ pub struct Swept {
 /// a breach `exempt` names is counted instead.
 pub fn sweep(st: &Start, depth: usize, exempt: Exempt<'_>) -> Swept {
     let found = std::sync::Mutex::new(Vec::new());
+    let pins = std::sync::Mutex::new(Vec::<(super::joint::oracle::Pin, usize)>::new());
     let check = |w: &World, path: &[super::explore::Act]| -> Result<(), String> {
         let mut f = found.lock().unwrap_or_else(|e| e.into_inner());
         for b in every_step(w) {
             note(&mut f, b, path);
+        }
+        drop(f);
+        let mut seen: Vec<super::joint::oracle::Pin> = super::joint::oracle::pinned_in(w)
+            .into_iter()
+            .map(|(_, pin, _)| pin)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        if !seen.is_empty() {
+            let mut p = pins.lock().unwrap_or_else(|e| e.into_inner());
+            for pin in seen {
+                match p.iter_mut().find(|(q, _)| *q == pin) {
+                    Some((_, n)) => *n += 1,
+                    None => p.push((pin, 1)),
+                }
+            }
         }
         Ok(())
     };
@@ -323,10 +433,13 @@ pub fn sweep(st: &Start, depth: usize, exempt: Exempt<'_>) -> Swept {
             );
         }
     }
+    let mut pinned = pins.into_inner().unwrap_or_else(|e| e.into_inner());
+    pinned.sort_unstable();
     Swept {
         stats,
         found: f,
         exempted,
+        pinned,
     }
 }
 

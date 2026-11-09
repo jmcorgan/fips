@@ -194,6 +194,60 @@ pub(crate) enum Fault {
     /// Under the aged-link candidate, an own dial completing on an aged
     /// inbound link is judged by the tie-break alone.
     AgedTieBreak,
+    /// The world's digest prints a packet's wire index in place of its
+    /// bytes.
+    WireByNumber,
+    /// A joint node's machine after a cross-connection move is built as a
+    /// new link's, keeping neither the link's age nor the replay record.
+    MoveBuildsFresh,
+    /// A joint node does not start the bundle again at a cross-connection
+    /// move.
+    RenewSkipped,
+    /// A joint node's bundle is built enabled whatever its multipath
+    /// setting.
+    ModeIgnored,
+    /// A joint node drops its rekey machine's request that a fresh msg1
+    /// replace the peering, so the msg1 never reaches the restart gates.
+    ReplaceDropped,
+    /// A joint node does not tell the core of its bundle's one-path roam.
+    PathsUnmirrored,
+    /// A joint node does not tell the core of a restart its rekey machine
+    /// found at its own rekey's msg2.
+    RestartDropped,
+    /// A joint node sends to the peer, and counts its link's use, at the
+    /// core's record of where the peer is, in place of the bundle's active
+    /// path.
+    SendsByHeld,
+    /// A joint node's state key holds what its machines show (`view` and
+    /// `bindings`) in place of every field that can change.
+    KeyFromView,
+    /// A joint node's state key leaves out the path bundle.
+    KeyOmitsBundle,
+    /// A joint node does not report an authentic frame from a pair its
+    /// link holds no path at to its bundle as a candidate.
+    HeardFeedDropped,
+    /// A joint node with multipath on sends a rekey answer on the
+    /// established link, never on the msg1's arrival path.
+    ArrivalIgnored,
+    /// The comparison takes a msg1 on a pair the bundle holds proven,
+    /// which the model reads as off the link, for a difference.
+    ProvenCompared,
+    /// A joint node keeps its rekey machine as it was at a
+    /// cross-connection move, so the machine runs the session of the
+    /// handshake moved off in place of the one moved onto.
+    MoveBuildsStale,
+    /// A joint node keeps the replaced peering's rekey machine at a
+    /// replacement or a restart, in place of building one on the new
+    /// handshake.
+    ReplaceKeepsMachine,
+    /// A joint node loses a lease the core hands back, without returning
+    /// its index to the pool.
+    LeaseForgotten,
+    /// A joint node leaves a removed peer's machines in place, unclosed.
+    CloseSkipped,
+    /// A joint node does not tell the core that a peer's bundle was
+    /// orphaned, so the core keeps a peer the node would remove.
+    OrphanKept,
 }
 
 impl Fault {
@@ -273,6 +327,24 @@ impl Fault {
         Self::FrameCutoverMissed,
         Self::CandidateHoldsNothing,
         Self::AgedTieBreak,
+        Self::WireByNumber,
+        Self::MoveBuildsFresh,
+        Self::RenewSkipped,
+        Self::ModeIgnored,
+        Self::ReplaceDropped,
+        Self::PathsUnmirrored,
+        Self::RestartDropped,
+        Self::SendsByHeld,
+        Self::KeyFromView,
+        Self::KeyOmitsBundle,
+        Self::HeardFeedDropped,
+        Self::ArrivalIgnored,
+        Self::ProvenCompared,
+        Self::MoveBuildsStale,
+        Self::ReplaceKeepsMachine,
+        Self::LeaseForgotten,
+        Self::CloseSkipped,
+        Self::OrphanKept,
     ];
 
     /// The switch whose variant name is `name`.

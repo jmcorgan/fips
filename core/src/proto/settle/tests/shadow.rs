@@ -40,6 +40,15 @@
 //! - **A cutover at the peer's frame**: the rekey machine cuts its own
 //!   answered rekey over at the peer's first frame under it, where the
 //!   model waits for its check. The shadow cuts over at that frame.
+//! - **A msg1 on a proven path**: the core and the node take a msg1 from
+//!   any pair the link's bundle holds Live or acked as on the link, where
+//!   the model, which has no paths, holds only the peer's current and
+//!   setup pairs on the setup transport. Where the model refuses such a
+//!   msg1 as off the link and the party logged it from a proven pair, the
+//!   shadow steps the model again with the msg1 from the setup pair, which
+//!   is its answer on the link, since rule 4.1 refuses before writing
+//!   anything. Rules 1 to 3 read no pair, so a restart or replacement on a
+//!   proven pair is compared as it arrived.
 //! - Where the node's replay memory or silent-session back-off refuses a
 //!   msg1 the model refuses too, the node asked those first; both refuse,
 //!   and the comparison goes on.
@@ -76,6 +85,9 @@ pub struct Rec {
     pub change: Option<Transition>,
     /// Whether the peering is heard afterwards.
     pub heard: bool,
+    /// A msg1 came from a pair the party's path bundle holds Live or
+    /// acked; false for a party with no bundle.
+    pub proven: bool,
 }
 
 /// One line of a party's log.
@@ -139,6 +151,10 @@ pub enum Named {
     /// either slot (`src/node/dataplane/encrypted.rs:263-280` at
     /// `2ba790b2`); the model ignores it.
     HeardByPrevious,
+    /// A msg1 from a pair the bundle holds proven, which the core and the
+    /// node take as on the link and the model, having no paths, reads as
+    /// off it.
+    ProvenPath,
 }
 
 /// One difference from the shadow.
@@ -231,6 +247,34 @@ pub fn compare(me: Node, log: &[Entry]) -> Found {
                 let mut s = j.step(ev);
                 if *pruned {
                     continue;
+                }
+                if let Event::Msg1 {
+                    hs,
+                    bytes,
+                    epoch,
+                    link,
+                    binding,
+                    sent,
+                    ..
+                } = ev
+                    && s.class == Some(Class::OffLink)
+                    && rec.proven
+                    && !fault!(ProvenCompared)
+                    && let Some(setup) = j.peering.as_ref().map(|p| p.setup)
+                {
+                    // Rule 4.1 refused before writing anything, so the
+                    // model's answer on the link is the same msg1 from the
+                    // peering's setup pair.
+                    s = j.step(Event::Msg1 {
+                        hs,
+                        bytes,
+                        epoch,
+                        link,
+                        from: setup,
+                        binding,
+                        sent,
+                    });
+                    found.named.push((peer, Named::ProvenPath));
                 }
                 if previous
                     && !fault!(PreviousUnheard)
@@ -380,8 +424,119 @@ pub fn resync_close(j: &Judge) -> Vec<Addr> {
 
 #[cfg(test)]
 mod checks {
-    use super::super::super::model::history::{Epoch, Hs, LinkId};
+    use super::super::super::model::history::{Bytes, Epoch, Hs, LinkId};
     use super::*;
+
+    /// A log of node 1's: node 2 held from its msg1 at `at(1)`, then at
+    /// 40 s, past both floors, a msg1 of node 2's from `from` with epoch
+    /// `epoch`, which the party logged as `class` with `change`, from a
+    /// pair its bundle holds proven or not.
+    fn proven_log(
+        from: Addr,
+        epoch: Epoch,
+        class: Class,
+        proven: bool,
+        change: Option<Transition>,
+    ) -> Vec<Entry> {
+        let peer = Node(2);
+        let msg1 = |hs: u32, epoch: Epoch, from: Addr| Event::Msg1 {
+            hs: Hs(hs),
+            bytes: Bytes(hs),
+            epoch,
+            link: LinkId(hs),
+            from,
+            binding: Binding::Connectionless,
+            sent: true,
+        };
+        alloc::vec![
+            Entry::Ev {
+                at: 0,
+                peer,
+                ev: msg1(1, Epoch(1), at(1)),
+                rec: Rec {
+                    class: Some(Class::NotHeld),
+                    change: Some(Transition::Promote),
+                    ..Rec::default()
+                },
+            },
+            Entry::Ev {
+                at: 40_000,
+                peer,
+                ev: msg1(2, epoch, from),
+                rec: Rec {
+                    class: Some(class),
+                    change,
+                    proven,
+                    ..Rec::default()
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn a_msg1_on_a_proven_pair_is_compared_as_on_the_link_and_a_refusal_there_still_reds() {
+        let second = at(7);
+        let other = Addr {
+            transport: 2,
+            at: 7,
+        };
+        let restart = Some(Transition::Replace);
+        // Each log, whether the comparison must find a difference, and
+        // whether it must name the proven path.
+        let cases = [
+            (
+                "a rekey on a proven second address",
+                proven_log(second, Epoch(1), Class::Rekey, true, None),
+                false,
+                true,
+            ),
+            (
+                "a rekey on a proven second transport",
+                proven_log(other, Epoch(1), Class::Rekey, true, None),
+                false,
+                true,
+            ),
+            (
+                "a rekey on a pair not proven",
+                proven_log(second, Epoch(1), Class::Rekey, false, None),
+                true,
+                false,
+            ),
+            (
+                "a refusal as off the link on a proven pair",
+                proven_log(second, Epoch(1), Class::OffLink, true, None),
+                true,
+                true,
+            ),
+            (
+                "a refusal as off the link on a pair not proven",
+                proven_log(second, Epoch(1), Class::OffLink, false, None),
+                false,
+                false,
+            ),
+            (
+                "a restart on a proven pair",
+                proven_log(second, Epoch(9), Class::Restart, true, restart),
+                false,
+                false,
+            ),
+        ];
+        for (name, log, differs, named) in cases {
+            let found = compare(Node(1), &log);
+            assert_eq!(
+                found.diffs.is_empty(),
+                !differs,
+                "{name}: difference expected {differs}: {:?}",
+                found.diffs
+            );
+            assert_eq!(
+                found.named.contains(&(Node(2), Named::ProvenPath)),
+                named,
+                "{name}: the proven path named {named}: {:?}",
+                found.named
+            );
+        }
+    }
 
     fn at(port: u16) -> Addr {
         Addr {

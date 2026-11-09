@@ -314,12 +314,14 @@ fn valid(w: &World, a: Act) -> bool {
         | Act::Dup(_)
         | Act::Restart(_)
         | Act::Advance
+        | Act::Leap
         | Act::Frame(_)
         | Act::Wall
         | Act::Replay(_)
         | Act::Third(_)
         | Act::Garbage(_)
-        | Act::Path(_) => true,
+        | Act::Path(_)
+        | Act::Dial(..) => true,
     }
 }
 
@@ -376,12 +378,14 @@ pub fn run(
                 | Act::Connect(..)
                 | Act::Fail(..)
                 | Act::Advance
+                | Act::Leap
                 | Act::Rekey(..)
                 | Act::Frame(_)
                 | Act::Replay(_)
                 | Act::Third(_)
                 | Act::Garbage(_)
-                | Act::Path(_) => {}
+                | Act::Path(_)
+                | Act::Dial(..) => {}
             }
             apply(&mut w, a);
             acts.push(a);

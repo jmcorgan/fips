@@ -13,7 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use super::super::machine::Peek;
+pub(crate) use super::super::machine::Peek;
 use super::stub::{Ev, Stub, kid};
 use crate::proto::rekey::{CycleView, Digest, Profile, RECORD_BOUND, Reason, Rekey, leaked};
 use crate::testutil::{TestClock, TestInstant};
@@ -216,6 +216,12 @@ impl Owed {
     /// Forget the list, with the machine.
     pub(crate) fn clear(&mut self) {
         self.0.clear();
+    }
+
+    /// Whether the list holds the ephemeral `e`: a msg1 carrying it was
+    /// taken before, so a copy of it is a repeat.
+    pub(crate) fn owes(&self, e: &Digest) -> bool {
+        self.0.contains(e)
     }
 }
 

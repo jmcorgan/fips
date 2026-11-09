@@ -243,7 +243,16 @@ impl ModelParty {
         let s = self.side(peer, net.now);
         if let Some((hs, _, at)) = s.judge.settled() {
             s.beat = net.now;
-            net.send(ix, None, at, Pkt::Frame { id: me, hs });
+            net.send(
+                ix,
+                None,
+                at,
+                Pkt::Frame {
+                    id: me,
+                    hs,
+                    wire: 0,
+                },
+            );
         }
     }
 
@@ -259,6 +268,7 @@ impl ModelParty {
             hs,
             bytes,
             epoch: self.epoch(),
+            wire: 0,
         };
         net.send(self.ix, from, to, pkt);
         let now = net.now;
@@ -323,6 +333,7 @@ impl ModelParty {
                 id: me,
                 hs,
                 epoch: mine,
+                wire: 0,
             },
         };
         let mut done = None;
@@ -452,6 +463,7 @@ impl ModelParty {
                     hs: Hs(*k),
                     bytes: d.bytes,
                     epoch,
+                    wire: 0,
                 };
                 net.send(ix, d.from, d.to, pkt);
             }
@@ -476,6 +488,7 @@ impl ModelParty {
                     hs: r.hs,
                     bytes: Bytes(r.hs.0),
                     epoch,
+                    wire: 0,
                 };
                 let to = r.to;
                 net.send(ix, None, to, pkt);
@@ -522,9 +535,10 @@ impl Party for ModelParty {
                     hs,
                     bytes,
                     epoch,
+                    ..
                 } => self.msg1(net, src, id, hs, bytes, epoch),
-                Pkt::Msg2 { id, hs, epoch } => self.msg2(net, src, id, hs, epoch),
-                Pkt::Frame { id, hs } => {
+                Pkt::Msg2 { id, hs, epoch, .. } => self.msg2(net, src, id, hs, epoch),
+                Pkt::Frame { id, hs, .. } => {
                     if self.sides.contains_key(&id.0) {
                         self.step(net, id, Event::Frame { hs, from: src });
                         net.mark(self.ix, src, true);
@@ -575,6 +589,7 @@ impl Party for ModelParty {
                             hs,
                             bytes: Bytes(hs.0),
                             epoch,
+                            wire: 0,
                         },
                     );
                 }
